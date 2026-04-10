@@ -14,6 +14,7 @@ namespace {
 thread_local GLContext* gCurrentContext = nullptr;
 constexpr const char* kBootstrapTestId = "bootstrap.clear-loop";
 constexpr const char* kPhaseAStateTestId = "phase-a.state";
+constexpr GLuint kPhaseAMaxDrawBuffers = 8;
 
 GLContext* requireCurrentContext(std::string_view functionName) {
     auto* context = Runtime::shared().currentContext();
@@ -31,6 +32,161 @@ std::string formatFloat(GLfloat value) {
     stream.precision(3);
     stream << value;
     return stream.str();
+}
+
+void recordValidationError(GLContext* context, std::string_view functionName, GLenum error, std::string_view message) {
+    if (context == nullptr) {
+        return;
+    }
+    context->pushError(error);
+    context->emitDebugMessage(
+        GL_DEBUG_SOURCE_APPLICATION,
+        GL_DEBUG_TYPE_ERROR,
+        2,
+        GL_DEBUG_SEVERITY_HIGH,
+        std::string(functionName) + ": " + std::string(message)
+    );
+    Runtime::shared().recordBootstrapTrace(
+        std::string(functionName) + " -> error " + std::to_string(error) + ": " + std::string(message)
+    );
+}
+
+void markStateFunction(FunctionId id, std::string_view note) {
+    Runtime::shared().coverageStore().markSmokeTested(id, kPhaseAStateTestId, note);
+    Runtime::shared().refreshCurrentContextClaimedVersion();
+}
+
+bool isValidEnableCap(GLenum cap) {
+    if (cap >= GL_CLIP_DISTANCE0 && cap <= GL_CLIP_DISTANCE7) {
+        return true;
+    }
+    switch (cap) {
+        case GL_BLEND:
+        case GL_CULL_FACE:
+        case GL_DEPTH_TEST:
+        case GL_DITHER:
+        case GL_LINE_SMOOTH:
+        case GL_MULTISAMPLE:
+        case GL_POLYGON_OFFSET_FILL:
+        case GL_POLYGON_OFFSET_LINE:
+        case GL_POLYGON_OFFSET_POINT:
+        case GL_POLYGON_SMOOTH:
+        case GL_PRIMITIVE_RESTART:
+        case GL_PRIMITIVE_RESTART_FIXED_INDEX:
+        case GL_PROGRAM_POINT_SIZE:
+        case GL_RASTERIZER_DISCARD:
+        case GL_SAMPLE_ALPHA_TO_COVERAGE:
+        case GL_SAMPLE_ALPHA_TO_ONE:
+        case GL_SAMPLE_COVERAGE:
+        case GL_SAMPLE_MASK:
+        case GL_SCISSOR_TEST:
+        case GL_STENCIL_TEST:
+        case GL_TEXTURE_CUBE_MAP_SEAMLESS:
+        case GL_FRAMEBUFFER_SRGB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidBlendFactor(GLenum factor) {
+    switch (factor) {
+        case GL_ZERO:
+        case GL_ONE:
+        case GL_SRC_COLOR:
+        case GL_ONE_MINUS_SRC_COLOR:
+        case GL_DST_COLOR:
+        case GL_ONE_MINUS_DST_COLOR:
+        case GL_SRC_ALPHA:
+        case GL_ONE_MINUS_SRC_ALPHA:
+        case GL_DST_ALPHA:
+        case GL_ONE_MINUS_DST_ALPHA:
+        case GL_CONSTANT_COLOR:
+        case GL_ONE_MINUS_CONSTANT_COLOR:
+        case GL_CONSTANT_ALPHA:
+        case GL_ONE_MINUS_CONSTANT_ALPHA:
+        case GL_SRC_ALPHA_SATURATE:
+        case GL_SRC1_COLOR:
+        case GL_ONE_MINUS_SRC1_COLOR:
+        case GL_SRC1_ALPHA:
+        case GL_ONE_MINUS_SRC1_ALPHA:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidBlendEquation(GLenum equation) {
+    switch (equation) {
+        case GL_FUNC_ADD:
+        case GL_FUNC_SUBTRACT:
+        case GL_FUNC_REVERSE_SUBTRACT:
+        case GL_MIN:
+        case GL_MAX:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidCompareFunc(GLenum func) {
+    switch (func) {
+        case GL_NEVER:
+        case GL_LESS:
+        case GL_EQUAL:
+        case GL_LEQUAL:
+        case GL_GREATER:
+        case GL_NOTEQUAL:
+        case GL_GEQUAL:
+        case GL_ALWAYS:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidStencilOp(GLenum op) {
+    switch (op) {
+        case GL_KEEP:
+        case GL_ZERO:
+        case GL_REPLACE:
+        case GL_INCR:
+        case GL_INCR_WRAP:
+        case GL_DECR:
+        case GL_DECR_WRAP:
+        case GL_INVERT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidStencilFace(GLenum face) {
+    return face == GL_FRONT || face == GL_BACK || face == GL_FRONT_AND_BACK;
+}
+
+bool isValidCullFaceMode(GLenum mode) {
+    return mode == GL_FRONT || mode == GL_BACK || mode == GL_FRONT_AND_BACK;
+}
+
+bool isValidFrontFace(GLenum mode) {
+    return mode == GL_CW || mode == GL_CCW;
+}
+
+bool isValidHintTarget(GLenum target) {
+    switch (target) {
+        case GL_FRAGMENT_SHADER_DERIVATIVE_HINT:
+        case GL_LINE_SMOOTH_HINT:
+        case GL_POLYGON_SMOOTH_HINT:
+        case GL_TEXTURE_COMPRESSION_HINT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidHintMode(GLenum mode) {
+    return mode == GL_FASTEST || mode == GL_NICEST || mode == GL_DONT_CARE;
 }
 }  // namespace
 
@@ -150,6 +306,11 @@ void APIENTRY glClear(GLbitfield mask) {
     if (context == nullptr) {
         return;
     }
+    constexpr GLbitfield validMask = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
+    if ((mask & ~validMask) != 0) {
+        recordValidationError(context, "glClear", GL_INVALID_VALUE, "mask contains unsupported bits");
+        return;
+    }
     context->clear(mask);
     Runtime::shared().coverageStore().markSmokeTested(
         FunctionId::glClear,
@@ -195,6 +356,10 @@ void APIENTRY glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     if (context == nullptr) {
         return;
     }
+    if (width < 0 || height < 0) {
+        recordValidationError(context, "glViewport", GL_INVALID_VALUE, "width and height must be non-negative");
+        return;
+    }
     context->setViewport(x, y, width, height);
     Runtime::shared().coverageStore().markSmokeTested(
         FunctionId::glViewport,
@@ -205,6 +370,48 @@ void APIENTRY glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     Runtime::shared().recordBootstrapTrace(
         "glViewport(" + std::to_string(x) + ", " + std::to_string(y) + ", "
         + std::to_string(width) + ", " + std::to_string(height) + ")"
+    );
+}
+
+void APIENTRY glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
+    auto* context = requireCurrentContext("glScissor");
+    if (context == nullptr) {
+        return;
+    }
+    if (width < 0 || height < 0) {
+        recordValidationError(context, "glScissor", GL_INVALID_VALUE, "width and height must be non-negative");
+        return;
+    }
+    context->setScissor(x, y, width, height);
+    markStateFunction(FunctionId::glScissor, "Scissor box state is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace(
+        "glScissor(" + std::to_string(x) + ", " + std::to_string(y) + ", "
+        + std::to_string(width) + ", " + std::to_string(height) + ")"
+    );
+}
+
+void APIENTRY glDepthRange(GLdouble nearValue, GLdouble farValue) {
+    auto* context = requireCurrentContext("glDepthRange");
+    if (context == nullptr) {
+        return;
+    }
+    context->setDepthRange(nearValue, farValue);
+    markStateFunction(FunctionId::glDepthRange, "Depth range state is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace(
+        "glDepthRange(" + formatFloat(static_cast<GLfloat>(nearValue)) + ", "
+        + formatFloat(static_cast<GLfloat>(farValue)) + ")"
+    );
+}
+
+void APIENTRY glDepthRangef(GLfloat nearValue, GLfloat farValue) {
+    auto* context = requireCurrentContext("glDepthRangef");
+    if (context == nullptr) {
+        return;
+    }
+    context->setDepthRange(nearValue, farValue);
+    markStateFunction(FunctionId::glDepthRangef, "Depth range float alias updates the canonical state.");
+    Runtime::shared().recordBootstrapTrace(
+        "glDepthRangef(" + formatFloat(nearValue) + ", " + formatFloat(farValue) + ")"
     );
 }
 
@@ -238,6 +445,16 @@ void APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     Runtime::shared().recordBootstrapTrace(
         "glReadPixels(" + std::to_string(width) + "x" + std::to_string(height) + ")"
     );
+}
+
+void APIENTRY glGetBooleanv(GLenum pname, GLboolean* data) {
+    auto* context = requireCurrentContext("glGetBooleanv");
+    if (context == nullptr) {
+        return;
+    }
+    (void)context->queryBoolean(pname, data);
+    markStateFunction(FunctionId::glGetBooleanv, "Boolean state and capability queries route through the context.");
+    Runtime::shared().recordBootstrapTrace("glGetBooleanv(" + std::to_string(pname) + ")");
 }
 
 void APIENTRY glGetIntegerv(GLenum pname, GLint* data) {
@@ -285,9 +502,23 @@ void APIENTRY glGetFloatv(GLenum pname, GLfloat* data) {
     Runtime::shared().recordBootstrapTrace("glGetFloatv(" + std::to_string(pname) + ")");
 }
 
+void APIENTRY glGetDoublev(GLenum pname, GLdouble* data) {
+    auto* context = requireCurrentContext("glGetDoublev");
+    if (context == nullptr) {
+        return;
+    }
+    (void)context->queryDouble(pname, data);
+    markStateFunction(FunctionId::glGetDoublev, "Double state and capability queries route through the context.");
+    Runtime::shared().recordBootstrapTrace("glGetDoublev(" + std::to_string(pname) + ")");
+}
+
 void APIENTRY glEnable(GLenum cap) {
     auto* context = requireCurrentContext("glEnable");
     if (context == nullptr) {
+        return;
+    }
+    if (!isValidEnableCap(cap)) {
+        recordValidationError(context, "glEnable", GL_INVALID_ENUM, "cap is not supported by the Phase A state mirror");
         return;
     }
     context->setEnabled(cap, true);
@@ -305,6 +536,10 @@ void APIENTRY glDisable(GLenum cap) {
     if (context == nullptr) {
         return;
     }
+    if (!isValidEnableCap(cap)) {
+        recordValidationError(context, "glDisable", GL_INVALID_ENUM, "cap is not supported by the Phase A state mirror");
+        return;
+    }
     context->setEnabled(cap, false);
     Runtime::shared().coverageStore().markSmokeTested(
         FunctionId::glDisable,
@@ -320,6 +555,10 @@ GLboolean APIENTRY glIsEnabled(GLenum cap) {
     if (context == nullptr) {
         return GL_FALSE;
     }
+    if (!isValidEnableCap(cap)) {
+        recordValidationError(context, "glIsEnabled", GL_INVALID_ENUM, "cap is not supported by the Phase A state mirror");
+        return GL_FALSE;
+    }
     Runtime::shared().coverageStore().markSmokeTested(
         FunctionId::glIsEnabled,
         kPhaseAStateTestId,
@@ -328,6 +567,285 @@ GLboolean APIENTRY glIsEnabled(GLenum cap) {
     Runtime::shared().refreshCurrentContextClaimedVersion();
     Runtime::shared().recordBootstrapTrace("glIsEnabled(" + std::to_string(cap) + ")");
     return context->isEnabled(cap) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glBlendFunc(GLenum srcFactor, GLenum dstFactor) {
+    auto* context = requireCurrentContext("glBlendFunc");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBlendFactor(srcFactor) || !isValidBlendFactor(dstFactor)) {
+        recordValidationError(context, "glBlendFunc", GL_INVALID_ENUM, "blend factor is invalid");
+        return;
+    }
+    context->setBlendFuncSeparate(srcFactor, dstFactor, srcFactor, dstFactor);
+    markStateFunction(FunctionId::glBlendFunc, "Blend factor state is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glBlendFunc(" + std::to_string(srcFactor) + ", " + std::to_string(dstFactor) + ")");
+}
+
+void APIENTRY glBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) {
+    auto* context = requireCurrentContext("glBlendFuncSeparate");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBlendFactor(srcRGB) || !isValidBlendFactor(dstRGB)
+        || !isValidBlendFactor(srcAlpha) || !isValidBlendFactor(dstAlpha)) {
+        recordValidationError(context, "glBlendFuncSeparate", GL_INVALID_ENUM, "blend factor is invalid");
+        return;
+    }
+    context->setBlendFuncSeparate(srcRGB, dstRGB, srcAlpha, dstAlpha);
+    markStateFunction(FunctionId::glBlendFuncSeparate, "Separate RGB/alpha blend factors are tracked.");
+    Runtime::shared().recordBootstrapTrace("glBlendFuncSeparate()");
+}
+
+void APIENTRY glBlendEquation(GLenum mode) {
+    auto* context = requireCurrentContext("glBlendEquation");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBlendEquation(mode)) {
+        recordValidationError(context, "glBlendEquation", GL_INVALID_ENUM, "blend equation is invalid");
+        return;
+    }
+    context->setBlendEquationSeparate(mode, mode);
+    markStateFunction(FunctionId::glBlendEquation, "Blend equation state is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glBlendEquation(" + std::to_string(mode) + ")");
+}
+
+void APIENTRY glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
+    auto* context = requireCurrentContext("glBlendEquationSeparate");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBlendEquation(modeRGB) || !isValidBlendEquation(modeAlpha)) {
+        recordValidationError(context, "glBlendEquationSeparate", GL_INVALID_ENUM, "blend equation is invalid");
+        return;
+    }
+    context->setBlendEquationSeparate(modeRGB, modeAlpha);
+    markStateFunction(FunctionId::glBlendEquationSeparate, "Separate RGB/alpha blend equations are tracked.");
+    Runtime::shared().recordBootstrapTrace("glBlendEquationSeparate()");
+}
+
+void APIENTRY glBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
+    auto* context = requireCurrentContext("glBlendColor");
+    if (context == nullptr) {
+        return;
+    }
+    context->setBlendColor(red, green, blue, alpha);
+    markStateFunction(FunctionId::glBlendColor, "Constant blend color is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace(
+        "glBlendColor(" + formatFloat(red) + ", " + formatFloat(green) + ", "
+        + formatFloat(blue) + ", " + formatFloat(alpha) + ")"
+    );
+}
+
+void APIENTRY glColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) {
+    auto* context = requireCurrentContext("glColorMask");
+    if (context == nullptr) {
+        return;
+    }
+    context->setColorMask(red, green, blue, alpha);
+    markStateFunction(FunctionId::glColorMask, "Global color write mask is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glColorMask()");
+}
+
+void APIENTRY glColorMaski(GLuint index, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) {
+    auto* context = requireCurrentContext("glColorMaski");
+    if (context == nullptr) {
+        return;
+    }
+    if (index >= kPhaseAMaxDrawBuffers) {
+        recordValidationError(context, "glColorMaski", GL_INVALID_VALUE, "draw-buffer index exceeds Phase A limit");
+        return;
+    }
+    context->setColorMaski(index, red, green, blue, alpha);
+    markStateFunction(FunctionId::glColorMaski, "Indexed color write mask state is tracked.");
+    Runtime::shared().recordBootstrapTrace("glColorMaski(" + std::to_string(index) + ")");
+}
+
+void APIENTRY glDepthFunc(GLenum func) {
+    auto* context = requireCurrentContext("glDepthFunc");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidCompareFunc(func)) {
+        recordValidationError(context, "glDepthFunc", GL_INVALID_ENUM, "depth function is invalid");
+        return;
+    }
+    context->setDepthFunc(func);
+    markStateFunction(FunctionId::glDepthFunc, "Depth compare function is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glDepthFunc(" + std::to_string(func) + ")");
+}
+
+void APIENTRY glDepthMask(GLboolean flag) {
+    auto* context = requireCurrentContext("glDepthMask");
+    if (context == nullptr) {
+        return;
+    }
+    context->setDepthMask(flag);
+    markStateFunction(FunctionId::glDepthMask, "Depth write mask is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glDepthMask()");
+}
+
+void APIENTRY glStencilFunc(GLenum func, GLint ref, GLuint mask) {
+    auto* context = requireCurrentContext("glStencilFunc");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidCompareFunc(func)) {
+        recordValidationError(context, "glStencilFunc", GL_INVALID_ENUM, "compare function is invalid");
+        return;
+    }
+    context->setStencilFuncSeparate(GL_FRONT_AND_BACK, func, ref, mask);
+    markStateFunction(FunctionId::glStencilFunc, "Front/back stencil compare state is tracked.");
+    Runtime::shared().recordBootstrapTrace("glStencilFunc()");
+}
+
+void APIENTRY glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask) {
+    auto* context = requireCurrentContext("glStencilFuncSeparate");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidStencilFace(face) || !isValidCompareFunc(func)) {
+        recordValidationError(context, "glStencilFuncSeparate", GL_INVALID_ENUM, "face or compare function is invalid");
+        return;
+    }
+    context->setStencilFuncSeparate(face, func, ref, mask);
+    markStateFunction(FunctionId::glStencilFuncSeparate, "Separate stencil compare state is tracked.");
+    Runtime::shared().recordBootstrapTrace("glStencilFuncSeparate()");
+}
+
+void APIENTRY glStencilOp(GLenum fail, GLenum depthFail, GLenum depthPass) {
+    auto* context = requireCurrentContext("glStencilOp");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidStencilOp(fail) || !isValidStencilOp(depthFail) || !isValidStencilOp(depthPass)) {
+        recordValidationError(context, "glStencilOp", GL_INVALID_ENUM, "stencil operation is invalid");
+        return;
+    }
+    context->setStencilOpSeparate(GL_FRONT_AND_BACK, fail, depthFail, depthPass);
+    markStateFunction(FunctionId::glStencilOp, "Front/back stencil operation state is tracked.");
+    Runtime::shared().recordBootstrapTrace("glStencilOp()");
+}
+
+void APIENTRY glStencilOpSeparate(GLenum face, GLenum fail, GLenum depthFail, GLenum depthPass) {
+    auto* context = requireCurrentContext("glStencilOpSeparate");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidStencilFace(face) || !isValidStencilOp(fail)
+        || !isValidStencilOp(depthFail) || !isValidStencilOp(depthPass)) {
+        recordValidationError(context, "glStencilOpSeparate", GL_INVALID_ENUM, "face or stencil operation is invalid");
+        return;
+    }
+    context->setStencilOpSeparate(face, fail, depthFail, depthPass);
+    markStateFunction(FunctionId::glStencilOpSeparate, "Separate stencil operation state is tracked.");
+    Runtime::shared().recordBootstrapTrace("glStencilOpSeparate()");
+}
+
+void APIENTRY glStencilMask(GLuint mask) {
+    auto* context = requireCurrentContext("glStencilMask");
+    if (context == nullptr) {
+        return;
+    }
+    context->setStencilMaskSeparate(GL_FRONT_AND_BACK, mask);
+    markStateFunction(FunctionId::glStencilMask, "Front/back stencil write mask is tracked.");
+    Runtime::shared().recordBootstrapTrace("glStencilMask(" + std::to_string(mask) + ")");
+}
+
+void APIENTRY glStencilMaskSeparate(GLenum face, GLuint mask) {
+    auto* context = requireCurrentContext("glStencilMaskSeparate");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidStencilFace(face)) {
+        recordValidationError(context, "glStencilMaskSeparate", GL_INVALID_ENUM, "face is invalid");
+        return;
+    }
+    context->setStencilMaskSeparate(face, mask);
+    markStateFunction(FunctionId::glStencilMaskSeparate, "Separate stencil write masks are tracked.");
+    Runtime::shared().recordBootstrapTrace("glStencilMaskSeparate()");
+}
+
+void APIENTRY glCullFace(GLenum mode) {
+    auto* context = requireCurrentContext("glCullFace");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidCullFaceMode(mode)) {
+        recordValidationError(context, "glCullFace", GL_INVALID_ENUM, "cull-face mode is invalid");
+        return;
+    }
+    context->setCullFace(mode);
+    markStateFunction(FunctionId::glCullFace, "Cull-face mode is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glCullFace(" + std::to_string(mode) + ")");
+}
+
+void APIENTRY glFrontFace(GLenum mode) {
+    auto* context = requireCurrentContext("glFrontFace");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFrontFace(mode)) {
+        recordValidationError(context, "glFrontFace", GL_INVALID_ENUM, "front-face winding is invalid");
+        return;
+    }
+    context->setFrontFace(mode);
+    markStateFunction(FunctionId::glFrontFace, "Front-face winding is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glFrontFace(" + std::to_string(mode) + ")");
+}
+
+void APIENTRY glPolygonOffset(GLfloat factor, GLfloat units) {
+    auto* context = requireCurrentContext("glPolygonOffset");
+    if (context == nullptr) {
+        return;
+    }
+    context->setPolygonOffset(factor, units);
+    markStateFunction(FunctionId::glPolygonOffset, "Polygon offset factor/units are tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glPolygonOffset(" + formatFloat(factor) + ", " + formatFloat(units) + ")");
+}
+
+void APIENTRY glLineWidth(GLfloat width) {
+    auto* context = requireCurrentContext("glLineWidth");
+    if (context == nullptr) {
+        return;
+    }
+    if (!std::isfinite(width) || width <= 0.0f) {
+        recordValidationError(context, "glLineWidth", GL_INVALID_VALUE, "width must be positive");
+        return;
+    }
+    context->setLineWidth(width);
+    markStateFunction(FunctionId::glLineWidth, "Line width is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glLineWidth(" + formatFloat(width) + ")");
+}
+
+void APIENTRY glPointSize(GLfloat size) {
+    auto* context = requireCurrentContext("glPointSize");
+    if (context == nullptr) {
+        return;
+    }
+    if (!std::isfinite(size) || size <= 0.0f) {
+        recordValidationError(context, "glPointSize", GL_INVALID_VALUE, "size must be positive");
+        return;
+    }
+    context->setPointSize(size);
+    markStateFunction(FunctionId::glPointSize, "Point size is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glPointSize(" + formatFloat(size) + ")");
+}
+
+void APIENTRY glHint(GLenum target, GLenum mode) {
+    auto* context = requireCurrentContext("glHint");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidHintTarget(target) || !isValidHintMode(mode)) {
+        recordValidationError(context, "glHint", GL_INVALID_ENUM, "hint target or mode is invalid");
+        return;
+    }
+    context->setHint(target, mode);
+    markStateFunction(FunctionId::glHint, "Hint state is tracked and queryable.");
+    Runtime::shared().recordBootstrapTrace("glHint(" + std::to_string(target) + ", " + std::to_string(mode) + ")");
 }
 
 const GLubyte* APIENTRY glGetString(GLenum name) {

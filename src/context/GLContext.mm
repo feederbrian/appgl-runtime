@@ -129,10 +129,82 @@ void GLContext::setViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     impl_->viewportY = y;
     impl_->viewportWidth = width > 0 ? width : 1;
     impl_->viewportHeight = height > 0 ? height : 1;
-    impl_->state->setViewport(x, y, impl_->viewportWidth, impl_->viewportHeight);
+    impl_->state->setViewport(x, y, width, height);
     if (impl_->frameGraph != nullptr) {
         impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
     }
+}
+
+void GLContext::setScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
+    impl_->state->setScissor(x, y, width, height);
+}
+
+void GLContext::setDepthRange(GLdouble nearValue, GLdouble farValue) {
+    impl_->state->setDepthRange(nearValue, farValue);
+}
+
+void GLContext::setBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) {
+    impl_->state->setBlendFuncSeparate(srcRGB, dstRGB, srcAlpha, dstAlpha);
+}
+
+void GLContext::setBlendEquationSeparate(GLenum equationRGB, GLenum equationAlpha) {
+    impl_->state->setBlendEquationSeparate(equationRGB, equationAlpha);
+}
+
+void GLContext::setBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
+    impl_->state->setBlendColor(red, green, blue, alpha);
+}
+
+void GLContext::setColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) {
+    impl_->state->setColorMask(red, green, blue, alpha);
+}
+
+void GLContext::setColorMaski(GLuint index, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) {
+    impl_->state->setColorMaski(index, red, green, blue, alpha);
+}
+
+void GLContext::setDepthFunc(GLenum func) {
+    impl_->state->setDepthFunc(func);
+}
+
+void GLContext::setDepthMask(GLboolean flag) {
+    impl_->state->setDepthMask(flag);
+}
+
+void GLContext::setStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask) {
+    impl_->state->setStencilFuncSeparate(face, func, ref, mask);
+}
+
+void GLContext::setStencilOpSeparate(GLenum face, GLenum fail, GLenum depthFail, GLenum depthPass) {
+    impl_->state->setStencilOpSeparate(face, fail, depthFail, depthPass);
+}
+
+void GLContext::setStencilMaskSeparate(GLenum face, GLuint mask) {
+    impl_->state->setStencilMaskSeparate(face, mask);
+}
+
+void GLContext::setCullFace(GLenum mode) {
+    impl_->state->setCullFace(mode);
+}
+
+void GLContext::setFrontFace(GLenum mode) {
+    impl_->state->setFrontFace(mode);
+}
+
+void GLContext::setPolygonOffset(GLfloat factor, GLfloat units) {
+    impl_->state->setPolygonOffset(factor, units);
+}
+
+void GLContext::setLineWidth(GLfloat width) {
+    impl_->state->setLineWidth(width);
+}
+
+void GLContext::setPointSize(GLfloat size) {
+    impl_->state->setPointSize(size);
+}
+
+void GLContext::setHint(GLenum target, GLenum mode) {
+    impl_->state->setHint(target, mode);
 }
 
 void GLContext::flush() {
@@ -148,7 +220,11 @@ void GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
         pushError(GL_INVALID_VALUE);
         return;
     }
-    if (format != GL_RGBA || type != GL_UNSIGNED_BYTE || width < 0 || height < 0) {
+    if (width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (format != GL_RGBA || type != GL_UNSIGNED_BYTE) {
         pushError(GL_INVALID_ENUM);
         return;
     }
@@ -158,7 +234,34 @@ void GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     }
 }
 
+bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
+    if (data == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->state->queryBoolean(pname, data)) {
+        return true;
+    }
+    GLint integerData[4] = {};
+    if (impl_->capabilities != nullptr && impl_->capabilities->queryInteger(pname, integerData)) {
+        data[0] = integerData[0] != 0 ? GL_TRUE : GL_FALSE;
+        if (pname == GL_MAX_VIEWPORT_DIMS) {
+            data[1] = integerData[1] != 0 ? GL_TRUE : GL_FALSE;
+        }
+        return true;
+    }
+    pushError(GL_INVALID_ENUM);
+    return false;
+}
+
 bool GLContext::queryInteger(GLenum pname, GLint* data) {
+    if (data == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->state->queryInteger(pname, data)) {
+        return true;
+    }
     if (impl_->capabilities == nullptr || !impl_->capabilities->queryInteger(pname, data)) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -167,6 +270,13 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
 }
 
 bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
+    if (data == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->state->queryInteger64(pname, data)) {
+        return true;
+    }
     if (impl_->capabilities == nullptr || !impl_->capabilities->queryInteger64(pname, data)) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -175,11 +285,38 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
 }
 
 bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
+    if (data == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->state->queryFloat(pname, data)) {
+        return true;
+    }
     if (impl_->capabilities == nullptr || !impl_->capabilities->queryFloat(pname, data)) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
     return true;
+}
+
+bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
+    if (data == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->state->queryDouble(pname, data)) {
+        return true;
+    }
+    GLfloat floatData[4] = {};
+    if (impl_->capabilities != nullptr && impl_->capabilities->queryFloat(pname, floatData)) {
+        data[0] = static_cast<GLdouble>(floatData[0]);
+        if (pname == GL_MAX_VIEWPORT_DIMS) {
+            data[1] = static_cast<GLdouble>(floatData[1]);
+        }
+        return true;
+    }
+    pushError(GL_INVALID_ENUM);
+    return false;
 }
 
 void GLContext::setEnabled(GLenum cap, bool enabled) {

@@ -42,6 +42,16 @@ bool GLCapabilities::queryInteger64(GLenum pname, GLint64* out) const {
     if (out == nullptr) {
         return false;
     }
+    if (pname == GL_MAX_VIEWPORT_DIMS) {
+        const auto value = integerLimits_.find(GL_MAX_VIEWPORT_DIMS);
+        if (value == integerLimits_.end()) {
+            return false;
+        }
+        out[0] = value->second;
+        out[1] = value->second;
+        return true;
+    }
+
     const auto value = integerLimits_.find(pname);
     if (value == integerLimits_.end()) {
         return false;
@@ -54,11 +64,14 @@ bool GLCapabilities::queryFloat(GLenum pname, GLfloat* out) const {
     if (out == nullptr) {
         return false;
     }
-    GLint integerValue = 0;
-    if (!queryInteger(pname, &integerValue)) {
+    GLint integerValue[2] = {};
+    if (!queryInteger(pname, integerValue)) {
         return false;
     }
-    *out = static_cast<GLfloat>(integerValue);
+    out[0] = static_cast<GLfloat>(integerValue[0]);
+    if (pname == GL_MAX_VIEWPORT_DIMS) {
+        out[1] = static_cast<GLfloat>(integerValue[1]);
+    }
     return true;
 }
 

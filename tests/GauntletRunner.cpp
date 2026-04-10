@@ -13,6 +13,8 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 #include "../include/AppGL/AppGL.h"
@@ -37,20 +39,46 @@ struct TestResult {
     std::string message;
 };
 
-constexpr std::array<FunctionId, 16> kBootstrapFunctions = {
+constexpr std::array<FunctionId, 42> kBootstrapFunctions = {
+    FunctionId::glCullFace,
+    FunctionId::glFrontFace,
+    FunctionId::glHint,
+    FunctionId::glLineWidth,
+    FunctionId::glPointSize,
     FunctionId::glClearColor,
     FunctionId::glClear,
     FunctionId::glClearDepth,
     FunctionId::glClearStencil,
+    FunctionId::glScissor,
+    FunctionId::glDepthRange,
+    FunctionId::glPolygonOffset,
     FunctionId::glEnable,
     FunctionId::glDisable,
     FunctionId::glIsEnabled,
     FunctionId::glViewport,
     FunctionId::glFlush,
     FunctionId::glReadPixels,
+    FunctionId::glStencilMask,
+    FunctionId::glColorMask,
+    FunctionId::glDepthMask,
+    FunctionId::glBlendFunc,
+    FunctionId::glStencilFunc,
+    FunctionId::glStencilOp,
+    FunctionId::glDepthFunc,
+    FunctionId::glGetBooleanv,
     FunctionId::glGetIntegerv,
     FunctionId::glGetInteger64v,
     FunctionId::glGetFloatv,
+    FunctionId::glGetDoublev,
+    FunctionId::glBlendFuncSeparate,
+    FunctionId::glBlendColor,
+    FunctionId::glBlendEquation,
+    FunctionId::glBlendEquationSeparate,
+    FunctionId::glStencilOpSeparate,
+    FunctionId::glStencilFuncSeparate,
+    FunctionId::glStencilMaskSeparate,
+    FunctionId::glColorMaski,
+    FunctionId::glDepthRangef,
     FunctionId::glGetString,
     FunctionId::glGetError,
     FunctionId::glDebugMessageCallback,
@@ -60,6 +88,14 @@ bool gLastGauntletPassed = false;
 
 bool stateAtLeastSmokeTested(CoverageState state) {
     return static_cast<int>(state) >= static_cast<int>(CoverageState::SmokeTested);
+}
+
+std::string formatDouble(double value) {
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed);
+    stream.precision(6);
+    stream << value;
+    return stream.str();
 }
 
 void APIENTRY bootstrapDebugCallback(
@@ -81,15 +117,69 @@ void APIENTRY bootstrapDebugCallback(
 }
 
 std::filesystem::path workspaceRoot() {
+    const auto isRoot = [](const std::filesystem::path& path) {
+        std::error_code error;
+        return std::filesystem::exists(path / "runtime" / "CMakeLists.txt", error)
+            && std::filesystem::exists(path / "docs" / "goldens" / "phase-a" / "README.md", error);
+    };
+
+    const auto canonicalOrAbsolute = [](std::filesystem::path path) {
+        std::error_code error;
+        const auto canonical = std::filesystem::weakly_canonical(path, error);
+        if (!error && !canonical.empty()) {
+            return canonical;
+        }
+        if (path.is_relative()) {
+            return std::filesystem::absolute(path, error);
+        }
+        return path;
+    };
+
+    const auto findFrom = [&](std::filesystem::path start) {
+        start = canonicalOrAbsolute(std::move(start));
+        if (std::filesystem::is_regular_file(start)) {
+            start = start.parent_path();
+        }
+        for (std::filesystem::path cursor = start; !cursor.empty(); cursor = cursor.parent_path()) {
+            if (isRoot(cursor)) {
+                return cursor;
+            }
+            if (cursor == cursor.root_path()) {
+                break;
+            }
+        }
+        return std::filesystem::path{};
+    };
+
     if (const char* root = std::getenv("APPGL_WORKSPACE_ROOT"); root != nullptr && root[0] != '\0') {
-        return std::filesystem::path(root);
+        const std::filesystem::path candidate = canonicalOrAbsolute(root);
+        if (isRoot(candidate)) {
+            return candidate;
+        }
     }
 
-    std::filesystem::path sourcePath(__FILE__);
-    if (sourcePath.is_relative()) {
-        sourcePath = std::filesystem::absolute(sourcePath);
+    if (const auto root = findFrom(__FILE__); !root.empty()) {
+        return root;
     }
-    return sourcePath.parent_path().parent_path().parent_path();
+
+    if (const auto root = findFrom(std::filesystem::current_path()); !root.empty()) {
+        return root;
+    }
+
+    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+        const std::filesystem::path homePath(home);
+        for (const auto& candidate : {
+                 homePath / "Documents" / "Developer" / "OpenGL 4.6 Mac",
+                 homePath / "Developer" / "OpenGL 4.6 Mac",
+             }) {
+            const auto canonical = canonicalOrAbsolute(candidate);
+            if (isRoot(canonical)) {
+                return canonical;
+            }
+        }
+    }
+
+    return canonicalOrAbsolute(std::filesystem::path(__FILE__)).parent_path().parent_path().parent_path();
 }
 
 bool shouldWriteGoldens() {
@@ -117,21 +207,60 @@ public:
         (void)context;
         glDebugMessageCallback(&bootstrapDebugCallback, nullptr);
         glViewport(0, 0, framebufferSize().width, framebufferSize().height);
+        glScissor(0, 0, framebufferSize().width, framebufferSize().height);
+        glDepthRange(0.0, 1.0);
+        glDepthRangef(0.0f, 1.0f);
         glClearDepth(0.875);
         glClearStencil(3);
         glEnable(GL_DEPTH_TEST);
         (void)glIsEnabled(GL_DEPTH_TEST);
         glDisable(GL_DEPTH_TEST);
+        glEnable(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glBlendColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glBlendFunc(GL_ONE, GL_ZERO);
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+        glStencilFunc(GL_ALWAYS, 0, ~0u);
+        glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, ~0u);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glStencilOpSeparate(GL_FRONT_AND_BACK, GL_KEEP, GL_KEEP, GL_KEEP);
+        glStencilMask(~0u);
+        glStencilMaskSeparate(GL_FRONT_AND_BACK, ~0u);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
+        glPolygonOffset(0.0f, 0.0f);
+        glLineWidth(1.0f);
+        glPointSize(1.0f);
+        glHint(GL_FRAGMENT_SHADER_DERIVATIVE_HINT, GL_DONT_CARE);
 
         GLint maxTextureSize = 0;
         glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
         (void)maxTextureSize;
+        GLint scissorBox[4] = {};
+        glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
+        (void)scissorBox;
         GLint64 maxElementIndex = 0;
         glGetInteger64v(GL_MAX_ELEMENT_INDEX, &maxElementIndex);
         (void)maxElementIndex;
         GLfloat maxSamples = 0.0f;
         glGetFloatv(GL_MAX_SAMPLES, &maxSamples);
         (void)maxSamples;
+        GLboolean depthWriteMask = GL_FALSE;
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWriteMask);
+        (void)depthWriteMask;
+        GLdouble depthRange[2] = {};
+        glGetDoublev(GL_DEPTH_RANGE, depthRange);
+        (void)depthRange;
+        glEnable(static_cast<GLenum>(0xffffffffu));
+        (void)glGetError();
+        glGetIntegerv(static_cast<GLenum>(0xffffffffu), &maxTextureSize);
+        (void)glGetError();
         (void)glGetString(GL_VERSION);
     }
 
@@ -218,7 +347,17 @@ TestResult runScene(Scene& scene) {
                 result.message = "Golden dimensions do not match actual readback.";
             } else if (comparison.diffRatio > scene.tolerance()) {
                 result.status = "failed";
-                result.message = "Golden diff exceeded tolerance.";
+                result.message = "Golden diff exceeded tolerance (diffRatio="
+                    + formatDouble(comparison.diffRatio)
+                    + ", maxChannelDelta="
+                    + formatDouble(comparison.maxChannelDelta)
+                    + ", tolerance="
+                    + formatDouble(scene.tolerance())
+                    + ", golden="
+                    + goldenPath.string()
+                    + ", actual="
+                    + actualPath.string()
+                    + ").";
             }
         }
     }
