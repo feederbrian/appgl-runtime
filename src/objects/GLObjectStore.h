@@ -1,0 +1,214 @@
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "../../include/AppGL/glcorearb.h"
+
+namespace appgl {
+
+template <typename T>
+class ObjectTable {
+public:
+    GLuint create();
+    GLuint reserveName();
+    bool erase(GLuint id);
+    bool contains(GLuint id) const;
+    T* get(GLuint id);
+    const T* get(GLuint id) const;
+
+private:
+    GLuint nextId_ = 1;
+    std::unordered_map<GLuint, T> objects_;
+};
+
+struct GLBufferObject {
+    void* metalBuffer = nullptr;
+    GLsizeiptr size = 0;
+    GLenum usage = GL_STATIC_DRAW;
+    bool mapped = false;
+    std::vector<std::uint8_t> shadowBytes;
+};
+
+struct GLTextureDesc {
+    GLenum target = 0;
+    GLenum internalFormat = 0;
+    GLsizei width = 0;
+    GLsizei height = 0;
+    GLsizei depth = 1;
+    GLsizei levels = 1;
+    GLsizei layers = 1;
+    bool immutable = false;
+};
+
+struct GLTextureObject {
+    void* metalTexture = nullptr;
+    GLTextureDesc desc;
+};
+
+struct GLSamplerObject {
+    void* metalSampler = nullptr;
+    GLint minFilter = GL_LINEAR;
+    GLint magFilter = GL_LINEAR;
+    GLint wrapS = GL_REPEAT;
+    GLint wrapT = GL_REPEAT;
+    GLint wrapR = GL_REPEAT;
+};
+
+struct GLRenderbufferObject {
+    void* metalTexture = nullptr;
+    GLenum internalFormat = 0;
+    GLsizei width = 0;
+    GLsizei height = 0;
+    GLsizei samples = 1;
+};
+
+struct GLFramebufferAttachment {
+    enum class Kind {
+        None,
+        Texture,
+        Renderbuffer,
+    };
+
+    Kind kind = Kind::None;
+    GLuint object = 0;
+    GLint level = 0;
+    GLint layer = 0;
+};
+
+struct GLFramebufferObject {
+    std::unordered_map<GLenum, GLFramebufferAttachment> attachments;
+};
+
+struct GLVertexAttributeState {
+    bool enabled = false;
+    GLint size = 4;
+    GLenum type = GL_FLOAT;
+    GLboolean normalized = GL_FALSE;
+    GLsizei stride = 0;
+    std::uintptr_t pointer = 0;
+    GLuint buffer = 0;
+    GLuint divisor = 0;
+};
+
+struct GLVertexArrayObject {
+    std::vector<GLVertexAttributeState> attributes;
+    GLuint elementArrayBuffer = 0;
+};
+
+struct GLShaderObject {
+    GLenum stage = 0;
+    std::string source;
+    std::vector<std::uint32_t> spirv;
+    std::string compileLog;
+    bool compiled = false;
+};
+
+struct GLProgramObject {
+    std::vector<GLuint> attachedShaders;
+    std::string linkLog;
+    bool linked = false;
+};
+
+struct GLQueryObject {
+    GLenum target = 0;
+    bool active = false;
+    GLuint64 result = 0;
+};
+
+struct GLSyncObject {
+    void* sharedEvent = nullptr;
+    GLuint64 signalValue = 0;
+};
+
+struct GLTransformFeedbackObject {
+    bool active = false;
+};
+
+class GLObjectStore {
+public:
+    explicit GLObjectStore(GLsizei maxVertexAttribs = 16);
+
+    ObjectTable<GLBufferObject>& buffers();
+    ObjectTable<GLTextureObject>& textures();
+    ObjectTable<GLSamplerObject>& samplers();
+    ObjectTable<GLRenderbufferObject>& renderbuffers();
+    ObjectTable<GLFramebufferObject>& framebuffers();
+    ObjectTable<GLVertexArrayObject>& vertexArrays();
+    ObjectTable<GLShaderObject>& shaders();
+    ObjectTable<GLProgramObject>& programs();
+    ObjectTable<GLQueryObject>& queries();
+    ObjectTable<GLSyncObject>& syncs();
+    ObjectTable<GLTransformFeedbackObject>& transformFeedbacks();
+
+    void deferDelete(std::string label);
+    void drainDeferredDeletes();
+
+private:
+    GLsizei maxVertexAttribs_ = 16;
+    ObjectTable<GLBufferObject> buffers_;
+    ObjectTable<GLTextureObject> textures_;
+    ObjectTable<GLSamplerObject> samplers_;
+    ObjectTable<GLRenderbufferObject> renderbuffers_;
+    ObjectTable<GLFramebufferObject> framebuffers_;
+    ObjectTable<GLVertexArrayObject> vertexArrays_;
+    ObjectTable<GLShaderObject> shaders_;
+    ObjectTable<GLProgramObject> programs_;
+    ObjectTable<GLQueryObject> queries_;
+    ObjectTable<GLSyncObject> syncs_;
+    ObjectTable<GLTransformFeedbackObject> transformFeedbacks_;
+    std::vector<std::string> deferredDeletes_;
+};
+
+template <typename T>
+GLuint ObjectTable<T>::create() {
+    const GLuint id = reserveName();
+    objects_[id] = T{};
+    return id;
+}
+
+template <typename T>
+GLuint ObjectTable<T>::reserveName() {
+    while (objects_.contains(nextId_) || nextId_ == 0) {
+        ++nextId_;
+    }
+    const GLuint id = nextId_++;
+    objects_.try_emplace(id, T{});
+    return id;
+}
+
+template <typename T>
+bool ObjectTable<T>::erase(GLuint id) {
+    if (id == 0) {
+        return false;
+    }
+    return objects_.erase(id) > 0;
+}
+
+template <typename T>
+bool ObjectTable<T>::contains(GLuint id) const {
+    return id != 0 && objects_.contains(id);
+}
+
+template <typename T>
+T* ObjectTable<T>::get(GLuint id) {
+    const auto found = objects_.find(id);
+    if (found == objects_.end()) {
+        return nullptr;
+    }
+    return &found->second;
+}
+
+template <typename T>
+const T* ObjectTable<T>::get(GLuint id) const {
+    const auto found = objects_.find(id);
+    if (found == objects_.end()) {
+        return nullptr;
+    }
+    return &found->second;
+}
+
+}  // namespace appgl

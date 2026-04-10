@@ -1,0 +1,5924 @@
+{
+  "source": "Khronos OpenGL Registry gl.xml",
+  "profile": "core",
+  "api": "gl",
+  "versionRange": [
+    "1.0",
+    "4.6"
+  ],
+  "functions": [
+    {
+      "name": "glCullFace",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFrontFace",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glHint",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glLineWidth",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPointSize",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPolygonMode",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glScissor",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexParameterf",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexParameterfv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexParameteri",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexParameteriv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexImage1D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexImage2D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawBuffer",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClear",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Smoke-tested",
+      "firstPassingTestId": "bootstrap.clear-loop",
+      "firstPassingBenchmarkId": "",
+      "notes": "Bootstrap clear path encodes a Metal render pass and presents it."
+    },
+    {
+      "name": "glClearColor",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Smoke-tested",
+      "firstPassingTestId": "bootstrap.clear-loop",
+      "firstPassingBenchmarkId": "",
+      "notes": "Animated clear loop drives the Metal-backed default framebuffer."
+    },
+    {
+      "name": "glClearStencil",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearDepth",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glStencilMask",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glColorMask",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDepthMask",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDisable",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glEnable",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFinish",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFlush",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Smoke-tested",
+      "firstPassingTestId": "bootstrap.clear-loop",
+      "firstPassingBenchmarkId": "",
+      "notes": "Bootstrap flush presents the pending default framebuffer work."
+    },
+    {
+      "name": "glBlendFunc",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glLogicOp",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glStencilFunc",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glStencilOp",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDepthFunc",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPixelStoref",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPixelStorei",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glReadBuffer",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glReadPixels",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetBooleanv",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetDoublev",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetError",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Smoke-tested",
+      "firstPassingTestId": "bootstrap.clear-loop",
+      "firstPassingBenchmarkId": "",
+      "notes": "Bootstrap runtime maintains a per-context error FIFO."
+    },
+    {
+      "name": "glGetFloatv",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetIntegerv",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetString",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Smoke-tested",
+      "firstPassingTestId": "bootstrap.clear-loop",
+      "firstPassingBenchmarkId": "",
+      "notes": "AppGL reports conservative bootstrap identity strings."
+    },
+    {
+      "name": "glGetTexImage",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTexParameterfv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTexParameteriv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTexLevelParameterfv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTexLevelParameteriv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsEnabled",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDepthRange",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glViewport",
+      "subsystem": "context and state",
+      "introducedVersion": "1.0",
+      "state": "Smoke-tested",
+      "firstPassingTestId": "bootstrap.clear-loop",
+      "firstPassingBenchmarkId": "",
+      "notes": "Viewport updates drive the drawable size."
+    },
+    {
+      "name": "glDrawArrays",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawElements",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPolygonOffset",
+      "subsystem": "context and state",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyTexImage1D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyTexImage2D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyTexSubImage1D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyTexSubImage2D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexSubImage1D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexSubImage2D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindTexture",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteTextures",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenTextures",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsTexture",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawRangeElements",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "1.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexImage3D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexSubImage3D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyTexSubImage3D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glActiveTexture",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glSampleCoverage",
+      "subsystem": "context and state",
+      "introducedVersion": "1.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCompressedTexImage3D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCompressedTexImage2D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCompressedTexImage1D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCompressedTexSubImage3D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCompressedTexSubImage2D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCompressedTexSubImage1D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetCompressedTexImage",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "1.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlendFuncSeparate",
+      "subsystem": "context and state",
+      "introducedVersion": "1.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMultiDrawArrays",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "1.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMultiDrawElements",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "1.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPointParameterf",
+      "subsystem": "context and state",
+      "introducedVersion": "1.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPointParameterfv",
+      "subsystem": "context and state",
+      "introducedVersion": "1.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPointParameteri",
+      "subsystem": "context and state",
+      "introducedVersion": "1.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPointParameteriv",
+      "subsystem": "context and state",
+      "introducedVersion": "1.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlendColor",
+      "subsystem": "context and state",
+      "introducedVersion": "1.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlendEquation",
+      "subsystem": "context and state",
+      "introducedVersion": "1.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenQueries",
+      "subsystem": "queries and sync",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteQueries",
+      "subsystem": "queries and sync",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsQuery",
+      "subsystem": "queries and sync",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBeginQuery",
+      "subsystem": "queries and sync",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glEndQuery",
+      "subsystem": "queries and sync",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetQueryiv",
+      "subsystem": "queries and sync",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetQueryObjectiv",
+      "subsystem": "queries and sync",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetQueryObjectuiv",
+      "subsystem": "queries and sync",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindBuffer",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteBuffers",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenBuffers",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsBuffer",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBufferData",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBufferSubData",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetBufferSubData",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMapBuffer",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUnmapBuffer",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetBufferParameteriv",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetBufferPointerv",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "1.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlendEquationSeparate",
+      "subsystem": "context and state",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawBuffers",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glStencilOpSeparate",
+      "subsystem": "context and state",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glStencilFuncSeparate",
+      "subsystem": "context and state",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glStencilMaskSeparate",
+      "subsystem": "context and state",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glAttachShader",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindAttribLocation",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCompileShader",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateProgram",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateShader",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteProgram",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteShader",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDetachShader",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDisableVertexAttribArray",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glEnableVertexAttribArray",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetActiveAttrib",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetActiveUniform",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetAttachedShaders",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetAttribLocation",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramInfoLog",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetShaderiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetShaderInfoLog",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetShaderSource",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetUniformLocation",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetUniformfv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetUniformiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetVertexAttribdv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetVertexAttribfv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetVertexAttribiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetVertexAttribPointerv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsProgram",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsShader",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glLinkProgram",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glShaderSource",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUseProgram",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform1f",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform2f",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform3f",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform4f",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform1i",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform2i",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform3i",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform4i",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform1fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform2fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform3fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform4fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform1iv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform2iv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform3iv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform4iv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix2fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix3fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix4fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glValidateProgram",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib1d",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib1dv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib1f",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib1fv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib1s",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib1sv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib2d",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib2dv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib2f",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib2fv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib2s",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib2sv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib3d",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib3dv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib3f",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib3fv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib3s",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib3sv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4Nbv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4Niv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4Nsv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4Nub",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4Nubv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4Nuiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4Nusv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4bv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4d",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4dv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4f",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4fv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4iv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4s",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4sv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4ubv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4uiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttrib4usv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribPointer",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "2.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix2x3fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix3x2fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix2x4fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix4x2fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix3x4fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix4x3fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "2.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glColorMaski",
+      "subsystem": "context and state",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetBooleani_v",
+      "subsystem": "context and state",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glEnablei",
+      "subsystem": "context and state",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDisablei",
+      "subsystem": "context and state",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsEnabledi",
+      "subsystem": "context and state",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBeginTransformFeedback",
+      "subsystem": "transform feedback",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glEndTransformFeedback",
+      "subsystem": "transform feedback",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTransformFeedbackVaryings",
+      "subsystem": "transform feedback",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTransformFeedbackVarying",
+      "subsystem": "transform feedback",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClampColor",
+      "subsystem": "context and state",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBeginConditionalRender",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glEndConditionalRender",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribIPointer",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetVertexAttribIiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetVertexAttribIuiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI1i",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI2i",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI3i",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI4i",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI1ui",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI2ui",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI3ui",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI4ui",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI1iv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI2iv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI3iv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI4iv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI1uiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI2uiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI3uiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI4uiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI4bv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI4sv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI4ubv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribI4usv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetUniformuiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindFragDataLocation",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetFragDataLocation",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform1ui",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform2ui",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform3ui",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform4ui",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform1uiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform2uiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform3uiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform4uiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexParameterIiv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexParameterIuiv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTexParameterIiv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTexParameterIuiv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearBufferiv",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearBufferuiv",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearBufferfv",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearBufferfi",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetStringi",
+      "subsystem": "context and state",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsRenderbuffer",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindRenderbuffer",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteRenderbuffers",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenRenderbuffers",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glRenderbufferStorage",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetRenderbufferParameteriv",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsFramebuffer",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindFramebuffer",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteFramebuffers",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenFramebuffers",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCheckFramebufferStatus",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFramebufferTexture1D",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFramebufferTexture2D",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFramebufferTexture3D",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFramebufferRenderbuffer",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetFramebufferAttachmentParameteriv",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenerateMipmap",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlitFramebuffer",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glRenderbufferStorageMultisample",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFramebufferTextureLayer",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMapBufferRange",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFlushMappedBufferRange",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindVertexArray",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteVertexArrays",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenVertexArrays",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsVertexArray",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawArraysInstanced",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawElementsInstanced",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexBuffer",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPrimitiveRestartIndex",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyBufferSubData",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetUniformIndices",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetActiveUniformsiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetActiveUniformName",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetUniformBlockIndex",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetActiveUniformBlockiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetActiveUniformBlockName",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformBlockBinding",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindBufferRange",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindBufferBase",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetIntegeri_v",
+      "subsystem": "context and state",
+      "introducedVersion": "3.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawElementsBaseVertex",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawRangeElementsBaseVertex",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawElementsInstancedBaseVertex",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMultiDrawElementsBaseVertex",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProvokingVertex",
+      "subsystem": "context and state",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFenceSync",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsSync",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteSync",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClientWaitSync",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glWaitSync",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetInteger64v",
+      "subsystem": "context and state",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetSynciv",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetInteger64i_v",
+      "subsystem": "context and state",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetBufferParameteri64v",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFramebufferTexture",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexImage2DMultisample",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexImage3DMultisample",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetMultisamplefv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glSampleMaski",
+      "subsystem": "context and state",
+      "introducedVersion": "3.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindFragDataLocationIndexed",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetFragDataIndex",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenSamplers",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteSamplers",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsSampler",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindSampler",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glSamplerParameteri",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glSamplerParameteriv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glSamplerParameterf",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glSamplerParameterfv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glSamplerParameterIiv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glSamplerParameterIuiv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetSamplerParameteriv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetSamplerParameterIiv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetSamplerParameterfv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetSamplerParameterIuiv",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glQueryCounter",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetQueryObjecti64v",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetQueryObjectui64v",
+      "subsystem": "queries and sync",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribDivisor",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribP1ui",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribP1uiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribP2ui",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribP2uiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribP3ui",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribP3uiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribP4ui",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribP4uiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "3.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMinSampleShading",
+      "subsystem": "context and state",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlendEquationi",
+      "subsystem": "context and state",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlendEquationSeparatei",
+      "subsystem": "context and state",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlendFunci",
+      "subsystem": "context and state",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlendFuncSeparatei",
+      "subsystem": "context and state",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawArraysIndirect",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawElementsIndirect",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform1d",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform2d",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform3d",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform4d",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform1dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform2dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform3dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniform4dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix2dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix3dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix4dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix2x3dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix2x4dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix3x2dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix3x4dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix4x2dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformMatrix4x3dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetUniformdv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetSubroutineUniformLocation",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetSubroutineIndex",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetActiveSubroutineUniformiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetActiveSubroutineUniformName",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetActiveSubroutineName",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUniformSubroutinesuiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetUniformSubroutineuiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramStageiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPatchParameteri",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPatchParameterfv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindTransformFeedback",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteTransformFeedbacks",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenTransformFeedbacks",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsTransformFeedback",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPauseTransformFeedback",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glResumeTransformFeedback",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawTransformFeedback",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawTransformFeedbackStream",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBeginQueryIndexed",
+      "subsystem": "queries and sync",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glEndQueryIndexed",
+      "subsystem": "queries and sync",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetQueryIndexediv",
+      "subsystem": "queries and sync",
+      "introducedVersion": "4.0",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glReleaseShaderCompiler",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glShaderBinary",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetShaderPrecisionFormat",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDepthRangef",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearDepthf",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramBinary",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramBinary",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUseProgramStages",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glActiveShaderProgram",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateShaderProgramv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindProgramPipeline",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDeleteProgramPipelines",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenProgramPipelines",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glIsProgramPipeline",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramPipelineiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramParameteri",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform1i",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform1iv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform1f",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform1fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform1d",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform1dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform1ui",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform1uiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform2i",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform2iv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform2f",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform2fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform2d",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform2dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform2ui",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform2uiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform3i",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform3iv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform3f",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform3fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform3d",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform3dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform3ui",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform3uiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform4i",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform4iv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform4f",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform4fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform4d",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform4dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform4ui",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniform4uiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix2fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix3fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix4fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix2dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix3dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix4dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix2x3fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix3x2fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix2x4fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix4x2fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix3x4fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix4x3fv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix2x3dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix3x2dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix2x4dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix4x2dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix3x4dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glProgramUniformMatrix4x3dv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glValidateProgramPipeline",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramPipelineInfoLog",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribL1d",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribL2d",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribL3d",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribL4d",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribL1dv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribL2dv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribL3dv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribL4dv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribLPointer",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetVertexAttribLdv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glViewportArrayv",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glViewportIndexedf",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glViewportIndexedfv",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glScissorArrayv",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glScissorIndexed",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glScissorIndexedv",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDepthRangeArrayv",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDepthRangeIndexed",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetFloati_v",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetDoublei_v",
+      "subsystem": "context and state",
+      "introducedVersion": "4.1",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawArraysInstancedBaseInstance",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawElementsInstancedBaseInstance",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawElementsInstancedBaseVertexBaseInstance",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetInternalformativ",
+      "subsystem": "context and state",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetActiveAtomicCounterBufferiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindImageTexture",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMemoryBarrier",
+      "subsystem": "compute",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexStorage1D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexStorage2D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexStorage3D",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawTransformFeedbackInstanced",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDrawTransformFeedbackStreamInstanced",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.2",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearBufferData",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearBufferSubData",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDispatchCompute",
+      "subsystem": "compute",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDispatchComputeIndirect",
+      "subsystem": "compute",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyImageSubData",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFramebufferParameteri",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetFramebufferParameteriv",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetInternalformati64v",
+      "subsystem": "context and state",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glInvalidateTexSubImage",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glInvalidateTexImage",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glInvalidateBufferSubData",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glInvalidateBufferData",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glInvalidateFramebuffer",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glInvalidateSubFramebuffer",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMultiDrawArraysIndirect",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMultiDrawElementsIndirect",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramInterfaceiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramResourceIndex",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramResourceName",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramResourceiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramResourceLocation",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetProgramResourceLocationIndex",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glShaderStorageBlockBinding",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexBufferRange",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexStorage2DMultisample",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexStorage3DMultisample",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureView",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindVertexBuffer",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribFormat",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribIFormat",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribLFormat",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexAttribBinding",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexBindingDivisor",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDebugMessageControl",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDebugMessageInsert",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDebugMessageCallback",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.3",
+      "state": "Smoke-tested",
+      "firstPassingTestId": "bootstrap.clear-loop",
+      "firstPassingBenchmarkId": "",
+      "notes": "Bootstrap debug callback receives unsupported-entry-point diagnostics."
+    },
+    {
+      "name": "glGetDebugMessageLog",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPushDebugGroup",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPopDebugGroup",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glObjectLabel",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetObjectLabel",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glObjectPtrLabel",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetObjectPtrLabel",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetPointerv",
+      "subsystem": "context and state",
+      "introducedVersion": "4.3",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBufferStorage",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearTexImage",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearTexSubImage",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindBuffersBase",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindBuffersRange",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindTextures",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindSamplers",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindImageTextures",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindVertexBuffers",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.4",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClipControl",
+      "subsystem": "context and state",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateTransformFeedbacks",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTransformFeedbackBufferBase",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTransformFeedbackBufferRange",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTransformFeedbackiv",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTransformFeedbacki_v",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTransformFeedbacki64_v",
+      "subsystem": "transform feedback",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateBuffers",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedBufferStorage",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedBufferData",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedBufferSubData",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyNamedBufferSubData",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearNamedBufferData",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearNamedBufferSubData",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMapNamedBuffer",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMapNamedBufferRange",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glUnmapNamedBuffer",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFlushMappedNamedBufferRange",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetNamedBufferParameteriv",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetNamedBufferParameteri64v",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetNamedBufferPointerv",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetNamedBufferSubData",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateFramebuffers",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferRenderbuffer",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferParameteri",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferTexture",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferTextureLayer",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferDrawBuffer",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferDrawBuffers",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedFramebufferReadBuffer",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glInvalidateNamedFramebufferData",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glInvalidateNamedFramebufferSubData",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearNamedFramebufferiv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearNamedFramebufferuiv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearNamedFramebufferfv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glClearNamedFramebufferfi",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlitNamedFramebuffer",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCheckNamedFramebufferStatus",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetNamedFramebufferParameteriv",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetNamedFramebufferAttachmentParameteriv",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateRenderbuffers",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedRenderbufferStorage",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedRenderbufferStorageMultisample",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetNamedRenderbufferParameteriv",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateTextures",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureBuffer",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureBufferRange",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureStorage1D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureStorage2D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureStorage3D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureStorage2DMultisample",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureStorage3DMultisample",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureSubImage1D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureSubImage2D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureSubImage3D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCompressedTextureSubImage1D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCompressedTextureSubImage2D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCompressedTextureSubImage3D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyTextureSubImage1D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyTextureSubImage2D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCopyTextureSubImage3D",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureParameterf",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureParameterfv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureParameteri",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureParameterIiv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureParameterIuiv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureParameteriv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGenerateTextureMipmap",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBindTextureUnit",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTextureImage",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetCompressedTextureImage",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTextureLevelParameterfv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTextureLevelParameteriv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTextureParameterfv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTextureParameterIiv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTextureParameterIuiv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTextureParameteriv",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateVertexArrays",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glDisableVertexArrayAttrib",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glEnableVertexArrayAttrib",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexArrayElementBuffer",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexArrayVertexBuffer",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexArrayVertexBuffers",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexArrayAttribBinding",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexArrayAttribFormat",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexArrayAttribIFormat",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexArrayAttribLFormat",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glVertexArrayBindingDivisor",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetVertexArrayiv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetVertexArrayIndexediv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetVertexArrayIndexed64iv",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateSamplers",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateProgramPipelines",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glCreateQueries",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetQueryBufferObjecti64v",
+      "subsystem": "queries and sync",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetQueryBufferObjectiv",
+      "subsystem": "queries and sync",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetQueryBufferObjectui64v",
+      "subsystem": "queries and sync",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetQueryBufferObjectuiv",
+      "subsystem": "queries and sync",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMemoryBarrierByRegion",
+      "subsystem": "compute",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetTextureSubImage",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetCompressedTextureSubImage",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetGraphicsResetStatus",
+      "subsystem": "debug and introspection",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetnCompressedTexImage",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetnTexImage",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetnUniformdv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetnUniformfv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetnUniformiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glGetnUniformuiv",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glReadnPixels",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTextureBarrier",
+      "subsystem": "direct state access",
+      "introducedVersion": "4.5",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glSpecializeShader",
+      "subsystem": "shaders and programs",
+      "introducedVersion": "4.6",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMultiDrawArraysIndirectCount",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.6",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glMultiDrawElementsIndirectCount",
+      "subsystem": "vertex input and drawing",
+      "introducedVersion": "4.6",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glPolygonOffsetClamp",
+      "subsystem": "context and state",
+      "introducedVersion": "4.6",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    }
+  ]
+}
