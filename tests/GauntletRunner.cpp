@@ -851,6 +851,51 @@ public:
         expectGLError(gl, GL_INVALID_ENUM, "unsupported offscreen FBO depth readback type");
 
         gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+
+        // Round-trip the cleared color through a second offscreen FBO via
+        // glBlitFramebuffer, then read it back. Verifies that the COLOR_BUFFER_BIT
+        // path is wired between independent attachments.
+        GLuint copyFramebuffer = 0;
+        GLuint copyTexture = 0;
+        gl.glGenFramebuffers(1, &copyFramebuffer);
+        gl.glGenTextures(1, &copyTexture);
+        gl.glBindTexture(GL_TEXTURE_2D, copyTexture);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size.width, size.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        gl.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, copyFramebuffer);
+        gl.glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, copyTexture, 0);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(gl.glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "blit destination FBO is complete");
+        gl.glBlitFramebuffer(0, 0, size.width, size.height, 0, 0, size.width, size.height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        expectGLError(gl, GL_NO_ERROR, "color blit emits no error");
+
+        gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, copyFramebuffer);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        std::array<std::uint8_t, 4> blittedSample = {};
+        gl.glReadPixels(size.width / 2, size.height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, blittedSample.data());
+        expectCondition(blittedSample[0] == 46 && blittedSample[1] == 112 && blittedSample[2] == 179 && blittedSample[3] == 255, "blitted color matches source");
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
+        gl.glDeleteFramebuffers(1, &copyFramebuffer);
+        gl.glDeleteTextures(1, &copyTexture);
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glGenFramebuffers,
+            FunctionId::glDeleteFramebuffers,
+            FunctionId::glBindFramebuffer,
+            FunctionId::glCheckFramebufferStatus,
+            FunctionId::glFramebufferTexture2D,
+            FunctionId::glFramebufferRenderbuffer,
+            FunctionId::glGenRenderbuffers,
+            FunctionId::glRenderbufferStorage,
+            FunctionId::glGetFramebufferAttachmentParameteriv,
+            FunctionId::glDrawBuffer,
+            FunctionId::glReadBuffer,
+            FunctionId::glBlitFramebuffer,
+        };
     }
 
 private:
@@ -1179,6 +1224,20 @@ TestResult runScene(Scene& scene) {
                     + pixelSummary("actualCenter", actual)
                     + ").";
             }
+        }
+    }
+
+    if (result.status == "passed") {
+        // Promote functions exercised by this scene from SmokeTested to ScenarioTested,
+        // anchoring the promotion to the golden image so the coverage entry can later
+        // be audited against a real artifact.
+        for (FunctionId id : scene.scenarioCoverage()) {
+            Runtime::shared().coverageStore().markScenarioTested(
+                id,
+                scene.id(),
+                result.goldenPath,
+                "Round-trip golden compare passed."
+            );
         }
     }
 

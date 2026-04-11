@@ -209,6 +209,12 @@ public:
     void clearDirty(DirtyBit bit);
     std::uint32_t dirtyMask() const;
 
+    // Returns true if a draw command may proceed under the current state. In core
+    // profile this rejects VAO 0 (the default vertex array) — bound by spec to be
+    // GL_INVALID_OPERATION since 3.2 core. The caller is responsible for translating
+    // a false return into the appropriate GL error and skipping applyDirtyStateForDraw.
+    bool validateForDraw() const;
+
     void applyDirtyStateForDraw(GLObjectStore& objects);
 
 private:

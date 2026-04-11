@@ -100,6 +100,7 @@ void APIENTRY glFramebufferTexture3D(GLenum target, GLenum attachment, GLenum te
 void APIENTRY glFramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level);
 void APIENTRY glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer);
 void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
+void APIENTRY glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
 void APIENTRY glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint* params);
 void APIENTRY glGenSamplers(GLsizei count, GLuint* samplers);
 void APIENTRY glDeleteSamplers(GLsizei count, const GLuint* samplers);

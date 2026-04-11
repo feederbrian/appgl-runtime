@@ -466,18 +466,33 @@ const GLDepthRangeState& GLStateTracker::depthRange() const {
 }
 
 void GLStateTracker::setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
+    if (clear_.color[0] == red && clear_.color[1] == green && clear_.color[2] == blue && clear_.color[3] == alpha) {
+        return;
+    }
     clear_.color[0] = red;
     clear_.color[1] = green;
     clear_.color[2] = blue;
     clear_.color[3] = alpha;
+    // Clear values are baked into the next render-pass load action, which lives
+    // on the framebuffer descriptor. Mark the framebuffer dirty so the frame graph
+    // rebuilds its load-action set on the next clear/draw.
+    markDirty(DirtyBit::Framebuffer);
 }
 
 void GLStateTracker::setClearDepth(GLdouble depth) {
+    if (clear_.depth == depth) {
+        return;
+    }
     clear_.depth = depth;
+    markDirty(DirtyBit::Framebuffer);
 }
 
 void GLStateTracker::setClearStencil(GLint stencil) {
+    if (clear_.stencil == stencil) {
+        return;
+    }
     clear_.stencil = stencil;
+    markDirty(DirtyBit::Framebuffer);
 }
 
 const GLClearState& GLStateTracker::clearState() const {
@@ -1109,7 +1124,20 @@ std::uint32_t GLStateTracker::dirtyMask() const {
     return dirtyMask_;
 }
 
+bool GLStateTracker::validateForDraw() const {
+    // GL 3.2+ core profile: drawing with VAO 0 is GL_INVALID_OPERATION. This guard
+    // is what the future glDraw* entrypoints must consult before pushing work.
+    return currentVertexArray_ != 0;
+}
+
 void GLStateTracker::applyDirtyStateForDraw(GLObjectStore& objects) {
+    // Defense-in-depth: VAO 0 has no real attribute layout in core profile, so
+    // skip the descriptor build entirely. The draw entrypoints should also call
+    // validateForDraw() to surface GL_INVALID_OPERATION before reaching here.
+    if (currentVertexArray_ == 0) {
+        dirtyMask_ = 0;
+        return;
+    }
     if (isDirty(DirtyBit::VertexInput)) {
         GLVertexArrayObject* vertexArray = objects.vertexArrays().get(currentVertexArray_);
         if (vertexArray != nullptr && (vertexArray->vertexDescriptorDirty || vertexArray->metalVertexDescriptor == nullptr)) {

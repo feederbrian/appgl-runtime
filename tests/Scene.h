@@ -1,6 +1,9 @@
 #pragma once
 
 #include <string>
+#include <vector>
+
+#include "../src/generated/gl_function_ids.gen.h"
 
 namespace appgl {
 class GLContext;
@@ -23,6 +26,10 @@ public:
     virtual void setup(GLContext& context) = 0;
     virtual void render(GLContext& context) = 0;
     virtual double tolerance() const { return 0.01; }
+
+    // Functions whose coverage state should be promoted to ScenarioTested when this
+    // scene's golden round-trip passes. Default: none.
+    virtual std::vector<FunctionId> scenarioCoverage() const { return {}; }
 };
 
 }  // namespace appgl::tests

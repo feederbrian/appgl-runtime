@@ -88,6 +88,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glFramebufferTexture2D = &impl::glFramebufferTexture2D;
     dispatch.glFramebufferTexture3D = &impl::glFramebufferTexture3D;
     dispatch.glFramebufferRenderbuffer = &impl::glFramebufferRenderbuffer;
+    dispatch.glBlitFramebuffer = &impl::glBlitFramebuffer;
     dispatch.glGetFramebufferAttachmentParameteriv = &impl::glGetFramebufferAttachmentParameteriv;
     dispatch.glRenderbufferStorageMultisample = &impl::glRenderbufferStorageMultisample;
     dispatch.glFramebufferTextureLayer = &impl::glFramebufferTextureLayer;
@@ -230,6 +231,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glFramebufferTexture2D, "2D texture framebuffer attachments are live.");
     coverage.markImplemented(FunctionId::glFramebufferTexture3D, "3D texture framebuffer attachments are live.");
     coverage.markImplemented(FunctionId::glFramebufferRenderbuffer, "Renderbuffer framebuffer attachments are live.");
+    coverage.markImplemented(FunctionId::glBlitFramebuffer, "CPU-shadowed framebuffer blits are live for color/depth/stencil masks (1:1 nearest).");
     coverage.markImplemented(FunctionId::glGetFramebufferAttachmentParameteriv, "Framebuffer attachment queries are live.");
     coverage.markImplemented(FunctionId::glRenderbufferStorageMultisample, "Multisample renderbuffer storage is live.");
     coverage.markImplemented(FunctionId::glFramebufferTextureLayer, "Layered texture framebuffer attachments are live.");

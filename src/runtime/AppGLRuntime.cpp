@@ -2246,6 +2246,17 @@ void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum
     }
 }
 
+void APIENTRY glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) {
+    auto* context = requireCurrentContext("glBlitFramebuffer");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->blitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter)) {
+        markFramebufferFunction(FunctionId::glBlitFramebuffer, "Framebuffer-to-framebuffer blits route through CPU shadow attachments.");
+        Runtime::shared().recordBootstrapTrace("glBlitFramebuffer(" + std::to_string(mask) + ")");
+    }
+}
+
 void APIENTRY glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint* params) {
     auto* context = requireCurrentContext("glGetFramebufferAttachmentParameteriv");
     if (context == nullptr) {
