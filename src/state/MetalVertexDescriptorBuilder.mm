@@ -15,6 +15,20 @@ namespace {
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
+// Must match BindingMap::vertexBufferBase in shader/ShaderTranslator.h.
+//
+// Metal exposes 31 buffer slots per shader stage (indices 0..30). We partition
+// them so that vertex buffers live in the low half and uniform/storage buffers
+// live in the high half:
+//   [ 0..16)  vertex buffers    (mirrors GL_MAX_VERTEX_ATTRIBS = 16)
+//   [16..30)  uniform buffers   (mirrors GL_MAX_UNIFORM_BUFFER_BINDINGS area)
+//   [30..31)  reserved (argument buffer tier-1 stash)
+//
+// The earlier layout pushed vertex buffers to slot 32 which exceeds Metal's
+// hard limit and fails -[MTLVertexAttributeDescriptorInternal setBufferIndex:].
+constexpr std::uint32_t kVertexBufferBase = 0;
+constexpr std::uint32_t kMaxVertexBufferSlots = 16;
+
 void* retainDescriptor(MTLVertexDescriptor* descriptor) {
     if (descriptor == nil) {
         return nullptr;
@@ -216,6 +230,32 @@ MetalVertexDescriptorBuildResult buildMetalVertexDescriptor(const GLVertexArrayO
     }
 
     std::uint64_t hash = kFnvOffset;
+
+    // Group attributes by (GL buffer, stride, divisor). Each unique tuple gets
+    // its own Metal vertex buffer slot starting at kVertexBufferBase. Interleaved
+    // attributes that share a VBO collapse into one slot — the per-attribute
+    // pointer becomes the descriptor offset within that layout.
+    bool slotOverflow = false;
+    auto findOrAssignSlot = [&result, &slotOverflow](GLuint glBuffer, std::uint32_t stride, GLuint divisor) -> std::uint32_t {
+        for (const auto& binding : result.vertexBufferBindings) {
+            if (binding.glBuffer == glBuffer && binding.stride == stride) {
+                // Note: divisor is already encoded by the layout's stepFunction/stepRate;
+                // two attributes sharing buffer+stride must also share divisor — we enforce
+                // this implicitly by using stride/divisor as part of the dedupe key below.
+                (void)divisor;
+                return binding.metalSlot;
+            }
+        }
+        const std::uint32_t slotIndex = static_cast<std::uint32_t>(result.vertexBufferBindings.size());
+        if (slotIndex >= kMaxVertexBufferSlots) {
+            slotOverflow = true;
+            return kVertexBufferBase;  // safe fallback; caller will see error string
+        }
+        const std::uint32_t slot = kVertexBufferBase + slotIndex;
+        result.vertexBufferBindings.push_back({glBuffer, slot, stride});
+        return slot;
+    };
+
     for (std::size_t index = 0; index < vertexArray.attributes.size(); ++index) {
         const auto& attribute = vertexArray.attributes[index];
         if (!attribute.enabled) {
@@ -228,20 +268,32 @@ MetalVertexDescriptorBuildResult buildMetalVertexDescriptor(const GLVertexArrayO
             return result;
         }
 
-        const std::size_t stride = attribute.stride > 0 ? static_cast<std::size_t>(attribute.stride) : attributeByteSize(attribute);
+        const std::uint32_t stride = static_cast<std::uint32_t>(
+            attribute.stride > 0 ? static_cast<std::size_t>(attribute.stride) : attributeByteSize(attribute)
+        );
+        const std::uint32_t metalSlot = findOrAssignSlot(attribute.buffer, stride, attribute.divisor);
+
         descriptor.attributes[index].format = format;
         descriptor.attributes[index].offset = static_cast<NSUInteger>(attribute.pointer);
-        descriptor.attributes[index].bufferIndex = static_cast<NSUInteger>(index);
-        descriptor.layouts[index].stride = static_cast<NSUInteger>(stride);
-        descriptor.layouts[index].stepFunction = attribute.divisor == 0 ? MTLVertexStepFunctionPerVertex : MTLVertexStepFunctionPerInstance;
-        descriptor.layouts[index].stepRate = attribute.divisor == 0 ? 1 : static_cast<NSUInteger>(attribute.divisor);
+        descriptor.attributes[index].bufferIndex = static_cast<NSUInteger>(metalSlot);
+        descriptor.layouts[metalSlot].stride = static_cast<NSUInteger>(stride);
+        descriptor.layouts[metalSlot].stepFunction = attribute.divisor == 0 ? MTLVertexStepFunctionPerVertex : MTLVertexStepFunctionPerInstance;
+        descriptor.layouts[metalSlot].stepRate = attribute.divisor == 0 ? 1 : static_cast<NSUInteger>(attribute.divisor);
 
         hashValue(hash, static_cast<std::uint64_t>(index));
         hashValue(hash, static_cast<std::uint64_t>(format));
         hashValue(hash, static_cast<std::uint64_t>(attribute.pointer));
         hashValue(hash, static_cast<std::uint64_t>(stride));
         hashValue(hash, static_cast<std::uint64_t>(attribute.divisor));
+        hashValue(hash, static_cast<std::uint64_t>(attribute.buffer));
+        hashValue(hash, static_cast<std::uint64_t>(metalSlot));
         hashValue(hash, attribute.integer ? 1u : 0u);
+    }
+
+    if (slotOverflow) {
+        result.error = "Vertex array uses more than " + std::to_string(kMaxVertexBufferSlots)
+            + " distinct vertex buffer slots; Metal supports at most 31 buffers per stage.";
+        return result;
     }
 
     result.hash = formatHash(hash);

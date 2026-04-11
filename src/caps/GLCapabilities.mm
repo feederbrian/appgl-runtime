@@ -143,7 +143,12 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_SAMPLES] = maxSamples;
     integerLimits_[GL_MAX_RENDERBUFFER_SIZE] = maxTextureSize;
     integerLimits_[GL_MAX_VIEWPORT_DIMS] = maxViewportDimension;
-    integerLimits_[GL_MAX_ELEMENT_INDEX] = std::min<GLint64>(maxBufferLength / 4, 0x7fffffff);
+    // GL 4.3 spec: GL_MAX_ELEMENT_INDEX must be at least 2^32 - 2 for the largest
+    // index type (GL_UNSIGNED_INT). It is a property of the index format, not of
+    // any particular buffer's storage size.
+    integerLimits_[GL_MAX_ELEMENT_INDEX] = static_cast<GLint64>(0xFFFFFFFEull);
+    integerLimits_[GL_MAX_ELEMENTS_INDICES] = std::min<GLint64>(maxBufferLength / 4, 0x7fffffff);
+    integerLimits_[GL_MAX_ELEMENTS_VERTICES] = std::min<GLint64>(maxBufferLength / 16, 0x7fffffff);
     integerLimits_[GL_MAX_DEBUG_MESSAGE_LENGTH] = 1024;
     integerLimits_[GL_MAX_DEBUG_LOGGED_MESSAGES] = 64;
     integerLimits_[GL_MAX_DEBUG_GROUP_STACK_DEPTH] = 64;

@@ -20,6 +20,7 @@ public:
     bool contains(GLuint id) const;
     T* get(GLuint id);
     const T* get(GLuint id) const;
+    std::size_t size() const { return objects_.size(); }
 
     template <typename Visitor>
     void forEach(Visitor&& visitor);
@@ -142,11 +143,18 @@ struct GLVertexAttributeState {
     bool longData = false;
 };
 
+struct GLVertexArrayBufferBinding {
+    GLuint glBuffer = 0;
+    std::uint32_t metalSlot = 0;
+    std::uint32_t stride = 0;
+};
+
 struct GLVertexArrayObject {
     std::vector<GLVertexAttributeState> attributes;
     void* metalVertexDescriptor = nullptr;
     std::string vertexDescriptorHash;
     std::string vertexDescriptorError;
+    std::vector<GLVertexArrayBufferBinding> vertexBufferBindings;
     GLuint elementArrayBuffer = 0;
     bool instantiated = false;
     bool vertexDescriptorDirty = true;

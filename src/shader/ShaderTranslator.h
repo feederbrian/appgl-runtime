@@ -11,10 +11,14 @@
 
 namespace appgl {
 
+// Metal exposes 31 buffer slots per shader stage (indices 0..30). Vertex
+// buffers must live in the low half so they fit MTLVertexDescriptor's
+// bufferIndex range, with uniform/storage buffers stacked above them. This
+// must stay in lockstep with kVertexBufferBase in MetalVertexDescriptorBuilder.mm.
 struct BindingMap {
-    std::uint32_t uniformBufferBase = 0;
-    std::uint32_t storageBufferBase = 16;
-    std::uint32_t vertexBufferBase = 32;
+    std::uint32_t vertexBufferBase = 0;    // [ 0..16) — VBOs
+    std::uint32_t uniformBufferBase = 16;  // [16..28) — UBOs
+    std::uint32_t storageBufferBase = 28;  // [28..30) — SSBOs (GL 4.3+, deferred)
     std::uint32_t textureBase = 0;
     std::uint32_t samplerBase = 0;
 };

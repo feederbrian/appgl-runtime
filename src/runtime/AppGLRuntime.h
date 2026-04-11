@@ -175,6 +175,7 @@ public:
 
     void noteRenderer(std::string renderer);
     std::size_t writeCoverageSnapshotJSON(char* out, std::size_t cap);
+    std::size_t writeDiagnosticsJSON(char* out, std::size_t cap);
 
     CoverageStore& coverageStore();
     TraceLog& traceLog();

@@ -621,18 +621,69 @@ const GLRasterState& GLStateTracker::rasterState() const {
     return raster_;
 }
 
+namespace {
+
+// Map a GL capability enum to the minimal set of pipeline-state dirty bits it
+// actually invalidates. Caps that don't affect any cached pipeline state (e.g.
+// GL_DITHER, GL_MULTISAMPLE on a non-MSAA target, GL_SCISSOR_TEST which is a
+// dynamic encoder state) return zero so that toggling them does not force a
+// pipeline rebuild.
+std::uint32_t dirtyBitsForCap(GLenum cap) {
+    using DB = DirtyBit;
+    switch (cap) {
+        case GL_BLEND:
+        case GL_SAMPLE_ALPHA_TO_COVERAGE:
+        case GL_SAMPLE_ALPHA_TO_ONE:
+        case GL_SAMPLE_COVERAGE:
+            return static_cast<std::uint32_t>(DB::BlendState);
+        case GL_DEPTH_TEST:
+        case GL_STENCIL_TEST:
+            return static_cast<std::uint32_t>(DB::DepthStencilState);
+        case GL_CULL_FACE:
+        case GL_POLYGON_OFFSET_FILL:
+        case GL_POLYGON_OFFSET_LINE:
+        case GL_POLYGON_OFFSET_POINT:
+        case GL_PROGRAM_POINT_SIZE:
+        case GL_RASTERIZER_DISCARD:
+        case GL_LINE_SMOOTH:
+        case GL_POLYGON_SMOOTH:
+            return static_cast<std::uint32_t>(DB::RasterState);
+        case GL_FRAMEBUFFER_SRGB:
+            return static_cast<std::uint32_t>(DB::BlendState);
+        // Caps below are dynamic encoder state or no-ops on Metal — toggling
+        // them must not invalidate any cached pipeline state object.
+        case GL_SCISSOR_TEST:
+        case GL_DITHER:
+        case GL_MULTISAMPLE:
+        case GL_PRIMITIVE_RESTART:
+        case GL_PRIMITIVE_RESTART_FIXED_INDEX:
+        case GL_DEBUG_OUTPUT:
+        case GL_DEBUG_OUTPUT_SYNCHRONOUS:
+        case GL_TEXTURE_CUBE_MAP_SEAMLESS:
+            return 0u;
+        default:
+            // Unknown caps fall through with no dirty bits set; the validation
+            // path is responsible for raising GL_INVALID_ENUM separately.
+            return 0u;
+    }
+}
+
+}  // namespace
+
 void GLStateTracker::enable(GLenum cap) {
+    const bool wasEnabled = enabledCaps_.contains(cap);
     enabledCaps_.insert(cap);
-    markDirty(DirtyBit::DepthStencilState);
-    markDirty(DirtyBit::BlendState);
-    markDirty(DirtyBit::RasterState);
+    if (!wasEnabled) {
+        dirtyMask_ |= dirtyBitsForCap(cap);
+    }
 }
 
 void GLStateTracker::disable(GLenum cap) {
+    const bool wasEnabled = enabledCaps_.contains(cap);
     enabledCaps_.erase(cap);
-    markDirty(DirtyBit::DepthStencilState);
-    markDirty(DirtyBit::BlendState);
-    markDirty(DirtyBit::RasterState);
+    if (wasEnabled) {
+        dirtyMask_ |= dirtyBitsForCap(cap);
+    }
 }
 
 bool GLStateTracker::isEnabled(GLenum cap) const {
@@ -1067,6 +1118,11 @@ void GLStateTracker::applyDirtyStateForDraw(GLObjectStore& objects) {
             vertexArray->metalVertexDescriptor = descriptor.descriptor;
             vertexArray->vertexDescriptorHash = std::move(descriptor.hash);
             vertexArray->vertexDescriptorError = std::move(descriptor.error);
+            vertexArray->vertexBufferBindings.clear();
+            vertexArray->vertexBufferBindings.reserve(descriptor.vertexBufferBindings.size());
+            for (const auto& binding : descriptor.vertexBufferBindings) {
+                vertexArray->vertexBufferBindings.push_back({binding.glBuffer, binding.metalSlot, binding.stride});
+            }
             vertexArray->vertexDescriptorDirty = false;
         }
     }

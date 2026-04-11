@@ -7,6 +7,8 @@
 
 #include "../../include/AppGL/AppGL.h"
 #include "../loader/DispatchInstall.h"
+#include "../objects/GLObjectStore.h"
+#include "../shared/JsonUtil.h"
 
 namespace appgl {
 
@@ -802,6 +804,80 @@ void Runtime::noteRenderer(std::string renderer) {
 
 std::size_t Runtime::writeCoverageSnapshotJSON(char* out, std::size_t cap) {
     const std::string payload = coverageStore_.buildSnapshotJson(rendererString_, traceLog_.snapshot());
+    const std::size_t required = payload.size() + 1;
+    if (out == nullptr || cap == 0) {
+        return required;
+    }
+    const std::size_t bytesToCopy = std::min(required - 1, cap - 1);
+    std::memcpy(out, payload.data(), bytesToCopy);
+    out[bytesToCopy] = '\0';
+    return required;
+}
+
+std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
+    std::ostringstream stream;
+    stream << "{";
+    stream << "\"renderer\":\"" << jsonEscape(rendererString_) << "\",";
+    stream << "\"hasCurrentContext\":" << (gCurrentContext != nullptr ? "true" : "false") << ",";
+
+    // ── Object store inventory (current context only) ──
+    stream << "\"objectStore\":{";
+    if (gCurrentContext != nullptr) {
+        auto& store = gCurrentContext->objects();
+
+        // Walk buffers/textures explicitly to compute resident byte totals.
+        std::uint64_t bufferBytes = 0;
+        store.buffers().forEach([&bufferBytes](GLuint, GLBufferObject& buffer) {
+            bufferBytes += static_cast<std::uint64_t>(buffer.size > 0 ? buffer.size : 0);
+        });
+        std::uint64_t textureBytes = 0;
+        store.textures().forEach([&textureBytes](GLuint, GLTextureObject& texture) {
+            for (const auto& [level, image] : texture.levels) {
+                (void)level;
+                textureBytes += static_cast<std::uint64_t>(image.rgba8.size());
+            }
+        });
+        std::uint64_t renderbufferBytes = 0;
+        store.renderbuffers().forEach([&renderbufferBytes](GLuint, GLRenderbufferObject& rb) {
+            renderbufferBytes += static_cast<std::uint64_t>(rb.rgba8.size())
+                + static_cast<std::uint64_t>(rb.depth32.size() * sizeof(GLfloat))
+                + static_cast<std::uint64_t>(rb.stencil8.size());
+        });
+
+        stream << "\"buffers\":" << store.buffers().size() << ",";
+        stream << "\"textures\":" << store.textures().size() << ",";
+        stream << "\"samplers\":" << store.samplers().size() << ",";
+        stream << "\"renderbuffers\":" << store.renderbuffers().size() << ",";
+        stream << "\"framebuffers\":" << store.framebuffers().size() << ",";
+        stream << "\"vertexArrays\":" << store.vertexArrays().size() << ",";
+        stream << "\"shaders\":" << store.shaders().size() << ",";
+        stream << "\"programs\":" << store.programs().size() << ",";
+        stream << "\"queries\":" << store.queries().size() << ",";
+        stream << "\"syncs\":" << store.syncs().size() << ",";
+        stream << "\"transformFeedbacks\":" << store.transformFeedbacks().size() << ",";
+        stream << "\"bufferBytes\":" << bufferBytes << ",";
+        stream << "\"textureBytes\":" << textureBytes << ",";
+        stream << "\"renderbufferBytes\":" << renderbufferBytes;
+    } else {
+        stream << "\"buffers\":0,\"textures\":0,\"samplers\":0,\"renderbuffers\":0,"
+                  "\"framebuffers\":0,\"vertexArrays\":0,\"shaders\":0,\"programs\":0,"
+                  "\"queries\":0,\"syncs\":0,\"transformFeedbacks\":0,"
+                  "\"bufferBytes\":0,\"textureBytes\":0,\"renderbufferBytes\":0";
+    }
+    stream << "},";
+
+    // ── Pipeline cache metrics — populated in Phase A Group 7. ──
+    stream << "\"pipelineCache\":{\"entries\":0,\"hits\":0,\"misses\":0,\"averageBuildMillis\":0.0},";
+
+    // ── Shader translation log — populated in Phase A Group 6. ──
+    stream << "\"shaderTranslations\":[],";
+
+    // ── GL error stream — populated when error history is wired. ──
+    stream << "\"errorLog\":[]";
+
+    stream << "}";
+
+    const std::string payload = stream.str();
     const std::size_t required = payload.size() + 1;
     if (out == nullptr || cap == 0) {
         return required;
@@ -2930,4 +3006,8 @@ extern "C" void appglSwapBuffers(AppGLContext* context) {
 
 extern "C" std::size_t appglCoverageSnapshotJSON(char* out, std::size_t cap) {
     return appgl::Runtime::shared().writeCoverageSnapshotJSON(out, cap);
+}
+
+extern "C" std::size_t appglDiagnosticsJSON(char* out, std::size_t cap) {
+    return appgl::Runtime::shared().writeDiagnosticsJSON(out, cap);
 }

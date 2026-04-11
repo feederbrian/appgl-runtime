@@ -17,6 +17,7 @@ void appglMakeCurrent(AppGLContext* context);
 void appglSwapBuffers(AppGLContext* context);
 size_t appglCoverageSnapshotJSON(char* out, size_t cap);
 size_t appglRunGauntletJSON(const char* phaseFilter, char* out, size_t cap);
+size_t appglDiagnosticsJSON(char* out, size_t cap);
 
 #ifdef __cplusplus
 }
