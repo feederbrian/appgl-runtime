@@ -95,6 +95,17 @@ public:
     bool getBufferParameterInteger(GLenum target, GLenum pname, GLint* params);
     bool getBufferParameterInteger64(GLenum target, GLenum pname, GLint64* params);
     bool getBufferPointer(GLenum target, GLenum pname, void** params);
+    bool genVertexArrays(GLsizei count, GLuint* arrays);
+    bool deleteVertexArrays(GLsizei count, const GLuint* arrays);
+    bool isVertexArray(GLuint array) const;
+    bool bindVertexArray(GLuint array);
+    bool enableVertexAttribArray(GLuint index, bool enabled);
+    bool vertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void* pointer);
+    bool vertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer);
+    bool vertexAttribDivisor(GLuint index, GLuint divisor);
+    bool getVertexAttribInteger(GLuint index, GLenum pname, GLint* params);
+    bool getVertexAttribFloat(GLuint index, GLenum pname, GLfloat* params);
+    bool getVertexAttribPointer(GLuint index, GLenum pname, void** pointer);
 
     void pushError(GLenum error);
     GLenum popError();

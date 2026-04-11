@@ -16,6 +16,7 @@ constexpr const char* kBootstrapTestId = "bootstrap.clear-loop";
 constexpr const char* kPhaseAStateTestId = "phase-a.state";
 constexpr const char* kPhaseADebugTestId = "phase-a.debug";
 constexpr const char* kPhaseABufferTestId = "phase-a.buffers";
+constexpr const char* kPhaseAVertexInputTestId = "phase-a.vertex-input";
 constexpr GLuint kPhaseAMaxDrawBuffers = 8;
 constexpr GLuint kPhaseAMaxIndexedBufferBindings = 32;
 
@@ -294,6 +295,63 @@ bool isValidBufferParameterPname(GLenum pname) {
 
 void markBufferFunction(FunctionId id, std::string_view note) {
     Runtime::shared().coverageStore().markSmokeTested(id, kPhaseABufferTestId, note);
+    Runtime::shared().refreshCurrentContextClaimedVersion();
+}
+
+bool isValidVertexAttribPointerType(GLenum type) {
+    switch (type) {
+        case GL_BYTE:
+        case GL_UNSIGNED_BYTE:
+        case GL_SHORT:
+        case GL_UNSIGNED_SHORT:
+        case GL_INT:
+        case GL_UNSIGNED_INT:
+        case GL_HALF_FLOAT:
+        case GL_FLOAT:
+        case GL_DOUBLE:
+        case GL_FIXED:
+        case GL_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidVertexAttribIPointerType(GLenum type) {
+    switch (type) {
+        case GL_BYTE:
+        case GL_UNSIGNED_BYTE:
+        case GL_SHORT:
+        case GL_UNSIGNED_SHORT:
+        case GL_INT:
+        case GL_UNSIGNED_INT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidVertexAttribPname(GLenum pname) {
+    switch (pname) {
+        case GL_VERTEX_ATTRIB_ARRAY_ENABLED:
+        case GL_VERTEX_ATTRIB_ARRAY_SIZE:
+        case GL_VERTEX_ATTRIB_ARRAY_STRIDE:
+        case GL_VERTEX_ATTRIB_ARRAY_TYPE:
+        case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED:
+        case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
+        case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
+        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
+        case GL_VERTEX_ATTRIB_ARRAY_LONG:
+        case GL_CURRENT_VERTEX_ATTRIB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void markVertexInputFunction(FunctionId id, std::string_view note) {
+    Runtime::shared().coverageStore().markSmokeTested(id, kPhaseAVertexInputTestId, note);
     Runtime::shared().refreshCurrentContextClaimedVersion();
 }
 
@@ -993,6 +1051,164 @@ void APIENTRY glGetBufferPointerv(GLenum target, GLenum pname, void** params) {
     if (context->getBufferPointer(target, pname, params)) {
         markBufferFunction(FunctionId::glGetBufferPointerv, "Mapped buffer pointer queries are live.");
         Runtime::shared().recordBootstrapTrace("glGetBufferPointerv(" + std::to_string(target) + ")");
+    }
+}
+
+void APIENTRY glGenVertexArrays(GLsizei n, GLuint* arrays) {
+    auto* context = requireCurrentContext("glGenVertexArrays");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->genVertexArrays(n, arrays)) {
+        markVertexInputFunction(FunctionId::glGenVertexArrays, "Vertex-array names are generated in the object store.");
+        Runtime::shared().recordBootstrapTrace("glGenVertexArrays(" + std::to_string(n) + ")");
+    }
+}
+
+void APIENTRY glDeleteVertexArrays(GLsizei n, const GLuint* arrays) {
+    auto* context = requireCurrentContext("glDeleteVertexArrays");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->deleteVertexArrays(n, arrays)) {
+        markVertexInputFunction(FunctionId::glDeleteVertexArrays, "Vertex arrays are deleted and stale bindings are cleared.");
+        Runtime::shared().recordBootstrapTrace("glDeleteVertexArrays(" + std::to_string(n) + ")");
+    }
+}
+
+GLboolean APIENTRY glIsVertexArray(GLuint array) {
+    auto* context = requireCurrentContext("glIsVertexArray");
+    if (context == nullptr) {
+        return GL_FALSE;
+    }
+    markVertexInputFunction(FunctionId::glIsVertexArray, "Vertex-array object existence queries are live.");
+    Runtime::shared().recordBootstrapTrace("glIsVertexArray(" + std::to_string(array) + ")");
+    return context->isVertexArray(array) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glBindVertexArray(GLuint array) {
+    auto* context = requireCurrentContext("glBindVertexArray");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->bindVertexArray(array)) {
+        markVertexInputFunction(FunctionId::glBindVertexArray, "Current vertex-array binding is tracked.");
+        Runtime::shared().recordBootstrapTrace("glBindVertexArray(" + std::to_string(array) + ")");
+    }
+}
+
+void APIENTRY glEnableVertexAttribArray(GLuint index) {
+    auto* context = requireCurrentContext("glEnableVertexAttribArray");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->enableVertexAttribArray(index, true)) {
+        markVertexInputFunction(FunctionId::glEnableVertexAttribArray, "Vertex attribute enable state is tracked per VAO.");
+        Runtime::shared().recordBootstrapTrace("glEnableVertexAttribArray(" + std::to_string(index) + ")");
+    }
+}
+
+void APIENTRY glDisableVertexAttribArray(GLuint index) {
+    auto* context = requireCurrentContext("glDisableVertexAttribArray");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->enableVertexAttribArray(index, false)) {
+        markVertexInputFunction(FunctionId::glDisableVertexAttribArray, "Vertex attribute disable state is tracked per VAO.");
+        Runtime::shared().recordBootstrapTrace("glDisableVertexAttribArray(" + std::to_string(index) + ")");
+    }
+}
+
+void APIENTRY glVertexAttribPointer(
+    GLuint index,
+    GLint size,
+    GLenum type,
+    GLboolean normalized,
+    GLsizei stride,
+    const void* pointer
+) {
+    auto* context = requireCurrentContext("glVertexAttribPointer");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidVertexAttribPointerType(type)) {
+        recordValidationError(context, "glVertexAttribPointer", GL_INVALID_ENUM, "type is not supported for floating-point attribute arrays");
+        return;
+    }
+    if (context->vertexAttribPointer(index, size, type, normalized, stride, pointer)) {
+        markVertexInputFunction(FunctionId::glVertexAttribPointer, "Floating-point vertex attribute pointer state captures the current array buffer.");
+        Runtime::shared().recordBootstrapTrace("glVertexAttribPointer(" + std::to_string(index) + ")");
+    }
+}
+
+void APIENTRY glVertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer) {
+    auto* context = requireCurrentContext("glVertexAttribIPointer");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidVertexAttribIPointerType(type)) {
+        recordValidationError(context, "glVertexAttribIPointer", GL_INVALID_ENUM, "type is not supported for integer attribute arrays");
+        return;
+    }
+    if (context->vertexAttribIPointer(index, size, type, stride, pointer)) {
+        markVertexInputFunction(FunctionId::glVertexAttribIPointer, "Integer vertex attribute pointer state captures the current array buffer.");
+        Runtime::shared().recordBootstrapTrace("glVertexAttribIPointer(" + std::to_string(index) + ")");
+    }
+}
+
+void APIENTRY glVertexAttribDivisor(GLuint index, GLuint divisor) {
+    auto* context = requireCurrentContext("glVertexAttribDivisor");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->vertexAttribDivisor(index, divisor)) {
+        markVertexInputFunction(FunctionId::glVertexAttribDivisor, "Vertex attribute divisors are tracked per VAO.");
+        Runtime::shared().recordBootstrapTrace("glVertexAttribDivisor(" + std::to_string(index) + ", " + std::to_string(divisor) + ")");
+    }
+}
+
+void APIENTRY glGetVertexAttribiv(GLuint index, GLenum pname, GLint* params) {
+    auto* context = requireCurrentContext("glGetVertexAttribiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidVertexAttribPname(pname)) {
+        recordValidationError(context, "glGetVertexAttribiv", GL_INVALID_ENUM, "pname is not a supported vertex attribute query");
+        return;
+    }
+    if (context->getVertexAttribInteger(index, pname, params)) {
+        markVertexInputFunction(FunctionId::glGetVertexAttribiv, "Integer vertex attribute state queries are live.");
+        Runtime::shared().recordBootstrapTrace("glGetVertexAttribiv(" + std::to_string(index) + ", " + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat* params) {
+    auto* context = requireCurrentContext("glGetVertexAttribfv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidVertexAttribPname(pname)) {
+        recordValidationError(context, "glGetVertexAttribfv", GL_INVALID_ENUM, "pname is not a supported vertex attribute query");
+        return;
+    }
+    if (context->getVertexAttribFloat(index, pname, params)) {
+        markVertexInputFunction(FunctionId::glGetVertexAttribfv, "Float vertex attribute state queries are live.");
+        Runtime::shared().recordBootstrapTrace("glGetVertexAttribfv(" + std::to_string(index) + ", " + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGetVertexAttribPointerv(GLuint index, GLenum pname, void** pointer) {
+    auto* context = requireCurrentContext("glGetVertexAttribPointerv");
+    if (context == nullptr) {
+        return;
+    }
+    if (pname != GL_VERTEX_ATTRIB_ARRAY_POINTER) {
+        recordValidationError(context, "glGetVertexAttribPointerv", GL_INVALID_ENUM, "pname must be GL_VERTEX_ATTRIB_ARRAY_POINTER");
+        return;
+    }
+    if (context->getVertexAttribPointer(index, pname, pointer)) {
+        markVertexInputFunction(FunctionId::glGetVertexAttribPointerv, "Vertex attribute pointer queries are live.");
+        Runtime::shared().recordBootstrapTrace("glGetVertexAttribPointerv(" + std::to_string(index) + ")");
     }
 }
 

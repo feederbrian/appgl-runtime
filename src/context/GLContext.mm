@@ -3,6 +3,7 @@
 #include "../caps/GLCapabilities.h"
 #include "../objects/GLObjectStore.h"
 #include "../state/GLStateTracker.h"
+#include "../state/MetalVertexDescriptorBuilder.h"
 
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
@@ -191,6 +192,11 @@ void resetBufferMapping(GLBufferObject& object) {
     object.mapPointer = nullptr;
 }
 
+void markVertexDescriptorDirty(GLVertexArrayObject& vertexArray) {
+    vertexArray.vertexDescriptorDirty = true;
+    vertexArray.vertexDescriptorError.clear();
+}
+
 }  // namespace
 
 struct GLContext::Impl {
@@ -200,6 +206,9 @@ struct GLContext::Impl {
         }
         objects->buffers().forEach([&](GLuint, GLBufferObject& buffer) {
             releaseBufferStorage(buffer);
+        });
+        objects->vertexArrays().forEach([&](GLuint, GLVertexArrayObject& vertexArray) {
+            releaseVertexDescriptor(vertexArray);
         });
     }
 
@@ -245,6 +254,14 @@ struct GLContext::Impl {
         object.size = 0;
         object.shadowBytes.clear();
         resetBufferMapping(object);
+    }
+
+    void releaseVertexDescriptor(GLVertexArrayObject& vertexArray) {
+        releaseMetalVertexDescriptor(vertexArray.metalVertexDescriptor);
+        vertexArray.metalVertexDescriptor = nullptr;
+        vertexArray.vertexDescriptorHash.clear();
+        vertexArray.vertexDescriptorError.clear();
+        vertexArray.vertexDescriptorDirty = true;
     }
 
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
@@ -317,6 +334,36 @@ struct GLContext::Impl {
             object.shadowBytes.data() + static_cast<std::size_t>(offset),
             static_cast<std::size_t>(length)
         );
+    }
+
+    GLVertexArrayObject* vertexArray(GLuint name) {
+        GLVertexArrayObject* object = objects->vertexArrays().get(name);
+        if (object != nullptr && object->attributes.empty()) {
+            objects->initializeVertexArray(*object);
+        }
+        return object;
+    }
+
+    GLVertexArrayObject* currentVertexArray() {
+        const GLuint name = state->boundVertexArray();
+        if (name == 0) {
+            return nullptr;
+        }
+        return vertexArray(name);
+    }
+
+    void deleteBufferReferencesFromVertexArrays(GLuint buffer) {
+        objects->vertexArrays().forEach([&](GLuint, GLVertexArrayObject& vertexArray) {
+            if (vertexArray.elementArrayBuffer == buffer) {
+                vertexArray.elementArrayBuffer = 0;
+            }
+            for (auto& attribute : vertexArray.attributes) {
+                if (attribute.buffer == buffer) {
+                    attribute.buffer = 0;
+                    markVertexDescriptorDirty(vertexArray);
+                }
+            }
+        });
     }
 
     void encodePendingWork() {
@@ -878,6 +925,7 @@ bool GLContext::deleteBuffers(GLsizei count, const GLuint* buffers) {
         }
         if (impl_->objects->buffers().erase(name)) {
             impl_->state->deleteBufferBindings(name);
+            impl_->deleteBufferReferencesFromVertexArrays(name);
             impl_->objects->deferDelete("buffer " + std::to_string(name));
         }
     }
@@ -892,6 +940,11 @@ bool GLContext::isBuffer(GLuint buffer) const {
 bool GLContext::bindBuffer(GLenum target, GLuint buffer) {
     if (buffer == 0) {
         impl_->state->bindBuffer(target, 0);
+        if (target == GL_ELEMENT_ARRAY_BUFFER) {
+            if (GLVertexArrayObject* vertexArray = impl_->currentVertexArray(); vertexArray != nullptr) {
+                vertexArray->elementArrayBuffer = 0;
+            }
+        }
         return true;
     }
     GLBufferObject* object = impl_->objects->buffers().get(buffer);
@@ -901,6 +954,11 @@ bool GLContext::bindBuffer(GLenum target, GLuint buffer) {
     }
     object->instantiated = true;
     impl_->state->bindBuffer(target, buffer);
+    if (target == GL_ELEMENT_ARRAY_BUFFER) {
+        if (GLVertexArrayObject* vertexArray = impl_->currentVertexArray(); vertexArray != nullptr) {
+            vertexArray->elementArrayBuffer = buffer;
+        }
+    }
     return true;
 }
 
@@ -1230,6 +1288,248 @@ bool GLContext::getBufferPointer(GLenum target, GLenum pname, void** params) {
         return false;
     }
     *params = object->mapped ? object->mapPointer : nullptr;
+    return true;
+}
+
+bool GLContext::genVertexArrays(GLsizei count, GLuint* arrays) {
+    if (count < 0 || (count > 0 && arrays == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        const GLuint name = impl_->objects->vertexArrays().reserveName();
+        arrays[index] = name;
+        if (GLVertexArrayObject* object = impl_->objects->vertexArrays().get(name); object != nullptr) {
+            impl_->objects->initializeVertexArray(*object);
+        }
+    }
+    return true;
+}
+
+bool GLContext::deleteVertexArrays(GLsizei count, const GLuint* arrays) {
+    if (count < 0 || (count > 0 && arrays == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        const GLuint name = arrays[index];
+        if (name == 0) {
+            continue;
+        }
+        if (GLVertexArrayObject* object = impl_->objects->vertexArrays().get(name); object != nullptr) {
+            impl_->releaseVertexDescriptor(*object);
+        }
+        if (impl_->objects->vertexArrays().erase(name)) {
+            if (impl_->state->boundVertexArray() == name) {
+                impl_->state->bindVertexArray(0);
+                impl_->state->bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+            }
+            impl_->objects->deferDelete("vertex array " + std::to_string(name));
+        }
+    }
+    return true;
+}
+
+bool GLContext::isVertexArray(GLuint array) const {
+    const GLVertexArrayObject* object = impl_->objects->vertexArrays().get(array);
+    return object != nullptr && object->instantiated;
+}
+
+bool GLContext::bindVertexArray(GLuint array) {
+    if (array == 0) {
+        impl_->state->bindVertexArray(0);
+        impl_->state->bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        return true;
+    }
+    GLVertexArrayObject* object = impl_->vertexArray(array);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    object->instantiated = true;
+    impl_->state->bindVertexArray(array);
+    impl_->state->bindBuffer(GL_ELEMENT_ARRAY_BUFFER, object->elementArrayBuffer);
+    return true;
+}
+
+bool GLContext::enableVertexAttribArray(GLuint index, bool enabled) {
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr || index >= vertexArray->attributes.size()) {
+        pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    vertexArray->attributes[index].enabled = enabled;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
+bool GLContext::vertexAttribPointer(
+    GLuint index,
+    GLint size,
+    GLenum type,
+    GLboolean normalized,
+    GLsizei stride,
+    const void* pointer
+) {
+    if (size < 1 || size > 4 || stride < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr || index >= vertexArray->attributes.size()) {
+        pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    const GLuint buffer = impl_->state->boundBuffer(GL_ARRAY_BUFFER);
+    if (buffer == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    auto& attribute = vertexArray->attributes[index];
+    attribute.size = size;
+    attribute.type = type;
+    attribute.normalized = normalized;
+    attribute.stride = stride;
+    attribute.pointer = reinterpret_cast<std::uintptr_t>(pointer);
+    attribute.buffer = buffer;
+    attribute.integer = false;
+    attribute.longData = false;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
+bool GLContext::vertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer) {
+    if (size < 1 || size > 4 || stride < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr || index >= vertexArray->attributes.size()) {
+        pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    const GLuint buffer = impl_->state->boundBuffer(GL_ARRAY_BUFFER);
+    if (buffer == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    auto& attribute = vertexArray->attributes[index];
+    attribute.size = size;
+    attribute.type = type;
+    attribute.normalized = GL_FALSE;
+    attribute.stride = stride;
+    attribute.pointer = reinterpret_cast<std::uintptr_t>(pointer);
+    attribute.buffer = buffer;
+    attribute.integer = true;
+    attribute.longData = false;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
+bool GLContext::vertexAttribDivisor(GLuint index, GLuint divisor) {
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr || index >= vertexArray->attributes.size()) {
+        pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    vertexArray->attributes[index].divisor = divisor;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
+bool GLContext::getVertexAttribInteger(GLuint index, GLenum pname, GLint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr || index >= vertexArray->attributes.size()) {
+        pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    const auto& attribute = vertexArray->attributes[index];
+    switch (pname) {
+        case GL_VERTEX_ATTRIB_ARRAY_ENABLED:
+            params[0] = attribute.enabled ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_SIZE:
+            params[0] = attribute.size;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_STRIDE:
+            params[0] = attribute.stride;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_TYPE:
+            params[0] = static_cast<GLint>(attribute.type);
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED:
+            params[0] = attribute.normalized;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
+            params[0] = static_cast<GLint>(attribute.buffer);
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
+            params[0] = attribute.integer ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
+            params[0] = static_cast<GLint>(attribute.divisor);
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_LONG:
+            params[0] = attribute.longData ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_CURRENT_VERTEX_ATTRIB:
+            params[0] = 0;
+            params[1] = 0;
+            params[2] = 0;
+            params[3] = 1;
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::getVertexAttribFloat(GLuint index, GLenum pname, GLfloat* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (pname == GL_CURRENT_VERTEX_ATTRIB) {
+        params[0] = 0.0f;
+        params[1] = 0.0f;
+        params[2] = 0.0f;
+        params[3] = 1.0f;
+        return true;
+    }
+
+    GLint values[4] = {};
+    if (!getVertexAttribInteger(index, pname, values)) {
+        return false;
+    }
+    params[0] = static_cast<GLfloat>(values[0]);
+    return true;
+}
+
+bool GLContext::getVertexAttribPointer(GLuint index, GLenum pname, void** pointer) {
+    if (pointer == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (pname != GL_VERTEX_ATTRIB_ARRAY_POINTER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr || index >= vertexArray->attributes.size()) {
+        pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    *pointer = reinterpret_cast<void*>(vertexArray->attributes[index].pointer);
     return true;
 }
 

@@ -43,6 +43,18 @@ void APIENTRY glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeipt
 void APIENTRY glGetBufferParameteriv(GLenum target, GLenum pname, GLint* params);
 void APIENTRY glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64* params);
 void APIENTRY glGetBufferPointerv(GLenum target, GLenum pname, void** params);
+void APIENTRY glGenVertexArrays(GLsizei n, GLuint* arrays);
+void APIENTRY glDeleteVertexArrays(GLsizei n, const GLuint* arrays);
+GLboolean APIENTRY glIsVertexArray(GLuint array);
+void APIENTRY glBindVertexArray(GLuint array);
+void APIENTRY glEnableVertexAttribArray(GLuint index);
+void APIENTRY glDisableVertexAttribArray(GLuint index);
+void APIENTRY glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void* pointer);
+void APIENTRY glVertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer);
+void APIENTRY glVertexAttribDivisor(GLuint index, GLuint divisor);
+void APIENTRY glGetVertexAttribiv(GLuint index, GLenum pname, GLint* params);
+void APIENTRY glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat* params);
+void APIENTRY glGetVertexAttribPointerv(GLuint index, GLenum pname, void** pointer);
 void APIENTRY glEnable(GLenum cap);
 void APIENTRY glDisable(GLenum cap);
 GLboolean APIENTRY glIsEnabled(GLenum cap);

@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -21,8 +22,10 @@
 #include "../include/AppGL/glcorearb.h"
 #include "../src/context/GLContext.h"
 #include "../src/debug/CoverageStore.h"
+#include "../src/objects/GLObjectStore.h"
 #include "../src/runtime/AppGLRuntime.h"
 #include "../src/shared/JsonUtil.h"
+#include "../src/state/GLStateTracker.h"
 
 namespace appgl::tests {
 namespace {
@@ -39,7 +42,7 @@ struct TestResult {
     std::string message;
 };
 
-constexpr std::array<FunctionId, 69> kBootstrapFunctions = {
+constexpr std::array<FunctionId, 81> kBootstrapFunctions = {
     FunctionId::glCullFace,
     FunctionId::glFrontFace,
     FunctionId::glHint,
@@ -87,6 +90,18 @@ constexpr std::array<FunctionId, 69> kBootstrapFunctions = {
     FunctionId::glGetBufferParameteriv,
     FunctionId::glGetBufferParameteri64v,
     FunctionId::glGetBufferPointerv,
+    FunctionId::glGenVertexArrays,
+    FunctionId::glDeleteVertexArrays,
+    FunctionId::glIsVertexArray,
+    FunctionId::glBindVertexArray,
+    FunctionId::glEnableVertexAttribArray,
+    FunctionId::glDisableVertexAttribArray,
+    FunctionId::glVertexAttribPointer,
+    FunctionId::glVertexAttribIPointer,
+    FunctionId::glVertexAttribDivisor,
+    FunctionId::glGetVertexAttribiv,
+    FunctionId::glGetVertexAttribfv,
+    FunctionId::glGetVertexAttribPointerv,
     FunctionId::glBlendFuncSeparate,
     FunctionId::glBlendColor,
     FunctionId::glBlendEquation,
@@ -159,6 +174,26 @@ void APIENTRY bootstrapDebugCallback(
     (void)length;
     (void)message;
     (void)userParam;
+}
+
+void expectCondition(bool condition, std::string_view label) {
+    if (!condition) {
+        throw std::runtime_error(std::string("Gauntlet expectation failed: ") + std::string(label));
+    }
+}
+
+void expectGLError(GLDispatchTable& gl, GLenum expected, std::string_view label) {
+    const GLenum actual = gl.glGetError();
+    if (actual != expected) {
+        throw std::runtime_error(
+            std::string("Gauntlet GL error mismatch for ")
+            + std::string(label)
+            + ": expected "
+            + std::to_string(expected)
+            + ", got "
+            + std::to_string(actual)
+        );
+    }
 }
 
 std::filesystem::path workspaceRoot() {
@@ -249,7 +284,6 @@ public:
     }
 
     void setup(GLContext& context) override {
-        (void)context;
         auto& gl = Runtime::shared().dispatch();
         gl.glDebugMessageCallback(&bootstrapDebugCallback, nullptr);
         gl.glViewport(0, 0, framebufferSize().width, framebufferSize().height);
@@ -323,6 +357,10 @@ public:
         gl.glBufferSubData(GL_ARRAY_BUFFER, sizeof(std::uint32_t), sizeof(patchData), patchData);
         std::uint32_t readbackData[4] = {};
         gl.glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(readbackData), readbackData);
+        gl.glBufferData(GL_ARRAY_BUFFER, -1, nullptr, GL_STATIC_DRAW);
+        expectGLError(gl, GL_INVALID_VALUE, "negative glBufferData size");
+        gl.glBindBuffer(static_cast<GLenum>(0xffffffffu), buffers[0]);
+        expectGLError(gl, GL_INVALID_ENUM, "invalid glBindBuffer target");
         gl.glBindBuffer(GL_COPY_READ_BUFFER, buffers[0]);
         gl.glBindBuffer(GL_COPY_WRITE_BUFFER, buffers[1]);
         gl.glBufferData(GL_COPY_WRITE_BUFFER, sizeof(readbackData), nullptr, GL_DYNAMIC_DRAW);
@@ -340,6 +378,9 @@ public:
             mappedWords[0] = 100;
             mappedWords[1] = 200;
         }
+        std::uint32_t rejectedMappedWrite = 9;
+        gl.glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(rejectedMappedWrite), &rejectedMappedWrite);
+        expectGLError(gl, GL_INVALID_OPERATION, "glBufferSubData while mapped");
         GLint mappedFlag = 0;
         gl.glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_MAPPED, &mappedFlag);
         GLint accessFlags = 0;
@@ -350,6 +391,8 @@ public:
         gl.glGetBufferPointerv(GL_ARRAY_BUFFER, GL_BUFFER_MAP_POINTER, &queriedMapPointer);
         gl.glFlushMappedBufferRange(GL_ARRAY_BUFFER, 0, sizeof(std::uint32_t) * 2);
         (void)gl.glUnmapBuffer(GL_ARRAY_BUFFER);
+        gl.glFlushMappedBufferRange(GL_ARRAY_BUFFER, 0, sizeof(std::uint32_t));
+        expectGLError(gl, GL_INVALID_OPERATION, "glFlushMappedBufferRange after unmap");
         void* wholeMap = gl.glMapBuffer(GL_ARRAY_BUFFER, GL_READ_WRITE);
         if (wholeMap != nullptr) {
             auto* mappedWords = static_cast<std::uint32_t*>(wholeMap);
@@ -364,6 +407,68 @@ public:
         (void)queriedMapPointer;
         (void)bufferSize;
         gl.glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(readbackData), readbackData);
+
+        GLuint vertexArray = 0;
+        gl.glGenVertexArrays(1, &vertexArray);
+        expectCondition(gl.glIsVertexArray(vertexArray) == GL_FALSE, "generated VAO is not instantiated before bind");
+        gl.glBindVertexArray(vertexArray);
+        expectCondition(gl.glIsVertexArray(vertexArray) == GL_TRUE, "bound VAO is instantiated");
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
+        gl.glBindVertexArray(0);
+        GLint elementArrayBinding = -1;
+        gl.glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &elementArrayBinding);
+        expectCondition(elementArrayBinding == 0, "unbound VAO clears element-array binding");
+        gl.glBindVertexArray(vertexArray);
+        gl.glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &elementArrayBinding);
+        expectCondition(elementArrayBinding == static_cast<GLint>(buffers[1]), "VAO restores element-array binding");
+        gl.glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+        const auto attributeOffset = static_cast<std::uintptr_t>(sizeof(float) * 2);
+        gl.glVertexAttribPointer(
+            0,
+            3,
+            GL_FLOAT,
+            GL_FALSE,
+            static_cast<GLsizei>(sizeof(float) * 5),
+            reinterpret_cast<const void*>(attributeOffset)
+        );
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribDivisor(0, 1);
+        gl.glVertexAttribIPointer(1, 4, GL_UNSIGNED_BYTE, static_cast<GLsizei>(sizeof(std::uint32_t)), nullptr);
+        gl.glEnableVertexAttribArray(1);
+        GLint attribQuery = 0;
+        gl.glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &attribQuery);
+        expectCondition(attribQuery == GL_TRUE, "vertex attribute 0 enabled");
+        gl.glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &attribQuery);
+        expectCondition(attribQuery == static_cast<GLint>(buffers[0]), "vertex attribute captures GL_ARRAY_BUFFER");
+        gl.glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_DIVISOR, &attribQuery);
+        expectCondition(attribQuery == 1, "vertex attribute divisor query");
+        gl.glGetVertexAttribiv(1, GL_VERTEX_ATTRIB_ARRAY_INTEGER, &attribQuery);
+        expectCondition(attribQuery == GL_TRUE, "integer vertex attribute query");
+        GLfloat attribSize = 0.0f;
+        gl.glGetVertexAttribfv(0, GL_VERTEX_ATTRIB_ARRAY_SIZE, &attribSize);
+        expectCondition(attribSize == 3.0f, "float vertex attribute size query");
+        void* attribPointer = nullptr;
+        gl.glGetVertexAttribPointerv(0, GL_VERTEX_ATTRIB_ARRAY_POINTER, &attribPointer);
+        expectCondition(
+            reinterpret_cast<std::uintptr_t>(attribPointer) == attributeOffset,
+            "vertex attribute pointer query"
+        );
+        context.state().applyDirtyStateForDraw(context.objects());
+        GLVertexArrayObject* vertexArrayObject = context.objects().vertexArrays().get(vertexArray);
+        expectCondition(vertexArrayObject != nullptr, "VAO object remains available for descriptor build");
+        expectCondition(vertexArrayObject->metalVertexDescriptor != nullptr, "MTLVertexDescriptor is cached on VAO");
+        expectCondition(!vertexArrayObject->vertexDescriptorDirty, "VAO descriptor dirty bit is cleared after build");
+        expectCondition(vertexArrayObject->vertexDescriptorError.empty(), "VAO descriptor build has no error");
+        expectCondition(!vertexArrayObject->vertexDescriptorHash.empty(), "VAO descriptor hash is populated");
+        gl.glDisableVertexAttribArray(1);
+        expectCondition(vertexArrayObject->vertexDescriptorDirty, "VAO descriptor is dirtied by attribute state changes");
+        gl.glVertexAttribPointer(0, 3, static_cast<GLenum>(0xffffffffu), GL_FALSE, 0, nullptr);
+        expectGLError(gl, GL_INVALID_ENUM, "invalid glVertexAttribPointer type");
+        gl.glDeleteVertexArrays(1, &vertexArray);
+        expectCondition(gl.glIsVertexArray(vertexArray) == GL_FALSE, "deleted VAO no longer exists");
+        gl.glBindVertexArray(vertexArray);
+        expectGLError(gl, GL_INVALID_OPERATION, "binding deleted vertex array");
+
         gl.glBindBufferRange(GL_UNIFORM_BUFFER, 0, buffers[0], 0, sizeof(readbackData));
         gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, buffers[1]);
         (void)gl.glIsBuffer(buffers[0]);
@@ -431,8 +536,18 @@ TestResult runScene(Scene& scene) {
     Runtime::shared().makeCurrent(context.get());
     Runtime::shared().noteRenderer(context->rendererString());
 
-    scene.setup(*context);
-    scene.render(*context);
+    try {
+        scene.setup(*context);
+        scene.render(*context);
+    } catch (const std::exception& error) {
+        result.status = "failed";
+        result.message = error.what();
+        Runtime::shared().makeCurrent(nullptr);
+        appendCoverageDelta(result);
+        const auto endedAt = std::chrono::steady_clock::now();
+        result.millis = std::chrono::duration<double, std::milli>(endedAt - startedAt).count();
+        return result;
+    }
 
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(size.width) * static_cast<std::size_t>(size.height) * 4);
     auto& gl = Runtime::shared().dispatch();

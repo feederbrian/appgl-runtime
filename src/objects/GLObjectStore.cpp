@@ -6,10 +6,6 @@ namespace appgl {
 
 GLObjectStore::GLObjectStore(GLsizei maxVertexAttribs)
     : maxVertexAttribs_(maxVertexAttribs) {
-    auto* defaultVao = vertexArrays_.get(vertexArrays_.create());
-    if (defaultVao != nullptr) {
-        defaultVao->attributes.resize(static_cast<std::size_t>(maxVertexAttribs_));
-    }
 }
 
 ObjectTable<GLBufferObject>& GLObjectStore::buffers() {
@@ -54,6 +50,14 @@ ObjectTable<GLSyncObject>& GLObjectStore::syncs() {
 
 ObjectTable<GLTransformFeedbackObject>& GLObjectStore::transformFeedbacks() {
     return transformFeedbacks_;
+}
+
+GLsizei GLObjectStore::maxVertexAttribs() const {
+    return maxVertexAttribs_;
+}
+
+void GLObjectStore::initializeVertexArray(GLVertexArrayObject& vertexArray) const {
+    vertexArray.attributes.resize(static_cast<std::size_t>(maxVertexAttribs_));
 }
 
 void GLObjectStore::deferDelete(std::string label) {

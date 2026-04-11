@@ -1,8 +1,10 @@
 #include "GLStateTracker.h"
 
+#include "MetalVertexDescriptorBuilder.h"
 #include "../objects/GLObjectStore.h"
 
 #include <algorithm>
+#include <utility>
 
 namespace appgl {
 namespace {
@@ -785,7 +787,17 @@ std::uint32_t GLStateTracker::dirtyMask() const {
 }
 
 void GLStateTracker::applyDirtyStateForDraw(GLObjectStore& objects) {
-    (void)objects;
+    if (isDirty(DirtyBit::VertexInput)) {
+        GLVertexArrayObject* vertexArray = objects.vertexArrays().get(currentVertexArray_);
+        if (vertexArray != nullptr && (vertexArray->vertexDescriptorDirty || vertexArray->metalVertexDescriptor == nullptr)) {
+            auto descriptor = buildMetalVertexDescriptor(*vertexArray);
+            releaseMetalVertexDescriptor(vertexArray->metalVertexDescriptor);
+            vertexArray->metalVertexDescriptor = descriptor.descriptor;
+            vertexArray->vertexDescriptorHash = std::move(descriptor.hash);
+            vertexArray->vertexDescriptorError = std::move(descriptor.error);
+            vertexArray->vertexDescriptorDirty = false;
+        }
+    }
     dirtyMask_ = 0;
 }
 

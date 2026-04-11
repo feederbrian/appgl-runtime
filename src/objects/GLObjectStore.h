@@ -101,11 +101,18 @@ struct GLVertexAttributeState {
     std::uintptr_t pointer = 0;
     GLuint buffer = 0;
     GLuint divisor = 0;
+    bool integer = false;
+    bool longData = false;
 };
 
 struct GLVertexArrayObject {
     std::vector<GLVertexAttributeState> attributes;
+    void* metalVertexDescriptor = nullptr;
+    std::string vertexDescriptorHash;
+    std::string vertexDescriptorError;
     GLuint elementArrayBuffer = 0;
+    bool instantiated = false;
+    bool vertexDescriptorDirty = true;
 };
 
 struct GLShaderObject {
@@ -152,6 +159,9 @@ public:
     ObjectTable<GLQueryObject>& queries();
     ObjectTable<GLSyncObject>& syncs();
     ObjectTable<GLTransformFeedbackObject>& transformFeedbacks();
+
+    GLsizei maxVertexAttribs() const;
+    void initializeVertexArray(GLVertexArrayObject& vertexArray) const;
 
     void deferDelete(std::string label);
     void drainDeferredDeletes();
