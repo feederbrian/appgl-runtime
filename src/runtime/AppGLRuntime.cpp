@@ -21,6 +21,8 @@ constexpr const char* kPhaseABufferTestId = "phase-a.buffers";
 constexpr const char* kPhaseAVertexInputTestId = "phase-a.vertex-input";
 constexpr const char* kPhaseATextureTestId = "phase-a.textures";
 constexpr const char* kPhaseAFramebufferTestId = "phase-a.framebuffers";
+constexpr const char* kPhaseAShaderTestId = "phase-a.shaders";
+constexpr const char* kPhaseAProgramTestId = "phase-a.programs";
 constexpr GLuint kPhaseAMaxDrawBuffers = 8;
 constexpr GLuint kPhaseAMaxIndexedBufferBindings = 32;
 constexpr GLuint kPhaseAMaxTextureUnits = 32;
@@ -300,6 +302,16 @@ bool isValidBufferParameterPname(GLenum pname) {
 
 void markBufferFunction(FunctionId id, std::string_view note) {
     Runtime::shared().coverageStore().markSmokeTested(id, kPhaseABufferTestId, note);
+    Runtime::shared().refreshCurrentContextClaimedVersion();
+}
+
+void markShaderFunction(FunctionId id, std::string_view note) {
+    Runtime::shared().coverageStore().markSmokeTested(id, kPhaseAShaderTestId, note);
+    Runtime::shared().refreshCurrentContextClaimedVersion();
+}
+
+void markProgramFunction(FunctionId id, std::string_view note) {
+    Runtime::shared().coverageStore().markSmokeTested(id, kPhaseAProgramTestId, note);
     Runtime::shared().refreshCurrentContextClaimedVersion();
 }
 
@@ -2980,6 +2992,532 @@ void APIENTRY glGetPointerv(GLenum pname, void** params) {
     (void)context->getPointer(pname, params);
     markDebugFunction(FunctionId::glGetPointerv, "Debug callback pointers are queryable.");
     Runtime::shared().recordBootstrapTrace("glGetPointerv(" + std::to_string(pname) + ")");
+}
+
+// ============================================================================
+// Group 6 — Shaders and Programs
+// ============================================================================
+
+GLuint APIENTRY glCreateShader(GLenum type) {
+    auto* context = requireCurrentContext("glCreateShader");
+    if (context == nullptr) {
+        return 0;
+    }
+    const GLuint id = context->createShader(type);
+    if (id != 0) {
+        markShaderFunction(FunctionId::glCreateShader, "Shader objects are created with a stage tag.");
+        Runtime::shared().recordBootstrapTrace("glCreateShader(" + std::to_string(type) + ") -> " + std::to_string(id));
+    }
+    return id;
+}
+
+void APIENTRY glDeleteShader(GLuint shader) {
+    auto* context = requireCurrentContext("glDeleteShader");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->deleteShader(shader)) {
+        markShaderFunction(FunctionId::glDeleteShader, "Shader objects are removed from the object store.");
+        Runtime::shared().recordBootstrapTrace("glDeleteShader(" + std::to_string(shader) + ")");
+    }
+}
+
+GLboolean APIENTRY glIsShader(GLuint shader) {
+    auto* context = requireCurrentContext("glIsShader");
+    if (context == nullptr) {
+        return GL_FALSE;
+    }
+    markShaderFunction(FunctionId::glIsShader, "Shader existence queries are live.");
+    return context->isShader(shader) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glShaderSource(GLuint shader, GLsizei count, const GLchar* const* strings, const GLint* length) {
+    auto* context = requireCurrentContext("glShaderSource");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->shaderSource(shader, count, strings, length)) {
+        markShaderFunction(FunctionId::glShaderSource, "Shader source strings are concatenated and stored.");
+        Runtime::shared().recordBootstrapTrace("glShaderSource(" + std::to_string(shader) + ", " + std::to_string(count) + ")");
+    }
+}
+
+void APIENTRY glCompileShader(GLuint shader) {
+    auto* context = requireCurrentContext("glCompileShader");
+    if (context == nullptr) {
+        return;
+    }
+    const bool ok = context->compileShader(shader);
+    markShaderFunction(FunctionId::glCompileShader, "Shader source is reflected for declarations.");
+    Runtime::shared().recordBootstrapTrace(
+        "glCompileShader(" + std::to_string(shader) + ") -> " + (ok ? "ok" : "failed")
+    );
+}
+
+void APIENTRY glGetShaderiv(GLuint shader, GLenum pname, GLint* params) {
+    auto* context = requireCurrentContext("glGetShaderiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getShaderiv(shader, pname, params)) {
+        markShaderFunction(FunctionId::glGetShaderiv, "Shader integer queries expose stage, status, and lengths.");
+    }
+}
+
+void APIENTRY glGetShaderInfoLog(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* infoLog) {
+    auto* context = requireCurrentContext("glGetShaderInfoLog");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getShaderInfoLog(shader, bufSize, length, infoLog)) {
+        markShaderFunction(FunctionId::glGetShaderInfoLog, "Shader compile logs are queryable.");
+    }
+}
+
+void APIENTRY glGetShaderSource(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* source) {
+    auto* context = requireCurrentContext("glGetShaderSource");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getShaderSource(shader, bufSize, length, source)) {
+        markShaderFunction(FunctionId::glGetShaderSource, "Stored shader source is queryable.");
+    }
+}
+
+GLuint APIENTRY glCreateProgram(void) {
+    auto* context = requireCurrentContext("glCreateProgram");
+    if (context == nullptr) {
+        return 0;
+    }
+    const GLuint id = context->createProgram();
+    markProgramFunction(FunctionId::glCreateProgram, "Program objects are created in the object store.");
+    Runtime::shared().recordBootstrapTrace("glCreateProgram() -> " + std::to_string(id));
+    return id;
+}
+
+void APIENTRY glDeleteProgram(GLuint program) {
+    auto* context = requireCurrentContext("glDeleteProgram");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->deleteProgram(program)) {
+        markProgramFunction(FunctionId::glDeleteProgram, "Program objects are removed and unbound on delete.");
+        Runtime::shared().recordBootstrapTrace("glDeleteProgram(" + std::to_string(program) + ")");
+    }
+}
+
+GLboolean APIENTRY glIsProgram(GLuint program) {
+    auto* context = requireCurrentContext("glIsProgram");
+    if (context == nullptr) {
+        return GL_FALSE;
+    }
+    markProgramFunction(FunctionId::glIsProgram, "Program existence queries are live.");
+    return context->isProgram(program) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glAttachShader(GLuint program, GLuint shader) {
+    auto* context = requireCurrentContext("glAttachShader");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->attachShader(program, shader)) {
+        markProgramFunction(FunctionId::glAttachShader, "Shader attachments are tracked per program.");
+        Runtime::shared().recordBootstrapTrace("glAttachShader(" + std::to_string(program) + ", " + std::to_string(shader) + ")");
+    }
+}
+
+void APIENTRY glDetachShader(GLuint program, GLuint shader) {
+    auto* context = requireCurrentContext("glDetachShader");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->detachShader(program, shader)) {
+        markProgramFunction(FunctionId::glDetachShader, "Shader attachments are removable.");
+        Runtime::shared().recordBootstrapTrace("glDetachShader(" + std::to_string(program) + ", " + std::to_string(shader) + ")");
+    }
+}
+
+void APIENTRY glLinkProgram(GLuint program) {
+    auto* context = requireCurrentContext("glLinkProgram");
+    if (context == nullptr) {
+        return;
+    }
+    const bool ok = context->linkProgram(program);
+    markProgramFunction(FunctionId::glLinkProgram, "Program link merges shader reflections and assigns locations.");
+    Runtime::shared().recordBootstrapTrace(
+        "glLinkProgram(" + std::to_string(program) + ") -> " + (ok ? "ok" : "failed")
+    );
+}
+
+void APIENTRY glUseProgram(GLuint program) {
+    auto* context = requireCurrentContext("glUseProgram");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->useProgram(program)) {
+        markProgramFunction(FunctionId::glUseProgram, "Current program is tracked in the state mirror.");
+        Runtime::shared().recordBootstrapTrace("glUseProgram(" + std::to_string(program) + ")");
+    }
+}
+
+void APIENTRY glValidateProgram(GLuint program) {
+    auto* context = requireCurrentContext("glValidateProgram");
+    if (context == nullptr) {
+        return;
+    }
+    context->validateProgram(program);
+    markProgramFunction(FunctionId::glValidateProgram, "Program validation status is tracked.");
+}
+
+void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
+    auto* context = requireCurrentContext("glGetProgramiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getProgramiv(program, pname, params)) {
+        markProgramFunction(FunctionId::glGetProgramiv, "Program integer queries expose link/validate state and counts.");
+    }
+}
+
+void APIENTRY glGetProgramInfoLog(GLuint program, GLsizei bufSize, GLsizei* length, GLchar* infoLog) {
+    auto* context = requireCurrentContext("glGetProgramInfoLog");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getProgramInfoLog(program, bufSize, length, infoLog)) {
+        markProgramFunction(FunctionId::glGetProgramInfoLog, "Program info logs are queryable.");
+    }
+}
+
+void APIENTRY glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei* count, GLuint* shaders) {
+    auto* context = requireCurrentContext("glGetAttachedShaders");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getAttachedShaders(program, maxCount, count, shaders)) {
+        markProgramFunction(FunctionId::glGetAttachedShaders, "Attached shader names are enumerable.");
+    }
+}
+
+void APIENTRY glBindAttribLocation(GLuint program, GLuint index, const GLchar* name) {
+    auto* context = requireCurrentContext("glBindAttribLocation");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->bindAttribLocation(program, index, name)) {
+        markProgramFunction(FunctionId::glBindAttribLocation, "Pre-link attribute location requests are honored.");
+    }
+}
+
+GLint APIENTRY glGetAttribLocation(GLuint program, const GLchar* name) {
+    auto* context = requireCurrentContext("glGetAttribLocation");
+    if (context == nullptr) {
+        return -1;
+    }
+    markProgramFunction(FunctionId::glGetAttribLocation, "Vertex attribute locations are queryable post-link.");
+    return context->getAttribLocation(program, name);
+}
+
+void APIENTRY glGetActiveAttrib(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name) {
+    auto* context = requireCurrentContext("glGetActiveAttrib");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getActiveAttrib(program, index, bufSize, length, size, type, name)) {
+        markProgramFunction(FunctionId::glGetActiveAttrib, "Active vertex attribute reflection is live.");
+    }
+}
+
+GLint APIENTRY glGetUniformLocation(GLuint program, const GLchar* name) {
+    auto* context = requireCurrentContext("glGetUniformLocation");
+    if (context == nullptr) {
+        return -1;
+    }
+    markProgramFunction(FunctionId::glGetUniformLocation, "Uniform locations are queryable post-link.");
+    return context->getUniformLocation(program, name);
+}
+
+void APIENTRY glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name) {
+    auto* context = requireCurrentContext("glGetActiveUniform");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getActiveUniform(program, index, bufSize, length, size, type, name)) {
+        markProgramFunction(FunctionId::glGetActiveUniform, "Active uniform reflection is live.");
+    }
+}
+
+void APIENTRY glGetUniformfv(GLuint program, GLint location, GLfloat* params) {
+    auto* context = requireCurrentContext("glGetUniformfv");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getUniformfv(program, location, params)) {
+        markProgramFunction(FunctionId::glGetUniformfv, "Uniform float readback is live.");
+    }
+}
+
+void APIENTRY glGetUniformiv(GLuint program, GLint location, GLint* params) {
+    auto* context = requireCurrentContext("glGetUniformiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getUniformiv(program, location, params)) {
+        markProgramFunction(FunctionId::glGetUniformiv, "Uniform integer readback is live.");
+    }
+}
+
+void APIENTRY glGetUniformuiv(GLuint program, GLint location, GLuint* params) {
+    auto* context = requireCurrentContext("glGetUniformuiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->getUniformuiv(program, location, params)) {
+        markProgramFunction(FunctionId::glGetUniformuiv, "Uniform unsigned integer readback is live.");
+    }
+}
+
+namespace {
+constexpr GLContext::UniformElementType kFloatElement = GLContext::UniformElementType::Float;
+constexpr GLContext::UniformElementType kIntElement = GLContext::UniformElementType::Int;
+constexpr GLContext::UniformElementType kUIntElement = GLContext::UniformElementType::UnsignedInt;
+
+inline void traceUniform(const char* name, GLint location) {
+    Runtime::shared().recordBootstrapTrace(std::string(name) + "(" + std::to_string(location) + ")");
+}
+}  // namespace
+
+void APIENTRY glUniform1f(GLint location, GLfloat v0) {
+    auto* context = requireCurrentContext("glUniform1f");
+    if (context == nullptr) return;
+    GLfloat v[1] = {v0};
+    if (context->setUniformScalarVector(location, kFloatElement, 1, 1, v)) {
+        markProgramFunction(FunctionId::glUniform1f, "Float scalar uniforms are live.");
+        traceUniform("glUniform1f", location);
+    }
+}
+void APIENTRY glUniform2f(GLint location, GLfloat v0, GLfloat v1) {
+    auto* context = requireCurrentContext("glUniform2f");
+    if (context == nullptr) return;
+    GLfloat v[2] = {v0, v1};
+    if (context->setUniformScalarVector(location, kFloatElement, 2, 1, v)) {
+        markProgramFunction(FunctionId::glUniform2f, "Float vec2 uniforms are live.");
+        traceUniform("glUniform2f", location);
+    }
+}
+void APIENTRY glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2) {
+    auto* context = requireCurrentContext("glUniform3f");
+    if (context == nullptr) return;
+    GLfloat v[3] = {v0, v1, v2};
+    if (context->setUniformScalarVector(location, kFloatElement, 3, 1, v)) {
+        markProgramFunction(FunctionId::glUniform3f, "Float vec3 uniforms are live.");
+        traceUniform("glUniform3f", location);
+    }
+}
+void APIENTRY glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
+    auto* context = requireCurrentContext("glUniform4f");
+    if (context == nullptr) return;
+    GLfloat v[4] = {v0, v1, v2, v3};
+    if (context->setUniformScalarVector(location, kFloatElement, 4, 1, v)) {
+        markProgramFunction(FunctionId::glUniform4f, "Float vec4 uniforms are live.");
+        traceUniform("glUniform4f", location);
+    }
+}
+
+void APIENTRY glUniform1i(GLint location, GLint v0) {
+    auto* context = requireCurrentContext("glUniform1i");
+    if (context == nullptr) return;
+    GLint v[1] = {v0};
+    if (context->setUniformScalarVector(location, kIntElement, 1, 1, v)) {
+        markProgramFunction(FunctionId::glUniform1i, "Int scalar uniforms are live.");
+        traceUniform("glUniform1i", location);
+    }
+}
+void APIENTRY glUniform2i(GLint location, GLint v0, GLint v1) {
+    auto* context = requireCurrentContext("glUniform2i");
+    if (context == nullptr) return;
+    GLint v[2] = {v0, v1};
+    if (context->setUniformScalarVector(location, kIntElement, 2, 1, v)) {
+        markProgramFunction(FunctionId::glUniform2i, "Int vec2 uniforms are live.");
+        traceUniform("glUniform2i", location);
+    }
+}
+void APIENTRY glUniform3i(GLint location, GLint v0, GLint v1, GLint v2) {
+    auto* context = requireCurrentContext("glUniform3i");
+    if (context == nullptr) return;
+    GLint v[3] = {v0, v1, v2};
+    if (context->setUniformScalarVector(location, kIntElement, 3, 1, v)) {
+        markProgramFunction(FunctionId::glUniform3i, "Int vec3 uniforms are live.");
+        traceUniform("glUniform3i", location);
+    }
+}
+void APIENTRY glUniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3) {
+    auto* context = requireCurrentContext("glUniform4i");
+    if (context == nullptr) return;
+    GLint v[4] = {v0, v1, v2, v3};
+    if (context->setUniformScalarVector(location, kIntElement, 4, 1, v)) {
+        markProgramFunction(FunctionId::glUniform4i, "Int vec4 uniforms are live.");
+        traceUniform("glUniform4i", location);
+    }
+}
+
+void APIENTRY glUniform1ui(GLint location, GLuint v0) {
+    auto* context = requireCurrentContext("glUniform1ui");
+    if (context == nullptr) return;
+    GLuint v[1] = {v0};
+    if (context->setUniformScalarVector(location, kUIntElement, 1, 1, v)) {
+        markProgramFunction(FunctionId::glUniform1ui, "Unsigned scalar uniforms are live.");
+        traceUniform("glUniform1ui", location);
+    }
+}
+void APIENTRY glUniform2ui(GLint location, GLuint v0, GLuint v1) {
+    auto* context = requireCurrentContext("glUniform2ui");
+    if (context == nullptr) return;
+    GLuint v[2] = {v0, v1};
+    if (context->setUniformScalarVector(location, kUIntElement, 2, 1, v)) {
+        markProgramFunction(FunctionId::glUniform2ui, "Unsigned uvec2 uniforms are live.");
+        traceUniform("glUniform2ui", location);
+    }
+}
+void APIENTRY glUniform3ui(GLint location, GLuint v0, GLuint v1, GLuint v2) {
+    auto* context = requireCurrentContext("glUniform3ui");
+    if (context == nullptr) return;
+    GLuint v[3] = {v0, v1, v2};
+    if (context->setUniformScalarVector(location, kUIntElement, 3, 1, v)) {
+        markProgramFunction(FunctionId::glUniform3ui, "Unsigned uvec3 uniforms are live.");
+        traceUniform("glUniform3ui", location);
+    }
+}
+void APIENTRY glUniform4ui(GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3) {
+    auto* context = requireCurrentContext("glUniform4ui");
+    if (context == nullptr) return;
+    GLuint v[4] = {v0, v1, v2, v3};
+    if (context->setUniformScalarVector(location, kUIntElement, 4, 1, v)) {
+        markProgramFunction(FunctionId::glUniform4ui, "Unsigned uvec4 uniforms are live.");
+        traceUniform("glUniform4ui", location);
+    }
+}
+
+void APIENTRY glUniform1fv(GLint location, GLsizei count, const GLfloat* value) {
+    auto* context = requireCurrentContext("glUniform1fv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kFloatElement, 1, count, value)) {
+        markProgramFunction(FunctionId::glUniform1fv, "Float scalar uniform arrays are live.");
+        traceUniform("glUniform1fv", location);
+    }
+}
+void APIENTRY glUniform2fv(GLint location, GLsizei count, const GLfloat* value) {
+    auto* context = requireCurrentContext("glUniform2fv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kFloatElement, 2, count, value)) {
+        markProgramFunction(FunctionId::glUniform2fv, "vec2 uniform arrays are live.");
+        traceUniform("glUniform2fv", location);
+    }
+}
+void APIENTRY glUniform3fv(GLint location, GLsizei count, const GLfloat* value) {
+    auto* context = requireCurrentContext("glUniform3fv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kFloatElement, 3, count, value)) {
+        markProgramFunction(FunctionId::glUniform3fv, "vec3 uniform arrays are live.");
+        traceUniform("glUniform3fv", location);
+    }
+}
+void APIENTRY glUniform4fv(GLint location, GLsizei count, const GLfloat* value) {
+    auto* context = requireCurrentContext("glUniform4fv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kFloatElement, 4, count, value)) {
+        markProgramFunction(FunctionId::glUniform4fv, "vec4 uniform arrays are live.");
+        traceUniform("glUniform4fv", location);
+    }
+}
+void APIENTRY glUniform1iv(GLint location, GLsizei count, const GLint* value) {
+    auto* context = requireCurrentContext("glUniform1iv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kIntElement, 1, count, value)) {
+        markProgramFunction(FunctionId::glUniform1iv, "Int scalar uniform arrays are live.");
+        traceUniform("glUniform1iv", location);
+    }
+}
+void APIENTRY glUniform2iv(GLint location, GLsizei count, const GLint* value) {
+    auto* context = requireCurrentContext("glUniform2iv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kIntElement, 2, count, value)) {
+        markProgramFunction(FunctionId::glUniform2iv, "ivec2 uniform arrays are live.");
+        traceUniform("glUniform2iv", location);
+    }
+}
+void APIENTRY glUniform3iv(GLint location, GLsizei count, const GLint* value) {
+    auto* context = requireCurrentContext("glUniform3iv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kIntElement, 3, count, value)) {
+        markProgramFunction(FunctionId::glUniform3iv, "ivec3 uniform arrays are live.");
+        traceUniform("glUniform3iv", location);
+    }
+}
+void APIENTRY glUniform4iv(GLint location, GLsizei count, const GLint* value) {
+    auto* context = requireCurrentContext("glUniform4iv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kIntElement, 4, count, value)) {
+        markProgramFunction(FunctionId::glUniform4iv, "ivec4 uniform arrays are live.");
+        traceUniform("glUniform4iv", location);
+    }
+}
+void APIENTRY glUniform1uiv(GLint location, GLsizei count, const GLuint* value) {
+    auto* context = requireCurrentContext("glUniform1uiv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kUIntElement, 1, count, value)) {
+        markProgramFunction(FunctionId::glUniform1uiv, "uint scalar uniform arrays are live.");
+        traceUniform("glUniform1uiv", location);
+    }
+}
+void APIENTRY glUniform2uiv(GLint location, GLsizei count, const GLuint* value) {
+    auto* context = requireCurrentContext("glUniform2uiv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kUIntElement, 2, count, value)) {
+        markProgramFunction(FunctionId::glUniform2uiv, "uvec2 uniform arrays are live.");
+        traceUniform("glUniform2uiv", location);
+    }
+}
+void APIENTRY glUniform3uiv(GLint location, GLsizei count, const GLuint* value) {
+    auto* context = requireCurrentContext("glUniform3uiv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kUIntElement, 3, count, value)) {
+        markProgramFunction(FunctionId::glUniform3uiv, "uvec3 uniform arrays are live.");
+        traceUniform("glUniform3uiv", location);
+    }
+}
+void APIENTRY glUniform4uiv(GLint location, GLsizei count, const GLuint* value) {
+    auto* context = requireCurrentContext("glUniform4uiv");
+    if (context == nullptr) return;
+    if (context->setUniformScalarVector(location, kUIntElement, 4, count, value)) {
+        markProgramFunction(FunctionId::glUniform4uiv, "uvec4 uniform arrays are live.");
+        traceUniform("glUniform4uiv", location);
+    }
+}
+
+void APIENTRY glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* context = requireCurrentContext("glUniformMatrix2fv");
+    if (context == nullptr) return;
+    if (context->setUniformMatrix(location, 2, 2, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix2fv, "mat2 uniforms are live.");
+        traceUniform("glUniformMatrix2fv", location);
+    }
+}
+void APIENTRY glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* context = requireCurrentContext("glUniformMatrix3fv");
+    if (context == nullptr) return;
+    if (context->setUniformMatrix(location, 3, 3, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix3fv, "mat3 uniforms are live.");
+        traceUniform("glUniformMatrix3fv", location);
+    }
+}
+void APIENTRY glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* context = requireCurrentContext("glUniformMatrix4fv");
+    if (context == nullptr) return;
+    if (context->setUniformMatrix(location, 4, 4, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix4fv, "mat4 uniforms are live.");
+        traceUniform("glUniformMatrix4fv", location);
+    }
 }
 
 }  // namespace impl

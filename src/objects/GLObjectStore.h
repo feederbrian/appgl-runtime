@@ -160,18 +160,57 @@ struct GLVertexArrayObject {
     bool vertexDescriptorDirty = true;
 };
 
+struct GLShaderDeclaration {
+    std::string name;
+    GLenum type = 0;
+    GLint arraySize = 1;
+    GLint explicitLocation = -1;
+};
+
 struct GLShaderObject {
     GLenum stage = 0;
     std::string source;
     std::vector<std::uint32_t> spirv;
     std::string compileLog;
     bool compiled = false;
+    bool deleteRequested = false;
+    std::vector<GLShaderDeclaration> declaredUniforms;
+    std::vector<GLShaderDeclaration> declaredInputs;
+    std::vector<GLShaderDeclaration> declaredOutputs;
+};
+
+struct GLProgramUniformInfo {
+    std::string name;
+    GLenum type = 0;
+    GLint arraySize = 1;
+    GLint location = -1;
+};
+
+struct GLProgramAttributeInfo {
+    std::string name;
+    GLenum type = 0;
+    GLint location = -1;
+};
+
+struct GLProgramUniformValue {
+    GLenum type = 0;
+    GLint arraySize = 1;
+    std::vector<GLfloat> floats;
+    std::vector<GLint> ints;
+    std::vector<GLuint> uints;
 };
 
 struct GLProgramObject {
     std::vector<GLuint> attachedShaders;
     std::string linkLog;
+    std::string validateLog;
     bool linked = false;
+    bool validated = false;
+    bool deleteRequested = false;
+    std::vector<GLProgramUniformInfo> uniforms;
+    std::vector<GLProgramAttributeInfo> attributes;
+    std::unordered_map<GLint, GLProgramUniformValue> uniformValues;
+    std::unordered_map<std::string, GLuint> requestedAttribLocations;
 };
 
 struct GLQueryObject {

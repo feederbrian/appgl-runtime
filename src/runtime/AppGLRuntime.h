@@ -156,6 +156,62 @@ void APIENTRY glGetObjectLabel(GLenum identifier, GLuint name, GLsizei bufSize, 
 void APIENTRY glObjectPtrLabel(const void* ptr, GLsizei length, const GLchar* label);
 void APIENTRY glGetObjectPtrLabel(const void* ptr, GLsizei bufSize, GLsizei* length, GLchar* label);
 void APIENTRY glGetPointerv(GLenum pname, void** params);
+
+// Group 6 — Shaders and Programs
+GLuint APIENTRY glCreateShader(GLenum type);
+void APIENTRY glDeleteShader(GLuint shader);
+GLboolean APIENTRY glIsShader(GLuint shader);
+void APIENTRY glShaderSource(GLuint shader, GLsizei count, const GLchar* const* strings, const GLint* length);
+void APIENTRY glCompileShader(GLuint shader);
+void APIENTRY glGetShaderiv(GLuint shader, GLenum pname, GLint* params);
+void APIENTRY glGetShaderInfoLog(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* infoLog);
+void APIENTRY glGetShaderSource(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* source);
+GLuint APIENTRY glCreateProgram(void);
+void APIENTRY glDeleteProgram(GLuint program);
+GLboolean APIENTRY glIsProgram(GLuint program);
+void APIENTRY glAttachShader(GLuint program, GLuint shader);
+void APIENTRY glDetachShader(GLuint program, GLuint shader);
+void APIENTRY glLinkProgram(GLuint program);
+void APIENTRY glUseProgram(GLuint program);
+void APIENTRY glValidateProgram(GLuint program);
+void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params);
+void APIENTRY glGetProgramInfoLog(GLuint program, GLsizei bufSize, GLsizei* length, GLchar* infoLog);
+void APIENTRY glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei* count, GLuint* shaders);
+void APIENTRY glBindAttribLocation(GLuint program, GLuint index, const GLchar* name);
+GLint APIENTRY glGetAttribLocation(GLuint program, const GLchar* name);
+void APIENTRY glGetActiveAttrib(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name);
+GLint APIENTRY glGetUniformLocation(GLuint program, const GLchar* name);
+void APIENTRY glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name);
+void APIENTRY glGetUniformfv(GLuint program, GLint location, GLfloat* params);
+void APIENTRY glGetUniformiv(GLuint program, GLint location, GLint* params);
+void APIENTRY glGetUniformuiv(GLuint program, GLint location, GLuint* params);
+void APIENTRY glUniform1f(GLint location, GLfloat v0);
+void APIENTRY glUniform2f(GLint location, GLfloat v0, GLfloat v1);
+void APIENTRY glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
+void APIENTRY glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
+void APIENTRY glUniform1i(GLint location, GLint v0);
+void APIENTRY glUniform2i(GLint location, GLint v0, GLint v1);
+void APIENTRY glUniform3i(GLint location, GLint v0, GLint v1, GLint v2);
+void APIENTRY glUniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3);
+void APIENTRY glUniform1ui(GLint location, GLuint v0);
+void APIENTRY glUniform2ui(GLint location, GLuint v0, GLuint v1);
+void APIENTRY glUniform3ui(GLint location, GLuint v0, GLuint v1, GLuint v2);
+void APIENTRY glUniform4ui(GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3);
+void APIENTRY glUniform1fv(GLint location, GLsizei count, const GLfloat* value);
+void APIENTRY glUniform2fv(GLint location, GLsizei count, const GLfloat* value);
+void APIENTRY glUniform3fv(GLint location, GLsizei count, const GLfloat* value);
+void APIENTRY glUniform4fv(GLint location, GLsizei count, const GLfloat* value);
+void APIENTRY glUniform1iv(GLint location, GLsizei count, const GLint* value);
+void APIENTRY glUniform2iv(GLint location, GLsizei count, const GLint* value);
+void APIENTRY glUniform3iv(GLint location, GLsizei count, const GLint* value);
+void APIENTRY glUniform4iv(GLint location, GLsizei count, const GLint* value);
+void APIENTRY glUniform1uiv(GLint location, GLsizei count, const GLuint* value);
+void APIENTRY glUniform2uiv(GLint location, GLsizei count, const GLuint* value);
+void APIENTRY glUniform3uiv(GLint location, GLsizei count, const GLuint* value);
+void APIENTRY glUniform4uiv(GLint location, GLsizei count, const GLuint* value);
+void APIENTRY glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
+void APIENTRY glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
+void APIENTRY glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
 }  // namespace impl
 
 class Runtime {

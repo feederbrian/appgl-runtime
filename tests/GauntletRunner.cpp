@@ -1122,6 +1122,243 @@ public:
     }
 };
 
+class ShaderProgramLifecycleScene final : public Scene {
+public:
+    std::string id() const override {
+        return "phase-a.shader-program-lifecycle";
+    }
+
+    std::string phase() const override {
+        return "phase-a";
+    }
+
+    SceneSize framebufferSize() const override {
+        return {72, 72};
+    }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        const GLuint vertex = gl.glCreateShader(GL_VERTEX_SHADER);
+        const GLuint fragment = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        expectCondition(vertex != 0 && fragment != 0, "shader creation returns non-zero handles");
+        expectCondition(gl.glIsShader(vertex) == GL_TRUE, "vertex shader handle is live");
+        expectCondition(gl.glIsShader(fragment) == GL_TRUE, "fragment shader handle is live");
+
+        const char* vertexSource =
+            "#version 330 core\n"
+            "layout(location = 0) in vec3 aPosition;\n"
+            "in vec2 aTexCoord;\n"
+            "uniform mat4 uMVP;\n"
+            "uniform float uTime;\n"
+            "out vec2 vTexCoord;\n"
+            "void main() {\n"
+            "    gl_Position = uMVP * vec4(aPosition * uTime, 1.0);\n"
+            "    vTexCoord = aTexCoord;\n"
+            "}\n";
+        const char* fragmentSource =
+            "#version 330 core\n"
+            "in vec2 vTexCoord;\n"
+            "uniform vec4 uColor;\n"
+            "uniform sampler2D uTexture;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = uColor * texture(uTexture, vTexCoord);\n"
+            "}\n";
+
+        gl.glShaderSource(vertex, 1, &vertexSource, nullptr);
+        gl.glShaderSource(fragment, 1, &fragmentSource, nullptr);
+
+        GLint sourceLength = 0;
+        gl.glGetShaderiv(vertex, GL_SHADER_SOURCE_LENGTH, &sourceLength);
+        expectCondition(sourceLength > 0, "vertex shader source length is queryable");
+
+        std::string sourceReadback(static_cast<std::size_t>(sourceLength), '\0');
+        GLsizei sourceWritten = 0;
+        gl.glGetShaderSource(vertex, sourceLength, &sourceWritten, sourceReadback.data());
+        expectCondition(sourceReadback.find("aPosition") != std::string::npos, "stored shader source is recoverable");
+
+        gl.glCompileShader(vertex);
+        gl.glCompileShader(fragment);
+
+        GLint vertexCompileStatus = 0;
+        GLint fragmentCompileStatus = 0;
+        gl.glGetShaderiv(vertex, GL_COMPILE_STATUS, &vertexCompileStatus);
+        gl.glGetShaderiv(fragment, GL_COMPILE_STATUS, &fragmentCompileStatus);
+        expectCondition(vertexCompileStatus == GL_TRUE, "vertex shader compiles");
+        expectCondition(fragmentCompileStatus == GL_TRUE, "fragment shader compiles");
+
+        GLint vertexLogLength = 0;
+        gl.glGetShaderiv(vertex, GL_INFO_LOG_LENGTH, &vertexLogLength);
+        std::string vertexLog(static_cast<std::size_t>(vertexLogLength == 0 ? 1 : vertexLogLength), '\0');
+        GLsizei vertexLogWritten = 0;
+        gl.glGetShaderInfoLog(vertex, static_cast<GLsizei>(vertexLog.size()), &vertexLogWritten, vertexLog.data());
+        expectCondition(vertexLogWritten >= 0, "vertex shader info log is queryable");
+
+        const GLuint program = gl.glCreateProgram();
+        expectCondition(program != 0, "program creation returns non-zero handle");
+        expectCondition(gl.glIsProgram(program) == GL_TRUE, "program handle is live");
+
+        gl.glAttachShader(program, vertex);
+        gl.glAttachShader(program, fragment);
+
+        GLint attachedCount = 0;
+        gl.glGetProgramiv(program, GL_ATTACHED_SHADERS, &attachedCount);
+        expectCondition(attachedCount == 2, "program attached shader count");
+
+        GLuint attached[2] = {0, 0};
+        GLsizei attachedWritten = 0;
+        gl.glGetAttachedShaders(program, 2, &attachedWritten, attached);
+        expectCondition(attachedWritten == 2, "program attached shader list size");
+        expectCondition((attached[0] == vertex || attached[1] == vertex)
+                        && (attached[0] == fragment || attached[1] == fragment),
+                        "program attached shader contents");
+
+        gl.glBindAttribLocation(program, 5, "aTexCoord");
+        gl.glLinkProgram(program);
+
+        GLint linkStatus = 0;
+        gl.glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
+        expectCondition(linkStatus == GL_TRUE, "program links");
+
+        GLint activeUniforms = 0;
+        gl.glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &activeUniforms);
+        expectCondition(activeUniforms >= 4, "program active uniform count covers declarations");
+
+        GLint activeAttributes = 0;
+        gl.glGetProgramiv(program, GL_ACTIVE_ATTRIBUTES, &activeAttributes);
+        expectCondition(activeAttributes >= 2, "program active attribute count covers declarations");
+
+        const GLint mvpLocation = gl.glGetUniformLocation(program, "uMVP");
+        const GLint colorLocation = gl.glGetUniformLocation(program, "uColor");
+        const GLint timeLocation = gl.glGetUniformLocation(program, "uTime");
+        const GLint textureLocation = gl.glGetUniformLocation(program, "uTexture");
+        expectCondition(mvpLocation >= 0, "uMVP location is resolvable");
+        expectCondition(colorLocation >= 0, "uColor location is resolvable");
+        expectCondition(timeLocation >= 0, "uTime location is resolvable");
+        expectCondition(textureLocation >= 0, "uTexture location is resolvable");
+        expectCondition(gl.glGetUniformLocation(program, "uMissing") == -1, "missing uniform reports -1");
+
+        const GLint posAttribLocation = gl.glGetAttribLocation(program, "aPosition");
+        const GLint texAttribLocation = gl.glGetAttribLocation(program, "aTexCoord");
+        expectCondition(posAttribLocation == 0, "aPosition honors layout location");
+        expectCondition(texAttribLocation == 5, "aTexCoord honors bindAttribLocation override");
+
+        char nameBuffer[64] = {};
+        GLsizei nameLength = 0;
+        GLint uniformSize = 0;
+        GLenum uniformType = 0;
+        gl.glGetActiveUniform(program, 0, sizeof(nameBuffer), &nameLength, &uniformSize, &uniformType, nameBuffer);
+        expectCondition(nameLength > 0, "active uniform query writes a name");
+        expectCondition(uniformSize >= 1, "active uniform size is at least one");
+
+        GLsizei attribNameLength = 0;
+        GLint attribSize = 0;
+        GLenum attribType = 0;
+        char attribNameBuffer[64] = {};
+        gl.glGetActiveAttrib(program, 0, sizeof(attribNameBuffer), &attribNameLength, &attribSize, &attribType, attribNameBuffer);
+        expectCondition(attribNameLength > 0, "active attribute query writes a name");
+
+        gl.glUseProgram(program);
+
+        gl.glUniform1f(timeLocation, 1.5f);
+        const GLfloat colorValue[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+        gl.glUniform4fv(colorLocation, 1, colorValue);
+        const GLfloat mvpIdentity[16] = {
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f,
+        };
+        gl.glUniformMatrix4fv(mvpLocation, 1, GL_FALSE, mvpIdentity);
+        gl.glUniform1i(textureLocation, 2);
+
+        GLfloat timeReadback = 0.0f;
+        gl.glGetUniformfv(program, timeLocation, &timeReadback);
+        expectCondition(timeReadback == 1.5f, "uTime readback matches");
+
+        GLfloat colorReadback[4] = {};
+        gl.glGetUniformfv(program, colorLocation, colorReadback);
+        expectCondition(colorReadback[0] == 0.25f && colorReadback[3] == 1.0f, "uColor readback matches");
+
+        GLfloat mvpReadback[16] = {};
+        gl.glGetUniformfv(program, mvpLocation, mvpReadback);
+        expectCondition(mvpReadback[0] == 1.0f && mvpReadback[5] == 1.0f && mvpReadback[10] == 1.0f && mvpReadback[15] == 1.0f, "uMVP readback matches");
+
+        GLint textureReadback = 0;
+        gl.glGetUniformiv(program, textureLocation, &textureReadback);
+        expectCondition(textureReadback == 2, "uTexture sampler readback matches");
+
+        gl.glValidateProgram(program);
+        GLint validateStatus = 0;
+        gl.glGetProgramiv(program, GL_VALIDATE_STATUS, &validateStatus);
+        expectCondition(validateStatus == GL_TRUE, "program validates");
+
+        GLint programLogLength = 0;
+        gl.glGetProgramiv(program, GL_INFO_LOG_LENGTH, &programLogLength);
+        std::string programLog(static_cast<std::size_t>(programLogLength == 0 ? 1 : programLogLength), '\0');
+        GLsizei programLogWritten = 0;
+        gl.glGetProgramInfoLog(program, static_cast<GLsizei>(programLog.size()), &programLogWritten, programLog.data());
+        expectCondition(programLogWritten >= 0, "program info log is queryable");
+
+        gl.glDetachShader(program, vertex);
+        GLint attachedAfterDetach = 0;
+        gl.glGetProgramiv(program, GL_ATTACHED_SHADERS, &attachedAfterDetach);
+        expectCondition(attachedAfterDetach == 1, "program attached shader count after detach");
+
+        gl.glUseProgram(0);
+        gl.glDeleteProgram(program);
+        gl.glDeleteShader(vertex);
+        gl.glDeleteShader(fragment);
+        expectCondition(gl.glIsProgram(program) == GL_FALSE, "deleted program handle is no longer live");
+        expectCondition(gl.glIsShader(vertex) == GL_FALSE, "deleted shader handle is no longer live");
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.18f, 0.22f, 0.36f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glCreateShader,
+            FunctionId::glDeleteShader,
+            FunctionId::glIsShader,
+            FunctionId::glShaderSource,
+            FunctionId::glCompileShader,
+            FunctionId::glGetShaderiv,
+            FunctionId::glGetShaderInfoLog,
+            FunctionId::glGetShaderSource,
+            FunctionId::glCreateProgram,
+            FunctionId::glDeleteProgram,
+            FunctionId::glIsProgram,
+            FunctionId::glAttachShader,
+            FunctionId::glDetachShader,
+            FunctionId::glLinkProgram,
+            FunctionId::glUseProgram,
+            FunctionId::glValidateProgram,
+            FunctionId::glGetProgramiv,
+            FunctionId::glGetProgramInfoLog,
+            FunctionId::glGetAttachedShaders,
+            FunctionId::glBindAttribLocation,
+            FunctionId::glGetAttribLocation,
+            FunctionId::glGetActiveAttrib,
+            FunctionId::glGetUniformLocation,
+            FunctionId::glGetActiveUniform,
+            FunctionId::glGetUniformfv,
+            FunctionId::glGetUniformiv,
+            FunctionId::glUniform1f,
+            FunctionId::glUniform1i,
+            FunctionId::glUniform4fv,
+            FunctionId::glUniformMatrix4fv,
+        };
+    }
+};
+
 void appendCoverageDelta(TestResult& result) {
     for (FunctionId id : kBootstrapFunctions) {
         const auto& status = Runtime::shared().coverageStore().status(id);
@@ -1306,6 +1543,8 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(textureSamplerScene));
         IndexUInt8ExpansionScene indexExpansionScene;
         tests.push_back(runScene(indexExpansionScene));
+        ShaderProgramLifecycleScene shaderProgramScene;
+        tests.push_back(runScene(shaderProgramScene));
     }
 
     return buildJSON(normalizedPhase, tests);

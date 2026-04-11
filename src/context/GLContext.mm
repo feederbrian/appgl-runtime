@@ -2,6 +2,7 @@
 #include "MetalFrameGraph.h"
 #include "../caps/GLCapabilities.h"
 #include "../objects/GLObjectStore.h"
+#include "../shader/GLSLReflection.h"
 #include "../state/GLStateTracker.h"
 #include "../state/MetalVertexDescriptorBuilder.h"
 
@@ -4066,6 +4067,728 @@ GLObjectStore& GLContext::objects() {
 
 GLStateTracker& GLContext::state() {
     return *impl_->state;
+}
+
+// ============================================================================
+// Phase A Group 6 — Shaders and Programs
+// ============================================================================
+
+namespace {
+
+bool isValidShaderStage(GLenum stage) {
+    switch (stage) {
+        case GL_VERTEX_SHADER:
+        case GL_FRAGMENT_SHADER:
+        case GL_GEOMETRY_SHADER:
+        case GL_TESS_CONTROL_SHADER:
+        case GL_TESS_EVALUATION_SHADER:
+        case GL_COMPUTE_SHADER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void copyStringToBuffer(const std::string& source, GLsizei bufSize, GLsizei* length, GLchar* dest) {
+    if (dest == nullptr || bufSize <= 0) {
+        if (length != nullptr) {
+            *length = 0;
+        }
+        return;
+    }
+    const GLsizei copyLen = std::min<GLsizei>(static_cast<GLsizei>(source.size()), bufSize - 1);
+    std::memcpy(dest, source.data(), static_cast<std::size_t>(copyLen));
+    dest[copyLen] = '\0';
+    if (length != nullptr) {
+        *length = copyLen;
+    }
+}
+
+void appendDeclarationsAsUniforms(
+    std::vector<GLProgramUniformInfo>& out,
+    const std::vector<GLShaderDeclaration>& decls
+) {
+    for (const auto& decl : decls) {
+        const auto existing = std::find_if(out.begin(), out.end(),
+            [&](const GLProgramUniformInfo& u) { return u.name == decl.name; });
+        if (existing != out.end()) {
+            continue;
+        }
+        GLProgramUniformInfo info;
+        info.name = decl.name;
+        info.type = decl.type;
+        info.arraySize = decl.arraySize > 0 ? decl.arraySize : 1;
+        info.location = -1;  // assigned below
+        out.push_back(std::move(info));
+    }
+}
+
+}  // namespace
+
+GLuint GLContext::createShader(GLenum stage) {
+    if (!isValidShaderStage(stage)) {
+        pushError(GL_INVALID_ENUM);
+        return 0;
+    }
+    const GLuint id = impl_->objects->shaders().create();
+    GLShaderObject* shader = impl_->objects->shaders().get(id);
+    shader->stage = stage;
+    return id;
+}
+
+bool GLContext::deleteShader(GLuint shader) {
+    if (shader == 0) {
+        return true;
+    }
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // GL allows the name to remain valid until detached from all programs.
+    // Phase A's gauntlet flow always detaches before deleting, so we just remove.
+    object->deleteRequested = true;
+    impl_->objects->shaders().erase(shader);
+    return true;
+}
+
+bool GLContext::isShader(GLuint shader) const {
+    return impl_->objects->shaders().contains(shader);
+}
+
+bool GLContext::shaderSource(GLuint shader, GLsizei count, const GLchar* const* strings, const GLint* length) {
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    std::string concatenated;
+    for (GLsizei i = 0; i < count; ++i) {
+        if (strings == nullptr || strings[i] == nullptr) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (length != nullptr && length[i] >= 0) {
+            concatenated.append(strings[i], static_cast<std::size_t>(length[i]));
+        } else {
+            concatenated.append(strings[i]);
+        }
+    }
+    object->source = std::move(concatenated);
+    object->compiled = false;
+    object->compileLog.clear();
+    object->declaredUniforms.clear();
+    object->declaredInputs.clear();
+    object->declaredOutputs.clear();
+    return true;
+}
+
+bool GLContext::compileShader(GLuint shader) {
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLSLReflectionResult reflection = reflectGLSL(object->source, object->stage);
+    object->declaredUniforms = std::move(reflection.uniforms);
+    object->declaredInputs = std::move(reflection.inputs);
+    object->declaredOutputs = std::move(reflection.outputs);
+    object->compiled = reflection.ok;
+    object->compileLog = reflection.log;
+    if (object->source.empty()) {
+        object->compiled = false;
+        object->compileLog = "shader source is empty";
+    }
+    return object->compiled;
+}
+
+bool GLContext::getShaderiv(GLuint shader, GLenum pname, GLint* params) {
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    switch (pname) {
+        case GL_SHADER_TYPE:
+            *params = static_cast<GLint>(object->stage);
+            return true;
+        case GL_DELETE_STATUS:
+            *params = object->deleteRequested ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_COMPILE_STATUS:
+            *params = object->compiled ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_INFO_LOG_LENGTH:
+            *params = static_cast<GLint>(object->compileLog.size() + (object->compileLog.empty() ? 0 : 1));
+            return true;
+        case GL_SHADER_SOURCE_LENGTH:
+            *params = static_cast<GLint>(object->source.size() + (object->source.empty() ? 0 : 1));
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::getShaderInfoLog(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* infoLog) {
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    copyStringToBuffer(object->compileLog, bufSize, length, infoLog);
+    return true;
+}
+
+bool GLContext::getShaderSource(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* source) {
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    copyStringToBuffer(object->source, bufSize, length, source);
+    return true;
+}
+
+GLuint GLContext::createProgram() {
+    return impl_->objects->programs().create();
+}
+
+bool GLContext::deleteProgram(GLuint program) {
+    if (program == 0) {
+        return true;
+    }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    object->deleteRequested = true;
+    if (impl_->state->currentProgram() == program) {
+        impl_->state->useProgram(0);
+    }
+    impl_->objects->programs().erase(program);
+    return true;
+}
+
+bool GLContext::isProgram(GLuint program) const {
+    return impl_->objects->programs().contains(program);
+}
+
+bool GLContext::attachShader(GLuint program, GLuint shader) {
+    GLProgramObject* programObject = impl_->objects->programs().get(program);
+    GLShaderObject* shaderObject = impl_->objects->shaders().get(shader);
+    if (programObject == nullptr || shaderObject == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (std::find(programObject->attachedShaders.begin(), programObject->attachedShaders.end(), shader) !=
+        programObject->attachedShaders.end()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    programObject->attachedShaders.push_back(shader);
+    return true;
+}
+
+bool GLContext::detachShader(GLuint program, GLuint shader) {
+    GLProgramObject* programObject = impl_->objects->programs().get(program);
+    if (programObject == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    auto it = std::find(programObject->attachedShaders.begin(), programObject->attachedShaders.end(), shader);
+    if (it == programObject->attachedShaders.end()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    programObject->attachedShaders.erase(it);
+    return true;
+}
+
+bool GLContext::linkProgram(GLuint program) {
+    GLProgramObject* programObject = impl_->objects->programs().get(program);
+    if (programObject == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    programObject->uniforms.clear();
+    programObject->attributes.clear();
+    programObject->uniformValues.clear();
+    programObject->linkLog.clear();
+    programObject->linked = false;
+
+    if (programObject->attachedShaders.empty()) {
+        programObject->linkLog = "no shaders attached";
+        return false;
+    }
+
+    bool sawVertex = false;
+    bool sawFragment = false;
+    GLuint nextAttribLocation = 0;
+
+    for (GLuint shaderId : programObject->attachedShaders) {
+        GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
+        if (shaderObject == nullptr || !shaderObject->compiled) {
+            programObject->linkLog = "attached shader is not compiled";
+            return false;
+        }
+        if (shaderObject->stage == GL_VERTEX_SHADER) {
+            sawVertex = true;
+            for (const auto& input : shaderObject->declaredInputs) {
+                GLProgramAttributeInfo attrib;
+                attrib.name = input.name;
+                attrib.type = input.type;
+                if (input.explicitLocation >= 0) {
+                    attrib.location = input.explicitLocation;
+                } else {
+                    auto requested = programObject->requestedAttribLocations.find(input.name);
+                    if (requested != programObject->requestedAttribLocations.end()) {
+                        attrib.location = static_cast<GLint>(requested->second);
+                    } else {
+                        attrib.location = static_cast<GLint>(nextAttribLocation++);
+                    }
+                }
+                if (static_cast<GLuint>(attrib.location) >= nextAttribLocation) {
+                    nextAttribLocation = static_cast<GLuint>(attrib.location) + 1;
+                }
+                programObject->attributes.push_back(std::move(attrib));
+            }
+        }
+        if (shaderObject->stage == GL_FRAGMENT_SHADER) {
+            sawFragment = true;
+        }
+        appendDeclarationsAsUniforms(programObject->uniforms, shaderObject->declaredUniforms);
+    }
+
+    if (!sawVertex || !sawFragment) {
+        programObject->linkLog = "program requires both vertex and fragment shaders";
+        return false;
+    }
+
+    // Assign sequential dense uniform locations and seed default values.
+    GLint nextLocation = 0;
+    for (auto& uniform : programObject->uniforms) {
+        uniform.location = nextLocation;
+        const GLint components = glslComponentCount(uniform.type) * std::max<GLint>(uniform.arraySize, 1);
+        GLProgramUniformValue value;
+        value.type = uniform.type;
+        value.arraySize = uniform.arraySize;
+        switch (uniform.type) {
+            case GL_INT:
+            case GL_INT_VEC2:
+            case GL_INT_VEC3:
+            case GL_INT_VEC4:
+            case GL_BOOL:
+            case GL_BOOL_VEC2:
+            case GL_BOOL_VEC3:
+            case GL_BOOL_VEC4:
+            case GL_SAMPLER_1D:
+            case GL_SAMPLER_2D:
+            case GL_SAMPLER_3D:
+            case GL_SAMPLER_CUBE:
+            case GL_SAMPLER_2D_ARRAY:
+            case GL_SAMPLER_2D_SHADOW:
+                value.ints.assign(static_cast<std::size_t>(components), 0);
+                break;
+            case GL_UNSIGNED_INT:
+            case GL_UNSIGNED_INT_VEC2:
+            case GL_UNSIGNED_INT_VEC3:
+            case GL_UNSIGNED_INT_VEC4:
+                value.uints.assign(static_cast<std::size_t>(components), 0u);
+                break;
+            default:
+                value.floats.assign(static_cast<std::size_t>(components), 0.0f);
+                break;
+        }
+        programObject->uniformValues[nextLocation] = std::move(value);
+        nextLocation += std::max<GLint>(uniform.arraySize, 1);
+    }
+
+    programObject->linked = true;
+    programObject->linkLog = "ok";
+    return true;
+}
+
+bool GLContext::useProgram(GLuint program) {
+    if (program != 0) {
+        GLProgramObject* object = impl_->objects->programs().get(program);
+        if (object == nullptr) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (!object->linked) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+    impl_->state->useProgram(program);
+    return true;
+}
+
+bool GLContext::validateProgram(GLuint program) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    object->validated = object->linked;
+    object->validateLog = object->linked ? "validation passed" : "program is not linked";
+    return object->validated;
+}
+
+bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    switch (pname) {
+        case GL_DELETE_STATUS:
+            *params = object->deleteRequested ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_LINK_STATUS:
+            *params = object->linked ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_VALIDATE_STATUS:
+            *params = object->validated ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_INFO_LOG_LENGTH: {
+            const std::string& log = object->validateLog.empty() ? object->linkLog : object->validateLog;
+            *params = static_cast<GLint>(log.size() + (log.empty() ? 0 : 1));
+            return true;
+        }
+        case GL_ATTACHED_SHADERS:
+            *params = static_cast<GLint>(object->attachedShaders.size());
+            return true;
+        case GL_ACTIVE_UNIFORMS:
+            *params = static_cast<GLint>(object->uniforms.size());
+            return true;
+        case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
+            std::size_t maxLen = 0;
+            for (const auto& u : object->uniforms) {
+                maxLen = std::max(maxLen, u.name.size() + 1);
+            }
+            *params = static_cast<GLint>(maxLen);
+            return true;
+        }
+        case GL_ACTIVE_ATTRIBUTES:
+            *params = static_cast<GLint>(object->attributes.size());
+            return true;
+        case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: {
+            std::size_t maxLen = 0;
+            for (const auto& a : object->attributes) {
+                maxLen = std::max(maxLen, a.name.size() + 1);
+            }
+            *params = static_cast<GLint>(maxLen);
+            return true;
+        }
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::getProgramInfoLog(GLuint program, GLsizei bufSize, GLsizei* length, GLchar* infoLog) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const std::string& log = object->validateLog.empty() ? object->linkLog : object->validateLog;
+    copyStringToBuffer(log, bufSize, length, infoLog);
+    return true;
+}
+
+bool GLContext::getAttachedShaders(GLuint program, GLsizei maxCount, GLsizei* count, GLuint* shaders) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLsizei n = std::min<GLsizei>(maxCount, static_cast<GLsizei>(object->attachedShaders.size()));
+    if (shaders != nullptr) {
+        for (GLsizei i = 0; i < n; ++i) {
+            shaders[i] = object->attachedShaders[static_cast<std::size_t>(i)];
+        }
+    }
+    if (count != nullptr) {
+        *count = n;
+    }
+    return true;
+}
+
+bool GLContext::bindAttribLocation(GLuint program, GLuint index, const GLchar* name) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    object->requestedAttribLocations[std::string(name)] = index;
+    return true;
+}
+
+GLint GLContext::getAttribLocation(GLuint program, const GLchar* name) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return -1;
+    }
+    if (!object->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return -1;
+    }
+    const std::string lookup = name;
+    for (const auto& attrib : object->attributes) {
+        if (attrib.name == lookup) {
+            return attrib.location;
+        }
+    }
+    return -1;
+}
+
+bool GLContext::getActiveAttrib(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (index >= object->attributes.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const auto& attrib = object->attributes[index];
+    if (size != nullptr) {
+        *size = 1;
+    }
+    if (type != nullptr) {
+        *type = attrib.type;
+    }
+    copyStringToBuffer(attrib.name, bufSize, length, name);
+    return true;
+}
+
+GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return -1;
+    }
+    if (!object->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return -1;
+    }
+    const std::string lookup = name;
+    for (const auto& uniform : object->uniforms) {
+        if (uniform.name == lookup) {
+            return uniform.location;
+        }
+    }
+    return -1;
+}
+
+bool GLContext::getActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (index >= object->uniforms.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const auto& uniform = object->uniforms[index];
+    if (size != nullptr) {
+        *size = std::max<GLint>(uniform.arraySize, 1);
+    }
+    if (type != nullptr) {
+        *type = uniform.type;
+    }
+    copyStringToBuffer(uniform.name, bufSize, length, name);
+    return true;
+}
+
+namespace {
+
+GLProgramUniformValue* lookupUniformValue(GLProgramObject* program, GLint location) {
+    if (program == nullptr || location < 0) {
+        return nullptr;
+    }
+    auto it = program->uniformValues.find(location);
+    if (it == program->uniformValues.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+}  // namespace
+
+bool GLContext::getUniformfv(GLuint program, GLint location, GLfloat* params) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramUniformValue* value = lookupUniformValue(object, location);
+    if (value == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!value->floats.empty()) {
+        std::memcpy(params, value->floats.data(), value->floats.size() * sizeof(GLfloat));
+    } else if (!value->ints.empty()) {
+        for (std::size_t i = 0; i < value->ints.size(); ++i) {
+            params[i] = static_cast<GLfloat>(value->ints[i]);
+        }
+    } else if (!value->uints.empty()) {
+        for (std::size_t i = 0; i < value->uints.size(); ++i) {
+            params[i] = static_cast<GLfloat>(value->uints[i]);
+        }
+    }
+    return true;
+}
+
+bool GLContext::getUniformiv(GLuint program, GLint location, GLint* params) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramUniformValue* value = lookupUniformValue(object, location);
+    if (value == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!value->ints.empty()) {
+        std::memcpy(params, value->ints.data(), value->ints.size() * sizeof(GLint));
+    } else if (!value->floats.empty()) {
+        for (std::size_t i = 0; i < value->floats.size(); ++i) {
+            params[i] = static_cast<GLint>(value->floats[i]);
+        }
+    } else if (!value->uints.empty()) {
+        for (std::size_t i = 0; i < value->uints.size(); ++i) {
+            params[i] = static_cast<GLint>(value->uints[i]);
+        }
+    }
+    return true;
+}
+
+bool GLContext::getUniformuiv(GLuint program, GLint location, GLuint* params) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramUniformValue* value = lookupUniformValue(object, location);
+    if (value == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!value->uints.empty()) {
+        std::memcpy(params, value->uints.data(), value->uints.size() * sizeof(GLuint));
+    } else if (!value->ints.empty()) {
+        for (std::size_t i = 0; i < value->ints.size(); ++i) {
+            params[i] = static_cast<GLuint>(value->ints[i]);
+        }
+    } else if (!value->floats.empty()) {
+        for (std::size_t i = 0; i < value->floats.size(); ++i) {
+            params[i] = static_cast<GLuint>(value->floats[i]);
+        }
+    }
+    return true;
+}
+
+bool GLContext::setUniformScalarVector(GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
+    if (location < 0) {
+        return true;  // -1 silently no-ops per spec.
+    }
+    if (count < 0 || vectorSize < 1 || vectorSize > 4) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint currentProgram = impl_->state->currentProgram();
+    GLProgramObject* object = impl_->objects->programs().get(currentProgram);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* slot = lookupUniformValue(object, location);
+    if (slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const std::size_t expected = static_cast<std::size_t>(vectorSize) *
+                                 static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    switch (element) {
+        case UniformElementType::Float: {
+            slot->floats.assign(static_cast<const GLfloat*>(values), static_cast<const GLfloat*>(values) + expected);
+            slot->ints.clear();
+            slot->uints.clear();
+            break;
+        }
+        case UniformElementType::Int: {
+            slot->ints.assign(static_cast<const GLint*>(values), static_cast<const GLint*>(values) + expected);
+            slot->floats.clear();
+            slot->uints.clear();
+            break;
+        }
+        case UniformElementType::UnsignedInt: {
+            slot->uints.assign(static_cast<const GLuint*>(values), static_cast<const GLuint*>(values) + expected);
+            slot->floats.clear();
+            slot->ints.clear();
+            break;
+        }
+    }
+    return true;
+}
+
+bool GLContext::setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values) {
+    if (location < 0) {
+        return true;
+    }
+    if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint currentProgram = impl_->state->currentProgram();
+    GLProgramObject* object = impl_->objects->programs().get(currentProgram);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* slot = lookupUniformValue(object, location);
+    if (slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) *
+                                 static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    slot->floats.assign(elements, 0.0f);
+    if (transpose == GL_FALSE) {
+        std::memcpy(slot->floats.data(), values, elements * sizeof(GLfloat));
+    } else {
+        const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+        for (GLsizei m = 0; m < std::max<GLsizei>(count, 1); ++m) {
+            for (GLint r = 0; r < rows; ++r) {
+                for (GLint c = 0; c < cols; ++c) {
+                    const std::size_t srcIndex = static_cast<std::size_t>(m) * matrixElements +
+                                                 static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) +
+                                                 static_cast<std::size_t>(c);
+                    const std::size_t dstIndex = static_cast<std::size_t>(m) * matrixElements +
+                                                 static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) +
+                                                 static_cast<std::size_t>(r);
+                    slot->floats[dstIndex] = values[srcIndex];
+                }
+            }
+        }
+    }
+    slot->ints.clear();
+    slot->uints.clear();
+    return true;
 }
 
 }  // namespace appgl

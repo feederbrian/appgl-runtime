@@ -36,6 +36,7 @@ set(APPGL_SOURCES
   src/debug/TraceLog.cpp
   src/loader/DispatchInstall.cpp
   src/objects/GLObjectStore.cpp
+  src/shader/GLSLReflection.cpp
   src/shader/PipelineCache.cpp
   src/shader/ShaderTranslator.cpp
   src/state/GLStateTracker.cpp

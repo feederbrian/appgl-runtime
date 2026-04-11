@@ -150,6 +150,39 @@ public:
     bool getSamplerParameterUnsignedInteger(GLuint sampler, GLenum pname, GLuint* params);
     bool getSamplerParameterFloat(GLuint sampler, GLenum pname, GLfloat* params);
 
+    GLuint createShader(GLenum stage);
+    bool deleteShader(GLuint shader);
+    bool isShader(GLuint shader) const;
+    bool shaderSource(GLuint shader, GLsizei count, const GLchar* const* strings, const GLint* length);
+    bool compileShader(GLuint shader);
+    bool getShaderiv(GLuint shader, GLenum pname, GLint* params);
+    bool getShaderInfoLog(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* infoLog);
+    bool getShaderSource(GLuint shader, GLsizei bufSize, GLsizei* length, GLchar* source);
+
+    GLuint createProgram();
+    bool deleteProgram(GLuint program);
+    bool isProgram(GLuint program) const;
+    bool attachShader(GLuint program, GLuint shader);
+    bool detachShader(GLuint program, GLuint shader);
+    bool linkProgram(GLuint program);
+    bool useProgram(GLuint program);
+    bool validateProgram(GLuint program);
+    bool getProgramiv(GLuint program, GLenum pname, GLint* params);
+    bool getProgramInfoLog(GLuint program, GLsizei bufSize, GLsizei* length, GLchar* infoLog);
+    bool getAttachedShaders(GLuint program, GLsizei maxCount, GLsizei* count, GLuint* shaders);
+    bool bindAttribLocation(GLuint program, GLuint index, const GLchar* name);
+    GLint getAttribLocation(GLuint program, const GLchar* name);
+    bool getActiveAttrib(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name);
+    GLint getUniformLocation(GLuint program, const GLchar* name);
+    bool getActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei* length, GLint* size, GLenum* type, GLchar* name);
+    bool getUniformfv(GLuint program, GLint location, GLfloat* params);
+    bool getUniformiv(GLuint program, GLint location, GLint* params);
+    bool getUniformuiv(GLuint program, GLint location, GLuint* params);
+
+    enum class UniformElementType { Float, Int, UnsignedInt };
+    bool setUniformScalarVector(GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values);
+    bool setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values);
+
     void pushError(GLenum error);
     GLenum popError();
 
