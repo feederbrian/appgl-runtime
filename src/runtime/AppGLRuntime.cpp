@@ -17,8 +17,10 @@ constexpr const char* kPhaseAStateTestId = "phase-a.state";
 constexpr const char* kPhaseADebugTestId = "phase-a.debug";
 constexpr const char* kPhaseABufferTestId = "phase-a.buffers";
 constexpr const char* kPhaseAVertexInputTestId = "phase-a.vertex-input";
+constexpr const char* kPhaseATextureTestId = "phase-a.textures";
 constexpr GLuint kPhaseAMaxDrawBuffers = 8;
 constexpr GLuint kPhaseAMaxIndexedBufferBindings = 32;
+constexpr GLuint kPhaseAMaxTextureUnits = 32;
 
 GLContext* requireCurrentContext(std::string_view functionName) {
     auto* context = Runtime::shared().currentContext();
@@ -352,6 +354,206 @@ bool isValidVertexAttribPname(GLenum pname) {
 
 void markVertexInputFunction(FunctionId id, std::string_view note) {
     Runtime::shared().coverageStore().markSmokeTested(id, kPhaseAVertexInputTestId, note);
+    Runtime::shared().refreshCurrentContextClaimedVersion();
+}
+
+bool isValidTextureTarget(GLenum target) {
+    return target == GL_TEXTURE_1D || target == GL_TEXTURE_2D || target == GL_TEXTURE_3D;
+}
+
+bool isValidTextureInternalFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_RED:
+        case GL_RG:
+        case GL_RGB:
+        case GL_RGBA:
+        case GL_R8:
+        case GL_RG8:
+        case GL_RGB8:
+        case GL_RGBA8:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidTextureUploadFormat(GLenum format) {
+    return format == GL_RED || format == GL_RG || format == GL_RGB || format == GL_RGBA;
+}
+
+bool isValidTextureUploadType(GLenum type) {
+    return type == GL_UNSIGNED_BYTE;
+}
+
+bool isValidTextureFilter(GLint filter, bool minFilter) {
+    if (filter == GL_NEAREST || filter == GL_LINEAR) {
+        return true;
+    }
+    return minFilter
+        && (filter == GL_NEAREST_MIPMAP_NEAREST
+            || filter == GL_LINEAR_MIPMAP_NEAREST
+            || filter == GL_NEAREST_MIPMAP_LINEAR
+            || filter == GL_LINEAR_MIPMAP_LINEAR);
+}
+
+bool isValidTextureWrap(GLint wrap) {
+    return wrap == GL_REPEAT || wrap == GL_MIRRORED_REPEAT || wrap == GL_CLAMP_TO_EDGE || wrap == GL_CLAMP_TO_BORDER;
+}
+
+bool isValidTextureCompareMode(GLint mode) {
+    return mode == GL_NONE || mode == GL_COMPARE_REF_TO_TEXTURE;
+}
+
+bool isValidTextureSwizzle(GLint value) {
+    return value == GL_RED || value == GL_GREEN || value == GL_BLUE || value == GL_ALPHA || value == GL_ZERO || value == GL_ONE;
+}
+
+bool isValidTextureParameterPname(GLenum pname) {
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:
+        case GL_TEXTURE_MAG_FILTER:
+        case GL_TEXTURE_WRAP_S:
+        case GL_TEXTURE_WRAP_T:
+        case GL_TEXTURE_WRAP_R:
+        case GL_TEXTURE_MIN_LOD:
+        case GL_TEXTURE_MAX_LOD:
+        case GL_TEXTURE_BASE_LEVEL:
+        case GL_TEXTURE_MAX_LEVEL:
+        case GL_TEXTURE_COMPARE_MODE:
+        case GL_TEXTURE_COMPARE_FUNC:
+        case GL_TEXTURE_BORDER_COLOR:
+        case GL_TEXTURE_SWIZZLE_R:
+        case GL_TEXTURE_SWIZZLE_G:
+        case GL_TEXTURE_SWIZZLE_B:
+        case GL_TEXTURE_SWIZZLE_A:
+        case GL_TEXTURE_SWIZZLE_RGBA:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidSamplerParameterPname(GLenum pname) {
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:
+        case GL_TEXTURE_MAG_FILTER:
+        case GL_TEXTURE_WRAP_S:
+        case GL_TEXTURE_WRAP_T:
+        case GL_TEXTURE_WRAP_R:
+        case GL_TEXTURE_MIN_LOD:
+        case GL_TEXTURE_MAX_LOD:
+        case GL_TEXTURE_COMPARE_MODE:
+        case GL_TEXTURE_COMPARE_FUNC:
+        case GL_TEXTURE_BORDER_COLOR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool validateTextureParameterValues(GLenum pname, const GLint* params) {
+    if (params == nullptr) {
+        return false;
+    }
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:
+            return isValidTextureFilter(params[0], true);
+        case GL_TEXTURE_MAG_FILTER:
+            return isValidTextureFilter(params[0], false);
+        case GL_TEXTURE_WRAP_S:
+        case GL_TEXTURE_WRAP_T:
+        case GL_TEXTURE_WRAP_R:
+            return isValidTextureWrap(params[0]);
+        case GL_TEXTURE_BASE_LEVEL:
+        case GL_TEXTURE_MAX_LEVEL:
+            return params[0] >= 0;
+        case GL_TEXTURE_COMPARE_MODE:
+            return isValidTextureCompareMode(params[0]);
+        case GL_TEXTURE_COMPARE_FUNC:
+            return isValidCompareFunc(static_cast<GLenum>(params[0]));
+        case GL_TEXTURE_SWIZZLE_R:
+        case GL_TEXTURE_SWIZZLE_G:
+        case GL_TEXTURE_SWIZZLE_B:
+        case GL_TEXTURE_SWIZZLE_A:
+            return isValidTextureSwizzle(params[0]);
+        case GL_TEXTURE_SWIZZLE_RGBA:
+            return isValidTextureSwizzle(params[0])
+                && isValidTextureSwizzle(params[1])
+                && isValidTextureSwizzle(params[2])
+                && isValidTextureSwizzle(params[3]);
+        case GL_TEXTURE_MIN_LOD:
+        case GL_TEXTURE_MAX_LOD:
+        case GL_TEXTURE_BORDER_COLOR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool validateTextureParameterValues(GLenum pname, const GLfloat* params) {
+    if (params == nullptr) {
+        return false;
+    }
+    switch (pname) {
+        case GL_TEXTURE_MIN_LOD:
+        case GL_TEXTURE_MAX_LOD:
+            return std::isfinite(params[0]);
+        case GL_TEXTURE_BORDER_COLOR:
+            return std::isfinite(params[0]) && std::isfinite(params[1])
+                && std::isfinite(params[2]) && std::isfinite(params[3]);
+        default: {
+            GLint integerParams[4] = {static_cast<GLint>(params[0]), 0, 0, 0};
+            if (pname == GL_TEXTURE_SWIZZLE_RGBA) {
+                integerParams[1] = static_cast<GLint>(params[1]);
+                integerParams[2] = static_cast<GLint>(params[2]);
+                integerParams[3] = static_cast<GLint>(params[3]);
+            }
+            return validateTextureParameterValues(pname, integerParams);
+        }
+    }
+}
+
+bool isValidPixelStorePname(GLenum pname) {
+    switch (pname) {
+        case GL_PACK_SWAP_BYTES:
+        case GL_PACK_LSB_FIRST:
+        case GL_PACK_ROW_LENGTH:
+        case GL_PACK_SKIP_ROWS:
+        case GL_PACK_SKIP_PIXELS:
+        case GL_PACK_ALIGNMENT:
+        case GL_PACK_IMAGE_HEIGHT:
+        case GL_PACK_SKIP_IMAGES:
+        case GL_UNPACK_SWAP_BYTES:
+        case GL_UNPACK_LSB_FIRST:
+        case GL_UNPACK_ROW_LENGTH:
+        case GL_UNPACK_SKIP_ROWS:
+        case GL_UNPACK_SKIP_PIXELS:
+        case GL_UNPACK_ALIGNMENT:
+        case GL_UNPACK_IMAGE_HEIGHT:
+        case GL_UNPACK_SKIP_IMAGES:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidPixelStoreValue(GLenum pname, GLint value) {
+    switch (pname) {
+        case GL_PACK_ALIGNMENT:
+        case GL_UNPACK_ALIGNMENT:
+            return value == 1 || value == 2 || value == 4 || value == 8;
+        case GL_PACK_SWAP_BYTES:
+        case GL_PACK_LSB_FIRST:
+        case GL_UNPACK_SWAP_BYTES:
+        case GL_UNPACK_LSB_FIRST:
+            return value == GL_FALSE || value == GL_TRUE;
+        default:
+            return value >= 0;
+    }
+}
+
+void markTextureFunction(FunctionId id, std::string_view note) {
+    Runtime::shared().coverageStore().markSmokeTested(id, kPhaseATextureTestId, note);
     Runtime::shared().refreshCurrentContextClaimedVersion();
 }
 
@@ -1209,6 +1411,551 @@ void APIENTRY glGetVertexAttribPointerv(GLuint index, GLenum pname, void** point
     if (context->getVertexAttribPointer(index, pname, pointer)) {
         markVertexInputFunction(FunctionId::glGetVertexAttribPointerv, "Vertex attribute pointer queries are live.");
         Runtime::shared().recordBootstrapTrace("glGetVertexAttribPointerv(" + std::to_string(index) + ")");
+    }
+}
+
+void APIENTRY glActiveTexture(GLenum texture) {
+    auto* context = requireCurrentContext("glActiveTexture");
+    if (context == nullptr) {
+        return;
+    }
+    if (texture < GL_TEXTURE0 || texture >= GL_TEXTURE0 + kPhaseAMaxTextureUnits) {
+        recordValidationError(context, "glActiveTexture", GL_INVALID_ENUM, "texture unit exceeds Phase A limit");
+        return;
+    }
+    if (context->activeTexture(texture)) {
+        markTextureFunction(FunctionId::glActiveTexture, "Active texture unit state is tracked.");
+        Runtime::shared().recordBootstrapTrace("glActiveTexture(" + std::to_string(texture) + ")");
+    }
+}
+
+void APIENTRY glGenTextures(GLsizei n, GLuint* textures) {
+    auto* context = requireCurrentContext("glGenTextures");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->genTextures(n, textures)) {
+        markTextureFunction(FunctionId::glGenTextures, "Texture names are generated in the object store.");
+        Runtime::shared().recordBootstrapTrace("glGenTextures(" + std::to_string(n) + ")");
+    }
+}
+
+void APIENTRY glDeleteTextures(GLsizei n, const GLuint* textures) {
+    auto* context = requireCurrentContext("glDeleteTextures");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->deleteTextures(n, textures)) {
+        markTextureFunction(FunctionId::glDeleteTextures, "Texture names are deleted and stale bindings are cleared.");
+        Runtime::shared().recordBootstrapTrace("glDeleteTextures(" + std::to_string(n) + ")");
+    }
+}
+
+GLboolean APIENTRY glIsTexture(GLuint texture) {
+    auto* context = requireCurrentContext("glIsTexture");
+    if (context == nullptr) {
+        return GL_FALSE;
+    }
+    markTextureFunction(FunctionId::glIsTexture, "Texture object existence queries are live.");
+    Runtime::shared().recordBootstrapTrace("glIsTexture(" + std::to_string(texture) + ")");
+    return context->isTexture(texture) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glBindTexture(GLenum target, GLuint texture) {
+    auto* context = requireCurrentContext("glBindTexture");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidTextureTarget(target)) {
+        recordValidationError(context, "glBindTexture", GL_INVALID_ENUM, "target is not a Phase A texture target");
+        return;
+    }
+    if (context->bindTexture(target, texture)) {
+        markTextureFunction(FunctionId::glBindTexture, "Texture target bindings are tracked per active texture unit.");
+        Runtime::shared().recordBootstrapTrace("glBindTexture(" + std::to_string(target) + ", " + std::to_string(texture) + ")");
+    }
+}
+
+void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLint border, GLenum format, GLenum type, const void* pixels) {
+    auto* context = requireCurrentContext("glTexImage1D");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_1D) {
+        recordValidationError(context, "glTexImage1D", GL_INVALID_ENUM, "target must be GL_TEXTURE_1D");
+        return;
+    }
+    if (!isValidTextureInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
+        recordValidationError(context, "glTexImage1D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        return;
+    }
+    if (context->texImage(target, level, internalformat, width, 1, 1, border, format, type, pixels)) {
+        markTextureFunction(FunctionId::glTexImage1D, "1D texture storage and RGBA8 shadow upload are live.");
+        Runtime::shared().recordBootstrapTrace("glTexImage1D(" + std::to_string(width) + ")");
+    }
+}
+
+void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void* pixels) {
+    auto* context = requireCurrentContext("glTexImage2D");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_2D) {
+        recordValidationError(context, "glTexImage2D", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D");
+        return;
+    }
+    if (!isValidTextureInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
+        recordValidationError(context, "glTexImage2D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        return;
+    }
+    if (context->texImage(target, level, internalformat, width, height, 1, border, format, type, pixels)) {
+        markTextureFunction(FunctionId::glTexImage2D, "2D texture storage and RGBA8 shadow upload are live.");
+        Runtime::shared().recordBootstrapTrace("glTexImage2D(" + std::to_string(width) + "x" + std::to_string(height) + ")");
+    }
+}
+
+void APIENTRY glTexImage3D(
+    GLenum target,
+    GLint level,
+    GLint internalformat,
+    GLsizei width,
+    GLsizei height,
+    GLsizei depth,
+    GLint border,
+    GLenum format,
+    GLenum type,
+    const void* pixels
+) {
+    auto* context = requireCurrentContext("glTexImage3D");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_3D) {
+        recordValidationError(context, "glTexImage3D", GL_INVALID_ENUM, "target must be GL_TEXTURE_3D");
+        return;
+    }
+    if (!isValidTextureInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
+        recordValidationError(context, "glTexImage3D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        return;
+    }
+    if (context->texImage(target, level, internalformat, width, height, depth, border, format, type, pixels)) {
+        markTextureFunction(FunctionId::glTexImage3D, "3D texture storage and RGBA8 shadow upload are live.");
+        Runtime::shared().recordBootstrapTrace("glTexImage3D(" + std::to_string(width) + "x" + std::to_string(height) + "x" + std::to_string(depth) + ")");
+    }
+}
+
+void APIENTRY glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const void* pixels) {
+    auto* context = requireCurrentContext("glTexSubImage1D");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_1D) {
+        recordValidationError(context, "glTexSubImage1D", GL_INVALID_ENUM, "target must be GL_TEXTURE_1D");
+        return;
+    }
+    if (!isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
+        recordValidationError(context, "glTexSubImage1D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        return;
+    }
+    if (context->texSubImage(target, level, xoffset, 0, 0, width, 1, 1, format, type, pixels)) {
+        markTextureFunction(FunctionId::glTexSubImage1D, "1D texture subimage uploads update shadow and Metal storage.");
+        Runtime::shared().recordBootstrapTrace("glTexSubImage1D(" + std::to_string(width) + ")");
+    }
+}
+
+void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels) {
+    auto* context = requireCurrentContext("glTexSubImage2D");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_2D) {
+        recordValidationError(context, "glTexSubImage2D", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D");
+        return;
+    }
+    if (!isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
+        recordValidationError(context, "glTexSubImage2D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        return;
+    }
+    if (context->texSubImage(target, level, xoffset, yoffset, 0, width, height, 1, format, type, pixels)) {
+        markTextureFunction(FunctionId::glTexSubImage2D, "2D texture subimage uploads update shadow and Metal storage.");
+        Runtime::shared().recordBootstrapTrace("glTexSubImage2D(" + std::to_string(width) + "x" + std::to_string(height) + ")");
+    }
+}
+
+void APIENTRY glTexSubImage3D(
+    GLenum target,
+    GLint level,
+    GLint xoffset,
+    GLint yoffset,
+    GLint zoffset,
+    GLsizei width,
+    GLsizei height,
+    GLsizei depth,
+    GLenum format,
+    GLenum type,
+    const void* pixels
+) {
+    auto* context = requireCurrentContext("glTexSubImage3D");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_3D) {
+        recordValidationError(context, "glTexSubImage3D", GL_INVALID_ENUM, "target must be GL_TEXTURE_3D");
+        return;
+    }
+    if (!isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
+        recordValidationError(context, "glTexSubImage3D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        return;
+    }
+    if (context->texSubImage(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels)) {
+        markTextureFunction(FunctionId::glTexSubImage3D, "3D texture subimage uploads update shadow and Metal storage.");
+        Runtime::shared().recordBootstrapTrace("glTexSubImage3D(" + std::to_string(width) + "x" + std::to_string(height) + "x" + std::to_string(depth) + ")");
+    }
+}
+
+void APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param) {
+    glTexParameteriv(target, pname, &param);
+    Runtime::shared().coverageStore().markSmokeTested(FunctionId::glTexParameteri, kPhaseATextureTestId, "Texture scalar integer parameters route through the canonical parameter store.");
+}
+
+void APIENTRY glTexParameteriv(GLenum target, GLenum pname, const GLint* params) {
+    auto* context = requireCurrentContext("glTexParameteriv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+        recordValidationError(context, "glTexParameteriv", GL_INVALID_ENUM, "target or pname is invalid");
+        return;
+    }
+    if (!validateTextureParameterValues(pname, params)) {
+        recordValidationError(context, "glTexParameteriv", params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM, "parameter value is invalid");
+        return;
+    }
+    if (context->texParameterInteger(target, pname, params)) {
+        markTextureFunction(FunctionId::glTexParameteriv, "Texture integer-vector parameters are tracked.");
+        Runtime::shared().recordBootstrapTrace("glTexParameteriv(" + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
+    glTexParameterfv(target, pname, &param);
+    Runtime::shared().coverageStore().markSmokeTested(FunctionId::glTexParameterf, kPhaseATextureTestId, "Texture scalar float parameters route through the canonical parameter store.");
+}
+
+void APIENTRY glTexParameterfv(GLenum target, GLenum pname, const GLfloat* params) {
+    auto* context = requireCurrentContext("glTexParameterfv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+        recordValidationError(context, "glTexParameterfv", GL_INVALID_ENUM, "target or pname is invalid");
+        return;
+    }
+    if (!validateTextureParameterValues(pname, params)) {
+        recordValidationError(context, "glTexParameterfv", params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM, "parameter value is invalid");
+        return;
+    }
+    if (context->texParameterFloat(target, pname, params)) {
+        markTextureFunction(FunctionId::glTexParameterfv, "Texture float-vector parameters are tracked.");
+        Runtime::shared().recordBootstrapTrace("glTexParameterfv(" + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glTexParameterIiv(GLenum target, GLenum pname, const GLint* params) {
+    auto* context = requireCurrentContext("glTexParameterIiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+        recordValidationError(context, "glTexParameterIiv", GL_INVALID_ENUM, "target or pname is invalid");
+        return;
+    }
+    if (!validateTextureParameterValues(pname, params)) {
+        recordValidationError(context, "glTexParameterIiv", params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM, "parameter value is invalid");
+        return;
+    }
+    if (context->texParameterInteger(target, pname, params)) {
+        markTextureFunction(FunctionId::glTexParameterIiv, "Texture integer-vector parameters are tracked.");
+        Runtime::shared().recordBootstrapTrace("glTexParameterIiv(" + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glTexParameterIuiv(GLenum target, GLenum pname, const GLuint* params) {
+    auto* context = requireCurrentContext("glTexParameterIuiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname) || params == nullptr) {
+        recordValidationError(context, "glTexParameterIuiv", params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM, "target, pname, or params are invalid");
+        return;
+    }
+    GLint converted[4] = {static_cast<GLint>(params[0]), 0, 0, 0};
+    if (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) {
+        converted[1] = static_cast<GLint>(params[1]);
+        converted[2] = static_cast<GLint>(params[2]);
+        converted[3] = static_cast<GLint>(params[3]);
+    }
+    if (!validateTextureParameterValues(pname, converted)) {
+        recordValidationError(context, "glTexParameterIuiv", GL_INVALID_ENUM, "parameter value is invalid");
+        return;
+    }
+    if (context->texParameterUnsignedInteger(target, pname, params)) {
+        markTextureFunction(FunctionId::glTexParameterIuiv, "Texture unsigned integer-vector parameters are tracked.");
+        Runtime::shared().recordBootstrapTrace("glTexParameterIuiv(" + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint* params) {
+    auto* context = requireCurrentContext("glGetTexParameteriv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+        recordValidationError(context, "glGetTexParameteriv", GL_INVALID_ENUM, "target or pname is invalid");
+        return;
+    }
+    if (context->getTexParameterInteger(target, pname, params)) {
+        markTextureFunction(FunctionId::glGetTexParameteriv, "Texture integer parameter queries are live.");
+        Runtime::shared().recordBootstrapTrace("glGetTexParameteriv(" + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) {
+    auto* context = requireCurrentContext("glGetTexParameterfv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+        recordValidationError(context, "glGetTexParameterfv", GL_INVALID_ENUM, "target or pname is invalid");
+        return;
+    }
+    if (context->getTexParameterFloat(target, pname, params)) {
+        markTextureFunction(FunctionId::glGetTexParameterfv, "Texture float parameter queries are live.");
+        Runtime::shared().recordBootstrapTrace("glGetTexParameterfv(" + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGetTexParameterIiv(GLenum target, GLenum pname, GLint* params) {
+    glGetTexParameteriv(target, pname, params);
+    Runtime::shared().coverageStore().markSmokeTested(FunctionId::glGetTexParameterIiv, kPhaseATextureTestId, "Texture integer parameter queries route through the canonical parameter store.");
+}
+
+void APIENTRY glGetTexParameterIuiv(GLenum target, GLenum pname, GLuint* params) {
+    auto* context = requireCurrentContext("glGetTexParameterIuiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+        recordValidationError(context, "glGetTexParameterIuiv", GL_INVALID_ENUM, "target or pname is invalid");
+        return;
+    }
+    if (context->getTexParameterUnsignedInteger(target, pname, params)) {
+        markTextureFunction(FunctionId::glGetTexParameterIuiv, "Texture unsigned parameter queries are live.");
+        Runtime::shared().recordBootstrapTrace("glGetTexParameterIuiv(" + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glPixelStorei(GLenum pname, GLint param) {
+    auto* context = requireCurrentContext("glPixelStorei");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidPixelStorePname(pname)) {
+        recordValidationError(context, "glPixelStorei", GL_INVALID_ENUM, "pname is not a supported pixel-store field");
+        return;
+    }
+    if (!isValidPixelStoreValue(pname, param)) {
+        recordValidationError(context, "glPixelStorei", GL_INVALID_VALUE, "pixel-store value is invalid");
+        return;
+    }
+    if (context->pixelStore(pname, param)) {
+        markTextureFunction(FunctionId::glPixelStorei, "Integer pixel-store state is tracked and queryable.");
+        Runtime::shared().recordBootstrapTrace("glPixelStorei(" + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glPixelStoref(GLenum pname, GLfloat param) {
+    if (!std::isfinite(param)) {
+        auto* context = requireCurrentContext("glPixelStoref");
+        recordValidationError(context, "glPixelStoref", GL_INVALID_VALUE, "pixel-store value must be finite");
+        return;
+    }
+    glPixelStorei(pname, static_cast<GLint>(param));
+    Runtime::shared().coverageStore().markSmokeTested(FunctionId::glPixelStoref, kPhaseATextureTestId, "Float pixel-store values route through the integer pixel-store state.");
+}
+
+void APIENTRY glGenSamplers(GLsizei count, GLuint* samplers) {
+    auto* context = requireCurrentContext("glGenSamplers");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->genSamplers(count, samplers)) {
+        markTextureFunction(FunctionId::glGenSamplers, "Sampler names are generated in the object store.");
+        Runtime::shared().recordBootstrapTrace("glGenSamplers(" + std::to_string(count) + ")");
+    }
+}
+
+void APIENTRY glDeleteSamplers(GLsizei count, const GLuint* samplers) {
+    auto* context = requireCurrentContext("glDeleteSamplers");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->deleteSamplers(count, samplers)) {
+        markTextureFunction(FunctionId::glDeleteSamplers, "Sampler names are deleted and stale bindings are cleared.");
+        Runtime::shared().recordBootstrapTrace("glDeleteSamplers(" + std::to_string(count) + ")");
+    }
+}
+
+GLboolean APIENTRY glIsSampler(GLuint sampler) {
+    auto* context = requireCurrentContext("glIsSampler");
+    if (context == nullptr) {
+        return GL_FALSE;
+    }
+    markTextureFunction(FunctionId::glIsSampler, "Sampler object existence queries are live.");
+    Runtime::shared().recordBootstrapTrace("glIsSampler(" + std::to_string(sampler) + ")");
+    return context->isSampler(sampler) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glBindSampler(GLuint unit, GLuint sampler) {
+    auto* context = requireCurrentContext("glBindSampler");
+    if (context == nullptr) {
+        return;
+    }
+    if (unit >= kPhaseAMaxTextureUnits) {
+        recordValidationError(context, "glBindSampler", GL_INVALID_VALUE, "sampler unit exceeds Phase A limit");
+        return;
+    }
+    if (context->bindSampler(unit, sampler)) {
+        markTextureFunction(FunctionId::glBindSampler, "Sampler bindings are tracked per texture unit.");
+        Runtime::shared().recordBootstrapTrace("glBindSampler(" + std::to_string(unit) + ", " + std::to_string(sampler) + ")");
+    }
+}
+
+void APIENTRY glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) {
+    glSamplerParameteriv(sampler, pname, &param);
+    Runtime::shared().coverageStore().markSmokeTested(FunctionId::glSamplerParameteri, kPhaseATextureTestId, "Sampler scalar integer parameters route through the canonical parameter store.");
+}
+
+void APIENTRY glSamplerParameteriv(GLuint sampler, GLenum pname, const GLint* param) {
+    auto* context = requireCurrentContext("glSamplerParameteriv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidSamplerParameterPname(pname)) {
+        recordValidationError(context, "glSamplerParameteriv", GL_INVALID_ENUM, "pname is invalid for sampler objects");
+        return;
+    }
+    if (!validateTextureParameterValues(pname, param)) {
+        recordValidationError(context, "glSamplerParameteriv", param == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM, "parameter value is invalid");
+        return;
+    }
+    if (context->samplerParameterInteger(sampler, pname, param)) {
+        markTextureFunction(FunctionId::glSamplerParameteriv, "Sampler integer-vector parameters are tracked.");
+        Runtime::shared().recordBootstrapTrace("glSamplerParameteriv(" + std::to_string(sampler) + ", " + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param) {
+    glSamplerParameterfv(sampler, pname, &param);
+    Runtime::shared().coverageStore().markSmokeTested(FunctionId::glSamplerParameterf, kPhaseATextureTestId, "Sampler scalar float parameters route through the canonical parameter store.");
+}
+
+void APIENTRY glSamplerParameterfv(GLuint sampler, GLenum pname, const GLfloat* param) {
+    auto* context = requireCurrentContext("glSamplerParameterfv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidSamplerParameterPname(pname)) {
+        recordValidationError(context, "glSamplerParameterfv", GL_INVALID_ENUM, "pname is invalid for sampler objects");
+        return;
+    }
+    if (!validateTextureParameterValues(pname, param)) {
+        recordValidationError(context, "glSamplerParameterfv", param == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM, "parameter value is invalid");
+        return;
+    }
+    if (context->samplerParameterFloat(sampler, pname, param)) {
+        markTextureFunction(FunctionId::glSamplerParameterfv, "Sampler float-vector parameters are tracked.");
+        Runtime::shared().recordBootstrapTrace("glSamplerParameterfv(" + std::to_string(sampler) + ", " + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glSamplerParameterIiv(GLuint sampler, GLenum pname, const GLint* param) {
+    glSamplerParameteriv(sampler, pname, param);
+    Runtime::shared().coverageStore().markSmokeTested(FunctionId::glSamplerParameterIiv, kPhaseATextureTestId, "Sampler integer-vector parameters route through the canonical parameter store.");
+}
+
+void APIENTRY glSamplerParameterIuiv(GLuint sampler, GLenum pname, const GLuint* param) {
+    auto* context = requireCurrentContext("glSamplerParameterIuiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidSamplerParameterPname(pname) || param == nullptr) {
+        recordValidationError(context, "glSamplerParameterIuiv", param == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM, "pname or param is invalid");
+        return;
+    }
+    GLint converted[4] = {static_cast<GLint>(param[0]), 0, 0, 0};
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        converted[1] = static_cast<GLint>(param[1]);
+        converted[2] = static_cast<GLint>(param[2]);
+        converted[3] = static_cast<GLint>(param[3]);
+    }
+    if (!validateTextureParameterValues(pname, converted)) {
+        recordValidationError(context, "glSamplerParameterIuiv", GL_INVALID_ENUM, "parameter value is invalid");
+        return;
+    }
+    if (context->samplerParameterUnsignedInteger(sampler, pname, param)) {
+        markTextureFunction(FunctionId::glSamplerParameterIuiv, "Sampler unsigned integer-vector parameters are tracked.");
+        Runtime::shared().recordBootstrapTrace("glSamplerParameterIuiv(" + std::to_string(sampler) + ", " + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGetSamplerParameteriv(GLuint sampler, GLenum pname, GLint* params) {
+    auto* context = requireCurrentContext("glGetSamplerParameteriv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidSamplerParameterPname(pname)) {
+        recordValidationError(context, "glGetSamplerParameteriv", GL_INVALID_ENUM, "pname is invalid for sampler objects");
+        return;
+    }
+    if (context->getSamplerParameterInteger(sampler, pname, params)) {
+        markTextureFunction(FunctionId::glGetSamplerParameteriv, "Sampler integer parameter queries are live.");
+        Runtime::shared().recordBootstrapTrace("glGetSamplerParameteriv(" + std::to_string(sampler) + ", " + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat* params) {
+    auto* context = requireCurrentContext("glGetSamplerParameterfv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidSamplerParameterPname(pname)) {
+        recordValidationError(context, "glGetSamplerParameterfv", GL_INVALID_ENUM, "pname is invalid for sampler objects");
+        return;
+    }
+    if (context->getSamplerParameterFloat(sampler, pname, params)) {
+        markTextureFunction(FunctionId::glGetSamplerParameterfv, "Sampler float parameter queries are live.");
+        Runtime::shared().recordBootstrapTrace("glGetSamplerParameterfv(" + std::to_string(sampler) + ", " + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGetSamplerParameterIiv(GLuint sampler, GLenum pname, GLint* params) {
+    glGetSamplerParameteriv(sampler, pname, params);
+    Runtime::shared().coverageStore().markSmokeTested(FunctionId::glGetSamplerParameterIiv, kPhaseATextureTestId, "Sampler integer parameter queries route through the canonical parameter store.");
+}
+
+void APIENTRY glGetSamplerParameterIuiv(GLuint sampler, GLenum pname, GLuint* params) {
+    auto* context = requireCurrentContext("glGetSamplerParameterIuiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidSamplerParameterPname(pname)) {
+        recordValidationError(context, "glGetSamplerParameterIuiv", GL_INVALID_ENUM, "pname is invalid for sampler objects");
+        return;
+    }
+    if (context->getSamplerParameterUnsignedInteger(sampler, pname, params)) {
+        markTextureFunction(FunctionId::glGetSamplerParameterIuiv, "Sampler unsigned parameter queries are live.");
+        Runtime::shared().recordBootstrapTrace("glGetSamplerParameterIuiv(" + std::to_string(sampler) + ", " + std::to_string(pname) + ")");
     }
 }
 

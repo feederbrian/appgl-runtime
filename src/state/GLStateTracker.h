@@ -92,6 +92,25 @@ struct GLTextureUnitState {
     GLuint sampler = 0;
 };
 
+struct GLPixelStoreState {
+    GLint packSwapBytes = GL_FALSE;
+    GLint packLsbFirst = GL_FALSE;
+    GLint packRowLength = 0;
+    GLint packSkipRows = 0;
+    GLint packSkipPixels = 0;
+    GLint packAlignment = 4;
+    GLint packImageHeight = 0;
+    GLint packSkipImages = 0;
+    GLint unpackSwapBytes = GL_FALSE;
+    GLint unpackLsbFirst = GL_FALSE;
+    GLint unpackRowLength = 0;
+    GLint unpackSkipRows = 0;
+    GLint unpackSkipPixels = 0;
+    GLint unpackAlignment = 4;
+    GLint unpackImageHeight = 0;
+    GLint unpackSkipImages = 0;
+};
+
 struct GLIndexedBufferBinding {
     GLuint buffer = 0;
     GLintptr offset = 0;
@@ -157,9 +176,16 @@ public:
     void deleteBufferBindings(GLuint object);
     void bindTexture(GLenum target, GLuint object);
     GLuint boundTexture(GLenum target) const;
+    void deleteTextureBindings(GLuint object);
 
     void setActiveTextureUnit(GLuint unit);
     GLuint activeTextureUnit() const;
+    void bindSampler(GLuint unit, GLuint object);
+    GLuint boundSampler(GLuint unit) const;
+    void deleteSamplerBindings(GLuint object);
+
+    void setPixelStore(GLenum pname, GLint value);
+    const GLPixelStoreState& pixelStore() const;
 
     void bindVertexArray(GLuint vao);
     GLuint boundVertexArray() const;
@@ -195,6 +221,7 @@ private:
     std::unordered_map<GLenum, GLuint> bufferBindings_;
     std::unordered_map<GLenum, std::array<GLIndexedBufferBinding, kMaxIndexedBufferBindings>> indexedBufferBindings_;
     std::array<GLTextureUnitState, kMaxTextureUnits> textureUnits_;
+    GLPixelStoreState pixelStore_;
     GLuint activeTextureUnit_ = 0;
     GLuint currentProgram_ = 0;
     GLuint currentVertexArray_ = 0;

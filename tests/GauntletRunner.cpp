@@ -42,7 +42,7 @@ struct TestResult {
     std::string message;
 };
 
-constexpr std::array<FunctionId, 81> kBootstrapFunctions = {
+constexpr std::array<FunctionId, 118> kBootstrapFunctions = {
     FunctionId::glCullFace,
     FunctionId::glFrontFace,
     FunctionId::glHint,
@@ -102,6 +102,43 @@ constexpr std::array<FunctionId, 81> kBootstrapFunctions = {
     FunctionId::glGetVertexAttribiv,
     FunctionId::glGetVertexAttribfv,
     FunctionId::glGetVertexAttribPointerv,
+    FunctionId::glActiveTexture,
+    FunctionId::glGenTextures,
+    FunctionId::glDeleteTextures,
+    FunctionId::glIsTexture,
+    FunctionId::glBindTexture,
+    FunctionId::glTexImage1D,
+    FunctionId::glTexImage2D,
+    FunctionId::glTexImage3D,
+    FunctionId::glTexSubImage1D,
+    FunctionId::glTexSubImage2D,
+    FunctionId::glTexSubImage3D,
+    FunctionId::glTexParameteri,
+    FunctionId::glTexParameteriv,
+    FunctionId::glTexParameterf,
+    FunctionId::glTexParameterfv,
+    FunctionId::glTexParameterIiv,
+    FunctionId::glTexParameterIuiv,
+    FunctionId::glGetTexParameteriv,
+    FunctionId::glGetTexParameterfv,
+    FunctionId::glGetTexParameterIiv,
+    FunctionId::glGetTexParameterIuiv,
+    FunctionId::glPixelStorei,
+    FunctionId::glPixelStoref,
+    FunctionId::glGenSamplers,
+    FunctionId::glDeleteSamplers,
+    FunctionId::glIsSampler,
+    FunctionId::glBindSampler,
+    FunctionId::glSamplerParameteri,
+    FunctionId::glSamplerParameteriv,
+    FunctionId::glSamplerParameterf,
+    FunctionId::glSamplerParameterfv,
+    FunctionId::glSamplerParameterIiv,
+    FunctionId::glSamplerParameterIuiv,
+    FunctionId::glGetSamplerParameteriv,
+    FunctionId::glGetSamplerParameterfv,
+    FunctionId::glGetSamplerParameterIiv,
+    FunctionId::glGetSamplerParameterIuiv,
     FunctionId::glBlendFuncSeparate,
     FunctionId::glBlendColor,
     FunctionId::glBlendEquation,
@@ -475,6 +512,109 @@ public:
         gl.glDeleteBuffers(2, buffers);
         (void)gl.glIsBuffer(buffers[0]);
 
+        gl.glActiveTexture(GL_TEXTURE1);
+        GLint activeTexture = 0;
+        gl.glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+        expectCondition(activeTexture == GL_TEXTURE1, "active texture query");
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        gl.glPixelStoref(GL_PACK_ALIGNMENT, 4.0f);
+        GLint unpackAlignment = 0;
+        gl.glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpackAlignment);
+        expectCondition(unpackAlignment == 1, "unpack alignment query");
+        GLuint textures[3] = {};
+        gl.glGenTextures(3, textures);
+        expectCondition(gl.glIsTexture(textures[0]) == GL_FALSE, "generated texture is not instantiated before bind");
+
+        const std::uint8_t linePixels[8] = {
+            255, 0, 0, 255,
+            0, 255, 0, 255,
+        };
+        const std::uint8_t linePatch[4] = {0, 0, 255, 255};
+        gl.glBindTexture(GL_TEXTURE_1D, textures[0]);
+        expectCondition(gl.glIsTexture(textures[0]) == GL_TRUE, "bound 1D texture is instantiated");
+        gl.glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA8, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, linePixels);
+        gl.glTexSubImage1D(GL_TEXTURE_1D, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, linePatch);
+
+        const std::uint8_t imagePixels[16] = {
+            10, 20, 30, 255,
+            40, 50, 60, 255,
+            70, 80, 90, 255,
+            100, 110, 120, 255,
+        };
+        const std::uint8_t imagePatch[4] = {200, 150, 100, 255};
+        const GLfloat borderColor[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+        const GLint swizzle[4] = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA};
+        const GLint wrapMode[1] = {GL_CLAMP_TO_EDGE};
+        const GLuint maxLevel[1] = {4};
+        gl.glBindTexture(GL_TEXTURE_2D, textures[1]);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        gl.glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, -2.0f);
+        gl.glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+        gl.glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzle);
+        gl.glTexParameterIiv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapMode);
+        gl.glTexParameterIuiv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, maxLevel);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, imagePixels);
+        gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, imagePatch);
+        GLint textureParam = 0;
+        gl.glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &textureParam);
+        expectCondition(textureParam == GL_LINEAR, "texture min filter query");
+        GLfloat textureBorder[4] = {};
+        gl.glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, textureBorder);
+        expectCondition(textureBorder[2] == borderColor[2], "texture border color query");
+        gl.glGetTexParameterIiv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &textureParam);
+        expectCondition(textureParam == GL_CLAMP_TO_EDGE, "texture integer parameter query");
+        GLuint textureParamUnsigned = 0;
+        gl.glGetTexParameterIuiv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &textureParamUnsigned);
+        expectCondition(textureParamUnsigned == maxLevel[0], "texture unsigned parameter query");
+
+        const std::uint8_t volumePixels[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        const std::uint8_t volumePatch[1] = {99};
+        gl.glBindTexture(GL_TEXTURE_3D, textures[2]);
+        gl.glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, 2, 2, 2, 0, GL_RED, GL_UNSIGNED_BYTE, volumePixels);
+        gl.glTexSubImage3D(GL_TEXTURE_3D, 0, 1, 1, 1, 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, volumePatch);
+        const GLTextureObject* textureObject = context.objects().textures().get(textures[1]);
+        expectCondition(textureObject != nullptr && textureObject->levels.contains(0), "2D texture level exists");
+        const auto& textureLevel = textureObject->levels.at(0);
+        expectCondition(textureLevel.rgba8.size() == 16, "2D texture shadow bytes exist");
+        expectCondition(textureLevel.rgba8[12] == 200, "2D texture subimage updated shadow storage");
+        gl.glBindTexture(static_cast<GLenum>(0xffffffffu), textures[1]);
+        expectGLError(gl, GL_INVALID_ENUM, "invalid glBindTexture target");
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, static_cast<GLenum>(0xffffffffu), GL_UNSIGNED_BYTE, imagePatch);
+        expectGLError(gl, GL_INVALID_ENUM, "invalid glTexImage2D format");
+
+        GLuint sampler = 0;
+        gl.glGenSamplers(1, &sampler);
+        expectCondition(gl.glIsSampler(sampler) == GL_TRUE, "generated sampler is instantiated");
+        gl.glBindSampler(1, sampler);
+        GLint samplerBinding = 0;
+        gl.glGetIntegerv(GL_SAMPLER_BINDING, &samplerBinding);
+        expectCondition(samplerBinding == static_cast<GLint>(sampler), "sampler binding query");
+        gl.glSamplerParameteri(sampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        gl.glSamplerParameterf(sampler, GL_TEXTURE_MIN_LOD, 0.0f);
+        gl.glSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR, borderColor);
+        gl.glSamplerParameteriv(sampler, GL_TEXTURE_WRAP_T, wrapMode);
+        gl.glSamplerParameterIiv(sampler, GL_TEXTURE_COMPARE_FUNC, wrapMode);
+        expectGLError(gl, GL_INVALID_ENUM, "invalid sampler compare func");
+        const GLint compareFunc[1] = {GL_LEQUAL};
+        gl.glSamplerParameterIiv(sampler, GL_TEXTURE_COMPARE_FUNC, compareFunc);
+        const GLuint wrapR[1] = {GL_REPEAT};
+        gl.glSamplerParameterIuiv(sampler, GL_TEXTURE_WRAP_R, wrapR);
+        GLint samplerParam = 0;
+        gl.glGetSamplerParameteriv(sampler, GL_TEXTURE_MIN_FILTER, &samplerParam);
+        expectCondition(samplerParam == GL_LINEAR_MIPMAP_LINEAR, "sampler min filter query");
+        GLfloat samplerBorder[4] = {};
+        gl.glGetSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR, samplerBorder);
+        expectCondition(samplerBorder[1] == borderColor[1], "sampler border color query");
+        gl.glGetSamplerParameterIiv(sampler, GL_TEXTURE_COMPARE_FUNC, &samplerParam);
+        expectCondition(samplerParam == GL_LEQUAL, "sampler integer query");
+        GLuint samplerParamUnsigned = 0;
+        gl.glGetSamplerParameterIuiv(sampler, GL_TEXTURE_WRAP_R, &samplerParamUnsigned);
+        expectCondition(samplerParamUnsigned == GL_REPEAT, "sampler unsigned query");
+        gl.glDeleteSamplers(1, &sampler);
+        expectCondition(gl.glIsSampler(sampler) == GL_FALSE, "deleted sampler no longer exists");
+        gl.glDeleteTextures(3, textures);
+        expectCondition(gl.glIsTexture(textures[1]) == GL_FALSE, "deleted texture no longer exists");
+
         GLint maxTextureSize = 0;
         gl.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
         (void)maxTextureSize;
@@ -505,6 +645,78 @@ public:
         auto& gl = Runtime::shared().dispatch();
         gl.glClearColor(0.18f, 0.25f, 0.41f, 1.0f);
         gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        gl.glFlush();
+    }
+};
+
+class VertexInputStateScene final : public Scene {
+public:
+    std::string id() const override {
+        return "phase-a.vertex-input";
+    }
+
+    std::string phase() const override {
+        return "phase-a";
+    }
+
+    SceneSize framebufferSize() const override {
+        return {96, 96};
+    }
+
+    void setup(GLContext& context) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        GLuint buffers[2] = {};
+        gl.glGenBuffers(2, buffers);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+        const float firstVertices[12] = {};
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(firstVertices), firstVertices, GL_STATIC_DRAW);
+        gl.glBindBuffer(GL_COPY_WRITE_BUFFER, buffers[1]);
+        const std::uint32_t indexData[3] = {0, 1, 2};
+        gl.glBufferData(GL_COPY_WRITE_BUFFER, sizeof(indexData), indexData, GL_STATIC_DRAW);
+
+        GLuint arrays[2] = {};
+        gl.glGenVertexArrays(2, arrays);
+        gl.glBindVertexArray(arrays[0]);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+        gl.glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, static_cast<GLsizei>(sizeof(float) * 3), nullptr);
+        gl.glEnableVertexAttribArray(0);
+        context.state().applyDirtyStateForDraw(context.objects());
+        const GLVertexArrayObject* firstArray = context.objects().vertexArrays().get(arrays[0]);
+        expectCondition(firstArray != nullptr && firstArray->metalVertexDescriptor != nullptr, "first VAO descriptor exists");
+        const std::string firstHash = firstArray->vertexDescriptorHash;
+
+        gl.glBindVertexArray(arrays[1]);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+        gl.glVertexAttribPointer(
+            0,
+            2,
+            GL_FLOAT,
+            GL_FALSE,
+            static_cast<GLsizei>(sizeof(float) * 4),
+            reinterpret_cast<const void*>(sizeof(float))
+        );
+        gl.glEnableVertexAttribArray(0);
+        context.state().applyDirtyStateForDraw(context.objects());
+        const GLVertexArrayObject* secondArray = context.objects().vertexArrays().get(arrays[1]);
+        expectCondition(secondArray != nullptr && secondArray->metalVertexDescriptor != nullptr, "second VAO descriptor exists");
+        expectCondition(secondArray->vertexDescriptorHash != firstHash, "VAO descriptor hash reflects input layout");
+
+        gl.glBindVertexArray(arrays[0]);
+        GLint elementBinding = 0;
+        gl.glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &elementBinding);
+        expectCondition(elementBinding == static_cast<GLint>(buffers[1]), "scenario VAO restores element buffer");
+
+        gl.glDeleteVertexArrays(2, arrays);
+        gl.glDeleteBuffers(2, buffers);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.30f, 0.16f, 0.19f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
         gl.glFlush();
     }
 };
@@ -671,6 +883,8 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "all" || normalizedPhase == "phase-a") {
         ClearReadbackScene scene;
         tests.push_back(runScene(scene));
+        VertexInputStateScene vertexInputScene;
+        tests.push_back(runScene(vertexInputScene));
     }
 
     return buildJSON(normalizedPhase, tests);

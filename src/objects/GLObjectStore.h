@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -45,26 +46,52 @@ struct GLBufferObject {
 struct GLTextureDesc {
     GLenum target = 0;
     GLenum internalFormat = 0;
+    GLenum sourceFormat = GL_RGBA;
+    GLenum sourceType = GL_UNSIGNED_BYTE;
     GLsizei width = 0;
-    GLsizei height = 0;
+    GLsizei height = 1;
     GLsizei depth = 1;
     GLsizei levels = 1;
     GLsizei layers = 1;
     bool immutable = false;
 };
 
-struct GLTextureObject {
-    void* metalTexture = nullptr;
+struct GLTextureImageLevel {
     GLTextureDesc desc;
+    std::vector<std::uint8_t> rgba8;
+    bool defined = false;
 };
 
-struct GLSamplerObject {
-    void* metalSampler = nullptr;
-    GLint minFilter = GL_LINEAR;
+struct GLTextureParameters {
+    GLint minFilter = GL_NEAREST_MIPMAP_LINEAR;
     GLint magFilter = GL_LINEAR;
     GLint wrapS = GL_REPEAT;
     GLint wrapT = GL_REPEAT;
     GLint wrapR = GL_REPEAT;
+    GLfloat minLod = -1000.0f;
+    GLfloat maxLod = 1000.0f;
+    GLint baseLevel = 0;
+    GLint maxLevel = 1000;
+    GLint compareMode = GL_NONE;
+    GLint compareFunc = GL_LEQUAL;
+    std::array<GLfloat, 4> borderColor = {0.0f, 0.0f, 0.0f, 0.0f};
+    std::array<GLint, 4> swizzle = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA};
+};
+
+struct GLTextureObject {
+    void* metalTexture = nullptr;
+    GLenum target = 0;
+    GLTextureDesc desc;
+    GLTextureParameters params;
+    std::unordered_map<GLint, GLTextureImageLevel> levels;
+    bool instantiated = false;
+};
+
+struct GLSamplerObject {
+    void* metalSampler = nullptr;
+    GLTextureParameters params;
+    bool instantiated = false;
+    bool dirty = true;
 };
 
 struct GLRenderbufferObject {

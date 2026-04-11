@@ -107,6 +107,8 @@ bool queryValue(
     const std::unordered_set<GLenum>& enabledCaps,
     const std::unordered_map<GLenum, GLuint>& bufferBindings,
     const std::unordered_map<GLenum, GLenum>& hints,
+    const GLTextureUnitState& activeTextureUnitState,
+    const GLPixelStoreState& pixelStore,
     GLuint activeTextureUnit,
     GLuint currentProgram,
     GLuint currentVertexArray,
@@ -123,6 +125,10 @@ bool queryValue(
     const auto boundBuffer = [&](GLenum target) {
         const auto found = bufferBindings.find(target);
         return found == bufferBindings.end() ? 0u : found->second;
+    };
+    const auto boundTexture = [&](GLenum target) {
+        const auto found = activeTextureUnitState.bindings.find(target);
+        return found == activeTextureUnitState.bindings.end() ? 0u : found->second;
     };
     if (pname >= GL_CLIP_DISTANCE0 && pname <= GL_CLIP_DISTANCE7) {
         writeBooleanScalar(out, enabled(pname));
@@ -276,6 +282,66 @@ bool queryValue(
         }
         case GL_ACTIVE_TEXTURE:
             writeScalar(out, GL_TEXTURE0 + activeTextureUnit);
+            return true;
+        case GL_TEXTURE_BINDING_1D:
+            writeScalar(out, boundTexture(GL_TEXTURE_1D));
+            return true;
+        case GL_TEXTURE_BINDING_2D:
+            writeScalar(out, boundTexture(GL_TEXTURE_2D));
+            return true;
+        case GL_TEXTURE_BINDING_3D:
+            writeScalar(out, boundTexture(GL_TEXTURE_3D));
+            return true;
+        case GL_SAMPLER_BINDING:
+            writeScalar(out, activeTextureUnitState.sampler);
+            return true;
+        case GL_PACK_SWAP_BYTES:
+            writeBooleanScalar(out, pixelStore.packSwapBytes == GL_TRUE);
+            return true;
+        case GL_PACK_LSB_FIRST:
+            writeBooleanScalar(out, pixelStore.packLsbFirst == GL_TRUE);
+            return true;
+        case GL_PACK_ROW_LENGTH:
+            writeScalar(out, pixelStore.packRowLength);
+            return true;
+        case GL_PACK_SKIP_ROWS:
+            writeScalar(out, pixelStore.packSkipRows);
+            return true;
+        case GL_PACK_SKIP_PIXELS:
+            writeScalar(out, pixelStore.packSkipPixels);
+            return true;
+        case GL_PACK_ALIGNMENT:
+            writeScalar(out, pixelStore.packAlignment);
+            return true;
+        case GL_PACK_IMAGE_HEIGHT:
+            writeScalar(out, pixelStore.packImageHeight);
+            return true;
+        case GL_PACK_SKIP_IMAGES:
+            writeScalar(out, pixelStore.packSkipImages);
+            return true;
+        case GL_UNPACK_SWAP_BYTES:
+            writeBooleanScalar(out, pixelStore.unpackSwapBytes == GL_TRUE);
+            return true;
+        case GL_UNPACK_LSB_FIRST:
+            writeBooleanScalar(out, pixelStore.unpackLsbFirst == GL_TRUE);
+            return true;
+        case GL_UNPACK_ROW_LENGTH:
+            writeScalar(out, pixelStore.unpackRowLength);
+            return true;
+        case GL_UNPACK_SKIP_ROWS:
+            writeScalar(out, pixelStore.unpackSkipRows);
+            return true;
+        case GL_UNPACK_SKIP_PIXELS:
+            writeScalar(out, pixelStore.unpackSkipPixels);
+            return true;
+        case GL_UNPACK_ALIGNMENT:
+            writeScalar(out, pixelStore.unpackAlignment);
+            return true;
+        case GL_UNPACK_IMAGE_HEIGHT:
+            writeScalar(out, pixelStore.unpackImageHeight);
+            return true;
+        case GL_UNPACK_SKIP_IMAGES:
+            writeScalar(out, pixelStore.unpackSkipImages);
             return true;
         case GL_ARRAY_BUFFER_BINDING:
             writeScalar(out, boundBuffer(GL_ARRAY_BUFFER));
@@ -564,6 +630,8 @@ bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
         enabledCaps_,
         bufferBindings_,
         hints_,
+        textureUnits_[activeTextureUnit_],
+        pixelStore_,
         activeTextureUnit_,
         currentProgram_,
         currentVertexArray_,
@@ -587,6 +655,8 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
         enabledCaps_,
         bufferBindings_,
         hints_,
+        textureUnits_[activeTextureUnit_],
+        pixelStore_,
         activeTextureUnit_,
         currentProgram_,
         currentVertexArray_,
@@ -610,6 +680,8 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
         enabledCaps_,
         bufferBindings_,
         hints_,
+        textureUnits_[activeTextureUnit_],
+        pixelStore_,
         activeTextureUnit_,
         currentProgram_,
         currentVertexArray_,
@@ -633,6 +705,8 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
         enabledCaps_,
         bufferBindings_,
         hints_,
+        textureUnits_[activeTextureUnit_],
+        pixelStore_,
         activeTextureUnit_,
         currentProgram_,
         currentVertexArray_,
@@ -656,6 +730,8 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
         enabledCaps_,
         bufferBindings_,
         hints_,
+        textureUnits_[activeTextureUnit_],
+        pixelStore_,
         activeTextureUnit_,
         currentProgram_,
         currentVertexArray_,
@@ -724,6 +800,21 @@ GLuint GLStateTracker::boundTexture(GLenum target) const {
     return found == unit.bindings.end() ? 0 : found->second;
 }
 
+void GLStateTracker::deleteTextureBindings(GLuint object) {
+    if (object == 0) {
+        return;
+    }
+    for (auto& unit : textureUnits_) {
+        for (auto& [target, boundObject] : unit.bindings) {
+            (void)target;
+            if (boundObject == object) {
+                boundObject = 0;
+            }
+        }
+    }
+    markDirty(DirtyBit::Program);
+}
+
 void GLStateTracker::setActiveTextureUnit(GLuint unit) {
     if (unit < textureUnits_.size()) {
         activeTextureUnit_ = unit;
@@ -732,6 +823,92 @@ void GLStateTracker::setActiveTextureUnit(GLuint unit) {
 
 GLuint GLStateTracker::activeTextureUnit() const {
     return activeTextureUnit_;
+}
+
+void GLStateTracker::bindSampler(GLuint unit, GLuint object) {
+    if (unit >= textureUnits_.size()) {
+        return;
+    }
+    textureUnits_[unit].sampler = object;
+    markDirty(DirtyBit::Program);
+}
+
+GLuint GLStateTracker::boundSampler(GLuint unit) const {
+    if (unit >= textureUnits_.size()) {
+        return 0;
+    }
+    return textureUnits_[unit].sampler;
+}
+
+void GLStateTracker::deleteSamplerBindings(GLuint object) {
+    if (object == 0) {
+        return;
+    }
+    for (auto& unit : textureUnits_) {
+        if (unit.sampler == object) {
+            unit.sampler = 0;
+        }
+    }
+    markDirty(DirtyBit::Program);
+}
+
+void GLStateTracker::setPixelStore(GLenum pname, GLint value) {
+    switch (pname) {
+        case GL_PACK_SWAP_BYTES:
+            pixelStore_.packSwapBytes = value;
+            break;
+        case GL_PACK_LSB_FIRST:
+            pixelStore_.packLsbFirst = value;
+            break;
+        case GL_PACK_ROW_LENGTH:
+            pixelStore_.packRowLength = value;
+            break;
+        case GL_PACK_SKIP_ROWS:
+            pixelStore_.packSkipRows = value;
+            break;
+        case GL_PACK_SKIP_PIXELS:
+            pixelStore_.packSkipPixels = value;
+            break;
+        case GL_PACK_ALIGNMENT:
+            pixelStore_.packAlignment = value;
+            break;
+        case GL_PACK_IMAGE_HEIGHT:
+            pixelStore_.packImageHeight = value;
+            break;
+        case GL_PACK_SKIP_IMAGES:
+            pixelStore_.packSkipImages = value;
+            break;
+        case GL_UNPACK_SWAP_BYTES:
+            pixelStore_.unpackSwapBytes = value;
+            break;
+        case GL_UNPACK_LSB_FIRST:
+            pixelStore_.unpackLsbFirst = value;
+            break;
+        case GL_UNPACK_ROW_LENGTH:
+            pixelStore_.unpackRowLength = value;
+            break;
+        case GL_UNPACK_SKIP_ROWS:
+            pixelStore_.unpackSkipRows = value;
+            break;
+        case GL_UNPACK_SKIP_PIXELS:
+            pixelStore_.unpackSkipPixels = value;
+            break;
+        case GL_UNPACK_ALIGNMENT:
+            pixelStore_.unpackAlignment = value;
+            break;
+        case GL_UNPACK_IMAGE_HEIGHT:
+            pixelStore_.unpackImageHeight = value;
+            break;
+        case GL_UNPACK_SKIP_IMAGES:
+            pixelStore_.unpackSkipImages = value;
+            break;
+        default:
+            break;
+    }
+}
+
+const GLPixelStoreState& GLStateTracker::pixelStore() const {
+    return pixelStore_;
 }
 
 void GLStateTracker::bindVertexArray(GLuint vao) {

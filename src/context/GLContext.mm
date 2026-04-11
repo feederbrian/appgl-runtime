@@ -10,8 +10,10 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -127,6 +129,137 @@ MTLResourceOptions metalBufferOptionsForUsage(GLenum usage) {
     return options;
 }
 
+MTLTextureType metalTextureTypeForTarget(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_1D:
+            return MTLTextureType1D;
+        case GL_TEXTURE_2D:
+            return MTLTextureType2D;
+        case GL_TEXTURE_3D:
+            return MTLTextureType3D;
+        default:
+            return MTLTextureType2D;
+    }
+}
+
+bool isTextureTarget(GLenum target) {
+    return target == GL_TEXTURE_1D || target == GL_TEXTURE_2D || target == GL_TEXTURE_3D;
+}
+
+bool isSupportedInternalTextureFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_RED:
+        case GL_RG:
+        case GL_RGB:
+        case GL_RGBA:
+        case GL_R8:
+        case GL_RG8:
+        case GL_RGB8:
+        case GL_RGBA8:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::size_t componentCountForFormat(GLenum format) {
+    switch (format) {
+        case GL_RED:
+            return 1;
+        case GL_RG:
+            return 2;
+        case GL_RGB:
+            return 3;
+        case GL_RGBA:
+            return 4;
+        default:
+            return 0;
+    }
+}
+
+bool isPowerOfTwoAlignment(GLint value) {
+    return value == 1 || value == 2 || value == 4 || value == 8;
+}
+
+std::size_t alignByteCount(std::size_t value, GLint alignment) {
+    const std::size_t align = static_cast<std::size_t>(alignment > 0 ? alignment : 1);
+    return ((value + align - 1u) / align) * align;
+}
+
+std::size_t safeDimension(GLsizei value) {
+    return static_cast<std::size_t>(std::max<GLsizei>(value, 1));
+}
+
+std::size_t rgba8ByteCount(GLsizei width, GLsizei height, GLsizei depth) {
+    return safeDimension(width) * safeDimension(height) * safeDimension(depth) * 4u;
+}
+
+MTLSamplerAddressMode metalAddressMode(GLint mode) {
+    switch (mode) {
+        case GL_CLAMP_TO_EDGE:
+            return MTLSamplerAddressModeClampToEdge;
+        case GL_CLAMP_TO_BORDER:
+            if (@available(macOS 10.12, *)) {
+                return MTLSamplerAddressModeClampToBorderColor;
+            }
+            return MTLSamplerAddressModeClampToEdge;
+        case GL_MIRRORED_REPEAT:
+            return MTLSamplerAddressModeMirrorRepeat;
+        case GL_REPEAT:
+        default:
+            return MTLSamplerAddressModeRepeat;
+    }
+}
+
+MTLSamplerMinMagFilter metalMinMagFilter(GLint filter) {
+    switch (filter) {
+        case GL_NEAREST:
+        case GL_NEAREST_MIPMAP_NEAREST:
+        case GL_NEAREST_MIPMAP_LINEAR:
+            return MTLSamplerMinMagFilterNearest;
+        case GL_LINEAR:
+        case GL_LINEAR_MIPMAP_NEAREST:
+        case GL_LINEAR_MIPMAP_LINEAR:
+        default:
+            return MTLSamplerMinMagFilterLinear;
+    }
+}
+
+MTLSamplerMipFilter metalMipFilter(GLint filter) {
+    switch (filter) {
+        case GL_NEAREST_MIPMAP_NEAREST:
+        case GL_LINEAR_MIPMAP_NEAREST:
+            return MTLSamplerMipFilterNearest;
+        case GL_NEAREST_MIPMAP_LINEAR:
+        case GL_LINEAR_MIPMAP_LINEAR:
+            return MTLSamplerMipFilterLinear;
+        default:
+            return MTLSamplerMipFilterNotMipmapped;
+    }
+}
+
+MTLCompareFunction metalCompareFunction(GLint func) {
+    switch (func) {
+        case GL_NEVER:
+            return MTLCompareFunctionNever;
+        case GL_LESS:
+            return MTLCompareFunctionLess;
+        case GL_EQUAL:
+            return MTLCompareFunctionEqual;
+        case GL_LEQUAL:
+            return MTLCompareFunctionLessEqual;
+        case GL_GREATER:
+            return MTLCompareFunctionGreater;
+        case GL_NOTEQUAL:
+            return MTLCompareFunctionNotEqual;
+        case GL_GEQUAL:
+            return MTLCompareFunctionGreaterEqual;
+        case GL_ALWAYS:
+        default:
+            return MTLCompareFunctionAlways;
+    }
+}
+
 bool legacyMapAccessToFlags(GLenum access, GLbitfield* flags) {
     if (flags == nullptr) {
         return false;
@@ -197,6 +330,195 @@ void markVertexDescriptorDirty(GLVertexArrayObject& vertexArray) {
     vertexArray.vertexDescriptorError.clear();
 }
 
+bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const GLint* values) {
+    if (values == nullptr) {
+        return false;
+    }
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:
+            params.minFilter = values[0];
+            return true;
+        case GL_TEXTURE_MAG_FILTER:
+            params.magFilter = values[0];
+            return true;
+        case GL_TEXTURE_WRAP_S:
+            params.wrapS = values[0];
+            return true;
+        case GL_TEXTURE_WRAP_T:
+            params.wrapT = values[0];
+            return true;
+        case GL_TEXTURE_WRAP_R:
+            params.wrapR = values[0];
+            return true;
+        case GL_TEXTURE_BASE_LEVEL:
+            params.baseLevel = values[0];
+            return true;
+        case GL_TEXTURE_MAX_LEVEL:
+            params.maxLevel = values[0];
+            return true;
+        case GL_TEXTURE_COMPARE_MODE:
+            params.compareMode = values[0];
+            return true;
+        case GL_TEXTURE_COMPARE_FUNC:
+            params.compareFunc = values[0];
+            return true;
+        case GL_TEXTURE_SWIZZLE_R:
+            params.swizzle[0] = values[0];
+            return true;
+        case GL_TEXTURE_SWIZZLE_G:
+            params.swizzle[1] = values[0];
+            return true;
+        case GL_TEXTURE_SWIZZLE_B:
+            params.swizzle[2] = values[0];
+            return true;
+        case GL_TEXTURE_SWIZZLE_A:
+            params.swizzle[3] = values[0];
+            return true;
+        case GL_TEXTURE_SWIZZLE_RGBA:
+            params.swizzle = {values[0], values[1], values[2], values[3]};
+            return true;
+        case GL_TEXTURE_BORDER_COLOR:
+            params.borderColor = {
+                static_cast<GLfloat>(values[0]),
+                static_cast<GLfloat>(values[1]),
+                static_cast<GLfloat>(values[2]),
+                static_cast<GLfloat>(values[3])
+            };
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool setTextureParameterFloat(GLTextureParameters& params, GLenum pname, const GLfloat* values) {
+    if (values == nullptr) {
+        return false;
+    }
+    switch (pname) {
+        case GL_TEXTURE_MIN_LOD:
+            params.minLod = values[0];
+            return true;
+        case GL_TEXTURE_MAX_LOD:
+            params.maxLod = values[0];
+            return true;
+        case GL_TEXTURE_BORDER_COLOR:
+            params.borderColor = {values[0], values[1], values[2], values[3]};
+            return true;
+        case GL_TEXTURE_SWIZZLE_RGBA: {
+            const GLint converted[4] = {
+                static_cast<GLint>(values[0]),
+                static_cast<GLint>(values[1]),
+                static_cast<GLint>(values[2]),
+                static_cast<GLint>(values[3])
+            };
+            return setTextureParameterInteger(params, pname, converted);
+        }
+        default: {
+            const GLint converted[4] = {
+                static_cast<GLint>(values[0]),
+                0,
+                0,
+                0
+            };
+            return setTextureParameterInteger(params, pname, converted);
+        }
+    }
+}
+
+bool getTextureParameterInteger(const GLTextureParameters& params, GLenum pname, GLint* values) {
+    if (values == nullptr) {
+        return false;
+    }
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:
+            values[0] = params.minFilter;
+            return true;
+        case GL_TEXTURE_MAG_FILTER:
+            values[0] = params.magFilter;
+            return true;
+        case GL_TEXTURE_WRAP_S:
+            values[0] = params.wrapS;
+            return true;
+        case GL_TEXTURE_WRAP_T:
+            values[0] = params.wrapT;
+            return true;
+        case GL_TEXTURE_WRAP_R:
+            values[0] = params.wrapR;
+            return true;
+        case GL_TEXTURE_MIN_LOD:
+            values[0] = static_cast<GLint>(params.minLod);
+            return true;
+        case GL_TEXTURE_MAX_LOD:
+            values[0] = static_cast<GLint>(params.maxLod);
+            return true;
+        case GL_TEXTURE_BASE_LEVEL:
+            values[0] = params.baseLevel;
+            return true;
+        case GL_TEXTURE_MAX_LEVEL:
+            values[0] = params.maxLevel;
+            return true;
+        case GL_TEXTURE_COMPARE_MODE:
+            values[0] = params.compareMode;
+            return true;
+        case GL_TEXTURE_COMPARE_FUNC:
+            values[0] = params.compareFunc;
+            return true;
+        case GL_TEXTURE_SWIZZLE_R:
+            values[0] = params.swizzle[0];
+            return true;
+        case GL_TEXTURE_SWIZZLE_G:
+            values[0] = params.swizzle[1];
+            return true;
+        case GL_TEXTURE_SWIZZLE_B:
+            values[0] = params.swizzle[2];
+            return true;
+        case GL_TEXTURE_SWIZZLE_A:
+            values[0] = params.swizzle[3];
+            return true;
+        case GL_TEXTURE_SWIZZLE_RGBA:
+            values[0] = params.swizzle[0];
+            values[1] = params.swizzle[1];
+            values[2] = params.swizzle[2];
+            values[3] = params.swizzle[3];
+            return true;
+        case GL_TEXTURE_BORDER_COLOR:
+            values[0] = static_cast<GLint>(params.borderColor[0]);
+            values[1] = static_cast<GLint>(params.borderColor[1]);
+            values[2] = static_cast<GLint>(params.borderColor[2]);
+            values[3] = static_cast<GLint>(params.borderColor[3]);
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool getTextureParameterFloat(const GLTextureParameters& params, GLenum pname, GLfloat* values) {
+    if (values == nullptr) {
+        return false;
+    }
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        values[0] = params.borderColor[0];
+        values[1] = params.borderColor[1];
+        values[2] = params.borderColor[2];
+        values[3] = params.borderColor[3];
+        return true;
+    }
+    if (pname == GL_TEXTURE_MIN_LOD) {
+        values[0] = params.minLod;
+        return true;
+    }
+    if (pname == GL_TEXTURE_MAX_LOD) {
+        values[0] = params.maxLod;
+        return true;
+    }
+    GLint integerValue[4] = {};
+    if (!getTextureParameterInteger(params, pname, integerValue)) {
+        return false;
+    }
+    values[0] = static_cast<GLfloat>(integerValue[0]);
+    return true;
+}
+
 }  // namespace
 
 struct GLContext::Impl {
@@ -206,6 +528,12 @@ struct GLContext::Impl {
         }
         objects->buffers().forEach([&](GLuint, GLBufferObject& buffer) {
             releaseBufferStorage(buffer);
+        });
+        objects->textures().forEach([&](GLuint, GLTextureObject& texture) {
+            releaseTextureStorage(texture);
+        });
+        objects->samplers().forEach([&](GLuint, GLSamplerObject& sampler) {
+            releaseSamplerState(sampler);
         });
         objects->vertexArrays().forEach([&](GLuint, GLVertexArrayObject& vertexArray) {
             releaseVertexDescriptor(vertexArray);
@@ -262,6 +590,163 @@ struct GLContext::Impl {
         vertexArray.vertexDescriptorHash.clear();
         vertexArray.vertexDescriptorError.clear();
         vertexArray.vertexDescriptorDirty = true;
+    }
+
+    void releaseTextureStorage(GLTextureObject& object) {
+        releaseRetainedMetalObject(object.metalTexture);
+        object.metalTexture = nullptr;
+        object.desc = {};
+        object.levels.clear();
+    }
+
+    void releaseSamplerState(GLSamplerObject& object) {
+        releaseRetainedMetalObject(object.metalSampler);
+        object.metalSampler = nullptr;
+        object.dirty = true;
+    }
+
+    GLTextureObject* currentTexture(GLenum target) {
+        const GLuint name = state->boundTexture(target);
+        if (name == 0) {
+            return nullptr;
+        }
+        return objects->textures().get(name);
+    }
+
+    bool buildRGBA8Upload(
+        GLsizei width,
+        GLsizei height,
+        GLsizei depth,
+        GLenum format,
+        GLenum type,
+        const void* pixels,
+        std::vector<std::uint8_t>& rgba8
+    ) {
+        if (width < 0 || height < 0 || depth < 0) {
+            return false;
+        }
+        rgba8.assign(rgba8ByteCount(width, height, depth), 0);
+        if (pixels == nullptr || width == 0 || height == 0 || depth == 0) {
+            return true;
+        }
+        if (type != GL_UNSIGNED_BYTE) {
+            return false;
+        }
+        const std::size_t components = componentCountForFormat(format);
+        if (components == 0) {
+            return false;
+        }
+
+        const auto& store = state->pixelStore();
+        const std::size_t sourceWidth = static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
+        const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
+        const std::size_t rowBytes = alignByteCount(sourceWidth * components, store.unpackAlignment);
+        const std::size_t imageBytes = rowBytes * sourceHeight;
+        const std::size_t sourceOffset =
+            static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+            + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
+            + static_cast<std::size_t>(store.unpackSkipPixels) * components;
+        const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
+
+        for (GLsizei z = 0; z < depth; ++z) {
+            for (GLsizei y = 0; y < height; ++y) {
+                for (GLsizei x = 0; x < width; ++x) {
+                    const std::size_t sourceIndex =
+                        static_cast<std::size_t>(z) * imageBytes
+                        + static_cast<std::size_t>(y) * rowBytes
+                        + static_cast<std::size_t>(x) * components;
+                    const std::size_t destIndex =
+                        ((static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                            + static_cast<std::size_t>(y))
+                            * static_cast<std::size_t>(width)
+                            + static_cast<std::size_t>(x))
+                        * 4u;
+                    rgba8[destIndex + 0] = source[sourceIndex + 0];
+                    rgba8[destIndex + 1] = components > 1 ? source[sourceIndex + 1] : 0;
+                    rgba8[destIndex + 2] = components > 2 ? source[sourceIndex + 2] : 0;
+                    rgba8[destIndex + 3] = components > 3 ? source[sourceIndex + 3] : 255;
+                }
+            }
+        }
+        return true;
+    }
+
+    bool replaceMetalBaseLevel(GLTextureObject& object, const GLTextureImageLevel& level) {
+        if (device == nil || !level.defined || level.desc.width <= 0 || level.desc.height <= 0 || level.desc.depth <= 0) {
+            return true;
+        }
+
+        releaseRetainedMetalObject(object.metalTexture);
+        object.metalTexture = nullptr;
+
+        MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
+        descriptor.textureType = metalTextureTypeForTarget(object.target);
+        descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        descriptor.width = static_cast<NSUInteger>(level.desc.width);
+        descriptor.height = static_cast<NSUInteger>(object.target == GL_TEXTURE_1D ? 1 : level.desc.height);
+        descriptor.depth = static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? level.desc.depth : 1);
+        descriptor.mipmapLevelCount = 1;
+        descriptor.usage = MTLTextureUsageShaderRead;
+        descriptor.storageMode = MTLStorageModeShared;
+
+        id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+        if (texture == nil) {
+            return false;
+        }
+
+        const NSUInteger bytesPerRow = static_cast<NSUInteger>(safeDimension(level.desc.width) * 4u);
+        const NSUInteger bytesPerImage = bytesPerRow * static_cast<NSUInteger>(safeDimension(level.desc.height));
+        const MTLRegion region = MTLRegionMake3D(
+            0,
+            0,
+            0,
+            static_cast<NSUInteger>(safeDimension(level.desc.width)),
+            static_cast<NSUInteger>(object.target == GL_TEXTURE_1D ? 1 : safeDimension(level.desc.height)),
+            static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? safeDimension(level.desc.depth) : 1)
+        );
+        if (!level.rgba8.empty()) {
+            if (object.target == GL_TEXTURE_3D) {
+                for (NSUInteger slice = 0; slice < region.size.depth; ++slice) {
+                    const MTLRegion sliceRegion = MTLRegionMake3D(0, 0, slice, region.size.width, region.size.height, 1);
+                    const auto* sliceBytes = level.rgba8.data() + static_cast<std::size_t>(slice * bytesPerImage);
+                    [texture replaceRegion:sliceRegion mipmapLevel:0 withBytes:sliceBytes bytesPerRow:bytesPerRow];
+                }
+            } else {
+                [texture replaceRegion:region mipmapLevel:0 withBytes:level.rgba8.data() bytesPerRow:bytesPerRow];
+            }
+        }
+        object.metalTexture = transferRetainedMetalObject(texture);
+        return true;
+    }
+
+    bool rebuildSamplerState(GLSamplerObject& object) {
+        releaseRetainedMetalObject(object.metalSampler);
+        object.metalSampler = nullptr;
+        if (device == nil) {
+            object.dirty = false;
+            return true;
+        }
+
+        MTLSamplerDescriptor* descriptor = [[MTLSamplerDescriptor alloc] init];
+        descriptor.minFilter = metalMinMagFilter(object.params.minFilter);
+        descriptor.magFilter = metalMinMagFilter(object.params.magFilter);
+        descriptor.mipFilter = metalMipFilter(object.params.minFilter);
+        descriptor.sAddressMode = metalAddressMode(object.params.wrapS);
+        descriptor.tAddressMode = metalAddressMode(object.params.wrapT);
+        descriptor.rAddressMode = metalAddressMode(object.params.wrapR);
+        descriptor.lodMinClamp = object.params.minLod;
+        descriptor.lodMaxClamp = object.params.maxLod;
+        descriptor.compareFunction = object.params.compareMode == GL_COMPARE_REF_TO_TEXTURE
+            ? metalCompareFunction(object.params.compareFunc)
+            : MTLCompareFunctionNever;
+
+        id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:descriptor];
+        if (sampler == nil) {
+            return false;
+        }
+        object.metalSampler = transferRetainedMetalObject(sampler);
+        object.dirty = false;
+        return true;
     }
 
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
@@ -1530,6 +2015,464 @@ bool GLContext::getVertexAttribPointer(GLuint index, GLenum pname, void** pointe
         return false;
     }
     *pointer = reinterpret_cast<void*>(vertexArray->attributes[index].pointer);
+    return true;
+}
+
+bool GLContext::activeTexture(GLenum texture) {
+    if (texture < GL_TEXTURE0 || texture >= GL_TEXTURE0 + 32) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    impl_->state->setActiveTextureUnit(texture - GL_TEXTURE0);
+    return true;
+}
+
+bool GLContext::genTextures(GLsizei count, GLuint* textures) {
+    if (count < 0 || (count > 0 && textures == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        textures[index] = impl_->objects->textures().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
+    if (count < 0 || (count > 0 && textures == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        const GLuint name = textures[index];
+        if (name == 0) {
+            continue;
+        }
+        if (GLTextureObject* object = impl_->objects->textures().get(name); object != nullptr) {
+            impl_->releaseTextureStorage(*object);
+        }
+        if (impl_->objects->textures().erase(name)) {
+            impl_->state->deleteTextureBindings(name);
+            impl_->objects->deferDelete("texture " + std::to_string(name));
+        }
+    }
+    return true;
+}
+
+bool GLContext::isTexture(GLuint texture) const {
+    const GLTextureObject* object = impl_->objects->textures().get(texture);
+    return object != nullptr && object->instantiated;
+}
+
+bool GLContext::bindTexture(GLenum target, GLuint texture) {
+    if (!isTextureTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (texture == 0) {
+        impl_->state->bindTexture(target, 0);
+        return true;
+    }
+    GLTextureObject* object = impl_->objects->textures().get(texture);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (object->target != 0 && object->target != target) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    object->target = target;
+    object->desc.target = target;
+    object->instantiated = true;
+    impl_->state->bindTexture(target, texture);
+    return true;
+}
+
+bool GLContext::texImage(
+    GLenum target,
+    GLint level,
+    GLint internalformat,
+    GLsizei width,
+    GLsizei height,
+    GLsizei depth,
+    GLint border,
+    GLenum format,
+    GLenum type,
+    const void* pixels
+) {
+    if (!isTextureTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (level < 0 || width < 0 || height < 0 || depth < 0 || border != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!isSupportedInternalTextureFormat(static_cast<GLenum>(internalformat)) || componentCountForFormat(format) == 0 || type != GL_UNSIGNED_BYTE) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if ((target == GL_TEXTURE_1D && (height != 1 || depth != 1))
+        || (target == GL_TEXTURE_2D && depth != 1)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    GLTextureImageLevel image;
+    image.desc.target = target;
+    image.desc.internalFormat = static_cast<GLenum>(internalformat);
+    image.desc.sourceFormat = format;
+    image.desc.sourceType = type;
+    image.desc.width = width;
+    image.desc.height = target == GL_TEXTURE_1D ? 1 : height;
+    image.desc.depth = target == GL_TEXTURE_3D ? depth : 1;
+    image.desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
+    image.defined = true;
+    if (!impl_->buildRGBA8Upload(image.desc.width, image.desc.height, image.desc.depth, format, type, pixels, image.rgba8)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    object->desc = image.desc;
+    object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
+    object->levels[level] = std::move(image);
+    if (level == 0 && !impl_->replaceMetalBaseLevel(*object, object->levels[level])) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::texSubImage(
+    GLenum target,
+    GLint level,
+    GLint xoffset,
+    GLint yoffset,
+    GLint zoffset,
+    GLsizei width,
+    GLsizei height,
+    GLsizei depth,
+    GLenum format,
+    GLenum type,
+    const void* pixels
+) {
+    if (!isTextureTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (level < 0 || xoffset < 0 || yoffset < 0 || zoffset < 0 || width < 0 || height < 0 || depth < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (componentCountForFormat(format) == 0 || type != GL_UNSIGNED_BYTE) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (width > 0 && height > 0 && depth > 0 && pixels == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    auto levelIt = object->levels.find(level);
+    if (levelIt == object->levels.end() || !levelIt->second.defined) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLTextureImageLevel& image = levelIt->second;
+    if (xoffset > image.desc.width || width > image.desc.width - xoffset
+        || yoffset > image.desc.height || height > image.desc.height - yoffset
+        || zoffset > image.desc.depth || depth > image.desc.depth - zoffset) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    std::vector<std::uint8_t> upload;
+    if (!impl_->buildRGBA8Upload(width, height, depth, format, type, pixels, upload)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    for (GLsizei z = 0; z < depth; ++z) {
+        for (GLsizei y = 0; y < height; ++y) {
+            const std::size_t sourceOffset =
+                (static_cast<std::size_t>(z) * static_cast<std::size_t>(height) + static_cast<std::size_t>(y))
+                * static_cast<std::size_t>(width) * 4u;
+            const std::size_t destOffset =
+                ((static_cast<std::size_t>(z + zoffset) * static_cast<std::size_t>(image.desc.height)
+                    + static_cast<std::size_t>(y + yoffset))
+                    * static_cast<std::size_t>(image.desc.width)
+                    + static_cast<std::size_t>(xoffset))
+                * 4u;
+            std::memcpy(
+                image.rgba8.data() + destOffset,
+                upload.data() + sourceOffset,
+                static_cast<std::size_t>(width) * 4u
+            );
+        }
+    }
+    if (level == 0 && !impl_->replaceMetalBaseLevel(*object, image)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* params) {
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!setTextureParameterInteger(object->params, pname, params)) {
+        pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::texParameterUnsignedInteger(GLenum target, GLenum pname, const GLuint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLint converted[4] = {
+        static_cast<GLint>(params[0]),
+        0,
+        0,
+        0
+    };
+    if (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) {
+        converted[1] = static_cast<GLint>(params[1]);
+        converted[2] = static_cast<GLint>(params[2]);
+        converted[3] = static_cast<GLint>(params[3]);
+    }
+    return texParameterInteger(target, pname, converted);
+}
+
+bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* params) {
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!setTextureParameterFloat(object->params, pname, params)) {
+        pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* params) {
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!getTextureParameterInteger(object->params, pname, params)) {
+        pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::getTexParameterUnsignedInteger(GLenum target, GLenum pname, GLuint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLint values[4] = {};
+    if (!getTexParameterInteger(target, pname, values)) {
+        return false;
+    }
+    params[0] = static_cast<GLuint>(values[0]);
+    if (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) {
+        params[1] = static_cast<GLuint>(values[1]);
+        params[2] = static_cast<GLuint>(values[2]);
+        params[3] = static_cast<GLuint>(values[3]);
+    }
+    return true;
+}
+
+bool GLContext::getTexParameterFloat(GLenum target, GLenum pname, GLfloat* params) {
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!getTextureParameterFloat(object->params, pname, params)) {
+        pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::pixelStore(GLenum pname, GLint value) {
+    impl_->state->setPixelStore(pname, value);
+    return true;
+}
+
+bool GLContext::genSamplers(GLsizei count, GLuint* samplers) {
+    if (count < 0 || (count > 0 && samplers == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        const GLuint name = impl_->objects->samplers().reserveName();
+        samplers[index] = name;
+        if (GLSamplerObject* object = impl_->objects->samplers().get(name); object != nullptr) {
+            object->instantiated = true;
+            (void)impl_->rebuildSamplerState(*object);
+        }
+    }
+    return true;
+}
+
+bool GLContext::deleteSamplers(GLsizei count, const GLuint* samplers) {
+    if (count < 0 || (count > 0 && samplers == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        const GLuint name = samplers[index];
+        if (name == 0) {
+            continue;
+        }
+        if (GLSamplerObject* object = impl_->objects->samplers().get(name); object != nullptr) {
+            impl_->releaseSamplerState(*object);
+        }
+        if (impl_->objects->samplers().erase(name)) {
+            impl_->state->deleteSamplerBindings(name);
+            impl_->objects->deferDelete("sampler " + std::to_string(name));
+        }
+    }
+    return true;
+}
+
+bool GLContext::isSampler(GLuint sampler) const {
+    const GLSamplerObject* object = impl_->objects->samplers().get(sampler);
+    return object != nullptr && object->instantiated;
+}
+
+bool GLContext::bindSampler(GLuint unit, GLuint sampler) {
+    if (unit >= 32) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (sampler != 0 && !isSampler(sampler)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    impl_->state->bindSampler(unit, sampler);
+    return true;
+}
+
+bool GLContext::samplerParameterInteger(GLuint sampler, GLenum pname, const GLint* params) {
+    GLSamplerObject* object = impl_->objects->samplers().get(sampler);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!setTextureParameterInteger(object->params, pname, params)) {
+        pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+        return false;
+    }
+    object->dirty = true;
+    if (!impl_->rebuildSamplerState(*object)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::samplerParameterUnsignedInteger(GLuint sampler, GLenum pname, const GLuint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLint converted[4] = {
+        static_cast<GLint>(params[0]),
+        0,
+        0,
+        0
+    };
+    if (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) {
+        converted[1] = static_cast<GLint>(params[1]);
+        converted[2] = static_cast<GLint>(params[2]);
+        converted[3] = static_cast<GLint>(params[3]);
+    }
+    return samplerParameterInteger(sampler, pname, converted);
+}
+
+bool GLContext::samplerParameterFloat(GLuint sampler, GLenum pname, const GLfloat* params) {
+    GLSamplerObject* object = impl_->objects->samplers().get(sampler);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!setTextureParameterFloat(object->params, pname, params)) {
+        pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+        return false;
+    }
+    object->dirty = true;
+    if (!impl_->rebuildSamplerState(*object)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::getSamplerParameterInteger(GLuint sampler, GLenum pname, GLint* params) {
+    const GLSamplerObject* object = impl_->objects->samplers().get(sampler);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!getTextureParameterInteger(object->params, pname, params)) {
+        pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::getSamplerParameterUnsignedInteger(GLuint sampler, GLenum pname, GLuint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLint values[4] = {};
+    if (!getSamplerParameterInteger(sampler, pname, values)) {
+        return false;
+    }
+    params[0] = static_cast<GLuint>(values[0]);
+    if (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) {
+        params[1] = static_cast<GLuint>(values[1]);
+        params[2] = static_cast<GLuint>(values[2]);
+        params[3] = static_cast<GLuint>(values[3]);
+    }
+    return true;
+}
+
+bool GLContext::getSamplerParameterFloat(GLuint sampler, GLenum pname, GLfloat* params) {
+    const GLSamplerObject* object = impl_->objects->samplers().get(sampler);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!getTextureParameterFloat(object->params, pname, params)) {
+        pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+        return false;
+    }
     return true;
 }
 
