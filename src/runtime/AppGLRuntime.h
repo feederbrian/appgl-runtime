@@ -76,6 +76,7 @@ void APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint* params);
 void APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params);
 void APIENTRY glGetTexParameterIiv(GLenum target, GLenum pname, GLint* params);
 void APIENTRY glGetTexParameterIuiv(GLenum target, GLenum pname, GLuint* params);
+void APIENTRY glGenerateMipmap(GLenum target);
 void APIENTRY glPixelStorei(GLenum pname, GLint param);
 void APIENTRY glPixelStoref(GLenum pname, GLfloat param);
 void APIENTRY glGenSamplers(GLsizei count, GLuint* samplers);

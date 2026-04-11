@@ -1755,6 +1755,21 @@ void APIENTRY glGetTexParameterIuiv(GLenum target, GLenum pname, GLuint* params)
     }
 }
 
+void APIENTRY glGenerateMipmap(GLenum target) {
+    auto* context = requireCurrentContext("glGenerateMipmap");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidTextureTarget(target)) {
+        recordValidationError(context, "glGenerateMipmap", GL_INVALID_ENUM, "target is not a Phase A texture target");
+        return;
+    }
+    if (context->generateMipmap(target)) {
+        markTextureFunction(FunctionId::glGenerateMipmap, "Mipmap chains are generated into texture shadow storage and Metal storage.");
+        Runtime::shared().recordBootstrapTrace("glGenerateMipmap(" + std::to_string(target) + ")");
+    }
+}
+
 void APIENTRY glPixelStorei(GLenum pname, GLint param) {
     auto* context = requireCurrentContext("glPixelStorei");
     if (context == nullptr) {

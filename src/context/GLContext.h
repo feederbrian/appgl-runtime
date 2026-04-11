@@ -119,6 +119,7 @@ public:
     bool getTexParameterInteger(GLenum target, GLenum pname, GLint* params);
     bool getTexParameterUnsignedInteger(GLenum target, GLenum pname, GLuint* params);
     bool getTexParameterFloat(GLenum target, GLenum pname, GLfloat* params);
+    bool generateMipmap(GLenum target);
     bool pixelStore(GLenum pname, GLint value);
     bool genSamplers(GLsizei count, GLuint* samplers);
     bool deleteSamplers(GLsizei count, const GLuint* samplers);

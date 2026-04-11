@@ -194,6 +194,77 @@ std::size_t rgba8ByteCount(GLsizei width, GLsizei height, GLsizei depth) {
     return safeDimension(width) * safeDimension(height) * safeDimension(depth) * 4u;
 }
 
+GLsizei mipDimension(GLsizei base, GLint levelOffset) {
+    if (levelOffset <= 0) {
+        return std::max<GLsizei>(base, 1);
+    }
+    return std::max<GLsizei>(base >> levelOffset, 1);
+}
+
+GLint mipTailOffset(GLsizei width, GLsizei height, GLsizei depth) {
+    std::size_t maxDimension = std::max({safeDimension(width), safeDimension(height), safeDimension(depth)});
+    GLint offset = 0;
+    while (maxDimension > 1) {
+        maxDimension >>= 1;
+        ++offset;
+    }
+    return offset;
+}
+
+std::vector<std::uint8_t> downsampleRGBA8(
+    const std::vector<std::uint8_t>& source,
+    GLsizei sourceWidth,
+    GLsizei sourceHeight,
+    GLsizei sourceDepth,
+    GLsizei destWidth,
+    GLsizei destHeight,
+    GLsizei destDepth
+) {
+    std::vector<std::uint8_t> dest(rgba8ByteCount(destWidth, destHeight, destDepth), 0);
+    if (source.empty()) {
+        return dest;
+    }
+
+    for (GLsizei z = 0; z < destDepth; ++z) {
+        for (GLsizei y = 0; y < destHeight; ++y) {
+            for (GLsizei x = 0; x < destWidth; ++x) {
+                std::uint32_t totals[4] = {};
+                std::uint32_t samples = 0;
+                for (GLsizei dz = 0; dz < 2; ++dz) {
+                    const GLsizei sourceZ = std::min<GLsizei>(z * 2 + dz, sourceDepth - 1);
+                    for (GLsizei dy = 0; dy < 2; ++dy) {
+                        const GLsizei sourceY = std::min<GLsizei>(y * 2 + dy, sourceHeight - 1);
+                        for (GLsizei dx = 0; dx < 2; ++dx) {
+                            const GLsizei sourceX = std::min<GLsizei>(x * 2 + dx, sourceWidth - 1);
+                            const std::size_t sourceOffset =
+                                ((static_cast<std::size_t>(sourceZ) * static_cast<std::size_t>(sourceHeight)
+                                    + static_cast<std::size_t>(sourceY))
+                                    * static_cast<std::size_t>(sourceWidth)
+                                    + static_cast<std::size_t>(sourceX))
+                                * 4u;
+                            for (std::size_t component = 0; component < 4; ++component) {
+                                totals[component] += source[sourceOffset + component];
+                            }
+                            ++samples;
+                        }
+                    }
+                }
+
+                const std::size_t destOffset =
+                    ((static_cast<std::size_t>(z) * static_cast<std::size_t>(destHeight)
+                        + static_cast<std::size_t>(y))
+                        * static_cast<std::size_t>(destWidth)
+                        + static_cast<std::size_t>(x))
+                    * 4u;
+                for (std::size_t component = 0; component < 4; ++component) {
+                    dest[destOffset + component] = static_cast<std::uint8_t>((totals[component] + samples / 2u) / samples);
+                }
+            }
+        }
+    }
+    return dest;
+}
+
 MTLSamplerAddressMode metalAddressMode(GLint mode) {
     switch (mode) {
         case GL_CLAMP_TO_EDGE:
@@ -671,9 +742,23 @@ struct GLContext::Impl {
         return true;
     }
 
-    bool replaceMetalBaseLevel(GLTextureObject& object, const GLTextureImageLevel& level) {
-        if (device == nil || !level.defined || level.desc.width <= 0 || level.desc.height <= 0 || level.desc.depth <= 0) {
+    bool replaceMetalTexture(GLTextureObject& object) {
+        const auto baseIt = object.levels.find(0);
+        if (baseIt == object.levels.end()) {
+            releaseRetainedMetalObject(object.metalTexture);
+            object.metalTexture = nullptr;
             return true;
+        }
+        const GLTextureImageLevel& baseLevel = baseIt->second;
+        if (device == nil || !baseLevel.defined || baseLevel.desc.width <= 0 || baseLevel.desc.height <= 0 || baseLevel.desc.depth <= 0) {
+            return true;
+        }
+
+        GLint highestDefinedLevel = 0;
+        for (const auto& [levelIndex, image] : object.levels) {
+            if (levelIndex >= 0 && image.defined) {
+                highestDefinedLevel = std::max(highestDefinedLevel, levelIndex);
+            }
         }
 
         releaseRetainedMetalObject(object.metalTexture);
@@ -682,10 +767,10 @@ struct GLContext::Impl {
         MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
         descriptor.textureType = metalTextureTypeForTarget(object.target);
         descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
-        descriptor.width = static_cast<NSUInteger>(level.desc.width);
-        descriptor.height = static_cast<NSUInteger>(object.target == GL_TEXTURE_1D ? 1 : level.desc.height);
-        descriptor.depth = static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? level.desc.depth : 1);
-        descriptor.mipmapLevelCount = 1;
+        descriptor.width = static_cast<NSUInteger>(baseLevel.desc.width);
+        descriptor.height = static_cast<NSUInteger>(object.target == GL_TEXTURE_1D ? 1 : baseLevel.desc.height);
+        descriptor.depth = static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1);
+        descriptor.mipmapLevelCount = static_cast<NSUInteger>(highestDefinedLevel + 1);
         descriptor.usage = MTLTextureUsageShaderRead;
         descriptor.storageMode = MTLStorageModeShared;
 
@@ -694,29 +779,86 @@ struct GLContext::Impl {
             return false;
         }
 
-        const NSUInteger bytesPerRow = static_cast<NSUInteger>(safeDimension(level.desc.width) * 4u);
-        const NSUInteger bytesPerImage = bytesPerRow * static_cast<NSUInteger>(safeDimension(level.desc.height));
-        const MTLRegion region = MTLRegionMake3D(
-            0,
-            0,
-            0,
-            static_cast<NSUInteger>(safeDimension(level.desc.width)),
-            static_cast<NSUInteger>(object.target == GL_TEXTURE_1D ? 1 : safeDimension(level.desc.height)),
-            static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? safeDimension(level.desc.depth) : 1)
-        );
-        if (!level.rgba8.empty()) {
+        for (const auto& [levelIndex, image] : object.levels) {
+            if (levelIndex < 0 || !image.defined || image.rgba8.empty()) {
+                continue;
+            }
+            const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
+            const NSUInteger bytesPerRow = static_cast<NSUInteger>(safeDimension(image.desc.width) * 4u);
+            const NSUInteger bytesPerImage = bytesPerRow * static_cast<NSUInteger>(safeDimension(image.desc.height));
+            const MTLRegion region = MTLRegionMake3D(
+                0,
+                0,
+                0,
+                static_cast<NSUInteger>(safeDimension(image.desc.width)),
+                static_cast<NSUInteger>(object.target == GL_TEXTURE_1D ? 1 : safeDimension(image.desc.height)),
+                static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? safeDimension(image.desc.depth) : 1)
+            );
             if (object.target == GL_TEXTURE_3D) {
                 for (NSUInteger slice = 0; slice < region.size.depth; ++slice) {
                     const MTLRegion sliceRegion = MTLRegionMake3D(0, 0, slice, region.size.width, region.size.height, 1);
-                    const auto* sliceBytes = level.rgba8.data() + static_cast<std::size_t>(slice * bytesPerImage);
-                    [texture replaceRegion:sliceRegion mipmapLevel:0 withBytes:sliceBytes bytesPerRow:bytesPerRow];
+                    const auto* sliceBytes = image.rgba8.data() + static_cast<std::size_t>(slice * bytesPerImage);
+                    [texture replaceRegion:sliceRegion mipmapLevel:mipLevel withBytes:sliceBytes bytesPerRow:bytesPerRow];
                 }
             } else {
-                [texture replaceRegion:region mipmapLevel:0 withBytes:level.rgba8.data() bytesPerRow:bytesPerRow];
+                [texture replaceRegion:region mipmapLevel:mipLevel withBytes:image.rgba8.data() bytesPerRow:bytesPerRow];
             }
         }
         object.metalTexture = transferRetainedMetalObject(texture);
         return true;
+    }
+
+    bool generateMipmaps(GLTextureObject& object) {
+        const GLint baseLevelIndex = object.params.baseLevel;
+        const auto baseIt = object.levels.find(baseLevelIndex);
+        if (baseIt == object.levels.end() || !baseIt->second.defined || baseIt->second.rgba8.empty()) {
+            return false;
+        }
+        if (object.params.maxLevel < baseLevelIndex) {
+            return false;
+        }
+
+        const GLTextureImageLevel baseLevel = baseIt->second;
+        const GLint tailOffset = mipTailOffset(
+            baseLevel.desc.width,
+            object.target == GL_TEXTURE_1D ? 1 : baseLevel.desc.height,
+            object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1
+        );
+        const GLint finalLevel = std::min(baseLevelIndex + tailOffset, object.params.maxLevel);
+        GLTextureImageLevel previousLevel = baseLevel;
+        for (GLint levelIndex = baseLevelIndex + 1; levelIndex <= finalLevel; ++levelIndex) {
+            const GLint offsetFromBase = levelIndex - baseLevelIndex;
+            GLTextureImageLevel generated;
+            generated.desc = baseLevel.desc;
+            generated.desc.width = mipDimension(baseLevel.desc.width, offsetFromBase);
+            generated.desc.height = object.target == GL_TEXTURE_1D ? 1 : mipDimension(baseLevel.desc.height, offsetFromBase);
+            generated.desc.depth = object.target == GL_TEXTURE_3D ? mipDimension(baseLevel.desc.depth, offsetFromBase) : 1;
+            generated.desc.levels = std::max<GLsizei>(object.desc.levels, levelIndex + 1);
+            generated.defined = true;
+            generated.rgba8 = downsampleRGBA8(
+                previousLevel.rgba8,
+                previousLevel.desc.width,
+                previousLevel.desc.height,
+                previousLevel.desc.depth,
+                generated.desc.width,
+                generated.desc.height,
+                generated.desc.depth
+            );
+            object.levels[levelIndex] = std::move(generated);
+            previousLevel = object.levels.at(levelIndex);
+        }
+
+        if (const auto levelZero = object.levels.find(0); levelZero != object.levels.end()) {
+            object.desc = levelZero->second.desc;
+        } else {
+            object.desc = baseLevel.desc;
+        }
+        object.desc.levels = std::max<GLsizei>(object.desc.levels, finalLevel + 1);
+        for (auto& [levelIndex, image] : object.levels) {
+            (void)levelIndex;
+            image.desc.levels = object.desc.levels;
+        }
+        return replaceMetalTexture(object);
     }
 
     bool rebuildSamplerState(GLSamplerObject& object) {
@@ -2140,10 +2282,13 @@ bool GLContext::texImage(
         return false;
     }
 
-    object->desc = image.desc;
+    if (level == 0 || !object->levels.contains(0)) {
+        object->desc = image.desc;
+    }
     object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
+    image.desc.levels = object->desc.levels;
     object->levels[level] = std::move(image);
-    if (level == 0 && !impl_->replaceMetalBaseLevel(*object, object->levels[level])) {
+    if (!impl_->replaceMetalTexture(*object)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
@@ -2221,7 +2366,7 @@ bool GLContext::texSubImage(
             );
         }
     }
-    if (level == 0 && !impl_->replaceMetalBaseLevel(*object, image)) {
+    if (!impl_->replaceMetalTexture(*object)) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
@@ -2312,6 +2457,23 @@ bool GLContext::getTexParameterFloat(GLenum target, GLenum pname, GLfloat* param
     }
     if (!getTextureParameterFloat(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::generateMipmap(GLenum target) {
+    if (!isTextureTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!impl_->generateMipmaps(*object)) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
     return true;

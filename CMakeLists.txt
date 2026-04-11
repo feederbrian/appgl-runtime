@@ -39,6 +39,7 @@ set(APPGL_SOURCES
   src/shader/PipelineCache.cpp
   src/shader/ShaderTranslator.cpp
   src/state/GLStateTracker.cpp
+  src/state/IndexExpansion.cpp
   src/state/MetalVertexDescriptorBuilder.mm
   src/generated/gl_entrypoints.gen.cpp
 )

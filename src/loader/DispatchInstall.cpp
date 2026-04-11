@@ -67,6 +67,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGetTexParameterfv = &impl::glGetTexParameterfv;
     dispatch.glGetTexParameterIiv = &impl::glGetTexParameterIiv;
     dispatch.glGetTexParameterIuiv = &impl::glGetTexParameterIuiv;
+    dispatch.glGenerateMipmap = &impl::glGenerateMipmap;
     dispatch.glPixelStorei = &impl::glPixelStorei;
     dispatch.glPixelStoref = &impl::glPixelStoref;
     dispatch.glGenSamplers = &impl::glGenSamplers;
@@ -186,6 +187,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glGetTexParameterfv, "Texture float parameter queries are live.");
     coverage.markImplemented(FunctionId::glGetTexParameterIiv, "Texture integer parameter queries are live.");
     coverage.markImplemented(FunctionId::glGetTexParameterIuiv, "Texture unsigned parameter queries are live.");
+    coverage.markImplemented(FunctionId::glGenerateMipmap, "Texture mipmap generation is live for Phase A texture storage.");
     coverage.markImplemented(FunctionId::glPixelStorei, "Integer pixel-store state is live.");
     coverage.markImplemented(FunctionId::glPixelStoref, "Float pixel-store state is live.");
     coverage.markImplemented(FunctionId::glGenSamplers, "Sampler name generation is live.");

@@ -49,6 +49,7 @@ struct MetalFrameGraph::Impl {
         GLdouble clearDepth,
         GLint clearStencil
     ) {
+        updateReadbackMirror(mask, clearRed, clearGreen, clearBlue, clearAlpha);
         if (device == nil || commandQueue == nil) {
             return;
         }
@@ -84,7 +85,6 @@ struct MetalFrameGraph::Impl {
 
         id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         [encoder endEncoding];
-        updateReadbackMirror(mask, clearRed, clearGreen, clearBlue, clearAlpha);
         pendingPresent = true;
     }
 

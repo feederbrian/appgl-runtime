@@ -26,6 +26,7 @@
 #include "../src/runtime/AppGLRuntime.h"
 #include "../src/shared/JsonUtil.h"
 #include "../src/state/GLStateTracker.h"
+#include "../src/state/IndexExpansion.h"
 
 namespace appgl::tests {
 namespace {
@@ -42,7 +43,7 @@ struct TestResult {
     std::string message;
 };
 
-constexpr std::array<FunctionId, 118> kBootstrapFunctions = {
+constexpr std::array<FunctionId, 119> kBootstrapFunctions = {
     FunctionId::glCullFace,
     FunctionId::glFrontFace,
     FunctionId::glHint,
@@ -123,6 +124,7 @@ constexpr std::array<FunctionId, 118> kBootstrapFunctions = {
     FunctionId::glGetTexParameterfv,
     FunctionId::glGetTexParameterIiv,
     FunctionId::glGetTexParameterIuiv,
+    FunctionId::glGenerateMipmap,
     FunctionId::glPixelStorei,
     FunctionId::glPixelStoref,
     FunctionId::glGenSamplers,
@@ -555,6 +557,7 @@ public:
         gl.glTexParameterIuiv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, maxLevel);
         gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, imagePixels);
         gl.glTexSubImage2D(GL_TEXTURE_2D, 0, 1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, imagePatch);
+        gl.glGenerateMipmap(GL_TEXTURE_2D);
         GLint textureParam = 0;
         gl.glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &textureParam);
         expectCondition(textureParam == GL_LINEAR, "texture min filter query");
@@ -577,6 +580,8 @@ public:
         const auto& textureLevel = textureObject->levels.at(0);
         expectCondition(textureLevel.rgba8.size() == 16, "2D texture shadow bytes exist");
         expectCondition(textureLevel.rgba8[12] == 200, "2D texture subimage updated shadow storage");
+        expectCondition(textureObject->levels.contains(1), "2D texture mip level generated");
+        expectCondition(textureObject->levels.at(1).desc.width == 1, "2D texture mip width is halved");
         gl.glBindTexture(static_cast<GLenum>(0xffffffffu), textures[1]);
         expectGLError(gl, GL_INVALID_ENUM, "invalid glBindTexture target");
         gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, static_cast<GLenum>(0xffffffffu), GL_UNSIGNED_BYTE, imagePatch);
@@ -716,6 +721,152 @@ public:
         (void)context;
         auto& gl = Runtime::shared().dispatch();
         gl.glClearColor(0.30f, 0.16f, 0.19f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+};
+
+class TextureSamplerStateScene final : public Scene {
+public:
+    std::string id() const override {
+        return "phase-a.texture-sampler-state";
+    }
+
+    std::string phase() const override {
+        return "phase-a";
+    }
+
+    SceneSize framebufferSize() const override {
+        return {80, 80};
+    }
+
+    void setup(GLContext& context) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        gl.glActiveTexture(GL_TEXTURE3);
+        GLint activeTexture = 0;
+        gl.glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+        expectCondition(activeTexture == GL_TEXTURE3, "texture scenario active unit query");
+
+        GLuint texture = 0;
+        gl.glGenTextures(1, &texture);
+        gl.glBindTexture(GL_TEXTURE_2D, texture);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 8);
+        const GLuint wrapR = GL_CLAMP_TO_EDGE;
+        gl.glTexParameterIuiv(GL_TEXTURE_2D, GL_TEXTURE_WRAP_R, &wrapR);
+        const GLuint swizzle[4] = {GL_BLUE, GL_GREEN, GL_RED, GL_ALPHA};
+        gl.glTexParameterIuiv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzle);
+
+        const std::uint8_t pixels[64] = {
+            255, 0, 0, 255,      220, 20, 20, 255,    20, 220, 20, 255,    0, 255, 0, 255,
+            220, 20, 20, 255,    180, 60, 40, 255,    60, 180, 40, 255,    20, 220, 20, 255,
+            20, 20, 220, 255,    40, 60, 180, 255,    180, 60, 180, 255,   220, 20, 220, 255,
+            0, 0, 255, 255,      20, 20, 220, 255,    220, 20, 220, 255,   255, 0, 255, 255,
+        };
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        gl.glGenerateMipmap(GL_TEXTURE_2D);
+
+        const GLTextureObject* textureObject = context.objects().textures().get(texture);
+        expectCondition(textureObject != nullptr, "texture scenario object exists");
+        expectCondition(textureObject->levels.contains(0), "texture scenario base level exists");
+        expectCondition(textureObject->levels.contains(1), "texture scenario first mip exists");
+        expectCondition(textureObject->levels.contains(2), "texture scenario second mip exists");
+        expectCondition(textureObject->levels.at(1).desc.width == 2, "texture scenario first mip width");
+        expectCondition(textureObject->levels.at(1).desc.height == 2, "texture scenario first mip height");
+        expectCondition(textureObject->levels.at(2).desc.width == 1, "texture scenario tail mip width");
+        expectCondition(textureObject->levels.at(2).rgba8.size() == 4, "texture scenario tail mip byte count");
+
+        struct ScalarQuerySentinel {
+            GLuint value = 0;
+            GLuint guardA = 0xdecafbadu;
+            GLuint guardB = 0xabcddcbau;
+        };
+        ScalarQuerySentinel textureScalar;
+        gl.glGetTexParameterIuiv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &textureScalar.value);
+        expectCondition(textureScalar.value == 8, "texture scalar unsigned query value");
+        expectCondition(textureScalar.guardA == 0xdecafbadu && textureScalar.guardB == 0xabcddcbau, "texture scalar unsigned query guard");
+        GLuint swizzleReadback[4] = {};
+        gl.glGetTexParameterIuiv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, swizzleReadback);
+        expectCondition(swizzleReadback[0] == GL_BLUE && swizzleReadback[2] == GL_RED, "texture vector unsigned query");
+
+        GLuint sampler = 0;
+        gl.glGenSamplers(1, &sampler);
+        gl.glBindSampler(3, sampler);
+        gl.glSamplerParameteri(sampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        gl.glSamplerParameterf(sampler, GL_TEXTURE_MIN_LOD, 0.0f);
+        const GLfloat borderColor[4] = {0.1f, 0.2f, 0.3f, 1.0f};
+        gl.glSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR, borderColor);
+        const GLuint samplerWrap = GL_REPEAT;
+        gl.glSamplerParameterIuiv(sampler, GL_TEXTURE_WRAP_R, &samplerWrap);
+
+        ScalarQuerySentinel samplerScalar;
+        gl.glGetSamplerParameterIuiv(sampler, GL_TEXTURE_WRAP_R, &samplerScalar.value);
+        expectCondition(samplerScalar.value == GL_REPEAT, "sampler scalar unsigned query value");
+        expectCondition(samplerScalar.guardA == 0xdecafbadu && samplerScalar.guardB == 0xabcddcbau, "sampler scalar unsigned query guard");
+        GLfloat samplerBorder[4] = {};
+        gl.glGetSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR, samplerBorder);
+        expectCondition(samplerBorder[2] == borderColor[2], "sampler vector float query");
+
+        gl.glGenerateMipmap(static_cast<GLenum>(0xffffffffu));
+        expectGLError(gl, GL_INVALID_ENUM, "invalid glGenerateMipmap target");
+
+        gl.glDeleteSamplers(1, &sampler);
+        gl.glDeleteTextures(1, &texture);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.08f, 0.32f, 0.22f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+};
+
+class IndexUInt8ExpansionScene final : public Scene {
+public:
+    std::string id() const override {
+        return "phase-a.index-uint8-expansion";
+    }
+
+    std::string phase() const override {
+        return "phase-a";
+    }
+
+    SceneSize framebufferSize() const override {
+        return {64, 64};
+    }
+
+    void setup(GLContext& context) override {
+        (void)context;
+
+        const GLubyte quadIndices[6] = {0, 1, 2, 2, 3, 0};
+        const IndexExpansionResult expanded = expandElementIndices(6, GL_UNSIGNED_BYTE, quadIndices);
+        expectCondition(expanded.ok, "uint8 index expansion succeeds");
+        expectCondition(expanded.outputType == GL_UNSIGNED_SHORT, "uint8 index expansion output type");
+        expectCondition(expanded.bytes.size() == sizeof(GLushort) * 6, "uint8 index expansion byte size");
+        const auto* expandedWords = reinterpret_cast<const GLushort*>(expanded.bytes.data());
+        expectCondition(expandedWords[0] == 0 && expandedWords[3] == 2 && expandedWords[4] == 3, "uint8 index expansion values");
+
+        const GLushort shortIndices[3] = {4, 5, 6};
+        const IndexExpansionResult passThrough = expandElementIndices(3, GL_UNSIGNED_SHORT, shortIndices);
+        expectCondition(passThrough.ok, "ushort index passthrough succeeds");
+        expectCondition(passThrough.outputType == GL_UNSIGNED_SHORT, "ushort index passthrough output type");
+        expectCondition(std::memcmp(passThrough.bytes.data(), shortIndices, sizeof(shortIndices)) == 0, "ushort index passthrough bytes");
+
+        const IndexExpansionResult invalidType = expandElementIndices(1, static_cast<GLenum>(0xffffffffu), quadIndices);
+        expectCondition(!invalidType.ok && invalidType.error == GL_INVALID_ENUM, "index expansion invalid type error");
+        const IndexExpansionResult invalidCount = expandElementIndices(-1, GL_UNSIGNED_BYTE, quadIndices);
+        expectCondition(!invalidCount.ok && invalidCount.error == GL_INVALID_VALUE, "index expansion invalid count error");
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.42f, 0.20f, 0.08f, 1.0f);
         gl.glClear(GL_COLOR_BUFFER_BIT);
         gl.glFlush();
     }
@@ -885,6 +1036,10 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(scene));
         VertexInputStateScene vertexInputScene;
         tests.push_back(runScene(vertexInputScene));
+        TextureSamplerStateScene textureSamplerScene;
+        tests.push_back(runScene(textureSamplerScene));
+        IndexUInt8ExpansionScene indexExpansionScene;
+        tests.push_back(runScene(indexExpansionScene));
     }
 
     return buildJSON(normalizedPhase, tests);
