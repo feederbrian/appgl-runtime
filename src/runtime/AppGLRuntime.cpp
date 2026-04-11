@@ -14,6 +14,7 @@ namespace {
 thread_local GLContext* gCurrentContext = nullptr;
 constexpr const char* kBootstrapTestId = "bootstrap.clear-loop";
 constexpr const char* kPhaseAStateTestId = "phase-a.state";
+constexpr const char* kPhaseADebugTestId = "phase-a.debug";
 constexpr GLuint kPhaseAMaxDrawBuffers = 8;
 
 GLContext* requireCurrentContext(std::string_view functionName) {
@@ -63,6 +64,8 @@ bool isValidEnableCap(GLenum cap) {
     switch (cap) {
         case GL_BLEND:
         case GL_CULL_FACE:
+        case GL_DEBUG_OUTPUT:
+        case GL_DEBUG_OUTPUT_SYNCHRONOUS:
         case GL_DEPTH_TEST:
         case GL_DITHER:
         case GL_LINE_SMOOTH:
@@ -187,6 +190,96 @@ bool isValidHintTarget(GLenum target) {
 
 bool isValidHintMode(GLenum mode) {
     return mode == GL_FASTEST || mode == GL_NICEST || mode == GL_DONT_CARE;
+}
+
+bool isValidDebugSource(GLenum source, bool allowDontCare) {
+    if (allowDontCare && source == GL_DONT_CARE) {
+        return true;
+    }
+    switch (source) {
+        case GL_DEBUG_SOURCE_API:
+        case GL_DEBUG_SOURCE_WINDOW_SYSTEM:
+        case GL_DEBUG_SOURCE_SHADER_COMPILER:
+        case GL_DEBUG_SOURCE_THIRD_PARTY:
+        case GL_DEBUG_SOURCE_APPLICATION:
+        case GL_DEBUG_SOURCE_OTHER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidDebugInsertSource(GLenum source) {
+    return source == GL_DEBUG_SOURCE_APPLICATION || source == GL_DEBUG_SOURCE_THIRD_PARTY;
+}
+
+bool isValidDebugType(GLenum type, bool allowDontCare) {
+    if (allowDontCare && type == GL_DONT_CARE) {
+        return true;
+    }
+    switch (type) {
+        case GL_DEBUG_TYPE_ERROR:
+        case GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR:
+        case GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR:
+        case GL_DEBUG_TYPE_PORTABILITY:
+        case GL_DEBUG_TYPE_PERFORMANCE:
+        case GL_DEBUG_TYPE_OTHER:
+        case GL_DEBUG_TYPE_MARKER:
+        case GL_DEBUG_TYPE_PUSH_GROUP:
+        case GL_DEBUG_TYPE_POP_GROUP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidDebugSeverity(GLenum severity, bool allowDontCare) {
+    if (allowDontCare && severity == GL_DONT_CARE) {
+        return true;
+    }
+    switch (severity) {
+        case GL_DEBUG_SEVERITY_HIGH:
+        case GL_DEBUG_SEVERITY_MEDIUM:
+        case GL_DEBUG_SEVERITY_LOW:
+        case GL_DEBUG_SEVERITY_NOTIFICATION:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidDebugObjectIdentifier(GLenum identifier) {
+    switch (identifier) {
+        case GL_BUFFER:
+        case GL_SHADER:
+        case GL_PROGRAM:
+        case GL_VERTEX_ARRAY:
+        case GL_QUERY:
+        case GL_PROGRAM_PIPELINE:
+        case GL_TRANSFORM_FEEDBACK:
+        case GL_SAMPLER:
+        case GL_TEXTURE:
+        case GL_RENDERBUFFER:
+        case GL_FRAMEBUFFER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::string stringFromGLText(GLsizei length, const GLchar* text) {
+    if (text == nullptr) {
+        return {};
+    }
+    if (length < 0) {
+        return std::string(text);
+    }
+    return std::string(text, text + length);
+}
+
+void markDebugFunction(FunctionId id, std::string_view note) {
+    Runtime::shared().coverageStore().markSmokeTested(id, kPhaseADebugTestId, note);
+    Runtime::shared().refreshCurrentContextClaimedVersion();
 }
 }  // namespace
 
@@ -876,19 +969,175 @@ GLenum APIENTRY glGetError(void) {
     return context->popError();
 }
 
+void APIENTRY glDebugMessageControl(
+    GLenum source,
+    GLenum type,
+    GLenum severity,
+    GLsizei count,
+    const GLuint* ids,
+    GLboolean enabled
+) {
+    auto* context = requireCurrentContext("glDebugMessageControl");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidDebugSource(source, true) || !isValidDebugType(type, true) || !isValidDebugSeverity(severity, true)) {
+        recordValidationError(context, "glDebugMessageControl", GL_INVALID_ENUM, "source, type, or severity is invalid");
+        return;
+    }
+    if (count < 0 || (count > 0 && ids == nullptr)) {
+        recordValidationError(context, "glDebugMessageControl", GL_INVALID_VALUE, "count/ids are invalid");
+        return;
+    }
+    context->setDebugMessageControl(source, type, severity, count, ids, enabled);
+    markDebugFunction(FunctionId::glDebugMessageControl, "Debug message filtering rules are tracked.");
+    Runtime::shared().recordBootstrapTrace("glDebugMessageControl()");
+}
+
+void APIENTRY glDebugMessageInsert(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* buf) {
+    auto* context = requireCurrentContext("glDebugMessageInsert");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidDebugInsertSource(source) || !isValidDebugType(type, false) || !isValidDebugSeverity(severity, false)) {
+        recordValidationError(context, "glDebugMessageInsert", GL_INVALID_ENUM, "source, type, or severity is invalid");
+        return;
+    }
+    if (length < 0 && buf == nullptr) {
+        recordValidationError(context, "glDebugMessageInsert", GL_INVALID_VALUE, "message must be non-null");
+        return;
+    }
+    if (length > 0 && buf == nullptr) {
+        recordValidationError(context, "glDebugMessageInsert", GL_INVALID_VALUE, "message must be non-null");
+        return;
+    }
+    context->insertDebugMessage(source, type, id, severity, stringFromGLText(length, buf));
+    markDebugFunction(FunctionId::glDebugMessageInsert, "Application debug messages enter the per-context log.");
+    Runtime::shared().recordBootstrapTrace("glDebugMessageInsert(" + std::to_string(id) + ")");
+}
+
 void APIENTRY glDebugMessageCallback(GLDEBUGPROC callback, const void* userParam) {
     auto* context = requireCurrentContext("glDebugMessageCallback");
     if (context == nullptr) {
         return;
     }
     context->setDebugCallback(callback, userParam);
-    Runtime::shared().coverageStore().markSmokeTested(
-        FunctionId::glDebugMessageCallback,
-        kBootstrapTestId,
-        "Bootstrap debug callback receives unsupported-entry-point diagnostics."
-    );
-    Runtime::shared().refreshCurrentContextClaimedVersion();
+    markDebugFunction(FunctionId::glDebugMessageCallback, "Debug callback and user pointer are tracked.");
     Runtime::shared().recordBootstrapTrace("glDebugMessageCallback(callback)");
+}
+
+GLuint APIENTRY glGetDebugMessageLog(
+    GLuint count,
+    GLsizei bufSize,
+    GLenum* sources,
+    GLenum* types,
+    GLuint* ids,
+    GLenum* severities,
+    GLsizei* lengths,
+    GLchar* messageLog
+) {
+    auto* context = requireCurrentContext("glGetDebugMessageLog");
+    if (context == nullptr) {
+        return 0;
+    }
+    const GLuint delivered = context->getDebugMessageLog(count, bufSize, sources, types, ids, severities, lengths, messageLog);
+    markDebugFunction(FunctionId::glGetDebugMessageLog, "Per-context debug messages can be drained through glGetDebugMessageLog.");
+    Runtime::shared().recordBootstrapTrace("glGetDebugMessageLog(" + std::to_string(delivered) + ")");
+    return delivered;
+}
+
+void APIENTRY glPushDebugGroup(GLenum source, GLuint id, GLsizei length, const GLchar* message) {
+    auto* context = requireCurrentContext("glPushDebugGroup");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidDebugSource(source, false)) {
+        recordValidationError(context, "glPushDebugGroup", GL_INVALID_ENUM, "source is invalid");
+        return;
+    }
+    if ((length < 0 || length > 0) && message == nullptr) {
+        recordValidationError(context, "glPushDebugGroup", GL_INVALID_VALUE, "message must be non-null");
+        return;
+    }
+    context->pushDebugGroup(source, id, stringFromGLText(length, message));
+    markDebugFunction(FunctionId::glPushDebugGroup, "Debug group stack push is tracked and logged.");
+    Runtime::shared().recordBootstrapTrace("glPushDebugGroup(" + std::to_string(id) + ")");
+}
+
+void APIENTRY glPopDebugGroup(void) {
+    auto* context = requireCurrentContext("glPopDebugGroup");
+    if (context == nullptr) {
+        return;
+    }
+    (void)context->popDebugGroup();
+    markDebugFunction(FunctionId::glPopDebugGroup, "Debug group stack pop is tracked and logged.");
+    Runtime::shared().recordBootstrapTrace("glPopDebugGroup()");
+}
+
+void APIENTRY glObjectLabel(GLenum identifier, GLuint name, GLsizei length, const GLchar* label) {
+    auto* context = requireCurrentContext("glObjectLabel");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidDebugObjectIdentifier(identifier)) {
+        recordValidationError(context, "glObjectLabel", GL_INVALID_ENUM, "object identifier is invalid");
+        return;
+    }
+    if ((length < 0 || length > 0) && label == nullptr) {
+        recordValidationError(context, "glObjectLabel", GL_INVALID_VALUE, "label must be non-null");
+        return;
+    }
+    context->setObjectLabel(identifier, name, stringFromGLText(length, label));
+    markDebugFunction(FunctionId::glObjectLabel, "Named GL object labels are tracked.");
+    Runtime::shared().recordBootstrapTrace("glObjectLabel(" + std::to_string(identifier) + ", " + std::to_string(name) + ")");
+}
+
+void APIENTRY glGetObjectLabel(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei* length, GLchar* label) {
+    auto* context = requireCurrentContext("glGetObjectLabel");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidDebugObjectIdentifier(identifier)) {
+        recordValidationError(context, "glGetObjectLabel", GL_INVALID_ENUM, "object identifier is invalid");
+        return;
+    }
+    context->getObjectLabel(identifier, name, bufSize, length, label);
+    markDebugFunction(FunctionId::glGetObjectLabel, "Named GL object labels are queryable.");
+    Runtime::shared().recordBootstrapTrace("glGetObjectLabel(" + std::to_string(identifier) + ", " + std::to_string(name) + ")");
+}
+
+void APIENTRY glObjectPtrLabel(const void* ptr, GLsizei length, const GLchar* label) {
+    auto* context = requireCurrentContext("glObjectPtrLabel");
+    if (context == nullptr) {
+        return;
+    }
+    if ((length < 0 || length > 0) && label == nullptr) {
+        recordValidationError(context, "glObjectPtrLabel", GL_INVALID_VALUE, "label must be non-null");
+        return;
+    }
+    context->setObjectPtrLabel(ptr, stringFromGLText(length, label));
+    markDebugFunction(FunctionId::glObjectPtrLabel, "Pointer labels are tracked.");
+    Runtime::shared().recordBootstrapTrace("glObjectPtrLabel()");
+}
+
+void APIENTRY glGetObjectPtrLabel(const void* ptr, GLsizei bufSize, GLsizei* length, GLchar* label) {
+    auto* context = requireCurrentContext("glGetObjectPtrLabel");
+    if (context == nullptr) {
+        return;
+    }
+    context->getObjectPtrLabel(ptr, bufSize, length, label);
+    markDebugFunction(FunctionId::glGetObjectPtrLabel, "Pointer labels are queryable.");
+    Runtime::shared().recordBootstrapTrace("glGetObjectPtrLabel()");
+}
+
+void APIENTRY glGetPointerv(GLenum pname, void** params) {
+    auto* context = requireCurrentContext("glGetPointerv");
+    if (context == nullptr) {
+        return;
+    }
+    (void)context->getPointer(pname, params);
+    markDebugFunction(FunctionId::glGetPointerv, "Debug callback pointers are queryable.");
+    Runtime::shared().recordBootstrapTrace("glGetPointerv(" + std::to_string(pname) + ")");
 }
 
 }  // namespace impl

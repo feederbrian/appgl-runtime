@@ -39,7 +39,7 @@ struct TestResult {
     std::string message;
 };
 
-constexpr std::array<FunctionId, 42> kBootstrapFunctions = {
+constexpr std::array<FunctionId, 52> kBootstrapFunctions = {
     FunctionId::glCullFace,
     FunctionId::glFrontFace,
     FunctionId::glHint,
@@ -81,7 +81,17 @@ constexpr std::array<FunctionId, 42> kBootstrapFunctions = {
     FunctionId::glDepthRangef,
     FunctionId::glGetString,
     FunctionId::glGetError,
+    FunctionId::glDebugMessageControl,
+    FunctionId::glDebugMessageInsert,
     FunctionId::glDebugMessageCallback,
+    FunctionId::glGetDebugMessageLog,
+    FunctionId::glPushDebugGroup,
+    FunctionId::glPopDebugGroup,
+    FunctionId::glObjectLabel,
+    FunctionId::glGetObjectLabel,
+    FunctionId::glObjectPtrLabel,
+    FunctionId::glGetObjectPtrLabel,
+    FunctionId::glGetPointerv,
 };
 
 bool gLastGauntletPassed = false;
@@ -95,6 +105,24 @@ std::string formatDouble(double value) {
     stream.setf(std::ios::fixed);
     stream.precision(6);
     stream << value;
+    return stream.str();
+}
+
+std::string pixelSummary(std::string_view label, const Image& image) {
+    std::ostringstream stream;
+    stream << label << "=";
+    if (image.empty() || image.pixels.size() < 4) {
+        stream << "empty";
+        return stream.str();
+    }
+    const std::size_t centerX = static_cast<std::size_t>(image.width / 2);
+    const std::size_t centerY = static_cast<std::size_t>(image.height / 2);
+    const std::size_t offset = (centerY * static_cast<std::size_t>(image.width) + centerX) * 4;
+    stream << "rgba("
+           << static_cast<int>(image.pixels[offset + 0]) << ","
+           << static_cast<int>(image.pixels[offset + 1]) << ","
+           << static_cast<int>(image.pixels[offset + 2]) << ","
+           << static_cast<int>(image.pixels[offset + 3]) << ")";
     return stream.str();
 }
 
@@ -205,70 +233,101 @@ public:
 
     void setup(GLContext& context) override {
         (void)context;
-        glDebugMessageCallback(&bootstrapDebugCallback, nullptr);
-        glViewport(0, 0, framebufferSize().width, framebufferSize().height);
-        glScissor(0, 0, framebufferSize().width, framebufferSize().height);
-        glDepthRange(0.0, 1.0);
-        glDepthRangef(0.0f, 1.0f);
-        glClearDepth(0.875);
-        glClearStencil(3);
-        glEnable(GL_DEPTH_TEST);
-        (void)glIsEnabled(GL_DEPTH_TEST);
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_SCISSOR_TEST);
-        glDisable(GL_SCISSOR_TEST);
-        glBlendColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glBlendFunc(GL_ONE, GL_ZERO);
-        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
-        glBlendEquation(GL_FUNC_ADD);
-        glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glDepthFunc(GL_LESS);
-        glDepthMask(GL_TRUE);
-        glStencilFunc(GL_ALWAYS, 0, ~0u);
-        glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, ~0u);
-        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        glStencilOpSeparate(GL_FRONT_AND_BACK, GL_KEEP, GL_KEEP, GL_KEEP);
-        glStencilMask(~0u);
-        glStencilMaskSeparate(GL_FRONT_AND_BACK, ~0u);
-        glCullFace(GL_BACK);
-        glFrontFace(GL_CCW);
-        glPolygonOffset(0.0f, 0.0f);
-        glLineWidth(1.0f);
-        glPointSize(1.0f);
-        glHint(GL_FRAGMENT_SHADER_DERIVATIVE_HINT, GL_DONT_CARE);
+        auto& gl = Runtime::shared().dispatch();
+        gl.glDebugMessageCallback(&bootstrapDebugCallback, nullptr);
+        gl.glViewport(0, 0, framebufferSize().width, framebufferSize().height);
+        gl.glScissor(0, 0, framebufferSize().width, framebufferSize().height);
+        gl.glDepthRange(0.0, 1.0);
+        gl.glDepthRangef(0.0f, 1.0f);
+        gl.glClearDepth(0.875);
+        gl.glClearStencil(3);
+        gl.glEnable(GL_DEPTH_TEST);
+        (void)gl.glIsEnabled(GL_DEPTH_TEST);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glEnable(GL_SCISSOR_TEST);
+        gl.glDisable(GL_SCISSOR_TEST);
+        gl.glBlendColor(0.0f, 0.0f, 0.0f, 0.0f);
+        gl.glBlendFunc(GL_ONE, GL_ZERO);
+        gl.glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+        gl.glBlendEquation(GL_FUNC_ADD);
+        gl.glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+        gl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        gl.glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        gl.glDepthFunc(GL_LESS);
+        gl.glDepthMask(GL_TRUE);
+        gl.glStencilFunc(GL_ALWAYS, 0, ~0u);
+        gl.glStencilFuncSeparate(GL_FRONT_AND_BACK, GL_ALWAYS, 0, ~0u);
+        gl.glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        gl.glStencilOpSeparate(GL_FRONT_AND_BACK, GL_KEEP, GL_KEEP, GL_KEEP);
+        gl.glStencilMask(~0u);
+        gl.glStencilMaskSeparate(GL_FRONT_AND_BACK, ~0u);
+        gl.glCullFace(GL_BACK);
+        gl.glFrontFace(GL_CCW);
+        gl.glPolygonOffset(0.0f, 0.0f);
+        gl.glLineWidth(1.0f);
+        gl.glPointSize(1.0f);
+        gl.glHint(GL_FRAGMENT_SHADER_DERIVATIVE_HINT, GL_DONT_CARE);
+        gl.glEnable(GL_DEBUG_OUTPUT);
+        gl.glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
+        gl.glDebugMessageInsert(
+            GL_DEBUG_SOURCE_APPLICATION,
+            GL_DEBUG_TYPE_MARKER,
+            42,
+            GL_DEBUG_SEVERITY_NOTIFICATION,
+            -1,
+            "phase-a debug marker"
+        );
+        GLenum debugSources[1] = {};
+        GLenum debugTypes[1] = {};
+        GLuint debugIds[1] = {};
+        GLenum debugSeverities[1] = {};
+        GLsizei debugLengths[1] = {};
+        GLchar debugLog[128] = {};
+        (void)gl.glGetDebugMessageLog(1, sizeof(debugLog), debugSources, debugTypes, debugIds, debugSeverities, debugLengths, debugLog);
+        gl.glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 77, -1, "phase-a group");
+        gl.glPopDebugGroup();
+        gl.glObjectLabel(GL_BUFFER, 7, -1, "phase-a buffer");
+        GLsizei labelLength = 0;
+        GLchar labelBuffer[64] = {};
+        gl.glGetObjectLabel(GL_BUFFER, 7, sizeof(labelBuffer), &labelLength, labelBuffer);
+        int pointerLabelTarget = 0;
+        gl.glObjectPtrLabel(&pointerLabelTarget, -1, "phase-a pointer");
+        gl.glGetObjectPtrLabel(&pointerLabelTarget, sizeof(labelBuffer), &labelLength, labelBuffer);
+        void* callbackPointer = nullptr;
+        gl.glGetPointerv(GL_DEBUG_CALLBACK_FUNCTION, &callbackPointer);
+        gl.glDisable(GL_DEBUG_OUTPUT);
 
         GLint maxTextureSize = 0;
-        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
+        gl.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
         (void)maxTextureSize;
         GLint scissorBox[4] = {};
-        glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
+        gl.glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
         (void)scissorBox;
         GLint64 maxElementIndex = 0;
-        glGetInteger64v(GL_MAX_ELEMENT_INDEX, &maxElementIndex);
+        gl.glGetInteger64v(GL_MAX_ELEMENT_INDEX, &maxElementIndex);
         (void)maxElementIndex;
         GLfloat maxSamples = 0.0f;
-        glGetFloatv(GL_MAX_SAMPLES, &maxSamples);
+        gl.glGetFloatv(GL_MAX_SAMPLES, &maxSamples);
         (void)maxSamples;
         GLboolean depthWriteMask = GL_FALSE;
-        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWriteMask);
+        gl.glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWriteMask);
         (void)depthWriteMask;
         GLdouble depthRange[2] = {};
-        glGetDoublev(GL_DEPTH_RANGE, depthRange);
+        gl.glGetDoublev(GL_DEPTH_RANGE, depthRange);
         (void)depthRange;
-        glEnable(static_cast<GLenum>(0xffffffffu));
-        (void)glGetError();
-        glGetIntegerv(static_cast<GLenum>(0xffffffffu), &maxTextureSize);
-        (void)glGetError();
-        (void)glGetString(GL_VERSION);
+        gl.glEnable(static_cast<GLenum>(0xffffffffu));
+        (void)gl.glGetError();
+        gl.glGetIntegerv(static_cast<GLenum>(0xffffffffu), &maxTextureSize);
+        (void)gl.glGetError();
+        (void)gl.glGetString(GL_VERSION);
     }
 
     void render(GLContext& context) override {
         (void)context;
-        glClearColor(0.18f, 0.25f, 0.41f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-        glFlush();
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.18f, 0.25f, 0.41f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        gl.glFlush();
     }
 };
 
@@ -303,8 +362,9 @@ TestResult runScene(Scene& scene) {
     scene.render(*context);
 
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(size.width) * static_cast<std::size_t>(size.height) * 4);
-    glReadPixels(0, 0, size.width, size.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    const GLenum readbackError = glGetError();
+    auto& gl = Runtime::shared().dispatch();
+    gl.glReadPixels(0, 0, size.width, size.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    const GLenum readbackError = gl.glGetError();
     if (readbackError != GL_NO_ERROR) {
         result.status = "failed";
         result.message = "glReadPixels returned GL error " + std::to_string(readbackError) + ".";
@@ -357,6 +417,10 @@ TestResult runScene(Scene& scene) {
                     + goldenPath.string()
                     + ", actual="
                     + actualPath.string()
+                    + ", "
+                    + pixelSummary("goldenCenter", *expected)
+                    + ", "
+                    + pixelSummary("actualCenter", actual)
                     + ").";
             }
         }

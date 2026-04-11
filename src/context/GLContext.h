@@ -58,6 +58,25 @@ public:
 
     void setDebugCallback(GLDEBUGPROC callback, const void* userParam);
     void emitDebugMessage(GLenum source, GLenum type, GLuint id, GLenum severity, std::string_view message);
+    void setDebugMessageControl(GLenum source, GLenum type, GLenum severity, GLsizei count, const GLuint* ids, GLboolean enabled);
+    void insertDebugMessage(GLenum source, GLenum type, GLuint id, GLenum severity, std::string_view message);
+    GLuint getDebugMessageLog(
+        GLuint count,
+        GLsizei bufSize,
+        GLenum* sources,
+        GLenum* types,
+        GLuint* ids,
+        GLenum* severities,
+        GLsizei* lengths,
+        GLchar* messageLog
+    );
+    void pushDebugGroup(GLenum source, GLuint id, std::string_view message);
+    bool popDebugGroup();
+    void setObjectLabel(GLenum identifier, GLuint name, std::string_view label);
+    void getObjectLabel(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei* length, GLchar* label);
+    void setObjectPtrLabel(const void* ptr, std::string_view label);
+    void getObjectPtrLabel(const void* ptr, GLsizei bufSize, GLsizei* length, GLchar* label);
+    bool getPointer(GLenum pname, void** params);
 
     void pushError(GLenum error);
     GLenum popError();

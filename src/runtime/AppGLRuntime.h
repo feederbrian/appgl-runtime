@@ -55,7 +55,17 @@ void APIENTRY glPointSize(GLfloat size);
 void APIENTRY glHint(GLenum target, GLenum mode);
 const GLubyte* APIENTRY glGetString(GLenum name);
 GLenum APIENTRY glGetError(void);
+void APIENTRY glDebugMessageControl(GLenum source, GLenum type, GLenum severity, GLsizei count, const GLuint* ids, GLboolean enabled);
+void APIENTRY glDebugMessageInsert(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* buf);
 void APIENTRY glDebugMessageCallback(GLDEBUGPROC callback, const void* userParam);
+GLuint APIENTRY glGetDebugMessageLog(GLuint count, GLsizei bufSize, GLenum* sources, GLenum* types, GLuint* ids, GLenum* severities, GLsizei* lengths, GLchar* messageLog);
+void APIENTRY glPushDebugGroup(GLenum source, GLuint id, GLsizei length, const GLchar* message);
+void APIENTRY glPopDebugGroup(void);
+void APIENTRY glObjectLabel(GLenum identifier, GLuint name, GLsizei length, const GLchar* label);
+void APIENTRY glGetObjectLabel(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei* length, GLchar* label);
+void APIENTRY glObjectPtrLabel(const void* ptr, GLsizei length, const GLchar* label);
+void APIENTRY glGetObjectPtrLabel(const void* ptr, GLsizei bufSize, GLsizei* length, GLchar* label);
+void APIENTRY glGetPointerv(GLenum pname, void** params);
 }  // namespace impl
 
 class Runtime {

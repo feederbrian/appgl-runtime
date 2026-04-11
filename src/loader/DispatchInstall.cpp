@@ -46,7 +46,17 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glHint = &impl::glHint;
     dispatch.glGetString = &impl::glGetString;
     dispatch.glGetError = &impl::glGetError;
+    dispatch.glDebugMessageControl = &impl::glDebugMessageControl;
+    dispatch.glDebugMessageInsert = &impl::glDebugMessageInsert;
     dispatch.glDebugMessageCallback = &impl::glDebugMessageCallback;
+    dispatch.glGetDebugMessageLog = &impl::glGetDebugMessageLog;
+    dispatch.glPushDebugGroup = &impl::glPushDebugGroup;
+    dispatch.glPopDebugGroup = &impl::glPopDebugGroup;
+    dispatch.glObjectLabel = &impl::glObjectLabel;
+    dispatch.glGetObjectLabel = &impl::glGetObjectLabel;
+    dispatch.glObjectPtrLabel = &impl::glObjectPtrLabel;
+    dispatch.glGetObjectPtrLabel = &impl::glGetObjectPtrLabel;
+    dispatch.glGetPointerv = &impl::glGetPointerv;
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glClear, "Bootstrap Metal clear path is live.");
@@ -89,7 +99,17 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glHint, "Hint-state tracking is live.");
     coverage.markImplemented(FunctionId::glGetString, "Bootstrap identity reporting is live.");
     coverage.markImplemented(FunctionId::glGetError, "Bootstrap per-context error FIFO is live.");
-    coverage.markImplemented(FunctionId::glDebugMessageCallback, "Bootstrap debug callback plumbing is live.");
+    coverage.markImplemented(FunctionId::glDebugMessageControl, "Debug message filtering is live.");
+    coverage.markImplemented(FunctionId::glDebugMessageInsert, "Debug message insertion is live.");
+    coverage.markImplemented(FunctionId::glDebugMessageCallback, "Debug callback plumbing is live.");
+    coverage.markImplemented(FunctionId::glGetDebugMessageLog, "Debug message log retrieval is live.");
+    coverage.markImplemented(FunctionId::glPushDebugGroup, "Debug group push is live.");
+    coverage.markImplemented(FunctionId::glPopDebugGroup, "Debug group pop is live.");
+    coverage.markImplemented(FunctionId::glObjectLabel, "Debug object labels are live.");
+    coverage.markImplemented(FunctionId::glGetObjectLabel, "Debug object-label queries are live.");
+    coverage.markImplemented(FunctionId::glObjectPtrLabel, "Debug pointer labels are live.");
+    coverage.markImplemented(FunctionId::glGetObjectPtrLabel, "Debug pointer-label queries are live.");
+    coverage.markImplemented(FunctionId::glGetPointerv, "Debug pointer queries are live.");
 }
 
 }  // namespace appgl

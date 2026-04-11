@@ -144,6 +144,10 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_RENDERBUFFER_SIZE] = maxTextureSize;
     integerLimits_[GL_MAX_VIEWPORT_DIMS] = maxViewportDimension;
     integerLimits_[GL_MAX_ELEMENT_INDEX] = std::min<GLint64>(maxBufferLength / 4, 0x7fffffff);
+    integerLimits_[GL_MAX_DEBUG_MESSAGE_LENGTH] = 1024;
+    integerLimits_[GL_MAX_DEBUG_LOGGED_MESSAGES] = 64;
+    integerLimits_[GL_MAX_DEBUG_GROUP_STACK_DEPTH] = 64;
+    integerLimits_[GL_MAX_LABEL_LENGTH] = 1024;
 }
 
 void GLCapabilities::initializeExtensions() {

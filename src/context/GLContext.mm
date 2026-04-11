@@ -8,9 +8,77 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace appgl {
+namespace {
+
+constexpr std::size_t kMaxDebugMessages = 64;
+constexpr std::size_t kMaxDebugMessageLength = 1024;
+constexpr std::size_t kMaxDebugGroupDepth = 64;
+
+struct DebugMessageRecord {
+    GLenum source = GL_DEBUG_SOURCE_APPLICATION;
+    GLenum type = GL_DEBUG_TYPE_OTHER;
+    GLuint id = 0;
+    GLenum severity = GL_DEBUG_SEVERITY_NOTIFICATION;
+    std::string message;
+};
+
+struct DebugControlRule {
+    GLenum source = GL_DONT_CARE;
+    GLenum type = GL_DONT_CARE;
+    GLenum severity = GL_DONT_CARE;
+    std::unordered_set<GLuint> ids;
+    bool hasIds = false;
+    bool enabled = true;
+};
+
+std::uint64_t objectLabelKey(GLenum identifier, GLuint name) {
+    return (static_cast<std::uint64_t>(identifier) << 32u) | static_cast<std::uint64_t>(name);
+}
+
+bool matchesDebugField(GLenum rule, GLenum value) {
+    return rule == GL_DONT_CARE || rule == value;
+}
+
+bool debugRuleMatches(const DebugControlRule& rule, const DebugMessageRecord& message) {
+    if (!matchesDebugField(rule.source, message.source)
+        || !matchesDebugField(rule.type, message.type)
+        || !matchesDebugField(rule.severity, message.severity)) {
+        return false;
+    }
+    return !rule.hasIds || rule.ids.contains(message.id);
+}
+
+std::string trimDebugMessage(std::string_view message) {
+    const std::size_t maxPayload = kMaxDebugMessageLength > 0 ? kMaxDebugMessageLength - 1 : 0;
+    const std::size_t count = std::min(message.size(), maxPayload);
+    return std::string(message.substr(0, count));
+}
+
+void copyLabelString(std::string_view value, GLsizei bufSize, GLsizei* length, GLchar* label) {
+    if (length != nullptr) {
+        *length = static_cast<GLsizei>(value.size());
+    }
+    if (label == nullptr || bufSize <= 0) {
+        return;
+    }
+
+    const std::size_t writable = static_cast<std::size_t>(bufSize - 1);
+    const std::size_t copied = std::min(value.size(), writable);
+    if (copied > 0) {
+        std::memcpy(label, value.data(), copied);
+    }
+    label[copied] = '\0';
+}
+
+}  // namespace
 
 struct GLContext::Impl {
     Impl(void* rawLayer, GLsizei initialWidth, GLsizei initialHeight, bool offscreen) {
@@ -74,6 +142,38 @@ struct GLContext::Impl {
         }
     }
 
+    bool debugMessageEnabled(const DebugMessageRecord& message) const {
+        for (auto cursor = debugControlRules.rbegin(); cursor != debugControlRules.rend(); ++cursor) {
+            if (debugRuleMatches(*cursor, message)) {
+                return cursor->enabled;
+            }
+        }
+        return true;
+    }
+
+    void enqueueDebugMessage(DebugMessageRecord message) {
+        if (!debugMessageEnabled(message)) {
+            return;
+        }
+        message.message = trimDebugMessage(message.message);
+        debugMessages.push_back(message);
+        while (debugMessages.size() > kMaxDebugMessages) {
+            debugMessages.pop_front();
+        }
+
+        if (debugCallback != nullptr) {
+            debugCallback(
+                message.source,
+                message.type,
+                message.id,
+                message.severity,
+                static_cast<GLsizei>(message.message.size()),
+                message.message.c_str(),
+                debugUserParam
+            );
+        }
+    }
+
     CAMetalLayer* layer = nil;
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> commandQueue = nil;
@@ -89,6 +189,11 @@ struct GLContext::Impl {
     GLsizei viewportHeight = 720;
     GLDEBUGPROC debugCallback = nullptr;
     const void* debugUserParam = nullptr;
+    std::deque<DebugMessageRecord> debugMessages;
+    std::vector<DebugControlRule> debugControlRules;
+    std::vector<DebugMessageRecord> debugGroupStack;
+    std::unordered_map<std::uint64_t, std::string> objectLabels;
+    std::unordered_map<const void*, std::string> pointerLabels;
     std::deque<GLenum> errors;
     std::string vendorString = "AppGL";
     std::string rendererString = "AppGL on Metal";
@@ -239,6 +344,14 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = integerValue != 0 ? GL_TRUE : GL_FALSE;
+        return true;
+    }
     if (impl_->state->queryBoolean(pname, data)) {
         return true;
     }
@@ -259,6 +372,16 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (pname == GL_DEBUG_GROUP_STACK_DEPTH) {
+        *data = static_cast<GLint>(impl_->debugGroupStack.size());
+        return true;
+    }
+    if (pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
+        *data = impl_->debugMessages.empty()
+            ? 0
+            : static_cast<GLint>(impl_->debugMessages.front().message.size() + 1);
+        return true;
+    }
     if (impl_->state->queryInteger(pname, data)) {
         return true;
     }
@@ -273,6 +396,14 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
     if (data == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLint64>(integerValue);
+        return true;
     }
     if (impl_->state->queryInteger64(pname, data)) {
         return true;
@@ -289,6 +420,14 @@ bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLfloat>(integerValue);
+        return true;
+    }
     if (impl_->state->queryFloat(pname, data)) {
         return true;
     }
@@ -303,6 +442,14 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
     if (data == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    if (pname == GL_DEBUG_GROUP_STACK_DEPTH || pname == GL_DEBUG_NEXT_LOGGED_MESSAGE_LENGTH) {
+        GLint integerValue = 0;
+        if (!queryInteger(pname, &integerValue)) {
+            return false;
+        }
+        *data = static_cast<GLdouble>(integerValue);
+        return true;
     }
     if (impl_->state->queryDouble(pname, data)) {
         return true;
@@ -343,19 +490,164 @@ void GLContext::emitDebugMessage(
     GLenum severity,
     std::string_view message
 ) {
-    if (impl_->debugCallback == nullptr) {
+    impl_->enqueueDebugMessage({source, type, id, severity, std::string(message)});
+}
+
+void GLContext::setDebugMessageControl(
+    GLenum source,
+    GLenum type,
+    GLenum severity,
+    GLsizei count,
+    const GLuint* ids,
+    GLboolean enabled
+) {
+    DebugControlRule rule;
+    rule.source = source;
+    rule.type = type;
+    rule.severity = severity;
+    rule.enabled = enabled == GL_TRUE;
+    rule.hasIds = count > 0;
+    for (GLsizei index = 0; index < count; ++index) {
+        rule.ids.insert(ids[index]);
+    }
+    impl_->debugControlRules.push_back(std::move(rule));
+}
+
+void GLContext::insertDebugMessage(
+    GLenum source,
+    GLenum type,
+    GLuint id,
+    GLenum severity,
+    std::string_view message
+) {
+    emitDebugMessage(source, type, id, severity, message);
+}
+
+GLuint GLContext::getDebugMessageLog(
+    GLuint count,
+    GLsizei bufSize,
+    GLenum* sources,
+    GLenum* types,
+    GLuint* ids,
+    GLenum* severities,
+    GLsizei* lengths,
+    GLchar* messageLog
+) {
+    if (bufSize < 0) {
+        pushError(GL_INVALID_VALUE);
+        return 0;
+    }
+
+    GLuint delivered = 0;
+    GLsizei usedBytes = 0;
+    while (delivered < count && !impl_->debugMessages.empty()) {
+        const DebugMessageRecord& message = impl_->debugMessages.front();
+        const GLsizei requiredBytes = static_cast<GLsizei>(message.message.size() + 1);
+        if (messageLog != nullptr && usedBytes + requiredBytes > bufSize) {
+            break;
+        }
+
+        if (sources != nullptr) {
+            sources[delivered] = message.source;
+        }
+        if (types != nullptr) {
+            types[delivered] = message.type;
+        }
+        if (ids != nullptr) {
+            ids[delivered] = message.id;
+        }
+        if (severities != nullptr) {
+            severities[delivered] = message.severity;
+        }
+        if (lengths != nullptr) {
+            lengths[delivered] = requiredBytes;
+        }
+        if (messageLog != nullptr) {
+            std::memcpy(messageLog + usedBytes, message.message.c_str(), static_cast<std::size_t>(requiredBytes));
+            usedBytes += requiredBytes;
+        }
+
+        impl_->debugMessages.pop_front();
+        ++delivered;
+    }
+    return delivered;
+}
+
+void GLContext::pushDebugGroup(GLenum source, GLuint id, std::string_view message) {
+    if (impl_->debugGroupStack.size() >= kMaxDebugGroupDepth) {
+        pushError(GL_STACK_OVERFLOW);
         return;
     }
-    const std::string stableMessage(message);
-    impl_->debugCallback(
-        source,
-        type,
-        id,
-        severity,
-        static_cast<GLsizei>(stableMessage.size()),
-        stableMessage.c_str(),
-        impl_->debugUserParam
-    );
+    DebugMessageRecord record{source, GL_DEBUG_TYPE_PUSH_GROUP, id, GL_DEBUG_SEVERITY_NOTIFICATION, std::string(message)};
+    impl_->debugGroupStack.push_back(record);
+    impl_->enqueueDebugMessage(record);
+}
+
+bool GLContext::popDebugGroup() {
+    if (impl_->debugGroupStack.empty()) {
+        pushError(GL_STACK_UNDERFLOW);
+        return false;
+    }
+    DebugMessageRecord record = impl_->debugGroupStack.back();
+    impl_->debugGroupStack.pop_back();
+    record.type = GL_DEBUG_TYPE_POP_GROUP;
+    impl_->enqueueDebugMessage(std::move(record));
+    return true;
+}
+
+void GLContext::setObjectLabel(GLenum identifier, GLuint name, std::string_view label) {
+    const std::uint64_t key = objectLabelKey(identifier, name);
+    if (label.empty()) {
+        impl_->objectLabels.erase(key);
+        return;
+    }
+    impl_->objectLabels[key] = trimDebugMessage(label);
+}
+
+void GLContext::getObjectLabel(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei* length, GLchar* label) {
+    if (bufSize < 0) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    const auto found = impl_->objectLabels.find(objectLabelKey(identifier, name));
+    const std::string_view value = found == impl_->objectLabels.end() ? std::string_view{} : std::string_view(found->second);
+    copyLabelString(value, bufSize, length, label);
+}
+
+void GLContext::setObjectPtrLabel(const void* ptr, std::string_view label) {
+    if (label.empty()) {
+        impl_->pointerLabels.erase(ptr);
+        return;
+    }
+    impl_->pointerLabels[ptr] = trimDebugMessage(label);
+}
+
+void GLContext::getObjectPtrLabel(const void* ptr, GLsizei bufSize, GLsizei* length, GLchar* label) {
+    if (bufSize < 0) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    const auto found = impl_->pointerLabels.find(ptr);
+    const std::string_view value = found == impl_->pointerLabels.end() ? std::string_view{} : std::string_view(found->second);
+    copyLabelString(value, bufSize, length, label);
+}
+
+bool GLContext::getPointer(GLenum pname, void** params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    switch (pname) {
+        case GL_DEBUG_CALLBACK_FUNCTION:
+            *params = reinterpret_cast<void*>(impl_->debugCallback);
+            return true;
+        case GL_DEBUG_CALLBACK_USER_PARAM:
+            *params = const_cast<void*>(impl_->debugUserParam);
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
 }
 
 void GLContext::pushError(GLenum error) {
