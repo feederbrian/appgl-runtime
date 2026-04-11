@@ -18,6 +18,7 @@ constexpr const char* kPhaseADebugTestId = "phase-a.debug";
 constexpr const char* kPhaseABufferTestId = "phase-a.buffers";
 constexpr const char* kPhaseAVertexInputTestId = "phase-a.vertex-input";
 constexpr const char* kPhaseATextureTestId = "phase-a.textures";
+constexpr const char* kPhaseAFramebufferTestId = "phase-a.framebuffers";
 constexpr GLuint kPhaseAMaxDrawBuffers = 8;
 constexpr GLuint kPhaseAMaxIndexedBufferBindings = 32;
 constexpr GLuint kPhaseAMaxTextureUnits = 32;
@@ -550,6 +551,85 @@ bool isValidPixelStoreValue(GLenum pname, GLint value) {
         default:
             return value >= 0;
     }
+}
+
+bool isValidFramebufferTarget(GLenum target) {
+    return target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER || target == GL_READ_FRAMEBUFFER;
+}
+
+bool isValidRenderbufferTarget(GLenum target) {
+    return target == GL_RENDERBUFFER;
+}
+
+bool isValidRenderbufferFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_RGB:
+        case GL_RGBA:
+        case GL_RGB8:
+        case GL_RGBA8:
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_COMPONENT16:
+        case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32:
+        case GL_DEPTH_COMPONENT32F:
+        case GL_STENCIL_INDEX:
+        case GL_STENCIL_INDEX8:
+        case GL_DEPTH_STENCIL:
+        case GL_DEPTH24_STENCIL8:
+        case GL_DEPTH32F_STENCIL8:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidRenderbufferParameterPname(GLenum pname) {
+    switch (pname) {
+        case GL_RENDERBUFFER_WIDTH:
+        case GL_RENDERBUFFER_HEIGHT:
+        case GL_RENDERBUFFER_INTERNAL_FORMAT:
+        case GL_RENDERBUFFER_RED_SIZE:
+        case GL_RENDERBUFFER_GREEN_SIZE:
+        case GL_RENDERBUFFER_BLUE_SIZE:
+        case GL_RENDERBUFFER_ALPHA_SIZE:
+        case GL_RENDERBUFFER_DEPTH_SIZE:
+        case GL_RENDERBUFFER_STENCIL_SIZE:
+        case GL_RENDERBUFFER_SAMPLES:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidFramebufferAttachment(GLenum attachment) {
+    return (attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + kPhaseAMaxDrawBuffers)
+        || attachment == GL_DEPTH_ATTACHMENT
+        || attachment == GL_STENCIL_ATTACHMENT
+        || attachment == GL_DEPTH_STENCIL_ATTACHMENT;
+}
+
+bool isValidFramebufferAttachmentPname(GLenum pname) {
+    switch (pname) {
+        case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+        case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+        case GL_FRAMEBUFFER_ATTACHMENT_LAYERED:
+        case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+        case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+        case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+        case GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+        case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+        case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void markFramebufferFunction(FunctionId id, std::string_view note) {
+    Runtime::shared().coverageStore().markSmokeTested(id, kPhaseAFramebufferTestId, note);
+    Runtime::shared().refreshCurrentContextClaimedVersion();
 }
 
 void markTextureFunction(FunctionId id, std::string_view note) {
@@ -1797,6 +1877,312 @@ void APIENTRY glPixelStoref(GLenum pname, GLfloat param) {
     }
     glPixelStorei(pname, static_cast<GLint>(param));
     Runtime::shared().coverageStore().markSmokeTested(FunctionId::glPixelStoref, kPhaseATextureTestId, "Float pixel-store values route through the integer pixel-store state.");
+}
+
+void APIENTRY glDrawBuffer(GLenum buffer) {
+    auto* context = requireCurrentContext("glDrawBuffer");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->drawBuffer(buffer)) {
+        markFramebufferFunction(FunctionId::glDrawBuffer, "Single draw-buffer state is tracked for default and user framebuffers.");
+        Runtime::shared().recordBootstrapTrace("glDrawBuffer(" + std::to_string(buffer) + ")");
+    }
+}
+
+void APIENTRY glDrawBuffers(GLsizei n, const GLenum* buffers) {
+    auto* context = requireCurrentContext("glDrawBuffers");
+    if (context == nullptr) {
+        return;
+    }
+    if (n > static_cast<GLsizei>(kPhaseAMaxDrawBuffers)) {
+        recordValidationError(context, "glDrawBuffers", GL_INVALID_VALUE, "draw-buffer count exceeds Phase A limit");
+        return;
+    }
+    if (context->drawBuffers(n, buffers)) {
+        markFramebufferFunction(FunctionId::glDrawBuffers, "MRT draw-buffer state is tracked up to the Phase A limit.");
+        Runtime::shared().recordBootstrapTrace("glDrawBuffers(" + std::to_string(n) + ")");
+    }
+}
+
+void APIENTRY glReadBuffer(GLenum buffer) {
+    auto* context = requireCurrentContext("glReadBuffer");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->readBuffer(buffer)) {
+        markFramebufferFunction(FunctionId::glReadBuffer, "Read-buffer state is tracked for default and user framebuffers.");
+        Runtime::shared().recordBootstrapTrace("glReadBuffer(" + std::to_string(buffer) + ")");
+    }
+}
+
+void APIENTRY glGenRenderbuffers(GLsizei n, GLuint* renderbuffers) {
+    auto* context = requireCurrentContext("glGenRenderbuffers");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->genRenderbuffers(n, renderbuffers)) {
+        markFramebufferFunction(FunctionId::glGenRenderbuffers, "Renderbuffer names are generated in the object store.");
+        Runtime::shared().recordBootstrapTrace("glGenRenderbuffers(" + std::to_string(n) + ")");
+    }
+}
+
+void APIENTRY glDeleteRenderbuffers(GLsizei n, const GLuint* renderbuffers) {
+    auto* context = requireCurrentContext("glDeleteRenderbuffers");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->deleteRenderbuffers(n, renderbuffers)) {
+        markFramebufferFunction(FunctionId::glDeleteRenderbuffers, "Renderbuffer deletion clears stale bindings and framebuffer attachments.");
+        Runtime::shared().recordBootstrapTrace("glDeleteRenderbuffers(" + std::to_string(n) + ")");
+    }
+}
+
+GLboolean APIENTRY glIsRenderbuffer(GLuint renderbuffer) {
+    auto* context = requireCurrentContext("glIsRenderbuffer");
+    if (context == nullptr) {
+        return GL_FALSE;
+    }
+    markFramebufferFunction(FunctionId::glIsRenderbuffer, "Renderbuffer object existence queries are live.");
+    Runtime::shared().recordBootstrapTrace("glIsRenderbuffer(" + std::to_string(renderbuffer) + ")");
+    return context->isRenderbuffer(renderbuffer) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glBindRenderbuffer(GLenum target, GLuint renderbuffer) {
+    auto* context = requireCurrentContext("glBindRenderbuffer");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidRenderbufferTarget(target)) {
+        recordValidationError(context, "glBindRenderbuffer", GL_INVALID_ENUM, "target must be GL_RENDERBUFFER");
+        return;
+    }
+    if (context->bindRenderbuffer(target, renderbuffer)) {
+        markFramebufferFunction(FunctionId::glBindRenderbuffer, "Renderbuffer binding state is tracked.");
+        Runtime::shared().recordBootstrapTrace("glBindRenderbuffer(" + std::to_string(renderbuffer) + ")");
+    }
+}
+
+void APIENTRY glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) {
+    auto* context = requireCurrentContext("glRenderbufferStorage");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidRenderbufferTarget(target)) {
+        recordValidationError(context, "glRenderbufferStorage", GL_INVALID_ENUM, "target must be GL_RENDERBUFFER");
+        return;
+    }
+    if (!isValidRenderbufferFormat(internalformat)) {
+        recordValidationError(context, "glRenderbufferStorage", GL_INVALID_ENUM, "internal format is outside the Phase A renderbuffer set");
+        return;
+    }
+    if (context->renderbufferStorage(target, internalformat, width, height, 0)) {
+        markFramebufferFunction(FunctionId::glRenderbufferStorage, "Renderbuffer storage is backed by a Metal render-target texture.");
+        Runtime::shared().recordBootstrapTrace("glRenderbufferStorage(" + std::to_string(width) + "x" + std::to_string(height) + ")");
+    }
+}
+
+void APIENTRY glRenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height) {
+    auto* context = requireCurrentContext("glRenderbufferStorageMultisample");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidRenderbufferTarget(target)) {
+        recordValidationError(context, "glRenderbufferStorageMultisample", GL_INVALID_ENUM, "target must be GL_RENDERBUFFER");
+        return;
+    }
+    if (!isValidRenderbufferFormat(internalformat)) {
+        recordValidationError(context, "glRenderbufferStorageMultisample", GL_INVALID_ENUM, "internal format is outside the Phase A renderbuffer set");
+        return;
+    }
+    if (context->renderbufferStorage(target, internalformat, width, height, samples)) {
+        markFramebufferFunction(FunctionId::glRenderbufferStorageMultisample, "Multisample renderbuffer metadata and Metal storage are tracked.");
+        Runtime::shared().recordBootstrapTrace("glRenderbufferStorageMultisample(" + std::to_string(samples) + ")");
+    }
+}
+
+void APIENTRY glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint* params) {
+    auto* context = requireCurrentContext("glGetRenderbufferParameteriv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidRenderbufferTarget(target) || !isValidRenderbufferParameterPname(pname)) {
+        recordValidationError(context, "glGetRenderbufferParameteriv", GL_INVALID_ENUM, "target or pname is invalid");
+        return;
+    }
+    if (context->getRenderbufferParameterInteger(target, pname, params)) {
+        markFramebufferFunction(FunctionId::glGetRenderbufferParameteriv, "Renderbuffer storage parameters are queryable.");
+        Runtime::shared().recordBootstrapTrace("glGetRenderbufferParameteriv(" + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGenFramebuffers(GLsizei n, GLuint* framebuffers) {
+    auto* context = requireCurrentContext("glGenFramebuffers");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->genFramebuffers(n, framebuffers)) {
+        markFramebufferFunction(FunctionId::glGenFramebuffers, "Framebuffer names are generated in the object store.");
+        Runtime::shared().recordBootstrapTrace("glGenFramebuffers(" + std::to_string(n) + ")");
+    }
+}
+
+void APIENTRY glDeleteFramebuffers(GLsizei n, const GLuint* framebuffers) {
+    auto* context = requireCurrentContext("glDeleteFramebuffers");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->deleteFramebuffers(n, framebuffers)) {
+        markFramebufferFunction(FunctionId::glDeleteFramebuffers, "Framebuffer deletion clears stale read/draw bindings.");
+        Runtime::shared().recordBootstrapTrace("glDeleteFramebuffers(" + std::to_string(n) + ")");
+    }
+}
+
+GLboolean APIENTRY glIsFramebuffer(GLuint framebuffer) {
+    auto* context = requireCurrentContext("glIsFramebuffer");
+    if (context == nullptr) {
+        return GL_FALSE;
+    }
+    markFramebufferFunction(FunctionId::glIsFramebuffer, "Framebuffer object existence queries are live.");
+    Runtime::shared().recordBootstrapTrace("glIsFramebuffer(" + std::to_string(framebuffer) + ")");
+    return context->isFramebuffer(framebuffer) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glBindFramebuffer(GLenum target, GLuint framebuffer) {
+    auto* context = requireCurrentContext("glBindFramebuffer");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferTarget(target)) {
+        recordValidationError(context, "glBindFramebuffer", GL_INVALID_ENUM, "target must be GL_FRAMEBUFFER, GL_DRAW_FRAMEBUFFER, or GL_READ_FRAMEBUFFER");
+        return;
+    }
+    if (context->bindFramebuffer(target, framebuffer)) {
+        markFramebufferFunction(FunctionId::glBindFramebuffer, "Framebuffer read/draw bindings are tracked.");
+        Runtime::shared().recordBootstrapTrace("glBindFramebuffer(" + std::to_string(target) + ", " + std::to_string(framebuffer) + ")");
+    }
+}
+
+GLenum APIENTRY glCheckFramebufferStatus(GLenum target) {
+    auto* context = requireCurrentContext("glCheckFramebufferStatus");
+    if (context == nullptr) {
+        return 0;
+    }
+    if (!isValidFramebufferTarget(target)) {
+        recordValidationError(context, "glCheckFramebufferStatus", GL_INVALID_ENUM, "target must be a framebuffer binding point");
+        return 0;
+    }
+    const GLenum status = context->checkFramebufferStatus(target);
+    if (status != 0) {
+        markFramebufferFunction(FunctionId::glCheckFramebufferStatus, "Framebuffer completeness checks are live.");
+        Runtime::shared().recordBootstrapTrace("glCheckFramebufferStatus(" + std::to_string(status) + ")");
+    }
+    return status;
+}
+
+void APIENTRY glFramebufferTexture1D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    auto* context = requireCurrentContext("glFramebufferTexture1D");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferAttachment(attachment) || textarget != GL_TEXTURE_1D) {
+        recordValidationError(context, "glFramebufferTexture1D", GL_INVALID_ENUM, "attachment or texture target is invalid");
+        return;
+    }
+    if (context->framebufferTexture(target, attachment, textarget, texture, level, 0, false)) {
+        markFramebufferFunction(FunctionId::glFramebufferTexture1D, "1D texture framebuffer attachments are tracked.");
+        Runtime::shared().recordBootstrapTrace("glFramebufferTexture1D(" + std::to_string(attachment) + ")");
+    }
+}
+
+void APIENTRY glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
+    auto* context = requireCurrentContext("glFramebufferTexture2D");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferAttachment(attachment) || textarget != GL_TEXTURE_2D) {
+        recordValidationError(context, "glFramebufferTexture2D", GL_INVALID_ENUM, "attachment or texture target is invalid");
+        return;
+    }
+    if (context->framebufferTexture(target, attachment, textarget, texture, level, 0, false)) {
+        markFramebufferFunction(FunctionId::glFramebufferTexture2D, "2D texture framebuffer attachments are tracked.");
+        Runtime::shared().recordBootstrapTrace("glFramebufferTexture2D(" + std::to_string(attachment) + ")");
+    }
+}
+
+void APIENTRY glFramebufferTexture3D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset) {
+    auto* context = requireCurrentContext("glFramebufferTexture3D");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferAttachment(attachment) || textarget != GL_TEXTURE_3D) {
+        recordValidationError(context, "glFramebufferTexture3D", GL_INVALID_ENUM, "attachment or texture target is invalid");
+        return;
+    }
+    if (context->framebufferTexture(target, attachment, textarget, texture, level, zoffset, false)) {
+        markFramebufferFunction(FunctionId::glFramebufferTexture3D, "3D texture framebuffer layer attachments are tracked.");
+        Runtime::shared().recordBootstrapTrace("glFramebufferTexture3D(" + std::to_string(attachment) + ")");
+    }
+}
+
+void APIENTRY glFramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level) {
+    auto* context = requireCurrentContext("glFramebufferTexture");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferAttachment(attachment)) {
+        recordValidationError(context, "glFramebufferTexture", GL_INVALID_ENUM, "attachment is invalid");
+        return;
+    }
+    if (context->framebufferTexture(target, attachment, 0, texture, level, 0, true)) {
+        markFramebufferFunction(FunctionId::glFramebufferTexture, "Whole-texture framebuffer attachments are tracked.");
+        Runtime::shared().recordBootstrapTrace("glFramebufferTexture(" + std::to_string(attachment) + ")");
+    }
+}
+
+void APIENTRY glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
+    auto* context = requireCurrentContext("glFramebufferTextureLayer");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferAttachment(attachment)) {
+        recordValidationError(context, "glFramebufferTextureLayer", GL_INVALID_ENUM, "attachment is invalid");
+        return;
+    }
+    if (context->framebufferTexture(target, attachment, 0, texture, level, layer, false)) {
+        markFramebufferFunction(FunctionId::glFramebufferTextureLayer, "Layered texture framebuffer attachments are tracked.");
+        Runtime::shared().recordBootstrapTrace("glFramebufferTextureLayer(" + std::to_string(attachment) + ")");
+    }
+}
+
+void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
+    auto* context = requireCurrentContext("glFramebufferRenderbuffer");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferAttachment(attachment) || renderbuffertarget != GL_RENDERBUFFER) {
+        recordValidationError(context, "glFramebufferRenderbuffer", GL_INVALID_ENUM, "attachment or renderbuffer target is invalid");
+        return;
+    }
+    if (context->framebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer)) {
+        markFramebufferFunction(FunctionId::glFramebufferRenderbuffer, "Renderbuffer framebuffer attachments are tracked.");
+        Runtime::shared().recordBootstrapTrace("glFramebufferRenderbuffer(" + std::to_string(attachment) + ")");
+    }
+}
+
+void APIENTRY glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint* params) {
+    auto* context = requireCurrentContext("glGetFramebufferAttachmentParameteriv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferAttachment(attachment) || !isValidFramebufferAttachmentPname(pname)) {
+        recordValidationError(context, "glGetFramebufferAttachmentParameteriv", GL_INVALID_ENUM, "attachment or pname is invalid");
+        return;
+    }
+    if (context->getFramebufferAttachmentParameterInteger(target, attachment, pname, params)) {
+        markFramebufferFunction(FunctionId::glGetFramebufferAttachmentParameteriv, "Framebuffer attachment parameters are queryable.");
+        Runtime::shared().recordBootstrapTrace("glGetFramebufferAttachmentParameteriv(" + std::to_string(pname) + ")");
+    }
 }
 
 void APIENTRY glGenSamplers(GLsizei count, GLuint* samplers) {

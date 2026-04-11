@@ -142,6 +142,103 @@ MTLTextureType metalTextureTypeForTarget(GLenum target) {
     }
 }
 
+id<MTLTexture> metalTextureFromRaw(void* object) {
+    if (object == nullptr) {
+        return nil;
+    }
+#if __has_feature(objc_arc)
+    return (__bridge id<MTLTexture>)object;
+#else
+    return (id<MTLTexture>)object;
+#endif
+}
+
+MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_RGB:
+        case GL_RGBA:
+        case GL_RGB8:
+        case GL_RGBA8:
+            return MTLPixelFormatRGBA8Unorm;
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_COMPONENT16:
+        case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32:
+        case GL_DEPTH_COMPONENT32F:
+            return MTLPixelFormatDepth32Float;
+        case GL_STENCIL_INDEX:
+        case GL_STENCIL_INDEX8:
+            return MTLPixelFormatStencil8;
+        case GL_DEPTH_STENCIL:
+        case GL_DEPTH24_STENCIL8:
+        case GL_DEPTH32F_STENCIL8:
+            return MTLPixelFormatDepth32Float_Stencil8;
+        default:
+            return MTLPixelFormatInvalid;
+    }
+}
+
+bool isSupportedRenderbufferFormat(GLenum internalFormat) {
+    return metalRenderbufferFormat(internalFormat) != MTLPixelFormatInvalid;
+}
+
+bool isColorAttachment(GLenum attachment) {
+    return attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + 8;
+}
+
+bool isFramebufferAttachment(GLenum attachment) {
+    return isColorAttachment(attachment)
+        || attachment == GL_DEPTH_ATTACHMENT
+        || attachment == GL_STENCIL_ATTACHMENT
+        || attachment == GL_DEPTH_STENCIL_ATTACHMENT;
+}
+
+bool isFramebufferColorBuffer(GLenum buffer) {
+    return buffer >= GL_COLOR_ATTACHMENT0 && buffer < GL_COLOR_ATTACHMENT0 + 8;
+}
+
+bool isDefaultFramebufferBuffer(GLenum buffer) {
+    return buffer == GL_NONE
+        || buffer == GL_FRONT
+        || buffer == GL_BACK
+        || buffer == GL_FRONT_AND_BACK
+        || buffer == GL_FRONT_LEFT
+        || buffer == GL_BACK_LEFT;
+}
+
+bool isDepthFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_COMPONENT16:
+        case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32:
+        case GL_DEPTH_COMPONENT32F:
+        case GL_DEPTH_STENCIL:
+        case GL_DEPTH24_STENCIL8:
+        case GL_DEPTH32F_STENCIL8:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isStencilFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_STENCIL_INDEX:
+        case GL_STENCIL_INDEX8:
+        case GL_DEPTH_STENCIL:
+        case GL_DEPTH24_STENCIL8:
+        case GL_DEPTH32F_STENCIL8:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isColorFormat(GLenum internalFormat) {
+    return !isDepthFormat(internalFormat) && !isStencilFormat(internalFormat);
+}
+
 bool isTextureTarget(GLenum target) {
     return target == GL_TEXTURE_1D || target == GL_TEXTURE_2D || target == GL_TEXTURE_3D;
 }
@@ -188,6 +285,11 @@ std::size_t alignByteCount(std::size_t value, GLint alignment) {
 
 std::size_t safeDimension(GLsizei value) {
     return static_cast<std::size_t>(std::max<GLsizei>(value, 1));
+}
+
+std::uint8_t normalizedByte(GLfloat value) {
+    const GLfloat clamped = std::clamp(value, 0.0f, 1.0f);
+    return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
 }
 
 std::size_t rgba8ByteCount(GLsizei width, GLsizei height, GLsizei depth) {
@@ -603,6 +705,9 @@ struct GLContext::Impl {
         objects->textures().forEach([&](GLuint, GLTextureObject& texture) {
             releaseTextureStorage(texture);
         });
+        objects->renderbuffers().forEach([&](GLuint, GLRenderbufferObject& renderbuffer) {
+            releaseRenderbufferStorage(renderbuffer);
+        });
         objects->samplers().forEach([&](GLuint, GLSamplerObject& sampler) {
             releaseSamplerState(sampler);
         });
@@ -668,6 +773,19 @@ struct GLContext::Impl {
         object.metalTexture = nullptr;
         object.desc = {};
         object.levels.clear();
+    }
+
+    void releaseRenderbufferStorage(GLRenderbufferObject& object) {
+        releaseRetainedMetalObject(object.metalTexture);
+        object.metalTexture = nullptr;
+        object.internalFormat = 0;
+        object.width = 0;
+        object.height = 0;
+        object.samples = 0;
+        object.rgba8.clear();
+        object.depth32.clear();
+        object.stencil8.clear();
+        object.storageDefined = false;
     }
 
     void releaseSamplerState(GLSamplerObject& object) {
@@ -805,6 +923,52 @@ struct GLContext::Impl {
             }
         }
         object.metalTexture = transferRetainedMetalObject(texture);
+        return true;
+    }
+
+    bool replaceRenderbufferStorage(GLRenderbufferObject& object, GLenum internalFormat, GLsizei width, GLsizei height, GLsizei samples) {
+        if (width < 0 || height < 0 || samples < 0 || !isSupportedRenderbufferFormat(internalFormat)) {
+            return false;
+        }
+
+        void* retainedTexture = nullptr;
+        if (device != nil && width > 0 && height > 0) {
+            const MTLPixelFormat pixelFormat = metalRenderbufferFormat(internalFormat);
+            MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat
+                                                                                                   width:static_cast<NSUInteger>(width)
+                                                                                                  height:static_cast<NSUInteger>(height)
+                                                                                               mipmapped:NO];
+            descriptor.storageMode = MTLStorageModePrivate;
+            descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            if (samples > 0) {
+                descriptor.textureType = MTLTextureType2DMultisample;
+                descriptor.sampleCount = static_cast<NSUInteger>(samples);
+            }
+
+            id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+            if (texture == nil) {
+                return false;
+            }
+            retainedTexture = transferRetainedMetalObject(texture);
+        }
+
+        releaseRenderbufferStorage(object);
+        object.metalTexture = retainedTexture;
+        object.internalFormat = internalFormat;
+        object.width = width;
+        object.height = height;
+        object.samples = samples;
+        const std::size_t texelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        if (isColorFormat(internalFormat)) {
+            object.rgba8.assign(texelCount * 4u, 0);
+        }
+        if (isDepthFormat(internalFormat)) {
+            object.depth32.assign(texelCount, 1.0f);
+        }
+        if (isStencilFormat(internalFormat)) {
+            object.stencil8.assign(texelCount, 0);
+        }
+        object.storageDefined = true;
         return true;
     }
 
@@ -993,6 +1157,398 @@ struct GLContext::Impl {
         });
     }
 
+    void deleteTextureReferencesFromFramebuffers(GLuint texture) {
+        objects->framebuffers().forEach([&](GLuint, GLFramebufferObject& framebuffer) {
+            for (auto& [attachmentPoint, attachment] : framebuffer.attachments) {
+                (void)attachmentPoint;
+                if (attachment.kind == GLFramebufferAttachment::Kind::Texture && attachment.object == texture) {
+                    attachment = {};
+                }
+            }
+        });
+    }
+
+    void deleteRenderbufferReferencesFromFramebuffers(GLuint renderbuffer) {
+        objects->framebuffers().forEach([&](GLuint, GLFramebufferObject& framebuffer) {
+            for (auto& [attachmentPoint, attachment] : framebuffer.attachments) {
+                (void)attachmentPoint;
+                if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer && attachment.object == renderbuffer) {
+                    attachment = {};
+                }
+            }
+        });
+    }
+
+    struct AttachmentInfo {
+        bool present = false;
+        bool complete = false;
+        GLsizei width = 0;
+        GLsizei height = 0;
+        GLsizei samples = 0;
+        GLenum internalFormat = 0;
+    };
+
+    AttachmentInfo framebufferAttachmentInfo(const GLFramebufferAttachment& attachment) const {
+        AttachmentInfo info;
+        if (attachment.kind == GLFramebufferAttachment::Kind::None || attachment.object == 0) {
+            return info;
+        }
+        info.present = true;
+        if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+            const GLTextureObject* texture = objects->textures().get(attachment.object);
+            if (texture == nullptr || !texture->instantiated || attachment.level < 0) {
+                return info;
+            }
+            const auto level = texture->levels.find(attachment.level);
+            if (level == texture->levels.end() || !level->second.defined) {
+                return info;
+            }
+            info.complete = level->second.desc.width > 0 && level->second.desc.height > 0 && level->second.desc.depth > 0;
+            info.width = level->second.desc.width;
+            info.height = texture->target == GL_TEXTURE_1D ? 1 : level->second.desc.height;
+            info.samples = 0;
+            info.internalFormat = level->second.desc.internalFormat;
+            return info;
+        }
+        if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
+            if (renderbuffer == nullptr || !renderbuffer->instantiated || !renderbuffer->storageDefined) {
+                return info;
+            }
+            info.complete = renderbuffer->width > 0 && renderbuffer->height > 0;
+            info.width = renderbuffer->width;
+            info.height = renderbuffer->height;
+            info.samples = renderbuffer->samples;
+            info.internalFormat = renderbuffer->internalFormat;
+            return info;
+        }
+        return info;
+    }
+
+    GLenum framebufferStatus(const GLFramebufferObject& framebuffer) const {
+        bool hasAttachment = false;
+        bool hasDimensions = false;
+        GLsizei width = 0;
+        GLsizei height = 0;
+        GLsizei samples = 0;
+        for (const auto& [attachmentPoint, attachment] : framebuffer.attachments) {
+            (void)attachmentPoint;
+            const AttachmentInfo info = framebufferAttachmentInfo(attachment);
+            if (!info.present) {
+                continue;
+            }
+            hasAttachment = true;
+            if (!info.complete) {
+                return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            if (!hasDimensions) {
+                width = info.width;
+                height = info.height;
+                samples = info.samples;
+                hasDimensions = true;
+            } else if (width != info.width || height != info.height) {
+                return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            } else if (samples != info.samples) {
+                return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
+            }
+        }
+
+        if (!hasAttachment) {
+            return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+        }
+
+        for (GLenum buffer : framebuffer.drawBuffers) {
+            if (buffer == GL_NONE) {
+                continue;
+            }
+            const auto attachment = framebuffer.attachments.find(buffer);
+            if (attachment == framebuffer.attachments.end() || framebufferAttachmentInfo(attachment->second).present == false) {
+                return GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER;
+            }
+        }
+        if (framebuffer.readBuffer != GL_NONE) {
+            const auto attachment = framebuffer.attachments.find(framebuffer.readBuffer);
+            if (attachment == framebuffer.attachments.end() || framebufferAttachmentInfo(attachment->second).present == false) {
+                return GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER;
+            }
+        }
+        return GL_FRAMEBUFFER_COMPLETE;
+    }
+
+    GLFramebufferAttachment* framebufferAttachment(GLFramebufferObject& framebuffer, GLenum attachment) {
+        if (auto found = framebuffer.attachments.find(attachment); found != framebuffer.attachments.end()) {
+            return &found->second;
+        }
+        if (attachment == GL_DEPTH_ATTACHMENT || attachment == GL_STENCIL_ATTACHMENT) {
+            if (auto found = framebuffer.attachments.find(GL_DEPTH_STENCIL_ATTACHMENT); found != framebuffer.attachments.end()) {
+                return &found->second;
+            }
+        }
+        return nullptr;
+    }
+
+    const GLFramebufferAttachment* framebufferAttachment(const GLFramebufferObject& framebuffer, GLenum attachment) const {
+        if (auto found = framebuffer.attachments.find(attachment); found != framebuffer.attachments.end()) {
+            return &found->second;
+        }
+        if (attachment == GL_DEPTH_ATTACHMENT || attachment == GL_STENCIL_ATTACHMENT) {
+            if (auto found = framebuffer.attachments.find(GL_DEPTH_STENCIL_ATTACHMENT); found != framebuffer.attachments.end()) {
+                return &found->second;
+            }
+        }
+        return nullptr;
+    }
+
+    bool clearColorAttachment(const GLFramebufferAttachment& attachment, const GLfloat color[4]) {
+        const std::uint8_t rgba[4] = {
+            normalizedByte(color[0]),
+            normalizedByte(color[1]),
+            normalizedByte(color[2]),
+            normalizedByte(color[3]),
+        };
+
+        if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+            GLTextureObject* texture = objects->textures().get(attachment.object);
+            if (texture == nullptr) {
+                return false;
+            }
+            auto level = texture->levels.find(attachment.level);
+            if (level == texture->levels.end() || !level->second.defined) {
+                return false;
+            }
+            GLTextureImageLevel& image = level->second;
+            const GLsizei sourceWidth = std::max<GLsizei>(image.desc.width, 1);
+            const GLsizei sourceHeight = texture->target == GL_TEXTURE_1D ? 1 : std::max<GLsizei>(image.desc.height, 1);
+            const GLsizei sourceDepth = texture->target == GL_TEXTURE_3D ? std::max<GLsizei>(image.desc.depth, 1) : 1;
+            if (image.rgba8.size() < rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth)) {
+                image.rgba8.assign(rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth), 0);
+            }
+            const GLsizei firstLayer = attachment.layered ? 0 : attachment.layer;
+            const GLsizei lastLayer = attachment.layered ? sourceDepth : firstLayer + 1;
+            if (firstLayer < 0 || firstLayer >= sourceDepth || lastLayer > sourceDepth) {
+                return false;
+            }
+            for (GLsizei z = firstLayer; z < lastLayer; ++z) {
+                for (GLsizei y = 0; y < sourceHeight; ++y) {
+                    for (GLsizei x = 0; x < sourceWidth; ++x) {
+                        const std::size_t offset =
+                            ((static_cast<std::size_t>(z) * static_cast<std::size_t>(sourceHeight)
+                                + static_cast<std::size_t>(y))
+                                * static_cast<std::size_t>(sourceWidth)
+                                + static_cast<std::size_t>(x))
+                            * 4u;
+                        std::memcpy(image.rgba8.data() + offset, rgba, 4);
+                    }
+                }
+            }
+            return replaceMetalTexture(*texture);
+        }
+
+        if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
+            if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isColorFormat(renderbuffer->internalFormat)) {
+                return false;
+            }
+            renderbuffer->rgba8.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height) * 4u, 0);
+            for (std::size_t offset = 0; offset < renderbuffer->rgba8.size(); offset += 4u) {
+                std::memcpy(renderbuffer->rgba8.data() + offset, rgba, 4);
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    bool clearDepthAttachment(const GLFramebufferAttachment& attachment, GLdouble value) {
+        const auto depth = static_cast<GLfloat>(std::clamp(value, 0.0, 1.0));
+        if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
+            return false;
+        }
+        GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
+        if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isDepthFormat(renderbuffer->internalFormat)) {
+            return false;
+        }
+        renderbuffer->depth32.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), depth);
+        return true;
+    }
+
+    bool clearStencilAttachment(const GLFramebufferAttachment& attachment, GLint value) {
+        if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
+            return false;
+        }
+        GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
+        if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isStencilFormat(renderbuffer->internalFormat)) {
+            return false;
+        }
+        renderbuffer->stencil8.assign(
+            static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height),
+            static_cast<std::uint8_t>(value & 0xff)
+        );
+        return true;
+    }
+
+    bool clearBoundFramebuffer(GLbitfield mask) {
+        const GLuint framebufferName = state->boundDrawFramebuffer();
+        GLFramebufferObject* framebuffer = objects->framebuffers().get(framebufferName);
+        if (framebufferName == 0 || framebuffer == nullptr || !framebuffer->instantiated || framebufferStatus(*framebuffer) != GL_FRAMEBUFFER_COMPLETE) {
+            return false;
+        }
+
+        if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
+            for (GLenum buffer : framebuffer->drawBuffers) {
+                if (buffer == GL_NONE) {
+                    continue;
+                }
+                const GLFramebufferAttachment* attachment = framebufferAttachment(*framebuffer, buffer);
+                if (attachment != nullptr && !clearColorAttachment(*attachment, state->clearState().color)) {
+                    return false;
+                }
+            }
+        }
+        if ((mask & GL_DEPTH_BUFFER_BIT) != 0) {
+            const GLFramebufferAttachment* attachment = framebufferAttachment(*framebuffer, GL_DEPTH_ATTACHMENT);
+            if (attachment != nullptr && !clearDepthAttachment(*attachment, state->clearState().depth)) {
+                return false;
+            }
+        }
+        if ((mask & GL_STENCIL_BUFFER_BIT) != 0) {
+            const GLFramebufferAttachment* attachment = framebufferAttachment(*framebuffer, GL_STENCIL_ATTACHMENT);
+            if (attachment != nullptr && !clearStencilAttachment(*attachment, state->clearState().stencil)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool readColorAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
+        const std::uint8_t* source = nullptr;
+        GLsizei sourceWidth = 0;
+        GLsizei sourceHeight = 0;
+        GLsizei sourceLayer = 0;
+
+        if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+            const GLTextureObject* texture = objects->textures().get(attachment.object);
+            if (texture == nullptr) {
+                return false;
+            }
+            const auto level = texture->levels.find(attachment.level);
+            if (level == texture->levels.end() || !level->second.defined || level->second.rgba8.empty()) {
+                return false;
+            }
+            source = level->second.rgba8.data();
+            sourceWidth = std::max<GLsizei>(level->second.desc.width, 1);
+            sourceHeight = texture->target == GL_TEXTURE_1D ? 1 : std::max<GLsizei>(level->second.desc.height, 1);
+            sourceLayer = texture->target == GL_TEXTURE_3D ? attachment.layer : 0;
+            if (sourceLayer < 0 || sourceLayer >= std::max<GLsizei>(level->second.desc.depth, 1)) {
+                return false;
+            }
+        } else if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
+            if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->rgba8.empty()) {
+                return false;
+            }
+            source = renderbuffer->rgba8.data();
+            sourceWidth = renderbuffer->width;
+            sourceHeight = renderbuffer->height;
+        } else {
+            return false;
+        }
+
+        auto* out = static_cast<std::uint8_t*>(pixels);
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint srcY = y + row;
+                const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
+                if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
+                    std::memset(out + dstOffset, 0, 4);
+                    continue;
+                }
+                const std::size_t srcOffset =
+                    ((static_cast<std::size_t>(sourceLayer) * static_cast<std::size_t>(sourceHeight)
+                        + static_cast<std::size_t>(srcY))
+                        * static_cast<std::size_t>(sourceWidth)
+                        + static_cast<std::size_t>(srcX))
+                    * 4u;
+                std::memcpy(out + dstOffset, source + srcOffset, 4);
+            }
+        }
+        return true;
+    }
+
+    bool readDepthAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
+        if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
+            return false;
+        }
+        const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
+        if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->depth32.empty()) {
+            return false;
+        }
+        auto* out = static_cast<GLfloat*>(pixels);
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint srcY = y + row;
+                const std::size_t dstOffset = static_cast<std::size_t>(row * width + col);
+                if (srcX < 0 || srcY < 0 || srcX >= renderbuffer->width || srcY >= renderbuffer->height) {
+                    out[dstOffset] = 0.0f;
+                    continue;
+                }
+                out[dstOffset] = renderbuffer->depth32[static_cast<std::size_t>(srcY) * static_cast<std::size_t>(renderbuffer->width) + static_cast<std::size_t>(srcX)];
+            }
+        }
+        return true;
+    }
+
+    bool readStencilAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
+        if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
+            return false;
+        }
+        const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
+        if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->stencil8.empty()) {
+            return false;
+        }
+        auto* out = static_cast<std::uint8_t*>(pixels);
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint srcY = y + row;
+                const std::size_t dstOffset = static_cast<std::size_t>(row * width + col);
+                if (srcX < 0 || srcY < 0 || srcX >= renderbuffer->width || srcY >= renderbuffer->height) {
+                    out[dstOffset] = 0;
+                    continue;
+                }
+                out[dstOffset] = renderbuffer->stencil8[static_cast<std::size_t>(srcY) * static_cast<std::size_t>(renderbuffer->width) + static_cast<std::size_t>(srcX)];
+            }
+        }
+        return true;
+    }
+
+    bool readFramebufferPixels(GLenum format, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
+        const GLuint framebufferName = state->boundReadFramebuffer();
+        const GLFramebufferObject* framebuffer = objects->framebuffers().get(framebufferName);
+        if (framebufferName == 0 || framebuffer == nullptr || !framebuffer->instantiated || framebufferStatus(*framebuffer) != GL_FRAMEBUFFER_COMPLETE) {
+            return false;
+        }
+
+        if (format == GL_RGBA) {
+            if (framebuffer->readBuffer == GL_NONE) {
+                return false;
+            }
+            const GLFramebufferAttachment* attachment = framebufferAttachment(*framebuffer, framebuffer->readBuffer);
+            return attachment != nullptr && readColorAttachmentPixels(*attachment, x, y, width, height, pixels);
+        }
+        if (format == GL_DEPTH_COMPONENT) {
+            const GLFramebufferAttachment* attachment = framebufferAttachment(*framebuffer, GL_DEPTH_ATTACHMENT);
+            return attachment != nullptr && readDepthAttachmentPixels(*attachment, x, y, width, height, pixels);
+        }
+        if (format == GL_STENCIL_INDEX) {
+            const GLFramebufferAttachment* attachment = framebufferAttachment(*framebuffer, GL_STENCIL_ATTACHMENT);
+            return attachment != nullptr && readStencilAttachmentPixels(*attachment, x, y, width, height, pixels);
+        }
+        return false;
+    }
+
     void encodePendingWork() {
         if (!pendingClear || frameGraph == nullptr) {
             return;
@@ -1101,6 +1657,12 @@ void GLContext::setClearStencil(GLint stencil) {
 }
 
 void GLContext::clear(GLbitfield mask) {
+    if (impl_->state->boundDrawFramebuffer() != 0) {
+        if (!impl_->clearBoundFramebuffer(mask)) {
+            pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+        }
+        return;
+    }
     impl_->pendingMask = mask;
     impl_->pendingClear = (mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0;
 }
@@ -1196,23 +1758,45 @@ void GLContext::swapBuffers() {
     impl_->presentPendingWork();
 }
 
-void GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels) {
+bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels) {
     if (pixels == nullptr) {
         pushError(GL_INVALID_VALUE);
-        return;
+        return false;
     }
     if (width < 0 || height < 0) {
         pushError(GL_INVALID_VALUE);
-        return;
+        return false;
     }
+    if (width == 0 || height == 0) {
+        return true;
+    }
+
+    if (impl_->state->boundReadFramebuffer() != 0) {
+        const bool supportedReadback =
+            (format == GL_RGBA && type == GL_UNSIGNED_BYTE)
+            || (format == GL_DEPTH_COMPONENT && type == GL_FLOAT)
+            || (format == GL_STENCIL_INDEX && type == GL_UNSIGNED_BYTE);
+        if (!supportedReadback) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+        if (!impl_->readFramebufferPixels(format, x, y, width, height, pixels)) {
+            pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+            return false;
+        }
+        return true;
+    }
+
     if (format != GL_RGBA || type != GL_UNSIGNED_BYTE) {
         pushError(GL_INVALID_ENUM);
-        return;
+        return false;
     }
     impl_->encodePendingWork();
     if (impl_->frameGraph == nullptr || !impl_->frameGraph->copyRGBA8Pixels(x, y, width, height, pixels)) {
         pushError(GL_INVALID_OPERATION);
+        return false;
     }
+    return true;
 }
 
 bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
@@ -1256,6 +1840,19 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         *data = impl_->debugMessages.empty()
             ? 0
             : static_cast<GLint>(impl_->debugMessages.front().message.size() + 1);
+        return true;
+    }
+    if (pname == GL_READ_BUFFER) {
+        const GLuint framebufferName = impl_->state->boundReadFramebuffer();
+        const GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
+        *data = static_cast<GLint>(framebufferName != 0 && framebuffer != nullptr ? framebuffer->readBuffer : impl_->state->readBuffer());
+        return true;
+    }
+    if (pname == GL_DRAW_BUFFER || (pname >= GL_DRAW_BUFFER0 && pname <= GL_DRAW_BUFFER7)) {
+        const GLuint index = pname == GL_DRAW_BUFFER ? 0u : static_cast<GLuint>(pname - GL_DRAW_BUFFER0);
+        const GLuint framebufferName = impl_->state->boundDrawFramebuffer();
+        const GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
+        *data = static_cast<GLint>(framebufferName != 0 && framebuffer != nullptr ? framebuffer->drawBuffers[index] : impl_->state->drawBuffer(index));
         return true;
     }
     if (impl_->state->queryInteger(pname, data)) {
@@ -2195,6 +2792,7 @@ bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
         }
         if (impl_->objects->textures().erase(name)) {
             impl_->state->deleteTextureBindings(name);
+            impl_->deleteTextureReferencesFromFramebuffers(name);
             impl_->objects->deferDelete("texture " + std::to_string(name));
         }
     }
@@ -2481,6 +3079,494 @@ bool GLContext::generateMipmap(GLenum target) {
 
 bool GLContext::pixelStore(GLenum pname, GLint value) {
     impl_->state->setPixelStore(pname, value);
+    return true;
+}
+
+bool GLContext::genRenderbuffers(GLsizei count, GLuint* renderbuffers) {
+    if (count < 0 || (count > 0 && renderbuffers == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        renderbuffers[index] = impl_->objects->renderbuffers().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::deleteRenderbuffers(GLsizei count, const GLuint* renderbuffers) {
+    if (count < 0 || (count > 0 && renderbuffers == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        const GLuint name = renderbuffers[index];
+        if (name == 0) {
+            continue;
+        }
+        if (GLRenderbufferObject* object = impl_->objects->renderbuffers().get(name); object != nullptr) {
+            impl_->releaseRenderbufferStorage(*object);
+        }
+        if (impl_->objects->renderbuffers().erase(name)) {
+            impl_->state->deleteRenderbufferBinding(name);
+            impl_->deleteRenderbufferReferencesFromFramebuffers(name);
+            impl_->objects->deferDelete("renderbuffer " + std::to_string(name));
+        }
+    }
+    return true;
+}
+
+bool GLContext::isRenderbuffer(GLuint renderbuffer) const {
+    const GLRenderbufferObject* object = impl_->objects->renderbuffers().get(renderbuffer);
+    return object != nullptr && object->instantiated;
+}
+
+bool GLContext::bindRenderbuffer(GLenum target, GLuint renderbuffer) {
+    if (target != GL_RENDERBUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (renderbuffer != 0) {
+        GLRenderbufferObject* object = impl_->objects->renderbuffers().get(renderbuffer);
+        if (object == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        object->instantiated = true;
+    }
+    impl_->state->bindRenderbuffer(renderbuffer);
+    return true;
+}
+
+bool GLContext::renderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height, GLsizei samples) {
+    if (target != GL_RENDERBUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (width < 0 || height < 0 || samples < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!isSupportedRenderbufferFormat(internalformat)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    const GLuint name = impl_->state->boundRenderbuffer();
+    GLRenderbufferObject* object = impl_->objects->renderbuffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!impl_->replaceRenderbufferStorage(*object, internalformat, width, height, samples)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::getRenderbufferParameterInteger(GLenum target, GLenum pname, GLint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (target != GL_RENDERBUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    const GLuint name = impl_->state->boundRenderbuffer();
+    const GLRenderbufferObject* object = impl_->objects->renderbuffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    const auto componentSize = [&](GLenum component) -> GLint {
+        if (!object->storageDefined) {
+            return 0;
+        }
+        switch (component) {
+            case GL_RED:
+            case GL_GREEN:
+            case GL_BLUE:
+                return isColorFormat(object->internalFormat) ? 8 : 0;
+            case GL_ALPHA:
+                return object->internalFormat == GL_RGBA || object->internalFormat == GL_RGBA8 ? 8 : 0;
+            case GL_DEPTH:
+                if (object->internalFormat == GL_DEPTH_COMPONENT16) {
+                    return 16;
+                }
+                if (object->internalFormat == GL_DEPTH_COMPONENT24 || object->internalFormat == GL_DEPTH24_STENCIL8) {
+                    return 24;
+                }
+                return isDepthFormat(object->internalFormat) ? 32 : 0;
+            case GL_STENCIL:
+                return isStencilFormat(object->internalFormat) ? 8 : 0;
+            default:
+                return 0;
+        }
+    };
+
+    switch (pname) {
+        case GL_RENDERBUFFER_WIDTH:
+            params[0] = object->width;
+            return true;
+        case GL_RENDERBUFFER_HEIGHT:
+            params[0] = object->height;
+            return true;
+        case GL_RENDERBUFFER_INTERNAL_FORMAT:
+            params[0] = static_cast<GLint>(object->internalFormat);
+            return true;
+        case GL_RENDERBUFFER_RED_SIZE:
+            params[0] = componentSize(GL_RED);
+            return true;
+        case GL_RENDERBUFFER_GREEN_SIZE:
+            params[0] = componentSize(GL_GREEN);
+            return true;
+        case GL_RENDERBUFFER_BLUE_SIZE:
+            params[0] = componentSize(GL_BLUE);
+            return true;
+        case GL_RENDERBUFFER_ALPHA_SIZE:
+            params[0] = componentSize(GL_ALPHA);
+            return true;
+        case GL_RENDERBUFFER_DEPTH_SIZE:
+            params[0] = componentSize(GL_DEPTH);
+            return true;
+        case GL_RENDERBUFFER_STENCIL_SIZE:
+            params[0] = componentSize(GL_STENCIL);
+            return true;
+        case GL_RENDERBUFFER_SAMPLES:
+            params[0] = object->samples;
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::genFramebuffers(GLsizei count, GLuint* framebuffers) {
+    if (count < 0 || (count > 0 && framebuffers == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        framebuffers[index] = impl_->objects->framebuffers().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::deleteFramebuffers(GLsizei count, const GLuint* framebuffers) {
+    if (count < 0 || (count > 0 && framebuffers == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        const GLuint name = framebuffers[index];
+        if (name == 0) {
+            continue;
+        }
+        if (impl_->objects->framebuffers().erase(name)) {
+            impl_->state->deleteFramebufferBindings(name);
+            impl_->objects->deferDelete("framebuffer " + std::to_string(name));
+        }
+    }
+    return true;
+}
+
+bool GLContext::isFramebuffer(GLuint framebuffer) const {
+    const GLFramebufferObject* object = impl_->objects->framebuffers().get(framebuffer);
+    return object != nullptr && object->instantiated;
+}
+
+bool GLContext::bindFramebuffer(GLenum target, GLuint framebuffer) {
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (framebuffer != 0) {
+        GLFramebufferObject* object = impl_->objects->framebuffers().get(framebuffer);
+        if (object == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        object->instantiated = true;
+    }
+    if (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER) {
+        impl_->state->bindDrawFramebuffer(framebuffer);
+    }
+    if (target == GL_FRAMEBUFFER || target == GL_READ_FRAMEBUFFER) {
+        impl_->state->bindReadFramebuffer(framebuffer);
+    }
+    return true;
+}
+
+GLenum GLContext::checkFramebufferStatus(GLenum target) const {
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
+        const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
+        return 0;
+    }
+    const GLuint name = target == GL_READ_FRAMEBUFFER
+        ? impl_->state->boundReadFramebuffer()
+        : impl_->state->boundDrawFramebuffer();
+    if (name == 0) {
+        return impl_->frameGraph != nullptr && impl_->frameGraph->hasValidAttachments()
+            ? GL_FRAMEBUFFER_COMPLETE
+            : GL_FRAMEBUFFER_UNDEFINED;
+    }
+    const GLFramebufferObject* object = impl_->objects->framebuffers().get(name);
+    if (object == nullptr || !object->instantiated) {
+        const_cast<GLContext*>(this)->pushError(GL_INVALID_OPERATION);
+        return 0;
+    }
+    return impl_->framebufferStatus(*object);
+}
+
+bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint layer, bool layered) {
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!isFramebufferAttachment(attachment) || (textarget != 0 && !isTextureTarget(textarget))) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (level < 0 || layer < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint framebufferName = target == GL_READ_FRAMEBUFFER
+        ? impl_->state->boundReadFramebuffer()
+        : impl_->state->boundDrawFramebuffer();
+    GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
+    if (framebufferName == 0 || framebuffer == nullptr || !framebuffer->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    if (texture == 0) {
+        framebuffer->attachments.erase(attachment);
+        return true;
+    }
+
+    const GLTextureObject* textureObject = impl_->objects->textures().get(texture);
+    if (textureObject == nullptr || !textureObject->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (textarget != 0 && textureObject->target != textarget) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (attachment == GL_DEPTH_ATTACHMENT && !isDepthFormat(textureObject->desc.internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (attachment == GL_STENCIL_ATTACHMENT && !isStencilFormat(textureObject->desc.internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (isColorAttachment(attachment) && !isColorFormat(textureObject->desc.internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    GLFramebufferAttachment stored;
+    stored.kind = GLFramebufferAttachment::Kind::Texture;
+    stored.object = texture;
+    stored.level = level;
+    stored.layer = layer;
+    stored.textureTarget = textarget == 0 ? textureObject->target : textarget;
+    stored.layered = layered;
+    framebuffer->attachments[attachment] = stored;
+    return true;
+}
+
+bool GLContext::framebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!isFramebufferAttachment(attachment) || renderbuffertarget != GL_RENDERBUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    const GLuint framebufferName = target == GL_READ_FRAMEBUFFER
+        ? impl_->state->boundReadFramebuffer()
+        : impl_->state->boundDrawFramebuffer();
+    GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
+    if (framebufferName == 0 || framebuffer == nullptr || !framebuffer->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    if (renderbuffer == 0) {
+        framebuffer->attachments.erase(attachment);
+        return true;
+    }
+
+    const GLRenderbufferObject* renderbufferObject = impl_->objects->renderbuffers().get(renderbuffer);
+    if (renderbufferObject == nullptr || !renderbufferObject->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (attachment == GL_DEPTH_ATTACHMENT && renderbufferObject->storageDefined && !isDepthFormat(renderbufferObject->internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (attachment == GL_STENCIL_ATTACHMENT && renderbufferObject->storageDefined && !isStencilFormat(renderbufferObject->internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (isColorAttachment(attachment) && renderbufferObject->storageDefined && !isColorFormat(renderbufferObject->internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    GLFramebufferAttachment stored;
+    stored.kind = GLFramebufferAttachment::Kind::Renderbuffer;
+    stored.object = renderbuffer;
+    framebuffer->attachments[attachment] = stored;
+    return true;
+}
+
+bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum attachment, GLenum pname, GLint* params) const {
+    if (params == nullptr) {
+        const_cast<GLContext*>(this)->pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
+        const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!isFramebufferAttachment(attachment)) {
+        const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
+        return false;
+    }
+
+    const GLuint framebufferName = target == GL_READ_FRAMEBUFFER
+        ? impl_->state->boundReadFramebuffer()
+        : impl_->state->boundDrawFramebuffer();
+    if (framebufferName == 0) {
+        switch (pname) {
+            case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+                params[0] = GL_FRAMEBUFFER_DEFAULT;
+                return true;
+            case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+                params[0] = 0;
+                return true;
+            default:
+                const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
+                return false;
+        }
+    }
+
+    const GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
+    if (framebuffer == nullptr || !framebuffer->instantiated) {
+        const_cast<GLContext*>(this)->pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const auto found = framebuffer->attachments.find(attachment);
+    const GLFramebufferAttachment attachmentState = found == framebuffer->attachments.end() ? GLFramebufferAttachment{} : found->second;
+    const auto attachmentInfo = impl_->framebufferAttachmentInfo(attachmentState);
+
+    switch (pname) {
+        case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+            params[0] = attachmentState.kind == GLFramebufferAttachment::Kind::Texture
+                ? GL_TEXTURE
+                : (attachmentState.kind == GLFramebufferAttachment::Kind::Renderbuffer ? GL_RENDERBUFFER : GL_NONE);
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+            params[0] = static_cast<GLint>(attachmentState.object);
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+            params[0] = attachmentState.kind == GLFramebufferAttachment::Kind::Texture ? attachmentState.level : 0;
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+            params[0] = attachmentState.kind == GLFramebufferAttachment::Kind::Texture ? attachmentState.layer : 0;
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_LAYERED:
+            params[0] = attachmentState.layered ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+            params[0] = attachmentInfo.complete && isColorFormat(attachmentInfo.internalFormat) ? 8 : 0;
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+            params[0] = attachmentInfo.complete && isColorFormat(attachmentInfo.internalFormat) ? 8 : 0;
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+            params[0] = attachmentInfo.complete && isColorFormat(attachmentInfo.internalFormat) ? 8 : 0;
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+            params[0] = attachmentInfo.complete && (attachmentInfo.internalFormat == GL_RGBA || attachmentInfo.internalFormat == GL_RGBA8) ? 8 : 0;
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+            params[0] = attachmentInfo.complete && isDepthFormat(attachmentInfo.internalFormat) ? 24 : 0;
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+            params[0] = attachmentInfo.complete && isStencilFormat(attachmentInfo.internalFormat) ? 8 : 0;
+            return true;
+        default:
+            const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::drawBuffer(GLenum buffer) {
+    return drawBuffers(1, &buffer);
+}
+
+bool GLContext::drawBuffers(GLsizei count, const GLenum* buffers) {
+    if (count < 0 || count > 8 || (count > 0 && buffers == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint framebufferName = impl_->state->boundDrawFramebuffer();
+    if (framebufferName == 0) {
+        for (GLsizei index = 0; index < count; ++index) {
+            if (!isDefaultFramebufferBuffer(buffers[index])) {
+                pushError(GL_INVALID_ENUM);
+                return false;
+            }
+        }
+        return impl_->state->setDrawBuffers(count, buffers);
+    }
+
+    GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
+    if (framebuffer == nullptr || !framebuffer->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    framebuffer->drawBuffers.fill(GL_NONE);
+    for (GLsizei index = 0; index < count; ++index) {
+        if (buffers[index] != GL_NONE && !isFramebufferColorBuffer(buffers[index])) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+        framebuffer->drawBuffers[static_cast<std::size_t>(index)] = buffers[index];
+    }
+    return true;
+}
+
+bool GLContext::readBuffer(GLenum buffer) {
+    const GLuint framebufferName = impl_->state->boundReadFramebuffer();
+    if (framebufferName == 0) {
+        if (!isDefaultFramebufferBuffer(buffer)) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+        return impl_->state->setReadBuffer(buffer);
+    }
+
+    GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
+    if (framebuffer == nullptr || !framebuffer->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (buffer != GL_NONE && !isFramebufferColorBuffer(buffer)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    framebuffer->readBuffer = buffer;
     return true;
 }
 

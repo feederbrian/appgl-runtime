@@ -177,6 +177,9 @@ public:
     void bindTexture(GLenum target, GLuint object);
     GLuint boundTexture(GLenum target) const;
     void deleteTextureBindings(GLuint object);
+    void bindRenderbuffer(GLuint object);
+    GLuint boundRenderbuffer() const;
+    void deleteRenderbufferBinding(GLuint object);
 
     void setActiveTextureUnit(GLuint unit);
     GLuint activeTextureUnit() const;
@@ -193,6 +196,11 @@ public:
     GLuint boundDrawFramebuffer() const;
     void bindReadFramebuffer(GLuint framebuffer);
     GLuint boundReadFramebuffer() const;
+    void deleteFramebufferBindings(GLuint framebuffer);
+    bool setDrawBuffers(GLsizei count, const GLenum* buffers);
+    GLenum drawBuffer(GLuint index) const;
+    bool setReadBuffer(GLenum buffer);
+    GLenum readBuffer() const;
     void useProgram(GLuint program);
     GLuint currentProgram() const;
 
@@ -223,6 +231,9 @@ private:
     std::array<GLTextureUnitState, kMaxTextureUnits> textureUnits_;
     GLPixelStoreState pixelStore_;
     GLuint activeTextureUnit_ = 0;
+    GLuint renderbuffer_ = 0;
+    std::array<GLenum, kMaxDrawBuffers> drawBuffers_;
+    GLenum readBuffer_ = GL_BACK;
     GLuint currentProgram_ = 0;
     GLuint currentVertexArray_ = 0;
     GLuint drawFramebuffer_ = 0;

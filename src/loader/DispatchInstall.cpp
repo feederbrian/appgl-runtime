@@ -6,6 +6,7 @@ namespace appgl {
 
 void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage) {
     dispatch.glClearColor = &impl::glClearColor;
+    dispatch.glDrawBuffer = &impl::glDrawBuffer;
     dispatch.glClear = &impl::glClear;
     dispatch.glClearDepth = &impl::glClearDepth;
     dispatch.glClearStencil = &impl::glClearStencil;
@@ -70,6 +71,27 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGenerateMipmap = &impl::glGenerateMipmap;
     dispatch.glPixelStorei = &impl::glPixelStorei;
     dispatch.glPixelStoref = &impl::glPixelStoref;
+    dispatch.glReadBuffer = &impl::glReadBuffer;
+    dispatch.glDrawBuffers = &impl::glDrawBuffers;
+    dispatch.glIsRenderbuffer = &impl::glIsRenderbuffer;
+    dispatch.glBindRenderbuffer = &impl::glBindRenderbuffer;
+    dispatch.glDeleteRenderbuffers = &impl::glDeleteRenderbuffers;
+    dispatch.glGenRenderbuffers = &impl::glGenRenderbuffers;
+    dispatch.glRenderbufferStorage = &impl::glRenderbufferStorage;
+    dispatch.glGetRenderbufferParameteriv = &impl::glGetRenderbufferParameteriv;
+    dispatch.glGenFramebuffers = &impl::glGenFramebuffers;
+    dispatch.glDeleteFramebuffers = &impl::glDeleteFramebuffers;
+    dispatch.glIsFramebuffer = &impl::glIsFramebuffer;
+    dispatch.glBindFramebuffer = &impl::glBindFramebuffer;
+    dispatch.glCheckFramebufferStatus = &impl::glCheckFramebufferStatus;
+    dispatch.glFramebufferTexture1D = &impl::glFramebufferTexture1D;
+    dispatch.glFramebufferTexture2D = &impl::glFramebufferTexture2D;
+    dispatch.glFramebufferTexture3D = &impl::glFramebufferTexture3D;
+    dispatch.glFramebufferRenderbuffer = &impl::glFramebufferRenderbuffer;
+    dispatch.glGetFramebufferAttachmentParameteriv = &impl::glGetFramebufferAttachmentParameteriv;
+    dispatch.glRenderbufferStorageMultisample = &impl::glRenderbufferStorageMultisample;
+    dispatch.glFramebufferTextureLayer = &impl::glFramebufferTextureLayer;
+    dispatch.glFramebufferTexture = &impl::glFramebufferTexture;
     dispatch.glGenSamplers = &impl::glGenSamplers;
     dispatch.glDeleteSamplers = &impl::glDeleteSamplers;
     dispatch.glIsSampler = &impl::glIsSampler;
@@ -126,6 +148,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGetPointerv = &impl::glGetPointerv;
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
+    coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
     coverage.markImplemented(FunctionId::glClear, "Bootstrap Metal clear path is live.");
     coverage.markImplemented(FunctionId::glClearDepth, "Default framebuffer depth clear state is live.");
     coverage.markImplemented(FunctionId::glClearStencil, "Default framebuffer stencil clear state is live.");
@@ -190,6 +213,27 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glGenerateMipmap, "Texture mipmap generation is live for Phase A texture storage.");
     coverage.markImplemented(FunctionId::glPixelStorei, "Integer pixel-store state is live.");
     coverage.markImplemented(FunctionId::glPixelStoref, "Float pixel-store state is live.");
+    coverage.markImplemented(FunctionId::glReadBuffer, "Read-buffer state tracking is live.");
+    coverage.markImplemented(FunctionId::glDrawBuffers, "MRT draw-buffer state tracking is live.");
+    coverage.markImplemented(FunctionId::glIsRenderbuffer, "Renderbuffer object query is live.");
+    coverage.markImplemented(FunctionId::glBindRenderbuffer, "Renderbuffer binding is live.");
+    coverage.markImplemented(FunctionId::glDeleteRenderbuffers, "Renderbuffer deletion is live.");
+    coverage.markImplemented(FunctionId::glGenRenderbuffers, "Renderbuffer name generation is live.");
+    coverage.markImplemented(FunctionId::glRenderbufferStorage, "Renderbuffer storage allocation is live.");
+    coverage.markImplemented(FunctionId::glGetRenderbufferParameteriv, "Renderbuffer parameter query is live.");
+    coverage.markImplemented(FunctionId::glGenFramebuffers, "Framebuffer name generation is live.");
+    coverage.markImplemented(FunctionId::glDeleteFramebuffers, "Framebuffer deletion is live.");
+    coverage.markImplemented(FunctionId::glIsFramebuffer, "Framebuffer object query is live.");
+    coverage.markImplemented(FunctionId::glBindFramebuffer, "Framebuffer read/draw binding is live.");
+    coverage.markImplemented(FunctionId::glCheckFramebufferStatus, "Framebuffer completeness checks are live.");
+    coverage.markImplemented(FunctionId::glFramebufferTexture1D, "1D texture framebuffer attachments are live.");
+    coverage.markImplemented(FunctionId::glFramebufferTexture2D, "2D texture framebuffer attachments are live.");
+    coverage.markImplemented(FunctionId::glFramebufferTexture3D, "3D texture framebuffer attachments are live.");
+    coverage.markImplemented(FunctionId::glFramebufferRenderbuffer, "Renderbuffer framebuffer attachments are live.");
+    coverage.markImplemented(FunctionId::glGetFramebufferAttachmentParameteriv, "Framebuffer attachment queries are live.");
+    coverage.markImplemented(FunctionId::glRenderbufferStorageMultisample, "Multisample renderbuffer storage is live.");
+    coverage.markImplemented(FunctionId::glFramebufferTextureLayer, "Layered texture framebuffer attachments are live.");
+    coverage.markImplemented(FunctionId::glFramebufferTexture, "Whole-texture framebuffer attachments are live.");
     coverage.markImplemented(FunctionId::glGenSamplers, "Sampler name generation is live.");
     coverage.markImplemented(FunctionId::glDeleteSamplers, "Sampler deletion is live.");
     coverage.markImplemented(FunctionId::glIsSampler, "Sampler object query is live.");

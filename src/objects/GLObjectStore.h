@@ -99,7 +99,12 @@ struct GLRenderbufferObject {
     GLenum internalFormat = 0;
     GLsizei width = 0;
     GLsizei height = 0;
-    GLsizei samples = 1;
+    GLsizei samples = 0;
+    std::vector<std::uint8_t> rgba8;
+    std::vector<GLfloat> depth32;
+    std::vector<std::uint8_t> stencil8;
+    bool instantiated = false;
+    bool storageDefined = false;
 };
 
 struct GLFramebufferAttachment {
@@ -113,10 +118,15 @@ struct GLFramebufferAttachment {
     GLuint object = 0;
     GLint level = 0;
     GLint layer = 0;
+    GLenum textureTarget = 0;
+    bool layered = false;
 };
 
 struct GLFramebufferObject {
     std::unordered_map<GLenum, GLFramebufferAttachment> attachments;
+    std::array<GLenum, 8> drawBuffers = {GL_COLOR_ATTACHMENT0, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE};
+    GLenum readBuffer = GL_COLOR_ATTACHMENT0;
+    bool instantiated = false;
 };
 
 struct GLVertexAttributeState {

@@ -7,6 +7,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <vector>
 
@@ -28,6 +29,8 @@ struct MetalFrameGraph::Impl {
     void resize(GLsizei width, GLsizei height) {
         drawableWidth = width > 0 ? width : 1;
         drawableHeight = height > 0 ? height : 1;
+        headlessReadbackRGBA.clear();
+        hasHeadlessReadback = false;
         if (layer != nil) {
             layer.drawableSize = CGSizeMake(drawableWidth, drawableHeight);
         }
@@ -49,8 +52,8 @@ struct MetalFrameGraph::Impl {
         GLdouble clearDepth,
         GLint clearStencil
     ) {
-        updateReadbackMirror(mask, clearRed, clearGreen, clearBlue, clearAlpha);
         if (device == nil || commandQueue == nil) {
+            storeHeadlessClear(mask, clearRed, clearGreen, clearBlue, clearAlpha);
             return;
         }
 
@@ -66,10 +69,13 @@ struct MetalFrameGraph::Impl {
 
         currentCommandBuffer = [commandQueue commandBuffer];
         MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].loadAction = (mask & GL_COLOR_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         pass.colorAttachments[0].clearColor = MTLClearColorMake(clearRed, clearGreen, clearBlue, clearAlpha);
+        readbackSourceTexture = colorTexture;
+        readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
 
         if (depthStencilTexture != nil) {
             pass.depthAttachment.texture = depthStencilTexture;
@@ -85,6 +91,7 @@ struct MetalFrameGraph::Impl {
 
         id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         [encoder endEncoding];
+        enqueueOffscreenClearUpload(mask, clearRed, clearGreen, clearBlue, clearAlpha);
         pendingPresent = true;
     }
 
@@ -106,9 +113,12 @@ struct MetalFrameGraph::Impl {
         }
 
         MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        readbackSourceTexture = colorTexture;
+        readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
         pass.depthAttachment.texture = depthStencilTexture;
         pass.depthAttachment.loadAction = MTLLoadActionLoad;
         pass.depthAttachment.storeAction = MTLStoreActionStore;
@@ -150,6 +160,9 @@ struct MetalFrameGraph::Impl {
             [currentCommandBuffer presentDrawable:currentDrawable];
         }
         [currentCommandBuffer commit];
+        if (usesOffscreenTarget) {
+            [currentCommandBuffer waitUntilCompleted];
+        }
         invalidateTransientState();
     }
 
@@ -157,19 +170,116 @@ struct MetalFrameGraph::Impl {
         if (outPixels == nullptr || width < 0 || height < 0) {
             return false;
         }
-        ensureReadbackMirror();
+        if (width == 0 || height == 0) {
+            return true;
+        }
+        if (device == nil || commandQueue == nil) {
+            return copyHeadlessPixels(x, y, width, height, outPixels);
+        }
+        ensureDrawableResources();
+        id<MTLTexture> sourceTexture = readbackSourceTexture != nil
+            ? readbackSourceTexture
+            : (usesOffscreenTarget ? offscreenColorTexture : nil);
+        if (sourceTexture == nil) {
+            return false;
+        }
+        const bool sourceIsBGRA = sourceTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+
+        const NSUInteger sourceWidth = sourceTexture.width;
+        const NSUInteger sourceHeight = sourceTexture.height;
+        const NSUInteger packedRowBytes = sourceWidth * 4u;
+        NSUInteger readbackRowBytes = packedRowBytes;
+        const std::uint8_t* sourceBytes = nullptr;
+        std::vector<std::uint8_t> directReadback;
+        id<MTLBuffer> readbackBuffer = nil;
+
+        const auto waitForQueue = [&]() -> bool {
+            id<MTLCommandBuffer> fence = [commandQueue commandBuffer];
+            if (fence == nil) {
+                return false;
+            }
+            [fence commit];
+            [fence waitUntilCompleted];
+            return fence.status != MTLCommandBufferStatusError;
+        };
+
+        if (sourceTexture.storageMode == MTLStorageModeShared) {
+            if (currentCommandBuffer != nil) {
+                [currentCommandBuffer commit];
+                [currentCommandBuffer waitUntilCompleted];
+                if (currentCommandBuffer.status == MTLCommandBufferStatusError) {
+                    invalidateTransientState();
+                    return false;
+                }
+                invalidateTransientState();
+            } else if (!waitForQueue()) {
+                return false;
+            }
+
+            directReadback.assign(static_cast<std::size_t>(packedRowBytes * sourceHeight), 0);
+            [sourceTexture getBytes:directReadback.data()
+                        bytesPerRow:packedRowBytes
+                         fromRegion:MTLRegionMake2D(0, 0, sourceWidth, sourceHeight)
+                        mipmapLevel:0];
+            sourceBytes = directReadback.data();
+        } else {
+            readbackRowBytes = alignBytesPerRow(packedRowBytes);
+            readbackBuffer = [device newBufferWithLength:readbackRowBytes * sourceHeight
+                                                 options:MTLResourceStorageModeShared];
+            if (readbackBuffer == nil) {
+                return false;
+            }
+
+            id<MTLCommandBuffer> commandBuffer = currentCommandBuffer != nil ? currentCommandBuffer : [commandQueue commandBuffer];
+            if (commandBuffer == nil) {
+                return false;
+            }
+            id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+            [blit copyFromTexture:sourceTexture
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake(0, 0, 0)
+                       sourceSize:MTLSizeMake(sourceWidth, sourceHeight, 1)
+                         toBuffer:readbackBuffer
+                destinationOffset:0
+           destinationBytesPerRow:readbackRowBytes
+         destinationBytesPerImage:readbackRowBytes * sourceHeight];
+            [blit endEncoding];
+            const bool consumedCurrentCommandBuffer = commandBuffer == currentCommandBuffer;
+            [commandBuffer commit];
+            [commandBuffer waitUntilCompleted];
+            if (commandBuffer.status == MTLCommandBufferStatusError) {
+                if (consumedCurrentCommandBuffer) {
+                    invalidateTransientState();
+                }
+                return false;
+            }
+            if (consumedCurrentCommandBuffer) {
+                invalidateTransientState();
+            }
+            sourceBytes = static_cast<const std::uint8_t*>([readbackBuffer contents]);
+        }
+
         auto* bytes = static_cast<std::uint8_t*>(outPixels);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
                 const GLint srcX = x + col;
                 const GLint srcY = y + row;
                 const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4;
-                if (srcX < 0 || srcY < 0 || srcX >= drawableWidth || srcY >= drawableHeight) {
+                if (srcX < 0 || srcY < 0 || srcX >= static_cast<GLint>(sourceWidth) || srcY >= static_cast<GLint>(sourceHeight)) {
                     std::memset(bytes + dstOffset, 0, 4);
                     continue;
                 }
-                const std::size_t srcOffset = static_cast<std::size_t>(srcY * drawableWidth + srcX) * 4;
-                std::memcpy(bytes + dstOffset, readbackRGBA.data() + srcOffset, 4);
+                const std::size_t srcOffset = static_cast<std::size_t>(srcY) * static_cast<std::size_t>(readbackRowBytes)
+                    + static_cast<std::size_t>(srcX) * 4u;
+                if (sourceIsBGRA) {
+                    bytes[dstOffset + 0] = sourceBytes[srcOffset + 2];
+                    bytes[dstOffset + 1] = sourceBytes[srcOffset + 1];
+                    bytes[dstOffset + 2] = sourceBytes[srcOffset + 0];
+                    bytes[dstOffset + 3] = sourceBytes[srcOffset + 3];
+                } else {
+                    std::memcpy(bytes + dstOffset, sourceBytes + srcOffset, 4);
+                }
             }
         }
         return true;
@@ -229,30 +339,103 @@ private:
             colorDescriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             offscreenColorTexture = [device newTextureWithDescriptor:colorDescriptor];
         }
-        ensureReadbackMirror();
     }
 
-    void ensureReadbackMirror() {
-        const std::size_t required = static_cast<std::size_t>(std::max(drawableWidth, 1)) * static_cast<std::size_t>(std::max(drawableHeight, 1)) * 4;
-        if (readbackRGBA.size() != required) {
-            readbackRGBA.assign(required, 0);
-        }
+    NSUInteger alignBytesPerRow(NSUInteger byteCount) const {
+        constexpr NSUInteger kMetalBufferAlignment = 256;
+        return ((byteCount + kMetalBufferAlignment - 1u) / kMetalBufferAlignment) * kMetalBufferAlignment;
     }
 
-    void updateReadbackMirror(GLbitfield mask, GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
-        ensureReadbackMirror();
+    std::uint8_t normalizedByte(GLfloat value) const {
+        const GLfloat clamped = std::clamp(value, 0.0f, 1.0f);
+        return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
+    }
+
+    void storeHeadlessClear(GLbitfield mask, GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
         if ((mask & GL_COLOR_BUFFER_BIT) == 0) {
             return;
         }
 
-        const auto toByte = [](GLfloat value) {
-            const GLfloat clamped = std::clamp(value, 0.0f, 1.0f);
-            return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
+        const std::size_t width = static_cast<std::size_t>(drawableWidth > 0 ? drawableWidth : 1);
+        const std::size_t height = static_cast<std::size_t>(drawableHeight > 0 ? drawableHeight : 1);
+        headlessReadbackRGBA.assign(width * height * 4u, 0);
+        const std::uint8_t rgba[4] = {
+            normalizedByte(red),
+            normalizedByte(green),
+            normalizedByte(blue),
+            normalizedByte(alpha),
         };
-        const std::uint8_t rgba[4] = {toByte(red), toByte(green), toByte(blue), toByte(alpha)};
-        for (std::size_t offset = 0; offset < readbackRGBA.size(); offset += 4) {
-            std::memcpy(readbackRGBA.data() + offset, rgba, 4);
+        for (std::size_t offset = 0; offset < headlessReadbackRGBA.size(); offset += 4u) {
+            std::memcpy(headlessReadbackRGBA.data() + offset, rgba, 4);
         }
+        hasHeadlessReadback = true;
+    }
+
+    bool copyHeadlessPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels) const {
+        if (!hasHeadlessReadback) {
+            return false;
+        }
+        const auto sourceWidth = drawableWidth > 0 ? drawableWidth : 1;
+        const auto sourceHeight = drawableHeight > 0 ? drawableHeight : 1;
+        auto* bytes = static_cast<std::uint8_t*>(outPixels);
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint srcY = y + row;
+                const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
+                if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
+                    std::memset(bytes + dstOffset, 0, 4);
+                    continue;
+                }
+                const std::size_t srcOffset = (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(sourceWidth)
+                    + static_cast<std::size_t>(srcX)) * 4u;
+                std::memcpy(bytes + dstOffset, headlessReadbackRGBA.data() + srcOffset, 4);
+            }
+        }
+        return true;
+    }
+
+    void enqueueOffscreenClearUpload(GLbitfield mask, GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
+        if (!usesOffscreenTarget || (mask & GL_COLOR_BUFFER_BIT) == 0 || offscreenColorTexture == nil || currentCommandBuffer == nil) {
+            return;
+        }
+
+        const NSUInteger width = offscreenColorTexture.width;
+        const NSUInteger height = offscreenColorTexture.height;
+        const NSUInteger packedRowBytes = width * 4u;
+        const NSUInteger rowBytes = alignBytesPerRow(packedRowBytes);
+        id<MTLBuffer> staging = [device newBufferWithLength:rowBytes * height options:MTLResourceStorageModeShared];
+        if (staging == nil) {
+            return;
+        }
+
+        const std::uint8_t rgba[4] = {
+            normalizedByte(red),
+            normalizedByte(green),
+            normalizedByte(blue),
+            normalizedByte(alpha),
+        };
+        auto* bytes = static_cast<std::uint8_t*>([staging contents]);
+        for (NSUInteger row = 0; row < height; ++row) {
+            std::uint8_t* rowStart = bytes + row * rowBytes;
+            for (NSUInteger col = 0; col < width; ++col) {
+                std::memcpy(rowStart + col * 4u, rgba, 4);
+            }
+        }
+
+        id<MTLBlitCommandEncoder> blit = [currentCommandBuffer blitCommandEncoder];
+        [blit copyFromBuffer:staging
+                sourceOffset:0
+           sourceBytesPerRow:rowBytes
+         sourceBytesPerImage:rowBytes * height
+                  sourceSize:MTLSizeMake(width, height, 1)
+                   toTexture:offscreenColorTexture
+            destinationSlice:0
+            destinationLevel:0
+           destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        readbackSourceTexture = offscreenColorTexture;
+        readbackSourceIsBGRA = false;
     }
 
     void invalidateTransientState() {
@@ -267,14 +450,17 @@ private:
     id<MTLCommandQueue> commandQueue = nil;
     id<MTLTexture> depthStencilTexture = nil;
     id<MTLTexture> offscreenColorTexture = nil;
+    id<MTLTexture> readbackSourceTexture = nil;
     id<MTLCommandBuffer> currentCommandBuffer = nil;
     id<MTLRenderCommandEncoder> currentRenderEncoder = nil;
     id<CAMetalDrawable> currentDrawable = nil;
+    std::vector<std::uint8_t> headlessReadbackRGBA;
     GLsizei drawableWidth = 1;
     GLsizei drawableHeight = 1;
-    std::vector<std::uint8_t> readbackRGBA;
     bool usesOffscreenTarget = false;
     bool pendingPresent = false;
+    bool readbackSourceIsBGRA = false;
+    bool hasHeadlessReadback = false;
 };
 
 MetalFrameGraph::MetalFrameGraph(void* layer, void* device, void* commandQueue)

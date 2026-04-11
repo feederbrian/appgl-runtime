@@ -43,12 +43,13 @@ struct TestResult {
     std::string message;
 };
 
-constexpr std::array<FunctionId, 119> kBootstrapFunctions = {
+constexpr std::array<FunctionId, 141> kBootstrapFunctions = {
     FunctionId::glCullFace,
     FunctionId::glFrontFace,
     FunctionId::glHint,
     FunctionId::glLineWidth,
     FunctionId::glPointSize,
+    FunctionId::glDrawBuffer,
     FunctionId::glClearColor,
     FunctionId::glClear,
     FunctionId::glClearDepth,
@@ -127,6 +128,27 @@ constexpr std::array<FunctionId, 119> kBootstrapFunctions = {
     FunctionId::glGenerateMipmap,
     FunctionId::glPixelStorei,
     FunctionId::glPixelStoref,
+    FunctionId::glReadBuffer,
+    FunctionId::glDrawBuffers,
+    FunctionId::glIsRenderbuffer,
+    FunctionId::glBindRenderbuffer,
+    FunctionId::glDeleteRenderbuffers,
+    FunctionId::glGenRenderbuffers,
+    FunctionId::glRenderbufferStorage,
+    FunctionId::glGetRenderbufferParameteriv,
+    FunctionId::glGenFramebuffers,
+    FunctionId::glDeleteFramebuffers,
+    FunctionId::glIsFramebuffer,
+    FunctionId::glBindFramebuffer,
+    FunctionId::glCheckFramebufferStatus,
+    FunctionId::glFramebufferTexture1D,
+    FunctionId::glFramebufferTexture2D,
+    FunctionId::glFramebufferTexture3D,
+    FunctionId::glFramebufferRenderbuffer,
+    FunctionId::glGetFramebufferAttachmentParameteriv,
+    FunctionId::glRenderbufferStorageMultisample,
+    FunctionId::glFramebufferTextureLayer,
+    FunctionId::glFramebufferTexture,
     FunctionId::glGenSamplers,
     FunctionId::glDeleteSamplers,
     FunctionId::glIsSampler,
@@ -386,6 +408,95 @@ public:
         void* callbackPointer = nullptr;
         gl.glGetPointerv(GL_DEBUG_CALLBACK_FUNCTION, &callbackPointer);
         gl.glDisable(GL_DEBUG_OUTPUT);
+
+        GLuint framebuffers[2] = {};
+        gl.glGenFramebuffers(2, framebuffers);
+        expectCondition(gl.glIsFramebuffer(framebuffers[0]) == GL_FALSE, "generated framebuffer is not instantiated before bind");
+        gl.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffers[0]);
+        expectCondition(gl.glIsFramebuffer(framebuffers[0]) == GL_TRUE, "draw-bound framebuffer is instantiated");
+        GLint drawFramebufferBinding = -1;
+        GLint readFramebufferBinding = -1;
+        gl.glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebufferBinding);
+        gl.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebufferBinding);
+        expectCondition(drawFramebufferBinding == static_cast<GLint>(framebuffers[0]), "draw framebuffer binding query");
+        expectCondition(readFramebufferBinding == 0, "draw-only framebuffer bind leaves read binding unchanged");
+        gl.glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffers[1]);
+        gl.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebufferBinding);
+        expectCondition(readFramebufferBinding == static_cast<GLint>(framebuffers[1]), "read framebuffer binding query");
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[0]);
+        gl.glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebufferBinding);
+        gl.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebufferBinding);
+        expectCondition(drawFramebufferBinding == static_cast<GLint>(framebuffers[0]), "GL_FRAMEBUFFER updates draw binding");
+        expectCondition(readFramebufferBinding == static_cast<GLint>(framebuffers[0]), "GL_FRAMEBUFFER updates read binding");
+        gl.glBindFramebuffer(static_cast<GLenum>(0xffffffffu), framebuffers[0]);
+        expectGLError(gl, GL_INVALID_ENUM, "invalid glBindFramebuffer target");
+        const GLuint unknownFramebuffer = framebuffers[1] + 999u;
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, unknownFramebuffer);
+        expectGLError(gl, GL_INVALID_OPERATION, "binding unknown framebuffer");
+
+        GLuint renderbuffers[2] = {};
+        gl.glGenRenderbuffers(2, renderbuffers);
+        expectCondition(gl.glIsRenderbuffer(renderbuffers[0]) == GL_FALSE, "generated renderbuffer is not instantiated before bind");
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, renderbuffers[0]);
+        expectCondition(gl.glIsRenderbuffer(renderbuffers[0]) == GL_TRUE, "bound renderbuffer is instantiated");
+        gl.glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, 16, 16);
+        GLint renderbufferWidth = 0;
+        gl.glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &renderbufferWidth);
+        expectCondition(renderbufferWidth == 16, "renderbuffer width query");
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, renderbuffers[1]);
+        gl.glRenderbufferStorageMultisample(GL_RENDERBUFFER, 0, GL_DEPTH24_STENCIL8, 16, 16);
+        GLint renderbufferSamples = -1;
+        gl.glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_SAMPLES, &renderbufferSamples);
+        expectCondition(renderbufferSamples == 0, "renderbuffer sample query");
+
+        GLuint framebufferTextures[3] = {};
+        gl.glGenTextures(3, framebufferTextures);
+        const std::uint8_t fboLine[64] = {};
+        const std::uint8_t fboImage[16 * 16 * 4] = {};
+        const std::uint8_t fboVolume[16 * 16 * 2 * 4] = {};
+        gl.glBindTexture(GL_TEXTURE_1D, framebufferTextures[0]);
+        gl.glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA8, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, fboLine);
+        gl.glBindTexture(GL_TEXTURE_2D, framebufferTextures[1]);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, fboImage);
+        gl.glBindTexture(GL_TEXTURE_3D, framebufferTextures[2]);
+        gl.glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 16, 16, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, fboVolume);
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[0]);
+        gl.glFramebufferTexture1D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_1D, framebufferTextures[0], 0);
+        gl.glFramebufferTexture1D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_1D, 0, 0);
+        gl.glFramebufferTexture3D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_3D, framebufferTextures[2], 0, 0);
+        gl.glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, framebufferTextures[2], 0, 1);
+        gl.glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, framebufferTextures[1], 0);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, framebufferTextures[1], 0);
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, renderbuffers[1]);
+        GLint attachmentType = 0;
+        gl.glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &attachmentType);
+        expectCondition(attachmentType == GL_TEXTURE, "framebuffer attachment object type query");
+        const GLenum drawBuffers[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glDrawBuffers(2, drawBuffers);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        GLint drawBuffer0 = 0;
+        GLint drawBuffer1 = 0;
+        gl.glGetIntegerv(GL_DRAW_BUFFER0, &drawBuffer0);
+        gl.glGetIntegerv(GL_DRAW_BUFFER1, &drawBuffer1);
+        expectCondition(drawBuffer0 == GL_COLOR_ATTACHMENT0 && drawBuffer1 == GL_COLOR_ATTACHMENT1, "draw buffer query");
+        GLint readBuffer = 0;
+        gl.glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+        expectCondition(readBuffer == GL_COLOR_ATTACHMENT0, "read buffer query");
+        expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "attached framebuffer is complete");
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+        expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER, "detached draw attachment makes framebuffer incomplete");
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, framebufferTextures[1], 0);
+
+        gl.glDeleteFramebuffers(1, &framebuffers[0]);
+        expectCondition(gl.glIsFramebuffer(framebuffers[0]) == GL_FALSE, "deleted framebuffer no longer exists");
+        gl.glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebufferBinding);
+        gl.glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebufferBinding);
+        expectCondition(drawFramebufferBinding == 0 && readFramebufferBinding == 0, "deleting bound framebuffer resets bindings");
+        gl.glDeleteFramebuffers(1, &framebuffers[1]);
+        gl.glDeleteRenderbuffers(2, renderbuffers);
+        gl.glDeleteTextures(3, framebufferTextures);
 
         GLuint buffers[2] = {};
         gl.glGenBuffers(2, buffers);
@@ -652,6 +763,100 @@ public:
         gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
         gl.glFlush();
     }
+};
+
+class FramebufferDepthStencilReadbackScene final : public Scene {
+public:
+    std::string id() const override {
+        return "phase-a.fbo-depth-stencil-readback";
+    }
+
+    std::string phase() const override {
+        return "phase-a";
+    }
+
+    SceneSize framebufferSize() const override {
+        return {48, 48};
+    }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        const SceneSize size = framebufferSize();
+
+        gl.glGenFramebuffers(1, &framebuffer_);
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
+
+        gl.glGenTextures(1, &colorTexture_);
+        gl.glBindTexture(GL_TEXTURE_2D, colorTexture_);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size.width, size.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture_, 0);
+
+        gl.glGenRenderbuffers(1, &depthStencilRenderbuffer_);
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, depthStencilRenderbuffer_);
+        gl.glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, size.width, size.height);
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depthStencilRenderbuffer_);
+
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        expectCondition(gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "offscreen FBO is complete");
+
+        GLint attachmentType = 0;
+        gl.glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &attachmentType);
+        expectCondition(attachmentType == GL_RENDERBUFFER, "depth/stencil attachment object type query");
+
+        GLint depthBits = 0;
+        gl.glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &depthBits);
+        expectCondition(depthBits == 24, "depth/stencil attachment depth-size query");
+
+        GLint stencilBits = 0;
+        gl.glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &stencilBits);
+        expectCondition(stencilBits == 8, "depth/stencil attachment stencil-size query");
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        const SceneSize size = framebufferSize();
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
+        gl.glViewport(0, 0, size.width, size.height);
+        gl.glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+        gl.glClearColor(0.18f, 0.44f, 0.70f, 1.0f);
+        gl.glClearDepth(0.375);
+        gl.glClearStencil(11);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+        std::array<GLfloat, 4> depthSample = {};
+        gl.glReadPixels(11, 13, 2, 2, GL_DEPTH_COMPONENT, GL_FLOAT, depthSample.data());
+        expectGLError(gl, GL_NO_ERROR, "offscreen FBO depth readback");
+        for (GLfloat value : depthSample) {
+            expectCondition(value > 0.374f && value < 0.376f, "offscreen FBO depth value");
+        }
+
+        std::array<std::uint8_t, 4> stencilSample = {};
+        gl.glReadPixels(17, 19, 2, 2, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencilSample.data());
+        expectGLError(gl, GL_NO_ERROR, "offscreen FBO stencil readback");
+        for (std::uint8_t value : stencilSample) {
+            expectCondition(value == 11, "offscreen FBO stencil value");
+        }
+
+        std::array<std::uint8_t, 4> colorSample = {};
+        gl.glReadPixels(size.width / 2, size.height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, colorSample.data());
+        expectGLError(gl, GL_NO_ERROR, "offscreen FBO color readback");
+        expectCondition(colorSample[0] == 46 && colorSample[1] == 112 && colorSample[2] == 179 && colorSample[3] == 255, "offscreen FBO color value");
+
+        gl.glReadPixels(0, 0, 1, 1, GL_DEPTH_COMPONENT, GL_UNSIGNED_BYTE, colorSample.data());
+        expectGLError(gl, GL_INVALID_ENUM, "unsupported offscreen FBO depth readback type");
+
+        gl.glReadBuffer(GL_COLOR_ATTACHMENT0);
+    }
+
+private:
+    GLuint framebuffer_ = 0;
+    GLuint colorTexture_ = 0;
+    GLuint depthStencilRenderbuffer_ = 0;
 };
 
 class VertexInputStateScene final : public Scene {
@@ -1034,6 +1239,8 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
     if (normalizedPhase == "all" || normalizedPhase == "phase-a") {
         ClearReadbackScene scene;
         tests.push_back(runScene(scene));
+        FramebufferDepthStencilReadbackScene framebufferScene;
+        tests.push_back(runScene(framebufferScene));
         VertexInputStateScene vertexInputScene;
         tests.push_back(runScene(vertexInputScene));
         TextureSamplerStateScene textureSamplerScene;

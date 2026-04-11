@@ -110,6 +110,9 @@ bool queryValue(
     const GLTextureUnitState& activeTextureUnitState,
     const GLPixelStoreState& pixelStore,
     GLuint activeTextureUnit,
+    GLuint renderbuffer,
+    const std::array<GLenum, 8>& drawBuffers,
+    GLenum readBuffer,
     GLuint currentProgram,
     GLuint currentVertexArray,
     GLuint drawFramebuffer,
@@ -295,6 +298,15 @@ bool queryValue(
         case GL_SAMPLER_BINDING:
             writeScalar(out, activeTextureUnitState.sampler);
             return true;
+        case GL_RENDERBUFFER_BINDING:
+            writeScalar(out, renderbuffer);
+            return true;
+        case GL_DRAW_BUFFER:
+            writeScalar(out, drawBuffers[0]);
+            return true;
+        case GL_READ_BUFFER:
+            writeScalar(out, readBuffer);
+            return true;
         case GL_PACK_SWAP_BYTES:
             writeBooleanScalar(out, pixelStore.packSwapBytes == GL_TRUE);
             return true;
@@ -400,6 +412,16 @@ bool queryValue(
         case GL_READ_FRAMEBUFFER_BINDING:
             writeScalar(out, readFramebuffer);
             return true;
+        case GL_DRAW_BUFFER0:
+        case GL_DRAW_BUFFER1:
+        case GL_DRAW_BUFFER2:
+        case GL_DRAW_BUFFER3:
+        case GL_DRAW_BUFFER4:
+        case GL_DRAW_BUFFER5:
+        case GL_DRAW_BUFFER6:
+        case GL_DRAW_BUFFER7:
+            writeScalar(out, drawBuffers[static_cast<std::size_t>(pname - GL_DRAW_BUFFER0)]);
+            return true;
         default:
             return false;
     }
@@ -411,6 +433,8 @@ GLStateTracker::GLStateTracker() {
     for (auto& mask : blend_.indexedColorMasks) {
         mask = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
     }
+    drawBuffers_.fill(GL_NONE);
+    drawBuffers_[0] = GL_BACK;
 }
 
 void GLStateTracker::setViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
@@ -633,6 +657,9 @@ bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
         textureUnits_[activeTextureUnit_],
         pixelStore_,
         activeTextureUnit_,
+        renderbuffer_,
+        drawBuffers_,
+        readBuffer_,
         currentProgram_,
         currentVertexArray_,
         drawFramebuffer_,
@@ -658,6 +685,9 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
         textureUnits_[activeTextureUnit_],
         pixelStore_,
         activeTextureUnit_,
+        renderbuffer_,
+        drawBuffers_,
+        readBuffer_,
         currentProgram_,
         currentVertexArray_,
         drawFramebuffer_,
@@ -683,6 +713,9 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
         textureUnits_[activeTextureUnit_],
         pixelStore_,
         activeTextureUnit_,
+        renderbuffer_,
+        drawBuffers_,
+        readBuffer_,
         currentProgram_,
         currentVertexArray_,
         drawFramebuffer_,
@@ -708,6 +741,9 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
         textureUnits_[activeTextureUnit_],
         pixelStore_,
         activeTextureUnit_,
+        renderbuffer_,
+        drawBuffers_,
+        readBuffer_,
         currentProgram_,
         currentVertexArray_,
         drawFramebuffer_,
@@ -733,6 +769,9 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
         textureUnits_[activeTextureUnit_],
         pixelStore_,
         activeTextureUnit_,
+        renderbuffer_,
+        drawBuffers_,
+        readBuffer_,
         currentProgram_,
         currentVertexArray_,
         drawFramebuffer_,
@@ -813,6 +852,22 @@ void GLStateTracker::deleteTextureBindings(GLuint object) {
         }
     }
     markDirty(DirtyBit::Program);
+}
+
+void GLStateTracker::bindRenderbuffer(GLuint object) {
+    renderbuffer_ = object;
+    markDirty(DirtyBit::Framebuffer);
+}
+
+GLuint GLStateTracker::boundRenderbuffer() const {
+    return renderbuffer_;
+}
+
+void GLStateTracker::deleteRenderbufferBinding(GLuint object) {
+    if (renderbuffer_ == object) {
+        renderbuffer_ = 0;
+        markDirty(DirtyBit::Framebuffer);
+    }
 }
 
 void GLStateTracker::setActiveTextureUnit(GLuint unit) {
@@ -936,6 +991,46 @@ void GLStateTracker::bindReadFramebuffer(GLuint framebuffer) {
 
 GLuint GLStateTracker::boundReadFramebuffer() const {
     return readFramebuffer_;
+}
+
+void GLStateTracker::deleteFramebufferBindings(GLuint framebuffer) {
+    if (drawFramebuffer_ == framebuffer) {
+        drawFramebuffer_ = 0;
+        markDirty(DirtyBit::Framebuffer);
+    }
+    if (readFramebuffer_ == framebuffer) {
+        readFramebuffer_ = 0;
+        markDirty(DirtyBit::Framebuffer);
+    }
+}
+
+bool GLStateTracker::setDrawBuffers(GLsizei count, const GLenum* buffers) {
+    if (count < 0 || static_cast<std::size_t>(count) > drawBuffers_.size() || (count > 0 && buffers == nullptr)) {
+        return false;
+    }
+    drawBuffers_.fill(GL_NONE);
+    for (GLsizei index = 0; index < count; ++index) {
+        drawBuffers_[static_cast<std::size_t>(index)] = buffers[index];
+    }
+    markDirty(DirtyBit::Framebuffer);
+    return true;
+}
+
+GLenum GLStateTracker::drawBuffer(GLuint index) const {
+    if (index >= drawBuffers_.size()) {
+        return GL_NONE;
+    }
+    return drawBuffers_[index];
+}
+
+bool GLStateTracker::setReadBuffer(GLenum buffer) {
+    readBuffer_ = buffer;
+    markDirty(DirtyBit::Framebuffer);
+    return true;
+}
+
+GLenum GLStateTracker::readBuffer() const {
+    return readBuffer_;
 }
 
 void GLStateTracker::useProgram(GLuint program) {
