@@ -39,7 +39,7 @@ struct TestResult {
     std::string message;
 };
 
-constexpr std::array<FunctionId, 52> kBootstrapFunctions = {
+constexpr std::array<FunctionId, 69> kBootstrapFunctions = {
     FunctionId::glCullFace,
     FunctionId::glFrontFace,
     FunctionId::glHint,
@@ -70,6 +70,23 @@ constexpr std::array<FunctionId, 52> kBootstrapFunctions = {
     FunctionId::glGetInteger64v,
     FunctionId::glGetFloatv,
     FunctionId::glGetDoublev,
+    FunctionId::glGenBuffers,
+    FunctionId::glDeleteBuffers,
+    FunctionId::glIsBuffer,
+    FunctionId::glBindBuffer,
+    FunctionId::glBindBufferBase,
+    FunctionId::glBindBufferRange,
+    FunctionId::glBufferData,
+    FunctionId::glBufferSubData,
+    FunctionId::glCopyBufferSubData,
+    FunctionId::glGetBufferSubData,
+    FunctionId::glMapBuffer,
+    FunctionId::glMapBufferRange,
+    FunctionId::glUnmapBuffer,
+    FunctionId::glFlushMappedBufferRange,
+    FunctionId::glGetBufferParameteriv,
+    FunctionId::glGetBufferParameteri64v,
+    FunctionId::glGetBufferPointerv,
     FunctionId::glBlendFuncSeparate,
     FunctionId::glBlendColor,
     FunctionId::glBlendEquation,
@@ -296,6 +313,62 @@ public:
         void* callbackPointer = nullptr;
         gl.glGetPointerv(GL_DEBUG_CALLBACK_FUNCTION, &callbackPointer);
         gl.glDisable(GL_DEBUG_OUTPUT);
+
+        GLuint buffers[2] = {};
+        gl.glGenBuffers(2, buffers);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+        const std::uint32_t seedData[4] = {1, 2, 3, 4};
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(seedData), seedData, GL_STATIC_DRAW);
+        const std::uint32_t patchData[2] = {20, 30};
+        gl.glBufferSubData(GL_ARRAY_BUFFER, sizeof(std::uint32_t), sizeof(patchData), patchData);
+        std::uint32_t readbackData[4] = {};
+        gl.glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(readbackData), readbackData);
+        gl.glBindBuffer(GL_COPY_READ_BUFFER, buffers[0]);
+        gl.glBindBuffer(GL_COPY_WRITE_BUFFER, buffers[1]);
+        gl.glBufferData(GL_COPY_WRITE_BUFFER, sizeof(readbackData), nullptr, GL_DYNAMIC_DRAW);
+        gl.glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, sizeof(readbackData));
+        gl.glGetBufferSubData(GL_COPY_WRITE_BUFFER, 0, sizeof(readbackData), readbackData);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+        void* mappedRange = gl.glMapBufferRange(
+            GL_ARRAY_BUFFER,
+            sizeof(std::uint32_t),
+            sizeof(std::uint32_t) * 2,
+            GL_MAP_WRITE_BIT | GL_MAP_FLUSH_EXPLICIT_BIT
+        );
+        if (mappedRange != nullptr) {
+            auto* mappedWords = static_cast<std::uint32_t*>(mappedRange);
+            mappedWords[0] = 100;
+            mappedWords[1] = 200;
+        }
+        GLint mappedFlag = 0;
+        gl.glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_MAPPED, &mappedFlag);
+        GLint accessFlags = 0;
+        gl.glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_ACCESS_FLAGS, &accessFlags);
+        GLint64 mapLength = 0;
+        gl.glGetBufferParameteri64v(GL_ARRAY_BUFFER, GL_BUFFER_MAP_LENGTH, &mapLength);
+        void* queriedMapPointer = nullptr;
+        gl.glGetBufferPointerv(GL_ARRAY_BUFFER, GL_BUFFER_MAP_POINTER, &queriedMapPointer);
+        gl.glFlushMappedBufferRange(GL_ARRAY_BUFFER, 0, sizeof(std::uint32_t) * 2);
+        (void)gl.glUnmapBuffer(GL_ARRAY_BUFFER);
+        void* wholeMap = gl.glMapBuffer(GL_ARRAY_BUFFER, GL_READ_WRITE);
+        if (wholeMap != nullptr) {
+            auto* mappedWords = static_cast<std::uint32_t*>(wholeMap);
+            mappedWords[3] = 400;
+        }
+        (void)gl.glUnmapBuffer(GL_ARRAY_BUFFER);
+        GLint bufferSize = 0;
+        gl.glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_SIZE, &bufferSize);
+        (void)mappedFlag;
+        (void)accessFlags;
+        (void)mapLength;
+        (void)queriedMapPointer;
+        (void)bufferSize;
+        gl.glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(readbackData), readbackData);
+        gl.glBindBufferRange(GL_UNIFORM_BUFFER, 0, buffers[0], 0, sizeof(readbackData));
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, buffers[1]);
+        (void)gl.glIsBuffer(buffers[0]);
+        gl.glDeleteBuffers(2, buffers);
+        (void)gl.glIsBuffer(buffers[0]);
 
         GLint maxTextureSize = 0;
         gl.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);

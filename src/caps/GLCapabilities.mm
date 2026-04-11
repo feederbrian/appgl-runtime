@@ -148,6 +148,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_DEBUG_LOGGED_MESSAGES] = 64;
     integerLimits_[GL_MAX_DEBUG_GROUP_STACK_DEPTH] = 64;
     integerLimits_[GL_MAX_LABEL_LENGTH] = 1024;
+    integerLimits_[GL_MIN_MAP_BUFFER_ALIGNMENT] = 64;
 }
 
 void GLCapabilities::initializeExtensions() {

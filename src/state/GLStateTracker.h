@@ -92,6 +92,12 @@ struct GLTextureUnitState {
     GLuint sampler = 0;
 };
 
+struct GLIndexedBufferBinding {
+    GLuint buffer = 0;
+    GLintptr offset = 0;
+    GLsizeiptr size = 0;
+};
+
 class GLStateTracker {
 public:
     GLStateTracker();
@@ -146,6 +152,9 @@ public:
 
     void bindBuffer(GLenum target, GLuint object);
     GLuint boundBuffer(GLenum target) const;
+    void bindIndexedBuffer(GLenum target, GLuint index, GLuint object, GLintptr offset, GLsizeiptr size);
+    GLIndexedBufferBinding indexedBufferBinding(GLenum target, GLuint index) const;
+    void deleteBufferBindings(GLuint object);
     void bindTexture(GLenum target, GLuint object);
     GLuint boundTexture(GLenum target) const;
 
@@ -171,6 +180,7 @@ public:
 private:
     static constexpr std::size_t kMaxTextureUnits = 32;
     static constexpr std::size_t kMaxDrawBuffers = 8;
+    static constexpr std::size_t kMaxIndexedBufferBindings = 32;
 
     GLViewportState viewport_;
     GLDepthRangeState depthRange_;
@@ -183,6 +193,7 @@ private:
     std::unordered_map<GLenum, GLenum> hints_;
     std::unordered_set<GLenum> enabledCaps_;
     std::unordered_map<GLenum, GLuint> bufferBindings_;
+    std::unordered_map<GLenum, std::array<GLIndexedBufferBinding, kMaxIndexedBufferBindings>> indexedBufferBindings_;
     std::array<GLTextureUnitState, kMaxTextureUnits> textureUnits_;
     GLuint activeTextureUnit_ = 0;
     GLuint currentProgram_ = 0;

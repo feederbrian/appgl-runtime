@@ -15,7 +15,9 @@ thread_local GLContext* gCurrentContext = nullptr;
 constexpr const char* kBootstrapTestId = "bootstrap.clear-loop";
 constexpr const char* kPhaseAStateTestId = "phase-a.state";
 constexpr const char* kPhaseADebugTestId = "phase-a.debug";
+constexpr const char* kPhaseABufferTestId = "phase-a.buffers";
 constexpr GLuint kPhaseAMaxDrawBuffers = 8;
+constexpr GLuint kPhaseAMaxIndexedBufferBindings = 32;
 
 GLContext* requireCurrentContext(std::string_view functionName) {
     auto* context = Runtime::shared().currentContext();
@@ -190,6 +192,109 @@ bool isValidHintTarget(GLenum target) {
 
 bool isValidHintMode(GLenum mode) {
     return mode == GL_FASTEST || mode == GL_NICEST || mode == GL_DONT_CARE;
+}
+
+bool isValidBufferTarget(GLenum target) {
+    switch (target) {
+        case GL_ARRAY_BUFFER:
+        case GL_ELEMENT_ARRAY_BUFFER:
+        case GL_COPY_READ_BUFFER:
+        case GL_COPY_WRITE_BUFFER:
+        case GL_PIXEL_PACK_BUFFER:
+        case GL_PIXEL_UNPACK_BUFFER:
+        case GL_TRANSFORM_FEEDBACK_BUFFER:
+        case GL_UNIFORM_BUFFER:
+        case GL_TEXTURE_BUFFER:
+        case GL_DRAW_INDIRECT_BUFFER:
+        case GL_ATOMIC_COUNTER_BUFFER:
+        case GL_DISPATCH_INDIRECT_BUFFER:
+        case GL_SHADER_STORAGE_BUFFER:
+        case GL_QUERY_BUFFER:
+        case GL_PARAMETER_BUFFER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidIndexedBufferTarget(GLenum target) {
+    switch (target) {
+        case GL_TRANSFORM_FEEDBACK_BUFFER:
+        case GL_UNIFORM_BUFFER:
+        case GL_ATOMIC_COUNTER_BUFFER:
+        case GL_SHADER_STORAGE_BUFFER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidBufferUsage(GLenum usage) {
+    switch (usage) {
+        case GL_STREAM_DRAW:
+        case GL_STREAM_READ:
+        case GL_STREAM_COPY:
+        case GL_STATIC_DRAW:
+        case GL_STATIC_READ:
+        case GL_STATIC_COPY:
+        case GL_DYNAMIC_DRAW:
+        case GL_DYNAMIC_READ:
+        case GL_DYNAMIC_COPY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidMapBufferAccess(GLenum access) {
+    return access == GL_READ_ONLY || access == GL_WRITE_ONLY || access == GL_READ_WRITE;
+}
+
+bool isValidMapBufferRangeAccess(GLbitfield access) {
+    constexpr GLbitfield kSupportedAccessBits = GL_MAP_READ_BIT
+        | GL_MAP_WRITE_BIT
+        | GL_MAP_INVALIDATE_RANGE_BIT
+        | GL_MAP_INVALIDATE_BUFFER_BIT
+        | GL_MAP_FLUSH_EXPLICIT_BIT
+        | GL_MAP_UNSYNCHRONIZED_BIT;
+    if ((access & ~kSupportedAccessBits) != 0) {
+        return false;
+    }
+
+    const bool readable = (access & GL_MAP_READ_BIT) != 0;
+    const bool writable = (access & GL_MAP_WRITE_BIT) != 0;
+    if (!readable && !writable) {
+        return false;
+    }
+    if (readable && (access & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT)) != 0) {
+        return false;
+    }
+    if ((access & GL_MAP_FLUSH_EXPLICIT_BIT) != 0 && !writable) {
+        return false;
+    }
+    return true;
+}
+
+bool isValidBufferParameterPname(GLenum pname) {
+    switch (pname) {
+        case GL_BUFFER_SIZE:
+        case GL_BUFFER_USAGE:
+        case GL_BUFFER_ACCESS:
+        case GL_BUFFER_ACCESS_FLAGS:
+        case GL_BUFFER_MAPPED:
+        case GL_BUFFER_MAP_OFFSET:
+        case GL_BUFFER_MAP_LENGTH:
+        case GL_BUFFER_IMMUTABLE_STORAGE:
+        case GL_BUFFER_STORAGE_FLAGS:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void markBufferFunction(FunctionId id, std::string_view note) {
+    Runtime::shared().coverageStore().markSmokeTested(id, kPhaseABufferTestId, note);
+    Runtime::shared().refreshCurrentContextClaimedVersion();
 }
 
 bool isValidDebugSource(GLenum source, bool allowDontCare) {
@@ -603,6 +708,292 @@ void APIENTRY glGetDoublev(GLenum pname, GLdouble* data) {
     (void)context->queryDouble(pname, data);
     markStateFunction(FunctionId::glGetDoublev, "Double state and capability queries route through the context.");
     Runtime::shared().recordBootstrapTrace("glGetDoublev(" + std::to_string(pname) + ")");
+}
+
+void APIENTRY glGenBuffers(GLsizei n, GLuint* buffers) {
+    auto* context = requireCurrentContext("glGenBuffers");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->genBuffers(n, buffers)) {
+        markBufferFunction(FunctionId::glGenBuffers, "Buffer names are generated in the object store.");
+        Runtime::shared().recordBootstrapTrace("glGenBuffers(" + std::to_string(n) + ")");
+    }
+}
+
+void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
+    auto* context = requireCurrentContext("glDeleteBuffers");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->deleteBuffers(n, buffers)) {
+        markBufferFunction(FunctionId::glDeleteBuffers, "Buffer names are deleted and stale bindings are cleared.");
+        Runtime::shared().recordBootstrapTrace("glDeleteBuffers(" + std::to_string(n) + ")");
+    }
+}
+
+GLboolean APIENTRY glIsBuffer(GLuint buffer) {
+    auto* context = requireCurrentContext("glIsBuffer");
+    if (context == nullptr) {
+        return GL_FALSE;
+    }
+    markBufferFunction(FunctionId::glIsBuffer, "Buffer object existence queries are live.");
+    Runtime::shared().recordBootstrapTrace("glIsBuffer(" + std::to_string(buffer) + ")");
+    return context->isBuffer(buffer) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
+    auto* context = requireCurrentContext("glBindBuffer");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glBindBuffer", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return;
+    }
+    if (context->bindBuffer(target, buffer)) {
+        markBufferFunction(FunctionId::glBindBuffer, "Generic buffer binding points are tracked.");
+        Runtime::shared().recordBootstrapTrace("glBindBuffer(" + std::to_string(target) + ", " + std::to_string(buffer) + ")");
+    }
+}
+
+void APIENTRY glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
+    auto* context = requireCurrentContext("glBindBufferBase");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidIndexedBufferTarget(target)) {
+        recordValidationError(context, "glBindBufferBase", GL_INVALID_ENUM, "target is not an indexed buffer binding point");
+        return;
+    }
+    if (index >= kPhaseAMaxIndexedBufferBindings) {
+        recordValidationError(context, "glBindBufferBase", GL_INVALID_VALUE, "binding index exceeds Phase A limit");
+        return;
+    }
+    if (context->bindBufferBase(target, index, buffer)) {
+        markBufferFunction(FunctionId::glBindBufferBase, "Indexed buffer-base bindings are tracked.");
+        Runtime::shared().recordBootstrapTrace("glBindBufferBase(" + std::to_string(target) + ", " + std::to_string(index) + ")");
+    }
+}
+
+void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
+    auto* context = requireCurrentContext("glBindBufferRange");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidIndexedBufferTarget(target)) {
+        recordValidationError(context, "glBindBufferRange", GL_INVALID_ENUM, "target is not an indexed buffer binding point");
+        return;
+    }
+    if (index >= kPhaseAMaxIndexedBufferBindings) {
+        recordValidationError(context, "glBindBufferRange", GL_INVALID_VALUE, "binding index exceeds Phase A limit");
+        return;
+    }
+    if (context->bindBufferRange(target, index, buffer, offset, size)) {
+        markBufferFunction(FunctionId::glBindBufferRange, "Indexed buffer-range bindings are tracked.");
+        Runtime::shared().recordBootstrapTrace("glBindBufferRange(" + std::to_string(target) + ", " + std::to_string(index) + ")");
+    }
+}
+
+void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
+    auto* context = requireCurrentContext("glBufferData");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glBufferData", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return;
+    }
+    if (!isValidBufferUsage(usage)) {
+        recordValidationError(context, "glBufferData", GL_INVALID_ENUM, "usage is invalid");
+        return;
+    }
+    if (context->bufferData(target, size, data, usage)) {
+        markBufferFunction(FunctionId::glBufferData, "Buffer storage is backed by deterministic shadow bytes.");
+        Runtime::shared().recordBootstrapTrace("glBufferData(" + std::to_string(target) + ", " + std::to_string(size) + ")");
+    }
+}
+
+void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
+    auto* context = requireCurrentContext("glBufferSubData");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glBufferSubData", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return;
+    }
+    if (context->bufferSubData(target, offset, size, data)) {
+        markBufferFunction(FunctionId::glBufferSubData, "Buffer subdata writes update deterministic shadow bytes.");
+        Runtime::shared().recordBootstrapTrace("glBufferSubData(" + std::to_string(target) + ", " + std::to_string(size) + ")");
+    }
+}
+
+void APIENTRY glCopyBufferSubData(
+    GLenum readTarget,
+    GLenum writeTarget,
+    GLintptr readOffset,
+    GLintptr writeOffset,
+    GLsizeiptr size
+) {
+    auto* context = requireCurrentContext("glCopyBufferSubData");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBufferTarget(readTarget) || !isValidBufferTarget(writeTarget)) {
+        recordValidationError(context, "glCopyBufferSubData", GL_INVALID_ENUM, "read or write target is invalid");
+        return;
+    }
+    if (context->copyBufferSubData(readTarget, writeTarget, readOffset, writeOffset, size)) {
+        markBufferFunction(FunctionId::glCopyBufferSubData, "Buffer-to-buffer shadow copy is live.");
+        Runtime::shared().recordBootstrapTrace("glCopyBufferSubData(" + std::to_string(size) + ")");
+    }
+}
+
+void APIENTRY glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* data) {
+    auto* context = requireCurrentContext("glGetBufferSubData");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glGetBufferSubData", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return;
+    }
+    if (context->getBufferSubData(target, offset, size, data)) {
+        markBufferFunction(FunctionId::glGetBufferSubData, "Buffer readback from shadow storage is live.");
+        Runtime::shared().recordBootstrapTrace("glGetBufferSubData(" + std::to_string(target) + ", " + std::to_string(size) + ")");
+    }
+}
+
+void* APIENTRY glMapBuffer(GLenum target, GLenum access) {
+    auto* context = requireCurrentContext("glMapBuffer");
+    if (context == nullptr) {
+        return nullptr;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glMapBuffer", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return nullptr;
+    }
+    if (!isValidMapBufferAccess(access)) {
+        recordValidationError(context, "glMapBuffer", GL_INVALID_ENUM, "access must be READ_ONLY, WRITE_ONLY, or READ_WRITE");
+        return nullptr;
+    }
+    void* pointer = context->mapBuffer(target, access);
+    if (pointer != nullptr) {
+        markBufferFunction(FunctionId::glMapBuffer, "Whole-buffer mapping returns a CPU-visible pointer.");
+        Runtime::shared().recordBootstrapTrace("glMapBuffer(" + std::to_string(target) + ")");
+    }
+    return pointer;
+}
+
+void* APIENTRY glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
+    auto* context = requireCurrentContext("glMapBufferRange");
+    if (context == nullptr) {
+        return nullptr;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glMapBufferRange", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return nullptr;
+    }
+    if (!isValidMapBufferRangeAccess(access)) {
+        recordValidationError(context, "glMapBufferRange", GL_INVALID_VALUE, "access flags are not a supported Phase A map combination");
+        return nullptr;
+    }
+    void* pointer = context->mapBufferRange(target, offset, length, access);
+    if (pointer != nullptr) {
+        markBufferFunction(FunctionId::glMapBufferRange, "Range mapping returns a CPU-visible pointer.");
+        Runtime::shared().recordBootstrapTrace("glMapBufferRange(" + std::to_string(target) + ", " + std::to_string(length) + ")");
+    }
+    return pointer;
+}
+
+GLboolean APIENTRY glUnmapBuffer(GLenum target) {
+    auto* context = requireCurrentContext("glUnmapBuffer");
+    if (context == nullptr) {
+        return GL_FALSE;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glUnmapBuffer", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return GL_FALSE;
+    }
+    const GLboolean unmapped = context->unmapBuffer(target);
+    if (unmapped == GL_TRUE) {
+        markBufferFunction(FunctionId::glUnmapBuffer, "Mapped buffer pointers are released and shadow bytes are synchronized.");
+        Runtime::shared().recordBootstrapTrace("glUnmapBuffer(" + std::to_string(target) + ")");
+    }
+    return unmapped;
+}
+
+void APIENTRY glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
+    auto* context = requireCurrentContext("glFlushMappedBufferRange");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glFlushMappedBufferRange", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return;
+    }
+    if (context->flushMappedBufferRange(target, offset, length)) {
+        markBufferFunction(FunctionId::glFlushMappedBufferRange, "Explicit mapped-range flush synchronizes the deterministic mirror.");
+        Runtime::shared().recordBootstrapTrace("glFlushMappedBufferRange(" + std::to_string(target) + ", " + std::to_string(length) + ")");
+    }
+}
+
+void APIENTRY glGetBufferParameteriv(GLenum target, GLenum pname, GLint* params) {
+    auto* context = requireCurrentContext("glGetBufferParameteriv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glGetBufferParameteriv", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return;
+    }
+    if (!isValidBufferParameterPname(pname)) {
+        recordValidationError(context, "glGetBufferParameteriv", GL_INVALID_ENUM, "pname is not a supported buffer parameter");
+        return;
+    }
+    if (context->getBufferParameterInteger(target, pname, params)) {
+        markBufferFunction(FunctionId::glGetBufferParameteriv, "Buffer integer parameter queries expose size, usage, and map state.");
+        Runtime::shared().recordBootstrapTrace("glGetBufferParameteriv(" + std::to_string(target) + ", " + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64* params) {
+    auto* context = requireCurrentContext("glGetBufferParameteri64v");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glGetBufferParameteri64v", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return;
+    }
+    if (!isValidBufferParameterPname(pname)) {
+        recordValidationError(context, "glGetBufferParameteri64v", GL_INVALID_ENUM, "pname is not a supported buffer parameter");
+        return;
+    }
+    if (context->getBufferParameterInteger64(target, pname, params)) {
+        markBufferFunction(FunctionId::glGetBufferParameteri64v, "Buffer integer64 parameter queries expose size and mapped range metadata.");
+        Runtime::shared().recordBootstrapTrace("glGetBufferParameteri64v(" + std::to_string(target) + ", " + std::to_string(pname) + ")");
+    }
+}
+
+void APIENTRY glGetBufferPointerv(GLenum target, GLenum pname, void** params) {
+    auto* context = requireCurrentContext("glGetBufferPointerv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBufferTarget(target)) {
+        recordValidationError(context, "glGetBufferPointerv", GL_INVALID_ENUM, "target is not a supported buffer binding point");
+        return;
+    }
+    if (pname != GL_BUFFER_MAP_POINTER) {
+        recordValidationError(context, "glGetBufferPointerv", GL_INVALID_ENUM, "pname must be GL_BUFFER_MAP_POINTER");
+        return;
+    }
+    if (context->getBufferPointer(target, pname, params)) {
+        markBufferFunction(FunctionId::glGetBufferPointerv, "Mapped buffer pointer queries are live.");
+        Runtime::shared().recordBootstrapTrace("glGetBufferPointerv(" + std::to_string(target) + ")");
+    }
 }
 
 void APIENTRY glEnable(GLenum cap) {

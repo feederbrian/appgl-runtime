@@ -78,6 +78,24 @@ public:
     void getObjectPtrLabel(const void* ptr, GLsizei bufSize, GLsizei* length, GLchar* label);
     bool getPointer(GLenum pname, void** params);
 
+    bool genBuffers(GLsizei count, GLuint* buffers);
+    bool deleteBuffers(GLsizei count, const GLuint* buffers);
+    bool isBuffer(GLuint buffer) const;
+    bool bindBuffer(GLenum target, GLuint buffer);
+    bool bindBufferBase(GLenum target, GLuint index, GLuint buffer);
+    bool bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size);
+    bool bufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage);
+    bool bufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data);
+    bool copyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
+    bool getBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* data);
+    void* mapBuffer(GLenum target, GLenum access);
+    void* mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access);
+    GLboolean unmapBuffer(GLenum target);
+    bool flushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length);
+    bool getBufferParameterInteger(GLenum target, GLenum pname, GLint* params);
+    bool getBufferParameterInteger64(GLenum target, GLenum pname, GLint64* params);
+    bool getBufferPointer(GLenum target, GLenum pname, void** params);
+
     void pushError(GLenum error);
     GLenum popError();
 

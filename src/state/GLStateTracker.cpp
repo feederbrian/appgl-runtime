@@ -103,6 +103,7 @@ bool queryValue(
     const GLStencilState& stencil,
     const GLRasterState& raster,
     const std::unordered_set<GLenum>& enabledCaps,
+    const std::unordered_map<GLenum, GLuint>& bufferBindings,
     const std::unordered_map<GLenum, GLenum>& hints,
     GLuint activeTextureUnit,
     GLuint currentProgram,
@@ -116,6 +117,10 @@ bool queryValue(
 
     const auto enabled = [&](GLenum cap) {
         return enabledCaps.contains(cap);
+    };
+    const auto boundBuffer = [&](GLenum target) {
+        const auto found = bufferBindings.find(target);
+        return found == bufferBindings.end() ? 0u : found->second;
     };
     if (pname >= GL_CLIP_DISTANCE0 && pname <= GL_CLIP_DISTANCE7) {
         writeBooleanScalar(out, enabled(pname));
@@ -269,6 +274,51 @@ bool queryValue(
         }
         case GL_ACTIVE_TEXTURE:
             writeScalar(out, GL_TEXTURE0 + activeTextureUnit);
+            return true;
+        case GL_ARRAY_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_ARRAY_BUFFER));
+            return true;
+        case GL_ELEMENT_ARRAY_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_ELEMENT_ARRAY_BUFFER));
+            return true;
+        case GL_COPY_READ_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_COPY_READ_BUFFER));
+            return true;
+        case GL_COPY_WRITE_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_COPY_WRITE_BUFFER));
+            return true;
+        case GL_PIXEL_PACK_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_PIXEL_PACK_BUFFER));
+            return true;
+        case GL_PIXEL_UNPACK_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_PIXEL_UNPACK_BUFFER));
+            return true;
+        case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_TRANSFORM_FEEDBACK_BUFFER));
+            return true;
+        case GL_UNIFORM_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_UNIFORM_BUFFER));
+            return true;
+        case GL_TEXTURE_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_TEXTURE_BUFFER));
+            return true;
+        case GL_DRAW_INDIRECT_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_DRAW_INDIRECT_BUFFER));
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_ATOMIC_COUNTER_BUFFER));
+            return true;
+        case GL_DISPATCH_INDIRECT_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_DISPATCH_INDIRECT_BUFFER));
+            return true;
+        case GL_SHADER_STORAGE_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_SHADER_STORAGE_BUFFER));
+            return true;
+        case GL_QUERY_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_QUERY_BUFFER));
+            return true;
+        case GL_PARAMETER_BUFFER_BINDING:
+            writeScalar(out, boundBuffer(GL_PARAMETER_BUFFER));
             return true;
         case GL_CURRENT_PROGRAM:
             writeScalar(out, currentProgram);
@@ -510,6 +560,7 @@ bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
         stencil_,
         raster_,
         enabledCaps_,
+        bufferBindings_,
         hints_,
         activeTextureUnit_,
         currentProgram_,
@@ -532,6 +583,7 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
         stencil_,
         raster_,
         enabledCaps_,
+        bufferBindings_,
         hints_,
         activeTextureUnit_,
         currentProgram_,
@@ -554,6 +606,7 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
         stencil_,
         raster_,
         enabledCaps_,
+        bufferBindings_,
         hints_,
         activeTextureUnit_,
         currentProgram_,
@@ -576,6 +629,7 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
         stencil_,
         raster_,
         enabledCaps_,
+        bufferBindings_,
         hints_,
         activeTextureUnit_,
         currentProgram_,
@@ -598,6 +652,7 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
         stencil_,
         raster_,
         enabledCaps_,
+        bufferBindings_,
         hints_,
         activeTextureUnit_,
         currentProgram_,
@@ -615,6 +670,45 @@ void GLStateTracker::bindBuffer(GLenum target, GLuint object) {
 GLuint GLStateTracker::boundBuffer(GLenum target) const {
     const auto found = bufferBindings_.find(target);
     return found == bufferBindings_.end() ? 0 : found->second;
+}
+
+void GLStateTracker::bindIndexedBuffer(GLenum target, GLuint index, GLuint object, GLintptr offset, GLsizeiptr size) {
+    auto& bindings = indexedBufferBindings_[target];
+    if (index >= bindings.size()) {
+        return;
+    }
+    bindings[index] = {object, offset, size};
+    bindBuffer(target, object);
+}
+
+GLIndexedBufferBinding GLStateTracker::indexedBufferBinding(GLenum target, GLuint index) const {
+    const auto found = indexedBufferBindings_.find(target);
+    if (found == indexedBufferBindings_.end() || index >= found->second.size()) {
+        return {};
+    }
+    return found->second[index];
+}
+
+void GLStateTracker::deleteBufferBindings(GLuint object) {
+    if (object == 0) {
+        return;
+    }
+    for (auto& [target, boundObject] : bufferBindings_) {
+        (void)target;
+        if (boundObject == object) {
+            boundObject = 0;
+        }
+    }
+    for (auto& [target, bindings] : indexedBufferBindings_) {
+        (void)target;
+        for (auto& binding : bindings) {
+            if (binding.buffer == object) {
+                binding = {};
+            }
+        }
+    }
+    markDirty(DirtyBit::VertexInput);
+    markDirty(DirtyBit::Program);
 }
 
 void GLStateTracker::bindTexture(GLenum target, GLuint object) {

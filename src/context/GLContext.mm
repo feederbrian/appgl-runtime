@@ -13,6 +13,7 @@
 #include <cstring>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace appgl {
@@ -78,9 +79,130 @@ void copyLabelString(std::string_view value, GLsizei bufSize, GLsizei* length, G
     label[copied] = '\0';
 }
 
+void* transferRetainedMetalObject(id object) {
+    if (object == nil) {
+        return nullptr;
+    }
+#if __has_feature(objc_arc)
+    return (__bridge_retained void*)object;
+#else
+    return object;
+#endif
+}
+
+void releaseRetainedMetalObject(void* object) {
+    if (object == nullptr) {
+        return;
+    }
+#if __has_feature(objc_arc)
+    CFRelease(object);
+#else
+    [(id)object release];
+#endif
+}
+
+id<MTLBuffer> metalBufferFromRaw(void* object) {
+    if (object == nullptr) {
+        return nil;
+    }
+#if __has_feature(objc_arc)
+    return (__bridge id<MTLBuffer>)object;
+#else
+    return (id<MTLBuffer>)object;
+#endif
+}
+
+MTLResourceOptions metalBufferOptionsForUsage(GLenum usage) {
+    MTLResourceOptions options = MTLResourceStorageModeShared;
+    switch (usage) {
+        case GL_STREAM_DRAW:
+        case GL_STATIC_DRAW:
+        case GL_DYNAMIC_DRAW:
+            options |= MTLResourceCPUCacheModeWriteCombined;
+            break;
+        default:
+            break;
+    }
+    return options;
+}
+
+bool legacyMapAccessToFlags(GLenum access, GLbitfield* flags) {
+    if (flags == nullptr) {
+        return false;
+    }
+    switch (access) {
+        case GL_READ_ONLY:
+            *flags = GL_MAP_READ_BIT;
+            return true;
+        case GL_WRITE_ONLY:
+            *flags = GL_MAP_WRITE_BIT;
+            return true;
+        case GL_READ_WRITE:
+            *flags = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT;
+            return true;
+        default:
+            return false;
+    }
+}
+
+GLenum legacyMapAccessFromFlags(GLbitfield access) {
+    const bool readable = (access & GL_MAP_READ_BIT) != 0;
+    const bool writable = (access & GL_MAP_WRITE_BIT) != 0;
+    if (readable && !writable) {
+        return GL_READ_ONLY;
+    }
+    if (!readable && writable) {
+        return GL_WRITE_ONLY;
+    }
+    return GL_READ_WRITE;
+}
+
+bool mapAccessWrites(GLbitfield access) {
+    return (access & GL_MAP_WRITE_BIT) != 0;
+}
+
+bool isSupportedMapBufferRangeAccess(GLbitfield access) {
+    constexpr GLbitfield kSupportedAccessBits = GL_MAP_READ_BIT
+        | GL_MAP_WRITE_BIT
+        | GL_MAP_INVALIDATE_RANGE_BIT
+        | GL_MAP_INVALIDATE_BUFFER_BIT
+        | GL_MAP_FLUSH_EXPLICIT_BIT
+        | GL_MAP_UNSYNCHRONIZED_BIT;
+    if ((access & ~kSupportedAccessBits) != 0) {
+        return false;
+    }
+    const bool readable = (access & GL_MAP_READ_BIT) != 0;
+    const bool writable = (access & GL_MAP_WRITE_BIT) != 0;
+    if (!readable && !writable) {
+        return false;
+    }
+    if (readable && (access & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT)) != 0) {
+        return false;
+    }
+    return (access & GL_MAP_FLUSH_EXPLICIT_BIT) == 0 || writable;
+}
+
+void resetBufferMapping(GLBufferObject& object) {
+    object.mapped = false;
+    object.mapAccess = GL_READ_WRITE;
+    object.mapAccessFlags = 0;
+    object.mapOffset = 0;
+    object.mapLength = 0;
+    object.mapPointer = nullptr;
+}
+
 }  // namespace
 
 struct GLContext::Impl {
+    ~Impl() {
+        if (objects == nullptr) {
+            return;
+        }
+        objects->buffers().forEach([&](GLuint, GLBufferObject& buffer) {
+            releaseBufferStorage(buffer);
+        });
+    }
+
     Impl(void* rawLayer, GLsizei initialWidth, GLsizei initialHeight, bool offscreen) {
         layer = (__bridge CAMetalLayer*)rawLayer;
         device = MTLCreateSystemDefaultDevice();
@@ -115,6 +237,86 @@ struct GLContext::Impl {
         }
         state->setViewport(viewportX, viewportY, viewportWidth, viewportHeight);
         extensionsString = capabilities != nullptr ? capabilities->extensionString() : "";
+    }
+
+    void releaseBufferStorage(GLBufferObject& object) {
+        releaseRetainedMetalObject(object.metalBuffer);
+        object.metalBuffer = nullptr;
+        object.size = 0;
+        object.shadowBytes.clear();
+        resetBufferMapping(object);
+    }
+
+    bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
+        std::vector<std::uint8_t> shadowBytes(static_cast<std::size_t>(size), 0);
+        if (data != nullptr && size > 0) {
+            std::memcpy(shadowBytes.data(), data, static_cast<std::size_t>(size));
+        }
+
+        void* retainedMetalBuffer = nullptr;
+        if (size > 0 && device != nil) {
+            id<MTLBuffer> metalBuffer =
+                [device newBufferWithLength:static_cast<NSUInteger>(size) options:metalBufferOptionsForUsage(usage)];
+            if (metalBuffer == nil) {
+                return false;
+            }
+            std::memcpy([metalBuffer contents], shadowBytes.data(), static_cast<std::size_t>(size));
+            retainedMetalBuffer = transferRetainedMetalObject(metalBuffer);
+        }
+
+        releaseBufferStorage(object);
+        object.size = size;
+        object.usage = usage;
+        object.shadowBytes = std::move(shadowBytes);
+        object.metalBuffer = retainedMetalBuffer;
+        resetBufferMapping(object);
+        return true;
+    }
+
+    std::uint8_t* mutableBufferContents(GLBufferObject& object) {
+        id<MTLBuffer> metalBuffer = metalBufferFromRaw(object.metalBuffer);
+        if (metalBuffer != nil) {
+            return static_cast<std::uint8_t*>([metalBuffer contents]);
+        }
+        return object.shadowBytes.empty() ? nullptr : object.shadowBytes.data();
+    }
+
+    const std::uint8_t* readableBufferContents(const GLBufferObject& object) const {
+        id<MTLBuffer> metalBuffer = metalBufferFromRaw(object.metalBuffer);
+        if (metalBuffer != nil) {
+            return static_cast<const std::uint8_t*>([metalBuffer contents]);
+        }
+        return object.shadowBytes.empty() ? nullptr : object.shadowBytes.data();
+    }
+
+    void syncShadowFromMetal(GLBufferObject& object, GLintptr offset, GLsizeiptr length) {
+        if (length <= 0 || object.metalBuffer == nullptr || object.shadowBytes.empty()) {
+            return;
+        }
+        const std::uint8_t* contents = readableBufferContents(object);
+        if (contents == nullptr) {
+            return;
+        }
+        std::memcpy(
+            object.shadowBytes.data() + static_cast<std::size_t>(offset),
+            contents + static_cast<std::size_t>(offset),
+            static_cast<std::size_t>(length)
+        );
+    }
+
+    void syncMetalFromShadow(GLBufferObject& object, GLintptr offset, GLsizeiptr length) {
+        if (length <= 0 || object.metalBuffer == nullptr || object.shadowBytes.empty()) {
+            return;
+        }
+        std::uint8_t* contents = mutableBufferContents(object);
+        if (contents == nullptr) {
+            return;
+        }
+        std::memcpy(
+            contents + static_cast<std::size_t>(offset),
+            object.shadowBytes.data() + static_cast<std::size_t>(offset),
+            static_cast<std::size_t>(length)
+        );
     }
 
     void encodePendingWork() {
@@ -648,6 +850,387 @@ bool GLContext::getPointer(GLenum pname, void** params) {
             pushError(GL_INVALID_ENUM);
             return false;
     }
+}
+
+bool GLContext::genBuffers(GLsizei count, GLuint* buffers) {
+    if (count < 0 || (count > 0 && buffers == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        buffers[index] = impl_->objects->buffers().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::deleteBuffers(GLsizei count, const GLuint* buffers) {
+    if (count < 0 || (count > 0 && buffers == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei index = 0; index < count; ++index) {
+        const GLuint name = buffers[index];
+        if (name == 0) {
+            continue;
+        }
+        if (GLBufferObject* object = impl_->objects->buffers().get(name); object != nullptr) {
+            impl_->releaseBufferStorage(*object);
+        }
+        if (impl_->objects->buffers().erase(name)) {
+            impl_->state->deleteBufferBindings(name);
+            impl_->objects->deferDelete("buffer " + std::to_string(name));
+        }
+    }
+    return true;
+}
+
+bool GLContext::isBuffer(GLuint buffer) const {
+    const GLBufferObject* object = impl_->objects->buffers().get(buffer);
+    return object != nullptr && object->instantiated;
+}
+
+bool GLContext::bindBuffer(GLenum target, GLuint buffer) {
+    if (buffer == 0) {
+        impl_->state->bindBuffer(target, 0);
+        return true;
+    }
+    GLBufferObject* object = impl_->objects->buffers().get(buffer);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    object->instantiated = true;
+    impl_->state->bindBuffer(target, buffer);
+    return true;
+}
+
+bool GLContext::bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
+    if (buffer == 0) {
+        impl_->state->bindIndexedBuffer(target, index, 0, 0, 0);
+        return true;
+    }
+    if (offset < 0 || size < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLBufferObject* object = impl_->objects->buffers().get(buffer);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    object->instantiated = true;
+    impl_->state->bindIndexedBuffer(target, index, buffer, offset, size);
+    return true;
+}
+
+bool GLContext::bindBufferBase(GLenum target, GLuint index, GLuint buffer) {
+    GLsizeiptr size = 0;
+    if (buffer != 0) {
+        GLBufferObject* object = impl_->objects->buffers().get(buffer);
+        if (object == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        object->instantiated = true;
+        size = object->size;
+    }
+    impl_->state->bindIndexedBuffer(target, index, buffer, 0, size);
+    return true;
+}
+
+bool GLContext::bufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
+    if (size < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint name = impl_->state->boundBuffer(target);
+    GLBufferObject* object = impl_->objects->buffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (object->mapped) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!impl_->replaceBufferStorage(*object, size, data, usage)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::bufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
+    if (offset < 0 || size < 0 || (size > 0 && data == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint name = impl_->state->boundBuffer(target);
+    GLBufferObject* object = impl_->objects->buffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated || object->mapped) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (offset > object->size || size > object->size - offset) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (size > 0) {
+        std::memcpy(
+            object->shadowBytes.data() + static_cast<std::size_t>(offset),
+            data,
+            static_cast<std::size_t>(size)
+        );
+        impl_->syncMetalFromShadow(*object, offset, size);
+    }
+    return true;
+}
+
+bool GLContext::copyBufferSubData(
+    GLenum readTarget,
+    GLenum writeTarget,
+    GLintptr readOffset,
+    GLintptr writeOffset,
+    GLsizeiptr size
+) {
+    if (readOffset < 0 || writeOffset < 0 || size < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint readName = impl_->state->boundBuffer(readTarget);
+    const GLuint writeName = impl_->state->boundBuffer(writeTarget);
+    GLBufferObject* readObject = impl_->objects->buffers().get(readName);
+    GLBufferObject* writeObject = impl_->objects->buffers().get(writeName);
+    if (readName == 0 || writeName == 0 || readObject == nullptr || writeObject == nullptr
+        || !readObject->instantiated || !writeObject->instantiated || readObject->mapped || writeObject->mapped) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (readOffset > readObject->size || size > readObject->size - readOffset
+        || writeOffset > writeObject->size || size > writeObject->size - writeOffset) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (readName == writeName) {
+        const GLintptr readEnd = readOffset + size;
+        const GLintptr writeEnd = writeOffset + size;
+        if (size > 0 && readOffset < writeEnd && writeOffset < readEnd) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
+    if (size > 0) {
+        const std::uint8_t* readBytes = impl_->readableBufferContents(*readObject);
+        if (readBytes == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        std::memcpy(
+            writeObject->shadowBytes.data() + static_cast<std::size_t>(writeOffset),
+            readBytes + static_cast<std::size_t>(readOffset),
+            static_cast<std::size_t>(size)
+        );
+        impl_->syncMetalFromShadow(*writeObject, writeOffset, size);
+    }
+    return true;
+}
+
+bool GLContext::getBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* data) {
+    if (offset < 0 || size < 0 || (size > 0 && data == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint name = impl_->state->boundBuffer(target);
+    GLBufferObject* object = impl_->objects->buffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated || object->mapped) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (offset > object->size || size > object->size - offset) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (size > 0) {
+        const std::uint8_t* bytes = impl_->readableBufferContents(*object);
+        if (bytes == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        std::memcpy(data, bytes + static_cast<std::size_t>(offset), static_cast<std::size_t>(size));
+    }
+    return true;
+}
+
+void* GLContext::mapBuffer(GLenum target, GLenum access) {
+    GLbitfield flags = 0;
+    if (!legacyMapAccessToFlags(access, &flags)) {
+        pushError(GL_INVALID_ENUM);
+        return nullptr;
+    }
+    const GLuint name = impl_->state->boundBuffer(target);
+    GLBufferObject* object = impl_->objects->buffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated || object->mapped || object->size <= 0) {
+        pushError(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+    void* pointer = mapBufferRange(target, 0, object->size, flags);
+    if (pointer != nullptr) {
+        object->mapAccess = access;
+    }
+    return pointer;
+}
+
+void* GLContext::mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
+    if (offset < 0 || length < 0) {
+        pushError(GL_INVALID_VALUE);
+        return nullptr;
+    }
+    if (!isSupportedMapBufferRangeAccess(access)) {
+        pushError(GL_INVALID_VALUE);
+        return nullptr;
+    }
+    const GLuint name = impl_->state->boundBuffer(target);
+    GLBufferObject* object = impl_->objects->buffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated || object->mapped) {
+        pushError(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+    if (length == 0 || object->size <= 0) {
+        pushError(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+    if (offset > object->size || length > object->size - offset) {
+        pushError(GL_INVALID_VALUE);
+        return nullptr;
+    }
+
+    std::uint8_t* contents = impl_->mutableBufferContents(*object);
+    if (contents == nullptr) {
+        pushError(GL_OUT_OF_MEMORY);
+        return nullptr;
+    }
+
+    object->mapped = true;
+    object->mapAccess = legacyMapAccessFromFlags(access);
+    object->mapAccessFlags = access;
+    object->mapOffset = offset;
+    object->mapLength = length;
+    object->mapPointer = contents + static_cast<std::size_t>(offset);
+    return object->mapPointer;
+}
+
+GLboolean GLContext::unmapBuffer(GLenum target) {
+    const GLuint name = impl_->state->boundBuffer(target);
+    GLBufferObject* object = impl_->objects->buffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated || !object->mapped) {
+        pushError(GL_INVALID_OPERATION);
+        return GL_FALSE;
+    }
+    if (mapAccessWrites(object->mapAccessFlags)) {
+        impl_->syncShadowFromMetal(*object, object->mapOffset, object->mapLength);
+    }
+    resetBufferMapping(*object);
+    return GL_TRUE;
+}
+
+bool GLContext::flushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
+    if (offset < 0 || length < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint name = impl_->state->boundBuffer(target);
+    GLBufferObject* object = impl_->objects->buffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated || !object->mapped
+        || (object->mapAccessFlags & GL_MAP_FLUSH_EXPLICIT_BIT) == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (offset > object->mapLength || length > object->mapLength - offset) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (mapAccessWrites(object->mapAccessFlags)) {
+        impl_->syncShadowFromMetal(*object, object->mapOffset + offset, length);
+    }
+    return true;
+}
+
+bool GLContext::getBufferParameterInteger(GLenum target, GLenum pname, GLint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLint64 value = 0;
+    if (!getBufferParameterInteger64(target, pname, &value)) {
+        return false;
+    }
+    *params = static_cast<GLint>(value);
+    return true;
+}
+
+bool GLContext::getBufferParameterInteger64(GLenum target, GLenum pname, GLint64* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint name = impl_->state->boundBuffer(target);
+    GLBufferObject* object = impl_->objects->buffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    switch (pname) {
+        case GL_BUFFER_SIZE:
+            *params = object->size;
+            return true;
+        case GL_BUFFER_USAGE:
+            *params = object->usage;
+            return true;
+        case GL_BUFFER_ACCESS:
+            *params = object->mapAccess;
+            return true;
+        case GL_BUFFER_ACCESS_FLAGS:
+            *params = object->mapped ? object->mapAccessFlags : 0;
+            return true;
+        case GL_BUFFER_MAPPED:
+            *params = object->mapped ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_BUFFER_MAP_OFFSET:
+            *params = object->mapped ? object->mapOffset : 0;
+            return true;
+        case GL_BUFFER_MAP_LENGTH:
+            *params = object->mapped ? object->mapLength : 0;
+            return true;
+        case GL_BUFFER_IMMUTABLE_STORAGE:
+            *params = GL_FALSE;
+            return true;
+        case GL_BUFFER_STORAGE_FLAGS:
+            *params = 0;
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::getBufferPointer(GLenum target, GLenum pname, void** params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (pname != GL_BUFFER_MAP_POINTER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    const GLuint name = impl_->state->boundBuffer(target);
+    GLBufferObject* object = impl_->objects->buffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    *params = object->mapped ? object->mapPointer : nullptr;
+    return true;
 }
 
 void GLContext::pushError(GLenum error) {

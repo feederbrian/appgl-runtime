@@ -20,6 +20,9 @@ public:
     T* get(GLuint id);
     const T* get(GLuint id) const;
 
+    template <typename Visitor>
+    void forEach(Visitor&& visitor);
+
 private:
     GLuint nextId_ = 1;
     std::unordered_map<GLuint, T> objects_;
@@ -30,6 +33,12 @@ struct GLBufferObject {
     GLsizeiptr size = 0;
     GLenum usage = GL_STATIC_DRAW;
     bool mapped = false;
+    bool instantiated = false;
+    GLenum mapAccess = GL_READ_WRITE;
+    GLbitfield mapAccessFlags = 0;
+    GLintptr mapOffset = 0;
+    GLsizeiptr mapLength = 0;
+    void* mapPointer = nullptr;
     std::vector<std::uint8_t> shadowBytes;
 };
 
@@ -209,6 +218,14 @@ const T* ObjectTable<T>::get(GLuint id) const {
         return nullptr;
     }
     return &found->second;
+}
+
+template <typename T>
+template <typename Visitor>
+void ObjectTable<T>::forEach(Visitor&& visitor) {
+    for (auto& [id, object] : objects_) {
+        visitor(id, object);
+    }
 }
 
 }  // namespace appgl
