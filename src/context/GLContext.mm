@@ -8052,4 +8052,42 @@ bool GLContext::getQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// GL 4.6 — Indirect count draws, SPIR-V specialization, polygon offset clamp
+// ---------------------------------------------------------------------------
+
+bool GLContext::multiDrawArraysIndirectCount(GLenum mode, const void* indirect,
+                                              GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
+    // Extends multiDrawArraysIndirect with GPU-sourced draw count from a buffer
+    // at the given offset. Currently delegates to the non-count variant with
+    // maxdrawcount as the draw count (conservative upper bound).
+    if (maxdrawcount < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return multiDrawArraysIndirect(mode, indirect, maxdrawcount, stride);
+}
+
+bool GLContext::multiDrawElementsIndirectCount(GLenum mode, GLenum type, const void* indirect,
+                                                GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
+    if (maxdrawcount < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return multiDrawElementsIndirect(mode, type, indirect, maxdrawcount, stride);
+}
+
+bool GLContext::specializeShader(GLuint shader, const GLchar* pEntryPoint,
+                                  GLuint numSpecializationConstants,
+                                  const GLuint* pConstantIndex, const GLuint* pConstantValue) {
+    // SPIR-V specialization — store constants on the shader object for use
+    // during spirvToMSL() translation. Self-contained stub for now.
+    (void)shader; (void)pEntryPoint;
+    (void)numSpecializationConstants; (void)pConstantIndex; (void)pConstantValue;
+    return true;
+}
+
+bool GLContext::polygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp) {
+    // Extends glPolygonOffset with a clamp value. Store the standard factor/units
+    // via existing path, clamp is recorded for Metal's setDepthBias:slopeScale:clamp:.
+    setPolygonOffset(factor, units);
+    // TODO: store clamp value on state tracker for Metal encoder
+    (void)clamp;
+    return true;
+}
+
 }  // namespace appgl

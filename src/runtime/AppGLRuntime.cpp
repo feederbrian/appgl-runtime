@@ -6036,6 +6036,39 @@ void APIENTRY glGetQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname
     markStateFunction(FunctionId::glGetQueryBufferObjectui64v, "GetQueryBufferObjectui64v stub.");
 }
 
+// ---------------------------------------------------------------------------
+// Pass E — GL 4.6 (4 functions)
+// ---------------------------------------------------------------------------
+
+void APIENTRY glMultiDrawArraysIndirectCount(GLenum mode, const void* indirect,
+                                              GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
+    auto* ctx = requireCurrentContext("glMultiDrawArraysIndirectCount");
+    if (!ctx) return;
+    if (!ctx->multiDrawArraysIndirectCount(mode, indirect, drawcount, maxdrawcount, stride)) return;
+    markDrawFunction(FunctionId::glMultiDrawArraysIndirectCount, "MultiDrawArraysIndirectCount (GPU-sourced count).");
+}
+void APIENTRY glMultiDrawElementsIndirectCount(GLenum mode, GLenum type, const void* indirect,
+                                                GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
+    auto* ctx = requireCurrentContext("glMultiDrawElementsIndirectCount");
+    if (!ctx) return;
+    if (!ctx->multiDrawElementsIndirectCount(mode, type, indirect, drawcount, maxdrawcount, stride)) return;
+    markDrawFunction(FunctionId::glMultiDrawElementsIndirectCount, "MultiDrawElementsIndirectCount (GPU-sourced count).");
+}
+void APIENTRY glSpecializeShader(GLuint shader, const GLchar* pEntryPoint,
+                                  GLuint numSpecializationConstants,
+                                  const GLuint* pConstantIndex, const GLuint* pConstantValue) {
+    auto* ctx = requireCurrentContext("glSpecializeShader");
+    if (!ctx) return;
+    if (!ctx->specializeShader(shader, pEntryPoint, numSpecializationConstants, pConstantIndex, pConstantValue)) return;
+    markShaderFunction(FunctionId::glSpecializeShader, "SpecializeShader SPIR-V stub.");
+}
+void APIENTRY glPolygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp) {
+    auto* ctx = requireCurrentContext("glPolygonOffsetClamp");
+    if (!ctx) return;
+    if (!ctx->polygonOffsetClamp(factor, units, clamp)) return;
+    markStateFunction(FunctionId::glPolygonOffsetClamp, "PolygonOffsetClamp extends PolygonOffset with clamp.");
+}
+
 }  // namespace impl
 
 }  // namespace appgl

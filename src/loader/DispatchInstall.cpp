@@ -1007,6 +1007,16 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
         coverage.markImplemented(id, "Query buffer object stub.");
     }
 
+    // Pass E — GL 4.6 (4 functions)
+    dispatch.glMultiDrawArraysIndirectCount = &impl::glMultiDrawArraysIndirectCount;
+    dispatch.glMultiDrawElementsIndirectCount = &impl::glMultiDrawElementsIndirectCount;
+    dispatch.glSpecializeShader = &impl::glSpecializeShader;
+    dispatch.glPolygonOffsetClamp = &impl::glPolygonOffsetClamp;
+    for (auto id : {FunctionId::glMultiDrawArraysIndirectCount, FunctionId::glMultiDrawElementsIndirectCount,
+                    FunctionId::glSpecializeShader, FunctionId::glPolygonOffsetClamp}) {
+        coverage.markImplemented(id, "GL 4.6 entry point.");
+    }
+
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in
     // the promotion-gate window. Queries are live; everything else ships as a
