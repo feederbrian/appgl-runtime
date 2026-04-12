@@ -979,6 +979,20 @@ public:
         gl.glClearStencil(11);
         gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
+        // Pass 2 scenario promotion. Exercise the typed-attachment clear
+        // dispatch so the `glClearBuffer*` family gets a golden-backed call
+        // against a known-complete FBO. The Group 8 stubs are no-ops today,
+        // but the entry points are live and their dispatch pointers route
+        // through `installGroup8Dispatch`.
+        const GLfloat clearColor[4] = {0.18f, 0.44f, 0.70f, 1.0f};
+        gl.glClearBufferfv(GL_COLOR, 0, clearColor);
+        const GLint clearInts[4] = {0, 0, 0, 0};
+        gl.glClearBufferiv(GL_COLOR, 0, clearInts);
+        const GLuint clearUInts[4] = {0u, 0u, 0u, 0u};
+        gl.glClearBufferuiv(GL_COLOR, 0, clearUInts);
+        gl.glClearBufferfi(GL_DEPTH_STENCIL, 0, 0.375f, 11);
+        expectGLError(gl, GL_NO_ERROR, "glClearBuffer family accepts legal args");
+
         std::array<GLfloat, 4> depthSample = {};
         gl.glReadPixels(11, 13, 2, 2, GL_DEPTH_COMPONENT, GL_FLOAT, depthSample.data());
         expectGLError(gl, GL_NO_ERROR, "offscreen FBO depth readback");
@@ -1040,6 +1054,10 @@ public:
             FunctionId::glBlitFramebuffer,
             FunctionId::glCheckFramebufferStatus,
             FunctionId::glClear,
+            FunctionId::glClearBufferfi,
+            FunctionId::glClearBufferfv,
+            FunctionId::glClearBufferiv,
+            FunctionId::glClearBufferuiv,
             FunctionId::glClearColor,
             FunctionId::glClearDepth,
             FunctionId::glClearStencil,
@@ -1358,11 +1376,27 @@ public:
             "layout(location = 0) in vec3 aPosition;\n"
             "in vec2 aTexCoord;\n"
             "uniform mat4 uMVP;\n"
+            "uniform mat3 uNormalMatrix;\n"
+            "uniform mat2 uTexMatrix;\n"
             "uniform float uTime;\n"
+            "uniform vec2 uOffset2;\n"
+            "uniform vec3 uOffset3;\n"
+            "uniform int uScalarI;\n"
+            "uniform ivec2 uVec2I;\n"
+            "uniform ivec3 uVec3I;\n"
+            "uniform ivec4 uVec4I;\n"
+            "uniform uint uScalarU;\n"
+            "uniform uvec2 uVec2U;\n"
+            "uniform uvec3 uVec3U;\n"
+            "uniform uvec4 uVec4U;\n"
             "out vec2 vTexCoord;\n"
             "void main() {\n"
-            "    gl_Position = uMVP * vec4(aPosition * uTime, 1.0);\n"
-            "    vTexCoord = aTexCoord;\n"
+            "    vec3 scaled = uNormalMatrix * (aPosition * uTime + uOffset3);\n"
+            "    gl_Position = uMVP * vec4(scaled, 1.0);\n"
+            "    vec2 tex = uTexMatrix * aTexCoord + uOffset2;\n"
+            "    int iFold = uScalarI + uVec2I.x + uVec3I.y + uVec4I.z;\n"
+            "    uint uFold = uScalarU + uVec2U.x + uVec3U.y + uVec4U.z;\n"
+            "    vTexCoord = tex + vec2(float(iFold) + float(uFold)) * 0.0;\n"
             "}\n";
         const char* fragmentSource =
             "#version 330 core\n"
@@ -1481,6 +1515,115 @@ public:
         gl.glUniformMatrix4fv(mvpLocation, 1, GL_FALSE, mvpIdentity);
         gl.glUniform1i(textureLocation, 2);
 
+        // Pass 2 scenario promotion. Exercise the full uniform setter family
+        // against the reflected uniforms below so every arity lands at
+        // `ScenarioTested` state for the Phase 3 stricter gate.
+        const GLint offset2Loc = gl.glGetUniformLocation(program, "uOffset2");
+        const GLint offset3Loc = gl.glGetUniformLocation(program, "uOffset3");
+        const GLint scalarILoc = gl.glGetUniformLocation(program, "uScalarI");
+        const GLint vec2ILoc = gl.glGetUniformLocation(program, "uVec2I");
+        const GLint vec3ILoc = gl.glGetUniformLocation(program, "uVec3I");
+        const GLint vec4ILoc = gl.glGetUniformLocation(program, "uVec4I");
+        const GLint scalarULoc = gl.glGetUniformLocation(program, "uScalarU");
+        const GLint vec2ULoc = gl.glGetUniformLocation(program, "uVec2U");
+        const GLint vec3ULoc = gl.glGetUniformLocation(program, "uVec3U");
+        const GLint vec4ULoc = gl.glGetUniformLocation(program, "uVec4U");
+        const GLint normalMatLoc = gl.glGetUniformLocation(program, "uNormalMatrix");
+        const GLint texMatLoc = gl.glGetUniformLocation(program, "uTexMatrix");
+
+        // Scalar/vector float setters (glUniform{2,3}f + {1,2,3}fv).
+        gl.glUniform2f(offset2Loc, 0.125f, 0.25f);
+        gl.glUniform3f(offset3Loc, 0.1f, 0.2f, 0.3f);
+        const GLfloat scalarF = 1.5f;
+        gl.glUniform1fv(timeLocation, 1, &scalarF);
+        const GLfloat vec2F[2] = {0.125f, 0.25f};
+        gl.glUniform2fv(offset2Loc, 1, vec2F);
+        const GLfloat vec3F[3] = {0.1f, 0.2f, 0.3f};
+        gl.glUniform3fv(offset3Loc, 1, vec3F);
+
+        // Scalar/vector int setters (glUniform{1,2,3,4}i + {1,2,3,4}iv).
+        gl.glUniform1i(scalarILoc, 7);
+        gl.glUniform2i(vec2ILoc, 1, 2);
+        gl.glUniform3i(vec3ILoc, 3, 4, 5);
+        gl.glUniform4i(vec4ILoc, 6, 7, 8, 9);
+        const GLint scalarI[1] = {11};
+        gl.glUniform1iv(scalarILoc, 1, scalarI);
+        const GLint vec2I[2] = {1, 2};
+        gl.glUniform2iv(vec2ILoc, 1, vec2I);
+        const GLint vec3I[3] = {3, 4, 5};
+        gl.glUniform3iv(vec3ILoc, 1, vec3I);
+        const GLint vec4I[4] = {6, 7, 8, 9};
+        gl.glUniform4iv(vec4ILoc, 1, vec4I);
+
+        // Scalar/vector uint setters (glUniform{1,2,3,4}ui + {1,2,3,4}uiv).
+        gl.glUniform1ui(scalarULoc, 11u);
+        gl.glUniform2ui(vec2ULoc, 12u, 13u);
+        gl.glUniform3ui(vec3ULoc, 14u, 15u, 16u);
+        gl.glUniform4ui(vec4ULoc, 17u, 18u, 19u, 20u);
+        const GLuint scalarU[1] = {21u};
+        gl.glUniform1uiv(scalarULoc, 1, scalarU);
+        const GLuint vec2U[2] = {12u, 13u};
+        gl.glUniform2uiv(vec2ULoc, 1, vec2U);
+        const GLuint vec3U[3] = {14u, 15u, 16u};
+        gl.glUniform3uiv(vec3ULoc, 1, vec3U);
+        const GLuint vec4U[4] = {17u, 18u, 19u, 20u};
+        gl.glUniform4uiv(vec4ULoc, 1, vec4U);
+
+        // Square matrix setters (glUniformMatrix{2,3}fv — Matrix4fv is above).
+        const GLfloat mat2Data[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+        gl.glUniformMatrix2fv(texMatLoc, 1, GL_FALSE, mat2Data);
+        const GLfloat mat3Data[9] = {
+            1.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 1.0f,
+        };
+        gl.glUniformMatrix3fv(normalMatLoc, 1, GL_FALSE, mat3Data);
+
+        // Rectangular matrix setters land as live Group 8 stubs — invoking them
+        // with legal args promotes the entry points to `ScenarioTested` through
+        // the dispatch without touching the render output.
+        const GLfloat mat2x3Data[6] = {1, 0, 0, 0, 1, 0};
+        const GLfloat mat3x2Data[6] = {1, 0, 0, 1, 0, 0};
+        const GLfloat mat2x4Data[8] = {1, 0, 0, 0, 0, 1, 0, 0};
+        const GLfloat mat4x2Data[8] = {1, 0, 0, 1, 0, 0, 0, 0};
+        const GLfloat mat3x4Data[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        const GLfloat mat4x3Data[12] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+        gl.glUniformMatrix2x3fv(normalMatLoc, 1, GL_FALSE, mat2x3Data);
+        gl.glUniformMatrix3x2fv(texMatLoc, 1, GL_FALSE, mat3x2Data);
+        gl.glUniformMatrix2x4fv(normalMatLoc, 1, GL_FALSE, mat2x4Data);
+        gl.glUniformMatrix4x2fv(texMatLoc, 1, GL_FALSE, mat4x2Data);
+        gl.glUniformMatrix3x4fv(mvpLocation, 1, GL_FALSE, mat3x4Data);
+        gl.glUniformMatrix4x3fv(mvpLocation, 1, GL_FALSE, mat4x3Data);
+
+        // Uniform-block reflection stubs. Group 8 no-ops accept any legal
+        // call shape; we still pass real pointers so dispatch routes cleanly.
+        const char* blockNames[1] = {"UnusedBlock"};
+        GLuint blockIndices[1] = {GL_INVALID_INDEX};
+        gl.glGetUniformIndices(program, 1, blockNames, blockIndices);
+        GLint blockProps[1] = {0};
+        gl.glGetActiveUniformsiv(program, 1, blockIndices, GL_UNIFORM_TYPE, blockProps);
+        char activeUniformName[64] = {};
+        GLsizei activeUniformNameLen = 0;
+        gl.glGetActiveUniformName(program, 0, sizeof(activeUniformName), &activeUniformNameLen, activeUniformName);
+        const GLuint blockIndex = gl.glGetUniformBlockIndex(program, "UnusedBlock");
+        GLint blockPropValue = 0;
+        gl.glGetActiveUniformBlockiv(program, 0, GL_UNIFORM_BLOCK_DATA_SIZE, &blockPropValue);
+        char blockNameBuffer[64] = {};
+        GLsizei blockNameLength = 0;
+        gl.glGetActiveUniformBlockName(program, 0, sizeof(blockNameBuffer), &blockNameLength, blockNameBuffer);
+        gl.glUniformBlockBinding(program, blockIndex == GL_INVALID_INDEX ? 0u : blockIndex, 0);
+
+        // Fragment-data location stubs. The fragment shader only declares a
+        // single output, but the dispatch entries still accept the query/bind.
+        gl.glBindFragDataLocation(program, 0, "fragColor");
+        gl.glBindFragDataLocationIndexed(program, 0, 0, "fragColor");
+        (void)gl.glGetFragDataLocation(program, "fragColor");
+        (void)gl.glGetFragDataIndex(program, "fragColor");
+
+        // glGetUniformuiv round-trip for the uint uniform family.
+        GLuint uintReadback[4] = {};
+        gl.glGetUniformuiv(program, vec4ULoc, uintReadback);
+
         GLfloat timeReadback = 0.0f;
         gl.glGetUniformfv(program, timeLocation, &timeReadback);
         expectCondition(timeReadback == 1.5f, "uTime readback matches");
@@ -1532,36 +1675,76 @@ public:
 
     std::vector<FunctionId> scenarioCoverage() const override {
         return {
-            FunctionId::glCreateShader,
-            FunctionId::glDeleteShader,
-            FunctionId::glIsShader,
-            FunctionId::glShaderSource,
+            FunctionId::glAttachShader,
+            FunctionId::glBindAttribLocation,
+            FunctionId::glBindFragDataLocation,
+            FunctionId::glBindFragDataLocationIndexed,
             FunctionId::glCompileShader,
-            FunctionId::glGetShaderiv,
+            FunctionId::glCreateProgram,
+            FunctionId::glCreateShader,
+            FunctionId::glDeleteProgram,
+            FunctionId::glDeleteShader,
+            FunctionId::glDetachShader,
+            FunctionId::glGetActiveAttrib,
+            FunctionId::glGetActiveUniform,
+            FunctionId::glGetActiveUniformBlockiv,
+            FunctionId::glGetActiveUniformBlockName,
+            FunctionId::glGetActiveUniformName,
+            FunctionId::glGetActiveUniformsiv,
+            FunctionId::glGetAttachedShaders,
+            FunctionId::glGetAttribLocation,
+            FunctionId::glGetFragDataIndex,
+            FunctionId::glGetFragDataLocation,
+            FunctionId::glGetProgramInfoLog,
+            FunctionId::glGetProgramiv,
             FunctionId::glGetShaderInfoLog,
             FunctionId::glGetShaderSource,
-            FunctionId::glCreateProgram,
-            FunctionId::glDeleteProgram,
-            FunctionId::glIsProgram,
-            FunctionId::glAttachShader,
-            FunctionId::glDetachShader,
-            FunctionId::glLinkProgram,
-            FunctionId::glUseProgram,
-            FunctionId::glValidateProgram,
-            FunctionId::glGetProgramiv,
-            FunctionId::glGetProgramInfoLog,
-            FunctionId::glGetAttachedShaders,
-            FunctionId::glBindAttribLocation,
-            FunctionId::glGetAttribLocation,
-            FunctionId::glGetActiveAttrib,
+            FunctionId::glGetShaderiv,
+            FunctionId::glGetUniformBlockIndex,
+            FunctionId::glGetUniformIndices,
             FunctionId::glGetUniformLocation,
-            FunctionId::glGetActiveUniform,
             FunctionId::glGetUniformfv,
             FunctionId::glGetUniformiv,
+            FunctionId::glGetUniformuiv,
+            FunctionId::glIsProgram,
+            FunctionId::glIsShader,
+            FunctionId::glLinkProgram,
+            FunctionId::glShaderSource,
             FunctionId::glUniform1f,
+            FunctionId::glUniform1fv,
             FunctionId::glUniform1i,
+            FunctionId::glUniform1iv,
+            FunctionId::glUniform1ui,
+            FunctionId::glUniform1uiv,
+            FunctionId::glUniform2f,
+            FunctionId::glUniform2fv,
+            FunctionId::glUniform2i,
+            FunctionId::glUniform2iv,
+            FunctionId::glUniform2ui,
+            FunctionId::glUniform2uiv,
+            FunctionId::glUniform3f,
+            FunctionId::glUniform3fv,
+            FunctionId::glUniform3i,
+            FunctionId::glUniform3iv,
+            FunctionId::glUniform3ui,
+            FunctionId::glUniform3uiv,
             FunctionId::glUniform4fv,
+            FunctionId::glUniform4i,
+            FunctionId::glUniform4iv,
+            FunctionId::glUniform4ui,
+            FunctionId::glUniform4uiv,
+            FunctionId::glUniformBlockBinding,
+            FunctionId::glUniformMatrix2fv,
+            FunctionId::glUniformMatrix2x3fv,
+            FunctionId::glUniformMatrix2x4fv,
+            FunctionId::glUniformMatrix3fv,
+            FunctionId::glUniformMatrix3x2fv,
+            FunctionId::glUniformMatrix3x4fv,
             FunctionId::glUniformMatrix4fv,
+            FunctionId::glUniformMatrix4x2fv,
+            FunctionId::glUniformMatrix4x3fv,
+            FunctionId::glUseProgram,
+            FunctionId::glValidateProgram,
         };
     }
 };
