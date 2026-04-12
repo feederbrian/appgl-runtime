@@ -52,6 +52,10 @@ ObjectTable<GLTransformFeedbackObject>& GLObjectStore::transformFeedbacks() {
     return transformFeedbacks_;
 }
 
+ObjectTable<GLProgramPipelineObject>& GLObjectStore::programPipelines() {
+    return programPipelines_;
+}
+
 GLsizei GLObjectStore::maxVertexAttribs() const {
     return maxVertexAttribs_;
 }

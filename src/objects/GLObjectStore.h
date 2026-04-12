@@ -232,6 +232,18 @@ struct GLTransformFeedbackObject {
     bool active = false;
 };
 
+struct GLProgramPipelineObject {
+    GLuint vertexProgram = 0;
+    GLuint fragmentProgram = 0;
+    GLuint geometryProgram = 0;
+    GLuint tessControlProgram = 0;
+    GLuint tessEvalProgram = 0;
+    GLuint computeProgram = 0;
+    GLuint activeShaderProgram = 0;
+    bool validated = false;
+    std::string infoLog;
+};
+
 class GLObjectStore {
 public:
     explicit GLObjectStore(GLsizei maxVertexAttribs = 16);
@@ -247,6 +259,7 @@ public:
     ObjectTable<GLQueryObject>& queries();
     ObjectTable<GLSyncObject>& syncs();
     ObjectTable<GLTransformFeedbackObject>& transformFeedbacks();
+    ObjectTable<GLProgramPipelineObject>& programPipelines();
 
     GLsizei maxVertexAttribs() const;
     void initializeVertexArray(GLVertexArrayObject& vertexArray) const;
@@ -267,6 +280,7 @@ private:
     ObjectTable<GLQueryObject> queries_;
     ObjectTable<GLSyncObject> syncs_;
     ObjectTable<GLTransformFeedbackObject> transformFeedbacks_;
+    ObjectTable<GLProgramPipelineObject> programPipelines_;
     std::vector<std::string> deferredDeletes_;
 };
 

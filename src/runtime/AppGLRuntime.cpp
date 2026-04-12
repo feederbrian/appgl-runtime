@@ -4468,6 +4468,284 @@ void APIENTRY glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype
     Runtime::shared().recordBootstrapTrace("glGetShaderPrecisionFormat(shadertype=" + std::to_string(shadertype) + ", precisiontype=" + std::to_string(precisiontype) + ")");
 }
 
+// --- GL 4.1: Program Pipeline Objects (Group 9) ---
+
+void APIENTRY glGenProgramPipelines(GLsizei n, GLuint* pipelines) {
+    auto* ctx = requireCurrentContext("glGenProgramPipelines");
+    if (!ctx) return;
+    if (n < 0) {
+        recordValidationError(ctx, "glGenProgramPipelines", GL_INVALID_VALUE, "n < 0");
+        return;
+    }
+    for (GLsizei i = 0; i < n; ++i) {
+        pipelines[i] = ctx->objects().programPipelines().reserveName();
+    }
+    markProgramFunction(FunctionId::glGenProgramPipelines, "Program pipeline name generation.");
+    Runtime::shared().recordBootstrapTrace("glGenProgramPipelines(n=" + std::to_string(n) + ")");
+}
+
+void APIENTRY glDeleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
+    auto* ctx = requireCurrentContext("glDeleteProgramPipelines");
+    if (!ctx) return;
+    if (n < 0) {
+        recordValidationError(ctx, "glDeleteProgramPipelines", GL_INVALID_VALUE, "n < 0");
+        return;
+    }
+    for (GLsizei i = 0; i < n; ++i) {
+        if (pipelines[i] != 0) {
+            ctx->objects().programPipelines().erase(pipelines[i]);
+        }
+    }
+    markProgramFunction(FunctionId::glDeleteProgramPipelines, "Program pipeline deletion.");
+    Runtime::shared().recordBootstrapTrace("glDeleteProgramPipelines(n=" + std::to_string(n) + ")");
+}
+
+GLboolean APIENTRY glIsProgramPipeline(GLuint pipeline) {
+    auto* ctx = requireCurrentContext("glIsProgramPipeline");
+    if (!ctx) return GL_FALSE;
+    GLboolean result = ctx->objects().programPipelines().contains(pipeline) ? GL_TRUE : GL_FALSE;
+    markProgramFunction(FunctionId::glIsProgramPipeline, "Program pipeline existence query.");
+    return result;
+}
+
+void APIENTRY glBindProgramPipeline(GLuint pipeline) {
+    auto* ctx = requireCurrentContext("glBindProgramPipeline");
+    if (!ctx) return;
+    if (pipeline != 0 && !ctx->objects().programPipelines().contains(pipeline)) {
+        recordValidationError(ctx, "glBindProgramPipeline", GL_INVALID_OPERATION, "pipeline does not exist");
+        return;
+    }
+    // State-tracked binding (no Metal effect — separable programs not wired to Metal pipeline yet).
+    markProgramFunction(FunctionId::glBindProgramPipeline, "Program pipeline binding (state-tracked).");
+    Runtime::shared().recordBootstrapTrace("glBindProgramPipeline(pipeline=" + std::to_string(pipeline) + ")");
+}
+
+void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program) {
+    auto* ctx = requireCurrentContext("glUseProgramStages");
+    if (!ctx) return;
+    auto* ppo = ctx->objects().programPipelines().get(pipeline);
+    if (!ppo) {
+        recordValidationError(ctx, "glUseProgramStages", GL_INVALID_OPERATION, "pipeline does not exist");
+        return;
+    }
+    // Track stage assignments on CPU.
+    if (stages & GL_VERTEX_SHADER_BIT)          ppo->vertexProgram = program;
+    if (stages & GL_FRAGMENT_SHADER_BIT)        ppo->fragmentProgram = program;
+    if (stages & GL_GEOMETRY_SHADER_BIT)        ppo->geometryProgram = program;
+    if (stages & GL_TESS_CONTROL_SHADER_BIT)    ppo->tessControlProgram = program;
+    if (stages & GL_TESS_EVALUATION_SHADER_BIT) ppo->tessEvalProgram = program;
+    if (stages & GL_COMPUTE_SHADER_BIT)         ppo->computeProgram = program;
+    if (stages == GL_ALL_SHADER_BITS) {
+        ppo->vertexProgram = program;
+        ppo->fragmentProgram = program;
+        ppo->geometryProgram = program;
+        ppo->tessControlProgram = program;
+        ppo->tessEvalProgram = program;
+        ppo->computeProgram = program;
+    }
+    markProgramFunction(FunctionId::glUseProgramStages, "UseProgramStages stage assignment (state-tracked).");
+    Runtime::shared().recordBootstrapTrace("glUseProgramStages(pipeline=" + std::to_string(pipeline) + ", stages=" + std::to_string(stages) + ", program=" + std::to_string(program) + ")");
+}
+
+void APIENTRY glActiveShaderProgram(GLuint pipeline, GLuint program) {
+    auto* ctx = requireCurrentContext("glActiveShaderProgram");
+    if (!ctx) return;
+    auto* ppo = ctx->objects().programPipelines().get(pipeline);
+    if (!ppo) {
+        recordValidationError(ctx, "glActiveShaderProgram", GL_INVALID_OPERATION, "pipeline does not exist");
+        return;
+    }
+    ppo->activeShaderProgram = program;
+    markProgramFunction(FunctionId::glActiveShaderProgram, "ActiveShaderProgram sets default uniform target.");
+    Runtime::shared().recordBootstrapTrace("glActiveShaderProgram(pipeline=" + std::to_string(pipeline) + ", program=" + std::to_string(program) + ")");
+}
+
+GLuint APIENTRY glCreateShaderProgramv(GLenum type, GLsizei count, const GLchar* const* strings) {
+    auto* ctx = requireCurrentContext("glCreateShaderProgramv");
+    if (!ctx) return 0;
+    // Convenience function: create shader, source, compile, create program, attach, link, delete shader.
+    GLuint shader = ctx->createShader(type);
+    if (shader == 0) {
+        recordValidationError(ctx, "glCreateShaderProgramv", GL_INVALID_ENUM, "invalid shader type");
+        return 0;
+    }
+    ctx->shaderSource(shader, count, strings, nullptr);
+    ctx->compileShader(shader);
+    GLint compiled = 0;
+    ctx->getShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+
+    GLuint program = ctx->createProgram();
+    if (compiled) {
+        // Mark as separable before linking (hint accepted silently, no Metal effect).
+        ctx->attachShader(program, shader);
+        ctx->linkProgram(program);
+        ctx->detachShader(program, shader);
+    }
+    ctx->deleteShader(shader);
+
+    markProgramFunction(FunctionId::glCreateShaderProgramv, "CreateShaderProgramv convenience (create+compile+link).");
+    Runtime::shared().recordBootstrapTrace("glCreateShaderProgramv(type=" + std::to_string(type) + ", count=" + std::to_string(count) + ") -> " + std::to_string(program));
+    return program;
+}
+
+void APIENTRY glValidateProgramPipeline(GLuint pipeline) {
+    auto* ctx = requireCurrentContext("glValidateProgramPipeline");
+    if (!ctx) return;
+    auto* ppo = ctx->objects().programPipelines().get(pipeline);
+    if (!ppo) {
+        recordValidationError(ctx, "glValidateProgramPipeline", GL_INVALID_OPERATION, "pipeline does not exist");
+        return;
+    }
+    // Always report validation success (state-only — no real separable pipeline in Metal yet).
+    ppo->validated = true;
+    ppo->infoLog = "Validation successful (AppGL stub).";
+    markProgramFunction(FunctionId::glValidateProgramPipeline, "ValidateProgramPipeline (always passes, stub).");
+    Runtime::shared().recordBootstrapTrace("glValidateProgramPipeline(pipeline=" + std::to_string(pipeline) + ")");
+}
+
+void APIENTRY glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* params) {
+    auto* ctx = requireCurrentContext("glGetProgramPipelineiv");
+    if (!ctx || !params) return;
+    auto* ppo = ctx->objects().programPipelines().get(pipeline);
+    if (!ppo) {
+        recordValidationError(ctx, "glGetProgramPipelineiv", GL_INVALID_OPERATION, "pipeline does not exist");
+        return;
+    }
+    switch (pname) {
+        case GL_ACTIVE_PROGRAM:              *params = static_cast<GLint>(ppo->activeShaderProgram); break;
+        case GL_VERTEX_SHADER:               *params = static_cast<GLint>(ppo->vertexProgram); break;
+        case GL_FRAGMENT_SHADER:             *params = static_cast<GLint>(ppo->fragmentProgram); break;
+        case GL_GEOMETRY_SHADER:             *params = static_cast<GLint>(ppo->geometryProgram); break;
+        case GL_TESS_CONTROL_SHADER:         *params = static_cast<GLint>(ppo->tessControlProgram); break;
+        case GL_TESS_EVALUATION_SHADER:      *params = static_cast<GLint>(ppo->tessEvalProgram); break;
+        case GL_COMPUTE_SHADER:              *params = static_cast<GLint>(ppo->computeProgram); break;
+        case GL_VALIDATE_STATUS:             *params = ppo->validated ? GL_TRUE : GL_FALSE; break;
+        case GL_INFO_LOG_LENGTH:             *params = static_cast<GLint>(ppo->infoLog.size() + 1); break;
+        default:
+            recordValidationError(ctx, "glGetProgramPipelineiv", GL_INVALID_ENUM, "invalid pname");
+            return;
+    }
+    markProgramFunction(FunctionId::glGetProgramPipelineiv, "GetProgramPipelineiv returns pipeline state.");
+    Runtime::shared().recordBootstrapTrace("glGetProgramPipelineiv(pipeline=" + std::to_string(pipeline) + ", pname=" + std::to_string(pname) + ")");
+}
+
+void APIENTRY glGetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize, GLsizei* length, GLchar* infoLog) {
+    auto* ctx = requireCurrentContext("glGetProgramPipelineInfoLog");
+    if (!ctx) return;
+    auto* ppo = ctx->objects().programPipelines().get(pipeline);
+    if (!ppo) {
+        recordValidationError(ctx, "glGetProgramPipelineInfoLog", GL_INVALID_OPERATION, "pipeline does not exist");
+        return;
+    }
+    GLsizei logLen = static_cast<GLsizei>(ppo->infoLog.size());
+    GLsizei copyLen = (bufSize > 0) ? std::min(logLen, bufSize - 1) : 0;
+    if (infoLog && copyLen > 0) {
+        std::memcpy(infoLog, ppo->infoLog.c_str(), static_cast<std::size_t>(copyLen));
+        infoLog[copyLen] = '\0';
+    } else if (infoLog && bufSize > 0) {
+        infoLog[0] = '\0';
+    }
+    if (length) *length = copyLen;
+    markProgramFunction(FunctionId::glGetProgramPipelineInfoLog, "GetProgramPipelineInfoLog returns validation log.");
+    Runtime::shared().recordBootstrapTrace("glGetProgramPipelineInfoLog(pipeline=" + std::to_string(pipeline) + ")");
+}
+
+// --- GL 4.0: Subroutine Uniforms (Group 3, stub-with-state) ---
+// Metal has no subroutine equivalent. These stubs report 0 subroutines/locations,
+// making them spec-legal for programs without subroutine declarations.
+
+GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadertype, const GLchar* name) {
+    auto* ctx = requireCurrentContext("glGetSubroutineUniformLocation");
+    if (!ctx) return -1;
+    (void)program; (void)shadertype; (void)name;
+    // No subroutines compiled — always return -1.
+    markProgramFunction(FunctionId::glGetSubroutineUniformLocation, "Subroutine uniform location stub (always -1, no subroutines).");
+    Runtime::shared().recordBootstrapTrace("glGetSubroutineUniformLocation(program=" + std::to_string(program) + ", name=" + std::string(name ? name : "(null)") + ") -> -1");
+    return -1;
+}
+
+GLuint APIENTRY glGetSubroutineIndex(GLuint program, GLenum shadertype, const GLchar* name) {
+    auto* ctx = requireCurrentContext("glGetSubroutineIndex");
+    if (!ctx) return GL_INVALID_INDEX;
+    (void)program; (void)shadertype; (void)name;
+    markProgramFunction(FunctionId::glGetSubroutineIndex, "Subroutine index stub (always GL_INVALID_INDEX).");
+    Runtime::shared().recordBootstrapTrace("glGetSubroutineIndex(program=" + std::to_string(program) + ", name=" + std::string(name ? name : "(null)") + ") -> GL_INVALID_INDEX");
+    return GL_INVALID_INDEX;
+}
+
+void APIENTRY glGetActiveSubroutineUniformiv(GLuint program, GLenum shadertype, GLuint index, GLenum pname, GLint* values) {
+    auto* ctx = requireCurrentContext("glGetActiveSubroutineUniformiv");
+    if (!ctx) return;
+    (void)program; (void)shadertype; (void)index;
+    // 0 active subroutine uniforms → any index is invalid.
+    if (pname == GL_NUM_COMPATIBLE_SUBROUTINES && values) {
+        *values = 0;
+    } else if (values) {
+        *values = 0;
+    }
+    markProgramFunction(FunctionId::glGetActiveSubroutineUniformiv, "Active subroutine uniform query stub (0 subroutines).");
+    Runtime::shared().recordBootstrapTrace("glGetActiveSubroutineUniformiv(program=" + std::to_string(program) + ", index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glGetActiveSubroutineUniformName(GLuint program, GLenum shadertype, GLuint index, GLsizei bufsize, GLsizei* length, GLchar* name) {
+    auto* ctx = requireCurrentContext("glGetActiveSubroutineUniformName");
+    if (!ctx) return;
+    (void)program; (void)shadertype; (void)index;
+    // 0 active subroutine uniforms → GL_INVALID_VALUE for any index.
+    recordValidationError(ctx, "glGetActiveSubroutineUniformName", GL_INVALID_VALUE, "no active subroutine uniforms");
+    if (name && bufsize > 0) name[0] = '\0';
+    if (length) *length = 0;
+    markProgramFunction(FunctionId::glGetActiveSubroutineUniformName, "Active subroutine uniform name stub (no subroutines).");
+}
+
+void APIENTRY glGetActiveSubroutineName(GLuint program, GLenum shadertype, GLuint index, GLsizei bufsize, GLsizei* length, GLchar* name) {
+    auto* ctx = requireCurrentContext("glGetActiveSubroutineName");
+    if (!ctx) return;
+    (void)program; (void)shadertype; (void)index;
+    recordValidationError(ctx, "glGetActiveSubroutineName", GL_INVALID_VALUE, "no active subroutines");
+    if (name && bufsize > 0) name[0] = '\0';
+    if (length) *length = 0;
+    markProgramFunction(FunctionId::glGetActiveSubroutineName, "Active subroutine name stub (no subroutines).");
+}
+
+void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GLuint* indices) {
+    auto* ctx = requireCurrentContext("glUniformSubroutinesuiv");
+    if (!ctx) return;
+    (void)shadertype; (void)count; (void)indices;
+    // No subroutine uniforms → count must be 0 for valid call, any >0 is technically invalid.
+    // Accept silently for robustness (state-tracked stub).
+    markProgramFunction(FunctionId::glUniformSubroutinesuiv, "UniformSubroutinesuiv stub (no subroutines, no-op).");
+    Runtime::shared().recordBootstrapTrace("glUniformSubroutinesuiv(shadertype=" + std::to_string(shadertype) + ", count=" + std::to_string(count) + ")");
+}
+
+void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuint* params) {
+    auto* ctx = requireCurrentContext("glGetUniformSubroutineuiv");
+    if (!ctx) return;
+    (void)shadertype; (void)location;
+    if (params) *params = 0;
+    markProgramFunction(FunctionId::glGetUniformSubroutineuiv, "GetUniformSubroutineuiv stub (returns 0).");
+    Runtime::shared().recordBootstrapTrace("glGetUniformSubroutineuiv(shadertype=" + std::to_string(shadertype) + ", location=" + std::to_string(location) + ")");
+}
+
+void APIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pname, GLint* values) {
+    auto* ctx = requireCurrentContext("glGetProgramStageiv");
+    if (!ctx || !values) return;
+    (void)program; (void)shadertype;
+    // Report 0 for all subroutine-related queries.
+    switch (pname) {
+        case GL_ACTIVE_SUBROUTINES:               *values = 0; break;
+        case GL_ACTIVE_SUBROUTINE_UNIFORMS:        *values = 0; break;
+        case GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS: *values = 0; break;
+        case GL_ACTIVE_SUBROUTINE_MAX_LENGTH:      *values = 0; break;
+        case GL_ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH: *values = 0; break;
+        default:
+            recordValidationError(ctx, "glGetProgramStageiv", GL_INVALID_ENUM, "invalid pname");
+            return;
+    }
+    markProgramFunction(FunctionId::glGetProgramStageiv, "GetProgramStageiv reports 0 subroutines.");
+    Runtime::shared().recordBootstrapTrace("glGetProgramStageiv(program=" + std::to_string(program) + ", pname=" + std::to_string(pname) + ")");
+}
+
 }  // namespace impl
 
 }  // namespace appgl

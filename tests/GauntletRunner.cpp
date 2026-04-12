@@ -1762,6 +1762,98 @@ public:
         gl.glShaderBinary(0, nullptr, 0, nullptr, 0);
         while (gl.glGetError() != GL_NO_ERROR) {}
 
+        // Phase 4 Group 9: Program Pipeline Objects.
+        {
+            GLuint ppo[2] = {0, 0};
+            gl.glGenProgramPipelines(2, ppo);
+            expectCondition(ppo[0] != 0 && ppo[1] != 0, "glGenProgramPipelines returns non-zero handles");
+            expectGLError(gl, GL_NO_ERROR, "glGenProgramPipelines no error");
+            expectCondition(gl.glIsProgramPipeline(ppo[0]) == GL_TRUE, "pipeline exists after gen");
+            expectCondition(gl.glIsProgramPipeline(99999) == GL_FALSE, "non-existent pipeline returns GL_FALSE");
+
+            gl.glBindProgramPipeline(ppo[0]);
+            expectGLError(gl, GL_NO_ERROR, "glBindProgramPipeline no error");
+            gl.glBindProgramPipeline(0);
+            expectGLError(gl, GL_NO_ERROR, "glBindProgramPipeline(0) unbind no error");
+
+            gl.glUseProgramStages(ppo[0], GL_VERTEX_SHADER_BIT | GL_FRAGMENT_SHADER_BIT, program);
+            expectGLError(gl, GL_NO_ERROR, "glUseProgramStages no error");
+            GLint vertStage = 0;
+            gl.glGetProgramPipelineiv(ppo[0], GL_VERTEX_SHADER, &vertStage);
+            expectCondition(vertStage == static_cast<GLint>(program), "vertex stage bound to program");
+            GLint fragStage = 0;
+            gl.glGetProgramPipelineiv(ppo[0], GL_FRAGMENT_SHADER, &fragStage);
+            expectCondition(fragStage == static_cast<GLint>(program), "fragment stage bound to program");
+
+            gl.glActiveShaderProgram(ppo[0], program);
+            expectGLError(gl, GL_NO_ERROR, "glActiveShaderProgram no error");
+            GLint activeProg = 0;
+            gl.glGetProgramPipelineiv(ppo[0], GL_ACTIVE_PROGRAM, &activeProg);
+            expectCondition(activeProg == static_cast<GLint>(program), "active shader program matches");
+
+            gl.glValidateProgramPipeline(ppo[0]);
+            expectGLError(gl, GL_NO_ERROR, "glValidateProgramPipeline no error");
+            GLint validateStatus = 0;
+            gl.glGetProgramPipelineiv(ppo[0], GL_VALIDATE_STATUS, &validateStatus);
+            expectCondition(validateStatus == GL_TRUE, "pipeline validates successfully");
+
+            GLint logLen = 0;
+            gl.glGetProgramPipelineiv(ppo[0], GL_INFO_LOG_LENGTH, &logLen);
+            expectCondition(logLen > 0, "pipeline info log length > 0 after validation");
+            char logBuf[256] = {};
+            GLsizei written = 0;
+            gl.glGetProgramPipelineInfoLog(ppo[0], sizeof(logBuf), &written, logBuf);
+            expectCondition(written > 0, "pipeline info log written > 0");
+
+            // glCreateShaderProgramv convenience.
+            const char* trivialVS =
+                "#version 330 core\n"
+                "void main() { gl_Position = vec4(0.0); }\n";
+            GLuint sepProg = gl.glCreateShaderProgramv(GL_VERTEX_SHADER, 1, &trivialVS);
+            expectCondition(sepProg != 0, "glCreateShaderProgramv returns non-zero");
+            expectCondition(gl.glIsProgram(sepProg) == GL_TRUE, "separable program is valid");
+            gl.glDeleteProgram(sepProg);
+            while (gl.glGetError() != GL_NO_ERROR) {}
+
+            gl.glDeleteProgramPipelines(2, ppo);
+            expectGLError(gl, GL_NO_ERROR, "glDeleteProgramPipelines no error");
+            expectCondition(gl.glIsProgramPipeline(ppo[0]) == GL_FALSE, "pipeline gone after delete");
+        }
+
+        // Phase 4 Group 3: Subroutine Uniforms (stub-with-state).
+        {
+            GLint subLoc = gl.glGetSubroutineUniformLocation(program, GL_VERTEX_SHADER, "nonExistent");
+            expectCondition(subLoc == -1, "subroutine uniform location returns -1 (no subroutines)");
+            GLuint subIdx = gl.glGetSubroutineIndex(program, GL_VERTEX_SHADER, "nonExistent");
+            expectCondition(subIdx == GL_INVALID_INDEX, "subroutine index returns GL_INVALID_INDEX");
+
+            GLint numCompat = -1;
+            gl.glGetActiveSubroutineUniformiv(program, GL_VERTEX_SHADER, 0, GL_NUM_COMPATIBLE_SUBROUTINES, &numCompat);
+            expectCondition(numCompat == 0, "active subroutine uniform compatible count is 0");
+
+            // glGetActiveSubroutineUniformName and glGetActiveSubroutineName report GL_INVALID_VALUE.
+            char subName[64] = {};
+            GLsizei subNameLen = 0;
+            gl.glGetActiveSubroutineUniformName(program, GL_VERTEX_SHADER, 0, sizeof(subName), &subNameLen, subName);
+            while (gl.glGetError() != GL_NO_ERROR) {}
+            gl.glGetActiveSubroutineName(program, GL_VERTEX_SHADER, 0, sizeof(subName), &subNameLen, subName);
+            while (gl.glGetError() != GL_NO_ERROR) {}
+
+            GLuint subIndices[1] = {0};
+            gl.glUniformSubroutinesuiv(GL_VERTEX_SHADER, 0, subIndices);
+            expectGLError(gl, GL_NO_ERROR, "glUniformSubroutinesuiv (count=0) no error");
+            GLuint readbackSub = 99;
+            gl.glGetUniformSubroutineuiv(GL_VERTEX_SHADER, 0, &readbackSub);
+            expectCondition(readbackSub == 0, "GetUniformSubroutineuiv returns 0");
+
+            GLint activeSubroutines = -1;
+            gl.glGetProgramStageiv(program, GL_VERTEX_SHADER, GL_ACTIVE_SUBROUTINES, &activeSubroutines);
+            expectCondition(activeSubroutines == 0, "GetProgramStageiv reports 0 active subroutines");
+            GLint activeSubUniforms = -1;
+            gl.glGetProgramStageiv(program, GL_VERTEX_SHADER, GL_ACTIVE_SUBROUTINE_UNIFORMS, &activeSubUniforms);
+            expectCondition(activeSubUniforms == 0, "GetProgramStageiv reports 0 active subroutine uniforms");
+        }
+
         gl.glDetachShader(program, vertex);
         GLint attachedAfterDetach = 0;
         gl.glGetProgramiv(program, GL_ATTACHED_SHADERS, &attachedAfterDetach);
@@ -1907,6 +1999,26 @@ public:
             FunctionId::glProgramParameteri,
             FunctionId::glShaderBinary,
             FunctionId::glReleaseShaderCompiler,
+            // Phase 4 Group 9: program pipeline objects.
+            FunctionId::glGenProgramPipelines,
+            FunctionId::glDeleteProgramPipelines,
+            FunctionId::glIsProgramPipeline,
+            FunctionId::glBindProgramPipeline,
+            FunctionId::glUseProgramStages,
+            FunctionId::glActiveShaderProgram,
+            FunctionId::glCreateShaderProgramv,
+            FunctionId::glValidateProgramPipeline,
+            FunctionId::glGetProgramPipelineiv,
+            FunctionId::glGetProgramPipelineInfoLog,
+            // Phase 4 Group 3: subroutine uniforms (stub).
+            FunctionId::glGetSubroutineUniformLocation,
+            FunctionId::glGetSubroutineIndex,
+            FunctionId::glGetActiveSubroutineUniformiv,
+            FunctionId::glGetActiveSubroutineUniformName,
+            FunctionId::glGetActiveSubroutineName,
+            FunctionId::glUniformSubroutinesuiv,
+            FunctionId::glGetUniformSubroutineuiv,
+            FunctionId::glGetProgramStageiv,
         };
     }
 };

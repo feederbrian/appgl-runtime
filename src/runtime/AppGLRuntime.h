@@ -329,6 +329,26 @@ void APIENTRY glVertexAttribL3dv(GLuint index, const GLdouble* v);
 void APIENTRY glVertexAttribL4dv(GLuint index, const GLdouble* v);
 void APIENTRY glVertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer);
 void APIENTRY glGetVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params);
+// GL 4.1 — program pipeline objects (Group 9).
+void APIENTRY glGenProgramPipelines(GLsizei n, GLuint* pipelines);
+void APIENTRY glDeleteProgramPipelines(GLsizei n, const GLuint* pipelines);
+GLboolean APIENTRY glIsProgramPipeline(GLuint pipeline);
+void APIENTRY glBindProgramPipeline(GLuint pipeline);
+void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program);
+void APIENTRY glActiveShaderProgram(GLuint pipeline, GLuint program);
+GLuint APIENTRY glCreateShaderProgramv(GLenum type, GLsizei count, const GLchar* const* strings);
+void APIENTRY glValidateProgramPipeline(GLuint pipeline);
+void APIENTRY glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* params);
+void APIENTRY glGetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize, GLsizei* length, GLchar* infoLog);
+// GL 4.0 — subroutine uniforms (Group 3, stub-with-state).
+GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadertype, const GLchar* name);
+GLuint APIENTRY glGetSubroutineIndex(GLuint program, GLenum shadertype, const GLchar* name);
+void APIENTRY glGetActiveSubroutineUniformiv(GLuint program, GLenum shadertype, GLuint index, GLenum pname, GLint* values);
+void APIENTRY glGetActiveSubroutineUniformName(GLuint program, GLenum shadertype, GLuint index, GLsizei bufsize, GLsizei* length, GLchar* name);
+void APIENTRY glGetActiveSubroutineName(GLuint program, GLenum shadertype, GLuint index, GLsizei bufsize, GLsizei* length, GLchar* name);
+void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GLuint* indices);
+void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuint* params);
+void APIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pname, GLint* values);
 }  // namespace impl
 
 class Runtime {

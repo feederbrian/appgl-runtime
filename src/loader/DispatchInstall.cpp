@@ -317,6 +317,26 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGetVertexAttribLdv = &impl::glGetVertexAttribLdv;
     // GL 4.1 — shader precision (Group 13).
     dispatch.glGetShaderPrecisionFormat = &impl::glGetShaderPrecisionFormat;
+    // GL 4.1 — program pipeline objects (Group 9).
+    dispatch.glGenProgramPipelines = &impl::glGenProgramPipelines;
+    dispatch.glDeleteProgramPipelines = &impl::glDeleteProgramPipelines;
+    dispatch.glIsProgramPipeline = &impl::glIsProgramPipeline;
+    dispatch.glBindProgramPipeline = &impl::glBindProgramPipeline;
+    dispatch.glUseProgramStages = &impl::glUseProgramStages;
+    dispatch.glActiveShaderProgram = &impl::glActiveShaderProgram;
+    dispatch.glCreateShaderProgramv = &impl::glCreateShaderProgramv;
+    dispatch.glValidateProgramPipeline = &impl::glValidateProgramPipeline;
+    dispatch.glGetProgramPipelineiv = &impl::glGetProgramPipelineiv;
+    dispatch.glGetProgramPipelineInfoLog = &impl::glGetProgramPipelineInfoLog;
+    // GL 4.0 — subroutine uniforms (Group 3, stub-with-state).
+    dispatch.glGetSubroutineUniformLocation = &impl::glGetSubroutineUniformLocation;
+    dispatch.glGetSubroutineIndex = &impl::glGetSubroutineIndex;
+    dispatch.glGetActiveSubroutineUniformiv = &impl::glGetActiveSubroutineUniformiv;
+    dispatch.glGetActiveSubroutineUniformName = &impl::glGetActiveSubroutineUniformName;
+    dispatch.glGetActiveSubroutineName = &impl::glGetActiveSubroutineName;
+    dispatch.glUniformSubroutinesuiv = &impl::glUniformSubroutinesuiv;
+    dispatch.glGetUniformSubroutineuiv = &impl::glGetUniformSubroutineuiv;
+    dispatch.glGetProgramStageiv = &impl::glGetProgramStageiv;
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
@@ -601,6 +621,26 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glVertexAttribLPointer, "Double-precision vertex attribute pointer (f64→f32 narrowing at draw).");
     coverage.markImplemented(FunctionId::glGetVertexAttribLdv, "Double vertex attrib readback from CPU-side shadow.");
     coverage.markImplemented(FunctionId::glGetShaderPrecisionFormat, "Shader precision query returns Metal-appropriate ranges.");
+    // GL 4.1 — program pipeline objects (Group 9).
+    coverage.markImplemented(FunctionId::glGenProgramPipelines, "Program pipeline name generation.");
+    coverage.markImplemented(FunctionId::glDeleteProgramPipelines, "Program pipeline deletion.");
+    coverage.markImplemented(FunctionId::glIsProgramPipeline, "Program pipeline existence query.");
+    coverage.markImplemented(FunctionId::glBindProgramPipeline, "Program pipeline binding (state-tracked).");
+    coverage.markImplemented(FunctionId::glUseProgramStages, "UseProgramStages stage assignment (state-tracked).");
+    coverage.markImplemented(FunctionId::glActiveShaderProgram, "ActiveShaderProgram sets default uniform target.");
+    coverage.markImplemented(FunctionId::glCreateShaderProgramv, "CreateShaderProgramv convenience (create+compile+link).");
+    coverage.markImplemented(FunctionId::glValidateProgramPipeline, "ValidateProgramPipeline (always passes, stub).");
+    coverage.markImplemented(FunctionId::glGetProgramPipelineiv, "GetProgramPipelineiv returns pipeline state.");
+    coverage.markImplemented(FunctionId::glGetProgramPipelineInfoLog, "GetProgramPipelineInfoLog returns validation log.");
+    // GL 4.0 — subroutine uniforms (Group 3, stub-with-state).
+    coverage.markImplemented(FunctionId::glGetSubroutineUniformLocation, "Subroutine uniform location stub (always -1).");
+    coverage.markImplemented(FunctionId::glGetSubroutineIndex, "Subroutine index stub (always GL_INVALID_INDEX).");
+    coverage.markImplemented(FunctionId::glGetActiveSubroutineUniformiv, "Active subroutine uniform query stub (0 subroutines).");
+    coverage.markImplemented(FunctionId::glGetActiveSubroutineUniformName, "Active subroutine uniform name stub (GL_INVALID_VALUE).");
+    coverage.markImplemented(FunctionId::glGetActiveSubroutineName, "Active subroutine name stub (GL_INVALID_VALUE).");
+    coverage.markImplemented(FunctionId::glUniformSubroutinesuiv, "UniformSubroutinesuiv stub (no-op).");
+    coverage.markImplemented(FunctionId::glGetUniformSubroutineuiv, "GetUniformSubroutineuiv stub (returns 0).");
+    coverage.markImplemented(FunctionId::glGetProgramStageiv, "GetProgramStageiv reports 0 subroutines.");
 
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in
