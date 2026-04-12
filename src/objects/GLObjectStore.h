@@ -225,6 +225,18 @@ struct GLProgramUniformValue {
     std::vector<GLdouble> doubles;  // CPU-side shadow for f64→f32 narrowing (lossless glGetUniformdv readback)
 };
 
+// GL 4.3 program resource introspection — per-resource entry used by
+// glGetProgramInterfaceiv / glGetProgramResourceiv / etc.
+struct GLProgramResourceEntry {
+    std::string name;
+    GLenum type = 0;          // GL_FLOAT, GL_FLOAT_VEC4, etc.
+    GLint location = -1;      // location/binding
+    GLint arraySize = 1;
+    GLint offset = -1;        // byte offset within block (-1 = N/A)
+    GLint blockIndex = -1;    // parent block index (-1 = not in a block)
+    GLbitfield referencedBy = 0; // bitmask: 1=vertex, 2=fragment, 4=compute, etc.
+};
+
 struct GLProgramObject {
     std::vector<GLuint> attachedShaders;
     std::string linkLog;
@@ -253,6 +265,18 @@ struct GLProgramObject {
     // Track which pixel format the cached pipeline was created for, so we
     // can invalidate if the render target format changes.
     std::uint32_t metalPipelineColorFormat = 0;
+
+    // GL 4.3 program resource introspection tables (populated at link time).
+    std::vector<GLProgramResourceEntry> resourceUniforms;
+    std::vector<GLProgramResourceEntry> resourceUniformBlocks;
+    std::vector<GLProgramResourceEntry> resourceInputs;
+    std::vector<GLProgramResourceEntry> resourceOutputs;
+    std::vector<GLProgramResourceEntry> resourceStorageBlocks;
+    std::vector<GLProgramResourceEntry> resourceAtomicCounterBuffers;
+    std::vector<GLProgramResourceEntry> resourceBufferVariables;
+
+    // GL 4.3 SSBO binding remapping (block index → user-specified binding).
+    std::unordered_map<GLuint, GLuint> ssboBindingRemap;
 };
 
 struct GLQueryObject {

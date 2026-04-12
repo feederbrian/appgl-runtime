@@ -369,6 +369,15 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     // GL 4.2 — image load/store and atomic counters.
     dispatch.glBindImageTexture = &impl::glBindImageTexture;
     dispatch.glGetActiveAtomicCounterBufferiv = &impl::glGetActiveAtomicCounterBufferiv;
+    // GL 4.3 — program resource introspection (ARB_program_interface_query).
+    dispatch.glGetProgramInterfaceiv = &impl::glGetProgramInterfaceiv;
+    dispatch.glGetProgramResourceiv = &impl::glGetProgramResourceiv;
+    dispatch.glGetProgramResourceName = &impl::glGetProgramResourceName;
+    dispatch.glGetProgramResourceIndex = &impl::glGetProgramResourceIndex;
+    dispatch.glGetProgramResourceLocation = &impl::glGetProgramResourceLocation;
+    dispatch.glGetProgramResourceLocationIndex = &impl::glGetProgramResourceLocationIndex;
+    // GL 4.3 — SSBO binding remapping.
+    dispatch.glShaderStorageBlockBinding = &impl::glShaderStorageBlockBinding;
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
@@ -705,6 +714,15 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     // GL 4.2 — image load/store and atomic counters.
     coverage.markImplemented(FunctionId::glBindImageTexture, "Image unit binding state tracked for load/store shaders.");
     coverage.markImplemented(FunctionId::glGetActiveAtomicCounterBufferiv, "Atomic counter buffer query returns sensible defaults (no native atomic counters on Metal).");
+    // GL 4.3 — program resource introspection (ARB_program_interface_query).
+    coverage.markImplemented(FunctionId::glGetProgramInterfaceiv, "Program interface query returns active resource counts from reflection tables.");
+    coverage.markImplemented(FunctionId::glGetProgramResourceiv, "Program resource property query returns reflection data.");
+    coverage.markImplemented(FunctionId::glGetProgramResourceName, "Program resource name query returns reflected names.");
+    coverage.markImplemented(FunctionId::glGetProgramResourceIndex, "Program resource index lookup by name.");
+    coverage.markImplemented(FunctionId::glGetProgramResourceLocation, "Program resource location lookup by name.");
+    coverage.markImplemented(FunctionId::glGetProgramResourceLocationIndex, "Program resource location index (dual-source blending).");
+    // GL 4.3 — SSBO binding remapping.
+    coverage.markImplemented(FunctionId::glShaderStorageBlockBinding, "SSBO block binding remapping tracked on program object.");
 
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in

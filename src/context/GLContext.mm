@@ -4897,6 +4897,55 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->linked = true;
     programObject->linkLog = "ok";
 
+    // Populate GL 4.3 program resource introspection tables from the
+    // reflection data we already gathered above.
+    programObject->resourceUniforms.clear();
+    programObject->resourceUniformBlocks.clear();
+    programObject->resourceInputs.clear();
+    programObject->resourceOutputs.clear();
+    programObject->resourceStorageBlocks.clear();
+    programObject->resourceAtomicCounterBuffers.clear();
+    programObject->resourceBufferVariables.clear();
+    programObject->ssboBindingRemap.clear();
+
+    for (const auto& u : programObject->uniforms) {
+        GLProgramResourceEntry entry;
+        entry.name = u.name;
+        entry.type = u.type;
+        entry.location = u.location;
+        entry.arraySize = u.arraySize;
+        entry.referencedBy = 0x03; // vertex + fragment (conservative)
+        programObject->resourceUniforms.push_back(std::move(entry));
+    }
+    for (const auto& a : programObject->attributes) {
+        GLProgramResourceEntry entry;
+        entry.name = a.name;
+        entry.type = a.type;
+        entry.location = a.location;
+        entry.referencedBy = 0x01; // vertex
+        programObject->resourceInputs.push_back(std::move(entry));
+    }
+    // Fragment outputs: populate from fragment shader declared outputs.
+    for (GLuint shaderId : programObject->attachedShaders) {
+        GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
+        if (shaderObject == nullptr) continue;
+        if (shaderObject->stage == GL_FRAGMENT_SHADER) {
+            GLint nextOutputLoc = 0;
+            for (const auto& output : shaderObject->declaredOutputs) {
+                GLProgramResourceEntry entry;
+                entry.name = output.name;
+                entry.type = output.type;
+                entry.location = (output.explicitLocation >= 0) ? output.explicitLocation : nextOutputLoc;
+                entry.arraySize = output.arraySize;
+                entry.referencedBy = 0x02; // fragment
+                if (entry.location >= nextOutputLoc) {
+                    nextOutputLoc = entry.location + 1;
+                }
+                programObject->resourceOutputs.push_back(std::move(entry));
+            }
+        }
+    }
+
     // Attempt GLSL→SPIR-V→MSL translation for the GPU pipeline. This is
     // best-effort: if it fails the program still links and falls back to the
     // hardcoded solid-color draw path.
@@ -6143,6 +6192,246 @@ bool GLContext::getActiveAtomicCounterBufferiv(GLuint program, GLuint bufferInde
             pushError(GL_INVALID_ENUM);
             return false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.3 — Program Resource Introspection (ARB_program_interface_query)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const std::vector<GLProgramResourceEntry>* getResourceTable(const GLProgramObject& prog, GLenum programInterface) {
+    switch (programInterface) {
+        case GL_UNIFORM:                return &prog.resourceUniforms;
+        case GL_UNIFORM_BLOCK:          return &prog.resourceUniformBlocks;
+        case GL_PROGRAM_INPUT:          return &prog.resourceInputs;
+        case GL_PROGRAM_OUTPUT:         return &prog.resourceOutputs;
+        case GL_SHADER_STORAGE_BLOCK:   return &prog.resourceStorageBlocks;
+        case GL_ATOMIC_COUNTER_BUFFER:  return &prog.resourceAtomicCounterBuffers;
+        case GL_BUFFER_VARIABLE:        return &prog.resourceBufferVariables;
+        default: return nullptr;
+    }
+}
+
+GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
+    switch (prop) {
+        case GL_NAME_LENGTH:       return static_cast<GLint>(entry.name.size() + 1);
+        case GL_TYPE:              return static_cast<GLint>(entry.type);
+        case GL_ARRAY_SIZE:        return entry.arraySize;
+        case GL_OFFSET:            return entry.offset;
+        case GL_BLOCK_INDEX:       return entry.blockIndex;
+        case GL_LOCATION:          return entry.location;
+        case GL_REFERENCED_BY_VERTEX_SHADER:   return (entry.referencedBy & 1) ? GL_TRUE : GL_FALSE;
+        case GL_REFERENCED_BY_FRAGMENT_SHADER: return (entry.referencedBy & 2) ? GL_TRUE : GL_FALSE;
+        case GL_REFERENCED_BY_COMPUTE_SHADER:  return (entry.referencedBy & 4) ? GL_TRUE : GL_FALSE;
+        case GL_REFERENCED_BY_GEOMETRY_SHADER: return GL_FALSE;
+        case GL_REFERENCED_BY_TESS_CONTROL_SHADER: return GL_FALSE;
+        case GL_REFERENCED_BY_TESS_EVALUATION_SHADER: return GL_FALSE;
+        case GL_BUFFER_BINDING:    return entry.location;
+        case GL_BUFFER_DATA_SIZE:  return 0;
+        case GL_NUM_ACTIVE_VARIABLES: return 0;
+        case GL_ACTIVE_VARIABLES:  return 0;
+        case GL_IS_ROW_MAJOR:      return GL_FALSE;
+        case GL_MATRIX_STRIDE:     return 0;
+        case GL_ATOMIC_COUNTER_BUFFER_INDEX: return -1;
+        case GL_TOP_LEVEL_ARRAY_SIZE:   return 1;
+        case GL_TOP_LEVEL_ARRAY_STRIDE: return 0;
+        default: return 0;
+    }
+}
+
+}  // anonymous namespace
+
+bool GLContext::getProgramInterfaceiv(GLuint program, GLenum programInterface, GLenum pname, GLint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr || !prog->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const auto* table = getResourceTable(*prog, programInterface);
+    if (table == nullptr) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    switch (pname) {
+        case GL_ACTIVE_RESOURCES:
+            *params = static_cast<GLint>(table->size());
+            return true;
+        case GL_MAX_NAME_LENGTH: {
+            GLint maxLen = 0;
+            for (const auto& entry : *table) {
+                GLint len = static_cast<GLint>(entry.name.size() + 1);
+                if (len > maxLen) maxLen = len;
+            }
+            *params = maxLen;
+            return true;
+        }
+        case GL_MAX_NUM_ACTIVE_VARIABLES:
+            *params = 0;
+            return true;
+        case GL_MAX_NUM_COMPATIBLE_SUBROUTINES:
+            *params = 0;
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::getProgramResourceiv(GLuint program, GLenum programInterface, GLuint index, GLsizei propCount, const GLenum* props, GLsizei count, GLsizei* length, GLint* params) {
+    if (propCount <= 0 || props == nullptr || count <= 0 || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr || !prog->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const auto* table = getResourceTable(*prog, programInterface);
+    if (table == nullptr) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (index >= table->size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const auto& entry = (*table)[index];
+    GLsizei written = 0;
+    for (GLsizei i = 0; i < propCount && written < count; ++i) {
+        params[written++] = getResourceProperty(entry, props[i]);
+    }
+    if (length != nullptr) {
+        *length = written;
+    }
+    return true;
+}
+
+bool GLContext::getProgramResourceName(GLuint program, GLenum programInterface, GLuint index, GLsizei bufSize, GLsizei* length, GLchar* name) {
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr || !prog->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const auto* table = getResourceTable(*prog, programInterface);
+    if (table == nullptr) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (index >= table->size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const auto& entry = (*table)[index];
+    if (name != nullptr && bufSize > 0) {
+        std::size_t toCopy = std::min(static_cast<std::size_t>(bufSize - 1), entry.name.size());
+        std::memcpy(name, entry.name.c_str(), toCopy);
+        name[toCopy] = '\0';
+        if (length != nullptr) {
+            *length = static_cast<GLsizei>(toCopy);
+        }
+    } else if (length != nullptr) {
+        *length = 0;
+    }
+    return true;
+}
+
+GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterface, const GLchar* name) {
+    if (name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return GL_INVALID_INDEX;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr || !prog->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return GL_INVALID_INDEX;
+    }
+    const auto* table = getResourceTable(*prog, programInterface);
+    if (table == nullptr) {
+        pushError(GL_INVALID_ENUM);
+        return GL_INVALID_INDEX;
+    }
+    for (std::size_t i = 0; i < table->size(); ++i) {
+        if ((*table)[i].name == name) {
+            return static_cast<GLuint>(i);
+        }
+    }
+    return GL_INVALID_INDEX;
+}
+
+GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterface, const GLchar* name) {
+    if (name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return -1;
+    }
+    if (programInterface != GL_UNIFORM && programInterface != GL_PROGRAM_INPUT && programInterface != GL_PROGRAM_OUTPUT) {
+        pushError(GL_INVALID_ENUM);
+        return -1;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr || !prog->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return -1;
+    }
+    const auto* table = getResourceTable(*prog, programInterface);
+    if (table == nullptr) {
+        return -1;
+    }
+    for (const auto& entry : *table) {
+        if (entry.name == name) {
+            return entry.location;
+        }
+    }
+    return -1;
+}
+
+GLint GLContext::getProgramResourceLocationIndex(GLuint program, GLenum programInterface, const GLchar* name) {
+    if (name == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return -1;
+    }
+    if (programInterface != GL_PROGRAM_OUTPUT) {
+        pushError(GL_INVALID_ENUM);
+        return -1;
+    }
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr || !prog->linked) {
+        pushError(GL_INVALID_OPERATION);
+        return -1;
+    }
+    // Fragment output location index (dual-source blending). Since we don't
+    // track dual-source indices yet, return 0 if the name is found.
+    for (const auto& entry : prog->resourceOutputs) {
+        if (entry.name == name) {
+            return 0;
+        }
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.3 — Shader Storage Block Binding
+// ---------------------------------------------------------------------------
+
+bool GLContext::shaderStorageBlockBinding(GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding) {
+    GLProgramObject* prog = impl_->objects->programs().get(program);
+    if (prog == nullptr || !prog->linked) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (storageBlockIndex >= prog->resourceStorageBlocks.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    prog->ssboBindingRemap[storageBlockIndex] = storageBlockBinding;
+    // Also update the resource entry's location field so queries reflect the remap.
+    prog->resourceStorageBlocks[storageBlockIndex].location = static_cast<GLint>(storageBlockBinding);
+    return true;
 }
 
 }  // namespace appgl

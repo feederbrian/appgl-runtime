@@ -244,6 +244,17 @@ public:
     // GL 4.2 — atomic counter buffer queries (stub returning sensible defaults).
     bool getActiveAtomicCounterBufferiv(GLuint program, GLuint bufferIndex, GLenum pname, GLint* params);
 
+    // GL 4.3 — program resource introspection (ARB_program_interface_query).
+    bool getProgramInterfaceiv(GLuint program, GLenum programInterface, GLenum pname, GLint* params);
+    bool getProgramResourceiv(GLuint program, GLenum programInterface, GLuint index, GLsizei propCount, const GLenum* props, GLsizei count, GLsizei* length, GLint* params);
+    bool getProgramResourceName(GLuint program, GLenum programInterface, GLuint index, GLsizei bufSize, GLsizei* length, GLchar* name);
+    GLuint getProgramResourceIndex(GLuint program, GLenum programInterface, const GLchar* name);
+    GLint getProgramResourceLocation(GLuint program, GLenum programInterface, const GLchar* name);
+    GLint getProgramResourceLocationIndex(GLuint program, GLenum programInterface, const GLchar* name);
+
+    // GL 4.3 — SSBO binding remapping.
+    bool shaderStorageBlockBinding(GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding);
+
     void pushError(GLenum error);
     GLenum popError();
 

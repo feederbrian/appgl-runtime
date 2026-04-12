@@ -5144,6 +5144,75 @@ void APIENTRY glGetActiveAtomicCounterBufferiv(GLuint program, GLuint bufferInde
     markProgramFunction(FunctionId::glGetActiveAtomicCounterBufferiv, "Atomic counter buffer query returns sensible defaults (Metal has no native atomic counters).");
 }
 
+// --- GL 4.3: Program Resource Introspection ---
+
+void APIENTRY glGetProgramInterfaceiv(GLuint program, GLenum programInterface, GLenum pname, GLint* params) {
+    auto* ctx = requireCurrentContext("glGetProgramInterfaceiv");
+    if (!ctx) return;
+    if (!ctx->getProgramInterfaceiv(program, programInterface, pname, params)) {
+        return;
+    }
+    markProgramFunction(FunctionId::glGetProgramInterfaceiv, "Program interface query returns resource counts from reflection tables.");
+}
+
+void APIENTRY glGetProgramResourceiv(GLuint program, GLenum programInterface, GLuint index, GLsizei propCount, const GLenum* props, GLsizei count, GLsizei* length, GLint* params) {
+    auto* ctx = requireCurrentContext("glGetProgramResourceiv");
+    if (!ctx) return;
+    if (!ctx->getProgramResourceiv(program, programInterface, index, propCount, props, count, length, params)) {
+        return;
+    }
+    markProgramFunction(FunctionId::glGetProgramResourceiv, "Program resource property query returns reflection data.");
+}
+
+void APIENTRY glGetProgramResourceName(GLuint program, GLenum programInterface, GLuint index, GLsizei bufSize, GLsizei* length, GLchar* name) {
+    auto* ctx = requireCurrentContext("glGetProgramResourceName");
+    if (!ctx) return;
+    if (!ctx->getProgramResourceName(program, programInterface, index, bufSize, length, name)) {
+        return;
+    }
+    markProgramFunction(FunctionId::glGetProgramResourceName, "Program resource name query returns reflected names.");
+}
+
+GLuint APIENTRY glGetProgramResourceIndex(GLuint program, GLenum programInterface, const GLchar* name) {
+    auto* ctx = requireCurrentContext("glGetProgramResourceIndex");
+    if (!ctx) return GL_INVALID_INDEX;
+    GLuint result = ctx->getProgramResourceIndex(program, programInterface, name);
+    markProgramFunction(FunctionId::glGetProgramResourceIndex, "Program resource index lookup by name.");
+    return result;
+}
+
+GLint APIENTRY glGetProgramResourceLocation(GLuint program, GLenum programInterface, const GLchar* name) {
+    auto* ctx = requireCurrentContext("glGetProgramResourceLocation");
+    if (!ctx) return -1;
+    GLint result = ctx->getProgramResourceLocation(program, programInterface, name);
+    markProgramFunction(FunctionId::glGetProgramResourceLocation, "Program resource location lookup by name.");
+    return result;
+}
+
+GLint APIENTRY glGetProgramResourceLocationIndex(GLuint program, GLenum programInterface, const GLchar* name) {
+    auto* ctx = requireCurrentContext("glGetProgramResourceLocationIndex");
+    if (!ctx) return -1;
+    GLint result = ctx->getProgramResourceLocationIndex(program, programInterface, name);
+    markProgramFunction(FunctionId::glGetProgramResourceLocationIndex, "Program resource location index (dual-source blending).");
+    return result;
+}
+
+// --- GL 4.3: SSBO Binding Remapping ---
+
+void APIENTRY glShaderStorageBlockBinding(GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding) {
+    auto* ctx = requireCurrentContext("glShaderStorageBlockBinding");
+    if (!ctx) return;
+    if (!ctx->shaderStorageBlockBinding(program, storageBlockIndex, storageBlockBinding)) {
+        return;
+    }
+    markProgramFunction(FunctionId::glShaderStorageBlockBinding, "SSBO block binding remapping tracked on program object.");
+    Runtime::shared().recordBootstrapTrace(
+        "glShaderStorageBlockBinding(program=" + std::to_string(program)
+        + ", blockIndex=" + std::to_string(storageBlockIndex)
+        + ", binding=" + std::to_string(storageBlockBinding) + ")"
+    );
+}
+
 }  // namespace impl
 
 }  // namespace appgl
