@@ -5340,6 +5340,90 @@ void APIENTRY glInvalidateBufferSubData(GLuint buffer, GLintptr offset, GLsizeip
     markStateFunction(FunctionId::glInvalidateBufferSubData, "Buffer sub-data invalidation hint accepted.");
 }
 
+// --- GL 4.3: Texture Operations ---
+
+void APIENTRY glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ,
+                                  GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ,
+                                  GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth) {
+    auto* ctx = requireCurrentContext("glCopyImageSubData");
+    if (!ctx) return;
+    if (!ctx->copyImageSubData(srcName, srcTarget, srcLevel, srcX, srcY, srcZ,
+                                dstName, dstTarget, dstLevel, dstX, dstY, dstZ,
+                                srcWidth, srcHeight, srcDepth)) {
+        return;
+    }
+    markTextureFunction(FunctionId::glCopyImageSubData, "CopyImageSubData stub (validated, Metal blit copy deferred).");
+}
+
+void APIENTRY glTextureView(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat,
+                             GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers) {
+    auto* ctx = requireCurrentContext("glTextureView");
+    if (!ctx) return;
+    if (!ctx->textureView(texture, target, origtexture, internalformat, minlevel, numlevels, minlayer, numlayers)) {
+        return;
+    }
+    markTextureFunction(FunctionId::glTextureView, "TextureView relationship recorded (Metal view creation deferred to draw).");
+}
+
+void APIENTRY glInvalidateTexImage(GLuint texture, GLint level) {
+    auto* ctx = requireCurrentContext("glInvalidateTexImage");
+    if (!ctx) return;
+    if (!ctx->invalidateTexImage(texture, level)) {
+        return;
+    }
+    markTextureFunction(FunctionId::glInvalidateTexImage, "Texture image invalidation hint accepted.");
+}
+
+void APIENTRY glInvalidateTexSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                       GLsizei width, GLsizei height, GLsizei depth) {
+    auto* ctx = requireCurrentContext("glInvalidateTexSubImage");
+    if (!ctx) return;
+    if (!ctx->invalidateTexSubImage(texture, level, xoffset, yoffset, zoffset, width, height, depth)) {
+        return;
+    }
+    markTextureFunction(FunctionId::glInvalidateTexSubImage, "Texture sub-image invalidation hint accepted.");
+}
+
+// --- GL 4.2: Transform Feedback Instanced Draw ---
+
+void APIENTRY glDrawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei instancecount) {
+    auto* ctx = requireCurrentContext("glDrawTransformFeedbackInstanced");
+    if (!ctx) return;
+    if (!ctx->drawTransformFeedbackInstanced(mode, id, instancecount)) {
+        return;
+    }
+    markDrawFunction(FunctionId::glDrawTransformFeedbackInstanced, "DrawTransformFeedbackInstanced stub (0 captured prims).");
+}
+
+void APIENTRY glDrawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLuint stream, GLsizei instancecount) {
+    auto* ctx = requireCurrentContext("glDrawTransformFeedbackStreamInstanced");
+    if (!ctx) return;
+    if (!ctx->drawTransformFeedbackStreamInstanced(mode, id, stream, instancecount)) {
+        return;
+    }
+    markDrawFunction(FunctionId::glDrawTransformFeedbackStreamInstanced, "DrawTransformFeedbackStreamInstanced stub (0 captured prims).");
+}
+
+// --- GL 4.2/4.3: Internal Format Query ---
+
+void APIENTRY glGetInternalformativ(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint* params) {
+    auto* ctx = requireCurrentContext("glGetInternalformativ");
+    if (!ctx) return;
+    if (!ctx->getInternalformativ(target, internalformat, pname, count, params)) {
+        return;
+    }
+    markStateFunction(FunctionId::glGetInternalformativ, "Internal format query returns Metal-appropriate capabilities.");
+}
+
+void APIENTRY glGetInternalformati64v(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint64* params) {
+    auto* ctx = requireCurrentContext("glGetInternalformati64v");
+    if (!ctx) return;
+    if (!ctx->getInternalformati64v(target, internalformat, pname, count, params)) {
+        return;
+    }
+    markStateFunction(FunctionId::glGetInternalformati64v, "Internal format i64 query returns Metal-appropriate capabilities.");
+}
+
 }  // namespace impl
 
 }  // namespace appgl

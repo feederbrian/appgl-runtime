@@ -278,6 +278,24 @@ public:
     bool invalidateBufferData(GLuint buffer);
     bool invalidateBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr length);
 
+    // GL 4.3 — texture operations.
+    bool copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ,
+                          GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ,
+                          GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth);
+    bool textureView(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat,
+                     GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers);
+    bool invalidateTexImage(GLuint texture, GLint level);
+    bool invalidateTexSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                               GLsizei width, GLsizei height, GLsizei depth);
+
+    // GL 4.2 — transform feedback instanced draw.
+    bool drawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei instancecount);
+    bool drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLuint stream, GLsizei instancecount);
+
+    // GL 4.2/4.3 — internal format query.
+    bool getInternalformativ(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint* params);
+    bool getInternalformati64v(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint64* params);
+
     void pushError(GLenum error);
     GLenum popError();
 

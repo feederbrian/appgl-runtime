@@ -6682,4 +6682,213 @@ bool GLContext::invalidateBufferSubData(GLuint buffer, GLintptr offset, GLsizeip
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// GL 4.3 — Texture Operations
+// ---------------------------------------------------------------------------
+
+bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ,
+                                 GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ,
+                                 GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth) {
+    if (srcWidth < 0 || srcHeight < 0 || srcDepth < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Validate source and destination exist.
+    bool srcIsTex = (srcTarget != GL_RENDERBUFFER);
+    bool dstIsTex = (dstTarget != GL_RENDERBUFFER);
+    if (srcIsTex && !impl_->objects->textures().contains(srcName)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!srcIsTex && !impl_->objects->renderbuffers().contains(srcName)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (dstIsTex && !impl_->objects->textures().contains(dstName)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!dstIsTex && !impl_->objects->renderbuffers().contains(dstName)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Stub: actual Metal blit encoder copy will be wired when texture Metal
+    // objects are fully instantiated at upload time.
+    return true;
+}
+
+bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat,
+                            GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers) {
+    GLTextureObject* viewObj = impl_->objects->textures().get(texture);
+    if (viewObj == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLTextureObject* origObj = impl_->objects->textures().get(origtexture);
+    if (origObj == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!origObj->desc.immutable) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (numlevels == 0 || numlayers == 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Record the view relationship. Actual Metal texture view
+    // (newTextureViewWithPixelFormat:) will be created when the Metal texture
+    // is first needed for rendering.
+    viewObj->target = target;
+    viewObj->desc.target = target;
+    viewObj->desc.internalFormat = internalformat;
+    viewObj->desc.levels = static_cast<GLsizei>(numlevels);
+    viewObj->desc.layers = static_cast<GLsizei>(numlayers);
+    viewObj->desc.immutable = true;
+    return true;
+}
+
+bool GLContext::invalidateTexImage(GLuint texture, GLint level) {
+    if (!impl_->objects->textures().contains(texture)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Hint: texture contents at this level can be discarded.
+    return true;
+}
+
+bool GLContext::invalidateTexSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                      GLsizei width, GLsizei height, GLsizei depth) {
+    if (width < 0 || height < 0 || depth < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!impl_->objects->textures().contains(texture)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.2 — Transform Feedback Instanced Draw
+// ---------------------------------------------------------------------------
+
+bool GLContext::drawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei instancecount) {
+    if (instancecount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLTransformFeedbackObject* tfObj = impl_->objects->transformFeedbacks().get(id);
+    if (tfObj == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Stub: draws instancecount instances of capturedPrimitives vertices.
+    // Currently capturedPrimitives is always 0 (no real TF capture yet).
+    return true;
+}
+
+bool GLContext::drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLuint stream, GLsizei instancecount) {
+    if (instancecount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (stream > 0) {
+        // Metal doesn't support multiple TF streams.
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLTransformFeedbackObject* tfObj = impl_->objects->transformFeedbacks().get(id);
+    if (tfObj == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.2/4.3 — Internal Format Query
+// ---------------------------------------------------------------------------
+
+bool GLContext::getInternalformativ(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint* params) {
+    if (count < 0 || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (count == 0) {
+        return true;
+    }
+    switch (pname) {
+        case GL_NUM_SAMPLE_COUNTS:
+            params[0] = 3; // Metal typically supports 1, 2, 4 samples
+            return true;
+        case GL_SAMPLES:
+            // Return sample counts in descending order.
+            if (count >= 1) params[0] = 4;
+            if (count >= 2) params[1] = 2;
+            if (count >= 3) params[2] = 1;
+            return true;
+        case GL_INTERNALFORMAT_SUPPORTED:
+            params[0] = GL_TRUE;
+            return true;
+        case GL_INTERNALFORMAT_PREFERRED:
+            params[0] = static_cast<GLint>(internalformat);
+            return true;
+        case GL_READ_PIXELS_FORMAT:
+            params[0] = GL_RGBA;
+            return true;
+        case GL_READ_PIXELS_TYPE:
+            params[0] = GL_UNSIGNED_BYTE;
+            return true;
+        case GL_MAX_WIDTH:
+            params[0] = 16384;
+            return true;
+        case GL_MAX_HEIGHT:
+            params[0] = 16384;
+            return true;
+        case GL_MAX_DEPTH:
+            params[0] = 2048;
+            return true;
+        case GL_MAX_LAYERS:
+            params[0] = 2048;
+            return true;
+        case GL_MAX_COMBINED_DIMENSIONS:
+            params[0] = 16384;
+            return true;
+        case GL_FRAMEBUFFER_RENDERABLE:
+        case GL_FRAMEBUFFER_BLEND:
+        case GL_COLOR_ENCODING:
+            params[0] = GL_FULL_SUPPORT;
+            return true;
+        default:
+            // For unrecognized pnames, return 0 rather than erroring — apps
+            // sometimes probe opportunistically.
+            for (GLsizei i = 0; i < count; ++i) {
+                params[i] = 0;
+            }
+            return true;
+    }
+}
+
+bool GLContext::getInternalformati64v(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint64* params) {
+    if (count < 0 || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (count == 0) {
+        return true;
+    }
+    // Reuse the 32-bit path, widening the results.
+    std::vector<GLint> temp(static_cast<std::size_t>(count), 0);
+    bool result = getInternalformativ(target, internalformat, pname, count, temp.data());
+    if (result) {
+        for (GLsizei i = 0; i < count; ++i) {
+            params[i] = static_cast<GLint64>(temp[static_cast<std::size_t>(i)]);
+        }
+    }
+    return result;
+}
+
 }  // namespace appgl

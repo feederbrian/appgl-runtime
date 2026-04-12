@@ -408,6 +408,21 @@ void APIENTRY glInvalidateFramebuffer(GLenum target, GLsizei numAttachments, con
 void APIENTRY glInvalidateSubFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments, GLint x, GLint y, GLsizei width, GLsizei height);
 void APIENTRY glInvalidateBufferData(GLuint buffer);
 void APIENTRY glInvalidateBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr length);
+// GL 4.3 — texture operations.
+void APIENTRY glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ,
+                                  GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ,
+                                  GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth);
+void APIENTRY glTextureView(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat,
+                             GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers);
+void APIENTRY glInvalidateTexImage(GLuint texture, GLint level);
+void APIENTRY glInvalidateTexSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                       GLsizei width, GLsizei height, GLsizei depth);
+// GL 4.2 — transform feedback instanced draw.
+void APIENTRY glDrawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei instancecount);
+void APIENTRY glDrawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLuint stream, GLsizei instancecount);
+// GL 4.2/4.3 — internal format query.
+void APIENTRY glGetInternalformativ(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint* params);
+void APIENTRY glGetInternalformati64v(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint64* params);
 }  // namespace impl
 
 class Runtime {
