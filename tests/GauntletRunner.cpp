@@ -3412,6 +3412,585 @@ public:
     }
 };
 
+// =========================================================================
+// Phase D — GL 4.4 / 4.5 DSA / 4.6 function coverage scenes
+// =========================================================================
+
+// Scene 1: GL 4.4 foundation (bufferStorage, multi-bind, tex clear) + DSA creation (9 create*)
+class GL44DSACreationScene final : public Scene {
+public:
+    std::string id() const override { return "phase-d.gl44-dsa-creation"; }
+    std::string phase() const override { return "phase-d"; }
+    SceneSize framebufferSize() const override { return {64, 64}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        // GL 4.4 — glBufferStorage (immutable buffer)
+        GLuint buf = 0;
+        gl.glGenBuffers(1, &buf);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, buf);
+        float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+        gl.glBufferStorage(GL_ARRAY_BUFFER, sizeof(data), data, GL_MAP_READ_BIT);
+
+        // GL 4.4 — multi-bind
+        GLuint bufs[2] = {buf, 0};
+        gl.glBindBuffersBase(GL_UNIFORM_BUFFER, 0, 1, bufs);
+        GLintptr offsets[1] = {0};
+        GLsizeiptr sizes[1] = {sizeof(data)};
+        gl.glBindBuffersRange(GL_UNIFORM_BUFFER, 0, 1, bufs, offsets, sizes);
+
+        GLuint vbo = 0;
+        gl.glGenBuffers(1, &vbo);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        gl.glBufferData(GL_ARRAY_BUFFER, 64, nullptr, GL_STATIC_DRAW);
+        GLuint vbufs[1] = {vbo};
+        GLintptr vOffsets[1] = {0};
+        GLsizei vStrides[1] = {16};
+        gl.glBindVertexBuffers(0, 1, vbufs, vOffsets, vStrides);
+
+        GLuint tex = 0;
+        gl.glGenTextures(1, &tex);
+        gl.glBindTexture(GL_TEXTURE_2D, tex);
+        gl.glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4);
+        GLuint texArr[1] = {tex};
+        gl.glBindTextures(0, 1, texArr);
+        GLuint sampler = 0;
+        gl.glGenSamplers(1, &sampler);
+        GLuint samplers[1] = {sampler};
+        gl.glBindSamplers(0, 1, samplers);
+        GLuint images[1] = {tex};
+        gl.glBindImageTextures(0, 1, images);
+
+        // GL 4.4 — texture clear
+        float clearColor[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+        gl.glClearTexImage(tex, 0, GL_RGBA, GL_FLOAT, clearColor);
+        gl.glClearTexSubImage(tex, 0, 0, 0, 0, 2, 2, 1, GL_RGBA, GL_FLOAT, clearColor);
+
+        // GL 4.5 — DSA object creation (9 create* functions)
+        GLuint cBuf = 0;
+        gl.glCreateBuffers(1, &cBuf);
+        GLuint cTex = 0;
+        gl.glCreateTextures(GL_TEXTURE_2D, 1, &cTex);
+        GLuint cSamp = 0;
+        gl.glCreateSamplers(1, &cSamp);
+        GLuint cFbo = 0;
+        gl.glCreateFramebuffers(1, &cFbo);
+        GLuint cRbo = 0;
+        gl.glCreateRenderbuffers(1, &cRbo);
+        GLuint cVao = 0;
+        gl.glCreateVertexArrays(1, &cVao);
+        GLuint cTf = 0;
+        gl.glCreateTransformFeedbacks(1, &cTf);
+        GLuint cPpo = 0;
+        gl.glCreateProgramPipelines(1, &cPpo);
+        GLuint cQuery = 0;
+        gl.glCreateQueries(GL_SAMPLES_PASSED, 1, &cQuery);
+
+        // Cleanup
+        gl.glDeleteBuffers(1, &buf);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteTextures(1, &tex);
+        gl.glDeleteSamplers(1, &sampler);
+        gl.glDeleteBuffers(1, &cBuf);
+        gl.glDeleteTextures(1, &cTex);
+        gl.glDeleteSamplers(1, &cSamp);
+        gl.glDeleteFramebuffers(1, &cFbo);
+        gl.glDeleteRenderbuffers(1, &cRbo);
+        gl.glDeleteVertexArrays(1, &cVao);
+        gl.glDeleteTransformFeedbacks(1, &cTf);
+        gl.glDeleteProgramPipelines(1, &cPpo);
+        gl.glDeleteQueries(1, &cQuery);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        while (gl.glGetError() != GL_NO_ERROR) {}
+        gl.glViewport(0, 0, 64, 64);
+        gl.glClearColor(0.10f, 0.30f, 0.50f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glBufferStorage,
+            FunctionId::glBindBuffersBase, FunctionId::glBindBuffersRange,
+            FunctionId::glBindVertexBuffers,
+            FunctionId::glBindTextures, FunctionId::glBindSamplers, FunctionId::glBindImageTextures,
+            FunctionId::glClearTexImage, FunctionId::glClearTexSubImage,
+            FunctionId::glCreateBuffers, FunctionId::glCreateTextures, FunctionId::glCreateSamplers,
+            FunctionId::glCreateFramebuffers, FunctionId::glCreateRenderbuffers,
+            FunctionId::glCreateVertexArrays, FunctionId::glCreateTransformFeedbacks,
+            FunctionId::glCreateProgramPipelines, FunctionId::glCreateQueries,
+        };
+    }
+};
+
+// Scene 2: DSA buffer operations (14) + DSA texture operations (34)
+class DSABufferTextureScene final : public Scene {
+public:
+    std::string id() const override { return "phase-d.dsa-buffer-texture"; }
+    std::string phase() const override { return "phase-d"; }
+    SceneSize framebufferSize() const override { return {64, 64}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        // --- DSA buffer operations (14 functions) ---
+        GLuint buf = 0;
+        gl.glCreateBuffers(1, &buf);
+        gl.glNamedBufferStorage(buf, 256, nullptr, GL_MAP_READ_BIT | GL_MAP_WRITE_BIT | GL_DYNAMIC_STORAGE_BIT);
+        float bdata[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+        gl.glNamedBufferSubData(buf, 0, sizeof(bdata), bdata);
+
+        GLuint buf2 = 0;
+        gl.glCreateBuffers(1, &buf2);
+        gl.glNamedBufferData(buf2, 256, nullptr, GL_DYNAMIC_DRAW);
+        gl.glCopyNamedBufferSubData(buf, buf2, 0, 0, sizeof(bdata));
+
+        void* ptr = gl.glMapNamedBuffer(buf2, GL_READ_ONLY);
+        (void)ptr;
+        gl.glUnmapNamedBuffer(buf2);
+
+        void* ptr2 = gl.glMapNamedBufferRange(buf2, 0, 64, GL_MAP_WRITE_BIT | GL_MAP_FLUSH_EXPLICIT_BIT);
+        (void)ptr2;
+        gl.glFlushMappedNamedBufferRange(buf2, 0, 16);
+        gl.glUnmapNamedBuffer(buf2);
+
+        gl.glClearNamedBufferData(buf2, GL_R32F, GL_RED, GL_FLOAT, nullptr);
+        gl.glClearNamedBufferSubData(buf2, GL_R32F, 0, 64, GL_RED, GL_FLOAT, nullptr);
+
+        GLint bparam = 0;
+        gl.glGetNamedBufferParameteriv(buf, GL_BUFFER_SIZE, &bparam);
+        GLint64 bparam64 = 0;
+        gl.glGetNamedBufferParameteri64v(buf, GL_BUFFER_SIZE, &bparam64);
+        void* bptr = nullptr;
+        gl.glGetNamedBufferPointerv(buf, GL_BUFFER_MAP_POINTER, &bptr);
+        float readback[4] = {};
+        gl.glGetNamedBufferSubData(buf, 0, sizeof(readback), readback);
+
+        // --- DSA texture operations (34 functions) ---
+        GLuint tex2d = 0;
+        gl.glCreateTextures(GL_TEXTURE_2D, 1, &tex2d);
+        gl.glTextureStorage2D(tex2d, 1, GL_RGBA8, 8, 8);
+        uint8_t pixels[8*8*4] = {};
+        gl.glTextureSubImage2D(tex2d, 0, 0, 0, 8, 8, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+        GLuint tex1d = 0;
+        gl.glCreateTextures(GL_TEXTURE_1D, 1, &tex1d);
+        gl.glTextureStorage1D(tex1d, 1, GL_RGBA8, 16);
+        uint8_t pix1d[16*4] = {};
+        gl.glTextureSubImage1D(tex1d, 0, 0, 16, GL_RGBA, GL_UNSIGNED_BYTE, pix1d);
+
+        GLuint tex3d = 0;
+        gl.glCreateTextures(GL_TEXTURE_3D, 1, &tex3d);
+        gl.glTextureStorage3D(tex3d, 1, GL_RGBA8, 4, 4, 4);
+        uint8_t pix3d[4*4*4*4] = {};
+        gl.glTextureSubImage3D(tex3d, 0, 0, 0, 0, 4, 4, 4, GL_RGBA, GL_UNSIGNED_BYTE, pix3d);
+
+        GLuint texMs = 0;
+        gl.glCreateTextures(GL_TEXTURE_2D_MULTISAMPLE, 1, &texMs);
+        gl.glTextureStorage2DMultisample(texMs, 4, GL_RGBA8, 8, 8, GL_TRUE);
+
+        GLuint texMs3 = 0;
+        gl.glCreateTextures(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, 1, &texMs3);
+        gl.glTextureStorage3DMultisample(texMs3, 4, GL_RGBA8, 4, 4, 2, GL_TRUE);
+
+        // Texture buffer
+        GLuint tboBuf = 0;
+        gl.glCreateBuffers(1, &tboBuf);
+        gl.glNamedBufferData(tboBuf, 64, nullptr, GL_STATIC_DRAW);
+        GLuint tbo = 0;
+        gl.glCreateTextures(GL_TEXTURE_BUFFER, 1, &tbo);
+        gl.glTextureBuffer(tbo, GL_RGBA32F, tboBuf);
+        GLuint tbo2 = 0;
+        gl.glCreateTextures(GL_TEXTURE_BUFFER, 1, &tbo2);
+        gl.glTextureBufferRange(tbo2, GL_RGBA32F, tboBuf, 0, 32);
+
+        // Compressed texture sub-image stubs
+        gl.glCompressedTextureSubImage1D(tex1d, 0, 0, 0, GL_RGBA, 0, nullptr);
+        gl.glCompressedTextureSubImage2D(tex2d, 0, 0, 0, 0, 0, GL_RGBA, 0, nullptr);
+        gl.glCompressedTextureSubImage3D(tex3d, 0, 0, 0, 0, 0, 0, 0, GL_RGBA, 0, nullptr);
+
+        // Copy texture sub-image stubs
+        gl.glCopyTextureSubImage1D(tex1d, 0, 0, 0, 0, 1);
+        gl.glCopyTextureSubImage2D(tex2d, 0, 0, 0, 0, 0, 1, 1);
+        gl.glCopyTextureSubImage3D(tex3d, 0, 0, 0, 0, 0, 0, 1, 1);
+
+        // Texture parameters
+        gl.glTextureParameterf(tex2d, GL_TEXTURE_MIN_LOD, 0.0f);
+        float fvParam[4] = {0.0f};
+        gl.glTextureParameterfv(tex2d, GL_TEXTURE_BORDER_COLOR, fvParam);
+        gl.glTextureParameteri(tex2d, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        GLint ivParam[1] = {GL_LINEAR};
+        gl.glTextureParameteriv(tex2d, GL_TEXTURE_MIN_FILTER, ivParam);
+        gl.glTextureParameterIiv(tex2d, GL_TEXTURE_MIN_FILTER, ivParam);
+        GLuint uivParam[1] = {GL_LINEAR};
+        gl.glTextureParameterIuiv(tex2d, GL_TEXTURE_MIN_FILTER, uivParam);
+
+        // Get texture parameters
+        GLfloat fvOut[4] = {};
+        gl.glGetTextureParameterfv(tex2d, GL_TEXTURE_MIN_LOD, fvOut);
+        GLint ivOut[1] = {};
+        gl.glGetTextureParameteriv(tex2d, GL_TEXTURE_MIN_FILTER, ivOut);
+        gl.glGetTextureParameterIiv(tex2d, GL_TEXTURE_MIN_FILTER, ivOut);
+        GLuint uivOut[1] = {};
+        gl.glGetTextureParameterIuiv(tex2d, GL_TEXTURE_MIN_FILTER, uivOut);
+
+        // Get texture level parameters
+        GLfloat lvlF = 0;
+        gl.glGetTextureLevelParameterfv(tex2d, 0, GL_TEXTURE_WIDTH, &lvlF);
+        GLint lvlI = 0;
+        gl.glGetTextureLevelParameteriv(tex2d, 0, GL_TEXTURE_WIDTH, &lvlI);
+
+        // Get texture image / sub-image stubs
+        uint8_t imgBuf[256] = {};
+        gl.glGetTextureImage(tex2d, 0, GL_RGBA, GL_UNSIGNED_BYTE, sizeof(imgBuf), imgBuf);
+        gl.glGetTextureSubImage(tex2d, 0, 0, 0, 0, 4, 4, 1, GL_RGBA, GL_UNSIGNED_BYTE, sizeof(imgBuf), imgBuf);
+        gl.glGetCompressedTextureImage(tex2d, 0, sizeof(imgBuf), imgBuf);
+        gl.glGetCompressedTextureSubImage(tex2d, 0, 0, 0, 0, 4, 4, 1, sizeof(imgBuf), imgBuf);
+
+        gl.glGenerateTextureMipmap(tex2d);
+        gl.glBindTextureUnit(0, tex2d);
+
+        // Cleanup
+        gl.glDeleteBuffers(1, &buf);
+        gl.glDeleteBuffers(1, &buf2);
+        gl.glDeleteBuffers(1, &tboBuf);
+        gl.glDeleteTextures(1, &tex2d);
+        gl.glDeleteTextures(1, &tex1d);
+        gl.glDeleteTextures(1, &tex3d);
+        gl.glDeleteTextures(1, &texMs);
+        gl.glDeleteTextures(1, &texMs3);
+        gl.glDeleteTextures(1, &tbo);
+        gl.glDeleteTextures(1, &tbo2);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        while (gl.glGetError() != GL_NO_ERROR) {}
+        gl.glViewport(0, 0, 64, 64);
+        gl.glClearColor(0.50f, 0.20f, 0.10f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            // DSA buffer (14)
+            FunctionId::glNamedBufferStorage, FunctionId::glNamedBufferData,
+            FunctionId::glNamedBufferSubData, FunctionId::glCopyNamedBufferSubData,
+            FunctionId::glMapNamedBuffer, FunctionId::glMapNamedBufferRange,
+            FunctionId::glUnmapNamedBuffer, FunctionId::glFlushMappedNamedBufferRange,
+            FunctionId::glClearNamedBufferData, FunctionId::glClearNamedBufferSubData,
+            FunctionId::glGetNamedBufferParameteriv, FunctionId::glGetNamedBufferParameteri64v,
+            FunctionId::glGetNamedBufferPointerv, FunctionId::glGetNamedBufferSubData,
+            // DSA texture (34)
+            FunctionId::glTextureStorage1D, FunctionId::glTextureStorage2D,
+            FunctionId::glTextureStorage3D, FunctionId::glTextureStorage2DMultisample,
+            FunctionId::glTextureStorage3DMultisample,
+            FunctionId::glTextureSubImage1D, FunctionId::glTextureSubImage2D, FunctionId::glTextureSubImage3D,
+            FunctionId::glTextureBuffer, FunctionId::glTextureBufferRange,
+            FunctionId::glCompressedTextureSubImage1D, FunctionId::glCompressedTextureSubImage2D,
+            FunctionId::glCompressedTextureSubImage3D,
+            FunctionId::glCopyTextureSubImage1D, FunctionId::glCopyTextureSubImage2D,
+            FunctionId::glCopyTextureSubImage3D,
+            FunctionId::glTextureParameterf, FunctionId::glTextureParameterfv,
+            FunctionId::glTextureParameteri, FunctionId::glTextureParameteriv,
+            FunctionId::glTextureParameterIiv, FunctionId::glTextureParameterIuiv,
+            FunctionId::glGetTextureParameterfv, FunctionId::glGetTextureParameteriv,
+            FunctionId::glGetTextureParameterIiv, FunctionId::glGetTextureParameterIuiv,
+            FunctionId::glGetTextureLevelParameterfv, FunctionId::glGetTextureLevelParameteriv,
+            FunctionId::glGetTextureImage, FunctionId::glGetTextureSubImage,
+            FunctionId::glGetCompressedTextureImage, FunctionId::glGetCompressedTextureSubImage,
+            FunctionId::glGenerateTextureMipmap, FunctionId::glBindTextureUnit,
+        };
+    }
+};
+
+// Scene 3: DSA framebuffer/renderbuffer (20) + DSA vertex array (13) + DSA transform feedback (5)
+class DSAFramebufferVAOScene final : public Scene {
+public:
+    std::string id() const override { return "phase-d.dsa-framebuffer-vao-tf"; }
+    std::string phase() const override { return "phase-d"; }
+    SceneSize framebufferSize() const override { return {64, 64}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        // --- DSA framebuffer/renderbuffer (20 functions) ---
+        GLuint fbo = 0, rbo = 0;
+        gl.glCreateFramebuffers(1, &fbo);
+        gl.glCreateRenderbuffers(1, &rbo);
+        gl.glNamedRenderbufferStorage(rbo, GL_RGBA8, 64, 64);
+        gl.glNamedRenderbufferStorageMultisample(rbo, 4, GL_RGBA8, 64, 64);
+        GLint rbParam = 0;
+        gl.glGetNamedRenderbufferParameteriv(rbo, GL_RENDERBUFFER_WIDTH, &rbParam);
+
+        gl.glNamedFramebufferRenderbuffer(fbo, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo);
+
+        GLuint texFbo = 0;
+        gl.glCreateTextures(GL_TEXTURE_2D, 1, &texFbo);
+        gl.glTextureStorage2D(texFbo, 1, GL_RGBA8, 64, 64);
+        gl.glNamedFramebufferTexture(fbo, GL_COLOR_ATTACHMENT0, texFbo, 0);
+        gl.glNamedFramebufferTextureLayer(fbo, GL_COLOR_ATTACHMENT0, texFbo, 0, 0);
+
+        GLenum drawBufs[1] = {GL_COLOR_ATTACHMENT0};
+        gl.glNamedFramebufferDrawBuffer(fbo, GL_COLOR_ATTACHMENT0);
+        gl.glNamedFramebufferDrawBuffers(fbo, 1, drawBufs);
+        gl.glNamedFramebufferReadBuffer(fbo, GL_COLOR_ATTACHMENT0);
+        gl.glNamedFramebufferParameteri(fbo, GL_FRAMEBUFFER_DEFAULT_WIDTH, 64);
+
+        GLint fbParam = 0;
+        gl.glGetNamedFramebufferParameteriv(fbo, GL_FRAMEBUFFER_DEFAULT_WIDTH, &fbParam);
+        GLint fbAttParam = 0;
+        gl.glGetNamedFramebufferAttachmentParameteriv(fbo, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &fbAttParam);
+
+        GLenum status = gl.glCheckNamedFramebufferStatus(fbo, GL_FRAMEBUFFER);
+        (void)status;
+
+        // Blit between default (0) and named FBO — both args can be 0 for default FB
+        gl.glBlitNamedFramebuffer(0, 0, 0, 0, 64, 64, 0, 0, 64, 64, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+        // Clear named framebuffer variants
+        float clearF[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        gl.glClearNamedFramebufferfv(fbo, GL_COLOR, 0, clearF);
+        GLint clearI[4] = {0};
+        gl.glClearNamedFramebufferiv(fbo, GL_COLOR, 0, clearI);
+        GLuint clearU[4] = {0};
+        gl.glClearNamedFramebufferuiv(fbo, GL_COLOR, 0, clearU);
+        gl.glClearNamedFramebufferfi(fbo, GL_DEPTH_STENCIL, 0, 1.0f, 0);
+
+        GLenum invalidateAtts[1] = {GL_COLOR_ATTACHMENT0};
+        gl.glInvalidateNamedFramebufferData(fbo, 1, invalidateAtts);
+        gl.glInvalidateNamedFramebufferSubData(fbo, 1, invalidateAtts, 0, 0, 32, 32);
+
+        // --- DSA vertex array (13 functions) ---
+        GLuint vao = 0;
+        gl.glCreateVertexArrays(1, &vao);
+        gl.glVertexArrayAttribFormat(vao, 0, 3, GL_FLOAT, GL_FALSE, 0);
+        gl.glVertexArrayAttribIFormat(vao, 1, 1, GL_INT, 0);
+        gl.glVertexArrayAttribLFormat(vao, 2, 1, GL_DOUBLE, 0);
+        gl.glVertexArrayAttribBinding(vao, 0, 0);
+        gl.glVertexArrayBindingDivisor(vao, 0, 0);
+
+        GLuint vbo = 0;
+        gl.glCreateBuffers(1, &vbo);
+        gl.glNamedBufferData(vbo, 256, nullptr, GL_STATIC_DRAW);
+        gl.glVertexArrayVertexBuffer(vao, 0, vbo, 0, 12);
+        GLuint vbufs[1] = {vbo};
+        GLintptr voffs[1] = {0};
+        GLsizei vstrides[1] = {12};
+        gl.glVertexArrayVertexBuffers(vao, 0, 1, vbufs, voffs, vstrides);
+
+        GLuint ebo = 0;
+        gl.glCreateBuffers(1, &ebo);
+        gl.glNamedBufferData(ebo, 64, nullptr, GL_STATIC_DRAW);
+        gl.glVertexArrayElementBuffer(vao, ebo);
+
+        gl.glEnableVertexArrayAttrib(vao, 0);
+        gl.glDisableVertexArrayAttrib(vao, 0);
+
+        GLint vaoParam = 0;
+        gl.glGetVertexArrayiv(vao, GL_ELEMENT_ARRAY_BUFFER_BINDING, &vaoParam);
+        gl.glGetVertexArrayIndexediv(vao, 0, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &vaoParam);
+        GLint64 vaoParam64 = 0;
+        gl.glGetVertexArrayIndexed64iv(vao, 0, GL_VERTEX_BINDING_OFFSET, &vaoParam64);
+
+        // --- DSA transform feedback (5 functions) ---
+        GLuint tf = 0;
+        gl.glCreateTransformFeedbacks(1, &tf);
+        GLuint tfBuf = 0;
+        gl.glCreateBuffers(1, &tfBuf);
+        gl.glNamedBufferData(tfBuf, 256, nullptr, GL_DYNAMIC_DRAW);
+        gl.glTransformFeedbackBufferBase(tf, 0, tfBuf);
+        gl.glTransformFeedbackBufferRange(tf, 0, tfBuf, 0, 128);
+        GLint tfParam = 0;
+        gl.glGetTransformFeedbackiv(tf, GL_TRANSFORM_FEEDBACK_ACTIVE, &tfParam);
+        gl.glGetTransformFeedbacki_v(tf, GL_TRANSFORM_FEEDBACK_BUFFER_BINDING, 0, &tfParam);
+        GLint64 tfParam64 = 0;
+        gl.glGetTransformFeedbacki64_v(tf, GL_TRANSFORM_FEEDBACK_BUFFER_START, 0, &tfParam64);
+
+        // Cleanup
+        gl.glDeleteFramebuffers(1, &fbo);
+        gl.glDeleteRenderbuffers(1, &rbo);
+        gl.glDeleteTextures(1, &texFbo);
+        gl.glDeleteVertexArrays(1, &vao);
+        gl.glDeleteBuffers(1, &vbo);
+        gl.glDeleteBuffers(1, &ebo);
+        gl.glDeleteTransformFeedbacks(1, &tf);
+        gl.glDeleteBuffers(1, &tfBuf);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        while (gl.glGetError() != GL_NO_ERROR) {}
+        gl.glViewport(0, 0, 64, 64);
+        gl.glClearColor(0.20f, 0.50f, 0.30f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            // DSA framebuffer/renderbuffer (20)
+            FunctionId::glNamedFramebufferRenderbuffer, FunctionId::glNamedFramebufferTexture,
+            FunctionId::glNamedFramebufferTextureLayer, FunctionId::glNamedFramebufferDrawBuffer,
+            FunctionId::glNamedFramebufferDrawBuffers, FunctionId::glNamedFramebufferReadBuffer,
+            FunctionId::glNamedFramebufferParameteri, FunctionId::glGetNamedFramebufferParameteriv,
+            FunctionId::glGetNamedFramebufferAttachmentParameteriv, FunctionId::glCheckNamedFramebufferStatus,
+            FunctionId::glBlitNamedFramebuffer, FunctionId::glClearNamedFramebufferfv,
+            FunctionId::glClearNamedFramebufferiv, FunctionId::glClearNamedFramebufferuiv,
+            FunctionId::glClearNamedFramebufferfi, FunctionId::glInvalidateNamedFramebufferData,
+            FunctionId::glInvalidateNamedFramebufferSubData,
+            FunctionId::glNamedRenderbufferStorage, FunctionId::glNamedRenderbufferStorageMultisample,
+            FunctionId::glGetNamedRenderbufferParameteriv,
+            // DSA vertex array (13)
+            FunctionId::glVertexArrayAttribFormat, FunctionId::glVertexArrayAttribIFormat,
+            FunctionId::glVertexArrayAttribLFormat, FunctionId::glVertexArrayAttribBinding,
+            FunctionId::glVertexArrayBindingDivisor, FunctionId::glVertexArrayVertexBuffer,
+            FunctionId::glVertexArrayVertexBuffers, FunctionId::glVertexArrayElementBuffer,
+            FunctionId::glEnableVertexArrayAttrib, FunctionId::glDisableVertexArrayAttrib,
+            FunctionId::glGetVertexArrayiv, FunctionId::glGetVertexArrayIndexediv,
+            FunctionId::glGetVertexArrayIndexed64iv,
+            // DSA transform feedback (5)
+            FunctionId::glTransformFeedbackBufferBase, FunctionId::glTransformFeedbackBufferRange,
+            FunctionId::glGetTransformFeedbackiv, FunctionId::glGetTransformFeedbacki_v,
+            FunctionId::glGetTransformFeedbacki64_v,
+        };
+    }
+};
+
+// Scene 4: ClipControl + robustness + barriers + query buffer + GL 4.6
+class ClipControlRobustnessGL46Scene final : public Scene {
+public:
+    std::string id() const override { return "phase-d.clip-control-robustness-gl46"; }
+    std::string phase() const override { return "phase-d"; }
+    SceneSize framebufferSize() const override { return {64, 64}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        // GL 4.5 — ClipControl
+        gl.glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+        gl.glClipControl(GL_UPPER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+        gl.glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);  // restore default
+
+        // GL 4.5 — GetGraphicsResetStatus
+        GLenum resetStatus = gl.glGetGraphicsResetStatus();
+        (void)resetStatus;
+
+        // GL 4.5 — ReadnPixels (robustness)
+        uint8_t px[4] = {};
+        gl.glReadnPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, sizeof(px), px);
+
+        // GL 4.5 — GetnUniform* (robustness) — need a valid program
+        GLuint prog = gl.glCreateProgram();
+        GLuint vs = gl.glCreateShader(GL_VERTEX_SHADER);
+        const char* vsSrc = "#version 330\nvoid main() { gl_Position = vec4(0); }\n";
+        gl.glShaderSource(vs, 1, &vsSrc, nullptr);
+        gl.glCompileShader(vs);
+        GLuint fs = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        const char* fsSrc = "#version 330\nuniform float u_val;\nout vec4 color;\nvoid main() { color = vec4(u_val); }\n";
+        gl.glShaderSource(fs, 1, &fsSrc, nullptr);
+        gl.glCompileShader(fs);
+        gl.glAttachShader(prog, vs);
+        gl.glAttachShader(prog, fs);
+        gl.glLinkProgram(prog);
+        gl.glUseProgram(prog);
+
+        GLint loc = gl.glGetUniformLocation(prog, "u_val");
+        if (loc >= 0) {
+            GLfloat fval = 0;
+            gl.glGetnUniformfv(prog, loc, sizeof(fval), &fval);
+            GLint ival = 0;
+            gl.glGetnUniformiv(prog, loc, sizeof(ival), &ival);
+            GLuint uval = 0;
+            gl.glGetnUniformuiv(prog, loc, sizeof(uval), &uval);
+            GLdouble dval = 0;
+            gl.glGetnUniformdv(prog, loc, sizeof(dval), &dval);
+        }
+        gl.glUseProgram(0);
+        gl.glDeleteShader(vs);
+        gl.glDeleteShader(fs);
+        gl.glDeleteProgram(prog);
+
+        // GL 4.5 — GetnTexImage / GetnCompressedTexImage (robustness stubs)
+        GLuint stubTex = 0;
+        gl.glCreateTextures(GL_TEXTURE_2D, 1, &stubTex);
+        gl.glTextureStorage2D(stubTex, 1, GL_RGBA8, 4, 4);
+        uint8_t imgBuf[128] = {};
+        gl.glGetnTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, sizeof(imgBuf), imgBuf);
+        gl.glGetnCompressedTexImage(GL_TEXTURE_2D, 0, sizeof(imgBuf), imgBuf);
+        gl.glDeleteTextures(1, &stubTex);
+
+        // GL 4.5 — Barriers
+        gl.glMemoryBarrierByRegion(GL_ALL_BARRIER_BITS);
+        gl.glTextureBarrier();
+
+        // GL 4.5 — Query buffer objects
+        GLuint query = 0, qBuf = 0;
+        gl.glCreateQueries(GL_SAMPLES_PASSED, 1, &query);
+        gl.glCreateBuffers(1, &qBuf);
+        gl.glNamedBufferData(qBuf, 64, nullptr, GL_DYNAMIC_READ);
+        gl.glGetQueryBufferObjectiv(query, qBuf, GL_QUERY_RESULT, 0);
+        gl.glGetQueryBufferObjectuiv(query, qBuf, GL_QUERY_RESULT, 0);
+        gl.glGetQueryBufferObjecti64v(query, qBuf, GL_QUERY_RESULT, 0);
+        gl.glGetQueryBufferObjectui64v(query, qBuf, GL_QUERY_RESULT, 0);
+        gl.glDeleteQueries(1, &query);
+        gl.glDeleteBuffers(1, &qBuf);
+
+        // GL 4.6 — Indirect count draws (call with maxdrawcount=0 for safe stub exercise)
+        gl.glMultiDrawArraysIndirectCount(GL_TRIANGLES, nullptr, 0, 0, 0);
+        gl.glMultiDrawElementsIndirectCount(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, 0, 0, 0);
+
+        // GL 4.6 — SpecializeShader (stub)
+        GLuint spvShader = gl.glCreateShader(GL_VERTEX_SHADER);
+        gl.glSpecializeShader(spvShader, "main", 0, nullptr, nullptr);
+        gl.glDeleteShader(spvShader);
+
+        // GL 4.6 — PolygonOffsetClamp
+        gl.glPolygonOffsetClamp(1.0f, 1.0f, 0.01f);
+        gl.glPolygonOffsetClamp(0.0f, 0.0f, 0.0f);  // reset
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        while (gl.glGetError() != GL_NO_ERROR) {}
+        gl.glViewport(0, 0, 64, 64);
+        gl.glClearColor(0.40f, 0.10f, 0.40f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            // ClipControl + robustness (11)
+            FunctionId::glClipControl, FunctionId::glGetGraphicsResetStatus,
+            FunctionId::glReadnPixels, FunctionId::glGetnUniformfv,
+            FunctionId::glGetnUniformiv, FunctionId::glGetnUniformuiv,
+            FunctionId::glGetnUniformdv, FunctionId::glGetnTexImage,
+            FunctionId::glGetnCompressedTexImage, FunctionId::glMemoryBarrierByRegion,
+            FunctionId::glTextureBarrier,
+            // Query buffer objects (4)
+            FunctionId::glGetQueryBufferObjectiv, FunctionId::glGetQueryBufferObjectuiv,
+            FunctionId::glGetQueryBufferObjecti64v, FunctionId::glGetQueryBufferObjectui64v,
+            // GL 4.6 (4)
+            FunctionId::glMultiDrawArraysIndirectCount, FunctionId::glMultiDrawElementsIndirectCount,
+            FunctionId::glSpecializeShader, FunctionId::glPolygonOffsetClamp,
+        };
+    }
+};
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -3629,6 +4208,17 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(advancedDrawScene));
         TextureOpsTFFormatQueryScene textureOpsTFScene;
         tests.push_back(runScene(textureOpsTFScene));
+    }
+
+    if (normalizedPhase == "all" || normalizedPhase == "phase-d") {
+        GL44DSACreationScene gl44DsaScene;
+        tests.push_back(runScene(gl44DsaScene));
+        DSABufferTextureScene dsaBufTexScene;
+        tests.push_back(runScene(dsaBufTexScene));
+        DSAFramebufferVAOScene dsaFbVaoScene;
+        tests.push_back(runScene(dsaFbVaoScene));
+        ClipControlRobustnessGL46Scene clipRobustScene;
+        tests.push_back(runScene(clipRobustScene));
     }
 
     return buildJSON(normalizedPhase, tests);
