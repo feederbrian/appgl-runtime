@@ -5571,6 +5571,215 @@ void APIENTRY glCreateQueries(GLenum target, GLsizei n, GLuint* ids) {
     markStateFunction(FunctionId::glCreateQueries, "DSA query creation.");
 }
 
+// ---------------------------------------------------------------------------
+// GL 4.5 — DSA buffer operations.
+// ---------------------------------------------------------------------------
+
+#define DSA_BUF_VOID(glName, ctxMethod, ...) \
+void APIENTRY glName(__VA_ARGS__) { \
+    auto* ctx = requireCurrentContext(#glName); \
+    if (!ctx) return; \
+    if (!ctx->ctxMethod) return; \
+    markBufferFunction(FunctionId::glName, "DSA " #glName "."); \
+}
+
+void APIENTRY glNamedBufferStorage(GLuint buffer, GLsizeiptr size, const void* data, GLbitfield flags) {
+    auto* ctx = requireCurrentContext("glNamedBufferStorage"); if (!ctx) return;
+    if (!ctx->namedBufferStorage(buffer, size, data, flags)) return;
+    markBufferFunction(FunctionId::glNamedBufferStorage, "DSA immutable buffer storage.");
+}
+void APIENTRY glNamedBufferData(GLuint buffer, GLsizeiptr size, const void* data, GLenum usage) {
+    auto* ctx = requireCurrentContext("glNamedBufferData"); if (!ctx) return;
+    if (!ctx->namedBufferData(buffer, size, data, usage)) return;
+    markBufferFunction(FunctionId::glNamedBufferData, "DSA buffer data upload.");
+}
+void APIENTRY glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const void* data) {
+    auto* ctx = requireCurrentContext("glNamedBufferSubData"); if (!ctx) return;
+    if (!ctx->namedBufferSubData(buffer, offset, size, data)) return;
+    markBufferFunction(FunctionId::glNamedBufferSubData, "DSA buffer sub-data upload.");
+}
+void APIENTRY glCopyNamedBufferSubData(GLuint readBuffer, GLuint writeBuffer, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) {
+    auto* ctx = requireCurrentContext("glCopyNamedBufferSubData"); if (!ctx) return;
+    if (!ctx->copyNamedBufferSubData(readBuffer, writeBuffer, readOffset, writeOffset, size)) return;
+    markBufferFunction(FunctionId::glCopyNamedBufferSubData, "DSA buffer copy.");
+}
+void* APIENTRY glMapNamedBuffer(GLuint buffer, GLenum access) {
+    auto* ctx = requireCurrentContext("glMapNamedBuffer"); if (!ctx) return nullptr;
+    void* result = nullptr;
+    ctx->mapNamedBuffer(buffer, access, &result);
+    markBufferFunction(FunctionId::glMapNamedBuffer, "DSA buffer map.");
+    return result;
+}
+void* APIENTRY glMapNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length, GLbitfield access) {
+    auto* ctx = requireCurrentContext("glMapNamedBufferRange"); if (!ctx) return nullptr;
+    void* result = nullptr;
+    ctx->mapNamedBufferRange(buffer, offset, length, access, &result);
+    markBufferFunction(FunctionId::glMapNamedBufferRange, "DSA buffer range map.");
+    return result;
+}
+GLboolean APIENTRY glUnmapNamedBuffer(GLuint buffer) {
+    auto* ctx = requireCurrentContext("glUnmapNamedBuffer"); if (!ctx) return GL_FALSE;
+    GLboolean result = GL_FALSE;
+    ctx->unmapNamedBuffer(buffer, &result);
+    markBufferFunction(FunctionId::glUnmapNamedBuffer, "DSA buffer unmap.");
+    return result;
+}
+void APIENTRY glFlushMappedNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length) {
+    auto* ctx = requireCurrentContext("glFlushMappedNamedBufferRange"); if (!ctx) return;
+    if (!ctx->flushMappedNamedBufferRange(buffer, offset, length)) return;
+    markBufferFunction(FunctionId::glFlushMappedNamedBufferRange, "DSA mapped buffer flush.");
+}
+void APIENTRY glClearNamedBufferData(GLuint buffer, GLenum internalformat, GLenum format, GLenum type, const void* data) {
+    auto* ctx = requireCurrentContext("glClearNamedBufferData"); if (!ctx) return;
+    if (!ctx->clearNamedBufferData(buffer, internalformat, format, type, data)) return;
+    markBufferFunction(FunctionId::glClearNamedBufferData, "DSA buffer clear.");
+}
+void APIENTRY glClearNamedBufferSubData(GLuint buffer, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data) {
+    auto* ctx = requireCurrentContext("glClearNamedBufferSubData"); if (!ctx) return;
+    if (!ctx->clearNamedBufferSubData(buffer, internalformat, offset, size, format, type, data)) return;
+    markBufferFunction(FunctionId::glClearNamedBufferSubData, "DSA buffer sub-range clear.");
+}
+void APIENTRY glGetNamedBufferParameteriv(GLuint buffer, GLenum pname, GLint* params) {
+    auto* ctx = requireCurrentContext("glGetNamedBufferParameteriv"); if (!ctx) return;
+    if (!ctx->getNamedBufferParameteriv(buffer, pname, params)) return;
+    markBufferFunction(FunctionId::glGetNamedBufferParameteriv, "DSA buffer parameter query.");
+}
+void APIENTRY glGetNamedBufferParameteri64v(GLuint buffer, GLenum pname, GLint64* params) {
+    auto* ctx = requireCurrentContext("glGetNamedBufferParameteri64v"); if (!ctx) return;
+    if (!ctx->getNamedBufferParameteri64v(buffer, pname, params)) return;
+    markBufferFunction(FunctionId::glGetNamedBufferParameteri64v, "DSA buffer i64 parameter query.");
+}
+void APIENTRY glGetNamedBufferPointerv(GLuint buffer, GLenum pname, void** params) {
+    auto* ctx = requireCurrentContext("glGetNamedBufferPointerv"); if (!ctx) return;
+    if (!ctx->getNamedBufferPointerv(buffer, pname, params)) return;
+    markBufferFunction(FunctionId::glGetNamedBufferPointerv, "DSA buffer pointer query.");
+}
+void APIENTRY glGetNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, void* data) {
+    auto* ctx = requireCurrentContext("glGetNamedBufferSubData"); if (!ctx) return;
+    if (!ctx->getNamedBufferSubData(buffer, offset, size, data)) return;
+    markBufferFunction(FunctionId::glGetNamedBufferSubData, "DSA buffer sub-data readback.");
+}
+
+#undef DSA_BUF_VOID
+
+// ---------------------------------------------------------------------------
+// GL 4.5 — DSA texture operations.
+// ---------------------------------------------------------------------------
+
+#define DSA_TEX_FN(glName, ctxCall) \
+    auto* ctx = requireCurrentContext(#glName); if (!ctx) return; \
+    if (!ctx->ctxCall) return; \
+    markTextureFunction(FunctionId::glName, "DSA " #glName ".");
+
+void APIENTRY glTextureStorage1D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width) {
+    DSA_TEX_FN(glTextureStorage1D, textureStorage1D(texture, levels, internalformat, width))
+}
+void APIENTRY glTextureStorage2D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height) {
+    DSA_TEX_FN(glTextureStorage2D, textureStorage2D(texture, levels, internalformat, width, height))
+}
+void APIENTRY glTextureStorage3D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth) {
+    DSA_TEX_FN(glTextureStorage3D, textureStorage3D(texture, levels, internalformat, width, height, depth))
+}
+void APIENTRY glTextureStorage2DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixed) {
+    DSA_TEX_FN(glTextureStorage2DMultisample, textureStorage2DMultisample(texture, samples, internalformat, width, height, fixed))
+}
+void APIENTRY glTextureStorage3DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixed) {
+    DSA_TEX_FN(glTextureStorage3DMultisample, textureStorage3DMultisample(texture, samples, internalformat, width, height, depth, fixed))
+}
+void APIENTRY glTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const void* pixels) {
+    DSA_TEX_FN(glTextureSubImage1D, textureSubImage1D(texture, level, xoffset, width, format, type, pixels))
+}
+void APIENTRY glTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels) {
+    DSA_TEX_FN(glTextureSubImage2D, textureSubImage2D(texture, level, xoffset, yoffset, width, height, format, type, pixels))
+}
+void APIENTRY glTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels) {
+    DSA_TEX_FN(glTextureSubImage3D, textureSubImage3D(texture, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels))
+}
+void APIENTRY glTextureBuffer(GLuint texture, GLenum internalformat, GLuint buffer) {
+    DSA_TEX_FN(glTextureBuffer, textureBuffer(texture, internalformat, buffer))
+}
+void APIENTRY glTextureBufferRange(GLuint texture, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size) {
+    DSA_TEX_FN(glTextureBufferRange, textureBufferRange(texture, internalformat, buffer, offset, size))
+}
+void APIENTRY glCompressedTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void* data) {
+    DSA_TEX_FN(glCompressedTextureSubImage1D, compressedTextureSubImage1D(texture, level, xoffset, width, format, imageSize, data))
+}
+void APIENTRY glCompressedTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void* data) {
+    DSA_TEX_FN(glCompressedTextureSubImage2D, compressedTextureSubImage2D(texture, level, xoffset, yoffset, width, height, format, imageSize, data))
+}
+void APIENTRY glCompressedTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void* data) {
+    DSA_TEX_FN(glCompressedTextureSubImage3D, compressedTextureSubImage3D(texture, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data))
+}
+void APIENTRY glCopyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
+    DSA_TEX_FN(glCopyTextureSubImage1D, copyTextureSubImage1D(texture, level, xoffset, x, y, width))
+}
+void APIENTRY glCopyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
+    DSA_TEX_FN(glCopyTextureSubImage2D, copyTextureSubImage2D(texture, level, xoffset, yoffset, x, y, width, height))
+}
+void APIENTRY glCopyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
+    DSA_TEX_FN(glCopyTextureSubImage3D, copyTextureSubImage3D(texture, level, xoffset, yoffset, zoffset, x, y, width, height))
+}
+void APIENTRY glTextureParameterf(GLuint texture, GLenum pname, GLfloat param) {
+    DSA_TEX_FN(glTextureParameterf, textureParameterf(texture, pname, param))
+}
+void APIENTRY glTextureParameterfv(GLuint texture, GLenum pname, const GLfloat* param) {
+    DSA_TEX_FN(glTextureParameterfv, textureParameterfv(texture, pname, param))
+}
+void APIENTRY glTextureParameteri(GLuint texture, GLenum pname, GLint param) {
+    DSA_TEX_FN(glTextureParameteri, textureParameteri(texture, pname, param))
+}
+void APIENTRY glTextureParameteriv(GLuint texture, GLenum pname, const GLint* param) {
+    DSA_TEX_FN(glTextureParameteriv, textureParameteriv(texture, pname, param))
+}
+void APIENTRY glTextureParameterIiv(GLuint texture, GLenum pname, const GLint* params) {
+    DSA_TEX_FN(glTextureParameterIiv, textureParameterIiv(texture, pname, params))
+}
+void APIENTRY glTextureParameterIuiv(GLuint texture, GLenum pname, const GLuint* params) {
+    DSA_TEX_FN(glTextureParameterIuiv, textureParameterIuiv(texture, pname, params))
+}
+void APIENTRY glGetTextureParameterfv(GLuint texture, GLenum pname, GLfloat* params) {
+    DSA_TEX_FN(glGetTextureParameterfv, getTextureParameterfv(texture, pname, params))
+}
+void APIENTRY glGetTextureParameteriv(GLuint texture, GLenum pname, GLint* params) {
+    DSA_TEX_FN(glGetTextureParameteriv, getTextureParameteriv(texture, pname, params))
+}
+void APIENTRY glGetTextureParameterIiv(GLuint texture, GLenum pname, GLint* params) {
+    DSA_TEX_FN(glGetTextureParameterIiv, getTextureParameterIiv(texture, pname, params))
+}
+void APIENTRY glGetTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* params) {
+    DSA_TEX_FN(glGetTextureParameterIuiv, getTextureParameterIuiv(texture, pname, params))
+}
+void APIENTRY glGetTextureLevelParameterfv(GLuint texture, GLint level, GLenum pname, GLfloat* params) {
+    DSA_TEX_FN(glGetTextureLevelParameterfv, getTextureLevelParameterfv(texture, level, pname, params))
+}
+void APIENTRY glGetTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params) {
+    DSA_TEX_FN(glGetTextureLevelParameteriv, getTextureLevelParameteriv(texture, level, pname, params))
+}
+void APIENTRY glGetTextureImage(GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
+    DSA_TEX_FN(glGetTextureImage, getTextureImage(texture, level, format, type, bufSize, pixels))
+}
+void APIENTRY glGetTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                    GLsizei width, GLsizei height, GLsizei depth,
+                                    GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
+    DSA_TEX_FN(glGetTextureSubImage, getTextureSubImage(texture, level, xoffset, yoffset, zoffset, width, height, depth, format, type, bufSize, pixels))
+}
+void APIENTRY glGetCompressedTextureImage(GLuint texture, GLint level, GLsizei bufSize, void* pixels) {
+    DSA_TEX_FN(glGetCompressedTextureImage, getCompressedTextureImage(texture, level, bufSize, pixels))
+}
+void APIENTRY glGetCompressedTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                              GLsizei width, GLsizei height, GLsizei depth,
+                                              GLsizei bufSize, void* pixels) {
+    DSA_TEX_FN(glGetCompressedTextureSubImage, getCompressedTextureSubImage(texture, level, xoffset, yoffset, zoffset, width, height, depth, bufSize, pixels))
+}
+void APIENTRY glGenerateTextureMipmap(GLuint texture) {
+    DSA_TEX_FN(glGenerateTextureMipmap, generateTextureMipmap(texture))
+}
+void APIENTRY glBindTextureUnit(GLuint unit, GLuint texture) {
+    DSA_TEX_FN(glBindTextureUnit, bindTextureUnit(unit, texture))
+}
+
+#undef DSA_TEX_FN
+
 }  // namespace impl
 
 }  // namespace appgl

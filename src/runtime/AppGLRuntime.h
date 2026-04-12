@@ -450,6 +450,60 @@ void APIENTRY glCreateVertexArrays(GLsizei n, GLuint* arrays);
 void APIENTRY glCreateTransformFeedbacks(GLsizei n, GLuint* ids);
 void APIENTRY glCreateProgramPipelines(GLsizei n, GLuint* pipelines);
 void APIENTRY glCreateQueries(GLenum target, GLsizei n, GLuint* ids);
+// GL 4.5 — DSA buffer operations.
+void APIENTRY glNamedBufferStorage(GLuint buffer, GLsizeiptr size, const void* data, GLbitfield flags);
+void APIENTRY glNamedBufferData(GLuint buffer, GLsizeiptr size, const void* data, GLenum usage);
+void APIENTRY glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const void* data);
+void APIENTRY glCopyNamedBufferSubData(GLuint readBuffer, GLuint writeBuffer, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
+void* APIENTRY glMapNamedBuffer(GLuint buffer, GLenum access);
+void* APIENTRY glMapNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length, GLbitfield access);
+GLboolean APIENTRY glUnmapNamedBuffer(GLuint buffer);
+void APIENTRY glFlushMappedNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length);
+void APIENTRY glClearNamedBufferData(GLuint buffer, GLenum internalformat, GLenum format, GLenum type, const void* data);
+void APIENTRY glClearNamedBufferSubData(GLuint buffer, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data);
+void APIENTRY glGetNamedBufferParameteriv(GLuint buffer, GLenum pname, GLint* params);
+void APIENTRY glGetNamedBufferParameteri64v(GLuint buffer, GLenum pname, GLint64* params);
+void APIENTRY glGetNamedBufferPointerv(GLuint buffer, GLenum pname, void** params);
+void APIENTRY glGetNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, void* data);
+// GL 4.5 — DSA texture operations.
+void APIENTRY glTextureStorage1D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width);
+void APIENTRY glTextureStorage2D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height);
+void APIENTRY glTextureStorage3D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
+void APIENTRY glTextureStorage2DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations);
+void APIENTRY glTextureStorage3DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations);
+void APIENTRY glTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const void* pixels);
+void APIENTRY glTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels);
+void APIENTRY glTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels);
+void APIENTRY glTextureBuffer(GLuint texture, GLenum internalformat, GLuint buffer);
+void APIENTRY glTextureBufferRange(GLuint texture, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size);
+void APIENTRY glCompressedTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void* data);
+void APIENTRY glCompressedTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void* data);
+void APIENTRY glCompressedTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void* data);
+void APIENTRY glCopyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width);
+void APIENTRY glCopyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+void APIENTRY glCopyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+void APIENTRY glTextureParameterf(GLuint texture, GLenum pname, GLfloat param);
+void APIENTRY glTextureParameterfv(GLuint texture, GLenum pname, const GLfloat* param);
+void APIENTRY glTextureParameteri(GLuint texture, GLenum pname, GLint param);
+void APIENTRY glTextureParameteriv(GLuint texture, GLenum pname, const GLint* param);
+void APIENTRY glTextureParameterIiv(GLuint texture, GLenum pname, const GLint* params);
+void APIENTRY glTextureParameterIuiv(GLuint texture, GLenum pname, const GLuint* params);
+void APIENTRY glGetTextureParameterfv(GLuint texture, GLenum pname, GLfloat* params);
+void APIENTRY glGetTextureParameteriv(GLuint texture, GLenum pname, GLint* params);
+void APIENTRY glGetTextureParameterIiv(GLuint texture, GLenum pname, GLint* params);
+void APIENTRY glGetTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* params);
+void APIENTRY glGetTextureLevelParameterfv(GLuint texture, GLint level, GLenum pname, GLfloat* params);
+void APIENTRY glGetTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params);
+void APIENTRY glGetTextureImage(GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels);
+void APIENTRY glGetTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                    GLsizei width, GLsizei height, GLsizei depth,
+                                    GLenum format, GLenum type, GLsizei bufSize, void* pixels);
+void APIENTRY glGetCompressedTextureImage(GLuint texture, GLint level, GLsizei bufSize, void* pixels);
+void APIENTRY glGetCompressedTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                              GLsizei width, GLsizei height, GLsizei depth,
+                                              GLsizei bufSize, void* pixels);
+void APIENTRY glGenerateTextureMipmap(GLuint texture);
+void APIENTRY glBindTextureUnit(GLuint unit, GLuint texture);
 }  // namespace impl
 
 class Runtime {

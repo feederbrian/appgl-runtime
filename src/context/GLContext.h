@@ -325,6 +325,62 @@ public:
     bool createProgramPipelines(GLsizei n, GLuint* pipelines);
     bool createQueries(GLenum target, GLsizei n, GLuint* ids);
 
+    // GL 4.5 — DSA buffer operations.
+    bool namedBufferStorage(GLuint buffer, GLsizeiptr size, const void* data, GLbitfield flags);
+    bool namedBufferData(GLuint buffer, GLsizeiptr size, const void* data, GLenum usage);
+    bool namedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const void* data);
+    bool copyNamedBufferSubData(GLuint readBuffer, GLuint writeBuffer, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
+    bool mapNamedBuffer(GLuint buffer, GLenum access, void** result);
+    bool mapNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length, GLbitfield access, void** result);
+    bool unmapNamedBuffer(GLuint buffer, GLboolean* result);
+    bool flushMappedNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length);
+    bool clearNamedBufferData(GLuint buffer, GLenum internalformat, GLenum format, GLenum type, const void* data);
+    bool clearNamedBufferSubData(GLuint buffer, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data);
+    bool getNamedBufferParameteriv(GLuint buffer, GLenum pname, GLint* params);
+    bool getNamedBufferParameteri64v(GLuint buffer, GLenum pname, GLint64* params);
+    bool getNamedBufferPointerv(GLuint buffer, GLenum pname, void** params);
+    bool getNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, void* data);
+
+    // GL 4.5 — DSA texture operations.
+    bool textureStorage1D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width);
+    bool textureStorage2D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height);
+    bool textureStorage3D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
+    bool textureStorage2DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations);
+    bool textureStorage3DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations);
+    bool textureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const void* pixels);
+    bool textureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels);
+    bool textureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels);
+    bool textureBuffer(GLuint texture, GLenum internalformat, GLuint buffer);
+    bool textureBufferRange(GLuint texture, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size);
+    bool compressedTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void* data);
+    bool compressedTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void* data);
+    bool compressedTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void* data);
+    bool copyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width);
+    bool copyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+    bool copyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+    bool textureParameterf(GLuint texture, GLenum pname, GLfloat param);
+    bool textureParameterfv(GLuint texture, GLenum pname, const GLfloat* param);
+    bool textureParameteri(GLuint texture, GLenum pname, GLint param);
+    bool textureParameteriv(GLuint texture, GLenum pname, const GLint* param);
+    bool textureParameterIiv(GLuint texture, GLenum pname, const GLint* params);
+    bool textureParameterIuiv(GLuint texture, GLenum pname, const GLuint* params);
+    bool getTextureParameterfv(GLuint texture, GLenum pname, GLfloat* params);
+    bool getTextureParameteriv(GLuint texture, GLenum pname, GLint* params);
+    bool getTextureParameterIiv(GLuint texture, GLenum pname, GLint* params);
+    bool getTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* params);
+    bool getTextureLevelParameterfv(GLuint texture, GLint level, GLenum pname, GLfloat* params);
+    bool getTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params);
+    bool getTextureImage(GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels);
+    bool getTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                            GLsizei width, GLsizei height, GLsizei depth,
+                            GLenum format, GLenum type, GLsizei bufSize, void* pixels);
+    bool getCompressedTextureImage(GLuint texture, GLint level, GLsizei bufSize, void* pixels);
+    bool getCompressedTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                      GLsizei width, GLsizei height, GLsizei depth,
+                                      GLsizei bufSize, void* pixels);
+    bool generateTextureMipmap(GLuint texture);
+    bool bindTextureUnit(GLuint unit, GLuint texture);
+
     void pushError(GLenum error);
     GLenum popError();
 

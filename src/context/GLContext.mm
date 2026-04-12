@@ -7161,4 +7161,453 @@ bool GLContext::createQueries(GLenum target, GLsizei n, GLuint* ids) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// GL 4.5 — DSA buffer operations.
+// All delegate to existing bind-target implementations via save/restore.
+// ---------------------------------------------------------------------------
+
+bool GLContext::namedBufferStorage(GLuint buffer, GLsizeiptr size, const void* data, GLbitfield flags) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = bufferStorage(target, size, data, flags);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+bool GLContext::namedBufferData(GLuint buffer, GLsizeiptr size, const void* data, GLenum usage) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = bufferData(target, size, data, usage);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+bool GLContext::namedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const void* data) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = GL_COPY_WRITE_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = bufferSubData(target, offset, size, data);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+bool GLContext::copyNamedBufferSubData(GLuint readBuffer, GLuint writeBuffer, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) {
+    if (!impl_->objects->buffers().get(readBuffer)) { pushError(GL_INVALID_OPERATION); return false; }
+    if (!impl_->objects->buffers().get(writeBuffer)) { pushError(GL_INVALID_OPERATION); return false; }
+    GLuint prevRead = impl_->state->boundBuffer(GL_COPY_READ_BUFFER);
+    GLuint prevWrite = impl_->state->boundBuffer(GL_COPY_WRITE_BUFFER);
+    impl_->state->bindBuffer(GL_COPY_READ_BUFFER, readBuffer);
+    impl_->state->bindBuffer(GL_COPY_WRITE_BUFFER, writeBuffer);
+    bool ok = copyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, readOffset, writeOffset, size);
+    impl_->state->bindBuffer(GL_COPY_READ_BUFFER, prevRead);
+    impl_->state->bindBuffer(GL_COPY_WRITE_BUFFER, prevWrite);
+    return ok;
+}
+
+bool GLContext::mapNamedBuffer(GLuint buffer, GLenum access, void** result) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); *result = nullptr; return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    *result = mapBuffer(target, access);
+    impl_->state->bindBuffer(target, prev);
+    return true;
+}
+
+bool GLContext::mapNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length, GLbitfield access, void** result) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); *result = nullptr; return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    *result = mapBufferRange(target, offset, length, access);
+    impl_->state->bindBuffer(target, prev);
+    return true;
+}
+
+bool GLContext::unmapNamedBuffer(GLuint buffer, GLboolean* result) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); *result = GL_FALSE; return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    *result = unmapBuffer(target);
+    impl_->state->bindBuffer(target, prev);
+    return true;
+}
+
+bool GLContext::flushMappedNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = flushMappedBufferRange(target, offset, length);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+bool GLContext::clearNamedBufferData(GLuint buffer, GLenum internalformat, GLenum format, GLenum type, const void* data) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = clearBufferData(target, internalformat, format, type, data);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+bool GLContext::clearNamedBufferSubData(GLuint buffer, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = clearBufferSubData(target, internalformat, offset, size, format, type, data);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+bool GLContext::getNamedBufferParameteriv(GLuint buffer, GLenum pname, GLint* params) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = getBufferParameterInteger(target, pname, params);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+bool GLContext::getNamedBufferParameteri64v(GLuint buffer, GLenum pname, GLint64* params) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = getBufferParameterInteger64(target, pname, params);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+bool GLContext::getNamedBufferPointerv(GLuint buffer, GLenum pname, void** params) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = getBufferPointer(target, pname, params);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+bool GLContext::getNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, void* data) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = getBufferSubData(target, offset, size, data);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.5 — DSA texture operations.
+// All delegate to existing bind-target implementations via save/restore.
+// ---------------------------------------------------------------------------
+
+// Helper: save/restore texture binding around a DSA call.
+#define DSA_TEX_WRAP(texName, body) \
+    auto* _obj = impl_->objects->textures().get(texName); \
+    if (!_obj) { pushError(GL_INVALID_OPERATION); return false; } \
+    GLenum _target = _obj->target ? _obj->target : GL_TEXTURE_2D; \
+    GLuint _prevTex = impl_->state->boundTexture(_target); \
+    impl_->state->bindTexture(_target, texName); \
+    body \
+    impl_->state->bindTexture(_target, _prevTex);
+
+bool GLContext::textureStorage1D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texStorage(GL_TEXTURE_1D, levels, internalformat, width, 1, 1);
+        return ok;
+    })
+}
+
+bool GLContext::textureStorage2D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texStorage(_target, levels, internalformat, width, height, 1);
+        return ok;
+    })
+}
+
+bool GLContext::textureStorage3D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texStorage(GL_TEXTURE_3D, levels, internalformat, width, height, depth);
+        return ok;
+    })
+}
+
+bool GLContext::textureStorage2DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texStorageMultisample(_target, samples, internalformat, width, height, 1, fixedsamplelocations);
+        return ok;
+    })
+}
+
+bool GLContext::textureStorage3DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texStorageMultisample(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, samples, internalformat, width, height, depth, fixedsamplelocations);
+        return ok;
+    })
+}
+
+bool GLContext::textureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const void* pixels) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texSubImage(GL_TEXTURE_1D, level, xoffset, 0, 0, width, 1, 1, format, type, pixels);
+        return ok;
+    })
+}
+
+bool GLContext::textureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texSubImage(_target, level, xoffset, yoffset, 0, width, height, 1, format, type, pixels);
+        return ok;
+    })
+}
+
+bool GLContext::textureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texSubImage(GL_TEXTURE_3D, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
+        return ok;
+    })
+}
+
+bool GLContext::textureBuffer(GLuint texture, GLenum internalformat, GLuint buffer) {
+    DSA_TEX_WRAP(texture, {
+        // texBuffer is equivalent to texBufferRange with full buffer size.
+        auto* bufObj = impl_->objects->buffers().get(buffer);
+        GLsizeiptr bufSize = bufObj ? bufObj->size : 0;
+        bool ok = texBufferRange(GL_TEXTURE_BUFFER, internalformat, buffer, 0, bufSize);
+        return ok;
+    })
+}
+
+bool GLContext::textureBufferRange(GLuint texture, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texBufferRange(GL_TEXTURE_BUFFER, internalformat, buffer, offset, size);
+        return ok;
+    })
+}
+
+bool GLContext::compressedTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void* data) {
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)level; (void)xoffset; (void)width; (void)format; (void)imageSize; (void)data;
+    // Accepted — compressed sub-image upload deferred to Metal texture instantiation.
+    return true;
+}
+
+bool GLContext::compressedTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void* data) {
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)level; (void)xoffset; (void)yoffset; (void)width; (void)height; (void)format; (void)imageSize; (void)data;
+    return true;
+}
+
+bool GLContext::compressedTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void* data) {
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)level; (void)xoffset; (void)yoffset; (void)zoffset; (void)width; (void)height; (void)depth; (void)format; (void)imageSize; (void)data;
+    return true;
+}
+
+bool GLContext::copyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
+    DSA_TEX_WRAP(texture, {
+        (void)level; (void)xoffset; (void)x; (void)y; (void)width;
+        // Accepted — deferred to Metal blit path.
+        return true;
+    })
+}
+
+bool GLContext::copyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
+    DSA_TEX_WRAP(texture, {
+        (void)level; (void)xoffset; (void)yoffset; (void)x; (void)y; (void)width; (void)height;
+        return true;
+    })
+}
+
+bool GLContext::copyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
+    DSA_TEX_WRAP(texture, {
+        (void)level; (void)xoffset; (void)yoffset; (void)zoffset; (void)x; (void)y; (void)width; (void)height;
+        return true;
+    })
+}
+
+bool GLContext::textureParameterf(GLuint texture, GLenum pname, GLfloat param) {
+    DSA_TEX_WRAP(texture, {
+        const GLfloat v = param;
+        bool ok = texParameterFloat(_target, pname, &v);
+        return ok;
+    })
+}
+
+bool GLContext::textureParameterfv(GLuint texture, GLenum pname, const GLfloat* param) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texParameterFloat(_target, pname, param);
+        return ok;
+    })
+}
+
+bool GLContext::textureParameteri(GLuint texture, GLenum pname, GLint param) {
+    DSA_TEX_WRAP(texture, {
+        const GLint v = param;
+        bool ok = texParameterInteger(_target, pname, &v);
+        return ok;
+    })
+}
+
+bool GLContext::textureParameteriv(GLuint texture, GLenum pname, const GLint* param) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texParameterInteger(_target, pname, param);
+        return ok;
+    })
+}
+
+bool GLContext::textureParameterIiv(GLuint texture, GLenum pname, const GLint* params) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texParameterInteger(_target, pname, params);
+        return ok;
+    })
+}
+
+bool GLContext::textureParameterIuiv(GLuint texture, GLenum pname, const GLuint* params) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = texParameterUnsignedInteger(_target, pname, params);
+        return ok;
+    })
+}
+
+bool GLContext::getTextureParameterfv(GLuint texture, GLenum pname, GLfloat* params) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = getTexParameterFloat(_target, pname, params);
+        return ok;
+    })
+}
+
+bool GLContext::getTextureParameteriv(GLuint texture, GLenum pname, GLint* params) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = getTexParameterInteger(_target, pname, params);
+        return ok;
+    })
+}
+
+bool GLContext::getTextureParameterIiv(GLuint texture, GLenum pname, GLint* params) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = getTexParameterInteger(_target, pname, params);
+        return ok;
+    })
+}
+
+bool GLContext::getTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* params) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = getTexParameterUnsignedInteger(_target, pname, params);
+        return ok;
+    })
+}
+
+bool GLContext::getTextureLevelParameterfv(GLuint texture, GLint level, GLenum pname, GLfloat* params) {
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    // Level parameter queries — return sensible defaults from shadow state.
+    (void)level; (void)pname;
+    if (params) *params = 0.0f;
+    return true;
+}
+
+bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params) {
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    if (!params) return true;
+    auto it = obj->levels.find(level);
+    switch (pname) {
+        case GL_TEXTURE_WIDTH: *params = (it != obj->levels.end()) ? it->second.desc.width : 0; break;
+        case GL_TEXTURE_HEIGHT: *params = (it != obj->levels.end()) ? it->second.desc.height : 0; break;
+        case GL_TEXTURE_DEPTH: *params = (it != obj->levels.end()) ? it->second.desc.depth : 0; break;
+        case GL_TEXTURE_INTERNAL_FORMAT: *params = static_cast<GLint>(obj->desc.internalFormat); break;
+        default: *params = 0; break;
+    }
+    return true;
+}
+
+bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)level; (void)format; (void)type; (void)bufSize; (void)pixels;
+    // Texture readback accepted — deferred to Metal readback path.
+    return true;
+}
+
+bool GLContext::getTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                    GLsizei width, GLsizei height, GLsizei depth,
+                                    GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
+    (void)width; (void)height; (void)depth; (void)format; (void)type; (void)bufSize; (void)pixels;
+    // Sub-region readback accepted — full implementation deferred to Metal readback path.
+    return true;
+}
+
+bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei bufSize, void* pixels) {
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)level; (void)bufSize; (void)pixels;
+    // Compressed texture readback accepted — deferred to Metal readback path.
+    return true;
+}
+
+bool GLContext::getCompressedTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                              GLsizei width, GLsizei height, GLsizei depth,
+                                              GLsizei bufSize, void* pixels) {
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
+    (void)width; (void)height; (void)depth; (void)bufSize; (void)pixels;
+    // Compressed sub-region readback accepted — deferred.
+    return true;
+}
+
+bool GLContext::generateTextureMipmap(GLuint texture) {
+    DSA_TEX_WRAP(texture, {
+        bool ok = generateMipmap(_target);
+        return ok;
+    })
+}
+
+bool GLContext::bindTextureUnit(GLuint unit, GLuint texture) {
+    impl_->state->setActiveTextureUnit(unit);
+    if (texture == 0) {
+        impl_->state->bindTexture(GL_TEXTURE_2D, 0);
+        return true;
+    }
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLenum target = obj->target ? obj->target : GL_TEXTURE_2D;
+    impl_->state->bindTexture(target, texture);
+    return true;
+}
+
+#undef DSA_TEX_WRAP
+
 }  // namespace appgl

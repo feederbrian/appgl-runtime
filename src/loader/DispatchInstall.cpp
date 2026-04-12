@@ -823,6 +823,88 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glCreateProgramPipelines, "DSA program pipeline creation.");
     coverage.markImplemented(FunctionId::glCreateQueries, "DSA query creation.");
 
+    // Phase 6 Pass B — GL 4.5 DSA buffer operations (14).
+    dispatch.glNamedBufferStorage = &impl::glNamedBufferStorage;
+    dispatch.glNamedBufferData = &impl::glNamedBufferData;
+    dispatch.glNamedBufferSubData = &impl::glNamedBufferSubData;
+    dispatch.glCopyNamedBufferSubData = &impl::glCopyNamedBufferSubData;
+    dispatch.glMapNamedBuffer = &impl::glMapNamedBuffer;
+    dispatch.glMapNamedBufferRange = &impl::glMapNamedBufferRange;
+    dispatch.glUnmapNamedBuffer = &impl::glUnmapNamedBuffer;
+    dispatch.glFlushMappedNamedBufferRange = &impl::glFlushMappedNamedBufferRange;
+    dispatch.glClearNamedBufferData = &impl::glClearNamedBufferData;
+    dispatch.glClearNamedBufferSubData = &impl::glClearNamedBufferSubData;
+    dispatch.glGetNamedBufferParameteriv = &impl::glGetNamedBufferParameteriv;
+    dispatch.glGetNamedBufferParameteri64v = &impl::glGetNamedBufferParameteri64v;
+    dispatch.glGetNamedBufferPointerv = &impl::glGetNamedBufferPointerv;
+    dispatch.glGetNamedBufferSubData = &impl::glGetNamedBufferSubData;
+    coverage.markImplemented(FunctionId::glNamedBufferStorage, "DSA immutable buffer storage.");
+    coverage.markImplemented(FunctionId::glNamedBufferData, "DSA buffer data upload.");
+    coverage.markImplemented(FunctionId::glNamedBufferSubData, "DSA buffer sub-data.");
+    coverage.markImplemented(FunctionId::glCopyNamedBufferSubData, "DSA buffer copy.");
+    coverage.markImplemented(FunctionId::glMapNamedBuffer, "DSA buffer map.");
+    coverage.markImplemented(FunctionId::glMapNamedBufferRange, "DSA buffer range map.");
+    coverage.markImplemented(FunctionId::glUnmapNamedBuffer, "DSA buffer unmap.");
+    coverage.markImplemented(FunctionId::glFlushMappedNamedBufferRange, "DSA mapped buffer flush.");
+    coverage.markImplemented(FunctionId::glClearNamedBufferData, "DSA buffer clear.");
+    coverage.markImplemented(FunctionId::glClearNamedBufferSubData, "DSA buffer sub-range clear.");
+    coverage.markImplemented(FunctionId::glGetNamedBufferParameteriv, "DSA buffer parameter query.");
+    coverage.markImplemented(FunctionId::glGetNamedBufferParameteri64v, "DSA buffer i64 parameter query.");
+    coverage.markImplemented(FunctionId::glGetNamedBufferPointerv, "DSA buffer pointer query.");
+    coverage.markImplemented(FunctionId::glGetNamedBufferSubData, "DSA buffer sub-data readback.");
+    // Phase 6 Pass B — GL 4.5 DSA texture operations (34).
+    dispatch.glTextureStorage1D = &impl::glTextureStorage1D;
+    dispatch.glTextureStorage2D = &impl::glTextureStorage2D;
+    dispatch.glTextureStorage3D = &impl::glTextureStorage3D;
+    dispatch.glTextureStorage2DMultisample = &impl::glTextureStorage2DMultisample;
+    dispatch.glTextureStorage3DMultisample = &impl::glTextureStorage3DMultisample;
+    dispatch.glTextureSubImage1D = &impl::glTextureSubImage1D;
+    dispatch.glTextureSubImage2D = &impl::glTextureSubImage2D;
+    dispatch.glTextureSubImage3D = &impl::glTextureSubImage3D;
+    dispatch.glTextureBuffer = &impl::glTextureBuffer;
+    dispatch.glTextureBufferRange = &impl::glTextureBufferRange;
+    dispatch.glCompressedTextureSubImage1D = &impl::glCompressedTextureSubImage1D;
+    dispatch.glCompressedTextureSubImage2D = &impl::glCompressedTextureSubImage2D;
+    dispatch.glCompressedTextureSubImage3D = &impl::glCompressedTextureSubImage3D;
+    dispatch.glCopyTextureSubImage1D = &impl::glCopyTextureSubImage1D;
+    dispatch.glCopyTextureSubImage2D = &impl::glCopyTextureSubImage2D;
+    dispatch.glCopyTextureSubImage3D = &impl::glCopyTextureSubImage3D;
+    dispatch.glTextureParameterf = &impl::glTextureParameterf;
+    dispatch.glTextureParameterfv = &impl::glTextureParameterfv;
+    dispatch.glTextureParameteri = &impl::glTextureParameteri;
+    dispatch.glTextureParameteriv = &impl::glTextureParameteriv;
+    dispatch.glTextureParameterIiv = &impl::glTextureParameterIiv;
+    dispatch.glTextureParameterIuiv = &impl::glTextureParameterIuiv;
+    dispatch.glGetTextureParameterfv = &impl::glGetTextureParameterfv;
+    dispatch.glGetTextureParameteriv = &impl::glGetTextureParameteriv;
+    dispatch.glGetTextureParameterIiv = &impl::glGetTextureParameterIiv;
+    dispatch.glGetTextureParameterIuiv = &impl::glGetTextureParameterIuiv;
+    dispatch.glGetTextureLevelParameterfv = &impl::glGetTextureLevelParameterfv;
+    dispatch.glGetTextureLevelParameteriv = &impl::glGetTextureLevelParameteriv;
+    dispatch.glGetTextureImage = &impl::glGetTextureImage;
+    dispatch.glGetTextureSubImage = &impl::glGetTextureSubImage;
+    dispatch.glGetCompressedTextureImage = &impl::glGetCompressedTextureImage;
+    dispatch.glGetCompressedTextureSubImage = &impl::glGetCompressedTextureSubImage;
+    dispatch.glGenerateTextureMipmap = &impl::glGenerateTextureMipmap;
+    dispatch.glBindTextureUnit = &impl::glBindTextureUnit;
+    for (auto id : {FunctionId::glTextureStorage1D, FunctionId::glTextureStorage2D, FunctionId::glTextureStorage3D,
+                    FunctionId::glTextureStorage2DMultisample, FunctionId::glTextureStorage3DMultisample,
+                    FunctionId::glTextureSubImage1D, FunctionId::glTextureSubImage2D, FunctionId::glTextureSubImage3D,
+                    FunctionId::glTextureBuffer, FunctionId::glTextureBufferRange,
+                    FunctionId::glCompressedTextureSubImage1D, FunctionId::glCompressedTextureSubImage2D, FunctionId::glCompressedTextureSubImage3D,
+                    FunctionId::glCopyTextureSubImage1D, FunctionId::glCopyTextureSubImage2D, FunctionId::glCopyTextureSubImage3D,
+                    FunctionId::glTextureParameterf, FunctionId::glTextureParameterfv,
+                    FunctionId::glTextureParameteri, FunctionId::glTextureParameteriv,
+                    FunctionId::glTextureParameterIiv, FunctionId::glTextureParameterIuiv,
+                    FunctionId::glGetTextureParameterfv, FunctionId::glGetTextureParameteriv,
+                    FunctionId::glGetTextureParameterIiv, FunctionId::glGetTextureParameterIuiv,
+                    FunctionId::glGetTextureLevelParameterfv, FunctionId::glGetTextureLevelParameteriv,
+                    FunctionId::glGetTextureImage, FunctionId::glGetTextureSubImage,
+                    FunctionId::glGetCompressedTextureImage, FunctionId::glGetCompressedTextureSubImage,
+                    FunctionId::glGenerateTextureMipmap, FunctionId::glBindTextureUnit}) {
+        coverage.markImplemented(id, "DSA texture wrapper.");
+    }
+
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in
     // the promotion-gate window. Queries are live; everything else ships as a
