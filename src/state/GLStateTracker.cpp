@@ -504,12 +504,54 @@ void GLStateTracker::setBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum s
     blend_.dstRGB = dstRGB;
     blend_.srcAlpha = srcAlpha;
     blend_.dstAlpha = dstAlpha;
+    for (auto& target : blend_.indexedBlend) {
+        target.srcRGB = srcRGB;
+        target.dstRGB = dstRGB;
+        target.srcAlpha = srcAlpha;
+        target.dstAlpha = dstAlpha;
+    }
+    markDirty(DirtyBit::BlendState);
+}
+
+void GLStateTracker::setBlendFuncSeparatei(GLuint index, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) {
+    if (index >= blend_.indexedBlend.size()) {
+        return;
+    }
+    auto& target = blend_.indexedBlend[index];
+    target.srcRGB = srcRGB;
+    target.dstRGB = dstRGB;
+    target.srcAlpha = srcAlpha;
+    target.dstAlpha = dstAlpha;
+    if (index == 0) {
+        blend_.srcRGB = srcRGB;
+        blend_.dstRGB = dstRGB;
+        blend_.srcAlpha = srcAlpha;
+        blend_.dstAlpha = dstAlpha;
+    }
     markDirty(DirtyBit::BlendState);
 }
 
 void GLStateTracker::setBlendEquationSeparate(GLenum equationRGB, GLenum equationAlpha) {
     blend_.equationRGB = equationRGB;
     blend_.equationAlpha = equationAlpha;
+    for (auto& target : blend_.indexedBlend) {
+        target.equationRGB = equationRGB;
+        target.equationAlpha = equationAlpha;
+    }
+    markDirty(DirtyBit::BlendState);
+}
+
+void GLStateTracker::setBlendEquationSeparatei(GLuint index, GLenum equationRGB, GLenum equationAlpha) {
+    if (index >= blend_.indexedBlend.size()) {
+        return;
+    }
+    auto& target = blend_.indexedBlend[index];
+    target.equationRGB = equationRGB;
+    target.equationAlpha = equationAlpha;
+    if (index == 0) {
+        blend_.equationRGB = equationRGB;
+        blend_.equationAlpha = equationAlpha;
+    }
     markDirty(DirtyBit::BlendState);
 }
 
@@ -537,6 +579,11 @@ void GLStateTracker::setColorMaski(GLuint index, GLboolean red, GLboolean green,
     if (index == 0) {
         blend_.colorMask = blend_.indexedColorMasks[index];
     }
+    markDirty(DirtyBit::BlendState);
+}
+
+void GLStateTracker::setMinSampleShading(GLfloat value) {
+    blend_.minSampleShading = std::clamp(value, 0.0f, 1.0f);
     markDirty(DirtyBit::BlendState);
 }
 

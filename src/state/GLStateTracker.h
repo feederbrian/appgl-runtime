@@ -46,6 +46,15 @@ struct GLScissorState {
     GLsizei height = 1;
 };
 
+struct GLBlendPerTarget {
+    GLenum srcRGB = GL_ONE;
+    GLenum dstRGB = GL_ZERO;
+    GLenum srcAlpha = GL_ONE;
+    GLenum dstAlpha = GL_ZERO;
+    GLenum equationRGB = GL_FUNC_ADD;
+    GLenum equationAlpha = GL_FUNC_ADD;
+};
+
 struct GLBlendState {
     GLenum srcRGB = GL_ONE;
     GLenum dstRGB = GL_ZERO;
@@ -56,6 +65,8 @@ struct GLBlendState {
     GLfloat color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     std::array<GLboolean, 4> colorMask = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
     std::array<std::array<GLboolean, 4>, 8> indexedColorMasks{};
+    std::array<GLBlendPerTarget, 8> indexedBlend{};
+    GLfloat minSampleShading = 0.0f;
 };
 
 struct GLDepthState {
@@ -136,10 +147,13 @@ public:
     const GLClearState& clearState() const;
 
     void setBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
+    void setBlendFuncSeparatei(GLuint index, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
     void setBlendEquationSeparate(GLenum equationRGB, GLenum equationAlpha);
+    void setBlendEquationSeparatei(GLuint index, GLenum equationRGB, GLenum equationAlpha);
     void setBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
     void setColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
     void setColorMaski(GLuint index, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
+    void setMinSampleShading(GLfloat value);
     const GLBlendState& blendState() const;
 
     void setDepthFunc(GLenum func);

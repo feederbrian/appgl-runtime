@@ -1951,6 +1951,14 @@ public:
         gl.glSampleCoverage(1.0f, GL_FALSE);
         gl.glSampleMaski(0, 0xFFFFFFFFu);
 
+        // Phase 4 Group 1: indexed blend and sample shading (GL 4.0).
+        gl.glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        gl.glBlendFuncSeparatei(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+        gl.glBlendEquationi(0, GL_FUNC_ADD);
+        gl.glBlendEquationSeparatei(0, GL_FUNC_ADD, GL_FUNC_ADD);
+        gl.glMinSampleShading(0.5f);
+        expectGLError(gl, GL_NO_ERROR, "indexed blend and sample shading accept legal args");
+
         while (gl.glGetError() != GL_NO_ERROR) {
         }
     }
@@ -1965,6 +1973,10 @@ public:
 
     std::vector<FunctionId> scenarioCoverage() const override {
         return {
+            FunctionId::glBlendEquationSeparatei,
+            FunctionId::glBlendEquationi,
+            FunctionId::glBlendFuncSeparatei,
+            FunctionId::glBlendFunci,
             FunctionId::glClampColor,
             FunctionId::glDisablei,
             FunctionId::glEnablei,
@@ -1975,6 +1987,7 @@ public:
             FunctionId::glGetStringi,
             FunctionId::glIsEnabledi,
             FunctionId::glLogicOp,
+            FunctionId::glMinSampleShading,
             FunctionId::glPointParameterf,
             FunctionId::glPointParameterfv,
             FunctionId::glPointParameteri,

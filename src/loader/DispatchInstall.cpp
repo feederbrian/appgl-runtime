@@ -115,8 +115,13 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glDepthRangef = &impl::glDepthRangef;
     dispatch.glBlendFunc = &impl::glBlendFunc;
     dispatch.glBlendFuncSeparate = &impl::glBlendFuncSeparate;
+    dispatch.glBlendFunci = &impl::glBlendFunci;
+    dispatch.glBlendFuncSeparatei = &impl::glBlendFuncSeparatei;
     dispatch.glBlendEquation = &impl::glBlendEquation;
     dispatch.glBlendEquationSeparate = &impl::glBlendEquationSeparate;
+    dispatch.glBlendEquationi = &impl::glBlendEquationi;
+    dispatch.glBlendEquationSeparatei = &impl::glBlendEquationSeparatei;
+    dispatch.glMinSampleShading = &impl::glMinSampleShading;
     dispatch.glBlendColor = &impl::glBlendColor;
     dispatch.glColorMask = &impl::glColorMask;
     dispatch.glColorMaski = &impl::glColorMaski;

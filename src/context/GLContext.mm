@@ -1936,8 +1936,16 @@ void GLContext::setBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlp
     impl_->state->setBlendFuncSeparate(srcRGB, dstRGB, srcAlpha, dstAlpha);
 }
 
+void GLContext::setBlendFuncSeparatei(GLuint index, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) {
+    impl_->state->setBlendFuncSeparatei(index, srcRGB, dstRGB, srcAlpha, dstAlpha);
+}
+
 void GLContext::setBlendEquationSeparate(GLenum equationRGB, GLenum equationAlpha) {
     impl_->state->setBlendEquationSeparate(equationRGB, equationAlpha);
+}
+
+void GLContext::setBlendEquationSeparatei(GLuint index, GLenum equationRGB, GLenum equationAlpha) {
+    impl_->state->setBlendEquationSeparatei(index, equationRGB, equationAlpha);
 }
 
 void GLContext::setBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
@@ -1950,6 +1958,10 @@ void GLContext::setColorMask(GLboolean red, GLboolean green, GLboolean blue, GLb
 
 void GLContext::setColorMaski(GLuint index, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha) {
     impl_->state->setColorMaski(index, red, green, blue, alpha);
+}
+
+void GLContext::setMinSampleShading(GLfloat value) {
+    impl_->state->setMinSampleShading(value);
 }
 
 void GLContext::setDepthFunc(GLenum func) {

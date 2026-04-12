@@ -2621,6 +2621,84 @@ void APIENTRY glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha) {
     Runtime::shared().recordBootstrapTrace("glBlendEquationSeparate()");
 }
 
+void APIENTRY glBlendFunci(GLuint buf, GLenum src, GLenum dst) {
+    auto* context = requireCurrentContext("glBlendFunci");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBlendFactor(src) || !isValidBlendFactor(dst)) {
+        recordValidationError(context, "glBlendFunci", GL_INVALID_ENUM, "blend factor is invalid");
+        return;
+    }
+    if (buf >= 8) {
+        recordValidationError(context, "glBlendFunci", GL_INVALID_VALUE, "draw buffer index out of range");
+        return;
+    }
+    context->setBlendFuncSeparatei(buf, src, dst, src, dst);
+    markStateFunction(FunctionId::glBlendFunci, "Indexed blend func state is tracked per draw buffer.");
+}
+
+void APIENTRY glBlendFuncSeparatei(GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) {
+    auto* context = requireCurrentContext("glBlendFuncSeparatei");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBlendFactor(srcRGB) || !isValidBlendFactor(dstRGB)
+        || !isValidBlendFactor(srcAlpha) || !isValidBlendFactor(dstAlpha)) {
+        recordValidationError(context, "glBlendFuncSeparatei", GL_INVALID_ENUM, "blend factor is invalid");
+        return;
+    }
+    if (buf >= 8) {
+        recordValidationError(context, "glBlendFuncSeparatei", GL_INVALID_VALUE, "draw buffer index out of range");
+        return;
+    }
+    context->setBlendFuncSeparatei(buf, srcRGB, dstRGB, srcAlpha, dstAlpha);
+    markStateFunction(FunctionId::glBlendFuncSeparatei, "Indexed separate blend func state is tracked per draw buffer.");
+}
+
+void APIENTRY glBlendEquationi(GLuint buf, GLenum mode) {
+    auto* context = requireCurrentContext("glBlendEquationi");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBlendEquation(mode)) {
+        recordValidationError(context, "glBlendEquationi", GL_INVALID_ENUM, "blend equation is invalid");
+        return;
+    }
+    if (buf >= 8) {
+        recordValidationError(context, "glBlendEquationi", GL_INVALID_VALUE, "draw buffer index out of range");
+        return;
+    }
+    context->setBlendEquationSeparatei(buf, mode, mode);
+    markStateFunction(FunctionId::glBlendEquationi, "Indexed blend equation state is tracked per draw buffer.");
+}
+
+void APIENTRY glBlendEquationSeparatei(GLuint buf, GLenum modeRGB, GLenum modeAlpha) {
+    auto* context = requireCurrentContext("glBlendEquationSeparatei");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidBlendEquation(modeRGB) || !isValidBlendEquation(modeAlpha)) {
+        recordValidationError(context, "glBlendEquationSeparatei", GL_INVALID_ENUM, "blend equation is invalid");
+        return;
+    }
+    if (buf >= 8) {
+        recordValidationError(context, "glBlendEquationSeparatei", GL_INVALID_VALUE, "draw buffer index out of range");
+        return;
+    }
+    context->setBlendEquationSeparatei(buf, modeRGB, modeAlpha);
+    markStateFunction(FunctionId::glBlendEquationSeparatei, "Indexed separate blend equation state is tracked per draw buffer.");
+}
+
+void APIENTRY glMinSampleShading(GLfloat value) {
+    auto* context = requireCurrentContext("glMinSampleShading");
+    if (context == nullptr) {
+        return;
+    }
+    context->setMinSampleShading(value);
+    markStateFunction(FunctionId::glMinSampleShading, "Minimum sample shading value is tracked.");
+}
+
 void APIENTRY glBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
     auto* context = requireCurrentContext("glBlendColor");
     if (context == nullptr) {

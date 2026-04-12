@@ -30,10 +30,13 @@ public:
     void setScissor(GLint x, GLint y, GLsizei width, GLsizei height);
     void setDepthRange(GLdouble nearValue, GLdouble farValue);
     void setBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
+    void setBlendFuncSeparatei(GLuint index, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
     void setBlendEquationSeparate(GLenum equationRGB, GLenum equationAlpha);
+    void setBlendEquationSeparatei(GLuint index, GLenum equationRGB, GLenum equationAlpha);
     void setBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
     void setColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
     void setColorMaski(GLuint index, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
+    void setMinSampleShading(GLfloat value);
     void setDepthFunc(GLenum func);
     void setDepthMask(GLboolean flag);
     void setStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask);
