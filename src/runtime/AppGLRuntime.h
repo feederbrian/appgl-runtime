@@ -603,6 +603,17 @@ public:
     CoverageStore& coverageStore();
     TraceLog& traceLog();
 
+    // Shader translation diagnostics. Called from GLContext::linkProgram().
+    struct ShaderTranslationRecord {
+        std::string id;       // e.g. "program-3-vertex"
+        std::string stage;    // "vertex" or "fragment"
+        std::string sourceHash;
+        std::string glslangLog;
+        std::string mslPreview; // first ~200 chars of MSL
+        bool success = false;
+    };
+    void recordShaderTranslation(ShaderTranslationRecord record);
+
 private:
     Runtime();
     void initializeDispatch();
@@ -613,6 +624,8 @@ private:
     std::string rendererString_ = "AppGL on Metal";
     mutable std::mutex contextMutex_;
     std::unordered_set<GLContext*> liveContexts_;
+    std::mutex translationMutex_;
+    std::vector<ShaderTranslationRecord> shaderTranslations_;
 };
 
 template <typename ReturnType>

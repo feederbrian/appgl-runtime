@@ -4973,6 +4973,15 @@ bool GLContext::linkProgram(GLuint program) {
         }
 
         if (!vertexSource.empty() && !fragmentSource.empty()) {
+            // Simple hash for diagnostics display.
+            auto quickHash = [](const std::string& s) -> std::string {
+                std::size_t h = std::hash<std::string>{}(s);
+                char buf[18];
+                std::snprintf(buf, sizeof(buf), "%016zx", h);
+                return buf;
+            };
+            const std::string programTag = "program-" + std::to_string(program);
+
             std::string compileLog;
             auto vertexSPIRV = translator.compileGLSL(vertexSource, vertexStage, 330, &compileLog);
             NSLog(@"[GL] linkProgram: vertex SPIRV %s (%zu words) log: %s",
@@ -5003,7 +5012,37 @@ bool GLContext::linkProgram(GLuint program) {
                     NSLog(@"[GL] linkProgram: *** TRANSLATION SUCCEEDED *** vertexInputs=%zu uniformBlocks=%zu",
                           programObject->vertexReflection.vertexInputs.size(),
                           programObject->vertexReflection.uniformBlocks.size());
+
+                    // Record successful translations for diagnostics card.
+                    Runtime::shared().recordShaderTranslation({
+                        programTag + "-vertex", "vertex", quickHash(vertexSource),
+                        "ok", programObject->vertexMSL.substr(0, 200), true
+                    });
+                    Runtime::shared().recordShaderTranslation({
+                        programTag + "-fragment", "fragment", quickHash(fragmentSource),
+                        "ok", programObject->fragmentMSL.substr(0, 200), true
+                    });
+                } else {
+                    // Record failed MSL translations.
+                    Runtime::shared().recordShaderTranslation({
+                        programTag + "-vertex", "vertex", quickHash(vertexSource),
+                        mslLog, "", vertMSL.empty() ? false : true
+                    });
+                    Runtime::shared().recordShaderTranslation({
+                        programTag + "-fragment", "fragment", quickHash(fragmentSource),
+                        mslLog, "", fragMSL.empty() ? false : true
+                    });
                 }
+            } else {
+                // Record failed SPIR-V compilations.
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-vertex", "vertex", quickHash(vertexSource),
+                    compileLog, "", !vertexSPIRV.empty()
+                });
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-fragment", "fragment", quickHash(fragmentSource),
+                    compileLog, "", !fragmentSPIRV.empty()
+                });
             }
         }
     }

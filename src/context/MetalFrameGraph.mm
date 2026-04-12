@@ -183,16 +183,13 @@ struct MetalFrameGraph::Impl {
         }
     }
 
-    // Phase A Group 7 — minimal draw path.
+    // Solid-color fallback draw path.
     //
-    // Until the full GLSL→SPIR-V→MSL pipeline ships (Group 6 left ShaderTranslator
-    // stubbed because glslang/SPIRV-Cross are not yet linked into the Xcode
-    // framework target), we use a single hand-written "solid color" MSL pipeline
-    // that consumes one float3 position attribute and a single float4 uniform
-    // color. This lets us exercise the Metal draw encoder path, vertex buffer
-    // binding, depth-test state, and gauntlet golden round-trip end-to-end on
-    // the one triangle test fixture. Future groups replace the fallback library
-    // with the translated MSL from the active program.
+    // Hand-written "solid color" MSL pipeline consuming one float3 position
+    // attribute and a single float4 uniform color. Used as a fallback when the
+    // active program has no translated MSL (e.g. program 0 or translation
+    // failure). The primary draw path is encodeTranslatedDraw(), which uses
+    // the GLSL→SPIR-V→MSL pipeline output cached on GLProgramObject.
     bool encodeSolidColorDraw(const MetalDrawInfo& info) {
         FG_TRACE(@"encodeSolidColorDraw: enter  mode=0x%X verts=%d encoder=%p cmdBuf=%p",
                  info.mode, info.vertexCount, currentRenderEncoder, currentCommandBuffer);

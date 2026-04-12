@@ -37,5 +37,17 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Optional third argument: write post-run diagnostics JSON to the given path.
+    if (argc > 3) {
+        const std::string diagPath = argv[3];
+        std::size_t diagRequired = appgl::Runtime::shared().writeDiagnosticsJSON(nullptr, 0);
+        std::vector<char> diagBuffer(diagRequired);
+        appgl::Runtime::shared().writeDiagnosticsJSON(diagBuffer.data(), diagBuffer.size());
+        std::ofstream diagOut(diagPath, std::ios::binary);
+        if (diagOut) {
+            diagOut.write(diagBuffer.data(), static_cast<std::streamsize>(diagRequired - 1));
+        }
+    }
+
     return appgl::tests::lastGauntletPassed() ? 0 : 2;
 }

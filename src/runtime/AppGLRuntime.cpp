@@ -854,6 +854,15 @@ void Runtime::noteRenderer(std::string renderer) {
     rendererString_ = std::move(renderer);
 }
 
+void Runtime::recordShaderTranslation(ShaderTranslationRecord record) {
+    std::lock_guard<std::mutex> lock(translationMutex_);
+    // Keep last 32 translations to avoid unbounded growth.
+    if (shaderTranslations_.size() >= 32) {
+        shaderTranslations_.erase(shaderTranslations_.begin());
+    }
+    shaderTranslations_.push_back(std::move(record));
+}
+
 std::size_t Runtime::writeCoverageSnapshotJSON(char* out, std::size_t cap) {
     const std::string payload = coverageStore_.buildSnapshotJson(rendererString_, traceLog_.snapshot());
     const std::size_t required = payload.size() + 1;
@@ -929,8 +938,24 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     // ── Pipeline cache metrics — populated in Phase A Group 7. ──
     stream << "\"pipelineCache\":{\"entries\":0,\"hits\":0,\"misses\":0,\"averageBuildMillis\":0.0},";
 
-    // ── Shader translation log — populated in Phase A Group 6. ──
-    stream << "\"shaderTranslations\":[],";
+    // ── Shader translation log ──
+    {
+        std::lock_guard<std::mutex> lock(translationMutex_);
+        stream << "\"shaderTranslations\":[";
+        for (std::size_t i = 0; i < shaderTranslations_.size(); ++i) {
+            if (i != 0) stream << ",";
+            const auto& rec = shaderTranslations_[i];
+            stream << "{"
+                   << "\"id\":\"" << jsonEscape(rec.id) << "\","
+                   << "\"stage\":\"" << jsonEscape(rec.stage) << "\","
+                   << "\"sourceHash\":\"" << jsonEscape(rec.sourceHash) << "\","
+                   << "\"glslangLog\":\"" << jsonEscape(rec.glslangLog) << "\","
+                   << "\"mslPreview\":\"" << jsonEscape(rec.mslPreview) << "\","
+                   << "\"success\":" << (rec.success ? "true" : "false")
+                   << "}";
+        }
+        stream << "],";
+    }
 
     // ── GL error stream — populated when error history is wired. ──
     stream << "\"errorLog\":[]";
