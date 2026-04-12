@@ -231,6 +231,19 @@ public:
     bool drawArrays(GLenum mode, GLint first, GLsizei count);
     bool drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
 
+    // GL 4.2/4.3 — compute shaders and memory barriers.
+    // Stubs: validate parameters and record state. Actual Metal compute encoding
+    // will be wired when compute shader programs are created at link time.
+    bool memoryBarrier(GLbitfield barriers);
+    bool dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z);
+    bool dispatchComputeIndirect(GLintptr indirect);
+
+    // GL 4.2 — image load/store.
+    bool bindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format);
+
+    // GL 4.2 — atomic counter buffer queries (stub returning sensible defaults).
+    bool getActiveAtomicCounterBufferiv(GLuint program, GLuint bufferIndex, GLenum pname, GLint* params);
+
     void pushError(GLenum error);
     GLenum popError();
 

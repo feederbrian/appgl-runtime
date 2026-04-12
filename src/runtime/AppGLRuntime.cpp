@@ -5069,6 +5069,81 @@ void APIENTRY glDrawElementsIndirect(GLenum mode, GLenum type, const void* indir
     Runtime::shared().recordBootstrapTrace("glDrawElementsIndirect(mode=" + std::to_string(mode) + ", type=" + std::to_string(type) + ")");
 }
 
+// --- GL 4.2: Memory Barriers ---
+
+void APIENTRY glMemoryBarrier(GLbitfield barriers) {
+    auto* ctx = requireCurrentContext("glMemoryBarrier");
+    if (!ctx) return;
+    if (!ctx->memoryBarrier(barriers)) {
+        return;
+    }
+    markStateFunction(FunctionId::glMemoryBarrier, "MemoryBarrier validated no-op (Metal handles ordering implicitly).");
+    Runtime::shared().recordBootstrapTrace("glMemoryBarrier(barriers=0x" + std::to_string(barriers) + ")");
+}
+
+// --- GL 4.3: Compute Shaders ---
+
+void APIENTRY glDispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z) {
+    auto* ctx = requireCurrentContext("glDispatchCompute");
+    if (!ctx) return;
+    if (!ctx->dispatchCompute(num_groups_x, num_groups_y, num_groups_z)) {
+        return;
+    }
+    markStateFunction(FunctionId::glDispatchCompute, "DispatchCompute stub (validated, compute pipeline not yet wired).");
+    Runtime::shared().recordBootstrapTrace(
+        "glDispatchCompute(x=" + std::to_string(num_groups_x)
+        + ", y=" + std::to_string(num_groups_y)
+        + ", z=" + std::to_string(num_groups_z) + ")"
+    );
+}
+
+void APIENTRY glDispatchComputeIndirect(GLintptr indirect) {
+    auto* ctx = requireCurrentContext("glDispatchComputeIndirect");
+    if (!ctx) return;
+    if (!ctx->dispatchComputeIndirect(indirect)) {
+        return;
+    }
+    markStateFunction(FunctionId::glDispatchComputeIndirect, "DispatchComputeIndirect stub (validated, compute pipeline not yet wired).");
+    Runtime::shared().recordBootstrapTrace(
+        "glDispatchComputeIndirect(indirect=" + std::to_string(indirect) + ")"
+    );
+}
+
+// --- GL 4.2: Image Load/Store ---
+
+void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format) {
+    auto* context = requireCurrentContext("glBindImageTexture");
+    if (context == nullptr) {
+        return;
+    }
+    if (!context->bindImageTexture(unit, texture, level, layered, layer, access, format)) {
+        return;
+    }
+    markTextureFunction(FunctionId::glBindImageTexture, "Image unit binding state is tracked for load/store shaders.");
+    Runtime::shared().recordBootstrapTrace(
+        "glBindImageTexture(unit=" + std::to_string(unit)
+        + ", texture=" + std::to_string(texture)
+        + ", level=" + std::to_string(level)
+        + ", layered=" + std::to_string(layered)
+        + ", layer=" + std::to_string(layer)
+        + ", access=0x" + std::to_string(access)
+        + ", format=0x" + std::to_string(format) + ")"
+    );
+}
+
+// --- GL 4.2: Atomic Counter Queries ---
+
+void APIENTRY glGetActiveAtomicCounterBufferiv(GLuint program, GLuint bufferIndex, GLenum pname, GLint* params) {
+    auto* context = requireCurrentContext("glGetActiveAtomicCounterBufferiv");
+    if (context == nullptr) {
+        return;
+    }
+    if (!context->getActiveAtomicCounterBufferiv(program, bufferIndex, pname, params)) {
+        return;
+    }
+    markProgramFunction(FunctionId::glGetActiveAtomicCounterBufferiv, "Atomic counter buffer query returns sensible defaults (Metal has no native atomic counters).");
+}
+
 }  // namespace impl
 
 }  // namespace appgl

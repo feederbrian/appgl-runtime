@@ -14,6 +14,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -1879,6 +1880,18 @@ struct GLContext::Impl {
     // Indexed by attribute slot; each stores 4 doubles (default {0,0,0,1}).
     static constexpr std::size_t kMaxImmediateDoubleAttribs = 16;
     std::array<std::array<GLdouble, 4>, kMaxImmediateDoubleAttribs> immediateDoubleAttribs{};
+    // GL 4.2 — image load/store unit bindings.
+    struct ImageBinding {
+        GLuint texture = 0;
+        GLint level = 0;
+        GLboolean layered = GL_FALSE;
+        GLint layer = 0;
+        GLenum access = GL_READ_ONLY;
+        GLenum format = GL_RGBA8;
+    };
+    static constexpr std::size_t kMaxImageUnits = 8;
+    std::array<ImageBinding, kMaxImageUnits> imageBindings{};
+
     std::string vendorString = "AppGL";
     std::string rendererString = "AppGL on Metal";
     std::string versionString;
@@ -5933,6 +5946,203 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         );
     }
     return ok;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.2 — Memory Barriers
+// ---------------------------------------------------------------------------
+
+bool GLContext::memoryBarrier(GLbitfield barriers) {
+    // All valid GL 4.2/4.3 barrier bits.
+    constexpr GLbitfield kValidBarrierBits =
+        GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT |
+        GL_ELEMENT_ARRAY_BARRIER_BIT |
+        GL_UNIFORM_BARRIER_BIT |
+        GL_TEXTURE_FETCH_BARRIER_BIT |
+        GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
+        GL_COMMAND_BARRIER_BIT |
+        GL_PIXEL_BUFFER_BARRIER_BIT |
+        GL_TEXTURE_UPDATE_BARRIER_BIT |
+        GL_BUFFER_UPDATE_BARRIER_BIT |
+        GL_FRAMEBUFFER_BARRIER_BIT |
+        GL_TRANSFORM_FEEDBACK_BARRIER_BIT |
+        GL_ATOMIC_COUNTER_BARRIER_BIT |
+        GL_SHADER_STORAGE_BARRIER_BIT;
+
+    if (barriers != GL_ALL_BARRIER_BITS && (barriers & ~kValidBarrierBits) != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    // Validated no-op. Metal command queue ordering handles most barriers
+    // implicitly; explicit MTLFence/MTLEvent synchronization will be added
+    // when compute pipelines are fully wired.
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.3 — Compute Shaders
+// ---------------------------------------------------------------------------
+
+bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z) {
+    constexpr GLuint kMaxWorkGroups = 65535;
+
+    if (num_groups_x == 0 || num_groups_y == 0 || num_groups_z == 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (num_groups_x > kMaxWorkGroups || num_groups_y > kMaxWorkGroups || num_groups_z > kMaxWorkGroups) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    // Stub: compute pipeline creation at link time is not yet wired.
+    // When GLSL compute shaders are compiled and linked, this will encode
+    // a Metal compute command via the frame graph.
+    return true;
+}
+
+bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
+    if (indirect < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if ((indirect % 4) != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    // Stub: indirect compute dispatch. The offset points into the currently
+    // bound GL_DISPATCH_INDIRECT_BUFFER. Actual Metal encoding will be wired
+    // when compute shader programs are created at link time.
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.2 — Image Load/Store
+// ---------------------------------------------------------------------------
+
+bool GLContext::bindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format) {
+    if (unit >= Impl::kMaxImageUnits) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (access != GL_READ_ONLY && access != GL_WRITE_ONLY && access != GL_READ_WRITE) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Validate format — accept the common image load/store formats.
+    switch (format) {
+        case GL_RGBA32F:
+        case GL_RGBA16F:
+        case GL_RG32F:
+        case GL_RG16F:
+        case GL_R11F_G11F_B10F:
+        case GL_R32F:
+        case GL_R16F:
+        case GL_RGBA32UI:
+        case GL_RGBA16UI:
+        case GL_RGB10_A2UI:
+        case GL_RGBA8UI:
+        case GL_RG32UI:
+        case GL_RG16UI:
+        case GL_RG8UI:
+        case GL_R32UI:
+        case GL_R16UI:
+        case GL_R8UI:
+        case GL_RGBA32I:
+        case GL_RGBA16I:
+        case GL_RGBA8I:
+        case GL_RG32I:
+        case GL_RG16I:
+        case GL_RG8I:
+        case GL_R32I:
+        case GL_R16I:
+        case GL_R8I:
+        case GL_RGBA16:
+        case GL_RGB10_A2:
+        case GL_RGBA8:
+        case GL_RG16:
+        case GL_RG8:
+        case GL_R16:
+        case GL_R8:
+        case GL_RGBA16_SNORM:
+        case GL_RGBA8_SNORM:
+        case GL_RG16_SNORM:
+        case GL_RG8_SNORM:
+        case GL_R16_SNORM:
+        case GL_R8_SNORM:
+            break;
+        default:
+            pushError(GL_INVALID_VALUE);
+            return false;
+    }
+
+    auto& binding = impl_->imageBindings[unit];
+    binding.texture = texture;
+    binding.level = level;
+    binding.layered = layered;
+    binding.layer = layer;
+    binding.access = access;
+    binding.format = format;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.2 — Atomic Counter Buffer Queries
+// ---------------------------------------------------------------------------
+
+bool GLContext::getActiveAtomicCounterBufferiv(GLuint program, GLuint bufferIndex, GLenum pname, GLint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Metal has no native atomic counters. Programs will never report any
+    // active atomic counter buffers, so any bufferIndex is out of range.
+    // However, for applications that query speculatively we return sensible
+    // defaults when bufferIndex == 0 to avoid error spam, and GL_INVALID_VALUE
+    // otherwise.
+    if (bufferIndex > 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    switch (pname) {
+        case GL_ATOMIC_COUNTER_BUFFER_BINDING:
+            *params = 0;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_DATA_SIZE:
+            *params = 0;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_ACTIVE_ATOMIC_COUNTERS:
+            *params = 0;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_VERTEX_SHADER:
+            *params = GL_FALSE;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_FRAGMENT_SHADER:
+            *params = GL_FALSE;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_GEOMETRY_SHADER:
+            *params = GL_FALSE;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_TESS_CONTROL_SHADER:
+            *params = GL_FALSE;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_TESS_EVALUATION_SHADER:
+            *params = GL_FALSE;
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_COMPUTE_SHADER:
+            *params = GL_FALSE;
+            return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
 }
 
 }  // namespace appgl

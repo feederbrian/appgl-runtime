@@ -362,6 +362,13 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     // GL 4.0 — indirect drawing (Group 6).
     dispatch.glDrawArraysIndirect = &impl::glDrawArraysIndirect;
     dispatch.glDrawElementsIndirect = &impl::glDrawElementsIndirect;
+    // GL 4.2/4.3 — compute shaders and memory barriers.
+    dispatch.glMemoryBarrier = &impl::glMemoryBarrier;
+    dispatch.glDispatchCompute = &impl::glDispatchCompute;
+    dispatch.glDispatchComputeIndirect = &impl::glDispatchComputeIndirect;
+    // GL 4.2 — image load/store and atomic counters.
+    dispatch.glBindImageTexture = &impl::glBindImageTexture;
+    dispatch.glGetActiveAtomicCounterBufferiv = &impl::glGetActiveAtomicCounterBufferiv;
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
@@ -691,6 +698,13 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     // GL 4.0 — indirect drawing (Group 6).
     coverage.markImplemented(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect stub (accepted, no draw).");
     coverage.markImplemented(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect stub (accepted, no draw).");
+    // GL 4.2/4.3 — compute shaders and memory barriers.
+    coverage.markImplemented(FunctionId::glMemoryBarrier, "MemoryBarrier validated no-op (Metal handles ordering implicitly).");
+    coverage.markImplemented(FunctionId::glDispatchCompute, "DispatchCompute stub (validated, compute pipeline not yet wired).");
+    coverage.markImplemented(FunctionId::glDispatchComputeIndirect, "DispatchComputeIndirect stub (validated, compute pipeline not yet wired).");
+    // GL 4.2 — image load/store and atomic counters.
+    coverage.markImplemented(FunctionId::glBindImageTexture, "Image unit binding state tracked for load/store shaders.");
+    coverage.markImplemented(FunctionId::glGetActiveAtomicCounterBufferiv, "Atomic counter buffer query returns sensible defaults (no native atomic counters on Metal).");
 
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in

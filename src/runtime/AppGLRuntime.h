@@ -374,6 +374,13 @@ void APIENTRY glDrawTransformFeedbackStream(GLenum mode, GLuint id, GLuint strea
 // GL 4.0 — indirect drawing (Group 6).
 void APIENTRY glDrawArraysIndirect(GLenum mode, const void* indirect);
 void APIENTRY glDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect);
+// GL 4.2/4.3 — compute shaders and memory barriers.
+void APIENTRY glMemoryBarrier(GLbitfield barriers);
+void APIENTRY glDispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z);
+void APIENTRY glDispatchComputeIndirect(GLintptr indirect);
+// GL 4.2 — image load/store and atomic counters.
+void APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format);
+void APIENTRY glGetActiveAtomicCounterBufferiv(GLuint program, GLuint bufferIndex, GLenum pname, GLint* params);
 }  // namespace impl
 
 class Runtime {
