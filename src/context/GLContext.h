@@ -296,6 +296,35 @@ public:
     bool getInternalformativ(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint* params);
     bool getInternalformati64v(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint64* params);
 
+    // GL 4.4 — immutable buffer storage.
+    bool bufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags);
+    // GL 4.4 — multi-bind.
+    bool bindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers);
+    bool bindBuffersRange(GLenum target, GLuint first, GLsizei count, const GLuint* buffers,
+                          const GLintptr* offsets, const GLsizeiptr* sizes);
+    bool bindVertexBuffers(GLuint first, GLsizei count, const GLuint* buffers,
+                           const GLintptr* offsets, const GLsizei* strides);
+    bool bindTextures(GLuint first, GLsizei count, const GLuint* textures);
+    bool bindSamplers(GLuint first, GLsizei count, const GLuint* samplers);
+    bool bindImageTextures(GLuint first, GLsizei count, const GLuint* textures);
+    // GL 4.4 — texture clear.
+    bool clearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, const void* data);
+    bool clearTexSubImage(GLuint texture, GLint level,
+                          GLint xoffset, GLint yoffset, GLint zoffset,
+                          GLsizei width, GLsizei height, GLsizei depth,
+                          GLenum format, GLenum type, const void* data);
+
+    // GL 4.5 — DSA object creation.
+    bool createBuffers(GLsizei n, GLuint* buffers);
+    bool createTextures(GLenum target, GLsizei n, GLuint* textures);
+    bool createSamplers(GLsizei n, GLuint* samplers);
+    bool createFramebuffers(GLsizei n, GLuint* framebuffers);
+    bool createRenderbuffers(GLsizei n, GLuint* renderbuffers);
+    bool createVertexArrays(GLsizei n, GLuint* arrays);
+    bool createTransformFeedbacks(GLsizei n, GLuint* ids);
+    bool createProgramPipelines(GLsizei n, GLuint* pipelines);
+    bool createQueries(GLenum target, GLsizei n, GLuint* ids);
+
     void pushError(GLenum error);
     GLenum popError();
 

@@ -37,6 +37,8 @@ struct GLBufferObject {
     GLenum usage = GL_STATIC_DRAW;
     bool mapped = false;
     bool instantiated = false;
+    bool immutable = false;           // GL 4.4 glBufferStorage
+    GLbitfield storageFlags = 0;      // GL 4.4 glBufferStorage flags
     GLenum mapAccess = GL_READ_WRITE;
     GLbitfield mapAccessFlags = 0;
     GLintptr mapOffset = 0;

@@ -423,6 +423,33 @@ void APIENTRY glDrawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
 // GL 4.2/4.3 — internal format query.
 void APIENTRY glGetInternalformativ(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint* params);
 void APIENTRY glGetInternalformati64v(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint64* params);
+// GL 4.4 — immutable buffer storage.
+void APIENTRY glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags);
+// GL 4.4 — multi-bind.
+void APIENTRY glBindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers);
+void APIENTRY glBindBuffersRange(GLenum target, GLuint first, GLsizei count, const GLuint* buffers,
+                                  const GLintptr* offsets, const GLsizeiptr* sizes);
+void APIENTRY glBindVertexBuffers(GLuint first, GLsizei count, const GLuint* buffers,
+                                   const GLintptr* offsets, const GLsizei* strides);
+void APIENTRY glBindTextures(GLuint first, GLsizei count, const GLuint* textures);
+void APIENTRY glBindSamplers(GLuint first, GLsizei count, const GLuint* samplers);
+void APIENTRY glBindImageTextures(GLuint first, GLsizei count, const GLuint* textures);
+// GL 4.4 — texture clear.
+void APIENTRY glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, const void* data);
+void APIENTRY glClearTexSubImage(GLuint texture, GLint level,
+                                  GLint xoffset, GLint yoffset, GLint zoffset,
+                                  GLsizei width, GLsizei height, GLsizei depth,
+                                  GLenum format, GLenum type, const void* data);
+// GL 4.5 — DSA object creation.
+void APIENTRY glCreateBuffers(GLsizei n, GLuint* buffers);
+void APIENTRY glCreateTextures(GLenum target, GLsizei n, GLuint* textures);
+void APIENTRY glCreateSamplers(GLsizei n, GLuint* samplers);
+void APIENTRY glCreateFramebuffers(GLsizei n, GLuint* framebuffers);
+void APIENTRY glCreateRenderbuffers(GLsizei n, GLuint* renderbuffers);
+void APIENTRY glCreateVertexArrays(GLsizei n, GLuint* arrays);
+void APIENTRY glCreateTransformFeedbacks(GLsizei n, GLuint* ids);
+void APIENTRY glCreateProgramPipelines(GLsizei n, GLuint* pipelines);
+void APIENTRY glCreateQueries(GLenum target, GLsizei n, GLuint* ids);
 }  // namespace impl
 
 class Runtime {

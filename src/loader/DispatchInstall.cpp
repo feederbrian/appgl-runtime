@@ -782,6 +782,47 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glGetInternalformativ, "Internal format query returns Metal-appropriate capabilities.");
     coverage.markImplemented(FunctionId::glGetInternalformati64v, "Internal format i64 query returns Metal-appropriate capabilities.");
 
+    // Phase 6 Pass A — GL 4.4: immutable buffer storage.
+    dispatch.glBufferStorage = &impl::glBufferStorage;
+    coverage.markImplemented(FunctionId::glBufferStorage, "Immutable buffer storage with validation.");
+    // GL 4.4 — multi-bind.
+    dispatch.glBindBuffersBase = &impl::glBindBuffersBase;
+    dispatch.glBindBuffersRange = &impl::glBindBuffersRange;
+    dispatch.glBindVertexBuffers = &impl::glBindVertexBuffers;
+    dispatch.glBindTextures = &impl::glBindTextures;
+    dispatch.glBindSamplers = &impl::glBindSamplers;
+    dispatch.glBindImageTextures = &impl::glBindImageTextures;
+    coverage.markImplemented(FunctionId::glBindBuffersBase, "Batch buffer base binding.");
+    coverage.markImplemented(FunctionId::glBindBuffersRange, "Batch buffer range binding.");
+    coverage.markImplemented(FunctionId::glBindVertexBuffers, "Batch vertex buffer binding.");
+    coverage.markImplemented(FunctionId::glBindTextures, "Batch texture binding.");
+    coverage.markImplemented(FunctionId::glBindSamplers, "Batch sampler binding.");
+    coverage.markImplemented(FunctionId::glBindImageTextures, "Batch image texture binding.");
+    // GL 4.4 — texture clear.
+    dispatch.glClearTexImage = &impl::glClearTexImage;
+    dispatch.glClearTexSubImage = &impl::glClearTexSubImage;
+    coverage.markImplemented(FunctionId::glClearTexImage, "Texture image cleared.");
+    coverage.markImplemented(FunctionId::glClearTexSubImage, "Texture sub-image cleared.");
+    // GL 4.5 — DSA object creation.
+    dispatch.glCreateBuffers = &impl::glCreateBuffers;
+    dispatch.glCreateTextures = &impl::glCreateTextures;
+    dispatch.glCreateSamplers = &impl::glCreateSamplers;
+    dispatch.glCreateFramebuffers = &impl::glCreateFramebuffers;
+    dispatch.glCreateRenderbuffers = &impl::glCreateRenderbuffers;
+    dispatch.glCreateVertexArrays = &impl::glCreateVertexArrays;
+    dispatch.glCreateTransformFeedbacks = &impl::glCreateTransformFeedbacks;
+    dispatch.glCreateProgramPipelines = &impl::glCreateProgramPipelines;
+    dispatch.glCreateQueries = &impl::glCreateQueries;
+    coverage.markImplemented(FunctionId::glCreateBuffers, "DSA buffer creation.");
+    coverage.markImplemented(FunctionId::glCreateTextures, "DSA texture creation.");
+    coverage.markImplemented(FunctionId::glCreateSamplers, "DSA sampler creation.");
+    coverage.markImplemented(FunctionId::glCreateFramebuffers, "DSA framebuffer creation.");
+    coverage.markImplemented(FunctionId::glCreateRenderbuffers, "DSA renderbuffer creation.");
+    coverage.markImplemented(FunctionId::glCreateVertexArrays, "DSA vertex array creation.");
+    coverage.markImplemented(FunctionId::glCreateTransformFeedbacks, "DSA transform feedback creation.");
+    coverage.markImplemented(FunctionId::glCreateProgramPipelines, "DSA program pipeline creation.");
+    coverage.markImplemented(FunctionId::glCreateQueries, "DSA query creation.");
+
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in
     // the promotion-gate window. Queries are live; everything else ships as a

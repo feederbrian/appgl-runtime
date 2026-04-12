@@ -5424,6 +5424,153 @@ void APIENTRY glGetInternalformati64v(GLenum target, GLenum internalformat, GLen
     markStateFunction(FunctionId::glGetInternalformati64v, "Internal format i64 query returns Metal-appropriate capabilities.");
 }
 
+// ---------------------------------------------------------------------------
+// GL 4.4 — Immutable buffer storage.
+// ---------------------------------------------------------------------------
+
+void APIENTRY glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags) {
+    auto* ctx = requireCurrentContext("glBufferStorage");
+    if (!ctx) return;
+    if (!ctx->bufferStorage(target, size, data, flags)) return;
+    markBufferFunction(FunctionId::glBufferStorage, "Immutable buffer storage created.");
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.4 — Multi-bind.
+// ---------------------------------------------------------------------------
+
+void APIENTRY glBindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers) {
+    auto* ctx = requireCurrentContext("glBindBuffersBase");
+    if (!ctx) return;
+    if (!ctx->bindBuffersBase(target, first, count, buffers)) return;
+    markBufferFunction(FunctionId::glBindBuffersBase, "Batch buffer base binding.");
+}
+
+void APIENTRY glBindBuffersRange(GLenum target, GLuint first, GLsizei count, const GLuint* buffers,
+                                  const GLintptr* offsets, const GLsizeiptr* sizes) {
+    auto* ctx = requireCurrentContext("glBindBuffersRange");
+    if (!ctx) return;
+    if (!ctx->bindBuffersRange(target, first, count, buffers, offsets, sizes)) return;
+    markBufferFunction(FunctionId::glBindBuffersRange, "Batch buffer range binding.");
+}
+
+void APIENTRY glBindVertexBuffers(GLuint first, GLsizei count, const GLuint* buffers,
+                                   const GLintptr* offsets, const GLsizei* strides) {
+    auto* ctx = requireCurrentContext("glBindVertexBuffers");
+    if (!ctx) return;
+    if (!ctx->bindVertexBuffers(first, count, buffers, offsets, strides)) return;
+    markVertexInputFunction(FunctionId::glBindVertexBuffers, "Batch vertex buffer binding.");
+}
+
+void APIENTRY glBindTextures(GLuint first, GLsizei count, const GLuint* textures) {
+    auto* ctx = requireCurrentContext("glBindTextures");
+    if (!ctx) return;
+    if (!ctx->bindTextures(first, count, textures)) return;
+    markTextureFunction(FunctionId::glBindTextures, "Batch texture binding.");
+}
+
+void APIENTRY glBindSamplers(GLuint first, GLsizei count, const GLuint* samplers) {
+    auto* ctx = requireCurrentContext("glBindSamplers");
+    if (!ctx) return;
+    if (!ctx->bindSamplers(first, count, samplers)) return;
+    markTextureFunction(FunctionId::glBindSamplers, "Batch sampler binding.");
+}
+
+void APIENTRY glBindImageTextures(GLuint first, GLsizei count, const GLuint* textures) {
+    auto* ctx = requireCurrentContext("glBindImageTextures");
+    if (!ctx) return;
+    if (!ctx->bindImageTextures(first, count, textures)) return;
+    markTextureFunction(FunctionId::glBindImageTextures, "Batch image texture binding.");
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.4 — Texture clear.
+// ---------------------------------------------------------------------------
+
+void APIENTRY glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, const void* data) {
+    auto* ctx = requireCurrentContext("glClearTexImage");
+    if (!ctx) return;
+    if (!ctx->clearTexImage(texture, level, format, type, data)) return;
+    markTextureFunction(FunctionId::glClearTexImage, "Texture image cleared.");
+}
+
+void APIENTRY glClearTexSubImage(GLuint texture, GLint level,
+                                  GLint xoffset, GLint yoffset, GLint zoffset,
+                                  GLsizei width, GLsizei height, GLsizei depth,
+                                  GLenum format, GLenum type, const void* data) {
+    auto* ctx = requireCurrentContext("glClearTexSubImage");
+    if (!ctx) return;
+    if (!ctx->clearTexSubImage(texture, level, xoffset, yoffset, zoffset, width, height, depth, format, type, data)) return;
+    markTextureFunction(FunctionId::glClearTexSubImage, "Texture sub-image cleared.");
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.5 — DSA object creation.
+// ---------------------------------------------------------------------------
+
+void APIENTRY glCreateBuffers(GLsizei n, GLuint* buffers) {
+    auto* ctx = requireCurrentContext("glCreateBuffers");
+    if (!ctx) return;
+    if (!ctx->createBuffers(n, buffers)) return;
+    markBufferFunction(FunctionId::glCreateBuffers, "DSA buffer creation.");
+}
+
+void APIENTRY glCreateTextures(GLenum target, GLsizei n, GLuint* textures) {
+    auto* ctx = requireCurrentContext("glCreateTextures");
+    if (!ctx) return;
+    if (!ctx->createTextures(target, n, textures)) return;
+    markTextureFunction(FunctionId::glCreateTextures, "DSA texture creation.");
+}
+
+void APIENTRY glCreateSamplers(GLsizei n, GLuint* samplers) {
+    auto* ctx = requireCurrentContext("glCreateSamplers");
+    if (!ctx) return;
+    if (!ctx->createSamplers(n, samplers)) return;
+    markTextureFunction(FunctionId::glCreateSamplers, "DSA sampler creation.");
+}
+
+void APIENTRY glCreateFramebuffers(GLsizei n, GLuint* framebuffers) {
+    auto* ctx = requireCurrentContext("glCreateFramebuffers");
+    if (!ctx) return;
+    if (!ctx->createFramebuffers(n, framebuffers)) return;
+    markFramebufferFunction(FunctionId::glCreateFramebuffers, "DSA framebuffer creation.");
+}
+
+void APIENTRY glCreateRenderbuffers(GLsizei n, GLuint* renderbuffers) {
+    auto* ctx = requireCurrentContext("glCreateRenderbuffers");
+    if (!ctx) return;
+    if (!ctx->createRenderbuffers(n, renderbuffers)) return;
+    markFramebufferFunction(FunctionId::glCreateRenderbuffers, "DSA renderbuffer creation.");
+}
+
+void APIENTRY glCreateVertexArrays(GLsizei n, GLuint* arrays) {
+    auto* ctx = requireCurrentContext("glCreateVertexArrays");
+    if (!ctx) return;
+    if (!ctx->createVertexArrays(n, arrays)) return;
+    markVertexInputFunction(FunctionId::glCreateVertexArrays, "DSA vertex array creation.");
+}
+
+void APIENTRY glCreateTransformFeedbacks(GLsizei n, GLuint* ids) {
+    auto* ctx = requireCurrentContext("glCreateTransformFeedbacks");
+    if (!ctx) return;
+    if (!ctx->createTransformFeedbacks(n, ids)) return;
+    markStateFunction(FunctionId::glCreateTransformFeedbacks, "DSA transform feedback creation.");
+}
+
+void APIENTRY glCreateProgramPipelines(GLsizei n, GLuint* pipelines) {
+    auto* ctx = requireCurrentContext("glCreateProgramPipelines");
+    if (!ctx) return;
+    if (!ctx->createProgramPipelines(n, pipelines)) return;
+    markShaderFunction(FunctionId::glCreateProgramPipelines, "DSA program pipeline creation.");
+}
+
+void APIENTRY glCreateQueries(GLenum target, GLsizei n, GLuint* ids) {
+    auto* ctx = requireCurrentContext("glCreateQueries");
+    if (!ctx) return;
+    if (!ctx->createQueries(target, n, ids)) return;
+    markStateFunction(FunctionId::glCreateQueries, "DSA query creation.");
+}
+
 }  // namespace impl
 
 }  // namespace appgl

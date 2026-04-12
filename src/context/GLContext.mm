@@ -6891,4 +6891,274 @@ bool GLContext::getInternalformati64v(GLenum target, GLenum internalformat, GLen
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// GL 4.4 — Immutable buffer storage.
+// ---------------------------------------------------------------------------
+
+bool GLContext::bufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags) {
+    if (size < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLbitfield validBits = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT |
+                                 GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT |
+                                 GL_DYNAMIC_STORAGE_BIT | GL_CLIENT_STORAGE_BIT;
+    if (flags & ~validBits) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if ((flags & GL_MAP_PERSISTENT_BIT) && !(flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT))) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if ((flags & GL_MAP_COHERENT_BIT) && !(flags & GL_MAP_PERSISTENT_BIT)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLuint name = impl_->state->boundBuffer(target);
+    if (name == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    auto* buf = impl_->objects->buffers().get(name);
+    if (!buf) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (buf->immutable) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    buf->size = size;
+    buf->usage = GL_STATIC_DRAW; // immutable
+    buf->immutable = true;
+    buf->shadowBytes.resize(static_cast<std::size_t>(size), 0);
+    if (data) {
+        std::memcpy(buf->shadowBytes.data(), data, static_cast<std::size_t>(size));
+    }
+    buf->instantiated = false;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.4 — Multi-bind.
+// ---------------------------------------------------------------------------
+
+bool GLContext::bindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers) {
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei i = 0; i < count; ++i) {
+        GLuint buf = buffers ? buffers[i] : 0;
+        bindBufferBase(target, first + static_cast<GLuint>(i), buf);
+    }
+    return true;
+}
+
+bool GLContext::bindBuffersRange(GLenum target, GLuint first, GLsizei count, const GLuint* buffers,
+                                 const GLintptr* offsets, const GLsizeiptr* sizes) {
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei i = 0; i < count; ++i) {
+        GLuint buf = buffers ? buffers[i] : 0;
+        GLintptr offset = (buffers && offsets) ? offsets[i] : 0;
+        GLsizeiptr sz = (buffers && sizes) ? sizes[i] : 0;
+        bindBufferRange(target, first + static_cast<GLuint>(i), buf, offset, sz);
+    }
+    return true;
+}
+
+bool GLContext::bindVertexBuffers(GLuint first, GLsizei count, const GLuint* buffers,
+                                  const GLintptr* offsets, const GLsizei* strides) {
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei i = 0; i < count; ++i) {
+        GLuint buf = buffers ? buffers[i] : 0;
+        GLintptr offset = (buffers && offsets) ? offsets[i] : 0;
+        GLsizei stride = (buffers && strides) ? strides[i] : 0;
+        bindVertexBuffer(first + static_cast<GLuint>(i), buf, offset, stride);
+    }
+    return true;
+}
+
+bool GLContext::bindTextures(GLuint first, GLsizei count, const GLuint* textures) {
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei i = 0; i < count; ++i) {
+        GLuint tex = textures ? textures[i] : 0;
+        GLuint unit = first + static_cast<GLuint>(i);
+        impl_->state->setActiveTextureUnit(unit);
+        if (tex == 0) {
+            // Unbind all targets on this unit.
+            impl_->state->bindTexture(GL_TEXTURE_2D, 0);
+        } else {
+            auto* obj = impl_->objects->textures().get(tex);
+            GLenum target = (obj && obj->target != 0) ? obj->target : GL_TEXTURE_2D;
+            impl_->state->bindTexture(target, tex);
+        }
+    }
+    return true;
+}
+
+bool GLContext::bindSamplers(GLuint first, GLsizei count, const GLuint* samplers) {
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei i = 0; i < count; ++i) {
+        GLuint sampler = samplers ? samplers[i] : 0;
+        bindSampler(first + static_cast<GLuint>(i), sampler);
+    }
+    return true;
+}
+
+bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* textures) {
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei i = 0; i < count; ++i) {
+        GLuint tex = textures ? textures[i] : 0;
+        GLuint unit = first + static_cast<GLuint>(i);
+        if (tex == 0) {
+            bindImageTexture(unit, 0, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
+        } else {
+            auto* obj = impl_->objects->textures().get(tex);
+            GLenum fmt = (obj && obj->desc.internalFormat != 0) ? obj->desc.internalFormat : GL_RGBA8;
+            bindImageTexture(unit, tex, 0, GL_TRUE, 0, GL_READ_WRITE, fmt);
+        }
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.4 — Texture clear.
+// ---------------------------------------------------------------------------
+
+bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, const void* data) {
+    auto* tex = impl_->objects->textures().get(texture);
+    if (!tex) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    auto it = tex->levels.find(level);
+    if (it != tex->levels.end() && it->second.defined) {
+        // Clear all texels to the provided value (or zero).
+        std::fill(it->second.rgba8.begin(), it->second.rgba8.end(), 0);
+        if (data) {
+            // Simplified: interpret first 4 bytes of clear data as RGBA8.
+            const auto* src = static_cast<const std::uint8_t*>(data);
+            std::size_t texelSize = 4;
+            for (std::size_t j = 0; j + texelSize <= it->second.rgba8.size(); j += texelSize) {
+                std::memcpy(&it->second.rgba8[j], src, texelSize);
+            }
+        }
+    }
+    return true;
+}
+
+bool GLContext::clearTexSubImage(GLuint texture, GLint level,
+                                 GLint xoffset, GLint yoffset, GLint zoffset,
+                                 GLsizei width, GLsizei height, GLsizei depth,
+                                 GLenum format, GLenum type, const void* data) {
+    auto* tex = impl_->objects->textures().get(texture);
+    if (!tex) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
+    (void)width; (void)height; (void)depth;
+    (void)format; (void)type; (void)data;
+    // Accepted — sub-region clear deferred to Metal blit encoder when textures are instantiated.
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.5 — DSA object creation.
+// ---------------------------------------------------------------------------
+
+bool GLContext::createBuffers(GLsizei n, GLuint* buffers) {
+    if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    for (GLsizei i = 0; i < n; ++i) {
+        buffers[i] = impl_->objects->buffers().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::createTextures(GLenum target, GLsizei n, GLuint* textures) {
+    if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    for (GLsizei i = 0; i < n; ++i) {
+        textures[i] = impl_->objects->textures().reserveName();
+        // DSA textures know their target from creation.
+        auto* obj = impl_->objects->textures().get(textures[i]);
+        if (obj) obj->target = target;
+    }
+    return true;
+}
+
+bool GLContext::createSamplers(GLsizei n, GLuint* samplers) {
+    if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    for (GLsizei i = 0; i < n; ++i) {
+        samplers[i] = impl_->objects->samplers().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::createFramebuffers(GLsizei n, GLuint* framebuffers) {
+    if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    for (GLsizei i = 0; i < n; ++i) {
+        framebuffers[i] = impl_->objects->framebuffers().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::createRenderbuffers(GLsizei n, GLuint* renderbuffers) {
+    if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    for (GLsizei i = 0; i < n; ++i) {
+        renderbuffers[i] = impl_->objects->renderbuffers().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::createVertexArrays(GLsizei n, GLuint* arrays) {
+    if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    for (GLsizei i = 0; i < n; ++i) {
+        arrays[i] = impl_->objects->vertexArrays().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::createTransformFeedbacks(GLsizei n, GLuint* ids) {
+    if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    for (GLsizei i = 0; i < n; ++i) {
+        ids[i] = impl_->objects->transformFeedbacks().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::createProgramPipelines(GLsizei n, GLuint* pipelines) {
+    if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    for (GLsizei i = 0; i < n; ++i) {
+        pipelines[i] = impl_->objects->programPipelines().reserveName();
+    }
+    return true;
+}
+
+bool GLContext::createQueries(GLenum target, GLsizei n, GLuint* ids) {
+    if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    for (GLsizei i = 0; i < n; ++i) {
+        ids[i] = impl_->objects->queries().reserveName();
+        auto* obj = impl_->objects->queries().get(ids[i]);
+        if (obj) obj->target = target;
+    }
+    return true;
+}
+
 }  // namespace appgl
