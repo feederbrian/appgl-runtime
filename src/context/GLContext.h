@@ -255,6 +255,29 @@ public:
     // GL 4.3 — SSBO binding remapping.
     bool shaderStorageBlockBinding(GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding);
 
+    // GL 4.2 — advanced instanced drawing with base instance.
+    bool drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance);
+    bool drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLuint baseinstance);
+    bool drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance);
+
+    // GL 4.3 — multi-draw indirect.
+    bool multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsizei drawcount, GLsizei stride);
+    bool multiDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect, GLsizei drawcount, GLsizei stride);
+
+    // GL 4.3 — buffer clear.
+    bool clearBufferData(GLenum target, GLenum internalformat, GLenum format, GLenum type, const void* data);
+    bool clearBufferSubData(GLenum target, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data);
+
+    // GL 4.3 — framebuffer parameters.
+    bool framebufferParameteri(GLenum target, GLenum pname, GLint param);
+    bool getFramebufferParameteriv(GLenum target, GLenum pname, GLint* params);
+
+    // GL 4.3 — invalidation hints.
+    bool invalidateFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments);
+    bool invalidateSubFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments, GLint x, GLint y, GLsizei width, GLsizei height);
+    bool invalidateBufferData(GLuint buffer);
+    bool invalidateBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr length);
+
     void pushError(GLenum error);
     GLenum popError();
 

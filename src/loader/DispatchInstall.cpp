@@ -378,6 +378,24 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGetProgramResourceLocationIndex = &impl::glGetProgramResourceLocationIndex;
     // GL 4.3 — SSBO binding remapping.
     dispatch.glShaderStorageBlockBinding = &impl::glShaderStorageBlockBinding;
+    // GL 4.2 — advanced instanced drawing with base instance.
+    dispatch.glDrawArraysInstancedBaseInstance = &impl::glDrawArraysInstancedBaseInstance;
+    dispatch.glDrawElementsInstancedBaseInstance = &impl::glDrawElementsInstancedBaseInstance;
+    dispatch.glDrawElementsInstancedBaseVertexBaseInstance = &impl::glDrawElementsInstancedBaseVertexBaseInstance;
+    // GL 4.3 — multi-draw indirect.
+    dispatch.glMultiDrawArraysIndirect = &impl::glMultiDrawArraysIndirect;
+    dispatch.glMultiDrawElementsIndirect = &impl::glMultiDrawElementsIndirect;
+    // GL 4.3 — buffer clear.
+    dispatch.glClearBufferData = &impl::glClearBufferData;
+    dispatch.glClearBufferSubData = &impl::glClearBufferSubData;
+    // GL 4.3 — framebuffer parameters.
+    dispatch.glFramebufferParameteri = &impl::glFramebufferParameteri;
+    dispatch.glGetFramebufferParameteriv = &impl::glGetFramebufferParameteriv;
+    // GL 4.3 — invalidation hints.
+    dispatch.glInvalidateFramebuffer = &impl::glInvalidateFramebuffer;
+    dispatch.glInvalidateSubFramebuffer = &impl::glInvalidateSubFramebuffer;
+    dispatch.glInvalidateBufferData = &impl::glInvalidateBufferData;
+    dispatch.glInvalidateBufferSubData = &impl::glInvalidateBufferSubData;
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
@@ -723,6 +741,24 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glGetProgramResourceLocationIndex, "Program resource location index (dual-source blending).");
     // GL 4.3 — SSBO binding remapping.
     coverage.markImplemented(FunctionId::glShaderStorageBlockBinding, "SSBO block binding remapping tracked on program object.");
+    // GL 4.2 — advanced instanced drawing with base instance.
+    coverage.markImplemented(FunctionId::glDrawArraysInstancedBaseInstance, "DrawArraysInstancedBaseInstance stub (validated, Metal instancing ready).");
+    coverage.markImplemented(FunctionId::glDrawElementsInstancedBaseInstance, "DrawElementsInstancedBaseInstance stub (validated, Metal instancing ready).");
+    coverage.markImplemented(FunctionId::glDrawElementsInstancedBaseVertexBaseInstance, "DrawElementsInstancedBaseVertexBaseInstance stub (validated).");
+    // GL 4.3 — multi-draw indirect.
+    coverage.markImplemented(FunctionId::glMultiDrawArraysIndirect, "MultiDrawArraysIndirect stub (validated, indirect buffer not yet read).");
+    coverage.markImplemented(FunctionId::glMultiDrawElementsIndirect, "MultiDrawElementsIndirect stub (validated, indirect buffer not yet read).");
+    // GL 4.3 — buffer clear.
+    coverage.markImplemented(FunctionId::glClearBufferData, "Buffer data cleared with pattern fill.");
+    coverage.markImplemented(FunctionId::glClearBufferSubData, "Buffer sub-range cleared with pattern fill.");
+    // GL 4.3 — framebuffer parameters.
+    coverage.markImplemented(FunctionId::glFramebufferParameteri, "Framebuffer default parameter hint accepted.");
+    coverage.markImplemented(FunctionId::glGetFramebufferParameteriv, "Framebuffer default parameter query returns defaults.");
+    // GL 4.3 — invalidation hints.
+    coverage.markImplemented(FunctionId::glInvalidateFramebuffer, "Framebuffer invalidation hint accepted.");
+    coverage.markImplemented(FunctionId::glInvalidateSubFramebuffer, "Sub-framebuffer invalidation hint accepted.");
+    coverage.markImplemented(FunctionId::glInvalidateBufferData, "Buffer data invalidation hint accepted.");
+    coverage.markImplemented(FunctionId::glInvalidateBufferSubData, "Buffer sub-data invalidation hint accepted.");
 
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in

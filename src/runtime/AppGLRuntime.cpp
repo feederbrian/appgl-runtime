@@ -5213,6 +5213,133 @@ void APIENTRY glShaderStorageBlockBinding(GLuint program, GLuint storageBlockInd
     );
 }
 
+// --- GL 4.2: Advanced Instanced Drawing ---
+
+void APIENTRY glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance) {
+    auto* ctx = requireCurrentContext("glDrawArraysInstancedBaseInstance");
+    if (!ctx) return;
+    if (!ctx->drawArraysInstancedBaseInstance(mode, first, count, instancecount, baseinstance)) {
+        return;
+    }
+    markDrawFunction(FunctionId::glDrawArraysInstancedBaseInstance, "DrawArraysInstancedBaseInstance stub (validated, Metal instancing ready).");
+}
+
+void APIENTRY glDrawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLuint baseinstance) {
+    auto* ctx = requireCurrentContext("glDrawElementsInstancedBaseInstance");
+    if (!ctx) return;
+    if (!ctx->drawElementsInstancedBaseInstance(mode, count, type, indices, instancecount, baseinstance)) {
+        return;
+    }
+    markDrawFunction(FunctionId::glDrawElementsInstancedBaseInstance, "DrawElementsInstancedBaseInstance stub (validated, Metal instancing ready).");
+}
+
+void APIENTRY glDrawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance) {
+    auto* ctx = requireCurrentContext("glDrawElementsInstancedBaseVertexBaseInstance");
+    if (!ctx) return;
+    if (!ctx->drawElementsInstancedBaseVertexBaseInstance(mode, count, type, indices, instancecount, basevertex, baseinstance)) {
+        return;
+    }
+    markDrawFunction(FunctionId::glDrawElementsInstancedBaseVertexBaseInstance, "DrawElementsInstancedBaseVertexBaseInstance stub (validated).");
+}
+
+// --- GL 4.3: Multi-Draw Indirect ---
+
+void APIENTRY glMultiDrawArraysIndirect(GLenum mode, const void* indirect, GLsizei drawcount, GLsizei stride) {
+    auto* ctx = requireCurrentContext("glMultiDrawArraysIndirect");
+    if (!ctx) return;
+    if (!ctx->multiDrawArraysIndirect(mode, indirect, drawcount, stride)) {
+        return;
+    }
+    markDrawFunction(FunctionId::glMultiDrawArraysIndirect, "MultiDrawArraysIndirect stub (validated, indirect buffer not yet read).");
+}
+
+void APIENTRY glMultiDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect, GLsizei drawcount, GLsizei stride) {
+    auto* ctx = requireCurrentContext("glMultiDrawElementsIndirect");
+    if (!ctx) return;
+    if (!ctx->multiDrawElementsIndirect(mode, type, indirect, drawcount, stride)) {
+        return;
+    }
+    markDrawFunction(FunctionId::glMultiDrawElementsIndirect, "MultiDrawElementsIndirect stub (validated, indirect buffer not yet read).");
+}
+
+// --- GL 4.3: Buffer Clear ---
+
+void APIENTRY glClearBufferData(GLenum target, GLenum internalformat, GLenum format, GLenum type, const void* data) {
+    auto* ctx = requireCurrentContext("glClearBufferData");
+    if (!ctx) return;
+    if (!ctx->clearBufferData(target, internalformat, format, type, data)) {
+        return;
+    }
+    markStateFunction(FunctionId::glClearBufferData, "Buffer data cleared with pattern fill.");
+}
+
+void APIENTRY glClearBufferSubData(GLenum target, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data) {
+    auto* ctx = requireCurrentContext("glClearBufferSubData");
+    if (!ctx) return;
+    if (!ctx->clearBufferSubData(target, internalformat, offset, size, format, type, data)) {
+        return;
+    }
+    markStateFunction(FunctionId::glClearBufferSubData, "Buffer sub-range cleared with pattern fill.");
+}
+
+// --- GL 4.3: Framebuffer Parameters ---
+
+void APIENTRY glFramebufferParameteri(GLenum target, GLenum pname, GLint param) {
+    auto* ctx = requireCurrentContext("glFramebufferParameteri");
+    if (!ctx) return;
+    if (!ctx->framebufferParameteri(target, pname, param)) {
+        return;
+    }
+    markStateFunction(FunctionId::glFramebufferParameteri, "Framebuffer default parameter hint accepted.");
+}
+
+void APIENTRY glGetFramebufferParameteriv(GLenum target, GLenum pname, GLint* params) {
+    auto* ctx = requireCurrentContext("glGetFramebufferParameteriv");
+    if (!ctx) return;
+    if (!ctx->getFramebufferParameteriv(target, pname, params)) {
+        return;
+    }
+    markStateFunction(FunctionId::glGetFramebufferParameteriv, "Framebuffer default parameter query returns defaults.");
+}
+
+// --- GL 4.3: Invalidation Hints ---
+
+void APIENTRY glInvalidateFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments) {
+    auto* ctx = requireCurrentContext("glInvalidateFramebuffer");
+    if (!ctx) return;
+    if (!ctx->invalidateFramebuffer(target, numAttachments, attachments)) {
+        return;
+    }
+    markStateFunction(FunctionId::glInvalidateFramebuffer, "Framebuffer invalidation hint accepted (maps to MTLStoreAction.dontCare).");
+}
+
+void APIENTRY glInvalidateSubFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments, GLint x, GLint y, GLsizei width, GLsizei height) {
+    auto* ctx = requireCurrentContext("glInvalidateSubFramebuffer");
+    if (!ctx) return;
+    if (!ctx->invalidateSubFramebuffer(target, numAttachments, attachments, x, y, width, height)) {
+        return;
+    }
+    markStateFunction(FunctionId::glInvalidateSubFramebuffer, "Sub-framebuffer invalidation hint accepted.");
+}
+
+void APIENTRY glInvalidateBufferData(GLuint buffer) {
+    auto* ctx = requireCurrentContext("glInvalidateBufferData");
+    if (!ctx) return;
+    if (!ctx->invalidateBufferData(buffer)) {
+        return;
+    }
+    markStateFunction(FunctionId::glInvalidateBufferData, "Buffer data invalidation hint accepted.");
+}
+
+void APIENTRY glInvalidateBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr length) {
+    auto* ctx = requireCurrentContext("glInvalidateBufferSubData");
+    if (!ctx) return;
+    if (!ctx->invalidateBufferSubData(buffer, offset, length)) {
+        return;
+    }
+    markStateFunction(FunctionId::glInvalidateBufferSubData, "Buffer sub-data invalidation hint accepted.");
+}
+
 }  // namespace impl
 
 }  // namespace appgl

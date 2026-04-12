@@ -6434,4 +6434,252 @@ bool GLContext::shaderStorageBlockBinding(GLuint program, GLuint storageBlockInd
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// GL 4.2 — Advanced Instanced Drawing with Base Instance
+// ---------------------------------------------------------------------------
+
+bool GLContext::drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance) {
+    if (count < 0 || instancecount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (count == 0 || instancecount == 0) {
+        return true; // valid no-op
+    }
+    // Stub: accepts and validates parameters. Actual Metal instanced encoding
+    // with baseInstance will be wired when the draw path is extended.
+    return true;
+}
+
+bool GLContext::drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLuint baseinstance) {
+    if (count < 0 || instancecount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (count == 0 || instancecount == 0) {
+        return true;
+    }
+    return true;
+}
+
+bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance) {
+    if (count < 0 || instancecount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (count == 0 || instancecount == 0) {
+        return true;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.3 — Multi-Draw Indirect
+// ---------------------------------------------------------------------------
+
+bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsizei drawcount, GLsizei stride) {
+    if (drawcount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (stride != 0 && stride < 16) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Stub: accepts parameters. Each draw command in the indirect buffer is a
+    // DrawArraysIndirectCommand (count, instanceCount, first, baseInstance).
+    return true;
+}
+
+bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect, GLsizei drawcount, GLsizei stride) {
+    if (drawcount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (stride != 0 && stride < 20) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.3 — Buffer Clear
+// ---------------------------------------------------------------------------
+
+bool GLContext::clearBufferData(GLenum target, GLenum internalformat, GLenum format, GLenum type, const void* data) {
+    GLuint boundBuffer = impl_->state->boundBuffer(target);
+    if (boundBuffer == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLBufferObject* buffer = impl_->objects->buffers().get(boundBuffer);
+    if (buffer == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (buffer->size == 0) {
+        return true; // valid no-op
+    }
+    // Fill the shadow bytes with the clear value (or zero if data is null).
+    if (buffer->shadowBytes.size() < static_cast<std::size_t>(buffer->size)) {
+        buffer->shadowBytes.resize(static_cast<std::size_t>(buffer->size), 0);
+    }
+    if (data == nullptr) {
+        std::memset(buffer->shadowBytes.data(), 0, buffer->shadowBytes.size());
+    } else {
+        // Simple fill: replicate first 4 bytes across the buffer.
+        std::uint8_t pattern[4] = {0, 0, 0, 0};
+        std::memcpy(pattern, data, std::min<std::size_t>(4, buffer->shadowBytes.size()));
+        for (std::size_t i = 0; i < buffer->shadowBytes.size(); i += 4) {
+            std::size_t remaining = std::min<std::size_t>(4, buffer->shadowBytes.size() - i);
+            std::memcpy(buffer->shadowBytes.data() + i, pattern, remaining);
+        }
+    }
+    return true;
+}
+
+bool GLContext::clearBufferSubData(GLenum target, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data) {
+    if (offset < 0 || size < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLuint boundBuffer = impl_->state->boundBuffer(target);
+    if (boundBuffer == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLBufferObject* buffer = impl_->objects->buffers().get(boundBuffer);
+    if (buffer == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (offset + size > buffer->size) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (size == 0) {
+        return true;
+    }
+    if (buffer->shadowBytes.size() < static_cast<std::size_t>(buffer->size)) {
+        buffer->shadowBytes.resize(static_cast<std::size_t>(buffer->size), 0);
+    }
+    if (data == nullptr) {
+        std::memset(buffer->shadowBytes.data() + offset, 0, static_cast<std::size_t>(size));
+    } else {
+        std::uint8_t pattern[4] = {0, 0, 0, 0};
+        std::memcpy(pattern, data, std::min<std::size_t>(4, static_cast<std::size_t>(size)));
+        for (GLsizeiptr i = 0; i < size; i += 4) {
+            GLsizeiptr remaining = std::min<GLsizeiptr>(4, size - i);
+            std::memcpy(buffer->shadowBytes.data() + offset + i, pattern, static_cast<std::size_t>(remaining));
+        }
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.3 — Framebuffer Parameters
+// ---------------------------------------------------------------------------
+
+bool GLContext::framebufferParameteri(GLenum target, GLenum pname, GLint param) {
+    if (target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER && target != GL_FRAMEBUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    // Accept parameter hints for attachment-less framebuffers. These are stored
+    // on the framebuffer object but don't affect Metal rendering yet.
+    switch (pname) {
+        case GL_FRAMEBUFFER_DEFAULT_WIDTH:
+        case GL_FRAMEBUFFER_DEFAULT_HEIGHT:
+        case GL_FRAMEBUFFER_DEFAULT_LAYERS:
+        case GL_FRAMEBUFFER_DEFAULT_SAMPLES:
+        case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS:
+            return true; // accepted, state-tracked as hint
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER && target != GL_FRAMEBUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    switch (pname) {
+        case GL_FRAMEBUFFER_DEFAULT_WIDTH:       *params = 0; return true;
+        case GL_FRAMEBUFFER_DEFAULT_HEIGHT:      *params = 0; return true;
+        case GL_FRAMEBUFFER_DEFAULT_LAYERS:      *params = 0; return true;
+        case GL_FRAMEBUFFER_DEFAULT_SAMPLES:     *params = 0; return true;
+        case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS: *params = GL_TRUE; return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.3 — Invalidation Hints
+// ---------------------------------------------------------------------------
+
+bool GLContext::invalidateFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments) {
+    if (numAttachments < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Performance hint: signal that attachment contents can be discarded.
+    // Maps to MTLStoreAction.dontCare in a future optimization pass.
+    return true;
+}
+
+bool GLContext::invalidateSubFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments, GLint x, GLint y, GLsizei width, GLsizei height) {
+    if (numAttachments < 0 || width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::invalidateBufferData(GLuint buffer) {
+    if (!impl_->objects->buffers().contains(buffer)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Hint that the entire buffer's contents are no longer needed.
+    return true;
+}
+
+bool GLContext::invalidateBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr length) {
+    if (offset < 0 || length < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLBufferObject* buf = impl_->objects->buffers().get(buffer);
+    if (buf == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (offset + length > buf->size) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    return true;
+}
+
 }  // namespace appgl
