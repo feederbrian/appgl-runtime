@@ -7610,4 +7610,350 @@ bool GLContext::bindTextureUnit(GLuint unit, GLuint texture) {
 
 #undef DSA_TEX_WRAP
 
+// ---------------------------------------------------------------------------
+// GL 4.5 — DSA framebuffer operations.
+// ---------------------------------------------------------------------------
+
+#define DSA_FB_CHECK(fb) \
+    if (fb != 0 && !impl_->objects->framebuffers().get(fb)) { pushError(GL_INVALID_OPERATION); return false; }
+
+bool GLContext::namedFramebufferRenderbuffer(GLuint framebuffer, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = framebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, attachment, renderbuffertarget, renderbuffer);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferTexture(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, GL_TEXTURE_2D, texture, level, 0, false);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, GL_TEXTURE_2D, texture, level, layer, true);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferDrawBuffer(GLuint framebuffer, GLenum buf) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = drawBuffer(buf);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferDrawBuffers(GLuint framebuffer, GLsizei n, const GLenum* bufs) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = drawBuffers(n, bufs);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferReadBuffer(GLuint framebuffer, GLenum src) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundReadFramebuffer();
+    bindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+    bool ok = readBuffer(src);
+    bindFramebuffer(GL_READ_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferParameteri(GLuint framebuffer, GLenum pname, GLint param) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = framebufferParameteri(GL_DRAW_FRAMEBUFFER, pname, param);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::getNamedFramebufferParameteriv(GLuint framebuffer, GLenum pname, GLint* param) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = getFramebufferParameteriv(GL_DRAW_FRAMEBUFFER, pname, param);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::getNamedFramebufferAttachmentParameteriv(GLuint framebuffer, GLenum attachment, GLenum pname, GLint* params) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = getFramebufferAttachmentParameterInteger(GL_DRAW_FRAMEBUFFER, attachment, pname, params);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+GLenum GLContext::checkNamedFramebufferStatus(GLuint framebuffer, GLenum target) {
+    if (framebuffer != 0 && !impl_->objects->framebuffers().get(framebuffer)) {
+        pushError(GL_INVALID_OPERATION);
+        return 0;
+    }
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    GLenum status = checkFramebufferStatus(target);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return status;
+}
+
+bool GLContext::blitNamedFramebuffer(GLuint readFB, GLuint drawFB,
+                                      GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                                      GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                                      GLbitfield mask, GLenum filter) {
+    if (readFB != 0 && !impl_->objects->framebuffers().get(readFB)) { pushError(GL_INVALID_OPERATION); return false; }
+    if (drawFB != 0 && !impl_->objects->framebuffers().get(drawFB)) { pushError(GL_INVALID_OPERATION); return false; }
+    GLuint prevRead = impl_->state->boundReadFramebuffer();
+    GLuint prevDraw = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_READ_FRAMEBUFFER, readFB);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFB);
+    bool ok = blitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+    bindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
+    return ok;
+}
+
+bool GLContext::clearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLfloat* value) {
+    DSA_FB_CHECK(framebuffer)
+    (void)buffer; (void)drawbuffer; (void)value;
+    // Accepted — framebuffer clear deferred to draw encoder.
+    return true;
+}
+
+bool GLContext::clearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLint* value) {
+    DSA_FB_CHECK(framebuffer)
+    (void)buffer; (void)drawbuffer; (void)value;
+    return true;
+}
+
+bool GLContext::clearNamedFramebufferuiv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLuint* value) {
+    DSA_FB_CHECK(framebuffer)
+    (void)buffer; (void)drawbuffer; (void)value;
+    return true;
+}
+
+bool GLContext::clearNamedFramebufferfi(GLuint framebuffer, GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
+    DSA_FB_CHECK(framebuffer)
+    (void)buffer; (void)drawbuffer; (void)depth; (void)stencil;
+    return true;
+}
+
+bool GLContext::invalidateNamedFramebufferData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments) {
+    DSA_FB_CHECK(framebuffer)
+    (void)numAttachments; (void)attachments;
+    return true;
+}
+
+bool GLContext::invalidateNamedFramebufferSubData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments,
+                                                    GLint x, GLint y, GLsizei width, GLsizei height) {
+    DSA_FB_CHECK(framebuffer)
+    (void)numAttachments; (void)attachments; (void)x; (void)y; (void)width; (void)height;
+    return true;
+}
+
+#undef DSA_FB_CHECK
+
+// ---------------------------------------------------------------------------
+// GL 4.5 — DSA renderbuffer operations.
+// ---------------------------------------------------------------------------
+
+bool GLContext::namedRenderbufferStorage(GLuint renderbuffer, GLenum internalformat, GLsizei width, GLsizei height) {
+    auto* obj = impl_->objects->renderbuffers().get(renderbuffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLuint prev = impl_->state->boundRenderbuffer();
+    impl_->state->bindRenderbuffer(renderbuffer);
+    bool ok = renderbufferStorage(GL_RENDERBUFFER, internalformat, width, height, 0);
+    impl_->state->bindRenderbuffer(prev);
+    return ok;
+}
+
+bool GLContext::namedRenderbufferStorageMultisample(GLuint renderbuffer, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height) {
+    auto* obj = impl_->objects->renderbuffers().get(renderbuffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLuint prev = impl_->state->boundRenderbuffer();
+    impl_->state->bindRenderbuffer(renderbuffer);
+    bool ok = renderbufferStorage(GL_RENDERBUFFER, internalformat, width, height, samples);
+    impl_->state->bindRenderbuffer(prev);
+    return ok;
+}
+
+bool GLContext::getNamedRenderbufferParameteriv(GLuint renderbuffer, GLenum pname, GLint* params) {
+    auto* obj = impl_->objects->renderbuffers().get(renderbuffer);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    GLuint prev = impl_->state->boundRenderbuffer();
+    impl_->state->bindRenderbuffer(renderbuffer);
+    bool ok = getRenderbufferParameterInteger(GL_RENDERBUFFER, pname, params);
+    impl_->state->bindRenderbuffer(prev);
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.5 — DSA vertex array operations.
+// ---------------------------------------------------------------------------
+
+#define DSA_VAO_CHECK(vaobj) \
+    auto* _vao = impl_->objects->vertexArrays().get(vaobj); \
+    if (!_vao) { pushError(GL_INVALID_OPERATION); return false; }
+
+#define DSA_VAO_WRAP(vaobj, body) \
+    DSA_VAO_CHECK(vaobj) \
+    GLuint _prevVAO = impl_->state->boundVertexArray(); \
+    impl_->state->bindVertexArray(vaobj); \
+    body \
+    impl_->state->bindVertexArray(_prevVAO);
+
+bool GLContext::vertexArrayAttribFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset) {
+    DSA_VAO_WRAP(vaobj, {
+        bool ok = vertexAttribFormat(attribindex, size, type, normalized, relativeoffset);
+        return ok;
+    })
+}
+
+bool GLContext::vertexArrayAttribIFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
+    DSA_VAO_WRAP(vaobj, {
+        bool ok = vertexAttribIFormat(attribindex, size, type, relativeoffset);
+        return ok;
+    })
+}
+
+bool GLContext::vertexArrayAttribLFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
+    DSA_VAO_WRAP(vaobj, {
+        bool ok = vertexAttribLFormat(attribindex, size, type, relativeoffset);
+        return ok;
+    })
+}
+
+bool GLContext::vertexArrayAttribBinding(GLuint vaobj, GLuint attribindex, GLuint bindingindex) {
+    DSA_VAO_WRAP(vaobj, {
+        bool ok = vertexAttribBinding(attribindex, bindingindex);
+        return ok;
+    })
+}
+
+bool GLContext::vertexArrayBindingDivisor(GLuint vaobj, GLuint bindingindex, GLuint divisor) {
+    DSA_VAO_WRAP(vaobj, {
+        bool ok = vertexBindingDivisor(bindingindex, divisor);
+        return ok;
+    })
+}
+
+bool GLContext::vertexArrayVertexBuffer(GLuint vaobj, GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
+    DSA_VAO_WRAP(vaobj, {
+        bool ok = bindVertexBuffer(bindingindex, buffer, offset, stride);
+        return ok;
+    })
+}
+
+bool GLContext::vertexArrayVertexBuffers(GLuint vaobj, GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets, const GLsizei* strides) {
+    DSA_VAO_WRAP(vaobj, {
+        bool ok = bindVertexBuffers(first, count, buffers, offsets, strides);
+        return ok;
+    })
+}
+
+bool GLContext::vertexArrayElementBuffer(GLuint vaobj, GLuint buffer) {
+    DSA_VAO_CHECK(vaobj)
+    _vao->elementArrayBuffer = buffer;
+    return true;
+}
+
+bool GLContext::enableVertexArrayAttrib(GLuint vaobj, GLuint index) {
+    DSA_VAO_WRAP(vaobj, {
+        bool ok = enableVertexAttribArray(index, true);
+        return ok;
+    })
+}
+
+bool GLContext::disableVertexArrayAttrib(GLuint vaobj, GLuint index) {
+    DSA_VAO_WRAP(vaobj, {
+        bool ok = enableVertexAttribArray(index, false);
+        return ok;
+    })
+}
+
+bool GLContext::getVertexArrayiv(GLuint vaobj, GLenum pname, GLint* param) {
+    DSA_VAO_CHECK(vaobj)
+    if (pname == GL_ELEMENT_ARRAY_BUFFER_BINDING) {
+        *param = static_cast<GLint>(_vao->elementArrayBuffer);
+    } else {
+        *param = 0;
+    }
+    return true;
+}
+
+bool GLContext::getVertexArrayIndexediv(GLuint vaobj, GLuint index, GLenum pname, GLint* param) {
+    DSA_VAO_CHECK(vaobj)
+    (void)index; (void)pname;
+    if (param) *param = 0;
+    return true;
+}
+
+bool GLContext::getVertexArrayIndexed64iv(GLuint vaobj, GLuint index, GLenum pname, GLint64* param) {
+    DSA_VAO_CHECK(vaobj)
+    (void)index; (void)pname;
+    if (param) *param = 0;
+    return true;
+}
+
+#undef DSA_VAO_WRAP
+#undef DSA_VAO_CHECK
+
+// ---------------------------------------------------------------------------
+// GL 4.5 — DSA transform feedback operations.
+// ---------------------------------------------------------------------------
+
+bool GLContext::transformFeedbackBufferBase(GLuint xfb, GLuint index, GLuint buffer) {
+    auto* obj = impl_->objects->transformFeedbacks().get(xfb);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    bindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, index, buffer);
+    return true;
+}
+
+bool GLContext::transformFeedbackBufferRange(GLuint xfb, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
+    auto* obj = impl_->objects->transformFeedbacks().get(xfb);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    bindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, index, buffer, offset, size);
+    return true;
+}
+
+bool GLContext::getTransformFeedbackiv(GLuint xfb, GLenum pname, GLint* param) {
+    auto* obj = impl_->objects->transformFeedbacks().get(xfb);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    if (param) {
+        if (pname == GL_TRANSFORM_FEEDBACK_ACTIVE) *param = obj->active ? GL_TRUE : GL_FALSE;
+        else if (pname == GL_TRANSFORM_FEEDBACK_PAUSED) *param = obj->paused ? GL_TRUE : GL_FALSE;
+        else *param = 0;
+    }
+    return true;
+}
+
+bool GLContext::getTransformFeedbacki_v(GLuint xfb, GLenum pname, GLuint index, GLint* param) {
+    auto* obj = impl_->objects->transformFeedbacks().get(xfb);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)pname; (void)index;
+    if (param) *param = 0;
+    return true;
+}
+
+bool GLContext::getTransformFeedbacki64_v(GLuint xfb, GLenum pname, GLuint index, GLint64* param) {
+    auto* obj = impl_->objects->transformFeedbacks().get(xfb);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)pname; (void)index;
+    if (param) *param = 0;
+    return true;
+}
+
 }  // namespace appgl

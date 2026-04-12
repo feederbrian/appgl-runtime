@@ -381,6 +381,53 @@ public:
     bool generateTextureMipmap(GLuint texture);
     bool bindTextureUnit(GLuint unit, GLuint texture);
 
+    // GL 4.5 — DSA framebuffer operations.
+    bool namedFramebufferRenderbuffer(GLuint framebuffer, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
+    bool namedFramebufferTexture(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level);
+    bool namedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer);
+    bool namedFramebufferDrawBuffer(GLuint framebuffer, GLenum buf);
+    bool namedFramebufferDrawBuffers(GLuint framebuffer, GLsizei n, const GLenum* bufs);
+    bool namedFramebufferReadBuffer(GLuint framebuffer, GLenum src);
+    bool namedFramebufferParameteri(GLuint framebuffer, GLenum pname, GLint param);
+    bool getNamedFramebufferParameteriv(GLuint framebuffer, GLenum pname, GLint* param);
+    bool getNamedFramebufferAttachmentParameteriv(GLuint framebuffer, GLenum attachment, GLenum pname, GLint* params);
+    GLenum checkNamedFramebufferStatus(GLuint framebuffer, GLenum target);
+    bool blitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuffer,
+                              GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                              GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                              GLbitfield mask, GLenum filter);
+    bool clearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLfloat* value);
+    bool clearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLint* value);
+    bool clearNamedFramebufferuiv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLuint* value);
+    bool clearNamedFramebufferfi(GLuint framebuffer, GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil);
+    bool invalidateNamedFramebufferData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments);
+    bool invalidateNamedFramebufferSubData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments,
+                                            GLint x, GLint y, GLsizei width, GLsizei height);
+    // GL 4.5 — DSA renderbuffer operations.
+    bool namedRenderbufferStorage(GLuint renderbuffer, GLenum internalformat, GLsizei width, GLsizei height);
+    bool namedRenderbufferStorageMultisample(GLuint renderbuffer, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height);
+    bool getNamedRenderbufferParameteriv(GLuint renderbuffer, GLenum pname, GLint* params);
+    // GL 4.5 — DSA vertex array operations.
+    bool vertexArrayAttribFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset);
+    bool vertexArrayAttribIFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset);
+    bool vertexArrayAttribLFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset);
+    bool vertexArrayAttribBinding(GLuint vaobj, GLuint attribindex, GLuint bindingindex);
+    bool vertexArrayBindingDivisor(GLuint vaobj, GLuint bindingindex, GLuint divisor);
+    bool vertexArrayVertexBuffer(GLuint vaobj, GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride);
+    bool vertexArrayVertexBuffers(GLuint vaobj, GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets, const GLsizei* strides);
+    bool vertexArrayElementBuffer(GLuint vaobj, GLuint buffer);
+    bool enableVertexArrayAttrib(GLuint vaobj, GLuint index);
+    bool disableVertexArrayAttrib(GLuint vaobj, GLuint index);
+    bool getVertexArrayiv(GLuint vaobj, GLenum pname, GLint* param);
+    bool getVertexArrayIndexediv(GLuint vaobj, GLuint index, GLenum pname, GLint* param);
+    bool getVertexArrayIndexed64iv(GLuint vaobj, GLuint index, GLenum pname, GLint64* param);
+    // GL 4.5 — DSA transform feedback operations.
+    bool transformFeedbackBufferBase(GLuint xfb, GLuint index, GLuint buffer);
+    bool transformFeedbackBufferRange(GLuint xfb, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size);
+    bool getTransformFeedbackiv(GLuint xfb, GLenum pname, GLint* param);
+    bool getTransformFeedbacki_v(GLuint xfb, GLenum pname, GLuint index, GLint* param);
+    bool getTransformFeedbacki64_v(GLuint xfb, GLenum pname, GLuint index, GLint64* param);
+
     void pushError(GLenum error);
     GLenum popError();
 

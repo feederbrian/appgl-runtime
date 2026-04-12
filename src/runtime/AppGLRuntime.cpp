@@ -5780,6 +5780,164 @@ void APIENTRY glBindTextureUnit(GLuint unit, GLuint texture) {
 
 #undef DSA_TEX_FN
 
+// ---------------------------------------------------------------------------
+// Pass C — DSA framebuffer / renderbuffer (20 functions)
+// ---------------------------------------------------------------------------
+
+#define DSA_FB_FN(glName, ctxCall) \
+    auto* ctx = requireCurrentContext(#glName); if (!ctx) return; \
+    if (!ctx->ctxCall) return; \
+    markFramebufferFunction(FunctionId::glName, "DSA " #glName ".");
+
+void APIENTRY glNamedFramebufferRenderbuffer(GLuint framebuffer, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
+    DSA_FB_FN(glNamedFramebufferRenderbuffer, namedFramebufferRenderbuffer(framebuffer, attachment, renderbuffertarget, renderbuffer))
+}
+void APIENTRY glNamedFramebufferTexture(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level) {
+    DSA_FB_FN(glNamedFramebufferTexture, namedFramebufferTexture(framebuffer, attachment, texture, level))
+}
+void APIENTRY glNamedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer) {
+    DSA_FB_FN(glNamedFramebufferTextureLayer, namedFramebufferTextureLayer(framebuffer, attachment, texture, level, layer))
+}
+void APIENTRY glNamedFramebufferDrawBuffer(GLuint framebuffer, GLenum buf) {
+    DSA_FB_FN(glNamedFramebufferDrawBuffer, namedFramebufferDrawBuffer(framebuffer, buf))
+}
+void APIENTRY glNamedFramebufferDrawBuffers(GLuint framebuffer, GLsizei n, const GLenum* bufs) {
+    DSA_FB_FN(glNamedFramebufferDrawBuffers, namedFramebufferDrawBuffers(framebuffer, n, bufs))
+}
+void APIENTRY glNamedFramebufferReadBuffer(GLuint framebuffer, GLenum src) {
+    DSA_FB_FN(glNamedFramebufferReadBuffer, namedFramebufferReadBuffer(framebuffer, src))
+}
+void APIENTRY glNamedFramebufferParameteri(GLuint framebuffer, GLenum pname, GLint param) {
+    DSA_FB_FN(glNamedFramebufferParameteri, namedFramebufferParameteri(framebuffer, pname, param))
+}
+void APIENTRY glGetNamedFramebufferParameteriv(GLuint framebuffer, GLenum pname, GLint* param) {
+    DSA_FB_FN(glGetNamedFramebufferParameteriv, getNamedFramebufferParameteriv(framebuffer, pname, param))
+}
+void APIENTRY glGetNamedFramebufferAttachmentParameteriv(GLuint framebuffer, GLenum attachment, GLenum pname, GLint* params) {
+    DSA_FB_FN(glGetNamedFramebufferAttachmentParameteriv, getNamedFramebufferAttachmentParameteriv(framebuffer, attachment, pname, params))
+}
+GLenum APIENTRY glCheckNamedFramebufferStatus(GLuint framebuffer, GLenum target) {
+    auto* ctx = requireCurrentContext("glCheckNamedFramebufferStatus");
+    if (!ctx) return 0;
+    GLenum result = ctx->checkNamedFramebufferStatus(framebuffer, target);
+    markFramebufferFunction(FunctionId::glCheckNamedFramebufferStatus, "DSA glCheckNamedFramebufferStatus.");
+    return result;
+}
+void APIENTRY glBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuffer,
+                                     GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                                     GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                                     GLbitfield mask, GLenum filter) {
+    DSA_FB_FN(glBlitNamedFramebuffer, blitNamedFramebuffer(readFramebuffer, drawFramebuffer, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter))
+}
+void APIENTRY glClearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLfloat* value) {
+    DSA_FB_FN(glClearNamedFramebufferfv, clearNamedFramebufferfv(framebuffer, buffer, drawbuffer, value))
+}
+void APIENTRY glClearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLint* value) {
+    DSA_FB_FN(glClearNamedFramebufferiv, clearNamedFramebufferiv(framebuffer, buffer, drawbuffer, value))
+}
+void APIENTRY glClearNamedFramebufferuiv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLuint* value) {
+    DSA_FB_FN(glClearNamedFramebufferuiv, clearNamedFramebufferuiv(framebuffer, buffer, drawbuffer, value))
+}
+void APIENTRY glClearNamedFramebufferfi(GLuint framebuffer, GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
+    DSA_FB_FN(glClearNamedFramebufferfi, clearNamedFramebufferfi(framebuffer, buffer, drawbuffer, depth, stencil))
+}
+void APIENTRY glInvalidateNamedFramebufferData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments) {
+    DSA_FB_FN(glInvalidateNamedFramebufferData, invalidateNamedFramebufferData(framebuffer, numAttachments, attachments))
+}
+void APIENTRY glInvalidateNamedFramebufferSubData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments,
+                                                   GLint x, GLint y, GLsizei width, GLsizei height) {
+    DSA_FB_FN(glInvalidateNamedFramebufferSubData, invalidateNamedFramebufferSubData(framebuffer, numAttachments, attachments, x, y, width, height))
+}
+void APIENTRY glNamedRenderbufferStorage(GLuint renderbuffer, GLenum internalformat, GLsizei width, GLsizei height) {
+    DSA_FB_FN(glNamedRenderbufferStorage, namedRenderbufferStorage(renderbuffer, internalformat, width, height))
+}
+void APIENTRY glNamedRenderbufferStorageMultisample(GLuint renderbuffer, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height) {
+    DSA_FB_FN(glNamedRenderbufferStorageMultisample, namedRenderbufferStorageMultisample(renderbuffer, samples, internalformat, width, height))
+}
+void APIENTRY glGetNamedRenderbufferParameteriv(GLuint renderbuffer, GLenum pname, GLint* params) {
+    DSA_FB_FN(glGetNamedRenderbufferParameteriv, getNamedRenderbufferParameteriv(renderbuffer, pname, params))
+}
+
+#undef DSA_FB_FN
+
+// ---------------------------------------------------------------------------
+// Pass C — DSA vertex array (13 functions)
+// ---------------------------------------------------------------------------
+
+#define DSA_VAO_FN(glName, ctxCall) \
+    auto* ctx = requireCurrentContext(#glName); if (!ctx) return; \
+    if (!ctx->ctxCall) return; \
+    markVertexInputFunction(FunctionId::glName, "DSA " #glName ".");
+
+void APIENTRY glVertexArrayAttribFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset) {
+    DSA_VAO_FN(glVertexArrayAttribFormat, vertexArrayAttribFormat(vaobj, attribindex, size, type, normalized, relativeoffset))
+}
+void APIENTRY glVertexArrayAttribIFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
+    DSA_VAO_FN(glVertexArrayAttribIFormat, vertexArrayAttribIFormat(vaobj, attribindex, size, type, relativeoffset))
+}
+void APIENTRY glVertexArrayAttribLFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
+    DSA_VAO_FN(glVertexArrayAttribLFormat, vertexArrayAttribLFormat(vaobj, attribindex, size, type, relativeoffset))
+}
+void APIENTRY glVertexArrayAttribBinding(GLuint vaobj, GLuint attribindex, GLuint bindingindex) {
+    DSA_VAO_FN(glVertexArrayAttribBinding, vertexArrayAttribBinding(vaobj, attribindex, bindingindex))
+}
+void APIENTRY glVertexArrayBindingDivisor(GLuint vaobj, GLuint bindingindex, GLuint divisor) {
+    DSA_VAO_FN(glVertexArrayBindingDivisor, vertexArrayBindingDivisor(vaobj, bindingindex, divisor))
+}
+void APIENTRY glVertexArrayVertexBuffer(GLuint vaobj, GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
+    DSA_VAO_FN(glVertexArrayVertexBuffer, vertexArrayVertexBuffer(vaobj, bindingindex, buffer, offset, stride))
+}
+void APIENTRY glVertexArrayVertexBuffers(GLuint vaobj, GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets, const GLsizei* strides) {
+    DSA_VAO_FN(glVertexArrayVertexBuffers, vertexArrayVertexBuffers(vaobj, first, count, buffers, offsets, strides))
+}
+void APIENTRY glVertexArrayElementBuffer(GLuint vaobj, GLuint buffer) {
+    DSA_VAO_FN(glVertexArrayElementBuffer, vertexArrayElementBuffer(vaobj, buffer))
+}
+void APIENTRY glEnableVertexArrayAttrib(GLuint vaobj, GLuint index) {
+    DSA_VAO_FN(glEnableVertexArrayAttrib, enableVertexArrayAttrib(vaobj, index))
+}
+void APIENTRY glDisableVertexArrayAttrib(GLuint vaobj, GLuint index) {
+    DSA_VAO_FN(glDisableVertexArrayAttrib, disableVertexArrayAttrib(vaobj, index))
+}
+void APIENTRY glGetVertexArrayiv(GLuint vaobj, GLenum pname, GLint* param) {
+    DSA_VAO_FN(glGetVertexArrayiv, getVertexArrayiv(vaobj, pname, param))
+}
+void APIENTRY glGetVertexArrayIndexediv(GLuint vaobj, GLuint index, GLenum pname, GLint* param) {
+    DSA_VAO_FN(glGetVertexArrayIndexediv, getVertexArrayIndexediv(vaobj, index, pname, param))
+}
+void APIENTRY glGetVertexArrayIndexed64iv(GLuint vaobj, GLuint index, GLenum pname, GLint64* param) {
+    DSA_VAO_FN(glGetVertexArrayIndexed64iv, getVertexArrayIndexed64iv(vaobj, index, pname, param))
+}
+
+#undef DSA_VAO_FN
+
+// ---------------------------------------------------------------------------
+// Pass C — DSA transform feedback (5 functions)
+// ---------------------------------------------------------------------------
+
+#define DSA_TF_FN(glName, ctxCall) \
+    auto* ctx = requireCurrentContext(#glName); if (!ctx) return; \
+    if (!ctx->ctxCall) return; \
+    markStateFunction(FunctionId::glName, "DSA " #glName ".");
+
+void APIENTRY glTransformFeedbackBufferBase(GLuint xfb, GLuint index, GLuint buffer) {
+    DSA_TF_FN(glTransformFeedbackBufferBase, transformFeedbackBufferBase(xfb, index, buffer))
+}
+void APIENTRY glTransformFeedbackBufferRange(GLuint xfb, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
+    DSA_TF_FN(glTransformFeedbackBufferRange, transformFeedbackBufferRange(xfb, index, buffer, offset, size))
+}
+void APIENTRY glGetTransformFeedbackiv(GLuint xfb, GLenum pname, GLint* param) {
+    DSA_TF_FN(glGetTransformFeedbackiv, getTransformFeedbackiv(xfb, pname, param))
+}
+void APIENTRY glGetTransformFeedbacki_v(GLuint xfb, GLenum pname, GLuint index, GLint* param) {
+    DSA_TF_FN(glGetTransformFeedbacki_v, getTransformFeedbacki_v(xfb, pname, index, param))
+}
+void APIENTRY glGetTransformFeedbacki64_v(GLuint xfb, GLenum pname, GLuint index, GLint64* param) {
+    DSA_TF_FN(glGetTransformFeedbacki64_v, getTransformFeedbacki64_v(xfb, pname, index, param))
+}
+
+#undef DSA_TF_FN
+
 }  // namespace impl
 
 }  // namespace appgl

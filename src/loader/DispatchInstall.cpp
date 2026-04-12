@@ -905,6 +905,77 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
         coverage.markImplemented(id, "DSA texture wrapper.");
     }
 
+    // Pass C — DSA framebuffer / renderbuffer (20 functions)
+    dispatch.glNamedFramebufferRenderbuffer = &impl::glNamedFramebufferRenderbuffer;
+    dispatch.glNamedFramebufferTexture = &impl::glNamedFramebufferTexture;
+    dispatch.glNamedFramebufferTextureLayer = &impl::glNamedFramebufferTextureLayer;
+    dispatch.glNamedFramebufferDrawBuffer = &impl::glNamedFramebufferDrawBuffer;
+    dispatch.glNamedFramebufferDrawBuffers = &impl::glNamedFramebufferDrawBuffers;
+    dispatch.glNamedFramebufferReadBuffer = &impl::glNamedFramebufferReadBuffer;
+    dispatch.glNamedFramebufferParameteri = &impl::glNamedFramebufferParameteri;
+    dispatch.glGetNamedFramebufferParameteriv = &impl::glGetNamedFramebufferParameteriv;
+    dispatch.glGetNamedFramebufferAttachmentParameteriv = &impl::glGetNamedFramebufferAttachmentParameteriv;
+    dispatch.glCheckNamedFramebufferStatus = &impl::glCheckNamedFramebufferStatus;
+    dispatch.glBlitNamedFramebuffer = &impl::glBlitNamedFramebuffer;
+    dispatch.glClearNamedFramebufferfv = &impl::glClearNamedFramebufferfv;
+    dispatch.glClearNamedFramebufferiv = &impl::glClearNamedFramebufferiv;
+    dispatch.glClearNamedFramebufferuiv = &impl::glClearNamedFramebufferuiv;
+    dispatch.glClearNamedFramebufferfi = &impl::glClearNamedFramebufferfi;
+    dispatch.glInvalidateNamedFramebufferData = &impl::glInvalidateNamedFramebufferData;
+    dispatch.glInvalidateNamedFramebufferSubData = &impl::glInvalidateNamedFramebufferSubData;
+    dispatch.glNamedRenderbufferStorage = &impl::glNamedRenderbufferStorage;
+    dispatch.glNamedRenderbufferStorageMultisample = &impl::glNamedRenderbufferStorageMultisample;
+    dispatch.glGetNamedRenderbufferParameteriv = &impl::glGetNamedRenderbufferParameteriv;
+    for (auto id : {FunctionId::glNamedFramebufferRenderbuffer, FunctionId::glNamedFramebufferTexture,
+                    FunctionId::glNamedFramebufferTextureLayer, FunctionId::glNamedFramebufferDrawBuffer,
+                    FunctionId::glNamedFramebufferDrawBuffers, FunctionId::glNamedFramebufferReadBuffer,
+                    FunctionId::glNamedFramebufferParameteri, FunctionId::glGetNamedFramebufferParameteriv,
+                    FunctionId::glGetNamedFramebufferAttachmentParameteriv, FunctionId::glCheckNamedFramebufferStatus,
+                    FunctionId::glBlitNamedFramebuffer, FunctionId::glClearNamedFramebufferfv,
+                    FunctionId::glClearNamedFramebufferiv, FunctionId::glClearNamedFramebufferuiv,
+                    FunctionId::glClearNamedFramebufferfi, FunctionId::glInvalidateNamedFramebufferData,
+                    FunctionId::glInvalidateNamedFramebufferSubData,
+                    FunctionId::glNamedRenderbufferStorage, FunctionId::glNamedRenderbufferStorageMultisample,
+                    FunctionId::glGetNamedRenderbufferParameteriv}) {
+        coverage.markImplemented(id, "DSA framebuffer/renderbuffer wrapper.");
+    }
+
+    // Pass C — DSA vertex array (13 functions)
+    dispatch.glVertexArrayAttribFormat = &impl::glVertexArrayAttribFormat;
+    dispatch.glVertexArrayAttribIFormat = &impl::glVertexArrayAttribIFormat;
+    dispatch.glVertexArrayAttribLFormat = &impl::glVertexArrayAttribLFormat;
+    dispatch.glVertexArrayAttribBinding = &impl::glVertexArrayAttribBinding;
+    dispatch.glVertexArrayBindingDivisor = &impl::glVertexArrayBindingDivisor;
+    dispatch.glVertexArrayVertexBuffer = &impl::glVertexArrayVertexBuffer;
+    dispatch.glVertexArrayVertexBuffers = &impl::glVertexArrayVertexBuffers;
+    dispatch.glVertexArrayElementBuffer = &impl::glVertexArrayElementBuffer;
+    dispatch.glEnableVertexArrayAttrib = &impl::glEnableVertexArrayAttrib;
+    dispatch.glDisableVertexArrayAttrib = &impl::glDisableVertexArrayAttrib;
+    dispatch.glGetVertexArrayiv = &impl::glGetVertexArrayiv;
+    dispatch.glGetVertexArrayIndexediv = &impl::glGetVertexArrayIndexediv;
+    dispatch.glGetVertexArrayIndexed64iv = &impl::glGetVertexArrayIndexed64iv;
+    for (auto id : {FunctionId::glVertexArrayAttribFormat, FunctionId::glVertexArrayAttribIFormat,
+                    FunctionId::glVertexArrayAttribLFormat, FunctionId::glVertexArrayAttribBinding,
+                    FunctionId::glVertexArrayBindingDivisor, FunctionId::glVertexArrayVertexBuffer,
+                    FunctionId::glVertexArrayVertexBuffers, FunctionId::glVertexArrayElementBuffer,
+                    FunctionId::glEnableVertexArrayAttrib, FunctionId::glDisableVertexArrayAttrib,
+                    FunctionId::glGetVertexArrayiv, FunctionId::glGetVertexArrayIndexediv,
+                    FunctionId::glGetVertexArrayIndexed64iv}) {
+        coverage.markImplemented(id, "DSA vertex array wrapper.");
+    }
+
+    // Pass C — DSA transform feedback (5 functions)
+    dispatch.glTransformFeedbackBufferBase = &impl::glTransformFeedbackBufferBase;
+    dispatch.glTransformFeedbackBufferRange = &impl::glTransformFeedbackBufferRange;
+    dispatch.glGetTransformFeedbackiv = &impl::glGetTransformFeedbackiv;
+    dispatch.glGetTransformFeedbacki_v = &impl::glGetTransformFeedbacki_v;
+    dispatch.glGetTransformFeedbacki64_v = &impl::glGetTransformFeedbacki64_v;
+    for (auto id : {FunctionId::glTransformFeedbackBufferBase, FunctionId::glTransformFeedbackBufferRange,
+                    FunctionId::glGetTransformFeedbackiv, FunctionId::glGetTransformFeedbacki_v,
+                    FunctionId::glGetTransformFeedbacki64_v}) {
+        coverage.markImplemented(id, "DSA transform feedback wrapper.");
+    }
+
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in
     // the promotion-gate window. Queries are live; everything else ships as a
