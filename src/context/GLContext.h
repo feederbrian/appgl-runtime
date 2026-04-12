@@ -126,6 +126,10 @@ public:
     bool getVertexAttribInteger(GLuint index, GLenum pname, GLint* params);
     bool getVertexAttribFloat(GLuint index, GLenum pname, GLfloat* params);
     bool getVertexAttribPointer(GLuint index, GLenum pname, void** pointer);
+    // GL 4.1 — double-precision vertex attributes (f64→f32 narrowing).
+    bool vertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer);
+    bool setVertexAttribLImmediate(GLuint index, GLint count, const GLdouble* values);
+    bool getVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params);
     bool activeTexture(GLenum texture);
     bool genTextures(GLsizei count, GLuint* textures);
     bool deleteTextures(GLsizei count, const GLuint* textures);

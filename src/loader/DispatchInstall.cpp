@@ -247,6 +247,17 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGetFloati_v = &impl::glGetFloati_v;
     dispatch.glGetDoublei_v = &impl::glGetDoublei_v;
     dispatch.glClearDepthf = &impl::glClearDepthf;
+    // GL 4.1 — double-precision vertex attributes (Group 12).
+    dispatch.glVertexAttribL1d = &impl::glVertexAttribL1d;
+    dispatch.glVertexAttribL2d = &impl::glVertexAttribL2d;
+    dispatch.glVertexAttribL3d = &impl::glVertexAttribL3d;
+    dispatch.glVertexAttribL4d = &impl::glVertexAttribL4d;
+    dispatch.glVertexAttribL1dv = &impl::glVertexAttribL1dv;
+    dispatch.glVertexAttribL2dv = &impl::glVertexAttribL2dv;
+    dispatch.glVertexAttribL3dv = &impl::glVertexAttribL3dv;
+    dispatch.glVertexAttribL4dv = &impl::glVertexAttribL4dv;
+    dispatch.glVertexAttribLPointer = &impl::glVertexAttribLPointer;
+    dispatch.glGetVertexAttribLdv = &impl::glGetVertexAttribLdv;
     // GL 4.1 — shader precision (Group 13).
     dispatch.glGetShaderPrecisionFormat = &impl::glGetShaderPrecisionFormat;
 
@@ -466,6 +477,16 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glGetFloati_v, "Indexed float state query returns tracked values.");
     coverage.markImplemented(FunctionId::glGetDoublei_v, "Indexed double state query returns tracked values.");
     coverage.markImplemented(FunctionId::glClearDepthf, "Float-precision depth clear state tracked.");
+    coverage.markImplemented(FunctionId::glVertexAttribL1d, "Double vertex attrib immediate (L1d) stored with CPU-side shadow.");
+    coverage.markImplemented(FunctionId::glVertexAttribL2d, "Double vertex attrib immediate (L2d) stored with CPU-side shadow.");
+    coverage.markImplemented(FunctionId::glVertexAttribL3d, "Double vertex attrib immediate (L3d) stored with CPU-side shadow.");
+    coverage.markImplemented(FunctionId::glVertexAttribL4d, "Double vertex attrib immediate (L4d) stored with CPU-side shadow.");
+    coverage.markImplemented(FunctionId::glVertexAttribL1dv, "Double vertex attrib immediate (L1dv) stored with CPU-side shadow.");
+    coverage.markImplemented(FunctionId::glVertexAttribL2dv, "Double vertex attrib immediate (L2dv) stored with CPU-side shadow.");
+    coverage.markImplemented(FunctionId::glVertexAttribL3dv, "Double vertex attrib immediate (L3dv) stored with CPU-side shadow.");
+    coverage.markImplemented(FunctionId::glVertexAttribL4dv, "Double vertex attrib immediate (L4dv) stored with CPU-side shadow.");
+    coverage.markImplemented(FunctionId::glVertexAttribLPointer, "Double-precision vertex attribute pointer (f64→f32 narrowing at draw).");
+    coverage.markImplemented(FunctionId::glGetVertexAttribLdv, "Double vertex attrib readback from CPU-side shadow.");
     coverage.markImplemented(FunctionId::glGetShaderPrecisionFormat, "Shader precision query returns Metal-appropriate ranges.");
 
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch

@@ -141,6 +141,9 @@ struct GLVertexAttributeState {
     GLuint divisor = 0;
     bool integer = false;
     bool longData = false;
+    // CPU-side shadow for glVertexAttribL{1,2,3,4}d[v] immediate values.
+    // Used by glGetVertexAttribLdv for lossless f64 readback.
+    GLdouble immediateDouble[4] = {0.0, 0.0, 0.0, 1.0};
 };
 
 struct GLVertexArrayBufferBinding {

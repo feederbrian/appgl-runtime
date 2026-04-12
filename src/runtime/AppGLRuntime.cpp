@@ -4077,6 +4077,101 @@ void APIENTRY glClearDepthf(GLfloat d) {
     Runtime::shared().recordBootstrapTrace("glClearDepthf(" + formatFloat(d) + ")");
 }
 
+// --- GL 4.1: Double-precision vertex attributes (Group 12) ---
+
+void APIENTRY glVertexAttribL1d(GLuint index, GLdouble x) {
+    auto* context = requireCurrentContext("glVertexAttribL1d");
+    if (context == nullptr) return;
+    const GLdouble v[1] = {x};
+    context->setVertexAttribLImmediate(index, 1, v);
+    markStateFunction(FunctionId::glVertexAttribL1d, "Double vertex attrib immediate (L1d) stored.");
+    Runtime::shared().recordBootstrapTrace("glVertexAttribL1d(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glVertexAttribL2d(GLuint index, GLdouble x, GLdouble y) {
+    auto* context = requireCurrentContext("glVertexAttribL2d");
+    if (context == nullptr) return;
+    const GLdouble v[2] = {x, y};
+    context->setVertexAttribLImmediate(index, 2, v);
+    markStateFunction(FunctionId::glVertexAttribL2d, "Double vertex attrib immediate (L2d) stored.");
+    Runtime::shared().recordBootstrapTrace("glVertexAttribL2d(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glVertexAttribL3d(GLuint index, GLdouble x, GLdouble y, GLdouble z) {
+    auto* context = requireCurrentContext("glVertexAttribL3d");
+    if (context == nullptr) return;
+    const GLdouble v[3] = {x, y, z};
+    context->setVertexAttribLImmediate(index, 3, v);
+    markStateFunction(FunctionId::glVertexAttribL3d, "Double vertex attrib immediate (L3d) stored.");
+    Runtime::shared().recordBootstrapTrace("glVertexAttribL3d(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glVertexAttribL4d(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w) {
+    auto* context = requireCurrentContext("glVertexAttribL4d");
+    if (context == nullptr) return;
+    const GLdouble v[4] = {x, y, z, w};
+    context->setVertexAttribLImmediate(index, 4, v);
+    markStateFunction(FunctionId::glVertexAttribL4d, "Double vertex attrib immediate (L4d) stored.");
+    Runtime::shared().recordBootstrapTrace("glVertexAttribL4d(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glVertexAttribL1dv(GLuint index, const GLdouble* v) {
+    auto* context = requireCurrentContext("glVertexAttribL1dv");
+    if (context == nullptr) return;
+    if (v == nullptr) { recordValidationError(context, "glVertexAttribL1dv", GL_INVALID_VALUE, "v must not be null"); return; }
+    context->setVertexAttribLImmediate(index, 1, v);
+    markStateFunction(FunctionId::glVertexAttribL1dv, "Double vertex attrib immediate (L1dv) stored.");
+    Runtime::shared().recordBootstrapTrace("glVertexAttribL1dv(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glVertexAttribL2dv(GLuint index, const GLdouble* v) {
+    auto* context = requireCurrentContext("glVertexAttribL2dv");
+    if (context == nullptr) return;
+    if (v == nullptr) { recordValidationError(context, "glVertexAttribL2dv", GL_INVALID_VALUE, "v must not be null"); return; }
+    context->setVertexAttribLImmediate(index, 2, v);
+    markStateFunction(FunctionId::glVertexAttribL2dv, "Double vertex attrib immediate (L2dv) stored.");
+    Runtime::shared().recordBootstrapTrace("glVertexAttribL2dv(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glVertexAttribL3dv(GLuint index, const GLdouble* v) {
+    auto* context = requireCurrentContext("glVertexAttribL3dv");
+    if (context == nullptr) return;
+    if (v == nullptr) { recordValidationError(context, "glVertexAttribL3dv", GL_INVALID_VALUE, "v must not be null"); return; }
+    context->setVertexAttribLImmediate(index, 3, v);
+    markStateFunction(FunctionId::glVertexAttribL3dv, "Double vertex attrib immediate (L3dv) stored.");
+    Runtime::shared().recordBootstrapTrace("glVertexAttribL3dv(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glVertexAttribL4dv(GLuint index, const GLdouble* v) {
+    auto* context = requireCurrentContext("glVertexAttribL4dv");
+    if (context == nullptr) return;
+    if (v == nullptr) { recordValidationError(context, "glVertexAttribL4dv", GL_INVALID_VALUE, "v must not be null"); return; }
+    context->setVertexAttribLImmediate(index, 4, v);
+    markStateFunction(FunctionId::glVertexAttribL4dv, "Double vertex attrib immediate (L4dv) stored.");
+    Runtime::shared().recordBootstrapTrace("glVertexAttribL4dv(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glVertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer) {
+    auto* context = requireCurrentContext("glVertexAttribLPointer");
+    if (context == nullptr) return;
+    if (!context->vertexAttribLPointer(index, size, type, stride, pointer)) {
+        // Error already pushed by context method.
+        return;
+    }
+    markStateFunction(FunctionId::glVertexAttribLPointer, "Double-precision vertex attribute pointer stored (f64→f32 at draw time).");
+    Runtime::shared().recordBootstrapTrace("glVertexAttribLPointer(index=" + std::to_string(index) + ", size=" + std::to_string(size) + ")");
+}
+
+void APIENTRY glGetVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params) {
+    auto* context = requireCurrentContext("glGetVertexAttribLdv");
+    if (context == nullptr) return;
+    if (!context->getVertexAttribLdv(index, pname, params)) {
+        return;
+    }
+    markStateFunction(FunctionId::glGetVertexAttribLdv, "Double vertex attrib readback returns CPU-side shadow.");
+    Runtime::shared().recordBootstrapTrace("glGetVertexAttribLdv(index=" + std::to_string(index) + ", pname=" + std::to_string(pname) + ")");
+}
+
 // --- GL 4.1: Shader precision (Group 13) ---
 
 void APIENTRY glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype, GLint* range, GLint* precision) {

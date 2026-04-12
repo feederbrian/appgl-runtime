@@ -2267,6 +2267,41 @@ public:
         GLdouble dget[4] = {};
         gl.glGetVertexAttribdv(idx, GL_CURRENT_VERTEX_ATTRIB, dget);
 
+        // Phase 4 Group 12: double-precision vertex attributes (GL 4.1).
+        // L-variant immediate setters with lossless f64 CPU-side shadow.
+        gl.glVertexAttribL1d(idx, 1.0);
+        const GLdouble ld1[1] = {1.0};
+        gl.glVertexAttribL1dv(idx, ld1);
+        gl.glVertexAttribL2d(idx, 1.0, 2.0);
+        const GLdouble ld2[2] = {1.0, 2.0};
+        gl.glVertexAttribL2dv(idx, ld2);
+        gl.glVertexAttribL3d(idx, 1.0, 2.0, 3.0);
+        const GLdouble ld3[3] = {1.0, 2.0, 3.0};
+        gl.glVertexAttribL3dv(idx, ld3);
+        gl.glVertexAttribL4d(idx, 1.0, 2.0, 3.0, 4.0);
+        const GLdouble ld4[4] = {1.0, 2.0, 3.0, 4.0};
+        gl.glVertexAttribL4dv(idx, ld4);
+        // Verify lossless readback via glGetVertexAttribLdv.
+        GLdouble ldReadback[4] = {};
+        gl.glGetVertexAttribLdv(idx, GL_CURRENT_VERTEX_ATTRIB, ldReadback);
+        expectCondition(ldReadback[0] == 1.0 && ldReadback[1] == 2.0 &&
+                        ldReadback[2] == 3.0 && ldReadback[3] == 4.0,
+                        "glGetVertexAttribLdv round-trips L4dv values losslessly");
+        // glVertexAttribLPointer requires a bound VAO + VBO (core profile).
+        GLuint dummyVAO = 0;
+        gl.glGenVertexArrays(1, &dummyVAO);
+        gl.glBindVertexArray(dummyVAO);
+        GLuint dummyVBO = 0;
+        gl.glGenBuffers(1, &dummyVBO);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, dummyVBO);
+        gl.glBufferData(GL_ARRAY_BUFFER, 64, nullptr, GL_STATIC_DRAW);
+        gl.glVertexAttribLPointer(idx, 2, GL_DOUBLE, 0, nullptr);
+        expectGLError(gl, GL_NO_ERROR, "glVertexAttribLPointer accepts GL_DOUBLE with bound VAO+VBO");
+        gl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gl.glBindVertexArray(0);
+        gl.glDeleteBuffers(1, &dummyVBO);
+        gl.glDeleteVertexArrays(1, &dummyVAO);
+
         // Instanced / multi-draw / base-vertex stubs.
         gl.glPrimitiveRestartIndex(0xFFFFu);
         gl.glDrawArraysInstanced(GL_TRIANGLES, 0, 0, 0);
@@ -2305,6 +2340,7 @@ public:
             FunctionId::glDrawRangeElementsBaseVertex,
             FunctionId::glGetVertexAttribIiv,
             FunctionId::glGetVertexAttribIuiv,
+            FunctionId::glGetVertexAttribLdv,
             FunctionId::glGetVertexAttribdv,
             FunctionId::glMultiDrawArrays,
             FunctionId::glMultiDrawElements,
@@ -2374,6 +2410,15 @@ public:
             FunctionId::glVertexAttribP3uiv,
             FunctionId::glVertexAttribP4ui,
             FunctionId::glVertexAttribP4uiv,
+            FunctionId::glVertexAttribL1d,
+            FunctionId::glVertexAttribL1dv,
+            FunctionId::glVertexAttribL2d,
+            FunctionId::glVertexAttribL2dv,
+            FunctionId::glVertexAttribL3d,
+            FunctionId::glVertexAttribL3dv,
+            FunctionId::glVertexAttribL4d,
+            FunctionId::glVertexAttribL4dv,
+            FunctionId::glVertexAttribLPointer,
         };
     }
 };

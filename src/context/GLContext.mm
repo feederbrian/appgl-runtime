@@ -753,6 +753,10 @@ struct GLContext::Impl {
         }
         state->setViewport(viewportX, viewportY, viewportWidth, viewportHeight);
         extensionsString = capabilities != nullptr ? capabilities->extensionString() : "";
+        // Initialize per-context immediate double attribs to {0,0,0,1} (OpenGL default).
+        for (auto& slot : immediateDoubleAttribs) {
+            slot = {0.0, 0.0, 0.0, 1.0};
+        }
     }
 
     void releaseBufferStorage(GLBufferObject& object) {
@@ -1869,6 +1873,10 @@ struct GLContext::Impl {
     std::unordered_map<std::uint64_t, std::string> objectLabels;
     std::unordered_map<const void*, std::string> pointerLabels;
     std::deque<GLenum> errors;
+    // Per-context immediate double vertex attribute values (GL 4.1 glVertexAttribL*).
+    // Indexed by attribute slot; each stores 4 doubles (default {0,0,0,1}).
+    static constexpr std::size_t kMaxImmediateDoubleAttribs = 16;
+    std::array<std::array<GLdouble, 4>, kMaxImmediateDoubleAttribs> immediateDoubleAttribs{};
     std::string vendorString = "AppGL";
     std::string rendererString = "AppGL on Metal";
     std::string versionString;
@@ -3090,6 +3098,84 @@ bool GLContext::getVertexAttribPointer(GLuint index, GLenum pname, void** pointe
         return false;
     }
     *pointer = reinterpret_cast<void*>(vertexArray->attributes[index].pointer);
+    return true;
+}
+
+// --- GL 4.1: Double-precision vertex attributes (Group 12) ---
+
+bool GLContext::vertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer) {
+    // GL spec: type must be GL_DOUBLE for glVertexAttribLPointer.
+    if (size < 1 || size > 4 || stride < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (type != GL_DOUBLE) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr || index >= vertexArray->attributes.size()) {
+        pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    const GLuint buffer = impl_->state->boundBuffer(GL_ARRAY_BUFFER);
+    if (buffer == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    auto& attribute = vertexArray->attributes[index];
+    attribute.size = size;
+    attribute.type = type;
+    attribute.normalized = GL_FALSE;
+    attribute.stride = stride;
+    attribute.pointer = reinterpret_cast<std::uintptr_t>(pointer);
+    attribute.buffer = buffer;
+    attribute.integer = false;
+    attribute.longData = true;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
+bool GLContext::setVertexAttribLImmediate(GLuint index, GLint count, const GLdouble* values) {
+    // Immediate vertex attributes are per-context state (not per-VAO).
+    if (index >= impl_->kMaxImmediateDoubleAttribs) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    auto& slot = impl_->immediateDoubleAttribs[index];
+    slot[0] = count >= 1 ? values[0] : 0.0;
+    slot[1] = count >= 2 ? values[1] : 0.0;
+    slot[2] = count >= 3 ? values[2] : 0.0;
+    slot[3] = count >= 4 ? values[3] : 1.0;
+    return true;
+}
+
+bool GLContext::getVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (pname == GL_CURRENT_VERTEX_ATTRIB) {
+        // Return the stored per-context immediate double values (lossless).
+        if (index >= impl_->kMaxImmediateDoubleAttribs) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const auto& slot = impl_->immediateDoubleAttribs[index];
+        params[0] = slot[0];
+        params[1] = slot[1];
+        params[2] = slot[2];
+        params[3] = slot[3];
+        return true;
+    }
+    // For non-CURRENT_VERTEX_ATTRIB pnames, delegate to the integer getter and widen.
+    GLint values[4] = {};
+    if (!getVertexAttribInteger(index, pname, values)) {
+        return false;
+    }
+    params[0] = static_cast<GLdouble>(values[0]);
     return true;
 }
 

@@ -261,6 +261,17 @@ void APIENTRY glGetDoublei_v(GLenum target, GLuint index, GLdouble* data);
 void APIENTRY glClearDepthf(GLfloat d);
 // GL 4.1 — shader precision.
 void APIENTRY glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype, GLint* range, GLint* precision);
+// GL 4.1 — double-precision vertex attributes (f64→f32 narrowing with CPU-side double shadow).
+void APIENTRY glVertexAttribL1d(GLuint index, GLdouble x);
+void APIENTRY glVertexAttribL2d(GLuint index, GLdouble x, GLdouble y);
+void APIENTRY glVertexAttribL3d(GLuint index, GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glVertexAttribL4d(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w);
+void APIENTRY glVertexAttribL1dv(GLuint index, const GLdouble* v);
+void APIENTRY glVertexAttribL2dv(GLuint index, const GLdouble* v);
+void APIENTRY glVertexAttribL3dv(GLuint index, const GLdouble* v);
+void APIENTRY glVertexAttribL4dv(GLuint index, const GLdouble* v);
+void APIENTRY glVertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer);
+void APIENTRY glGetVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params);
 }  // namespace impl
 
 class Runtime {
