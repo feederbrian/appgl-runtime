@@ -2840,6 +2840,49 @@ public:
         gl.glBeginTransformFeedback(GL_TRIANGLES);
         gl.glEndTransformFeedback();
 
+        // Phase 4 Group 4: Transform feedback objects (gen/delete/is/bind/pause/resume/draw).
+        {
+            GLuint tfObjs[2] = {0, 0};
+            gl.glGenTransformFeedbacks(2, tfObjs);
+            expectCondition(tfObjs[0] != 0 && tfObjs[1] != 0, "glGenTransformFeedbacks returns non-zero handles");
+            expectGLError(gl, GL_NO_ERROR, "glGenTransformFeedbacks no error");
+
+            expectCondition(gl.glIsTransformFeedback(tfObjs[0]) == GL_TRUE, "TF object exists after gen");
+            expectCondition(gl.glIsTransformFeedback(99999) == GL_FALSE, "non-existent TF returns GL_FALSE");
+
+            gl.glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, tfObjs[0]);
+            expectGLError(gl, GL_NO_ERROR, "glBindTransformFeedback no error");
+            gl.glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+            expectGLError(gl, GL_NO_ERROR, "glBindTransformFeedback(0) unbind no error");
+
+            gl.glPauseTransformFeedback();
+            expectGLError(gl, GL_NO_ERROR, "glPauseTransformFeedback no error");
+            gl.glResumeTransformFeedback();
+            expectGLError(gl, GL_NO_ERROR, "glResumeTransformFeedback no error");
+
+            // Draw stubs (0 primitives — no TF capture active).
+            gl.glDrawTransformFeedback(GL_TRIANGLES, tfObjs[0]);
+            expectGLError(gl, GL_NO_ERROR, "glDrawTransformFeedback no error");
+            gl.glDrawTransformFeedbackStream(GL_TRIANGLES, tfObjs[0], 0);
+            expectGLError(gl, GL_NO_ERROR, "glDrawTransformFeedbackStream no error");
+
+            gl.glDeleteTransformFeedbacks(2, tfObjs);
+            expectGLError(gl, GL_NO_ERROR, "glDeleteTransformFeedbacks no error");
+            expectCondition(gl.glIsTransformFeedback(tfObjs[0]) == GL_FALSE, "TF object gone after delete");
+        }
+
+        // Phase 4 Group 6: Indirect drawing stubs.
+        {
+            // DrawArraysIndirect with client-memory indirect struct.
+            struct { GLuint count, instanceCount, first, baseInstance; } indirectArrays = {0, 1, 0, 0};
+            gl.glDrawArraysIndirect(GL_TRIANGLES, &indirectArrays);
+            expectGLError(gl, GL_NO_ERROR, "glDrawArraysIndirect no error");
+
+            struct { GLuint count, instanceCount, firstIndex, baseVertex; GLuint baseInstance; } indirectElements = {0, 1, 0, 0, 0};
+            gl.glDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, &indirectElements);
+            expectGLError(gl, GL_NO_ERROR, "glDrawElementsIndirect no error");
+        }
+
         gl.glDeleteProgram(program);
 
         while (gl.glGetError() != GL_NO_ERROR) {
@@ -2860,6 +2903,18 @@ public:
             FunctionId::glEndTransformFeedback,
             FunctionId::glGetTransformFeedbackVarying,
             FunctionId::glTransformFeedbackVaryings,
+            // Phase 4 Group 4: transform feedback objects.
+            FunctionId::glGenTransformFeedbacks,
+            FunctionId::glDeleteTransformFeedbacks,
+            FunctionId::glIsTransformFeedback,
+            FunctionId::glBindTransformFeedback,
+            FunctionId::glPauseTransformFeedback,
+            FunctionId::glResumeTransformFeedback,
+            FunctionId::glDrawTransformFeedback,
+            FunctionId::glDrawTransformFeedbackStream,
+            // Phase 4 Group 6: indirect drawing.
+            FunctionId::glDrawArraysIndirect,
+            FunctionId::glDrawElementsIndirect,
         };
     }
 };

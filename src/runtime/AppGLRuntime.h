@@ -349,6 +349,18 @@ void APIENTRY glGetActiveSubroutineName(GLuint program, GLenum shadertype, GLuin
 void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GLuint* indices);
 void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuint* params);
 void APIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pname, GLint* values);
+// GL 4.0 — transform feedback objects (Group 4).
+void APIENTRY glGenTransformFeedbacks(GLsizei n, GLuint* ids);
+void APIENTRY glDeleteTransformFeedbacks(GLsizei n, const GLuint* ids);
+GLboolean APIENTRY glIsTransformFeedback(GLuint id);
+void APIENTRY glBindTransformFeedback(GLenum target, GLuint id);
+void APIENTRY glPauseTransformFeedback(void);
+void APIENTRY glResumeTransformFeedback(void);
+void APIENTRY glDrawTransformFeedback(GLenum mode, GLuint id);
+void APIENTRY glDrawTransformFeedbackStream(GLenum mode, GLuint id, GLuint stream);
+// GL 4.0 — indirect drawing (Group 6).
+void APIENTRY glDrawArraysIndirect(GLenum mode, const void* indirect);
+void APIENTRY glDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect);
 }  // namespace impl
 
 class Runtime {

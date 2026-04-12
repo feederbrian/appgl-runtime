@@ -141,4 +141,16 @@ if(APPGL_VENDOR_THIRD_PARTY)
 
   add_subdirectory(third_party/glslang EXCLUDE_FROM_ALL)
   add_subdirectory(third_party/SPIRV-Cross EXCLUDE_FROM_ALL)
+
+  foreach(target AppGL AppGL_static)
+    target_compile_definitions(${target} PRIVATE APPGL_HAS_SHADER_COMPILER=1)
+    target_link_libraries(${target} PRIVATE
+      glslang
+      glslang-default-resource-limits
+      SPIRV
+      spirv-cross-core
+      spirv-cross-glsl
+      spirv-cross-msl
+    )
+  endforeach()
 endif()

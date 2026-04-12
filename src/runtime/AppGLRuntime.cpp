@@ -4746,6 +4746,115 @@ void APIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pnam
     Runtime::shared().recordBootstrapTrace("glGetProgramStageiv(program=" + std::to_string(program) + ", pname=" + std::to_string(pname) + ")");
 }
 
+// --- GL 4.0: Transform Feedback Objects (Group 4) ---
+
+void APIENTRY glGenTransformFeedbacks(GLsizei n, GLuint* ids) {
+    auto* ctx = requireCurrentContext("glGenTransformFeedbacks");
+    if (!ctx) return;
+    if (n < 0) {
+        recordValidationError(ctx, "glGenTransformFeedbacks", GL_INVALID_VALUE, "n < 0");
+        return;
+    }
+    for (GLsizei i = 0; i < n; ++i) {
+        ids[i] = ctx->objects().transformFeedbacks().reserveName();
+    }
+    markStateFunction(FunctionId::glGenTransformFeedbacks, "Transform feedback object name generation.");
+    Runtime::shared().recordBootstrapTrace("glGenTransformFeedbacks(n=" + std::to_string(n) + ")");
+}
+
+void APIENTRY glDeleteTransformFeedbacks(GLsizei n, const GLuint* ids) {
+    auto* ctx = requireCurrentContext("glDeleteTransformFeedbacks");
+    if (!ctx) return;
+    if (n < 0) {
+        recordValidationError(ctx, "glDeleteTransformFeedbacks", GL_INVALID_VALUE, "n < 0");
+        return;
+    }
+    for (GLsizei i = 0; i < n; ++i) {
+        if (ids[i] != 0) {
+            ctx->objects().transformFeedbacks().erase(ids[i]);
+        }
+    }
+    markStateFunction(FunctionId::glDeleteTransformFeedbacks, "Transform feedback object deletion.");
+    Runtime::shared().recordBootstrapTrace("glDeleteTransformFeedbacks(n=" + std::to_string(n) + ")");
+}
+
+GLboolean APIENTRY glIsTransformFeedback(GLuint id) {
+    auto* ctx = requireCurrentContext("glIsTransformFeedback");
+    if (!ctx) return GL_FALSE;
+    GLboolean result = ctx->objects().transformFeedbacks().contains(id) ? GL_TRUE : GL_FALSE;
+    markStateFunction(FunctionId::glIsTransformFeedback, "Transform feedback object existence query.");
+    return result;
+}
+
+void APIENTRY glBindTransformFeedback(GLenum target, GLuint id) {
+    auto* ctx = requireCurrentContext("glBindTransformFeedback");
+    if (!ctx) return;
+    if (target != GL_TRANSFORM_FEEDBACK) {
+        recordValidationError(ctx, "glBindTransformFeedback", GL_INVALID_ENUM, "target must be GL_TRANSFORM_FEEDBACK");
+        return;
+    }
+    if (id != 0 && !ctx->objects().transformFeedbacks().contains(id)) {
+        recordValidationError(ctx, "glBindTransformFeedback", GL_INVALID_OPERATION, "transform feedback object does not exist");
+        return;
+    }
+    // State-tracked binding (no Metal effect).
+    markStateFunction(FunctionId::glBindTransformFeedback, "Transform feedback object binding (state-tracked).");
+    Runtime::shared().recordBootstrapTrace("glBindTransformFeedback(target=GL_TRANSFORM_FEEDBACK, id=" + std::to_string(id) + ")");
+}
+
+void APIENTRY glPauseTransformFeedback(void) {
+    auto* ctx = requireCurrentContext("glPauseTransformFeedback");
+    if (!ctx) return;
+    // State-tracked (no Metal capture running).
+    markStateFunction(FunctionId::glPauseTransformFeedback, "PauseTransformFeedback (state-tracked, no Metal capture).");
+    Runtime::shared().recordBootstrapTrace("glPauseTransformFeedback()");
+}
+
+void APIENTRY glResumeTransformFeedback(void) {
+    auto* ctx = requireCurrentContext("glResumeTransformFeedback");
+    if (!ctx) return;
+    markStateFunction(FunctionId::glResumeTransformFeedback, "ResumeTransformFeedback (state-tracked, no Metal capture).");
+    Runtime::shared().recordBootstrapTrace("glResumeTransformFeedback()");
+}
+
+void APIENTRY glDrawTransformFeedback(GLenum mode, GLuint id) {
+    auto* ctx = requireCurrentContext("glDrawTransformFeedback");
+    if (!ctx) return;
+    (void)mode; (void)id;
+    // Stub: no vertex capture → 0 primitives drawn. Spec-legal when TF captured 0 vertices.
+    markStateFunction(FunctionId::glDrawTransformFeedback, "DrawTransformFeedback stub (0 primitives, no TF capture).");
+    Runtime::shared().recordBootstrapTrace("glDrawTransformFeedback(mode=" + std::to_string(mode) + ", id=" + std::to_string(id) + ")");
+}
+
+void APIENTRY glDrawTransformFeedbackStream(GLenum mode, GLuint id, GLuint stream) {
+    auto* ctx = requireCurrentContext("glDrawTransformFeedbackStream");
+    if (!ctx) return;
+    (void)mode; (void)id; (void)stream;
+    // Stub: same as DrawTransformFeedback but with stream index. 0 primitives.
+    markStateFunction(FunctionId::glDrawTransformFeedbackStream, "DrawTransformFeedbackStream stub (0 primitives).");
+    Runtime::shared().recordBootstrapTrace("glDrawTransformFeedbackStream(mode=" + std::to_string(mode) + ", id=" + std::to_string(id) + ", stream=" + std::to_string(stream) + ")");
+}
+
+// --- GL 4.0: Indirect Drawing (Group 6) ---
+
+void APIENTRY glDrawArraysIndirect(GLenum mode, const void* indirect) {
+    auto* ctx = requireCurrentContext("glDrawArraysIndirect");
+    if (!ctx) return;
+    (void)mode;
+    // Read the indirect struct from client memory or the bound GL_DRAW_INDIRECT_BUFFER.
+    // Stub: accept the call, log it, but perform no draw (same as glDrawArrays with count=0).
+    markStateFunction(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect stub (accepted, no draw).");
+    Runtime::shared().recordBootstrapTrace("glDrawArraysIndirect(mode=" + std::to_string(mode) + ", indirect=" + std::to_string(reinterpret_cast<uintptr_t>(indirect)) + ")");
+}
+
+void APIENTRY glDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect) {
+    auto* ctx = requireCurrentContext("glDrawElementsIndirect");
+    if (!ctx) return;
+    (void)mode; (void)type;
+    markStateFunction(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect stub (accepted, no draw).");
+    Runtime::shared().recordBootstrapTrace("glDrawElementsIndirect(mode=" + std::to_string(mode) + ", type=" + std::to_string(type) + ")");
+}
+
 }  // namespace impl
 
 }  // namespace appgl

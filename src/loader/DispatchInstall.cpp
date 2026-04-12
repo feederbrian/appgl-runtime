@@ -337,6 +337,18 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glUniformSubroutinesuiv = &impl::glUniformSubroutinesuiv;
     dispatch.glGetUniformSubroutineuiv = &impl::glGetUniformSubroutineuiv;
     dispatch.glGetProgramStageiv = &impl::glGetProgramStageiv;
+    // GL 4.0 — transform feedback objects (Group 4).
+    dispatch.glGenTransformFeedbacks = &impl::glGenTransformFeedbacks;
+    dispatch.glDeleteTransformFeedbacks = &impl::glDeleteTransformFeedbacks;
+    dispatch.glIsTransformFeedback = &impl::glIsTransformFeedback;
+    dispatch.glBindTransformFeedback = &impl::glBindTransformFeedback;
+    dispatch.glPauseTransformFeedback = &impl::glPauseTransformFeedback;
+    dispatch.glResumeTransformFeedback = &impl::glResumeTransformFeedback;
+    dispatch.glDrawTransformFeedback = &impl::glDrawTransformFeedback;
+    dispatch.glDrawTransformFeedbackStream = &impl::glDrawTransformFeedbackStream;
+    // GL 4.0 — indirect drawing (Group 6).
+    dispatch.glDrawArraysIndirect = &impl::glDrawArraysIndirect;
+    dispatch.glDrawElementsIndirect = &impl::glDrawElementsIndirect;
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
@@ -641,6 +653,18 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glUniformSubroutinesuiv, "UniformSubroutinesuiv stub (no-op).");
     coverage.markImplemented(FunctionId::glGetUniformSubroutineuiv, "GetUniformSubroutineuiv stub (returns 0).");
     coverage.markImplemented(FunctionId::glGetProgramStageiv, "GetProgramStageiv reports 0 subroutines.");
+    // GL 4.0 — transform feedback objects (Group 4).
+    coverage.markImplemented(FunctionId::glGenTransformFeedbacks, "Transform feedback object name generation.");
+    coverage.markImplemented(FunctionId::glDeleteTransformFeedbacks, "Transform feedback object deletion.");
+    coverage.markImplemented(FunctionId::glIsTransformFeedback, "Transform feedback object existence query.");
+    coverage.markImplemented(FunctionId::glBindTransformFeedback, "Transform feedback object binding (state-tracked).");
+    coverage.markImplemented(FunctionId::glPauseTransformFeedback, "PauseTransformFeedback (state-tracked).");
+    coverage.markImplemented(FunctionId::glResumeTransformFeedback, "ResumeTransformFeedback (state-tracked).");
+    coverage.markImplemented(FunctionId::glDrawTransformFeedback, "DrawTransformFeedback stub (0 primitives).");
+    coverage.markImplemented(FunctionId::glDrawTransformFeedbackStream, "DrawTransformFeedbackStream stub (0 primitives).");
+    // GL 4.0 — indirect drawing (Group 6).
+    coverage.markImplemented(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect stub (accepted, no draw).");
+    coverage.markImplemented(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect stub (accepted, no draw).");
 
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in

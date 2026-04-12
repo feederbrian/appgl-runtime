@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../../include/AppGL/glcorearb.h"
+#include "../shader/ShaderTranslator.h"
 
 namespace appgl {
 
@@ -215,6 +216,23 @@ struct GLProgramObject {
     std::vector<GLProgramAttributeInfo> attributes;
     std::unordered_map<GLint, GLProgramUniformValue> uniformValues;
     std::unordered_map<std::string, GLuint> requestedAttribLocations;
+
+    // Translated shader pipeline (populated at link time when the shader
+    // compiler is available).  The MSL sources are consumed by MetalFrameGraph
+    // to create MTLRenderPipelineState on first draw.
+    std::string vertexMSL;
+    std::string fragmentMSL;
+    ShaderReflection vertexReflection;
+    ShaderReflection fragmentReflection;
+    bool hasTranslatedPipeline = false;
+
+    // Opaque pipeline state handle, owned by MetalFrameGraph.  Stored here so
+    // repeated draws skip pipeline creation.  Type-erased to avoid ObjC in this
+    // header — cast to id<MTLRenderPipelineState> in .mm files.
+    void* metalPipelineState = nullptr;
+    // Track which pixel format the cached pipeline was created for, so we
+    // can invalidate if the render target format changes.
+    std::uint32_t metalPipelineColorFormat = 0;
 };
 
 struct GLQueryObject {
@@ -230,6 +248,8 @@ struct GLSyncObject {
 
 struct GLTransformFeedbackObject {
     bool active = false;
+    bool paused = false;
+    GLsizei capturedPrimitives = 0;  // for glDrawTransformFeedback
 };
 
 struct GLProgramPipelineObject {

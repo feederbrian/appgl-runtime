@@ -4,6 +4,7 @@
 #include "../objects/GLObjectStore.h"
 #include "../runtime/AppGLRuntime.h"
 #include "../shader/GLSLReflection.h"
+#include "../shader/ShaderTranslator.h"
 #include "../state/GLStateTracker.h"
 #include "../state/IndexExpansion.h"
 #include "../state/MetalVertexDescriptorBuilder.h"
@@ -4585,6 +4586,69 @@ bool GLContext::linkProgram(GLuint program) {
 
     programObject->linked = true;
     programObject->linkLog = "ok";
+
+    // Attempt GLSL→SPIR-V→MSL translation for the GPU pipeline. This is
+    // best-effort: if it fails the program still links and falls back to the
+    // hardcoded solid-color draw path.
+    programObject->hasTranslatedPipeline = false;
+    programObject->vertexMSL.clear();
+    programObject->fragmentMSL.clear();
+    programObject->metalPipelineState = nullptr;
+
+    {
+        ShaderTranslator translator;
+        BindingMap bindings;
+        std::string vertexSource, fragmentSource;
+        GLenum vertexStage = 0, fragmentStage = 0;
+
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
+            if (shaderObject == nullptr) continue;
+            if (shaderObject->stage == GL_VERTEX_SHADER) {
+                vertexSource = shaderObject->source;
+                vertexStage = shaderObject->stage;
+            } else if (shaderObject->stage == GL_FRAGMENT_SHADER) {
+                fragmentSource = shaderObject->source;
+                fragmentStage = shaderObject->stage;
+            }
+        }
+
+        if (!vertexSource.empty() && !fragmentSource.empty()) {
+            std::string compileLog;
+            auto vertexSPIRV = translator.compileGLSL(vertexSource, vertexStage, 330, &compileLog);
+            NSLog(@"[GL] linkProgram: vertex SPIRV %s (%zu words) log: %s",
+                  vertexSPIRV.empty() ? "FAILED" : "ok", vertexSPIRV.size(), compileLog.c_str());
+            auto fragmentSPIRV = translator.compileGLSL(fragmentSource, fragmentStage, 330, &compileLog);
+            NSLog(@"[GL] linkProgram: fragment SPIRV %s (%zu words) log: %s",
+                  fragmentSPIRV.empty() ? "FAILED" : "ok", fragmentSPIRV.size(), compileLog.c_str());
+
+            if (!vertexSPIRV.empty() && !fragmentSPIRV.empty()) {
+                std::string mslLog;
+                std::string vertMSL = translator.spirvToMSL(vertexSPIRV.data(), vertexSPIRV.size(), bindings, &mslLog);
+                NSLog(@"[GL] linkProgram: vertex MSL %s (%zu chars) log: %s",
+                      vertMSL.empty() ? "FAILED" : "ok", vertMSL.size(), mslLog.c_str());
+                std::string fragMSL = translator.spirvToMSL(fragmentSPIRV.data(), fragmentSPIRV.size(), bindings, &mslLog);
+                NSLog(@"[GL] linkProgram: fragment MSL %s (%zu chars) log: %s",
+                      fragMSL.empty() ? "FAILED" : "ok", fragMSL.size(), mslLog.c_str());
+
+                if (!vertMSL.empty() && !fragMSL.empty()) {
+                    programObject->vertexMSL = std::move(vertMSL);
+                    programObject->fragmentMSL = std::move(fragMSL);
+
+                    // Reflect vertex stage for attribute layout.
+                    programObject->vertexReflection = translator.reflect(
+                        vertexSPIRV.data(), vertexSPIRV.size(), bindings, nullptr);
+                    programObject->fragmentReflection = translator.reflect(
+                        fragmentSPIRV.data(), fragmentSPIRV.size(), bindings, nullptr);
+                    programObject->hasTranslatedPipeline = true;
+                    NSLog(@"[GL] linkProgram: *** TRANSLATION SUCCEEDED *** vertexInputs=%zu uniformBlocks=%zu",
+                          programObject->vertexReflection.vertexInputs.size(),
+                          programObject->vertexReflection.uniformBlocks.size());
+                }
+            }
+        }
+    }
+
     return true;
 }
 
@@ -5306,24 +5370,88 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // the draw would run against an uncleared default attachment.
     impl_->encodePendingWork();
 
+    // Try the translated shader pipeline first (GPU-side vertex processing).
+    const GLuint programName = impl_->state->currentProgram();
+    GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+    NSLog(@"[GL] drawArrays: mode=0x%X count=%d program=%u hasTranslated=%d",
+          mode, count, programName, program ? (int)program->hasTranslatedPipeline : -1);
+    if (program != nullptr && program->hasTranslatedPipeline) {
+        const GLuint vaoName = impl_->state->boundVertexArray();
+        GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        if (vao != nullptr && !vao->attributes.empty()) {
+            const auto& posAttr = vao->attributes[0];
+            GLBufferObject* vbo = (posAttr.buffer != 0) ? impl_->objects->buffers().get(posAttr.buffer) : nullptr;
+            if (vbo != nullptr && !vbo->shadowBytes.empty()) {
+                const std::size_t posStride = posAttr.stride > 0
+                    ? static_cast<std::size_t>(posAttr.stride)
+                    : sizeof(GLfloat) * static_cast<std::size_t>(posAttr.size);
+                const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
+                const std::size_t startOff = static_cast<std::size_t>(posAttr.pointer) + firstOff;
+
+                if (startOff <= vbo->shadowBytes.size()) {
+                    TranslatedDrawInfo tdi;
+                    tdi.mode = mode;
+                    tdi.vertexCount = count;
+                    tdi.vertexData = vbo->shadowBytes.data() + startOff;
+                    tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
+                    tdi.vertexStride = posStride;
+                    tdi.depthTestEnabled = impl_->state->isEnabled(GL_DEPTH_TEST);
+                    tdi.depthFunc = impl_->state->depthState().func;
+                    tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);
+                    tdi.cullFaceMode = impl_->state->rasterState().cullFaceMode;
+                    tdi.frontFace = impl_->state->rasterState().frontFace;
+                    tdi.vertexMSL = &program->vertexMSL;
+                    tdi.fragmentMSL = &program->fragmentMSL;
+                    tdi.vertexReflection = &program->vertexReflection;
+                    tdi.fragmentReflection = &program->fragmentReflection;
+                    tdi.pipelineStateOut = &program->metalPipelineState;
+                    tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+
+                    // Pack all uniform values into a single buffer matching the
+                    // SPIRV-Cross push-constant struct layout.  For simple programs
+                    // the uniforms are laid out in declaration order.
+                    for (const auto& uniform : program->uniforms) {
+                        auto it = program->uniformValues.find(uniform.location);
+                        if (it != program->uniformValues.end()) {
+                            const auto& val = it->second;
+                            if (!val.floats.empty()) {
+                                tdi.uniformBuffer.insert(tdi.uniformBuffer.end(),
+                                    val.floats.begin(), val.floats.end());
+                            } else if (!val.ints.empty()) {
+                                for (GLint v : val.ints) {
+                                    float fv;
+                                    std::memcpy(&fv, &v, sizeof(float));
+                                    tdi.uniformBuffer.push_back(fv);
+                                }
+                            }
+                        }
+                    }
+
+                    const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+                    if (ok) {
+                        return true;
+                    }
+                    // Fall through to solid-color path on failure.
+                }
+            }
+        }
+    }
+
+    // Fallback: solid-color draw path (hardcoded appgl_solid pipeline).
     SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawArrays");
     if (!setup.ok) {
-        // Unsupported configuration for the MVP path — record a debug
-        // message and no-op so scenes can continue running.
         emitDebugMessage(
             GL_DEBUG_SOURCE_API,
             GL_DEBUG_TYPE_OTHER,
             0,
             GL_DEBUG_SEVERITY_LOW,
-            "glDrawArrays: draw skipped (Phase A Group 7 only supports vec3 position + uColor)"
+            "glDrawArrays: draw skipped (no translated pipeline and solid-color path unsupported)"
         );
         return false;
     }
 
     setup.info.vertexCount = count;
     setup.info.baseVertex = first;
-    // Advance the position pointer by the baseVertex offset so the encoder can
-    // upload exactly the vertices we want.
     const std::size_t stride = setup.info.positionStride;
     const std::size_t firstOffset = static_cast<std::size_t>(first) * stride;
     const std::size_t startOffset = static_cast<std::size_t>(setup.vertexArray->attributes[0].pointer) + firstOffset;
@@ -5375,21 +5503,14 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
     impl_->encodePendingWork();
 
-    SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawElements");
-    if (!setup.ok) {
-        emitDebugMessage(
-            GL_DEBUG_SOURCE_API,
-            GL_DEBUG_TYPE_OTHER,
-            0,
-            GL_DEBUG_SEVERITY_LOW,
-            "glDrawElements: draw skipped (Phase A Group 7 only supports vec3 position + uColor)"
-        );
+    // Resolve element buffer early — needed by both translated and solid paths.
+    const GLuint vaoName = impl_->state->boundVertexArray();
+    GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+    if (vao == nullptr) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
-
-    // Pull the element buffer data out of the VAO's element array binding so
-    // we can hand raw bytes to MetalFrameGraph.
-    const GLuint elementBufferName = setup.vertexArray->elementArrayBuffer;
+    const GLuint elementBufferName = vao->elementArrayBuffer;
     if (elementBufferName == 0) {
         pushError(GL_INVALID_OPERATION);
         return false;
@@ -5421,6 +5542,81 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         expanded = std::move(result.bytes);
         effectiveType = result.outputType;
         effectivePtr = expanded.data();
+    }
+
+    // Try the translated shader pipeline first (GPU-side vertex processing).
+    const GLuint programName = impl_->state->currentProgram();
+    GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+    if (program != nullptr && program->hasTranslatedPipeline) {
+        if (!vao->attributes.empty()) {
+            const auto& posAttr = vao->attributes[0];
+            GLBufferObject* vbo = (posAttr.buffer != 0) ? impl_->objects->buffers().get(posAttr.buffer) : nullptr;
+            if (vbo != nullptr && !vbo->shadowBytes.empty()) {
+                const std::size_t posStride = posAttr.stride > 0
+                    ? static_cast<std::size_t>(posAttr.stride)
+                    : sizeof(GLfloat) * static_cast<std::size_t>(posAttr.size);
+                const std::size_t startOff = static_cast<std::size_t>(posAttr.pointer);
+
+                if (startOff <= vbo->shadowBytes.size()) {
+                    TranslatedDrawInfo tdi;
+                    tdi.mode = mode;
+                    tdi.vertexCount = count;
+                    tdi.vertexData = vbo->shadowBytes.data() + startOff;
+                    tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
+                    tdi.vertexStride = posStride;
+                    tdi.indices = effectivePtr;
+                    tdi.indexCount = count;
+                    tdi.indexType = effectiveType;
+                    tdi.depthTestEnabled = impl_->state->isEnabled(GL_DEPTH_TEST);
+                    tdi.depthFunc = impl_->state->depthState().func;
+                    tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);
+                    tdi.cullFaceMode = impl_->state->rasterState().cullFaceMode;
+                    tdi.frontFace = impl_->state->rasterState().frontFace;
+                    tdi.vertexMSL = &program->vertexMSL;
+                    tdi.fragmentMSL = &program->fragmentMSL;
+                    tdi.vertexReflection = &program->vertexReflection;
+                    tdi.fragmentReflection = &program->fragmentReflection;
+                    tdi.pipelineStateOut = &program->metalPipelineState;
+                    tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+
+                    for (const auto& uniform : program->uniforms) {
+                        auto it = program->uniformValues.find(uniform.location);
+                        if (it != program->uniformValues.end()) {
+                            const auto& val = it->second;
+                            if (!val.floats.empty()) {
+                                tdi.uniformBuffer.insert(tdi.uniformBuffer.end(),
+                                    val.floats.begin(), val.floats.end());
+                            } else if (!val.ints.empty()) {
+                                for (GLint v : val.ints) {
+                                    float fv;
+                                    std::memcpy(&fv, &v, sizeof(float));
+                                    tdi.uniformBuffer.push_back(fv);
+                                }
+                            }
+                        }
+                    }
+
+                    const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+                    if (ok) {
+                        return true;
+                    }
+                    // Fall through to solid-color path on failure.
+                }
+            }
+        }
+    }
+
+    // Fallback: solid-color draw path (hardcoded appgl_solid pipeline).
+    SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawElements");
+    if (!setup.ok) {
+        emitDebugMessage(
+            GL_DEBUG_SOURCE_API,
+            GL_DEBUG_TYPE_OTHER,
+            0,
+            GL_DEBUG_SEVERITY_LOW,
+            "glDrawElements: draw skipped (no translated pipeline and solid-color path unsupported)"
+        );
+        return false;
     }
 
     setup.info.vertexCount = count;
