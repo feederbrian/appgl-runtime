@@ -428,6 +428,23 @@ public:
     bool getTransformFeedbacki_v(GLuint xfb, GLenum pname, GLuint index, GLint* param);
     bool getTransformFeedbacki64_v(GLuint xfb, GLenum pname, GLuint index, GLint64* param);
 
+    // GL 4.5 — ClipControl, robustness, barriers, query buffer objects.
+    bool clipControl(GLenum origin, GLenum depth);
+    GLenum getGraphicsResetStatus();
+    bool readnPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLsizei bufSize, void* data);
+    bool getnUniformfv(GLuint program, GLint location, GLsizei bufSize, GLfloat* params);
+    bool getnUniformiv(GLuint program, GLint location, GLsizei bufSize, GLint* params);
+    bool getnUniformuiv(GLuint program, GLint location, GLsizei bufSize, GLuint* params);
+    bool getnUniformdv(GLuint program, GLint location, GLsizei bufSize, GLdouble* params);
+    bool getnTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels);
+    bool getnCompressedTexImage(GLenum target, GLint lod, GLsizei bufSize, void* pixels);
+    bool memoryBarrierByRegion(GLbitfield barriers);
+    bool textureBarrier();
+    bool getQueryBufferObjectiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
+    bool getQueryBufferObjectuiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
+    bool getQueryBufferObjecti64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
+    bool getQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
+
     void pushError(GLenum error);
     GLenum popError();
 

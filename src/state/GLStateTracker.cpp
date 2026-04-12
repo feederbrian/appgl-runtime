@@ -1299,6 +1299,11 @@ std::uint32_t GLStateTracker::dirtyMask() const {
     return dirtyMask_;
 }
 
+void GLStateTracker::setClipOrigin(GLenum origin) { clipOrigin_ = origin; }
+GLenum GLStateTracker::clipOrigin() const { return clipOrigin_; }
+void GLStateTracker::setClipDepthMode(GLenum depth) { clipDepthMode_ = depth; }
+GLenum GLStateTracker::clipDepthMode() const { return clipDepthMode_; }
+
 bool GLStateTracker::validateForDraw() const {
     // GL 3.2+ core profile: drawing with VAO 0 is GL_INVALID_OPERATION. This guard
     // is what the future glDraw* entrypoints must consult before pushing work.

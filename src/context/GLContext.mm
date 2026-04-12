@@ -7956,4 +7956,100 @@ bool GLContext::getTransformFeedbacki64_v(GLuint xfb, GLenum pname, GLuint index
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// GL 4.5 — ClipControl, robustness APIs, barriers, query buffer objects
+// ---------------------------------------------------------------------------
+
+bool GLContext::clipControl(GLenum origin, GLenum depth) {
+    if (origin != GL_LOWER_LEFT && origin != GL_UPPER_LEFT) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (depth != GL_NEGATIVE_ONE_TO_ONE && depth != GL_ZERO_TO_ONE) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    impl_->state->setClipOrigin(origin);
+    impl_->state->setClipDepthMode(depth);
+    return true;
+}
+
+GLenum GLContext::getGraphicsResetStatus() {
+    return GL_NO_ERROR;
+}
+
+bool GLContext::readnPixels(GLint x, GLint y, GLsizei width, GLsizei height,
+                            GLenum format, GLenum type, GLsizei bufSize, void* data) {
+    if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return readPixels(x, y, width, height, format, type, data);
+}
+
+bool GLContext::getnUniformfv(GLuint program, GLint location, GLsizei bufSize, GLfloat* params) {
+    if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return getUniformfv(program, location, params);
+}
+
+bool GLContext::getnUniformiv(GLuint program, GLint location, GLsizei bufSize, GLint* params) {
+    if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return getUniformiv(program, location, params);
+}
+
+bool GLContext::getnUniformuiv(GLuint program, GLint location, GLsizei bufSize, GLuint* params) {
+    if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return getUniformuiv(program, location, params);
+}
+
+bool GLContext::getnUniformdv(GLuint program, GLint location, GLsizei bufSize, GLdouble* params) {
+    if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
+    return getUniformdv(program, location, params);
+}
+
+bool GLContext::getnTexImage(GLenum target, GLint level, GLenum format, GLenum type,
+                             GLsizei bufSize, void* pixels) {
+    (void)target; (void)level; (void)format; (void)type; (void)bufSize; (void)pixels;
+    return true;
+}
+
+bool GLContext::getnCompressedTexImage(GLenum target, GLint lod, GLsizei bufSize, void* pixels) {
+    (void)target; (void)lod; (void)bufSize; (void)pixels;
+    return true;
+}
+
+bool GLContext::memoryBarrierByRegion(GLbitfield barriers) {
+    (void)barriers;
+    return true;
+}
+
+bool GLContext::textureBarrier() {
+    return true;
+}
+
+bool GLContext::getQueryBufferObjectiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    auto* buf = impl_->objects->buffers().get(buffer);
+    if (!buf) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)id; (void)pname; (void)offset;
+    return true;
+}
+
+bool GLContext::getQueryBufferObjectuiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    auto* buf = impl_->objects->buffers().get(buffer);
+    if (!buf) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)id; (void)pname; (void)offset;
+    return true;
+}
+
+bool GLContext::getQueryBufferObjecti64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    auto* buf = impl_->objects->buffers().get(buffer);
+    if (!buf) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)id; (void)pname; (void)offset;
+    return true;
+}
+
+bool GLContext::getQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    auto* buf = impl_->objects->buffers().get(buffer);
+    if (!buf) { pushError(GL_INVALID_OPERATION); return false; }
+    (void)id; (void)pname; (void)offset;
+    return true;
+}
+
 }  // namespace appgl

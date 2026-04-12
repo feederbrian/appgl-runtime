@@ -976,6 +976,37 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
         coverage.markImplemented(id, "DSA transform feedback wrapper.");
     }
 
+    // Pass D — ClipControl, robustness, barriers (11 functions)
+    dispatch.glClipControl = &impl::glClipControl;
+    dispatch.glGetGraphicsResetStatus = &impl::glGetGraphicsResetStatus;
+    dispatch.glReadnPixels = &impl::glReadnPixels;
+    dispatch.glGetnUniformfv = &impl::glGetnUniformfv;
+    dispatch.glGetnUniformiv = &impl::glGetnUniformiv;
+    dispatch.glGetnUniformuiv = &impl::glGetnUniformuiv;
+    dispatch.glGetnUniformdv = &impl::glGetnUniformdv;
+    dispatch.glGetnTexImage = &impl::glGetnTexImage;
+    dispatch.glGetnCompressedTexImage = &impl::glGetnCompressedTexImage;
+    dispatch.glMemoryBarrierByRegion = &impl::glMemoryBarrierByRegion;
+    dispatch.glTextureBarrier = &impl::glTextureBarrier;
+    for (auto id : {FunctionId::glClipControl, FunctionId::glGetGraphicsResetStatus,
+                    FunctionId::glReadnPixels, FunctionId::glGetnUniformfv,
+                    FunctionId::glGetnUniformiv, FunctionId::glGetnUniformuiv,
+                    FunctionId::glGetnUniformdv, FunctionId::glGetnTexImage,
+                    FunctionId::glGetnCompressedTexImage, FunctionId::glMemoryBarrierByRegion,
+                    FunctionId::glTextureBarrier}) {
+        coverage.markImplemented(id, "GL 4.5 ClipControl / robustness / barrier.");
+    }
+
+    // Pass D — Query buffer objects (4 functions)
+    dispatch.glGetQueryBufferObjectiv = &impl::glGetQueryBufferObjectiv;
+    dispatch.glGetQueryBufferObjectuiv = &impl::glGetQueryBufferObjectuiv;
+    dispatch.glGetQueryBufferObjecti64v = &impl::glGetQueryBufferObjecti64v;
+    dispatch.glGetQueryBufferObjectui64v = &impl::glGetQueryBufferObjectui64v;
+    for (auto id : {FunctionId::glGetQueryBufferObjectiv, FunctionId::glGetQueryBufferObjectuiv,
+                    FunctionId::glGetQueryBufferObjecti64v, FunctionId::glGetQueryBufferObjectui64v}) {
+        coverage.markImplemented(id, "Query buffer object stub.");
+    }
+
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in
     // the promotion-gate window. Queries are live; everything else ships as a

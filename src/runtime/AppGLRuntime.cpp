@@ -5938,6 +5938,104 @@ void APIENTRY glGetTransformFeedbacki64_v(GLuint xfb, GLenum pname, GLuint index
 
 #undef DSA_TF_FN
 
+// ---------------------------------------------------------------------------
+// Pass D — ClipControl, robustness, barriers, query buffer objects (15 functions)
+// ---------------------------------------------------------------------------
+
+void APIENTRY glClipControl(GLenum origin, GLenum depth) {
+    auto* ctx = requireCurrentContext("glClipControl");
+    if (!ctx) return;
+    if (!ctx->clipControl(origin, depth)) return;
+    markStateFunction(FunctionId::glClipControl, "ClipControl origin/depth mode set.");
+}
+GLenum APIENTRY glGetGraphicsResetStatus(void) {
+    auto* ctx = requireCurrentContext("glGetGraphicsResetStatus");
+    if (!ctx) return GL_NO_ERROR;
+    GLenum result = ctx->getGraphicsResetStatus();
+    markStateFunction(FunctionId::glGetGraphicsResetStatus, "GetGraphicsResetStatus (always GL_NO_ERROR on Metal).");
+    return result;
+}
+void APIENTRY glReadnPixels(GLint x, GLint y, GLsizei width, GLsizei height,
+                            GLenum format, GLenum type, GLsizei bufSize, void* data) {
+    auto* ctx = requireCurrentContext("glReadnPixels");
+    if (!ctx) return;
+    if (!ctx->readnPixels(x, y, width, height, format, type, bufSize, data)) return;
+    markFramebufferFunction(FunctionId::glReadnPixels, "ReadnPixels robustness delegate.");
+}
+void APIENTRY glGetnUniformfv(GLuint program, GLint location, GLsizei bufSize, GLfloat* params) {
+    auto* ctx = requireCurrentContext("glGetnUniformfv");
+    if (!ctx) return;
+    if (!ctx->getnUniformfv(program, location, bufSize, params)) return;
+    markProgramFunction(FunctionId::glGetnUniformfv, "GetnUniformfv robustness delegate.");
+}
+void APIENTRY glGetnUniformiv(GLuint program, GLint location, GLsizei bufSize, GLint* params) {
+    auto* ctx = requireCurrentContext("glGetnUniformiv");
+    if (!ctx) return;
+    if (!ctx->getnUniformiv(program, location, bufSize, params)) return;
+    markProgramFunction(FunctionId::glGetnUniformiv, "GetnUniformiv robustness delegate.");
+}
+void APIENTRY glGetnUniformuiv(GLuint program, GLint location, GLsizei bufSize, GLuint* params) {
+    auto* ctx = requireCurrentContext("glGetnUniformuiv");
+    if (!ctx) return;
+    if (!ctx->getnUniformuiv(program, location, bufSize, params)) return;
+    markProgramFunction(FunctionId::glGetnUniformuiv, "GetnUniformuiv robustness delegate.");
+}
+void APIENTRY glGetnUniformdv(GLuint program, GLint location, GLsizei bufSize, GLdouble* params) {
+    auto* ctx = requireCurrentContext("glGetnUniformdv");
+    if (!ctx) return;
+    if (!ctx->getnUniformdv(program, location, bufSize, params)) return;
+    markProgramFunction(FunctionId::glGetnUniformdv, "GetnUniformdv robustness delegate.");
+}
+void APIENTRY glGetnTexImage(GLenum target, GLint level, GLenum format, GLenum type,
+                             GLsizei bufSize, void* pixels) {
+    auto* ctx = requireCurrentContext("glGetnTexImage");
+    if (!ctx) return;
+    if (!ctx->getnTexImage(target, level, format, type, bufSize, pixels)) return;
+    markTextureFunction(FunctionId::glGetnTexImage, "GetnTexImage robustness stub.");
+}
+void APIENTRY glGetnCompressedTexImage(GLenum target, GLint lod, GLsizei bufSize, void* pixels) {
+    auto* ctx = requireCurrentContext("glGetnCompressedTexImage");
+    if (!ctx) return;
+    if (!ctx->getnCompressedTexImage(target, lod, bufSize, pixels)) return;
+    markTextureFunction(FunctionId::glGetnCompressedTexImage, "GetnCompressedTexImage robustness stub.");
+}
+void APIENTRY glMemoryBarrierByRegion(GLbitfield barriers) {
+    auto* ctx = requireCurrentContext("glMemoryBarrierByRegion");
+    if (!ctx) return;
+    if (!ctx->memoryBarrierByRegion(barriers)) return;
+    markStateFunction(FunctionId::glMemoryBarrierByRegion, "MemoryBarrierByRegion no-op (Metal handles ordering).");
+}
+void APIENTRY glTextureBarrier(void) {
+    auto* ctx = requireCurrentContext("glTextureBarrier");
+    if (!ctx) return;
+    if (!ctx->textureBarrier()) return;
+    markStateFunction(FunctionId::glTextureBarrier, "TextureBarrier no-op hint.");
+}
+void APIENTRY glGetQueryBufferObjectiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    auto* ctx = requireCurrentContext("glGetQueryBufferObjectiv");
+    if (!ctx) return;
+    if (!ctx->getQueryBufferObjectiv(id, buffer, pname, offset)) return;
+    markStateFunction(FunctionId::glGetQueryBufferObjectiv, "GetQueryBufferObjectiv stub.");
+}
+void APIENTRY glGetQueryBufferObjectuiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    auto* ctx = requireCurrentContext("glGetQueryBufferObjectuiv");
+    if (!ctx) return;
+    if (!ctx->getQueryBufferObjectuiv(id, buffer, pname, offset)) return;
+    markStateFunction(FunctionId::glGetQueryBufferObjectuiv, "GetQueryBufferObjectuiv stub.");
+}
+void APIENTRY glGetQueryBufferObjecti64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    auto* ctx = requireCurrentContext("glGetQueryBufferObjecti64v");
+    if (!ctx) return;
+    if (!ctx->getQueryBufferObjecti64v(id, buffer, pname, offset)) return;
+    markStateFunction(FunctionId::glGetQueryBufferObjecti64v, "GetQueryBufferObjecti64v stub.");
+}
+void APIENTRY glGetQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    auto* ctx = requireCurrentContext("glGetQueryBufferObjectui64v");
+    if (!ctx) return;
+    if (!ctx->getQueryBufferObjectui64v(id, buffer, pname, offset)) return;
+    markStateFunction(FunctionId::glGetQueryBufferObjectui64v, "GetQueryBufferObjectui64v stub.");
+}
+
 }  // namespace impl
 
 }  // namespace appgl

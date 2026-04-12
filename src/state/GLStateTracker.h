@@ -240,6 +240,12 @@ public:
     void useProgram(GLuint program);
     GLuint currentProgram() const;
 
+    // GL 4.5 ClipControl state.
+    void setClipOrigin(GLenum origin);
+    GLenum clipOrigin() const;
+    void setClipDepthMode(GLenum depth);
+    GLenum clipDepthMode() const;
+
     void markDirty(DirtyBit bit);
     bool isDirty(DirtyBit bit) const;
     void clearDirty(DirtyBit bit);
@@ -288,6 +294,8 @@ private:
     GLuint drawFramebuffer_ = 0;
     GLuint readFramebuffer_ = 0;
     std::uint32_t dirtyMask_ = 0xffffffffu;
+    GLenum clipOrigin_ = GL_LOWER_LEFT;
+    GLenum clipDepthMode_ = GL_NEGATIVE_ONE_TO_ONE;
 };
 
 }  // namespace appgl
