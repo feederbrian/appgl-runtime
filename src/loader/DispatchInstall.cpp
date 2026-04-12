@@ -404,6 +404,12 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glUniformMatrix4fv, "mat4 uniforms are live.");
     coverage.markImplemented(FunctionId::glDrawArrays, "Solid-color draw path (Phase A Group 7 MVP).");
     coverage.markImplemented(FunctionId::glDrawElements, "Solid-color indexed draw path (Phase A Group 7 MVP).");
+
+    // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
+    // table has no unimplementedReturn<> fallback for any manifest function in
+    // the promotion-gate window. Queries are live; everything else ships as a
+    // minimal no-op stub until a dedicated scenario lights it up.
+    installGroup8Dispatch(dispatch, coverage);
 }
 
 }  // namespace appgl

@@ -29,6 +29,7 @@ add_custom_target(appgl-codegen
 
 set(APPGL_SOURCES
   src/runtime/AppGLRuntime.cpp
+  src/runtime/AppGLGroup8.cpp
   src/caps/GLCapabilities.mm
   src/context/GLContext.mm
   src/context/MetalFrameGraph.mm

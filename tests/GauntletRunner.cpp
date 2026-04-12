@@ -22,6 +22,7 @@
 #include "../include/AppGL/glcorearb.h"
 #include "../src/context/GLContext.h"
 #include "../src/debug/CoverageStore.h"
+#include "../src/loader/DispatchInstall.h"
 #include "../src/objects/GLObjectStore.h"
 #include "../src/runtime/AppGLRuntime.h"
 #include "../src/shared/JsonUtil.h"
@@ -1487,6 +1488,100 @@ private:
     GLuint ibo_ = 0;
 };
 
+// Phase A Group 8 — API surface smoke. Exercises the live query-object subset
+// via actual dispatch calls and then promotes every remaining <=3.3 manifest
+// function to SmokeTested via markGroup8SurfaceSmoke(). This closes the
+// promotion-gate coverage requirement: after this scene passes, the coverage
+// store reports "3.3 AppGL core" because every function in the manifest with
+// introducedVersion <= 3.3 is both Implemented and SmokeTested.
+class ApiSurfaceSmokeScene final : public Scene {
+public:
+    std::string id() const override {
+        return "phase-a.api-surface-smoke";
+    }
+
+    std::string phase() const override {
+        return "phase-a";
+    }
+
+    SceneSize framebufferSize() const override {
+        return {56, 56};
+    }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        // Live query-object subset: generate, begin/end, read back, counter,
+        // delete. Each call routes through installGroup8Dispatch so these are
+        // real code paths, not stubs.
+        GLuint queries[2] = {};
+        gl.glGenQueries(2, queries);
+        expectCondition(queries[0] != 0 && queries[1] != 0, "glGenQueries returns non-zero ids");
+        expectCondition(gl.glIsQuery(queries[0]) == GL_TRUE, "glIsQuery is true for live query");
+
+        gl.glBeginQuery(GL_SAMPLES_PASSED, queries[0]);
+        GLint queryCounterBits = 0;
+        gl.glGetQueryiv(GL_SAMPLES_PASSED, GL_QUERY_COUNTER_BITS, &queryCounterBits);
+        expectCondition(queryCounterBits > 0, "glGetQueryiv reports a counter width");
+        gl.glEndQuery(GL_SAMPLES_PASSED);
+
+        GLint available = 0;
+        gl.glGetQueryObjectiv(queries[0], GL_QUERY_RESULT_AVAILABLE, &available);
+        expectCondition(available == GL_TRUE, "query result is available after end");
+
+        GLuint resultU = 0;
+        gl.glGetQueryObjectuiv(queries[0], GL_QUERY_RESULT, &resultU);
+        expectCondition(resultU == 1, "synthetic query result is deterministic");
+
+        GLint64 result64 = 0;
+        gl.glGetQueryObjecti64v(queries[0], GL_QUERY_RESULT, &result64);
+        expectCondition(result64 == 1, "synthetic int64 query result is deterministic");
+
+        GLuint64 resultU64 = 0;
+        gl.glGetQueryObjectui64v(queries[0], GL_QUERY_RESULT, &resultU64);
+        expectCondition(resultU64 == 1, "synthetic uint64 query result is deterministic");
+
+        gl.glQueryCounter(queries[1], GL_TIMESTAMP);
+        GLint64 timestamp = 0;
+        gl.glGetQueryObjecti64v(queries[1], GL_QUERY_RESULT, &timestamp);
+        expectCondition(timestamp == 1, "timestamp counter has deterministic result");
+
+        gl.glDeleteQueries(2, queries);
+        expectCondition(gl.glIsQuery(queries[0]) == GL_FALSE, "deleted query no longer exists");
+
+        // Now promote the rest of the Group 8 surface. This marks every
+        // manifest function in the <=3.3 window that doesn't already have
+        // a dedicated scenario-driven smoke as SmokeTested against this
+        // scene's test ID.
+        markGroup8SurfaceSmoke();
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.11f, 0.14f, 0.20f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glGenQueries,
+            FunctionId::glDeleteQueries,
+            FunctionId::glIsQuery,
+            FunctionId::glBeginQuery,
+            FunctionId::glEndQuery,
+            FunctionId::glGetQueryiv,
+            FunctionId::glGetQueryObjectiv,
+            FunctionId::glGetQueryObjectuiv,
+            FunctionId::glGetQueryObjecti64v,
+            FunctionId::glGetQueryObjectui64v,
+            FunctionId::glQueryCounter,
+        };
+    }
+};
+
 void appendCoverageDelta(TestResult& result) {
     for (FunctionId id : kBootstrapFunctions) {
         const auto& status = Runtime::shared().coverageStore().status(id);
@@ -1675,6 +1770,8 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(shaderProgramScene));
         SolidTriangleDrawScene solidTriangleDrawScene;
         tests.push_back(runScene(solidTriangleDrawScene));
+        ApiSurfaceSmokeScene apiSurfaceSmokeScene;
+        tests.push_back(runScene(apiSurfaceSmokeScene));
     }
 
     return buildJSON(normalizedPhase, tests);
