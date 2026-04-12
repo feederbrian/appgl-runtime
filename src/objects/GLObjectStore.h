@@ -55,7 +55,12 @@ struct GLTextureDesc {
     GLsizei depth = 1;
     GLsizei levels = 1;
     GLsizei layers = 1;
+    GLsizei samples = 0;
     bool immutable = false;
+    // Buffer-texture (glTexBufferRange) state.
+    GLuint sourceBuffer = 0;
+    GLintptr bufferOffset = 0;
+    GLsizeiptr bufferSize = 0;
 };
 
 struct GLTextureImageLevel {
@@ -145,6 +150,20 @@ struct GLVertexAttributeState {
     // CPU-side shadow for glVertexAttribL{1,2,3,4}d[v] immediate values.
     // Used by glGetVertexAttribLdv for lossless f64 readback.
     GLdouble immediateDouble[4] = {0.0, 0.0, 0.0, 1.0};
+    // GL 4.3 separated vertex format state.
+    GLuint bindingIndex = 0;         // which binding point this attribute uses (default = attrib index)
+    GLuint relativeOffset = 0;       // offset within the vertex for this attribute
+    bool useSeparatedFormat = false;  // true when set via glVertexAttrib*Format
+};
+
+// GL 4.3 separated vertex format: per-binding-point state.
+// Each binding point holds the buffer, offset, stride and divisor independently
+// of the attribute format.  Maps directly to Metal's MTLVertexBufferLayoutDescriptor.
+struct GLVertexBindingPoint {
+    GLuint buffer = 0;
+    GLintptr offset = 0;
+    GLsizei stride = 0;
+    GLuint divisor = 0;
 };
 
 struct GLVertexArrayBufferBinding {
@@ -155,6 +174,7 @@ struct GLVertexArrayBufferBinding {
 
 struct GLVertexArrayObject {
     std::vector<GLVertexAttributeState> attributes;
+    std::vector<GLVertexBindingPoint> bindingPoints;  // GL 4.3 separated format binding points
     void* metalVertexDescriptor = nullptr;
     std::string vertexDescriptorHash;
     std::string vertexDescriptorError;

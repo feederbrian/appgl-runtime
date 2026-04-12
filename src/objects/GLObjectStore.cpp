@@ -61,7 +61,13 @@ GLsizei GLObjectStore::maxVertexAttribs() const {
 }
 
 void GLObjectStore::initializeVertexArray(GLVertexArrayObject& vertexArray) const {
-    vertexArray.attributes.resize(static_cast<std::size_t>(maxVertexAttribs_));
+    const auto count = static_cast<std::size_t>(maxVertexAttribs_);
+    vertexArray.attributes.resize(count);
+    vertexArray.bindingPoints.resize(count);
+    // GL 4.3 spec default: each attribute's bindingIndex == its own index.
+    for (std::size_t i = 0; i < count; ++i) {
+        vertexArray.attributes[i].bindingIndex = static_cast<GLuint>(i);
+    }
 }
 
 void GLObjectStore::deferDelete(std::string label) {

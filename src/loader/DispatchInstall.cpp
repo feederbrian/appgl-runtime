@@ -44,6 +44,13 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glVertexAttribPointer = &impl::glVertexAttribPointer;
     dispatch.glVertexAttribIPointer = &impl::glVertexAttribIPointer;
     dispatch.glVertexAttribDivisor = &impl::glVertexAttribDivisor;
+    // GL 4.3 — separated vertex format (ARB_vertex_attrib_binding).
+    dispatch.glBindVertexBuffer = &impl::glBindVertexBuffer;
+    dispatch.glVertexAttribFormat = &impl::glVertexAttribFormat;
+    dispatch.glVertexAttribIFormat = &impl::glVertexAttribIFormat;
+    dispatch.glVertexAttribLFormat = &impl::glVertexAttribLFormat;
+    dispatch.glVertexAttribBinding = &impl::glVertexAttribBinding;
+    dispatch.glVertexBindingDivisor = &impl::glVertexBindingDivisor;
     dispatch.glGetVertexAttribiv = &impl::glGetVertexAttribiv;
     dispatch.glGetVertexAttribfv = &impl::glGetVertexAttribfv;
     dispatch.glGetVertexAttribPointerv = &impl::glGetVertexAttribPointerv;
@@ -69,6 +76,12 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGetTexParameterIiv = &impl::glGetTexParameterIiv;
     dispatch.glGetTexParameterIuiv = &impl::glGetTexParameterIuiv;
     dispatch.glGenerateMipmap = &impl::glGenerateMipmap;
+    dispatch.glTexStorage1D = &impl::glTexStorage1D;
+    dispatch.glTexStorage2D = &impl::glTexStorage2D;
+    dispatch.glTexStorage3D = &impl::glTexStorage3D;
+    dispatch.glTexStorage2DMultisample = &impl::glTexStorage2DMultisample;
+    dispatch.glTexStorage3DMultisample = &impl::glTexStorage3DMultisample;
+    dispatch.glTexBufferRange = &impl::glTexBufferRange;
     dispatch.glPixelStorei = &impl::glPixelStorei;
     dispatch.glPixelStoref = &impl::glPixelStoref;
     dispatch.glReadBuffer = &impl::glReadBuffer;
@@ -389,6 +402,13 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glVertexAttribPointer, "Floating-point vertex attribute pointer state is live.");
     coverage.markImplemented(FunctionId::glVertexAttribIPointer, "Integer vertex attribute pointer state is live.");
     coverage.markImplemented(FunctionId::glVertexAttribDivisor, "Vertex attribute divisor state is live.");
+    // GL 4.3 — separated vertex format (ARB_vertex_attrib_binding).
+    coverage.markImplemented(FunctionId::glBindVertexBuffer, "Separated vertex format binding point buffer/offset/stride is live.");
+    coverage.markImplemented(FunctionId::glVertexAttribFormat, "Separated floating-point vertex attribute format is live.");
+    coverage.markImplemented(FunctionId::glVertexAttribIFormat, "Separated integer vertex attribute format is live.");
+    coverage.markImplemented(FunctionId::glVertexAttribLFormat, "Separated double-precision vertex attribute format is live.");
+    coverage.markImplemented(FunctionId::glVertexAttribBinding, "Vertex attribute to binding point association is live.");
+    coverage.markImplemented(FunctionId::glVertexBindingDivisor, "Separated vertex format binding point divisor is live.");
     coverage.markImplemented(FunctionId::glGetVertexAttribiv, "Integer vertex attribute state query is live.");
     coverage.markImplemented(FunctionId::glGetVertexAttribfv, "Float vertex attribute state query is live.");
     coverage.markImplemented(FunctionId::glGetVertexAttribPointerv, "Vertex attribute pointer query is live.");
@@ -414,6 +434,12 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glGetTexParameterIiv, "Texture integer parameter queries are live.");
     coverage.markImplemented(FunctionId::glGetTexParameterIuiv, "Texture unsigned parameter queries are live.");
     coverage.markImplemented(FunctionId::glGenerateMipmap, "Texture mipmap generation is live for Phase A texture storage.");
+    coverage.markImplemented(FunctionId::glTexStorage1D, "1D immutable texture storage is live.");
+    coverage.markImplemented(FunctionId::glTexStorage2D, "2D immutable texture storage is live.");
+    coverage.markImplemented(FunctionId::glTexStorage3D, "3D immutable texture storage is live.");
+    coverage.markImplemented(FunctionId::glTexStorage2DMultisample, "2D multisample immutable texture storage is live.");
+    coverage.markImplemented(FunctionId::glTexStorage3DMultisample, "3D multisample immutable texture storage is live.");
+    coverage.markImplemented(FunctionId::glTexBufferRange, "Buffer-texture range binding is live.");
     coverage.markImplemented(FunctionId::glPixelStorei, "Integer pixel-store state is live.");
     coverage.markImplemented(FunctionId::glPixelStoref, "Float pixel-store state is live.");
     coverage.markImplemented(FunctionId::glReadBuffer, "Read-buffer state tracking is live.");

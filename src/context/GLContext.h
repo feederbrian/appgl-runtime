@@ -126,6 +126,13 @@ public:
     bool getVertexAttribInteger(GLuint index, GLenum pname, GLint* params);
     bool getVertexAttribFloat(GLuint index, GLenum pname, GLfloat* params);
     bool getVertexAttribPointer(GLuint index, GLenum pname, void** pointer);
+    // GL 4.3 — separated vertex format (ARB_vertex_attrib_binding).
+    bool bindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride);
+    bool vertexAttribFormat(GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset);
+    bool vertexAttribIFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset);
+    bool vertexAttribLFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset);
+    bool vertexAttribBinding(GLuint attribindex, GLuint bindingindex);
+    bool vertexBindingDivisor(GLuint bindingindex, GLuint divisor);
     // GL 4.1 — double-precision vertex attributes (f64→f32 narrowing).
     bool vertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer);
     bool setVertexAttribLImmediate(GLuint index, GLint count, const GLdouble* values);
@@ -144,6 +151,9 @@ public:
     bool getTexParameterUnsignedInteger(GLenum target, GLenum pname, GLuint* params);
     bool getTexParameterFloat(GLenum target, GLenum pname, GLfloat* params);
     bool generateMipmap(GLenum target);
+    bool texStorage(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
+    bool texStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations);
+    bool texBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size);
     bool pixelStore(GLenum pname, GLint value);
     bool genRenderbuffers(GLsizei count, GLuint* renderbuffers);
     bool deleteRenderbuffers(GLsizei count, const GLuint* renderbuffers);

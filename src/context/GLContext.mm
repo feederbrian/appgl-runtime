@@ -3015,6 +3015,141 @@ bool GLContext::vertexAttribDivisor(GLuint index, GLuint divisor) {
     return true;
 }
 
+// --- GL 4.3: Separated vertex format (ARB_vertex_attrib_binding) ---
+
+bool GLContext::bindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
+    if (stride < 0 || offset < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (bindingindex >= vertexArray->bindingPoints.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Buffer 0 is valid (unbinds the binding point).
+    if (buffer != 0 && !impl_->objects->buffers().contains(buffer)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    auto& bp = vertexArray->bindingPoints[bindingindex];
+    bp.buffer = buffer;
+    bp.offset = offset;
+    bp.stride = stride;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
+bool GLContext::vertexAttribFormat(GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset) {
+    if (size < 1 || size > 4) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr || attribindex >= vertexArray->attributes.size()) {
+        pushError(attribindex >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    auto& attribute = vertexArray->attributes[attribindex];
+    attribute.size = size;
+    attribute.type = type;
+    attribute.normalized = normalized;
+    attribute.relativeOffset = relativeoffset;
+    attribute.integer = false;
+    attribute.longData = false;
+    attribute.useSeparatedFormat = true;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
+bool GLContext::vertexAttribIFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
+    if (size < 1 || size > 4) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr || attribindex >= vertexArray->attributes.size()) {
+        pushError(attribindex >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    auto& attribute = vertexArray->attributes[attribindex];
+    attribute.size = size;
+    attribute.type = type;
+    attribute.normalized = GL_FALSE;
+    attribute.relativeOffset = relativeoffset;
+    attribute.integer = true;
+    attribute.longData = false;
+    attribute.useSeparatedFormat = true;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
+bool GLContext::vertexAttribLFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
+    if (size < 1 || size > 4) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (type != GL_DOUBLE) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr || attribindex >= vertexArray->attributes.size()) {
+        pushError(attribindex >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    auto& attribute = vertexArray->attributes[attribindex];
+    attribute.size = size;
+    attribute.type = type;
+    attribute.normalized = GL_FALSE;
+    attribute.relativeOffset = relativeoffset;
+    attribute.integer = false;
+    attribute.longData = true;
+    attribute.useSeparatedFormat = true;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
+bool GLContext::vertexAttribBinding(GLuint attribindex, GLuint bindingindex) {
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (attribindex >= vertexArray->attributes.size() || bindingindex >= vertexArray->bindingPoints.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    vertexArray->attributes[attribindex].bindingIndex = bindingindex;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
+bool GLContext::vertexBindingDivisor(GLuint bindingindex, GLuint divisor) {
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    if (vertexArray == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (bindingindex >= vertexArray->bindingPoints.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    vertexArray->bindingPoints[bindingindex].divisor = divisor;
+    markVertexDescriptorDirty(*vertexArray);
+    impl_->state->markDirty(DirtyBit::VertexInput);
+    return true;
+}
+
 bool GLContext::getVertexAttribInteger(GLuint index, GLenum pname, GLint* params) {
     if (params == nullptr) {
         pushError(GL_INVALID_VALUE);
@@ -3290,6 +3425,10 @@ bool GLContext::texImage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (object->desc.immutable) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
 
     GLTextureImageLevel image;
     image.desc.target = target;
@@ -3394,6 +3533,161 @@ bool GLContext::texSubImage(
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
+    return true;
+}
+
+bool GLContext::texStorage(
+    GLenum target,
+    GLsizei levels,
+    GLenum internalformat,
+    GLsizei width,
+    GLsizei height,
+    GLsizei depth
+) {
+    if (!isTextureTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (levels < 1 || width < 1 || height < 1 || depth < 1) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!isSupportedInternalTextureFormat(internalformat)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (object->desc.immutable) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    object->desc.target = target;
+    object->desc.internalFormat = internalformat;
+    object->desc.width = width;
+    object->desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
+    object->desc.depth = (target == GL_TEXTURE_3D) ? depth : 1;
+    object->desc.levels = levels;
+    object->desc.immutable = true;
+    object->target = target;
+
+    // Pre-create level-0 image entry so replaceMetalTexture has something to work with.
+    GLTextureImageLevel baseLevel;
+    baseLevel.desc = object->desc;
+    baseLevel.defined = true;
+    const std::size_t byteCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * static_cast<std::size_t>(object->desc.depth) * 4u;
+    baseLevel.rgba8.resize(byteCount, 0);
+    object->levels[0] = std::move(baseLevel);
+
+    if (!impl_->replaceMetalTexture(*object)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::texStorageMultisample(
+    GLenum target,
+    GLsizei samples,
+    GLenum internalformat,
+    GLsizei width,
+    GLsizei height,
+    GLsizei depth,
+    GLboolean fixedsamplelocations
+) {
+    if (target != GL_TEXTURE_2D_MULTISAMPLE && target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (samples < 1 || width < 1 || height < 1 || depth < 1) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!isSupportedInternalTextureFormat(internalformat)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (object->desc.immutable) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    // Clamp sample count to Metal maximum (typically 4 on Apple Silicon).
+    GLsizei clampedSamples = std::min<GLsizei>(samples, 4);
+
+    object->desc.target = target;
+    object->desc.internalFormat = internalformat;
+    object->desc.width = width;
+    object->desc.height = height;
+    object->desc.depth = (target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) ? depth : 1;
+    object->desc.levels = 1;
+    object->desc.samples = clampedSamples;
+    object->desc.immutable = true;
+    object->target = target;
+
+    // Create a base-level entry for Metal texture creation.
+    GLTextureImageLevel baseLevel;
+    baseLevel.desc = object->desc;
+    baseLevel.defined = true;
+    const std::size_t byteCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * static_cast<std::size_t>(object->desc.depth) * 4u;
+    baseLevel.rgba8.resize(byteCount, 0);
+    object->levels[0] = std::move(baseLevel);
+
+    if (!impl_->replaceMetalTexture(*object)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
+    }
+    return true;
+}
+
+bool GLContext::texBufferRange(
+    GLenum target,
+    GLenum internalformat,
+    GLuint buffer,
+    GLintptr offset,
+    GLsizeiptr size
+) {
+    if (target != GL_TEXTURE_BUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!isSupportedInternalTextureFormat(internalformat)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (offset < 0 || size <= 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    // Record the buffer-texture binding state.
+    object->desc.target = target;
+    object->desc.internalFormat = internalformat;
+    object->desc.sourceBuffer = buffer;
+    object->desc.bufferOffset = offset;
+    object->desc.bufferSize = size;
+    object->desc.immutable = true;
+    object->target = target;
+
+    // Metal texture-buffer creation would go here; for now we record the state
+    // so higher-level code can query and create the MTLTextureBuffer view later.
     return true;
 }
 

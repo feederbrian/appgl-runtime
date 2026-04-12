@@ -1585,6 +1585,106 @@ void APIENTRY glVertexAttribDivisor(GLuint index, GLuint divisor) {
     }
 }
 
+// --- GL 4.3: Separated vertex format (ARB_vertex_attrib_binding) ---
+
+void APIENTRY glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
+    auto* context = requireCurrentContext("glBindVertexBuffer");
+    if (context == nullptr) {
+        return;
+    }
+    if (stride < 0) {
+        recordValidationError(context, "glBindVertexBuffer", GL_INVALID_VALUE, "stride must be non-negative");
+        return;
+    }
+    if (offset < 0) {
+        recordValidationError(context, "glBindVertexBuffer", GL_INVALID_VALUE, "offset must be non-negative");
+        return;
+    }
+    if (context->bindVertexBuffer(bindingindex, buffer, offset, stride)) {
+        markVertexInputFunction(FunctionId::glBindVertexBuffer, "Separated vertex format binding point buffer/offset/stride is tracked per VAO.");
+        Runtime::shared().recordBootstrapTrace("glBindVertexBuffer(" + std::to_string(bindingindex) + ", " + std::to_string(buffer) + ")");
+    }
+}
+
+void APIENTRY glVertexAttribFormat(GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset) {
+    auto* context = requireCurrentContext("glVertexAttribFormat");
+    if (context == nullptr) {
+        return;
+    }
+    if (size < 1 || size > 4) {
+        recordValidationError(context, "glVertexAttribFormat", GL_INVALID_VALUE, "size must be 1, 2, 3, or 4");
+        return;
+    }
+    if (!isValidVertexAttribPointerType(type)) {
+        recordValidationError(context, "glVertexAttribFormat", GL_INVALID_ENUM, "type is not a valid vertex attribute format type");
+        return;
+    }
+    if (context->vertexAttribFormat(attribindex, size, type, normalized, relativeoffset)) {
+        markVertexInputFunction(FunctionId::glVertexAttribFormat, "Separated floating-point vertex attribute format is tracked per VAO.");
+        Runtime::shared().recordBootstrapTrace("glVertexAttribFormat(" + std::to_string(attribindex) + ", size=" + std::to_string(size) + ")");
+    }
+}
+
+void APIENTRY glVertexAttribIFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
+    auto* context = requireCurrentContext("glVertexAttribIFormat");
+    if (context == nullptr) {
+        return;
+    }
+    if (size < 1 || size > 4) {
+        recordValidationError(context, "glVertexAttribIFormat", GL_INVALID_VALUE, "size must be 1, 2, 3, or 4");
+        return;
+    }
+    if (!isValidVertexAttribIPointerType(type)) {
+        recordValidationError(context, "glVertexAttribIFormat", GL_INVALID_ENUM, "type is not a valid integer vertex attribute format type");
+        return;
+    }
+    if (context->vertexAttribIFormat(attribindex, size, type, relativeoffset)) {
+        markVertexInputFunction(FunctionId::glVertexAttribIFormat, "Separated integer vertex attribute format is tracked per VAO.");
+        Runtime::shared().recordBootstrapTrace("glVertexAttribIFormat(" + std::to_string(attribindex) + ", size=" + std::to_string(size) + ")");
+    }
+}
+
+void APIENTRY glVertexAttribLFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
+    auto* context = requireCurrentContext("glVertexAttribLFormat");
+    if (context == nullptr) {
+        return;
+    }
+    if (size < 1 || size > 4) {
+        recordValidationError(context, "glVertexAttribLFormat", GL_INVALID_VALUE, "size must be 1, 2, 3, or 4");
+        return;
+    }
+    if (type != GL_DOUBLE) {
+        recordValidationError(context, "glVertexAttribLFormat", GL_INVALID_ENUM, "type must be GL_DOUBLE for long vertex attribute format");
+        return;
+    }
+    if (context->vertexAttribLFormat(attribindex, size, type, relativeoffset)) {
+        markVertexInputFunction(FunctionId::glVertexAttribLFormat, "Separated double-precision vertex attribute format is tracked per VAO.");
+        Runtime::shared().recordBootstrapTrace("glVertexAttribLFormat(" + std::to_string(attribindex) + ", size=" + std::to_string(size) + ")");
+    }
+}
+
+void APIENTRY glVertexAttribBinding(GLuint attribindex, GLuint bindingindex) {
+    auto* context = requireCurrentContext("glVertexAttribBinding");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->vertexAttribBinding(attribindex, bindingindex)) {
+        markVertexInputFunction(FunctionId::glVertexAttribBinding, "Vertex attribute to binding point association is tracked per VAO.");
+        Runtime::shared().recordBootstrapTrace("glVertexAttribBinding(" + std::to_string(attribindex) + ", " + std::to_string(bindingindex) + ")");
+    }
+}
+
+void APIENTRY glVertexBindingDivisor(GLuint bindingindex, GLuint divisor) {
+    auto* context = requireCurrentContext("glVertexBindingDivisor");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->vertexBindingDivisor(bindingindex, divisor)) {
+        markVertexInputFunction(FunctionId::glVertexBindingDivisor, "Separated vertex format binding point divisor is tracked per VAO.");
+        Runtime::shared().recordBootstrapTrace("glVertexBindingDivisor(" + std::to_string(bindingindex) + ", " + std::to_string(divisor) + ")");
+    }
+}
+
 void APIENTRY glGetVertexAttribiv(GLuint index, GLenum pname, GLint* params) {
     auto* context = requireCurrentContext("glGetVertexAttribiv");
     if (context == nullptr) {
@@ -1983,6 +2083,120 @@ void APIENTRY glGenerateMipmap(GLenum target) {
     if (context->generateMipmap(target)) {
         markTextureFunction(FunctionId::glGenerateMipmap, "Mipmap chains are generated into texture shadow storage and Metal storage.");
         Runtime::shared().recordBootstrapTrace("glGenerateMipmap(" + std::to_string(target) + ")");
+    }
+}
+
+void APIENTRY glTexStorage1D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width) {
+    auto* context = requireCurrentContext("glTexStorage1D");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_1D) {
+        recordValidationError(context, "glTexStorage1D", GL_INVALID_ENUM, "target must be GL_TEXTURE_1D");
+        return;
+    }
+    if (!isValidTextureInternalFormat(internalformat)) {
+        recordValidationError(context, "glTexStorage1D", GL_INVALID_ENUM, "internalformat is not a supported texture format");
+        return;
+    }
+    if (context->texStorage(target, levels, internalformat, width, 1, 1)) {
+        markTextureFunction(FunctionId::glTexStorage1D, "1D immutable texture storage is live.");
+        Runtime::shared().recordBootstrapTrace("glTexStorage1D(" + std::to_string(width) + ", " + std::to_string(levels) + " levels)");
+    }
+}
+
+void APIENTRY glTexStorage2D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height) {
+    auto* context = requireCurrentContext("glTexStorage2D");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) {
+        recordValidationError(context, "glTexStorage2D", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D or GL_TEXTURE_CUBE_MAP");
+        return;
+    }
+    if (!isValidTextureInternalFormat(internalformat)) {
+        recordValidationError(context, "glTexStorage2D", GL_INVALID_ENUM, "internalformat is not a supported texture format");
+        return;
+    }
+    if (context->texStorage(target, levels, internalformat, width, height, 1)) {
+        markTextureFunction(FunctionId::glTexStorage2D, "2D immutable texture storage is live.");
+        Runtime::shared().recordBootstrapTrace("glTexStorage2D(" + std::to_string(width) + "x" + std::to_string(height) + ", " + std::to_string(levels) + " levels)");
+    }
+}
+
+void APIENTRY glTexStorage3D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth) {
+    auto* context = requireCurrentContext("glTexStorage3D");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY) {
+        recordValidationError(context, "glTexStorage3D", GL_INVALID_ENUM, "target must be GL_TEXTURE_3D or GL_TEXTURE_2D_ARRAY");
+        return;
+    }
+    if (!isValidTextureInternalFormat(internalformat)) {
+        recordValidationError(context, "glTexStorage3D", GL_INVALID_ENUM, "internalformat is not a supported texture format");
+        return;
+    }
+    if (context->texStorage(target, levels, internalformat, width, height, depth)) {
+        markTextureFunction(FunctionId::glTexStorage3D, "3D immutable texture storage is live.");
+        Runtime::shared().recordBootstrapTrace("glTexStorage3D(" + std::to_string(width) + "x" + std::to_string(height) + "x" + std::to_string(depth) + ", " + std::to_string(levels) + " levels)");
+    }
+}
+
+void APIENTRY glTexStorage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {
+    auto* context = requireCurrentContext("glTexStorage2DMultisample");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_2D_MULTISAMPLE) {
+        recordValidationError(context, "glTexStorage2DMultisample", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D_MULTISAMPLE");
+        return;
+    }
+    if (!isValidTextureInternalFormat(internalformat)) {
+        recordValidationError(context, "glTexStorage2DMultisample", GL_INVALID_ENUM, "internalformat is not a supported texture format");
+        return;
+    }
+    if (context->texStorageMultisample(target, samples, internalformat, width, height, 1, fixedsamplelocations)) {
+        markTextureFunction(FunctionId::glTexStorage2DMultisample, "2D multisample immutable texture storage is live.");
+        Runtime::shared().recordBootstrapTrace("glTexStorage2DMultisample(" + std::to_string(width) + "x" + std::to_string(height) + ", " + std::to_string(samples) + " samples)");
+    }
+}
+
+void APIENTRY glTexStorage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations) {
+    auto* context = requireCurrentContext("glTexStorage3DMultisample");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+        recordValidationError(context, "glTexStorage3DMultisample", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D_MULTISAMPLE_ARRAY");
+        return;
+    }
+    if (!isValidTextureInternalFormat(internalformat)) {
+        recordValidationError(context, "glTexStorage3DMultisample", GL_INVALID_ENUM, "internalformat is not a supported texture format");
+        return;
+    }
+    if (context->texStorageMultisample(target, samples, internalformat, width, height, depth, fixedsamplelocations)) {
+        markTextureFunction(FunctionId::glTexStorage3DMultisample, "3D multisample immutable texture storage is live.");
+        Runtime::shared().recordBootstrapTrace("glTexStorage3DMultisample(" + std::to_string(width) + "x" + std::to_string(height) + "x" + std::to_string(depth) + ", " + std::to_string(samples) + " samples)");
+    }
+}
+
+void APIENTRY glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size) {
+    auto* context = requireCurrentContext("glTexBufferRange");
+    if (context == nullptr) {
+        return;
+    }
+    if (target != GL_TEXTURE_BUFFER) {
+        recordValidationError(context, "glTexBufferRange", GL_INVALID_ENUM, "target must be GL_TEXTURE_BUFFER");
+        return;
+    }
+    if (!isValidTextureInternalFormat(internalformat)) {
+        recordValidationError(context, "glTexBufferRange", GL_INVALID_ENUM, "internalformat is not a supported texture format");
+        return;
+    }
+    if (context->texBufferRange(target, internalformat, buffer, offset, size)) {
+        markTextureFunction(FunctionId::glTexBufferRange, "Buffer-texture range binding is live.");
+        Runtime::shared().recordBootstrapTrace("glTexBufferRange(buffer=" + std::to_string(buffer) + ", offset=" + std::to_string(offset) + ", size=" + std::to_string(size) + ")");
     }
 }
 
