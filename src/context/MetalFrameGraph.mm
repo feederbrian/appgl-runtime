@@ -31,6 +31,7 @@ struct MetalFrameGraph::Impl {
             layer.device = device;
             layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
             layer.framebufferOnly = NO;
+            layer.displaySyncEnabled = NO;
         }
         ensureDrawableResources();
     }
@@ -84,9 +85,7 @@ struct MetalFrameGraph::Impl {
             currentCommandBuffer = nil;
         }
 
-        if (usesOffscreenTarget) {
-            currentDrawable = nil;
-        } else {
+        if (!usesOffscreenTarget && currentDrawable == nil) {
             currentDrawable = [layer nextDrawable];
             if (currentDrawable == nil) {
                 return;

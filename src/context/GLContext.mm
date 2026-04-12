@@ -1811,6 +1811,7 @@ struct GLContext::Impl {
             state->clearState().depth,
             state->clearState().stencil
         );
+        pendingMask = 0;
         pendingClear = false;
     }
 
@@ -1918,8 +1919,10 @@ void GLContext::clear(GLbitfield mask) {
         }
         return;
     }
-    impl_->pendingMask = mask;
-    impl_->pendingClear = (mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0;
+    // Accumulate mask bits so consecutive glClear calls (e.g. color then
+    // depth) don't overwrite each other before the pending clear is flushed.
+    impl_->pendingMask |= mask;
+    impl_->pendingClear = (impl_->pendingMask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) != 0;
 }
 
 void GLContext::setViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
