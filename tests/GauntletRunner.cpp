@@ -1692,6 +1692,76 @@ public:
         gl.glGetUniformdv(program, colorLocation, dReadback);
         expectCondition(dReadback[0] == 0.6 && dReadback[3] == 0.9, "double uniform readback from shadow matches");
 
+        // Phase 4 Group 10: glProgramUniform* family (explicit program handle).
+        // Exercise all 50 arities using the already-linked program + existing locations.
+        gl.glProgramUniform1f(program, timeLocation, 1.0f);
+        const GLfloat pf1[1] = {1.0f}; gl.glProgramUniform1fv(program, timeLocation, 1, pf1);
+        gl.glProgramUniform2f(program, colorLocation, 0.5f, 0.5f);
+        const GLfloat pf2[2] = {0.5f, 0.5f}; gl.glProgramUniform2fv(program, colorLocation, 1, pf2);
+        gl.glProgramUniform3f(program, colorLocation, 0.5f, 0.5f, 0.5f);
+        const GLfloat pf3[3] = {0.5f, 0.5f, 0.5f}; gl.glProgramUniform3fv(program, colorLocation, 1, pf3);
+        gl.glProgramUniform4f(program, colorLocation, 0.5f, 0.5f, 0.5f, 1.0f);
+        const GLfloat pf4[4] = {0.5f, 0.5f, 0.5f, 1.0f}; gl.glProgramUniform4fv(program, colorLocation, 1, pf4);
+        gl.glProgramUniform1i(program, timeLocation, 1);
+        const GLint pi1[1] = {1}; gl.glProgramUniform1iv(program, timeLocation, 1, pi1);
+        gl.glProgramUniform2i(program, colorLocation, 1, 2);
+        const GLint pi2[2] = {1, 2}; gl.glProgramUniform2iv(program, colorLocation, 1, pi2);
+        gl.glProgramUniform3i(program, colorLocation, 1, 2, 3);
+        const GLint pi3[3] = {1, 2, 3}; gl.glProgramUniform3iv(program, colorLocation, 1, pi3);
+        gl.glProgramUniform4i(program, colorLocation, 1, 2, 3, 4);
+        const GLint pi4[4] = {1, 2, 3, 4}; gl.glProgramUniform4iv(program, colorLocation, 1, pi4);
+        gl.glProgramUniform1ui(program, timeLocation, 1u);
+        const GLuint pu1[1] = {1u}; gl.glProgramUniform1uiv(program, timeLocation, 1, pu1);
+        gl.glProgramUniform2ui(program, colorLocation, 1u, 2u);
+        const GLuint pu2[2] = {1u, 2u}; gl.glProgramUniform2uiv(program, colorLocation, 1, pu2);
+        gl.glProgramUniform3ui(program, colorLocation, 1u, 2u, 3u);
+        const GLuint pu3[3] = {1u, 2u, 3u}; gl.glProgramUniform3uiv(program, colorLocation, 1, pu3);
+        gl.glProgramUniform4ui(program, colorLocation, 1u, 2u, 3u, 4u);
+        const GLuint pu4[4] = {1u, 2u, 3u, 4u}; gl.glProgramUniform4uiv(program, colorLocation, 1, pu4);
+        gl.glProgramUniform1d(program, timeLocation, 1.0);
+        const GLdouble pd1[1] = {1.0}; gl.glProgramUniform1dv(program, timeLocation, 1, pd1);
+        gl.glProgramUniform2d(program, colorLocation, 1.0, 2.0);
+        const GLdouble pd2[2] = {1.0, 2.0}; gl.glProgramUniform2dv(program, colorLocation, 1, pd2);
+        gl.glProgramUniform3d(program, colorLocation, 1.0, 2.0, 3.0);
+        const GLdouble pd3[3] = {1.0, 2.0, 3.0}; gl.glProgramUniform3dv(program, colorLocation, 1, pd3);
+        gl.glProgramUniform4d(program, colorLocation, 1.0, 2.0, 3.0, 4.0);
+        const GLdouble pd4[4] = {1.0, 2.0, 3.0, 4.0}; gl.glProgramUniform4dv(program, colorLocation, 1, pd4);
+        // Float matrices.
+        const GLfloat pm2[4] = {1,0,0,1}; gl.glProgramUniformMatrix2fv(program, timeLocation, 1, GL_FALSE, pm2);
+        const GLfloat pm3[9] = {1,0,0,0,1,0,0,0,1}; gl.glProgramUniformMatrix3fv(program, timeLocation, 1, GL_FALSE, pm3);
+        const GLfloat pm4[16] = {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}; gl.glProgramUniformMatrix4fv(program, timeLocation, 1, GL_FALSE, pm4);
+        const GLfloat pm2x3[6] = {1,0,0,0,1,0}; gl.glProgramUniformMatrix2x3fv(program, timeLocation, 1, GL_FALSE, pm2x3);
+        const GLfloat pm3x2[6] = {1,0,0,1,0,0}; gl.glProgramUniformMatrix3x2fv(program, timeLocation, 1, GL_FALSE, pm3x2);
+        const GLfloat pm2x4[8] = {1,0,0,0,0,1,0,0}; gl.glProgramUniformMatrix2x4fv(program, timeLocation, 1, GL_FALSE, pm2x4);
+        const GLfloat pm4x2[8] = {1,0,0,1,0,0,0,0}; gl.glProgramUniformMatrix4x2fv(program, timeLocation, 1, GL_FALSE, pm4x2);
+        const GLfloat pm3x4[12] = {1,0,0,0,0,1,0,0,0,0,1,0}; gl.glProgramUniformMatrix3x4fv(program, timeLocation, 1, GL_FALSE, pm3x4);
+        const GLfloat pm4x3[12] = {1,0,0,0,1,0,0,0,1,0,0,0}; gl.glProgramUniformMatrix4x3fv(program, timeLocation, 1, GL_FALSE, pm4x3);
+        // Double matrices.
+        const GLdouble pdm2[4] = {1,0,0,1}; gl.glProgramUniformMatrix2dv(program, timeLocation, 1, GL_FALSE, pdm2);
+        const GLdouble pdm3[9] = {1,0,0,0,1,0,0,0,1}; gl.glProgramUniformMatrix3dv(program, timeLocation, 1, GL_FALSE, pdm3);
+        const GLdouble pdm4[16] = {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}; gl.glProgramUniformMatrix4dv(program, timeLocation, 1, GL_FALSE, pdm4);
+        const GLdouble pdm2x3[6] = {1,0,0,0,1,0}; gl.glProgramUniformMatrix2x3dv(program, timeLocation, 1, GL_FALSE, pdm2x3);
+        const GLdouble pdm3x2[6] = {1,0,0,1,0,0}; gl.glProgramUniformMatrix3x2dv(program, timeLocation, 1, GL_FALSE, pdm3x2);
+        const GLdouble pdm2x4[8] = {1,0,0,0,0,1,0,0}; gl.glProgramUniformMatrix2x4dv(program, timeLocation, 1, GL_FALSE, pdm2x4);
+        const GLdouble pdm4x2[8] = {1,0,0,1,0,0,0,0}; gl.glProgramUniformMatrix4x2dv(program, timeLocation, 1, GL_FALSE, pdm4x2);
+        const GLdouble pdm3x4[12] = {1,0,0,0,0,1,0,0,0,0,1,0}; gl.glProgramUniformMatrix3x4dv(program, timeLocation, 1, GL_FALSE, pdm3x4);
+        const GLdouble pdm4x3[12] = {1,0,0,0,1,0,0,0,1,0,0,0}; gl.glProgramUniformMatrix4x3dv(program, timeLocation, 1, GL_FALSE, pdm4x3);
+        expectGLError(gl, GL_NO_ERROR, "all 50 ProgramUniform arities accept legal args");
+
+        // Phase 4 Group 11: program/shader binary stubs.
+        gl.glProgramParameteri(program, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+        expectGLError(gl, GL_NO_ERROR, "glProgramParameteri accepts retrievable hint");
+        gl.glReleaseShaderCompiler();
+        expectGLError(gl, GL_NO_ERROR, "glReleaseShaderCompiler is a no-op hint");
+        // glGetProgramBinary and glProgramBinary report errors (0 formats) — drain.
+        GLsizei binLength = 0; GLenum binFormat = 0;
+        gl.glGetProgramBinary(program, 0, &binLength, &binFormat, nullptr);
+        while (gl.glGetError() != GL_NO_ERROR) {}
+        gl.glProgramBinary(program, 0, nullptr, 0);
+        while (gl.glGetError() != GL_NO_ERROR) {}
+        gl.glShaderBinary(0, nullptr, 0, nullptr, 0);
+        while (gl.glGetError() != GL_NO_ERROR) {}
+
         gl.glDetachShader(program, vertex);
         GLint attachedAfterDetach = 0;
         gl.glGetProgramiv(program, GL_ATTACHED_SHADERS, &attachedAfterDetach);
@@ -1804,6 +1874,39 @@ public:
             FunctionId::glUniformMatrix4x3fv,
             FunctionId::glUseProgram,
             FunctionId::glValidateProgram,
+            // Phase 4 Group 10: glProgramUniform* (50 arities).
+            FunctionId::glProgramUniform1f, FunctionId::glProgramUniform1fv,
+            FunctionId::glProgramUniform2f, FunctionId::glProgramUniform2fv,
+            FunctionId::glProgramUniform3f, FunctionId::glProgramUniform3fv,
+            FunctionId::glProgramUniform4f, FunctionId::glProgramUniform4fv,
+            FunctionId::glProgramUniform1i, FunctionId::glProgramUniform1iv,
+            FunctionId::glProgramUniform2i, FunctionId::glProgramUniform2iv,
+            FunctionId::glProgramUniform3i, FunctionId::glProgramUniform3iv,
+            FunctionId::glProgramUniform4i, FunctionId::glProgramUniform4iv,
+            FunctionId::glProgramUniform1ui, FunctionId::glProgramUniform1uiv,
+            FunctionId::glProgramUniform2ui, FunctionId::glProgramUniform2uiv,
+            FunctionId::glProgramUniform3ui, FunctionId::glProgramUniform3uiv,
+            FunctionId::glProgramUniform4ui, FunctionId::glProgramUniform4uiv,
+            FunctionId::glProgramUniform1d, FunctionId::glProgramUniform1dv,
+            FunctionId::glProgramUniform2d, FunctionId::glProgramUniform2dv,
+            FunctionId::glProgramUniform3d, FunctionId::glProgramUniform3dv,
+            FunctionId::glProgramUniform4d, FunctionId::glProgramUniform4dv,
+            FunctionId::glProgramUniformMatrix2fv, FunctionId::glProgramUniformMatrix3fv,
+            FunctionId::glProgramUniformMatrix4fv,
+            FunctionId::glProgramUniformMatrix2x3fv, FunctionId::glProgramUniformMatrix3x2fv,
+            FunctionId::glProgramUniformMatrix2x4fv, FunctionId::glProgramUniformMatrix4x2fv,
+            FunctionId::glProgramUniformMatrix3x4fv, FunctionId::glProgramUniformMatrix4x3fv,
+            FunctionId::glProgramUniformMatrix2dv, FunctionId::glProgramUniformMatrix3dv,
+            FunctionId::glProgramUniformMatrix4dv,
+            FunctionId::glProgramUniformMatrix2x3dv, FunctionId::glProgramUniformMatrix3x2dv,
+            FunctionId::glProgramUniformMatrix2x4dv, FunctionId::glProgramUniformMatrix4x2dv,
+            FunctionId::glProgramUniformMatrix3x4dv, FunctionId::glProgramUniformMatrix4x3dv,
+            // Phase 4 Group 11: program/shader binary.
+            FunctionId::glGetProgramBinary,
+            FunctionId::glProgramBinary,
+            FunctionId::glProgramParameteri,
+            FunctionId::glShaderBinary,
+            FunctionId::glReleaseShaderCompiler,
         };
     }
 };

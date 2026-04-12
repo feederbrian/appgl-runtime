@@ -4077,6 +4077,292 @@ void APIENTRY glClearDepthf(GLfloat d) {
     Runtime::shared().recordBootstrapTrace("glClearDepthf(" + formatFloat(d) + ")");
 }
 
+// --- GL 4.1: Program uniforms (Group 10) — explicit program handle variants ---
+// Macros for the 50 arity clones. Each delegates to the appropriate ForProgram method.
+
+#define IMPL_PROGRAM_UNIFORM_SCALAR(N, TYPE, ELEM, FTYPE)                                     \
+void APIENTRY glProgramUniform##N##FTYPE(GLuint program, GLint location, ARGLIST_##N##_##TYPE) { \
+    auto* context = requireCurrentContext("glProgramUniform" #N #FTYPE);                       \
+    if (context == nullptr) return;                                                             \
+    TYPE v[] = { VALLIST_##N };                                                                 \
+    if (context->setUniformScalarVectorForProgram(program, location, ELEM, N, 1, v)) {         \
+        markProgramFunction(FunctionId::glProgramUniform##N##FTYPE,                            \
+            "ProgramUniform" #N #FTYPE " (explicit program).");                                \
+        traceUniform("glProgramUniform" #N #FTYPE, location);                                  \
+    }                                                                                           \
+}
+
+// Expand argument lists via helper macros is too complex for the preprocessor.
+// Instead, write all 50 functions directly for clarity and auditability.
+
+void APIENTRY glProgramUniform1i(GLuint program, GLint location, GLint v0) {
+    auto* ctx = requireCurrentContext("glProgramUniform1i"); if (!ctx) return;
+    GLint v[] = {v0};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kIntElement, 1, 1, v)) { markProgramFunction(FunctionId::glProgramUniform1i, "ProgramUniform1i."); traceUniform("glProgramUniform1i", location); }
+}
+void APIENTRY glProgramUniform1iv(GLuint program, GLint location, GLsizei count, const GLint* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform1iv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kIntElement, 1, count, value)) { markProgramFunction(FunctionId::glProgramUniform1iv, "ProgramUniform1iv."); traceUniform("glProgramUniform1iv", location); }
+}
+void APIENTRY glProgramUniform1f(GLuint program, GLint location, GLfloat v0) {
+    auto* ctx = requireCurrentContext("glProgramUniform1f"); if (!ctx) return;
+    GLfloat v[] = {v0};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kFloatElement, 1, 1, v)) { markProgramFunction(FunctionId::glProgramUniform1f, "ProgramUniform1f."); traceUniform("glProgramUniform1f", location); }
+}
+void APIENTRY glProgramUniform1fv(GLuint program, GLint location, GLsizei count, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform1fv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kFloatElement, 1, count, value)) { markProgramFunction(FunctionId::glProgramUniform1fv, "ProgramUniform1fv."); traceUniform("glProgramUniform1fv", location); }
+}
+void APIENTRY glProgramUniform1d(GLuint program, GLint location, GLdouble x) {
+    auto* ctx = requireCurrentContext("glProgramUniform1d"); if (!ctx) return;
+    GLdouble v[] = {x};
+    if (ctx->setUniformDoubleForProgram(program, location, 1, 1, v)) { markProgramFunction(FunctionId::glProgramUniform1d, "ProgramUniform1d."); traceUniform("glProgramUniform1d", location); }
+}
+void APIENTRY glProgramUniform1dv(GLuint program, GLint location, GLsizei count, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform1dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleForProgram(program, location, 1, count, value)) { markProgramFunction(FunctionId::glProgramUniform1dv, "ProgramUniform1dv."); traceUniform("glProgramUniform1dv", location); }
+}
+void APIENTRY glProgramUniform1ui(GLuint program, GLint location, GLuint v0) {
+    auto* ctx = requireCurrentContext("glProgramUniform1ui"); if (!ctx) return;
+    GLuint v[] = {v0};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kUIntElement, 1, 1, v)) { markProgramFunction(FunctionId::glProgramUniform1ui, "ProgramUniform1ui."); traceUniform("glProgramUniform1ui", location); }
+}
+void APIENTRY glProgramUniform1uiv(GLuint program, GLint location, GLsizei count, const GLuint* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform1uiv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kUIntElement, 1, count, value)) { markProgramFunction(FunctionId::glProgramUniform1uiv, "ProgramUniform1uiv."); traceUniform("glProgramUniform1uiv", location); }
+}
+void APIENTRY glProgramUniform2i(GLuint program, GLint location, GLint v0, GLint v1) {
+    auto* ctx = requireCurrentContext("glProgramUniform2i"); if (!ctx) return;
+    GLint v[] = {v0, v1};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kIntElement, 2, 1, v)) { markProgramFunction(FunctionId::glProgramUniform2i, "ProgramUniform2i."); traceUniform("glProgramUniform2i", location); }
+}
+void APIENTRY glProgramUniform2iv(GLuint program, GLint location, GLsizei count, const GLint* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform2iv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kIntElement, 2, count, value)) { markProgramFunction(FunctionId::glProgramUniform2iv, "ProgramUniform2iv."); traceUniform("glProgramUniform2iv", location); }
+}
+void APIENTRY glProgramUniform2f(GLuint program, GLint location, GLfloat v0, GLfloat v1) {
+    auto* ctx = requireCurrentContext("glProgramUniform2f"); if (!ctx) return;
+    GLfloat v[] = {v0, v1};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kFloatElement, 2, 1, v)) { markProgramFunction(FunctionId::glProgramUniform2f, "ProgramUniform2f."); traceUniform("glProgramUniform2f", location); }
+}
+void APIENTRY glProgramUniform2fv(GLuint program, GLint location, GLsizei count, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform2fv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kFloatElement, 2, count, value)) { markProgramFunction(FunctionId::glProgramUniform2fv, "ProgramUniform2fv."); traceUniform("glProgramUniform2fv", location); }
+}
+void APIENTRY glProgramUniform2d(GLuint program, GLint location, GLdouble x, GLdouble y) {
+    auto* ctx = requireCurrentContext("glProgramUniform2d"); if (!ctx) return;
+    GLdouble v[] = {x, y};
+    if (ctx->setUniformDoubleForProgram(program, location, 2, 1, v)) { markProgramFunction(FunctionId::glProgramUniform2d, "ProgramUniform2d."); traceUniform("glProgramUniform2d", location); }
+}
+void APIENTRY glProgramUniform2dv(GLuint program, GLint location, GLsizei count, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform2dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleForProgram(program, location, 2, count, value)) { markProgramFunction(FunctionId::glProgramUniform2dv, "ProgramUniform2dv."); traceUniform("glProgramUniform2dv", location); }
+}
+void APIENTRY glProgramUniform2ui(GLuint program, GLint location, GLuint v0, GLuint v1) {
+    auto* ctx = requireCurrentContext("glProgramUniform2ui"); if (!ctx) return;
+    GLuint v[] = {v0, v1};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kUIntElement, 2, 1, v)) { markProgramFunction(FunctionId::glProgramUniform2ui, "ProgramUniform2ui."); traceUniform("glProgramUniform2ui", location); }
+}
+void APIENTRY glProgramUniform2uiv(GLuint program, GLint location, GLsizei count, const GLuint* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform2uiv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kUIntElement, 2, count, value)) { markProgramFunction(FunctionId::glProgramUniform2uiv, "ProgramUniform2uiv."); traceUniform("glProgramUniform2uiv", location); }
+}
+void APIENTRY glProgramUniform3i(GLuint program, GLint location, GLint v0, GLint v1, GLint v2) {
+    auto* ctx = requireCurrentContext("glProgramUniform3i"); if (!ctx) return;
+    GLint v[] = {v0, v1, v2};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kIntElement, 3, 1, v)) { markProgramFunction(FunctionId::glProgramUniform3i, "ProgramUniform3i."); traceUniform("glProgramUniform3i", location); }
+}
+void APIENTRY glProgramUniform3iv(GLuint program, GLint location, GLsizei count, const GLint* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform3iv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kIntElement, 3, count, value)) { markProgramFunction(FunctionId::glProgramUniform3iv, "ProgramUniform3iv."); traceUniform("glProgramUniform3iv", location); }
+}
+void APIENTRY glProgramUniform3f(GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2) {
+    auto* ctx = requireCurrentContext("glProgramUniform3f"); if (!ctx) return;
+    GLfloat v[] = {v0, v1, v2};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kFloatElement, 3, 1, v)) { markProgramFunction(FunctionId::glProgramUniform3f, "ProgramUniform3f."); traceUniform("glProgramUniform3f", location); }
+}
+void APIENTRY glProgramUniform3fv(GLuint program, GLint location, GLsizei count, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform3fv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kFloatElement, 3, count, value)) { markProgramFunction(FunctionId::glProgramUniform3fv, "ProgramUniform3fv."); traceUniform("glProgramUniform3fv", location); }
+}
+void APIENTRY glProgramUniform3d(GLuint program, GLint location, GLdouble x, GLdouble y, GLdouble z) {
+    auto* ctx = requireCurrentContext("glProgramUniform3d"); if (!ctx) return;
+    GLdouble v[] = {x, y, z};
+    if (ctx->setUniformDoubleForProgram(program, location, 3, 1, v)) { markProgramFunction(FunctionId::glProgramUniform3d, "ProgramUniform3d."); traceUniform("glProgramUniform3d", location); }
+}
+void APIENTRY glProgramUniform3dv(GLuint program, GLint location, GLsizei count, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform3dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleForProgram(program, location, 3, count, value)) { markProgramFunction(FunctionId::glProgramUniform3dv, "ProgramUniform3dv."); traceUniform("glProgramUniform3dv", location); }
+}
+void APIENTRY glProgramUniform3ui(GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2) {
+    auto* ctx = requireCurrentContext("glProgramUniform3ui"); if (!ctx) return;
+    GLuint v[] = {v0, v1, v2};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kUIntElement, 3, 1, v)) { markProgramFunction(FunctionId::glProgramUniform3ui, "ProgramUniform3ui."); traceUniform("glProgramUniform3ui", location); }
+}
+void APIENTRY glProgramUniform3uiv(GLuint program, GLint location, GLsizei count, const GLuint* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform3uiv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kUIntElement, 3, count, value)) { markProgramFunction(FunctionId::glProgramUniform3uiv, "ProgramUniform3uiv."); traceUniform("glProgramUniform3uiv", location); }
+}
+void APIENTRY glProgramUniform4i(GLuint program, GLint location, GLint v0, GLint v1, GLint v2, GLint v3) {
+    auto* ctx = requireCurrentContext("glProgramUniform4i"); if (!ctx) return;
+    GLint v[] = {v0, v1, v2, v3};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kIntElement, 4, 1, v)) { markProgramFunction(FunctionId::glProgramUniform4i, "ProgramUniform4i."); traceUniform("glProgramUniform4i", location); }
+}
+void APIENTRY glProgramUniform4iv(GLuint program, GLint location, GLsizei count, const GLint* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform4iv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kIntElement, 4, count, value)) { markProgramFunction(FunctionId::glProgramUniform4iv, "ProgramUniform4iv."); traceUniform("glProgramUniform4iv", location); }
+}
+void APIENTRY glProgramUniform4f(GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
+    auto* ctx = requireCurrentContext("glProgramUniform4f"); if (!ctx) return;
+    GLfloat v[] = {v0, v1, v2, v3};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kFloatElement, 4, 1, v)) { markProgramFunction(FunctionId::glProgramUniform4f, "ProgramUniform4f."); traceUniform("glProgramUniform4f", location); }
+}
+void APIENTRY glProgramUniform4fv(GLuint program, GLint location, GLsizei count, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform4fv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kFloatElement, 4, count, value)) { markProgramFunction(FunctionId::glProgramUniform4fv, "ProgramUniform4fv."); traceUniform("glProgramUniform4fv", location); }
+}
+void APIENTRY glProgramUniform4d(GLuint program, GLint location, GLdouble x, GLdouble y, GLdouble z, GLdouble w) {
+    auto* ctx = requireCurrentContext("glProgramUniform4d"); if (!ctx) return;
+    GLdouble v[] = {x, y, z, w};
+    if (ctx->setUniformDoubleForProgram(program, location, 4, 1, v)) { markProgramFunction(FunctionId::glProgramUniform4d, "ProgramUniform4d."); traceUniform("glProgramUniform4d", location); }
+}
+void APIENTRY glProgramUniform4dv(GLuint program, GLint location, GLsizei count, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform4dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleForProgram(program, location, 4, count, value)) { markProgramFunction(FunctionId::glProgramUniform4dv, "ProgramUniform4dv."); traceUniform("glProgramUniform4dv", location); }
+}
+void APIENTRY glProgramUniform4ui(GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3) {
+    auto* ctx = requireCurrentContext("glProgramUniform4ui"); if (!ctx) return;
+    GLuint v[] = {v0, v1, v2, v3};
+    if (ctx->setUniformScalarVectorForProgram(program, location, kUIntElement, 4, 1, v)) { markProgramFunction(FunctionId::glProgramUniform4ui, "ProgramUniform4ui."); traceUniform("glProgramUniform4ui", location); }
+}
+void APIENTRY glProgramUniform4uiv(GLuint program, GLint location, GLsizei count, const GLuint* value) {
+    auto* ctx = requireCurrentContext("glProgramUniform4uiv"); if (!ctx) return;
+    if (ctx->setUniformScalarVectorForProgram(program, location, kUIntElement, 4, count, value)) { markProgramFunction(FunctionId::glProgramUniform4uiv, "ProgramUniform4uiv."); traceUniform("glProgramUniform4uiv", location); }
+}
+
+// Float matrices.
+void APIENTRY glProgramUniformMatrix2fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix2fv"); if (!ctx) return;
+    if (ctx->setUniformMatrixForProgram(program, location, 2, 2, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix2fv, "ProgramUniformMatrix2fv."); traceUniform("glProgramUniformMatrix2fv", location); }
+}
+void APIENTRY glProgramUniformMatrix3fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix3fv"); if (!ctx) return;
+    if (ctx->setUniformMatrixForProgram(program, location, 3, 3, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix3fv, "ProgramUniformMatrix3fv."); traceUniform("glProgramUniformMatrix3fv", location); }
+}
+void APIENTRY glProgramUniformMatrix4fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix4fv"); if (!ctx) return;
+    if (ctx->setUniformMatrixForProgram(program, location, 4, 4, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix4fv, "ProgramUniformMatrix4fv."); traceUniform("glProgramUniformMatrix4fv", location); }
+}
+void APIENTRY glProgramUniformMatrix2x3fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix2x3fv"); if (!ctx) return;
+    if (ctx->setUniformMatrixForProgram(program, location, 2, 3, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix2x3fv, "ProgramUniformMatrix2x3fv."); traceUniform("glProgramUniformMatrix2x3fv", location); }
+}
+void APIENTRY glProgramUniformMatrix3x2fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix3x2fv"); if (!ctx) return;
+    if (ctx->setUniformMatrixForProgram(program, location, 3, 2, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix3x2fv, "ProgramUniformMatrix3x2fv."); traceUniform("glProgramUniformMatrix3x2fv", location); }
+}
+void APIENTRY glProgramUniformMatrix2x4fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix2x4fv"); if (!ctx) return;
+    if (ctx->setUniformMatrixForProgram(program, location, 2, 4, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix2x4fv, "ProgramUniformMatrix2x4fv."); traceUniform("glProgramUniformMatrix2x4fv", location); }
+}
+void APIENTRY glProgramUniformMatrix4x2fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix4x2fv"); if (!ctx) return;
+    if (ctx->setUniformMatrixForProgram(program, location, 4, 2, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix4x2fv, "ProgramUniformMatrix4x2fv."); traceUniform("glProgramUniformMatrix4x2fv", location); }
+}
+void APIENTRY glProgramUniformMatrix3x4fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix3x4fv"); if (!ctx) return;
+    if (ctx->setUniformMatrixForProgram(program, location, 3, 4, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix3x4fv, "ProgramUniformMatrix3x4fv."); traceUniform("glProgramUniformMatrix3x4fv", location); }
+}
+void APIENTRY glProgramUniformMatrix4x3fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix4x3fv"); if (!ctx) return;
+    if (ctx->setUniformMatrixForProgram(program, location, 4, 3, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix4x3fv, "ProgramUniformMatrix4x3fv."); traceUniform("glProgramUniformMatrix4x3fv", location); }
+}
+
+// Double matrices.
+void APIENTRY glProgramUniformMatrix2dv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix2dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleMatrixForProgram(program, location, 2, 2, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix2dv, "ProgramUniformMatrix2dv."); traceUniform("glProgramUniformMatrix2dv", location); }
+}
+void APIENTRY glProgramUniformMatrix3dv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix3dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleMatrixForProgram(program, location, 3, 3, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix3dv, "ProgramUniformMatrix3dv."); traceUniform("glProgramUniformMatrix3dv", location); }
+}
+void APIENTRY glProgramUniformMatrix4dv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix4dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleMatrixForProgram(program, location, 4, 4, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix4dv, "ProgramUniformMatrix4dv."); traceUniform("glProgramUniformMatrix4dv", location); }
+}
+void APIENTRY glProgramUniformMatrix2x3dv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix2x3dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleMatrixForProgram(program, location, 2, 3, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix2x3dv, "ProgramUniformMatrix2x3dv."); traceUniform("glProgramUniformMatrix2x3dv", location); }
+}
+void APIENTRY glProgramUniformMatrix3x2dv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix3x2dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleMatrixForProgram(program, location, 3, 2, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix3x2dv, "ProgramUniformMatrix3x2dv."); traceUniform("glProgramUniformMatrix3x2dv", location); }
+}
+void APIENTRY glProgramUniformMatrix2x4dv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix2x4dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleMatrixForProgram(program, location, 2, 4, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix2x4dv, "ProgramUniformMatrix2x4dv."); traceUniform("glProgramUniformMatrix2x4dv", location); }
+}
+void APIENTRY glProgramUniformMatrix4x2dv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix4x2dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleMatrixForProgram(program, location, 4, 2, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix4x2dv, "ProgramUniformMatrix4x2dv."); traceUniform("glProgramUniformMatrix4x2dv", location); }
+}
+void APIENTRY glProgramUniformMatrix3x4dv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix3x4dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleMatrixForProgram(program, location, 3, 4, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix3x4dv, "ProgramUniformMatrix3x4dv."); traceUniform("glProgramUniformMatrix3x4dv", location); }
+}
+void APIENTRY glProgramUniformMatrix4x3dv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* ctx = requireCurrentContext("glProgramUniformMatrix4x3dv"); if (!ctx) return;
+    if (ctx->setUniformDoubleMatrixForProgram(program, location, 4, 3, count, transpose, value)) { markProgramFunction(FunctionId::glProgramUniformMatrix4x3dv, "ProgramUniformMatrix4x3dv."); traceUniform("glProgramUniformMatrix4x3dv", location); }
+}
+
+// --- GL 4.1: Program/Shader Binary and Release (Group 11) ---
+
+void APIENTRY glGetProgramBinary(GLuint program, GLsizei bufSize, GLsizei* length, GLenum* binaryFormat, void* binary) {
+    auto* ctx = requireCurrentContext("glGetProgramBinary"); if (!ctx) return;
+    (void)program; (void)bufSize; (void)binary;
+    // Spec-legal: report GL_INVALID_OPERATION when GL_NUM_PROGRAM_BINARY_FORMATS == 0
+    // and GL_PROGRAM_BINARY_RETRIEVABLE_HINT is false (default).
+    if (length != nullptr) *length = 0;
+    if (binaryFormat != nullptr) *binaryFormat = 0;
+    recordValidationError(ctx, "glGetProgramBinary", GL_INVALID_OPERATION, "no binary formats supported");
+    markProgramFunction(FunctionId::glGetProgramBinary, "ProgramBinary stub (0 formats).");
+    Runtime::shared().recordBootstrapTrace("glGetProgramBinary(program=" + std::to_string(program) + ")");
+}
+
+void APIENTRY glProgramBinary(GLuint program, GLenum binaryFormat, const void* binary, GLsizei length) {
+    auto* ctx = requireCurrentContext("glProgramBinary"); if (!ctx) return;
+    (void)program; (void)binaryFormat; (void)binary; (void)length;
+    // Spec-legal: no supported binary formats → always fails.
+    recordValidationError(ctx, "glProgramBinary", GL_INVALID_ENUM, "binaryFormat not recognized (0 supported formats)");
+    markProgramFunction(FunctionId::glProgramBinary, "ProgramBinary stub (0 formats).");
+    Runtime::shared().recordBootstrapTrace("glProgramBinary(program=" + std::to_string(program) + ")");
+}
+
+void APIENTRY glProgramParameteri(GLuint program, GLenum pname, GLint value) {
+    auto* ctx = requireCurrentContext("glProgramParameteri"); if (!ctx) return;
+    (void)program; (void)pname; (void)value;
+    // Accept GL_PROGRAM_BINARY_RETRIEVABLE_HINT and GL_PROGRAM_SEPARABLE silently.
+    markProgramFunction(FunctionId::glProgramParameteri, "ProgramParameteri accepts hint without effect.");
+    Runtime::shared().recordBootstrapTrace("glProgramParameteri(program=" + std::to_string(program) + ", pname=" + std::to_string(pname) + ")");
+}
+
+void APIENTRY glShaderBinary(GLsizei count, const GLuint* shaders, GLenum binaryformat, const void* binary, GLsizei length) {
+    auto* ctx = requireCurrentContext("glShaderBinary"); if (!ctx) return;
+    (void)count; (void)shaders; (void)binaryformat; (void)binary; (void)length;
+    // Spec-legal: report GL_INVALID_ENUM when binaryformat is not recognized (0 supported).
+    recordValidationError(ctx, "glShaderBinary", GL_INVALID_ENUM, "binaryformat not recognized (0 supported formats)");
+    markProgramFunction(FunctionId::glShaderBinary, "ShaderBinary stub (0 formats).");
+    Runtime::shared().recordBootstrapTrace("glShaderBinary(count=" + std::to_string(count) + ")");
+}
+
+void APIENTRY glReleaseShaderCompiler(void) {
+    auto* ctx = requireCurrentContext("glReleaseShaderCompiler"); if (!ctx) return;
+    // Spec: this is a hint — the runtime may ignore it.
+    markProgramFunction(FunctionId::glReleaseShaderCompiler, "ReleaseShaderCompiler hint accepted (no-op).");
+    Runtime::shared().recordBootstrapTrace("glReleaseShaderCompiler()");
+}
+
 // --- GL 4.1: Double-precision vertex attributes (Group 12) ---
 
 void APIENTRY glVertexAttribL1d(GLuint index, GLdouble x) {

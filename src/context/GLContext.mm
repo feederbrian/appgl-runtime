@@ -5049,6 +5049,101 @@ bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, G
     return true;
 }
 
+// --- GL 4.1: glProgramUniform* family — explicit program handle variants ---
+
+bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
+    if (location < 0) return true;
+    if (count < 0 || vectorSize < 1 || vectorSize > 4) { pushError(GL_INVALID_VALUE); return false; }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    GLProgramUniformValue* slot = lookupUniformValue(object, location);
+    if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    const std::size_t expected = static_cast<std::size_t>(vectorSize) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    switch (element) {
+        case UniformElementType::Float:
+            slot->floats.assign(static_cast<const GLfloat*>(values), static_cast<const GLfloat*>(values) + expected);
+            slot->ints.clear(); slot->uints.clear(); break;
+        case UniformElementType::Int:
+            slot->ints.assign(static_cast<const GLint*>(values), static_cast<const GLint*>(values) + expected);
+            slot->floats.clear(); slot->uints.clear(); break;
+        case UniformElementType::UnsignedInt:
+            slot->uints.assign(static_cast<const GLuint*>(values), static_cast<const GLuint*>(values) + expected);
+            slot->floats.clear(); slot->ints.clear(); break;
+    }
+    return true;
+}
+
+bool GLContext::setUniformMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values) {
+    if (location < 0) return true;
+    if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    GLProgramUniformValue* slot = lookupUniformValue(object, location);
+    if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    slot->floats.assign(elements, 0.0f);
+    if (transpose == GL_FALSE) {
+        std::memcpy(slot->floats.data(), values, elements * sizeof(GLfloat));
+    } else {
+        const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+        for (GLsizei m = 0; m < std::max<GLsizei>(count, 1); ++m) {
+            for (GLint r = 0; r < rows; ++r) {
+                for (GLint c = 0; c < cols; ++c) {
+                    const std::size_t srcIndex = static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) + static_cast<std::size_t>(c);
+                    const std::size_t dstIndex = static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) + static_cast<std::size_t>(r);
+                    slot->floats[dstIndex] = values[srcIndex];
+                }
+            }
+        }
+    }
+    slot->ints.clear(); slot->uints.clear();
+    return true;
+}
+
+bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint vectorSize, GLsizei count, const GLdouble* values) {
+    if (location < 0) return true;
+    if (count < 0 || vectorSize < 1 || vectorSize > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    GLProgramUniformValue* slot = lookupUniformValue(object, location);
+    if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    const std::size_t expected = static_cast<std::size_t>(vectorSize) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    slot->doubles.assign(values, values + expected);
+    slot->floats.resize(expected);
+    for (std::size_t i = 0; i < expected; ++i) { slot->floats[i] = static_cast<GLfloat>(values[i]); }
+    slot->ints.clear(); slot->uints.clear();
+    return true;
+}
+
+bool GLContext::setUniformDoubleMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values) {
+    if (location < 0) return true;
+    if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    GLProgramUniformValue* slot = lookupUniformValue(object, location);
+    if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    slot->doubles.resize(elements);
+    slot->floats.resize(elements);
+    if (transpose == GL_FALSE) {
+        for (std::size_t i = 0; i < elements; ++i) { slot->doubles[i] = values[i]; slot->floats[i] = static_cast<GLfloat>(values[i]); }
+    } else {
+        const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+        for (GLsizei m = 0; m < std::max<GLsizei>(count, 1); ++m) {
+            for (GLint r = 0; r < rows; ++r) {
+                for (GLint c = 0; c < cols; ++c) {
+                    const std::size_t srcIndex = static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) + static_cast<std::size_t>(c);
+                    const std::size_t dstIndex = static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) + static_cast<std::size_t>(r);
+                    slot->doubles[dstIndex] = values[srcIndex];
+                    slot->floats[dstIndex] = static_cast<GLfloat>(values[srcIndex]);
+                }
+            }
+        }
+    }
+    slot->ints.clear(); slot->uints.clear();
+    return true;
+}
+
 bool GLContext::getUniformdv(GLuint program, GLint location, GLdouble* params) {
     GLProgramObject* object = impl_->objects->programs().get(program);
     if (object == nullptr || params == nullptr) {

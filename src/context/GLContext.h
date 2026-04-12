@@ -209,6 +209,11 @@ public:
     bool setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values);
     bool setUniformDouble(GLint location, GLint vectorSize, GLsizei count, const GLdouble* values);
     bool setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values);
+    // GL 4.1 — glProgramUniform* family: explicit program handle variants.
+    bool setUniformScalarVectorForProgram(GLuint program, GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values);
+    bool setUniformMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values);
+    bool setUniformDoubleForProgram(GLuint program, GLint location, GLint vectorSize, GLsizei count, const GLdouble* values);
+    bool setUniformDoubleMatrixForProgram(GLuint program, GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values);
 
     // Phase A Group 7 — drawing. See MetalFrameGraph::encodeSolidColorDraw for
     // the minimal pipeline state we currently support. Additional draw variants
