@@ -1,7 +1,11 @@
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "GauntletRunner.h"
+#include "../src/runtime/AppGLRuntime.h"
 
 int main(int argc, char** argv) {
     const std::string phaseFilter = argc > 1 ? argv[1] : "phase-a";
@@ -12,5 +16,26 @@ int main(int argc, char** argv) {
     }
 
     std::cout << payload << '\n';
+
+    // Optional second argument: write the post-run coverage snapshot JSON to
+    // the given path. Used to refresh docs/appgl-coverage-snapshot-gate3.json
+    // from CLI after Phase 3 gate work.
+    if (argc > 2) {
+        const std::string snapshotPath = argv[2];
+        std::size_t required = appgl::Runtime::shared().writeCoverageSnapshotJSON(nullptr, 0);
+        std::vector<char> buffer(required);
+        appgl::Runtime::shared().writeCoverageSnapshotJSON(buffer.data(), buffer.size());
+        std::ofstream out(snapshotPath, std::ios::binary);
+        if (!out) {
+            std::cerr << "Failed to open snapshot path: " << snapshotPath << "\n";
+            return 3;
+        }
+        out.write(buffer.data(), static_cast<std::streamsize>(required - 1));
+        if (!out) {
+            std::cerr << "Failed to write coverage snapshot to: " << snapshotPath << "\n";
+            return 3;
+        }
+    }
+
     return appgl::tests::lastGauntletPassed() ? 0 : 2;
 }
