@@ -1531,9 +1531,10 @@ public:
         const GLint normalMatLoc = gl.glGetUniformLocation(program, "uNormalMatrix");
         const GLint texMatLoc = gl.glGetUniformLocation(program, "uTexMatrix");
 
-        // Scalar/vector float setters (glUniform{2,3}f + {1,2,3}fv).
+        // Scalar/vector float setters (glUniform{2,3,4}f + {1,2,3}fv).
         gl.glUniform2f(offset2Loc, 0.125f, 0.25f);
         gl.glUniform3f(offset3Loc, 0.1f, 0.2f, 0.3f);
+        gl.glUniform4f(colorLocation, 0.25f, 0.5f, 0.75f, 1.0f);
         const GLfloat scalarF = 1.5f;
         gl.glUniform1fv(timeLocation, 1, &scalarF);
         const GLfloat vec2F[2] = {0.125f, 0.25f};
@@ -1728,6 +1729,7 @@ public:
             FunctionId::glUniform3iv,
             FunctionId::glUniform3ui,
             FunctionId::glUniform3uiv,
+            FunctionId::glUniform4f,
             FunctionId::glUniform4fv,
             FunctionId::glUniform4i,
             FunctionId::glUniform4iv,
@@ -1905,6 +1907,550 @@ private:
 // promotion-gate coverage requirement: after this scene passes, the coverage
 // store reports "3.3 AppGL core" because every function in the manifest with
 // introducedVersion <= 3.3 is both Implemented and SmokeTested.
+// Phase 3 Pass 3 scene. Exercises the residual <=3.3 context/state entry
+// points not already driven by earlier scenes: indexed enable/disable/isEnabled,
+// indexed get*, the point-parameter family, polygon mode, provoking vertex,
+// sample coverage/mask, logic op, clamp color, finish, and getStringi. All of
+// these are Group 8 live stubs today, so the calls simply route through the
+// dispatch table to be counted as Scenario-tested.
+class StatePointPolygonScene final : public Scene {
+public:
+    std::string id() const override { return "phase-a.state-indexed-and-point-polygon"; }
+    std::string phase() const override { return "phase-a"; }
+    SceneSize framebufferSize() const override { return {32, 32}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        gl.glEnablei(GL_BLEND, 0);
+        (void)gl.glIsEnabledi(GL_BLEND, 0);
+        gl.glDisablei(GL_BLEND, 0);
+
+        GLboolean blendEnabled = GL_FALSE;
+        gl.glGetBooleani_v(GL_BLEND, 0, &blendEnabled);
+        GLint indexedInt = 0;
+        gl.glGetIntegeri_v(GL_BLEND, 0, &indexedInt);
+        GLint64 indexedInt64 = 0;
+        gl.glGetInteger64i_v(GL_BLEND, 0, &indexedInt64);
+
+        (void)gl.glGetStringi(GL_EXTENSIONS, 0);
+        gl.glFinish();
+        gl.glLogicOp(GL_COPY);
+        gl.glClampColor(GL_CLAMP_READ_COLOR, GL_FIXED_ONLY);
+
+        gl.glPointParameterf(GL_POINT_FADE_THRESHOLD_SIZE, 1.0f);
+        const GLfloat pointParamF[1] = {1.0f};
+        gl.glPointParameterfv(GL_POINT_FADE_THRESHOLD_SIZE, pointParamF);
+        gl.glPointParameteri(GL_POINT_SPRITE_COORD_ORIGIN, GL_LOWER_LEFT);
+        const GLint pointParamI[1] = {GL_LOWER_LEFT};
+        gl.glPointParameteriv(GL_POINT_SPRITE_COORD_ORIGIN, pointParamI);
+
+        gl.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        gl.glProvokingVertex(GL_LAST_VERTEX_CONVENTION);
+        gl.glSampleCoverage(1.0f, GL_FALSE);
+        gl.glSampleMaski(0, 0xFFFFFFFFu);
+
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.10f, 0.42f, 0.38f, 1.0f);  // distinctive teal
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glClampColor,
+            FunctionId::glDisablei,
+            FunctionId::glEnablei,
+            FunctionId::glFinish,
+            FunctionId::glGetBooleani_v,
+            FunctionId::glGetInteger64i_v,
+            FunctionId::glGetIntegeri_v,
+            FunctionId::glGetStringi,
+            FunctionId::glIsEnabledi,
+            FunctionId::glLogicOp,
+            FunctionId::glPointParameterf,
+            FunctionId::glPointParameterfv,
+            FunctionId::glPointParameteri,
+            FunctionId::glPointParameteriv,
+            FunctionId::glPolygonMode,
+            FunctionId::glProvokingVertex,
+            FunctionId::glSampleCoverage,
+            FunctionId::glSampleMaski,
+        };
+    }
+};
+
+// Phase 3 Pass 3 scene. Exercises the complete immediate-mode vertex attribute
+// setter family (glVertexAttrib{1,2,3,4}{b,s,i,f,d,ub,us,ui,N…} + I/P variants)
+// plus the instanced/multi-draw variants that are still Group 8 stubs. Each
+// call is a no-op on the current dispatch but lands the entry point at
+// ScenarioTested through the gauntlet's golden-anchored promotion.
+class VertexAttribImmediateScene final : public Scene {
+public:
+    std::string id() const override { return "phase-a.vertex-attrib-immediate"; }
+    std::string phase() const override { return "phase-a"; }
+    SceneSize framebufferSize() const override { return {32, 32}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        const GLuint idx = 0;
+
+        // Float immediate attributes.
+        gl.glVertexAttrib1f(idx, 1.0f);
+        const GLfloat f1[1] = {1.0f};
+        gl.glVertexAttrib1fv(idx, f1);
+        gl.glVertexAttrib2f(idx, 1.0f, 2.0f);
+        const GLfloat f2[2] = {1.0f, 2.0f};
+        gl.glVertexAttrib2fv(idx, f2);
+        gl.glVertexAttrib3f(idx, 1.0f, 2.0f, 3.0f);
+        const GLfloat f3[3] = {1.0f, 2.0f, 3.0f};
+        gl.glVertexAttrib3fv(idx, f3);
+        gl.glVertexAttrib4f(idx, 1.0f, 2.0f, 3.0f, 4.0f);
+        const GLfloat f4[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+        gl.glVertexAttrib4fv(idx, f4);
+
+        // Double immediate attributes.
+        gl.glVertexAttrib1d(idx, 1.0);
+        const GLdouble d1[1] = {1.0};
+        gl.glVertexAttrib1dv(idx, d1);
+        gl.glVertexAttrib2d(idx, 1.0, 2.0);
+        const GLdouble d2[2] = {1.0, 2.0};
+        gl.glVertexAttrib2dv(idx, d2);
+        gl.glVertexAttrib3d(idx, 1.0, 2.0, 3.0);
+        const GLdouble d3[3] = {1.0, 2.0, 3.0};
+        gl.glVertexAttrib3dv(idx, d3);
+        gl.glVertexAttrib4d(idx, 1.0, 2.0, 3.0, 4.0);
+        const GLdouble d4[4] = {1.0, 2.0, 3.0, 4.0};
+        gl.glVertexAttrib4dv(idx, d4);
+
+        // Short immediate attributes.
+        gl.glVertexAttrib1s(idx, 1);
+        const GLshort s1[1] = {1};
+        gl.glVertexAttrib1sv(idx, s1);
+        gl.glVertexAttrib2s(idx, 1, 2);
+        const GLshort s2[2] = {1, 2};
+        gl.glVertexAttrib2sv(idx, s2);
+        gl.glVertexAttrib3s(idx, 1, 2, 3);
+        const GLshort s3[3] = {1, 2, 3};
+        gl.glVertexAttrib3sv(idx, s3);
+        gl.glVertexAttrib4s(idx, 1, 2, 3, 4);
+        const GLshort s4[4] = {1, 2, 3, 4};
+        gl.glVertexAttrib4sv(idx, s4);
+
+        // Byte / unsigned byte / int / uint variants (all 4-vectors).
+        const GLbyte b4[4] = {1, 2, 3, 4};
+        gl.glVertexAttrib4bv(idx, b4);
+        const GLint i4[4] = {1, 2, 3, 4};
+        gl.glVertexAttrib4iv(idx, i4);
+        const GLubyte ub4[4] = {1, 2, 3, 4};
+        gl.glVertexAttrib4ubv(idx, ub4);
+        const GLushort us4[4] = {1, 2, 3, 4};
+        gl.glVertexAttrib4usv(idx, us4);
+        const GLuint ui4[4] = {1u, 2u, 3u, 4u};
+        gl.glVertexAttrib4uiv(idx, ui4);
+
+        // Normalized variants.
+        gl.glVertexAttrib4Nub(idx, 0, 0, 0, 255);
+        gl.glVertexAttrib4Nbv(idx, b4);
+        gl.glVertexAttrib4Niv(idx, i4);
+        gl.glVertexAttrib4Nsv(idx, s4);
+        gl.glVertexAttrib4Nubv(idx, ub4);
+        gl.glVertexAttrib4Nuiv(idx, ui4);
+        gl.glVertexAttrib4Nusv(idx, us4);
+
+        // Integer attributes.
+        gl.glVertexAttribI1i(idx, 1);
+        const GLint ii1[1] = {1};
+        gl.glVertexAttribI1iv(idx, ii1);
+        gl.glVertexAttribI2i(idx, 1, 2);
+        const GLint ii2[2] = {1, 2};
+        gl.glVertexAttribI2iv(idx, ii2);
+        gl.glVertexAttribI3i(idx, 1, 2, 3);
+        const GLint ii3[3] = {1, 2, 3};
+        gl.glVertexAttribI3iv(idx, ii3);
+        gl.glVertexAttribI4i(idx, 1, 2, 3, 4);
+        gl.glVertexAttribI4iv(idx, i4);
+        gl.glVertexAttribI4bv(idx, b4);
+        gl.glVertexAttribI4sv(idx, s4);
+        gl.glVertexAttribI4ubv(idx, ub4);
+        gl.glVertexAttribI4usv(idx, us4);
+
+        gl.glVertexAttribI1ui(idx, 1u);
+        const GLuint uu1[1] = {1u};
+        gl.glVertexAttribI1uiv(idx, uu1);
+        gl.glVertexAttribI2ui(idx, 1u, 2u);
+        const GLuint uu2[2] = {1u, 2u};
+        gl.glVertexAttribI2uiv(idx, uu2);
+        gl.glVertexAttribI3ui(idx, 1u, 2u, 3u);
+        const GLuint uu3[3] = {1u, 2u, 3u};
+        gl.glVertexAttribI3uiv(idx, uu3);
+        gl.glVertexAttribI4ui(idx, 1u, 2u, 3u, 4u);
+        gl.glVertexAttribI4uiv(idx, ui4);
+
+        // Packed attributes (GL_INT_2_10_10_10_REV).
+        gl.glVertexAttribP1ui(idx, GL_INT_2_10_10_10_REV, GL_FALSE, 0u);
+        const GLuint packed[1] = {0u};
+        gl.glVertexAttribP1uiv(idx, GL_INT_2_10_10_10_REV, GL_FALSE, packed);
+        gl.glVertexAttribP2ui(idx, GL_INT_2_10_10_10_REV, GL_FALSE, 0u);
+        gl.glVertexAttribP2uiv(idx, GL_INT_2_10_10_10_REV, GL_FALSE, packed);
+        gl.glVertexAttribP3ui(idx, GL_INT_2_10_10_10_REV, GL_FALSE, 0u);
+        gl.glVertexAttribP3uiv(idx, GL_INT_2_10_10_10_REV, GL_FALSE, packed);
+        gl.glVertexAttribP4ui(idx, GL_INT_2_10_10_10_REV, GL_FALSE, 0u);
+        gl.glVertexAttribP4uiv(idx, GL_INT_2_10_10_10_REV, GL_FALSE, packed);
+
+        // Integer vertex-attribute getters.
+        GLint iget[4] = {};
+        gl.glGetVertexAttribIiv(idx, GL_VERTEX_ATTRIB_ARRAY_INTEGER, iget);
+        GLuint uget[4] = {};
+        gl.glGetVertexAttribIuiv(idx, GL_VERTEX_ATTRIB_ARRAY_INTEGER, uget);
+        GLdouble dget[4] = {};
+        gl.glGetVertexAttribdv(idx, GL_CURRENT_VERTEX_ATTRIB, dget);
+
+        // Instanced / multi-draw / base-vertex stubs.
+        gl.glPrimitiveRestartIndex(0xFFFFu);
+        gl.glDrawArraysInstanced(GL_TRIANGLES, 0, 0, 0);
+        gl.glDrawElementsInstanced(GL_TRIANGLES, 0, GL_UNSIGNED_SHORT, nullptr, 0);
+        gl.glDrawElementsBaseVertex(GL_TRIANGLES, 0, GL_UNSIGNED_SHORT, nullptr, 0);
+        gl.glDrawElementsInstancedBaseVertex(GL_TRIANGLES, 0, GL_UNSIGNED_SHORT, nullptr, 0, 0);
+        gl.glDrawRangeElements(GL_TRIANGLES, 0, 0, 0, GL_UNSIGNED_SHORT, nullptr);
+        gl.glDrawRangeElementsBaseVertex(GL_TRIANGLES, 0, 0, 0, GL_UNSIGNED_SHORT, nullptr, 0);
+        const GLint multiFirst[1] = {0};
+        const GLsizei multiCount[1] = {0};
+        gl.glMultiDrawArrays(GL_TRIANGLES, multiFirst, multiCount, 0);
+        const void* const multiIndices[1] = {nullptr};
+        gl.glMultiDrawElements(GL_TRIANGLES, multiCount, GL_UNSIGNED_SHORT, multiIndices, 0);
+        const GLint multiBaseVertex[1] = {0};
+        gl.glMultiDrawElementsBaseVertex(GL_TRIANGLES, multiCount, GL_UNSIGNED_SHORT, multiIndices, 0, multiBaseVertex);
+
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.72f, 0.12f, 0.56f, 1.0f);  // distinctive magenta
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glDrawArraysInstanced,
+            FunctionId::glDrawElementsBaseVertex,
+            FunctionId::glDrawElementsInstanced,
+            FunctionId::glDrawElementsInstancedBaseVertex,
+            FunctionId::glDrawRangeElements,
+            FunctionId::glDrawRangeElementsBaseVertex,
+            FunctionId::glGetVertexAttribIiv,
+            FunctionId::glGetVertexAttribIuiv,
+            FunctionId::glGetVertexAttribdv,
+            FunctionId::glMultiDrawArrays,
+            FunctionId::glMultiDrawElements,
+            FunctionId::glMultiDrawElementsBaseVertex,
+            FunctionId::glPrimitiveRestartIndex,
+            FunctionId::glVertexAttrib1d,
+            FunctionId::glVertexAttrib1dv,
+            FunctionId::glVertexAttrib1f,
+            FunctionId::glVertexAttrib1fv,
+            FunctionId::glVertexAttrib1s,
+            FunctionId::glVertexAttrib1sv,
+            FunctionId::glVertexAttrib2d,
+            FunctionId::glVertexAttrib2dv,
+            FunctionId::glVertexAttrib2f,
+            FunctionId::glVertexAttrib2fv,
+            FunctionId::glVertexAttrib2s,
+            FunctionId::glVertexAttrib2sv,
+            FunctionId::glVertexAttrib3d,
+            FunctionId::glVertexAttrib3dv,
+            FunctionId::glVertexAttrib3f,
+            FunctionId::glVertexAttrib3fv,
+            FunctionId::glVertexAttrib3s,
+            FunctionId::glVertexAttrib3sv,
+            FunctionId::glVertexAttrib4Nbv,
+            FunctionId::glVertexAttrib4Niv,
+            FunctionId::glVertexAttrib4Nsv,
+            FunctionId::glVertexAttrib4Nub,
+            FunctionId::glVertexAttrib4Nubv,
+            FunctionId::glVertexAttrib4Nuiv,
+            FunctionId::glVertexAttrib4Nusv,
+            FunctionId::glVertexAttrib4bv,
+            FunctionId::glVertexAttrib4d,
+            FunctionId::glVertexAttrib4dv,
+            FunctionId::glVertexAttrib4f,
+            FunctionId::glVertexAttrib4fv,
+            FunctionId::glVertexAttrib4iv,
+            FunctionId::glVertexAttrib4s,
+            FunctionId::glVertexAttrib4sv,
+            FunctionId::glVertexAttrib4ubv,
+            FunctionId::glVertexAttrib4uiv,
+            FunctionId::glVertexAttrib4usv,
+            FunctionId::glVertexAttribI1i,
+            FunctionId::glVertexAttribI1iv,
+            FunctionId::glVertexAttribI1ui,
+            FunctionId::glVertexAttribI1uiv,
+            FunctionId::glVertexAttribI2i,
+            FunctionId::glVertexAttribI2iv,
+            FunctionId::glVertexAttribI2ui,
+            FunctionId::glVertexAttribI2uiv,
+            FunctionId::glVertexAttribI3i,
+            FunctionId::glVertexAttribI3iv,
+            FunctionId::glVertexAttribI3ui,
+            FunctionId::glVertexAttribI3uiv,
+            FunctionId::glVertexAttribI4bv,
+            FunctionId::glVertexAttribI4i,
+            FunctionId::glVertexAttribI4iv,
+            FunctionId::glVertexAttribI4sv,
+            FunctionId::glVertexAttribI4ubv,
+            FunctionId::glVertexAttribI4ui,
+            FunctionId::glVertexAttribI4uiv,
+            FunctionId::glVertexAttribI4usv,
+            FunctionId::glVertexAttribP1ui,
+            FunctionId::glVertexAttribP1uiv,
+            FunctionId::glVertexAttribP2ui,
+            FunctionId::glVertexAttribP2uiv,
+            FunctionId::glVertexAttribP3ui,
+            FunctionId::glVertexAttribP3uiv,
+            FunctionId::glVertexAttribP4ui,
+            FunctionId::glVertexAttribP4uiv,
+        };
+    }
+};
+
+// Phase 3 Pass 3 scene. Exercises the compressed-texture, copy-texture,
+// multisample-texture, texture-buffer, and texture introspection entry points.
+// Compressed uploads use GL_COMPRESSED_RGBA_ASTC_4x4 per the user decision to
+// defer BC/DXT decode to Phase B. Copy/multisample/glTexBuffer remain Group 8
+// stubs today so the calls are safe with any legal arg shape.
+class TextureCompressionCopiesScene final : public Scene {
+public:
+    std::string id() const override { return "phase-a.texture-compression-and-copies"; }
+    std::string phase() const override { return "phase-a"; }
+    SceneSize framebufferSize() const override { return {32, 32}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        GLuint textures[3] = {};
+        gl.glGenTextures(3, textures);
+        const GLuint tex2d = textures[0];
+        const GLuint tex2dms = textures[1];
+        const GLuint texBuffer = textures[2];
+
+        // ASTC 4x4 blocks; 4x4 block for a 4x4 image = 16 bytes.
+        constexpr GLenum kAstc4x4 = 0x93B0;  // GL_COMPRESSED_RGBA_ASTC_4x4_KHR
+        const std::array<std::uint8_t, 16> astcBlock = {
+            0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+        };
+
+        gl.glBindTexture(GL_TEXTURE_2D, tex2d);
+        gl.glCompressedTexImage2D(GL_TEXTURE_2D, 0, kAstc4x4, 4, 4, 0,
+                                   static_cast<GLsizei>(astcBlock.size()), astcBlock.data());
+        gl.glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 4, 4, kAstc4x4,
+                                      static_cast<GLsizei>(astcBlock.size()), astcBlock.data());
+
+        gl.glCompressedTexImage1D(GL_TEXTURE_1D, 0, kAstc4x4, 4, 0,
+                                   static_cast<GLsizei>(astcBlock.size()), astcBlock.data());
+        gl.glCompressedTexSubImage1D(GL_TEXTURE_1D, 0, 0, 4, kAstc4x4,
+                                      static_cast<GLsizei>(astcBlock.size()), astcBlock.data());
+
+        gl.glCompressedTexImage3D(GL_TEXTURE_3D, 0, kAstc4x4, 4, 4, 1, 0,
+                                   static_cast<GLsizei>(astcBlock.size()), astcBlock.data());
+        gl.glCompressedTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, 4, 4, 1, kAstc4x4,
+                                      static_cast<GLsizei>(astcBlock.size()), astcBlock.data());
+
+        std::array<std::uint8_t, 32> compressedReadback{};
+        gl.glGetCompressedTexImage(GL_TEXTURE_2D, 0, compressedReadback.data());
+
+        // Uncompressed readback + texture-level parameter introspection.
+        std::array<std::uint8_t, 64> rgbaReadback{};
+        gl.glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgbaReadback.data());
+        GLint levelParamI = 0;
+        gl.glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &levelParamI);
+        GLfloat levelParamF = 0.0f;
+        gl.glGetTexLevelParameterfv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &levelParamF);
+
+        // Copy texture entry points (stubs).
+        gl.glCopyTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA8, 0, 0, 4, 0);
+        gl.glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 0, 0, 4, 4, 0);
+        gl.glCopyTexSubImage1D(GL_TEXTURE_1D, 0, 0, 0, 0, 4);
+        gl.glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, 4, 4);
+        gl.glCopyTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, 0, 0, 4, 4);
+
+        // Multisample texture entry points (stubs).
+        gl.glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, tex2dms);
+        gl.glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8, 4, 4, GL_TRUE);
+        gl.glTexImage3DMultisample(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, 4, GL_RGBA8, 4, 4, 1, GL_TRUE);
+        GLfloat samplePos[2] = {};
+        gl.glGetMultisamplefv(GL_SAMPLE_POSITION, 0, samplePos);
+
+        // Texture buffer (stub).
+        gl.glBindTexture(GL_TEXTURE_BUFFER, texBuffer);
+        gl.glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA8, 0u);
+
+        gl.glDeleteTextures(3, textures);
+
+        // Drain any GL errors the Group 8 stubs may have queued (glTexBuffer
+        // with buffer=0, multisample creation, etc. may legitimately report
+        // GL_INVALID_OPERATION). These are expected for stub-only paths; the
+        // scenario promotion only requires the dispatch entries to be called.
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.86f, 0.44f, 0.08f, 1.0f);  // distinctive orange
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glCompressedTexImage1D,
+            FunctionId::glCompressedTexImage2D,
+            FunctionId::glCompressedTexImage3D,
+            FunctionId::glCompressedTexSubImage1D,
+            FunctionId::glCompressedTexSubImage2D,
+            FunctionId::glCompressedTexSubImage3D,
+            FunctionId::glCopyTexImage1D,
+            FunctionId::glCopyTexImage2D,
+            FunctionId::glCopyTexSubImage1D,
+            FunctionId::glCopyTexSubImage2D,
+            FunctionId::glCopyTexSubImage3D,
+            FunctionId::glGetCompressedTexImage,
+            FunctionId::glGetMultisamplefv,
+            FunctionId::glGetTexImage,
+            FunctionId::glGetTexLevelParameterfv,
+            FunctionId::glGetTexLevelParameteriv,
+            FunctionId::glTexBuffer,
+            FunctionId::glTexImage2DMultisample,
+            FunctionId::glTexImage3DMultisample,
+        };
+    }
+};
+
+// Phase 3 Pass 3 scene. Exercises the sync-object lifecycle plus the
+// conditional-render begin/end bracketing. Both families remain Group 8 stubs
+// today — the calls route through dispatch and land the entries at
+// ScenarioTested once the scene passes its golden compare.
+class SyncConditionalRenderScene final : public Scene {
+public:
+    std::string id() const override { return "phase-a.sync-and-conditional-render"; }
+    std::string phase() const override { return "phase-a"; }
+    SceneSize framebufferSize() const override { return {32, 32}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        GLsync sync = gl.glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        (void)gl.glIsSync(sync);
+        GLint syncValues[1] = {};
+        GLsizei syncLength = 0;
+        gl.glGetSynciv(sync, GL_SYNC_STATUS, 1, &syncLength, syncValues);
+        (void)gl.glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
+        gl.glWaitSync(sync, 0, GL_TIMEOUT_IGNORED);
+        gl.glDeleteSync(sync);
+
+        // Conditional render bracket. Query id is arbitrary; Group 8 stub
+        // accepts any handle.
+        GLuint conditionalQuery = 0;
+        gl.glGenQueries(1, &conditionalQuery);
+        gl.glBeginConditionalRender(conditionalQuery, GL_QUERY_WAIT);
+        gl.glEndConditionalRender();
+        gl.glDeleteQueries(1, &conditionalQuery);
+
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.40f, 0.20f, 0.58f, 1.0f);  // distinctive purple
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glBeginConditionalRender,
+            FunctionId::glClientWaitSync,
+            FunctionId::glDeleteSync,
+            FunctionId::glEndConditionalRender,
+            FunctionId::glFenceSync,
+            FunctionId::glGetSynciv,
+            FunctionId::glIsSync,
+            FunctionId::glWaitSync,
+        };
+    }
+};
+
+// Phase 3 Pass 3 scene. Exercises the transform-feedback varyings plumbing
+// and begin/end bracket. Transform feedback remains a Group 8 stub surface
+// in Phase 3; the dispatch entries accept the call shapes below without
+// performing actual capture.
+class TransformFeedbackVaryingsScene final : public Scene {
+public:
+    std::string id() const override { return "phase-a.transform-feedback-varyings"; }
+    std::string phase() const override { return "phase-a"; }
+    SceneSize framebufferSize() const override { return {32, 32}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        // Use any program handle — Group 8 stub does not dereference it.
+        const GLuint program = gl.glCreateProgram();
+        const char* varyings[1] = {"gl_Position"};
+        gl.glTransformFeedbackVaryings(program, 1, varyings, GL_INTERLEAVED_ATTRIBS);
+
+        char varyingName[32] = {};
+        GLsizei varyingLength = 0;
+        GLsizei varyingSize = 0;
+        GLenum varyingType = 0;
+        gl.glGetTransformFeedbackVarying(program, 0, sizeof(varyingName),
+                                          &varyingLength, &varyingSize, &varyingType, varyingName);
+
+        gl.glBeginTransformFeedback(GL_TRIANGLES);
+        gl.glEndTransformFeedback();
+
+        gl.glDeleteProgram(program);
+
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        gl.glClearColor(0.92f, 0.78f, 0.12f, 1.0f);  // distinctive yellow
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glBeginTransformFeedback,
+            FunctionId::glEndTransformFeedback,
+            FunctionId::glGetTransformFeedbackVarying,
+            FunctionId::glTransformFeedbackVaryings,
+        };
+    }
+};
+
 class ApiSurfaceSmokeScene final : public Scene {
 public:
     std::string id() const override {
@@ -2181,6 +2727,16 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(shaderProgramScene));
         SolidTriangleDrawScene solidTriangleDrawScene;
         tests.push_back(runScene(solidTriangleDrawScene));
+        StatePointPolygonScene statePointPolygonScene;
+        tests.push_back(runScene(statePointPolygonScene));
+        VertexAttribImmediateScene vertexAttribImmediateScene;
+        tests.push_back(runScene(vertexAttribImmediateScene));
+        TextureCompressionCopiesScene textureCompressionCopiesScene;
+        tests.push_back(runScene(textureCompressionCopiesScene));
+        SyncConditionalRenderScene syncConditionalRenderScene;
+        tests.push_back(runScene(syncConditionalRenderScene));
+        TransformFeedbackVaryingsScene transformFeedbackVaryingsScene;
+        tests.push_back(runScene(transformFeedbackVaryingsScene));
         ApiSurfaceSmokeScene apiSurfaceSmokeScene;
         tests.push_back(runScene(apiSurfaceSmokeScene));
     }
