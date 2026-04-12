@@ -183,6 +183,12 @@ public:
     bool setUniformScalarVector(GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values);
     bool setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values);
 
+    // Phase A Group 7 — drawing. See MetalFrameGraph::encodeSolidColorDraw for
+    // the minimal pipeline state we currently support. Additional draw variants
+    // (instanced, base-vertex, multi-draw) ship in Group 8.
+    bool drawArrays(GLenum mode, GLint first, GLsizei count);
+    bool drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
+
     void pushError(GLenum error);
     GLenum popError();
 

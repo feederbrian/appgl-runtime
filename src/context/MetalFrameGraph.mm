@@ -140,6 +140,262 @@ struct MetalFrameGraph::Impl {
         }
     }
 
+    // Phase A Group 7 — minimal draw path.
+    //
+    // Until the full GLSL→SPIR-V→MSL pipeline ships (Group 6 left ShaderTranslator
+    // stubbed because glslang/SPIRV-Cross are not yet linked into the Xcode
+    // framework target), we use a single hand-written "solid color" MSL pipeline
+    // that consumes one float3 position attribute and a single float4 uniform
+    // color. This lets us exercise the Metal draw encoder path, vertex buffer
+    // binding, depth-test state, and gauntlet golden round-trip end-to-end on
+    // the one triangle test fixture. Future groups replace the fallback library
+    // with the translated MSL from the active program.
+    bool encodeSolidColorDraw(const MetalDrawInfo& info) {
+        if (device == nil || commandQueue == nil) {
+            return false;
+        }
+        if (info.vertexCount <= 0 || info.positions == nullptr || info.positionByteCount == 0) {
+            return false;
+        }
+        if (info.mode != GL_TRIANGLES && info.mode != GL_TRIANGLE_STRIP) {
+            return false;
+        }
+        if (info.positionComponents != 3) {
+            return false;
+        }
+
+        ensureDrawableResources();
+        if (!ensureSolidColorLibrary()) {
+            return false;
+        }
+        if (!ensureSolidColorPipelineState(info)) {
+            return false;
+        }
+
+        // If a prior clear is sitting unflushed in currentCommandBuffer, commit
+        // and wait for it before starting the draw pass. encodeClear followed
+        // by enqueueOffscreenClearUpload leaves the offscreen color texture
+        // with a render-pass clear and a blit copy pending on the same command
+        // buffer; chaining a second render-pass encoder that does
+        // LoadActionLoad on that texture within the same command buffer does
+        // not reliably observe the blit's writes on Apple-Silicon, and the
+        // draw ends up sampling the Private texture's uninitialized magenta
+        // sentinel. Splitting the command buffers forces the clear + blit to
+        // land before the draw's load.
+        if (currentCommandBuffer != nil) {
+            [currentCommandBuffer commit];
+            [currentCommandBuffer waitUntilCompleted];
+            currentCommandBuffer = nil;
+        }
+        currentCommandBuffer = [commandQueue commandBuffer];
+        if (currentCommandBuffer == nil) {
+            return false;
+        }
+
+        if (!usesOffscreenTarget && currentDrawable == nil) {
+            currentDrawable = [layer nextDrawable];
+            if (currentDrawable == nil) {
+                return false;
+            }
+        }
+
+        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        if (colorTexture == nil) {
+            return false;
+        }
+
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = colorTexture;
+        pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        if (depthStencilTexture != nil) {
+            pass.depthAttachment.texture = depthStencilTexture;
+            pass.depthAttachment.loadAction = MTLLoadActionLoad;
+            pass.depthAttachment.storeAction = MTLStoreActionStore;
+            pass.stencilAttachment.texture = depthStencilTexture;
+            pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+            pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        }
+
+        id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (encoder == nil) {
+            return false;
+        }
+        [encoder setRenderPipelineState:solidColorPipelineState];
+
+        if (depthStencilTexture != nil) {
+            id<MTLDepthStencilState> dsState = depthStencilStateForDraw(info);
+            if (dsState != nil) {
+                [encoder setDepthStencilState:dsState];
+            }
+        }
+
+        if (info.cullFaceEnabled) {
+            [encoder setCullMode:(info.cullFaceMode == GL_FRONT ? MTLCullModeFront :
+                                  info.cullFaceMode == GL_FRONT_AND_BACK ? MTLCullModeBack : MTLCullModeBack)];
+        } else {
+            [encoder setCullMode:MTLCullModeNone];
+        }
+        [encoder setFrontFacingWinding:info.frontFace == GL_CW ? MTLWindingClockwise : MTLWindingCounterClockwise];
+
+        // Vertex positions are pushed as inline bytes (fits in Metal's 4KB limit
+        // for every fixture we ship in Phase A). Attribute 0 lives in buffer 0.
+        if (info.positionByteCount <= 4096) {
+            [encoder setVertexBytes:info.positions length:info.positionByteCount atIndex:0];
+        } else {
+            id<MTLBuffer> vb = [device newBufferWithBytes:info.positions
+                                                   length:info.positionByteCount
+                                                  options:MTLResourceStorageModeShared];
+            if (vb == nil) {
+                [encoder endEncoding];
+                return false;
+            }
+            [encoder setVertexBuffer:vb offset:0 atIndex:0];
+        }
+        // Uniform color lives in fragment buffer 0.
+        [encoder setFragmentBytes:info.uniformColor length:sizeof(info.uniformColor) atIndex:0];
+
+        const MTLPrimitiveType primitive = (info.mode == GL_TRIANGLE_STRIP)
+            ? MTLPrimitiveTypeTriangleStrip
+            : MTLPrimitiveTypeTriangle;
+
+        if (info.indices != nullptr && info.indexCount > 0) {
+            MTLIndexType metalIndexType = MTLIndexTypeUInt16;
+            std::size_t bytesPerIndex = 2;
+            switch (info.indexType) {
+                case GL_UNSIGNED_INT:
+                    metalIndexType = MTLIndexTypeUInt32;
+                    bytesPerIndex = 4;
+                    break;
+                case GL_UNSIGNED_SHORT:
+                    metalIndexType = MTLIndexTypeUInt16;
+                    bytesPerIndex = 2;
+                    break;
+                default:
+                    [encoder endEncoding];
+                    return false;
+            }
+            const std::size_t indexBytes = static_cast<std::size_t>(info.indexCount) * bytesPerIndex;
+            id<MTLBuffer> ib = [device newBufferWithBytes:info.indices
+                                                    length:indexBytes
+                                                   options:MTLResourceStorageModeShared];
+            if (ib == nil) {
+                [encoder endEncoding];
+                return false;
+            }
+            [encoder drawIndexedPrimitives:primitive
+                                indexCount:static_cast<NSUInteger>(info.indexCount)
+                                 indexType:metalIndexType
+                               indexBuffer:ib
+                         indexBufferOffset:0];
+        } else {
+            [encoder drawPrimitives:primitive
+                        vertexStart:static_cast<NSUInteger>(info.baseVertex)
+                        vertexCount:static_cast<NSUInteger>(info.vertexCount)];
+        }
+
+        [encoder endEncoding];
+        readbackSourceTexture = colorTexture;
+        readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        pendingPresent = true;
+        return true;
+    }
+
+    bool ensureSolidColorLibrary() {
+        if (solidColorLibrary != nil) {
+            return true;
+        }
+        NSString* source = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct AppGLVertexIn {
+    float3 position [[attribute(0)]];
+};
+
+struct AppGLVertexOut {
+    float4 position [[position]];
+};
+
+vertex AppGLVertexOut appgl_solid_vs(AppGLVertexIn in [[stage_in]]) {
+    AppGLVertexOut out;
+    out.position = float4(in.position, 1.0);
+    return out;
+}
+
+fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
+    return color;
+}
+)MSL";
+        NSError* error = nil;
+        solidColorLibrary = [device newLibraryWithSource:source options:nil error:&error];
+        if (solidColorLibrary == nil) {
+            return false;
+        }
+        solidColorVertexFn = [solidColorLibrary newFunctionWithName:@"appgl_solid_vs"];
+        solidColorFragmentFn = [solidColorLibrary newFunctionWithName:@"appgl_solid_fs"];
+        return solidColorVertexFn != nil && solidColorFragmentFn != nil;
+    }
+
+    bool ensureSolidColorPipelineState(const MetalDrawInfo& info) {
+        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : nil;
+        const MTLPixelFormat colorFormat = colorTexture != nil
+            ? colorTexture.pixelFormat
+            : MTLPixelFormatBGRA8Unorm;
+
+        if (solidColorPipelineState != nil
+            && solidColorPipelineColorFormat == colorFormat) {
+            return true;
+        }
+
+        MTLVertexDescriptor* vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+        vertexDescriptor.attributes[0].format = MTLVertexFormatFloat3;
+        vertexDescriptor.attributes[0].offset = 0;
+        vertexDescriptor.attributes[0].bufferIndex = 0;
+        const NSUInteger stride = info.positionStride > 0
+            ? info.positionStride
+            : sizeof(float) * 3u;
+        vertexDescriptor.layouts[0].stride = stride;
+        vertexDescriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+        vertexDescriptor.layouts[0].stepRate = 1;
+
+        MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.vertexFunction = solidColorVertexFn;
+        desc.fragmentFunction = solidColorFragmentFn;
+        desc.vertexDescriptor = vertexDescriptor;
+        desc.colorAttachments[0].pixelFormat = colorFormat;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+        desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+
+        NSError* error = nil;
+        solidColorPipelineState = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (solidColorPipelineState == nil) {
+            return false;
+        }
+        solidColorPipelineColorFormat = colorFormat;
+        return true;
+    }
+
+    id<MTLDepthStencilState> depthStencilStateForDraw(const MetalDrawInfo& info) {
+        MTLDepthStencilDescriptor* desc = [[MTLDepthStencilDescriptor alloc] init];
+        desc.depthWriteEnabled = info.depthTestEnabled;
+        if (info.depthTestEnabled) {
+            switch (info.depthFunc) {
+                case GL_NEVER: desc.depthCompareFunction = MTLCompareFunctionNever; break;
+                case GL_LESS: desc.depthCompareFunction = MTLCompareFunctionLess; break;
+                case GL_EQUAL: desc.depthCompareFunction = MTLCompareFunctionEqual; break;
+                case GL_LEQUAL: desc.depthCompareFunction = MTLCompareFunctionLessEqual; break;
+                case GL_GREATER: desc.depthCompareFunction = MTLCompareFunctionGreater; break;
+                case GL_NOTEQUAL: desc.depthCompareFunction = MTLCompareFunctionNotEqual; break;
+                case GL_GEQUAL: desc.depthCompareFunction = MTLCompareFunctionGreaterEqual; break;
+                case GL_ALWAYS: default: desc.depthCompareFunction = MTLCompareFunctionAlways; break;
+            }
+        } else {
+            desc.depthCompareFunction = MTLCompareFunctionAlways;
+        }
+        return [device newDepthStencilStateWithDescriptor:desc];
+    }
+
     void endFrame(GLObjectStore& objects) {
         endRenderPass();
         objects.drainDeferredDeletes();
@@ -454,6 +710,11 @@ private:
     id<MTLCommandBuffer> currentCommandBuffer = nil;
     id<MTLRenderCommandEncoder> currentRenderEncoder = nil;
     id<CAMetalDrawable> currentDrawable = nil;
+    id<MTLLibrary> solidColorLibrary = nil;
+    id<MTLFunction> solidColorVertexFn = nil;
+    id<MTLFunction> solidColorFragmentFn = nil;
+    id<MTLRenderPipelineState> solidColorPipelineState = nil;
+    MTLPixelFormat solidColorPipelineColorFormat = MTLPixelFormatInvalid;
     std::vector<std::uint8_t> headlessReadbackRGBA;
     GLsizei drawableWidth = 1;
     GLsizei drawableHeight = 1;
@@ -499,6 +760,10 @@ void* MetalFrameGraph::currentRenderEncoder() const {
 
 void MetalFrameGraph::endRenderPass() {
     impl_->endRenderPass();
+}
+
+bool MetalFrameGraph::encodeSolidColorDraw(const MetalDrawInfo& info) {
+    return impl_->encodeSolidColorDraw(info);
 }
 
 void MetalFrameGraph::endFrame(GLObjectStore& objects) {

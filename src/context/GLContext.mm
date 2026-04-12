@@ -2,8 +2,10 @@
 #include "MetalFrameGraph.h"
 #include "../caps/GLCapabilities.h"
 #include "../objects/GLObjectStore.h"
+#include "../runtime/AppGLRuntime.h"
 #include "../shader/GLSLReflection.h"
 #include "../state/GLStateTracker.h"
+#include "../state/IndexExpansion.h"
 #include "../state/MetalVertexDescriptorBuilder.h"
 
 #import <AppKit/AppKit.h>
@@ -1876,13 +1878,17 @@ struct GLContext::Impl {
 
 GLContext::GLContext(void* layer)
     : impl_(std::make_unique<Impl>(layer, 1280, 720, false)) {
+    Runtime::shared().registerContext(this);
 }
 
 GLContext::GLContext(GLsizei offscreenWidth, GLsizei offscreenHeight)
     : impl_(std::make_unique<Impl>(nullptr, offscreenWidth, offscreenHeight, true)) {
+    Runtime::shared().registerContext(this);
 }
 
-GLContext::~GLContext() = default;
+GLContext::~GLContext() {
+    Runtime::shared().unregisterContext(this);
+}
 
 void GLContext::setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
     impl_->state->setClearColor(red, green, blue, alpha);
@@ -4789,6 +4795,274 @@ bool GLContext::setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei
     slot->ints.clear();
     slot->uints.clear();
     return true;
+}
+
+namespace {
+
+// Phase A Group 7 — MVP draw path. Until the GLSL→MSL translator is wired up,
+// the runtime supports one hand-written "solid color" pipeline: a single
+// vec3 position attribute at location 0 plus a vec4 uniform named "uColor".
+// Anything outside that envelope is rejected here so the caller can emit a
+// debug message and bail cleanly instead of producing garbage pixels.
+struct SolidColorDrawSetup {
+    bool ok = false;
+    MetalDrawInfo info;
+    GLVertexArrayObject* vertexArray = nullptr;
+    GLProgramObject* program = nullptr;
+    const std::uint8_t* positionShadow = nullptr;
+    std::size_t positionShadowSize = 0;
+};
+
+SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStore& objects, GLenum mode, const char* debugLabel) {
+    SolidColorDrawSetup setup;
+
+    if (mode != GL_TRIANGLES && mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN) {
+        return setup;
+    }
+
+    const GLuint vaoName = state.boundVertexArray();
+    if (vaoName == 0) {
+        return setup;
+    }
+    GLVertexArrayObject* vao = objects.vertexArrays().get(vaoName);
+    if (vao == nullptr) {
+        return setup;
+    }
+    if (vao->attributes.empty()) {
+        objects.initializeVertexArray(*vao);
+        if (vao->attributes.empty()) {
+            return setup;
+        }
+    }
+
+    const GLuint programName = state.currentProgram();
+    if (programName == 0) {
+        return setup;
+    }
+    GLProgramObject* program = objects.programs().get(programName);
+    if (program == nullptr || !program->linked) {
+        return setup;
+    }
+
+    const auto& positionAttr = vao->attributes[0];
+    if (!positionAttr.enabled || positionAttr.type != GL_FLOAT || positionAttr.size != 3 || positionAttr.buffer == 0) {
+        return setup;
+    }
+    GLBufferObject* vbo = objects.buffers().get(positionAttr.buffer);
+    if (vbo == nullptr || vbo->shadowBytes.empty()) {
+        return setup;
+    }
+    const std::size_t positionStride = positionAttr.stride > 0
+        ? static_cast<std::size_t>(positionAttr.stride)
+        : sizeof(GLfloat) * 3;
+    if (static_cast<std::size_t>(positionAttr.pointer) > vbo->shadowBytes.size()) {
+        return setup;
+    }
+
+    setup.info.mode = mode;
+    setup.info.positions = vbo->shadowBytes.data() + static_cast<std::size_t>(positionAttr.pointer);
+    setup.info.positionByteCount = vbo->shadowBytes.size() - static_cast<std::size_t>(positionAttr.pointer);
+    setup.info.positionStride = positionStride;
+    setup.info.positionComponents = 3;
+    setup.positionShadow = vbo->shadowBytes.data();
+    setup.positionShadowSize = vbo->shadowBytes.size();
+
+    // Default to opaque white, then override from the "uColor" uniform if the
+    // linked program has one. This mirrors what the hand-written fragment
+    // shader expects at fragment buffer index 0.
+    setup.info.uniformColor[0] = 1.0f;
+    setup.info.uniformColor[1] = 1.0f;
+    setup.info.uniformColor[2] = 1.0f;
+    setup.info.uniformColor[3] = 1.0f;
+    for (const auto& uniform : program->uniforms) {
+        if (uniform.name == "uColor" && uniform.type == GL_FLOAT_VEC4 && uniform.location >= 0) {
+            auto it = program->uniformValues.find(uniform.location);
+            if (it != program->uniformValues.end() && it->second.floats.size() >= 4) {
+                setup.info.uniformColor[0] = it->second.floats[0];
+                setup.info.uniformColor[1] = it->second.floats[1];
+                setup.info.uniformColor[2] = it->second.floats[2];
+                setup.info.uniformColor[3] = it->second.floats[3];
+            }
+            break;
+        }
+    }
+
+    setup.info.depthTestEnabled = state.isEnabled(GL_DEPTH_TEST);
+    setup.info.depthFunc = state.depthState().func;
+    setup.info.cullFaceEnabled = state.isEnabled(GL_CULL_FACE);
+    setup.info.cullFaceMode = state.rasterState().cullFaceMode;
+    setup.info.frontFace = state.rasterState().frontFace;
+    if (debugLabel != nullptr) {
+        setup.info.debugLabel = debugLabel;
+    }
+
+    setup.vertexArray = vao;
+    setup.program = program;
+    setup.ok = true;
+    return setup;
+}
+
+}  // namespace
+
+bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (count == 0) {
+        return true;
+    }
+    if (!impl_->state->validateForDraw()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    if (impl_->frameGraph == nullptr) {
+        return false;
+    }
+    // Make sure the drawable and depth targets are sized for the current
+    // viewport BEFORE we flush the pending clear. Resizing invalidates any
+    // unflushed command buffer, so doing it after the clear would drop the
+    // clear on the floor and leave the offscreen attachment uninitialized.
+    impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
+    // Flush any pending clear before we start the draw render pass; otherwise
+    // the draw would run against an uncleared default attachment.
+    impl_->encodePendingWork();
+
+    SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawArrays");
+    if (!setup.ok) {
+        // Unsupported configuration for the MVP path — record a debug
+        // message and no-op so scenes can continue running.
+        emitDebugMessage(
+            GL_DEBUG_SOURCE_API,
+            GL_DEBUG_TYPE_OTHER,
+            0,
+            GL_DEBUG_SEVERITY_LOW,
+            "glDrawArrays: draw skipped (Phase A Group 7 only supports vec3 position + uColor)"
+        );
+        return false;
+    }
+
+    setup.info.vertexCount = count;
+    setup.info.baseVertex = first;
+    // Advance the position pointer by the baseVertex offset so the encoder can
+    // upload exactly the vertices we want.
+    const std::size_t stride = setup.info.positionStride;
+    const std::size_t firstOffset = static_cast<std::size_t>(first) * stride;
+    const std::size_t startOffset = static_cast<std::size_t>(setup.vertexArray->attributes[0].pointer) + firstOffset;
+    if (startOffset > setup.positionShadowSize) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    setup.info.positions = setup.positionShadow + startOffset;
+    setup.info.positionByteCount = setup.positionShadowSize - startOffset;
+    setup.info.indices = nullptr;
+    setup.info.indexCount = 0;
+    setup.info.indexType = 0;
+
+    const bool ok = impl_->frameGraph->encodeSolidColorDraw(setup.info);
+    if (!ok) {
+        emitDebugMessage(
+            GL_DEBUG_SOURCE_API,
+            GL_DEBUG_TYPE_ERROR,
+            0,
+            GL_DEBUG_SEVERITY_HIGH,
+            "glDrawArrays: MetalFrameGraph failed to encode draw"
+        );
+    }
+    return ok;
+}
+
+bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (count == 0) {
+        return true;
+    }
+    if (!isSupportedElementIndexType(type)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!impl_->state->validateForDraw()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    if (impl_->frameGraph == nullptr) {
+        return false;
+    }
+    // Size the drawable before flushing the clear — see glDrawArrays for the
+    // rationale.
+    impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
+    impl_->encodePendingWork();
+
+    SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawElements");
+    if (!setup.ok) {
+        emitDebugMessage(
+            GL_DEBUG_SOURCE_API,
+            GL_DEBUG_TYPE_OTHER,
+            0,
+            GL_DEBUG_SEVERITY_LOW,
+            "glDrawElements: draw skipped (Phase A Group 7 only supports vec3 position + uColor)"
+        );
+        return false;
+    }
+
+    // Pull the element buffer data out of the VAO's element array binding so
+    // we can hand raw bytes to MetalFrameGraph.
+    const GLuint elementBufferName = setup.vertexArray->elementArrayBuffer;
+    if (elementBufferName == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLBufferObject* elementBuffer = impl_->objects->buffers().get(elementBufferName);
+    if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    const std::size_t indexOffset = reinterpret_cast<std::uintptr_t>(indices);
+    if (indexOffset > elementBuffer->shadowBytes.size()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
+
+    // GL_UNSIGNED_BYTE is not supported natively by Metal; expandElementIndices
+    // promotes to GL_UNSIGNED_SHORT. For UINT16/UINT32 we can pass through.
+    std::vector<std::uint8_t> expanded;
+    GLenum effectiveType = type;
+    const void* effectivePtr = indexPtr;
+    if (elementIndexTypeNeedsExpansion(type)) {
+        IndexExpansionResult result = expandElementIndices(count, type, indexPtr);
+        if (!result.ok) {
+            pushError(result.error);
+            return false;
+        }
+        expanded = std::move(result.bytes);
+        effectiveType = result.outputType;
+        effectivePtr = expanded.data();
+    }
+
+    setup.info.vertexCount = count;
+    setup.info.baseVertex = 0;
+    setup.info.indices = effectivePtr;
+    setup.info.indexCount = count;
+    setup.info.indexType = effectiveType;
+
+    const bool ok = impl_->frameGraph->encodeSolidColorDraw(setup.info);
+    if (!ok) {
+        emitDebugMessage(
+            GL_DEBUG_SOURCE_API,
+            GL_DEBUG_TYPE_ERROR,
+            0,
+            GL_DEBUG_SEVERITY_HIGH,
+            "glDrawElements: MetalFrameGraph failed to encode draw"
+        );
+    }
+    return ok;
 }
 
 }  // namespace appgl

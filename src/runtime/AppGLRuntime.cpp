@@ -23,6 +23,7 @@ constexpr const char* kPhaseATextureTestId = "phase-a.textures";
 constexpr const char* kPhaseAFramebufferTestId = "phase-a.framebuffers";
 constexpr const char* kPhaseAShaderTestId = "phase-a.shaders";
 constexpr const char* kPhaseAProgramTestId = "phase-a.programs";
+constexpr const char* kPhaseADrawTestId = "phase-a.draw";
 constexpr GLuint kPhaseAMaxDrawBuffers = 8;
 constexpr GLuint kPhaseAMaxIndexedBufferBindings = 32;
 constexpr GLuint kPhaseAMaxTextureUnits = 32;
@@ -312,6 +313,11 @@ void markShaderFunction(FunctionId id, std::string_view note) {
 
 void markProgramFunction(FunctionId id, std::string_view note) {
     Runtime::shared().coverageStore().markSmokeTested(id, kPhaseAProgramTestId, note);
+    Runtime::shared().refreshCurrentContextClaimedVersion();
+}
+
+void markDrawFunction(FunctionId id, std::string_view note) {
+    Runtime::shared().coverageStore().markSmokeTested(id, kPhaseADrawTestId, note);
     Runtime::shared().refreshCurrentContextClaimedVersion();
 }
 
@@ -800,6 +806,40 @@ GLContext* Runtime::currentContext() {
     return gCurrentContext;
 }
 
+void Runtime::registerContext(GLContext* context) {
+    if (context == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(contextMutex_);
+    liveContexts_.insert(context);
+}
+
+void Runtime::unregisterContext(GLContext* context) {
+    if (context == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(contextMutex_);
+    liveContexts_.erase(context);
+    // Clear the current-context slot on THIS thread if it still points at the
+    // context being destroyed. Other threads cannot be reached through thread_local
+    // storage, but isContextLiveLocked() protects diagnostic readers on those
+    // threads from dereferencing a freed pointer.
+    if (gCurrentContext == context) {
+        gCurrentContext = nullptr;
+    }
+}
+
+bool Runtime::isContextLiveLocked(GLContext* context) const {
+    if (context == nullptr) {
+        return false;
+    }
+    return liveContexts_.find(context) != liveContexts_.end();
+}
+
+std::mutex& Runtime::contextMutex() {
+    return contextMutex_;
+}
+
 std::string Runtime::claimedVersionString() const {
     return coverageStore_.highestFullyImplementedVersion();
 }
@@ -827,15 +867,23 @@ std::size_t Runtime::writeCoverageSnapshotJSON(char* out, std::size_t cap) {
 }
 
 std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
+    // Hold the context mutex for the entire inventory walk so that a concurrent
+    // context destruction (from any thread) cannot free the pointer we are
+    // dereferencing. If `gCurrentContext` was cleared by unregisterContext on
+    // this thread, the liveness check below will cleanly take the null branch.
+    std::lock_guard<std::mutex> contextLock(contextMutex_);
+    GLContext* const currentContext = gCurrentContext;
+    const bool contextIsLive = isContextLiveLocked(currentContext);
+
     std::ostringstream stream;
     stream << "{";
     stream << "\"renderer\":\"" << jsonEscape(rendererString_) << "\",";
-    stream << "\"hasCurrentContext\":" << (gCurrentContext != nullptr ? "true" : "false") << ",";
+    stream << "\"hasCurrentContext\":" << (contextIsLive ? "true" : "false") << ",";
 
     // ── Object store inventory (current context only) ──
     stream << "\"objectStore\":{";
-    if (gCurrentContext != nullptr) {
-        auto& store = gCurrentContext->objects();
+    if (contextIsLive) {
+        auto& store = currentContext->objects();
 
         // Walk buffers/textures explicitly to compute resident byte totals.
         std::uint64_t bufferBytes = 0;
@@ -3518,6 +3566,86 @@ void APIENTRY glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transp
         markProgramFunction(FunctionId::glUniformMatrix4fv, "mat4 uniforms are live.");
         traceUniform("glUniformMatrix4fv", location);
     }
+}
+
+namespace {
+
+bool isValidDrawMode(GLenum mode) {
+    switch (mode) {
+        case GL_POINTS:
+        case GL_LINES:
+        case GL_LINE_LOOP:
+        case GL_LINE_STRIP:
+        case GL_TRIANGLES:
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:
+        case GL_LINES_ADJACENCY:
+        case GL_LINE_STRIP_ADJACENCY:
+        case GL_TRIANGLES_ADJACENCY:
+        case GL_TRIANGLE_STRIP_ADJACENCY:
+        case GL_PATCHES:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isValidDrawElementsType(GLenum type) {
+    return type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT || type == GL_UNSIGNED_INT;
+}
+
+}  // namespace
+
+void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+    auto* context = requireCurrentContext("glDrawArrays");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidDrawMode(mode)) {
+        recordValidationError(context, "glDrawArrays", GL_INVALID_ENUM, "mode is not a recognized primitive type");
+        return;
+    }
+    if (first < 0 || count < 0) {
+        recordValidationError(context, "glDrawArrays", GL_INVALID_VALUE, "first and count must be non-negative");
+        return;
+    }
+    context->drawArrays(mode, first, count);
+    markDrawFunction(
+        FunctionId::glDrawArrays,
+        "Metal-backed solid-color draw path encodes glDrawArrays triangles."
+    );
+    Runtime::shared().recordBootstrapTrace(
+        "glDrawArrays(mode=" + std::to_string(mode) + ", first=" + std::to_string(first)
+        + ", count=" + std::to_string(count) + ")"
+    );
+}
+
+void APIENTRY glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
+    auto* context = requireCurrentContext("glDrawElements");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidDrawMode(mode)) {
+        recordValidationError(context, "glDrawElements", GL_INVALID_ENUM, "mode is not a recognized primitive type");
+        return;
+    }
+    if (!isValidDrawElementsType(type)) {
+        recordValidationError(context, "glDrawElements", GL_INVALID_ENUM, "type must be UNSIGNED_BYTE/SHORT/INT");
+        return;
+    }
+    if (count < 0) {
+        recordValidationError(context, "glDrawElements", GL_INVALID_VALUE, "count must be non-negative");
+        return;
+    }
+    context->drawElements(mode, count, type, indices);
+    markDrawFunction(
+        FunctionId::glDrawElements,
+        "Metal-backed solid-color draw path encodes glDrawElements triangles."
+    );
+    Runtime::shared().recordBootstrapTrace(
+        "glDrawElements(mode=" + std::to_string(mode) + ", count=" + std::to_string(count)
+        + ", type=" + std::to_string(type) + ")"
+    );
 }
 
 }  // namespace impl

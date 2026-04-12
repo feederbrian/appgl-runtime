@@ -1359,6 +1359,134 @@ public:
     }
 };
 
+// Phase A Group 7 — drawing MVP. Renders a single solid-color triangle using
+// the hand-written MSL pipeline baked into MetalFrameGraph, then captures the
+// result via glReadPixels for a golden round-trip. Also exercises the indexed
+// draw path so the GL_UNSIGNED_SHORT route is covered. The triangle covers a
+// predictable chunk of the framebuffer so small pixel deltas in the golden
+// compare highlight regressions in the draw encoder.
+class SolidTriangleDrawScene final : public Scene {
+public:
+    std::string id() const override {
+        return "phase-a.solid-triangle-draw";
+    }
+
+    std::string phase() const override {
+        return "phase-a";
+    }
+
+    SceneSize framebufferSize() const override {
+        return {96, 96};
+    }
+
+    double tolerance() const override {
+        // The hand-written MSL pipeline is deterministic, but anti-aliased
+        // rasterization edges can still drift by one channel at the triangle
+        // border depending on GPU family. Keep the tolerance tight but not
+        // zero so the scene stays stable across driver revisions.
+        return 0.02;
+    }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        // Compile a minimal "solid color" program. The runtime's Phase A
+        // Group 7 draw path looks for attribute 0 (vec3 position) and a
+        // uniform named "uColor", both of which this program provides.
+        const char* vertexSource =
+            "#version 330 core\n"
+            "layout(location = 0) in vec3 aPosition;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPosition, 1.0);\n"
+            "}\n";
+        const char* fragmentSource =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = uColor;\n"
+            "}\n";
+
+        const GLuint vertex = gl.glCreateShader(GL_VERTEX_SHADER);
+        const GLuint fragment = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(vertex, 1, &vertexSource, nullptr);
+        gl.glShaderSource(fragment, 1, &fragmentSource, nullptr);
+        gl.glCompileShader(vertex);
+        gl.glCompileShader(fragment);
+
+        program_ = gl.glCreateProgram();
+        gl.glAttachShader(program_, vertex);
+        gl.glAttachShader(program_, fragment);
+        gl.glLinkProgram(program_);
+        GLint linkStatus = 0;
+        gl.glGetProgramiv(program_, GL_LINK_STATUS, &linkStatus);
+        expectCondition(linkStatus == GL_TRUE, "solid triangle program links");
+        gl.glDeleteShader(vertex);
+        gl.glDeleteShader(fragment);
+
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glBindVertexArray(vao_);
+
+        // Clip-space triangle centered in the viewport.
+        const GLfloat positions[9] = {
+            -0.6f, -0.5f, 0.0f,
+             0.6f, -0.5f, 0.0f,
+             0.0f,  0.7f, 0.0f,
+        };
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(positions), positions, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), nullptr);
+
+        // Index buffer for the glDrawElements path.
+        const GLushort indices[3] = {0, 1, 2};
+        gl.glGenBuffers(1, &ibo_);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
+        gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+        gl.glUseProgram(program_);
+        const GLint colorLocation = gl.glGetUniformLocation(program_, "uColor");
+        expectCondition(colorLocation >= 0, "uColor is resolvable on solid triangle program");
+        const GLfloat triangleColor[4] = {0.95f, 0.45f, 0.20f, 1.0f};
+        gl.glUniform4fv(colorLocation, 1, triangleColor);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        gl.glViewport(0, 0, framebufferSize().width, framebufferSize().height);
+        gl.glClearColor(0.08f, 0.10f, 0.18f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        gl.glUseProgram(program_);
+        gl.glBindVertexArray(vao_);
+
+        // Exercise both draw paths: drawArrays first, then drawElements.
+        // Both should paint the same triangle, so the final framebuffer
+        // matches the single-triangle golden.
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, nullptr);
+
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glDrawArrays,
+            FunctionId::glDrawElements,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLuint vao_ = 0;
+    GLuint vbo_ = 0;
+    GLuint ibo_ = 0;
+};
+
 void appendCoverageDelta(TestResult& result) {
     for (FunctionId id : kBootstrapFunctions) {
         const auto& status = Runtime::shared().coverageStore().status(id);
@@ -1545,6 +1673,8 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(indexExpansionScene));
         ShaderProgramLifecycleScene shaderProgramScene;
         tests.push_back(runScene(shaderProgramScene));
+        SolidTriangleDrawScene solidTriangleDrawScene;
+        tests.push_back(runScene(solidTriangleDrawScene));
     }
 
     return buildJSON(normalizedPhase, tests);

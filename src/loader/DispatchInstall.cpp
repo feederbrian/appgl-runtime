@@ -202,6 +202,8 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glUniformMatrix2fv = &impl::glUniformMatrix2fv;
     dispatch.glUniformMatrix3fv = &impl::glUniformMatrix3fv;
     dispatch.glUniformMatrix4fv = &impl::glUniformMatrix4fv;
+    dispatch.glDrawArrays = &impl::glDrawArrays;
+    dispatch.glDrawElements = &impl::glDrawElements;
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
@@ -400,6 +402,8 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glUniformMatrix2fv, "mat2 uniforms are live.");
     coverage.markImplemented(FunctionId::glUniformMatrix3fv, "mat3 uniforms are live.");
     coverage.markImplemented(FunctionId::glUniformMatrix4fv, "mat4 uniforms are live.");
+    coverage.markImplemented(FunctionId::glDrawArrays, "Solid-color draw path (Phase A Group 7 MVP).");
+    coverage.markImplemented(FunctionId::glDrawElements, "Solid-color indexed draw path (Phase A Group 7 MVP).");
 }
 
 }  // namespace appgl

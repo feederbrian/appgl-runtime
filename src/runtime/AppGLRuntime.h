@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_set>
 
 #include "../../include/AppGL/glcorearb.h"
 #include "../context/GLContext.h"
@@ -212,6 +214,8 @@ void APIENTRY glUniform4uiv(GLint location, GLsizei count, const GLuint* value);
 void APIENTRY glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
 void APIENTRY glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
 void APIENTRY glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
+void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count);
+void APIENTRY glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
 }  // namespace impl
 
 class Runtime {
@@ -227,6 +231,16 @@ public:
 
     void makeCurrent(GLContext* context);
     GLContext* currentContext();
+
+    // Context liveness tracking. Every GLContext registers itself in construction
+    // and unregisters in destruction. Callers that want to inspect the current
+    // context from another thread (e.g. the diagnostics JSON refresh) can hold
+    // contextMutex() for the duration of the access, guaranteeing that an
+    // unregister cannot race with the read.
+    void registerContext(GLContext* context);
+    void unregisterContext(GLContext* context);
+    bool isContextLiveLocked(GLContext* context) const;
+    std::mutex& contextMutex();
     std::string claimedVersionString() const;
     void refreshCurrentContextClaimedVersion();
 
@@ -245,6 +259,8 @@ private:
     CoverageStore coverageStore_;
     TraceLog traceLog_;
     std::string rendererString_ = "AppGL on Metal";
+    mutable std::mutex contextMutex_;
+    std::unordered_set<GLContext*> liveContexts_;
 };
 
 template <typename ReturnType>
