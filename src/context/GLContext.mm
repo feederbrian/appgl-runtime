@@ -1932,6 +1932,76 @@ void GLContext::setDepthRange(GLdouble nearValue, GLdouble farValue) {
     impl_->state->setDepthRange(nearValue, farValue);
 }
 
+// --- Per-viewport-index state (GL 4.1 ARB_viewport_array) ---
+
+void GLContext::setViewportIndexed(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h) {
+    impl_->state->setViewportIndexed(index, x, y, w, h);
+}
+
+void GLContext::setViewportArray(GLuint first, GLsizei count, const GLfloat* v) {
+    impl_->state->setViewportArray(first, count, v);
+}
+
+void GLContext::setScissorIndexed(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height) {
+    impl_->state->setScissorIndexed(index, left, bottom, width, height);
+}
+
+void GLContext::setScissorArray(GLuint first, GLsizei count, const GLint* v) {
+    impl_->state->setScissorArray(first, count, v);
+}
+
+void GLContext::setDepthRangeIndexed(GLuint index, GLdouble nearVal, GLdouble farVal) {
+    impl_->state->setDepthRangeIndexed(index, nearVal, farVal);
+}
+
+void GLContext::setDepthRangeArray(GLuint first, GLsizei count, const GLdouble* v) {
+    impl_->state->setDepthRangeArray(first, count, v);
+}
+
+bool GLContext::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) {
+    return impl_->state->queryFloatIndexed(target, index, data);
+}
+
+bool GLContext::queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) {
+    return impl_->state->queryDoubleIndexed(target, index, data);
+}
+
+// --- Tessellation state (GL 4.0) ---
+
+void GLContext::setPatchParameteri(GLenum pname, GLint value) {
+    impl_->state->setPatchParameteri(pname, value);
+}
+
+void GLContext::setPatchParameterfv(GLenum pname, const GLfloat* values) {
+    impl_->state->setPatchParameterfv(pname, values);
+}
+
+// --- Shader precision query (GL 4.1) ---
+
+void GLContext::getShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype, GLint* range, GLint* precision) {
+    // Metal GPUs support full 32-bit float and integer precision.
+    // Report ranges matching IEEE 754 single-precision and 32-bit integer.
+    (void)shadertype;
+    switch (precisiontype) {
+        case GL_LOW_FLOAT:
+        case GL_MEDIUM_FLOAT:
+        case GL_HIGH_FLOAT:
+            if (range) { range[0] = 127; range[1] = 127; }
+            if (precision) { *precision = 23; }
+            break;
+        case GL_LOW_INT:
+        case GL_MEDIUM_INT:
+        case GL_HIGH_INT:
+            if (range) { range[0] = 31; range[1] = 30; }
+            if (precision) { *precision = 0; }
+            break;
+        default:
+            if (range) { range[0] = 0; range[1] = 0; }
+            if (precision) { *precision = 0; }
+            break;
+    }
+}
+
 void GLContext::setBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha) {
     impl_->state->setBlendFuncSeparate(srcRGB, dstRGB, srcAlpha, dstAlpha);
 }
@@ -4806,6 +4876,120 @@ bool GLContext::setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei
     }
     slot->ints.clear();
     slot->uints.clear();
+    return true;
+}
+
+bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count, const GLdouble* values) {
+    if (location < 0) {
+        return true;
+    }
+    if (count < 0 || vectorSize < 1 || vectorSize > 4 || values == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint currentProgram = impl_->state->currentProgram();
+    GLProgramObject* object = impl_->objects->programs().get(currentProgram);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* slot = lookupUniformValue(object, location);
+    if (slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const std::size_t expected = static_cast<std::size_t>(vectorSize) *
+                                 static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    // Shadow original doubles for lossless glGetUniformdv readback.
+    slot->doubles.assign(values, values + expected);
+    // Narrow to float for the Metal pipeline.
+    slot->floats.resize(expected);
+    for (std::size_t i = 0; i < expected; ++i) {
+        slot->floats[i] = static_cast<GLfloat>(values[i]);
+    }
+    slot->ints.clear();
+    slot->uints.clear();
+    return true;
+}
+
+bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values) {
+    if (location < 0) {
+        return true;
+    }
+    if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint currentProgram = impl_->state->currentProgram();
+    GLProgramObject* object = impl_->objects->programs().get(currentProgram);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLProgramUniformValue* slot = lookupUniformValue(object, location);
+    if (slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) *
+                                 static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    // Shadow original doubles.
+    slot->doubles.resize(elements);
+    slot->floats.resize(elements);
+    if (transpose == GL_FALSE) {
+        for (std::size_t i = 0; i < elements; ++i) {
+            slot->doubles[i] = values[i];
+            slot->floats[i] = static_cast<GLfloat>(values[i]);
+        }
+    } else {
+        const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+        for (GLsizei m = 0; m < std::max<GLsizei>(count, 1); ++m) {
+            for (GLint r = 0; r < rows; ++r) {
+                for (GLint c = 0; c < cols; ++c) {
+                    const std::size_t srcIndex = static_cast<std::size_t>(m) * matrixElements +
+                                                 static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) +
+                                                 static_cast<std::size_t>(c);
+                    const std::size_t dstIndex = static_cast<std::size_t>(m) * matrixElements +
+                                                 static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) +
+                                                 static_cast<std::size_t>(r);
+                    slot->doubles[dstIndex] = values[srcIndex];
+                    slot->floats[dstIndex] = static_cast<GLfloat>(values[srcIndex]);
+                }
+            }
+        }
+    }
+    slot->ints.clear();
+    slot->uints.clear();
+    return true;
+}
+
+bool GLContext::getUniformdv(GLuint program, GLint location, GLdouble* params) {
+    GLProgramObject* object = impl_->objects->programs().get(program);
+    if (object == nullptr || params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLProgramUniformValue* value = lookupUniformValue(object, location);
+    if (value == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // Prefer the lossless double shadow if available.
+    if (!value->doubles.empty()) {
+        std::memcpy(params, value->doubles.data(), value->doubles.size() * sizeof(GLdouble));
+    } else if (!value->floats.empty()) {
+        for (std::size_t i = 0; i < value->floats.size(); ++i) {
+            params[i] = static_cast<GLdouble>(value->floats[i]);
+        }
+    } else if (!value->ints.empty()) {
+        for (std::size_t i = 0; i < value->ints.size(); ++i) {
+            params[i] = static_cast<GLdouble>(value->ints[i]);
+        }
+    } else if (!value->uints.empty()) {
+        for (std::size_t i = 0; i < value->uints.size(); ++i) {
+            params[i] = static_cast<GLdouble>(value->uints[i]);
+        }
+    }
     return true;
 }
 

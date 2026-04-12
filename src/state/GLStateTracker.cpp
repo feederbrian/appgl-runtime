@@ -465,6 +465,134 @@ const GLDepthRangeState& GLStateTracker::depthRange() const {
     return depthRange_;
 }
 
+// --- Per-viewport-index state (GL 4.1 ARB_viewport_array) ---
+
+void GLStateTracker::setViewportIndexed(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h) {
+    if (index >= kMaxViewports) return;
+    indexedViewports_[index] = {x, y, w, h};
+    if (index == 0) {
+        viewport_ = {static_cast<GLint>(x), static_cast<GLint>(y),
+                     static_cast<GLsizei>(w), static_cast<GLsizei>(h)};
+    }
+    markDirty(DirtyBit::ViewportScissor);
+}
+
+void GLStateTracker::setViewportArray(GLuint first, GLsizei count, const GLfloat* v) {
+    for (GLsizei i = 0; i < count; ++i) {
+        setViewportIndexed(first + static_cast<GLuint>(i),
+                           v[i * 4 + 0], v[i * 4 + 1], v[i * 4 + 2], v[i * 4 + 3]);
+    }
+}
+
+void GLStateTracker::setScissorIndexed(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height) {
+    if (index >= kMaxViewports) return;
+    indexedScissors_[index] = {left, bottom, width, height};
+    if (index == 0) {
+        scissor_ = {left, bottom, width, height};
+    }
+    markDirty(DirtyBit::ViewportScissor);
+}
+
+void GLStateTracker::setScissorArray(GLuint first, GLsizei count, const GLint* v) {
+    for (GLsizei i = 0; i < count; ++i) {
+        setScissorIndexed(first + static_cast<GLuint>(i),
+                          v[i * 4 + 0], v[i * 4 + 1],
+                          static_cast<GLsizei>(v[i * 4 + 2]),
+                          static_cast<GLsizei>(v[i * 4 + 3]));
+    }
+}
+
+void GLStateTracker::setDepthRangeIndexed(GLuint index, GLdouble nearVal, GLdouble farVal) {
+    if (index >= kMaxViewports) return;
+    indexedDepthRanges_[index].nearValue = std::clamp(nearVal, 0.0, 1.0);
+    indexedDepthRanges_[index].farValue = std::clamp(farVal, 0.0, 1.0);
+    if (index == 0) {
+        depthRange_.nearValue = indexedDepthRanges_[0].nearValue;
+        depthRange_.farValue = indexedDepthRanges_[0].farValue;
+    }
+    markDirty(DirtyBit::DepthStencilState);
+}
+
+void GLStateTracker::setDepthRangeArray(GLuint first, GLsizei count, const GLdouble* v) {
+    for (GLsizei i = 0; i < count; ++i) {
+        setDepthRangeIndexed(first + static_cast<GLuint>(i), v[i * 2 + 0], v[i * 2 + 1]);
+    }
+}
+
+bool GLStateTracker::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) const {
+    if (index >= kMaxViewports) return false;
+    switch (target) {
+        case GL_VIEWPORT: {
+            const auto& vp = indexedViewports_[index];
+            data[0] = vp.x; data[1] = vp.y; data[2] = vp.w; data[3] = vp.h;
+            return true;
+        }
+        case GL_DEPTH_RANGE: {
+            const auto& dr = indexedDepthRanges_[index];
+            data[0] = static_cast<GLfloat>(dr.nearValue);
+            data[1] = static_cast<GLfloat>(dr.farValue);
+            return true;
+        }
+        case GL_SCISSOR_BOX: {
+            const auto& sc = indexedScissors_[index];
+            data[0] = static_cast<GLfloat>(sc.x);
+            data[1] = static_cast<GLfloat>(sc.y);
+            data[2] = static_cast<GLfloat>(sc.w);
+            data[3] = static_cast<GLfloat>(sc.h);
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+bool GLStateTracker::queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) const {
+    if (index >= kMaxViewports) return false;
+    switch (target) {
+        case GL_VIEWPORT: {
+            const auto& vp = indexedViewports_[index];
+            data[0] = vp.x; data[1] = vp.y; data[2] = vp.w; data[3] = vp.h;
+            return true;
+        }
+        case GL_DEPTH_RANGE: {
+            const auto& dr = indexedDepthRanges_[index];
+            data[0] = dr.nearValue;
+            data[1] = dr.farValue;
+            return true;
+        }
+        case GL_SCISSOR_BOX: {
+            const auto& sc = indexedScissors_[index];
+            data[0] = static_cast<GLdouble>(sc.x);
+            data[1] = static_cast<GLdouble>(sc.y);
+            data[2] = static_cast<GLdouble>(sc.w);
+            data[3] = static_cast<GLdouble>(sc.h);
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+// --- Tessellation state (GL 4.0) ---
+
+void GLStateTracker::setPatchParameteri(GLenum pname, GLint value) {
+    if (pname == GL_PATCH_VERTICES) {
+        tessellation_.patchVertices = value;
+    }
+}
+
+void GLStateTracker::setPatchParameterfv(GLenum pname, const GLfloat* values) {
+    if (pname == GL_PATCH_DEFAULT_OUTER_LEVEL) {
+        for (int i = 0; i < 4; ++i) tessellation_.defaultOuterLevel[i] = values[i];
+    } else if (pname == GL_PATCH_DEFAULT_INNER_LEVEL) {
+        for (int i = 0; i < 2; ++i) tessellation_.defaultInnerLevel[i] = values[i];
+    }
+}
+
+const GLTessellationState& GLStateTracker::tessellationState() const {
+    return tessellation_;
+}
+
 void GLStateTracker::setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
     if (clear_.color[0] == red && clear_.color[1] == green && clear_.color[2] == blue && clear_.color[3] == alpha) {
         return;

@@ -1653,6 +1653,45 @@ public:
         gl.glGetProgramInfoLog(program, static_cast<GLsizei>(programLog.size()), &programLogWritten, programLog.data());
         expectCondition(programLogWritten >= 0, "program info log is queryable");
 
+        // Phase 4 Group 2: double-precision uniform setters (f64→f32 narrowing).
+        // Placed after float readback assertions so the double overwrites don't
+        // invalidate the float round-trip checks above.
+        gl.glUniform1d(timeLocation, 2.718281828459045);
+        gl.glUniform2d(offset2Loc, 3.14159265358979, 1.41421356237310);
+        gl.glUniform3d(offset3Loc, 0.577215664901532, 1.61803398874989, 2.23606797749979);
+        gl.glUniform4d(colorLocation, 0.125, 0.250, 0.375, 0.500);
+        const GLdouble d1v[1] = {1.23456789012345};
+        gl.glUniform1dv(timeLocation, 1, d1v);
+        const GLdouble d2v[2] = {0.1, 0.2};
+        gl.glUniform2dv(offset2Loc, 1, d2v);
+        const GLdouble d3v[3] = {0.3, 0.4, 0.5};
+        gl.glUniform3dv(offset3Loc, 1, d3v);
+        const GLdouble d4v[4] = {0.6, 0.7, 0.8, 0.9};
+        gl.glUniform4dv(colorLocation, 1, d4v);
+        const GLdouble dmat2[4] = {1.0, 0.0, 0.0, 1.0};
+        gl.glUniformMatrix2dv(texMatLoc, 1, GL_FALSE, dmat2);
+        const GLdouble dmat3[9] = {1,0,0, 0,1,0, 0,0,1};
+        gl.glUniformMatrix3dv(normalMatLoc, 1, GL_FALSE, dmat3);
+        const GLdouble dmat4[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        gl.glUniformMatrix4dv(mvpLocation, 1, GL_FALSE, dmat4);
+        const GLdouble dmat2x3[6] = {1,0,0, 0,1,0};
+        gl.glUniformMatrix2x3dv(normalMatLoc, 1, GL_FALSE, dmat2x3);
+        const GLdouble dmat2x4[8] = {1,0,0,0, 0,1,0,0};
+        gl.glUniformMatrix2x4dv(normalMatLoc, 1, GL_FALSE, dmat2x4);
+        const GLdouble dmat3x2[6] = {1,0, 0,1, 0,0};
+        gl.glUniformMatrix3x2dv(texMatLoc, 1, GL_FALSE, dmat3x2);
+        const GLdouble dmat3x4[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};
+        gl.glUniformMatrix3x4dv(mvpLocation, 1, GL_FALSE, dmat3x4);
+        const GLdouble dmat4x2[8] = {1,0, 0,1, 0,0, 0,0};
+        gl.glUniformMatrix4x2dv(texMatLoc, 1, GL_FALSE, dmat4x2);
+        const GLdouble dmat4x3[12] = {1,0,0, 0,1,0, 0,0,1, 0,0,0};
+        gl.glUniformMatrix4x3dv(mvpLocation, 1, GL_FALSE, dmat4x3);
+
+        // glGetUniformdv lossless round-trip from the CPU shadow.
+        GLdouble dReadback[4] = {};
+        gl.glGetUniformdv(program, colorLocation, dReadback);
+        expectCondition(dReadback[0] == 0.6 && dReadback[3] == 0.9, "double uniform readback from shadow matches");
+
         gl.glDetachShader(program, vertex);
         GLint attachedAfterDetach = 0;
         gl.glGetProgramiv(program, GL_ATTACHED_SHADERS, &attachedAfterDetach);
@@ -1704,6 +1743,7 @@ public:
             FunctionId::glGetUniformBlockIndex,
             FunctionId::glGetUniformIndices,
             FunctionId::glGetUniformLocation,
+            FunctionId::glGetUniformdv,
             FunctionId::glGetUniformfv,
             FunctionId::glGetUniformiv,
             FunctionId::glGetUniformuiv,
@@ -1711,24 +1751,32 @@ public:
             FunctionId::glIsShader,
             FunctionId::glLinkProgram,
             FunctionId::glShaderSource,
+            FunctionId::glUniform1d,
+            FunctionId::glUniform1dv,
             FunctionId::glUniform1f,
             FunctionId::glUniform1fv,
             FunctionId::glUniform1i,
             FunctionId::glUniform1iv,
             FunctionId::glUniform1ui,
             FunctionId::glUniform1uiv,
+            FunctionId::glUniform2d,
+            FunctionId::glUniform2dv,
             FunctionId::glUniform2f,
             FunctionId::glUniform2fv,
             FunctionId::glUniform2i,
             FunctionId::glUniform2iv,
             FunctionId::glUniform2ui,
             FunctionId::glUniform2uiv,
+            FunctionId::glUniform3d,
+            FunctionId::glUniform3dv,
             FunctionId::glUniform3f,
             FunctionId::glUniform3fv,
             FunctionId::glUniform3i,
             FunctionId::glUniform3iv,
             FunctionId::glUniform3ui,
             FunctionId::glUniform3uiv,
+            FunctionId::glUniform4d,
+            FunctionId::glUniform4dv,
             FunctionId::glUniform4f,
             FunctionId::glUniform4fv,
             FunctionId::glUniform4i,
@@ -1736,14 +1784,23 @@ public:
             FunctionId::glUniform4ui,
             FunctionId::glUniform4uiv,
             FunctionId::glUniformBlockBinding,
+            FunctionId::glUniformMatrix2dv,
             FunctionId::glUniformMatrix2fv,
+            FunctionId::glUniformMatrix2x3dv,
             FunctionId::glUniformMatrix2x3fv,
+            FunctionId::glUniformMatrix2x4dv,
             FunctionId::glUniformMatrix2x4fv,
+            FunctionId::glUniformMatrix3dv,
             FunctionId::glUniformMatrix3fv,
+            FunctionId::glUniformMatrix3x2dv,
             FunctionId::glUniformMatrix3x2fv,
+            FunctionId::glUniformMatrix3x4dv,
             FunctionId::glUniformMatrix3x4fv,
+            FunctionId::glUniformMatrix4dv,
             FunctionId::glUniformMatrix4fv,
+            FunctionId::glUniformMatrix4x2dv,
             FunctionId::glUniformMatrix4x2fv,
+            FunctionId::glUniformMatrix4x3dv,
             FunctionId::glUniformMatrix4x3fv,
             FunctionId::glUseProgram,
             FunctionId::glValidateProgram,
@@ -1959,6 +2016,72 @@ public:
         gl.glMinSampleShading(0.5f);
         expectGLError(gl, GL_NO_ERROR, "indexed blend and sample shading accept legal args");
 
+        // Phase 4 Group 7: tessellation parameters (GL 4.0).
+        gl.glPatchParameteri(GL_PATCH_VERTICES, 4);
+        expectGLError(gl, GL_NO_ERROR, "glPatchParameteri accepts GL_PATCH_VERTICES");
+        const GLfloat outerLevel[4] = {2.0f, 2.0f, 2.0f, 2.0f};
+        gl.glPatchParameterfv(GL_PATCH_DEFAULT_OUTER_LEVEL, outerLevel);
+        expectGLError(gl, GL_NO_ERROR, "glPatchParameterfv accepts GL_PATCH_DEFAULT_OUTER_LEVEL");
+        const GLfloat innerLevel[2] = {1.0f, 1.0f};
+        gl.glPatchParameterfv(GL_PATCH_DEFAULT_INNER_LEVEL, innerLevel);
+        expectGLError(gl, GL_NO_ERROR, "glPatchParameterfv accepts GL_PATCH_DEFAULT_INNER_LEVEL");
+
+        // Phase 4 Group 5: indexed queries (GL 4.0) — stub-with-state.
+        GLuint queryObj = 0;
+        gl.glGenQueries(1, &queryObj);
+        gl.glBeginQueryIndexed(GL_PRIMITIVES_GENERATED, 0, queryObj);
+        gl.glEndQueryIndexed(GL_PRIMITIVES_GENERATED, 0);
+        GLint queryResult = -1;
+        gl.glGetQueryIndexediv(GL_PRIMITIVES_GENERATED, 0, GL_CURRENT_QUERY, &queryResult);
+        expectCondition(queryResult == 0, "glGetQueryIndexediv returns 0 for CURRENT_QUERY after end");
+        gl.glDeleteQueries(1, &queryObj);
+
+        // Phase 4 Group 8: viewport/scissor/depth arrays (GL 4.1).
+        gl.glViewportIndexedf(0, 0.0f, 0.0f, 32.0f, 32.0f);
+        expectGLError(gl, GL_NO_ERROR, "glViewportIndexedf accepts index 0");
+        const GLfloat vpv[4] = {0.0f, 0.0f, 32.0f, 32.0f};
+        gl.glViewportIndexedfv(0, vpv);
+        expectGLError(gl, GL_NO_ERROR, "glViewportIndexedfv accepts index 0");
+        const GLfloat vpa[8] = {0.0f, 0.0f, 32.0f, 32.0f, 0.0f, 0.0f, 16.0f, 16.0f};
+        gl.glViewportArrayv(0, 2, vpa);
+        expectGLError(gl, GL_NO_ERROR, "glViewportArrayv accepts 2 viewports");
+
+        gl.glScissorIndexed(0, 0, 0, 32, 32);
+        expectGLError(gl, GL_NO_ERROR, "glScissorIndexed accepts index 0");
+        const GLint scv[4] = {0, 0, 32, 32};
+        gl.glScissorIndexedv(0, scv);
+        expectGLError(gl, GL_NO_ERROR, "glScissorIndexedv accepts index 0");
+        const GLint sca[8] = {0, 0, 32, 32, 0, 0, 16, 16};
+        gl.glScissorArrayv(0, 2, sca);
+        expectGLError(gl, GL_NO_ERROR, "glScissorArrayv accepts 2 scissors");
+
+        gl.glDepthRangeIndexed(0, 0.0, 1.0);
+        expectGLError(gl, GL_NO_ERROR, "glDepthRangeIndexed accepts index 0");
+        const GLdouble dra[4] = {0.0, 1.0, 0.25, 0.75};
+        gl.glDepthRangeArrayv(0, 2, dra);
+        expectGLError(gl, GL_NO_ERROR, "glDepthRangeArrayv accepts 2 ranges");
+
+        // Verify indexed query readback (GetFloati_v / GetDoublei_v).
+        GLfloat vpReadback[4] = {};
+        gl.glGetFloati_v(GL_VIEWPORT, 0, vpReadback);
+        expectGLError(gl, GL_NO_ERROR, "glGetFloati_v reads GL_VIEWPORT at index 0");
+        GLdouble drReadback[2] = {};
+        gl.glGetDoublei_v(GL_DEPTH_RANGE, 0, drReadback);
+        expectGLError(gl, GL_NO_ERROR, "glGetDoublei_v reads GL_DEPTH_RANGE at index 0");
+
+        // glClearDepthf (GL 4.1).
+        gl.glClearDepthf(1.0f);
+        expectGLError(gl, GL_NO_ERROR, "glClearDepthf accepts float depth");
+
+        // Phase 4 Group 13: shader precision query (GL 4.1).
+        GLint precRange[2] = {};
+        GLint precPrecision = 0;
+        gl.glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT, precRange, &precPrecision);
+        expectCondition(precRange[0] == 127 && precRange[1] == 127,
+                        "glGetShaderPrecisionFormat HIGH_FLOAT range is [127,127]");
+        expectCondition(precPrecision == 23,
+                        "glGetShaderPrecisionFormat HIGH_FLOAT precision is 23");
+
         while (gl.glGetError() != GL_NO_ERROR) {
         }
     }
@@ -1973,21 +2096,32 @@ public:
 
     std::vector<FunctionId> scenarioCoverage() const override {
         return {
+            FunctionId::glBeginQueryIndexed,
             FunctionId::glBlendEquationSeparatei,
             FunctionId::glBlendEquationi,
             FunctionId::glBlendFuncSeparatei,
             FunctionId::glBlendFunci,
             FunctionId::glClampColor,
+            FunctionId::glClearDepthf,
+            FunctionId::glDepthRangeArrayv,
+            FunctionId::glDepthRangeIndexed,
             FunctionId::glDisablei,
             FunctionId::glEnablei,
+            FunctionId::glEndQueryIndexed,
             FunctionId::glFinish,
             FunctionId::glGetBooleani_v,
+            FunctionId::glGetDoublei_v,
+            FunctionId::glGetFloati_v,
             FunctionId::glGetInteger64i_v,
             FunctionId::glGetIntegeri_v,
+            FunctionId::glGetQueryIndexediv,
+            FunctionId::glGetShaderPrecisionFormat,
             FunctionId::glGetStringi,
             FunctionId::glIsEnabledi,
             FunctionId::glLogicOp,
             FunctionId::glMinSampleShading,
+            FunctionId::glPatchParameterfv,
+            FunctionId::glPatchParameteri,
             FunctionId::glPointParameterf,
             FunctionId::glPointParameterfv,
             FunctionId::glPointParameteri,
@@ -1996,6 +2130,12 @@ public:
             FunctionId::glProvokingVertex,
             FunctionId::glSampleCoverage,
             FunctionId::glSampleMaski,
+            FunctionId::glScissorArrayv,
+            FunctionId::glScissorIndexed,
+            FunctionId::glScissorIndexedv,
+            FunctionId::glViewportArrayv,
+            FunctionId::glViewportIndexedf,
+            FunctionId::glViewportIndexedfv,
         };
     }
 };

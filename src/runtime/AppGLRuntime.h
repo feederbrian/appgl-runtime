@@ -192,6 +192,7 @@ void APIENTRY glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize, 
 void APIENTRY glGetUniformfv(GLuint program, GLint location, GLfloat* params);
 void APIENTRY glGetUniformiv(GLuint program, GLint location, GLint* params);
 void APIENTRY glGetUniformuiv(GLuint program, GLint location, GLuint* params);
+void APIENTRY glGetUniformdv(GLuint program, GLint location, GLdouble* params);
 void APIENTRY glUniform1f(GLint location, GLfloat v0);
 void APIENTRY glUniform2f(GLint location, GLfloat v0, GLfloat v1);
 void APIENTRY glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
@@ -219,8 +220,47 @@ void APIENTRY glUniform4uiv(GLint location, GLsizei count, const GLuint* value);
 void APIENTRY glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
 void APIENTRY glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
 void APIENTRY glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat* value);
+// GL 4.0 double-precision uniform setters (f64→f32 narrowing with CPU-side double shadow).
+void APIENTRY glUniform1d(GLint location, GLdouble x);
+void APIENTRY glUniform2d(GLint location, GLdouble x, GLdouble y);
+void APIENTRY glUniform3d(GLint location, GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glUniform4d(GLint location, GLdouble x, GLdouble y, GLdouble z, GLdouble w);
+void APIENTRY glUniform1dv(GLint location, GLsizei count, const GLdouble* value);
+void APIENTRY glUniform2dv(GLint location, GLsizei count, const GLdouble* value);
+void APIENTRY glUniform3dv(GLint location, GLsizei count, const GLdouble* value);
+void APIENTRY glUniform4dv(GLint location, GLsizei count, const GLdouble* value);
+void APIENTRY glUniformMatrix2dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value);
+void APIENTRY glUniformMatrix3dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value);
+void APIENTRY glUniformMatrix4dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value);
+void APIENTRY glUniformMatrix2x3dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value);
+void APIENTRY glUniformMatrix2x4dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value);
+void APIENTRY glUniformMatrix3x2dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value);
+void APIENTRY glUniformMatrix3x4dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value);
+void APIENTRY glUniformMatrix4x2dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value);
+void APIENTRY glUniformMatrix4x3dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value);
 void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count);
 void APIENTRY glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
+// GL 4.0 — tessellation patch parameters.
+void APIENTRY glPatchParameteri(GLenum pname, GLint value);
+void APIENTRY glPatchParameterfv(GLenum pname, const GLfloat* values);
+// GL 4.0 — indexed queries.
+void APIENTRY glBeginQueryIndexed(GLenum target, GLuint index, GLuint id);
+void APIENTRY glEndQueryIndexed(GLenum target, GLuint index);
+void APIENTRY glGetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint* params);
+// GL 4.1 — viewport/scissor/depth arrays.
+void APIENTRY glViewportArrayv(GLuint first, GLsizei count, const GLfloat* v);
+void APIENTRY glViewportIndexedf(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h);
+void APIENTRY glViewportIndexedfv(GLuint index, const GLfloat* v);
+void APIENTRY glScissorArrayv(GLuint first, GLsizei count, const GLint* v);
+void APIENTRY glScissorIndexed(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height);
+void APIENTRY glScissorIndexedv(GLuint index, const GLint* v);
+void APIENTRY glDepthRangeArrayv(GLuint first, GLsizei count, const GLdouble* v);
+void APIENTRY glDepthRangeIndexed(GLuint index, GLdouble n, GLdouble f);
+void APIENTRY glGetFloati_v(GLenum target, GLuint index, GLfloat* data);
+void APIENTRY glGetDoublei_v(GLenum target, GLuint index, GLdouble* data);
+void APIENTRY glClearDepthf(GLfloat d);
+// GL 4.1 — shader precision.
+void APIENTRY glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype, GLint* range, GLint* precision);
 }  // namespace impl
 
 class Runtime {

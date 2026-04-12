@@ -3646,6 +3646,157 @@ void APIENTRY glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transp
     }
 }
 
+// GL 4.0 double-precision uniform setters. The Metal pipeline receives f32;
+// original f64 values are shadowed for lossless glGetUniformdv readback.
+void APIENTRY glGetUniformdv(GLuint program, GLint location, GLdouble* params) {
+    auto* context = requireCurrentContext("glGetUniformdv");
+    if (context == nullptr) return;
+    if (context->getUniformdv(program, location, params)) {
+        markProgramFunction(FunctionId::glGetUniformdv, "Double uniform readback is live via CPU shadow.");
+    }
+}
+
+void APIENTRY glUniform1d(GLint location, GLdouble x) {
+    auto* context = requireCurrentContext("glUniform1d");
+    if (context == nullptr) return;
+    GLdouble v[1] = {x};
+    if (context->setUniformDouble(location, 1, 1, v)) {
+        markProgramFunction(FunctionId::glUniform1d, "Double scalar uniforms narrowed to float.");
+        traceUniform("glUniform1d", location);
+    }
+}
+void APIENTRY glUniform2d(GLint location, GLdouble x, GLdouble y) {
+    auto* context = requireCurrentContext("glUniform2d");
+    if (context == nullptr) return;
+    GLdouble v[2] = {x, y};
+    if (context->setUniformDouble(location, 2, 1, v)) {
+        markProgramFunction(FunctionId::glUniform2d, "Double dvec2 uniforms narrowed to float.");
+        traceUniform("glUniform2d", location);
+    }
+}
+void APIENTRY glUniform3d(GLint location, GLdouble x, GLdouble y, GLdouble z) {
+    auto* context = requireCurrentContext("glUniform3d");
+    if (context == nullptr) return;
+    GLdouble v[3] = {x, y, z};
+    if (context->setUniformDouble(location, 3, 1, v)) {
+        markProgramFunction(FunctionId::glUniform3d, "Double dvec3 uniforms narrowed to float.");
+        traceUniform("glUniform3d", location);
+    }
+}
+void APIENTRY glUniform4d(GLint location, GLdouble x, GLdouble y, GLdouble z, GLdouble w) {
+    auto* context = requireCurrentContext("glUniform4d");
+    if (context == nullptr) return;
+    GLdouble v[4] = {x, y, z, w};
+    if (context->setUniformDouble(location, 4, 1, v)) {
+        markProgramFunction(FunctionId::glUniform4d, "Double dvec4 uniforms narrowed to float.");
+        traceUniform("glUniform4d", location);
+    }
+}
+void APIENTRY glUniform1dv(GLint location, GLsizei count, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniform1dv");
+    if (context == nullptr) return;
+    if (context->setUniformDouble(location, 1, count, value)) {
+        markProgramFunction(FunctionId::glUniform1dv, "Double scalar uniform arrays narrowed to float.");
+        traceUniform("glUniform1dv", location);
+    }
+}
+void APIENTRY glUniform2dv(GLint location, GLsizei count, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniform2dv");
+    if (context == nullptr) return;
+    if (context->setUniformDouble(location, 2, count, value)) {
+        markProgramFunction(FunctionId::glUniform2dv, "Double dvec2 uniform arrays narrowed to float.");
+        traceUniform("glUniform2dv", location);
+    }
+}
+void APIENTRY glUniform3dv(GLint location, GLsizei count, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniform3dv");
+    if (context == nullptr) return;
+    if (context->setUniformDouble(location, 3, count, value)) {
+        markProgramFunction(FunctionId::glUniform3dv, "Double dvec3 uniform arrays narrowed to float.");
+        traceUniform("glUniform3dv", location);
+    }
+}
+void APIENTRY glUniform4dv(GLint location, GLsizei count, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniform4dv");
+    if (context == nullptr) return;
+    if (context->setUniformDouble(location, 4, count, value)) {
+        markProgramFunction(FunctionId::glUniform4dv, "Double dvec4 uniform arrays narrowed to float.");
+        traceUniform("glUniform4dv", location);
+    }
+}
+void APIENTRY glUniformMatrix2dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniformMatrix2dv");
+    if (context == nullptr) return;
+    if (context->setUniformDoubleMatrix(location, 2, 2, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix2dv, "Double dmat2 uniforms narrowed to float.");
+        traceUniform("glUniformMatrix2dv", location);
+    }
+}
+void APIENTRY glUniformMatrix3dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniformMatrix3dv");
+    if (context == nullptr) return;
+    if (context->setUniformDoubleMatrix(location, 3, 3, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix3dv, "Double dmat3 uniforms narrowed to float.");
+        traceUniform("glUniformMatrix3dv", location);
+    }
+}
+void APIENTRY glUniformMatrix4dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniformMatrix4dv");
+    if (context == nullptr) return;
+    if (context->setUniformDoubleMatrix(location, 4, 4, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix4dv, "Double dmat4 uniforms narrowed to float.");
+        traceUniform("glUniformMatrix4dv", location);
+    }
+}
+void APIENTRY glUniformMatrix2x3dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniformMatrix2x3dv");
+    if (context == nullptr) return;
+    if (context->setUniformDoubleMatrix(location, 2, 3, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix2x3dv, "Double dmat2x3 uniforms narrowed to float.");
+        traceUniform("glUniformMatrix2x3dv", location);
+    }
+}
+void APIENTRY glUniformMatrix2x4dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniformMatrix2x4dv");
+    if (context == nullptr) return;
+    if (context->setUniformDoubleMatrix(location, 2, 4, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix2x4dv, "Double dmat2x4 uniforms narrowed to float.");
+        traceUniform("glUniformMatrix2x4dv", location);
+    }
+}
+void APIENTRY glUniformMatrix3x2dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniformMatrix3x2dv");
+    if (context == nullptr) return;
+    if (context->setUniformDoubleMatrix(location, 3, 2, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix3x2dv, "Double dmat3x2 uniforms narrowed to float.");
+        traceUniform("glUniformMatrix3x2dv", location);
+    }
+}
+void APIENTRY glUniformMatrix3x4dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniformMatrix3x4dv");
+    if (context == nullptr) return;
+    if (context->setUniformDoubleMatrix(location, 3, 4, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix3x4dv, "Double dmat3x4 uniforms narrowed to float.");
+        traceUniform("glUniformMatrix3x4dv", location);
+    }
+}
+void APIENTRY glUniformMatrix4x2dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniformMatrix4x2dv");
+    if (context == nullptr) return;
+    if (context->setUniformDoubleMatrix(location, 4, 2, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix4x2dv, "Double dmat4x2 uniforms narrowed to float.");
+        traceUniform("glUniformMatrix4x2dv", location);
+    }
+}
+void APIENTRY glUniformMatrix4x3dv(GLint location, GLsizei count, GLboolean transpose, const GLdouble* value) {
+    auto* context = requireCurrentContext("glUniformMatrix4x3dv");
+    if (context == nullptr) return;
+    if (context->setUniformDoubleMatrix(location, 4, 3, count, transpose, value)) {
+        markProgramFunction(FunctionId::glUniformMatrix4x3dv, "Double dmat4x3 uniforms narrowed to float.");
+        traceUniform("glUniformMatrix4x3dv", location);
+    }
+}
+
 namespace {
 
 bool isValidDrawMode(GLenum mode) {
@@ -3724,6 +3875,216 @@ void APIENTRY glDrawElements(GLenum mode, GLsizei count, GLenum type, const void
         "glDrawElements(mode=" + std::to_string(mode) + ", count=" + std::to_string(count)
         + ", type=" + std::to_string(type) + ")"
     );
+}
+
+// --- GL 4.0: Tessellation patch parameters (Group 7) ---
+
+void APIENTRY glPatchParameteri(GLenum pname, GLint value) {
+    auto* context = requireCurrentContext("glPatchParameteri");
+    if (context == nullptr) return;
+    if (pname != GL_PATCH_VERTICES) {
+        recordValidationError(context, "glPatchParameteri", GL_INVALID_ENUM, "pname must be GL_PATCH_VERTICES");
+        return;
+    }
+    if (value <= 0) {
+        recordValidationError(context, "glPatchParameteri", GL_INVALID_VALUE, "value must be positive");
+        return;
+    }
+    context->setPatchParameteri(pname, value);
+    markStateFunction(FunctionId::glPatchParameteri, "Tessellation patch vertex count tracked.");
+    Runtime::shared().recordBootstrapTrace("glPatchParameteri(pname=" + std::to_string(pname) + ", value=" + std::to_string(value) + ")");
+}
+
+void APIENTRY glPatchParameterfv(GLenum pname, const GLfloat* values) {
+    auto* context = requireCurrentContext("glPatchParameterfv");
+    if (context == nullptr) return;
+    if (pname != GL_PATCH_DEFAULT_OUTER_LEVEL && pname != GL_PATCH_DEFAULT_INNER_LEVEL) {
+        recordValidationError(context, "glPatchParameterfv", GL_INVALID_ENUM, "pname must be GL_PATCH_DEFAULT_OUTER_LEVEL or GL_PATCH_DEFAULT_INNER_LEVEL");
+        return;
+    }
+    if (values == nullptr) {
+        recordValidationError(context, "glPatchParameterfv", GL_INVALID_VALUE, "values must not be null");
+        return;
+    }
+    context->setPatchParameterfv(pname, values);
+    markStateFunction(FunctionId::glPatchParameterfv, "Tessellation default level state tracked.");
+    Runtime::shared().recordBootstrapTrace("glPatchParameterfv(pname=" + std::to_string(pname) + ")");
+}
+
+// --- GL 4.0: Indexed queries (Group 5) — stub-with-state ---
+
+void APIENTRY glBeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
+    auto* context = requireCurrentContext("glBeginQueryIndexed");
+    if (context == nullptr) return;
+    (void)target; (void)index; (void)id;
+    // Stub: indexed query targets for geometry shader streams are tracked on the CPU
+    // without GPU effect. Full Metal-backed occlusion queries are Phase 5+.
+    markStateFunction(FunctionId::glBeginQueryIndexed, "Indexed query begin stub accepts call shape.");
+    Runtime::shared().recordBootstrapTrace("glBeginQueryIndexed(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ", id=" + std::to_string(id) + ")");
+}
+
+void APIENTRY glEndQueryIndexed(GLenum target, GLuint index) {
+    auto* context = requireCurrentContext("glEndQueryIndexed");
+    if (context == nullptr) return;
+    (void)target; (void)index;
+    markStateFunction(FunctionId::glEndQueryIndexed, "Indexed query end stub accepts call shape.");
+    Runtime::shared().recordBootstrapTrace("glEndQueryIndexed(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glGetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint* params) {
+    auto* context = requireCurrentContext("glGetQueryIndexediv");
+    if (context == nullptr) return;
+    (void)target; (void)index;
+    // Return sensible defaults: CURRENT_QUERY = 0, QUERY_COUNTER_BITS = 0.
+    if (params != nullptr) {
+        if (pname == GL_CURRENT_QUERY) {
+            *params = 0;
+        } else if (pname == GL_QUERY_COUNTER_BITS) {
+            *params = 0;
+        } else {
+            *params = 0;
+        }
+    }
+    markStateFunction(FunctionId::glGetQueryIndexediv, "Indexed query get stub returns defaults.");
+    Runtime::shared().recordBootstrapTrace("glGetQueryIndexediv(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ")");
+}
+
+// --- GL 4.1: Viewport/Scissor/Depth arrays (Group 8) ---
+
+void APIENTRY glViewportArrayv(GLuint first, GLsizei count, const GLfloat* v) {
+    auto* context = requireCurrentContext("glViewportArrayv");
+    if (context == nullptr) return;
+    if (count < 0) {
+        recordValidationError(context, "glViewportArrayv", GL_INVALID_VALUE, "count must be non-negative");
+        return;
+    }
+    context->setViewportArray(first, count, v);
+    markStateFunction(FunctionId::glViewportArrayv, "Per-viewport-index array state tracked.");
+    Runtime::shared().recordBootstrapTrace("glViewportArrayv(first=" + std::to_string(first) + ", count=" + std::to_string(count) + ")");
+}
+
+void APIENTRY glViewportIndexedf(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h) {
+    auto* context = requireCurrentContext("glViewportIndexedf");
+    if (context == nullptr) return;
+    context->setViewportIndexed(index, x, y, w, h);
+    markStateFunction(FunctionId::glViewportIndexedf, "Per-viewport-index state tracked.");
+    Runtime::shared().recordBootstrapTrace("glViewportIndexedf(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glViewportIndexedfv(GLuint index, const GLfloat* v) {
+    auto* context = requireCurrentContext("glViewportIndexedfv");
+    if (context == nullptr) return;
+    if (v == nullptr) {
+        recordValidationError(context, "glViewportIndexedfv", GL_INVALID_VALUE, "v must not be null");
+        return;
+    }
+    context->setViewportIndexed(index, v[0], v[1], v[2], v[3]);
+    markStateFunction(FunctionId::glViewportIndexedfv, "Per-viewport-index state tracked.");
+    Runtime::shared().recordBootstrapTrace("glViewportIndexedfv(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glScissorArrayv(GLuint first, GLsizei count, const GLint* v) {
+    auto* context = requireCurrentContext("glScissorArrayv");
+    if (context == nullptr) return;
+    if (count < 0) {
+        recordValidationError(context, "glScissorArrayv", GL_INVALID_VALUE, "count must be non-negative");
+        return;
+    }
+    context->setScissorArray(first, count, v);
+    markStateFunction(FunctionId::glScissorArrayv, "Per-scissor-index array state tracked.");
+    Runtime::shared().recordBootstrapTrace("glScissorArrayv(first=" + std::to_string(first) + ", count=" + std::to_string(count) + ")");
+}
+
+void APIENTRY glScissorIndexed(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height) {
+    auto* context = requireCurrentContext("glScissorIndexed");
+    if (context == nullptr) return;
+    if (width < 0 || height < 0) {
+        recordValidationError(context, "glScissorIndexed", GL_INVALID_VALUE, "width and height must be non-negative");
+        return;
+    }
+    context->setScissorIndexed(index, left, bottom, width, height);
+    markStateFunction(FunctionId::glScissorIndexed, "Per-scissor-index state tracked.");
+    Runtime::shared().recordBootstrapTrace("glScissorIndexed(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glScissorIndexedv(GLuint index, const GLint* v) {
+    auto* context = requireCurrentContext("glScissorIndexedv");
+    if (context == nullptr) return;
+    if (v == nullptr) {
+        recordValidationError(context, "glScissorIndexedv", GL_INVALID_VALUE, "v must not be null");
+        return;
+    }
+    context->setScissorIndexed(index, v[0], v[1], static_cast<GLsizei>(v[2]), static_cast<GLsizei>(v[3]));
+    markStateFunction(FunctionId::glScissorIndexedv, "Per-scissor-index state tracked.");
+    Runtime::shared().recordBootstrapTrace("glScissorIndexedv(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glDepthRangeArrayv(GLuint first, GLsizei count, const GLdouble* v) {
+    auto* context = requireCurrentContext("glDepthRangeArrayv");
+    if (context == nullptr) return;
+    if (count < 0) {
+        recordValidationError(context, "glDepthRangeArrayv", GL_INVALID_VALUE, "count must be non-negative");
+        return;
+    }
+    context->setDepthRangeArray(first, count, v);
+    markStateFunction(FunctionId::glDepthRangeArrayv, "Per-depth-range-index array state tracked.");
+    Runtime::shared().recordBootstrapTrace("glDepthRangeArrayv(first=" + std::to_string(first) + ", count=" + std::to_string(count) + ")");
+}
+
+void APIENTRY glDepthRangeIndexed(GLuint index, GLdouble n, GLdouble f) {
+    auto* context = requireCurrentContext("glDepthRangeIndexed");
+    if (context == nullptr) return;
+    context->setDepthRangeIndexed(index, n, f);
+    markStateFunction(FunctionId::glDepthRangeIndexed, "Per-depth-range-index state tracked.");
+    Runtime::shared().recordBootstrapTrace("glDepthRangeIndexed(index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glGetFloati_v(GLenum target, GLuint index, GLfloat* data) {
+    auto* context = requireCurrentContext("glGetFloati_v");
+    if (context == nullptr) return;
+    if (data == nullptr) {
+        recordValidationError(context, "glGetFloati_v", GL_INVALID_VALUE, "data must not be null");
+        return;
+    }
+    if (!context->queryFloatIndexed(target, index, data)) {
+        recordValidationError(context, "glGetFloati_v", GL_INVALID_ENUM, "target is not a recognized indexed state");
+        return;
+    }
+    markStateFunction(FunctionId::glGetFloati_v, "Indexed float state query returns tracked values.");
+    Runtime::shared().recordBootstrapTrace("glGetFloati_v(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glGetDoublei_v(GLenum target, GLuint index, GLdouble* data) {
+    auto* context = requireCurrentContext("glGetDoublei_v");
+    if (context == nullptr) return;
+    if (data == nullptr) {
+        recordValidationError(context, "glGetDoublei_v", GL_INVALID_VALUE, "data must not be null");
+        return;
+    }
+    if (!context->queryDoubleIndexed(target, index, data)) {
+        recordValidationError(context, "glGetDoublei_v", GL_INVALID_ENUM, "target is not a recognized indexed state");
+        return;
+    }
+    markStateFunction(FunctionId::glGetDoublei_v, "Indexed double state query returns tracked values.");
+    Runtime::shared().recordBootstrapTrace("glGetDoublei_v(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ")");
+}
+
+void APIENTRY glClearDepthf(GLfloat d) {
+    auto* context = requireCurrentContext("glClearDepthf");
+    if (context == nullptr) return;
+    context->setClearDepth(static_cast<GLdouble>(d));
+    markStateFunction(FunctionId::glClearDepthf, "Float-precision depth clear state tracked.");
+    Runtime::shared().recordBootstrapTrace("glClearDepthf(" + formatFloat(d) + ")");
+}
+
+// --- GL 4.1: Shader precision (Group 13) ---
+
+void APIENTRY glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype, GLint* range, GLint* precision) {
+    auto* context = requireCurrentContext("glGetShaderPrecisionFormat");
+    if (context == nullptr) return;
+    context->getShaderPrecisionFormat(shadertype, precisiontype, range, precision);
+    markStateFunction(FunctionId::glGetShaderPrecisionFormat, "Shader precision query returns Metal-appropriate ranges.");
+    Runtime::shared().recordBootstrapTrace("glGetShaderPrecisionFormat(shadertype=" + std::to_string(shadertype) + ", precisiontype=" + std::to_string(precisiontype) + ")");
 }
 
 }  // namespace impl

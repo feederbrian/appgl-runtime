@@ -198,6 +198,7 @@ struct GLProgramUniformValue {
     std::vector<GLfloat> floats;
     std::vector<GLint> ints;
     std::vector<GLuint> uints;
+    std::vector<GLdouble> doubles;  // CPU-side shadow for f64→f32 narrowing (lossless glGetUniformdv readback)
 };
 
 struct GLProgramObject {

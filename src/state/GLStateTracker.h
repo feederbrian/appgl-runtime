@@ -122,6 +122,12 @@ struct GLPixelStoreState {
     GLint unpackSkipImages = 0;
 };
 
+struct GLTessellationState {
+    GLint patchVertices = 3;
+    GLfloat defaultOuterLevel[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    GLfloat defaultInnerLevel[2] = {1.0f, 1.0f};
+};
+
 struct GLIndexedBufferBinding {
     GLuint buffer = 0;
     GLintptr offset = 0;
@@ -140,6 +146,22 @@ public:
 
     void setDepthRange(GLdouble nearValue, GLdouble farValue);
     const GLDepthRangeState& depthRange() const;
+
+    // Per-viewport-index state (GL 4.1 ARB_viewport_array).
+    static constexpr std::size_t kMaxViewports = 16;
+    void setViewportIndexed(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h);
+    void setViewportArray(GLuint first, GLsizei count, const GLfloat* v);
+    void setScissorIndexed(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height);
+    void setScissorArray(GLuint first, GLsizei count, const GLint* v);
+    void setDepthRangeIndexed(GLuint index, GLdouble nearVal, GLdouble farVal);
+    void setDepthRangeArray(GLuint first, GLsizei count, const GLdouble* v);
+    bool queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) const;
+    bool queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) const;
+
+    // Tessellation state (GL 4.0).
+    void setPatchParameteri(GLenum pname, GLint value);
+    void setPatchParameterfv(GLenum pname, const GLfloat* values);
+    const GLTessellationState& tessellationState() const;
 
     void setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
     void setClearDepth(GLdouble depth);
@@ -240,6 +262,13 @@ private:
     GLDepthRangeState depthRange_;
     GLClearState clear_;
     GLScissorState scissor_;
+    // Per-viewport-index arrays for GL 4.1.
+    struct IndexedViewport { GLfloat x = 0, y = 0, w = 1, h = 1; };
+    struct IndexedScissor { GLint x = 0, y = 0; GLsizei w = 1, h = 1; };
+    std::array<IndexedViewport, kMaxViewports> indexedViewports_{};
+    std::array<IndexedScissor, kMaxViewports> indexedScissors_{};
+    std::array<GLDepthRangeState, kMaxViewports> indexedDepthRanges_{};
+    GLTessellationState tessellation_;
     GLBlendState blend_;
     GLDepthState depth_;
     GLStencilState stencil_;

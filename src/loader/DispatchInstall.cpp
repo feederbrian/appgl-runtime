@@ -207,8 +207,48 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glUniformMatrix2fv = &impl::glUniformMatrix2fv;
     dispatch.glUniformMatrix3fv = &impl::glUniformMatrix3fv;
     dispatch.glUniformMatrix4fv = &impl::glUniformMatrix4fv;
+    // GL 4.0 double-precision uniform setters (f64→f32 narrowing).
+    dispatch.glGetUniformdv = &impl::glGetUniformdv;
+    dispatch.glUniform1d = &impl::glUniform1d;
+    dispatch.glUniform2d = &impl::glUniform2d;
+    dispatch.glUniform3d = &impl::glUniform3d;
+    dispatch.glUniform4d = &impl::glUniform4d;
+    dispatch.glUniform1dv = &impl::glUniform1dv;
+    dispatch.glUniform2dv = &impl::glUniform2dv;
+    dispatch.glUniform3dv = &impl::glUniform3dv;
+    dispatch.glUniform4dv = &impl::glUniform4dv;
+    dispatch.glUniformMatrix2dv = &impl::glUniformMatrix2dv;
+    dispatch.glUniformMatrix3dv = &impl::glUniformMatrix3dv;
+    dispatch.glUniformMatrix4dv = &impl::glUniformMatrix4dv;
+    dispatch.glUniformMatrix2x3dv = &impl::glUniformMatrix2x3dv;
+    dispatch.glUniformMatrix2x4dv = &impl::glUniformMatrix2x4dv;
+    dispatch.glUniformMatrix3x2dv = &impl::glUniformMatrix3x2dv;
+    dispatch.glUniformMatrix3x4dv = &impl::glUniformMatrix3x4dv;
+    dispatch.glUniformMatrix4x2dv = &impl::glUniformMatrix4x2dv;
+    dispatch.glUniformMatrix4x3dv = &impl::glUniformMatrix4x3dv;
     dispatch.glDrawArrays = &impl::glDrawArrays;
     dispatch.glDrawElements = &impl::glDrawElements;
+    // GL 4.0 — tessellation patch parameters (Group 7).
+    dispatch.glPatchParameteri = &impl::glPatchParameteri;
+    dispatch.glPatchParameterfv = &impl::glPatchParameterfv;
+    // GL 4.0 — indexed queries (Group 5).
+    dispatch.glBeginQueryIndexed = &impl::glBeginQueryIndexed;
+    dispatch.glEndQueryIndexed = &impl::glEndQueryIndexed;
+    dispatch.glGetQueryIndexediv = &impl::glGetQueryIndexediv;
+    // GL 4.1 — viewport/scissor/depth arrays (Group 8).
+    dispatch.glViewportArrayv = &impl::glViewportArrayv;
+    dispatch.glViewportIndexedf = &impl::glViewportIndexedf;
+    dispatch.glViewportIndexedfv = &impl::glViewportIndexedfv;
+    dispatch.glScissorArrayv = &impl::glScissorArrayv;
+    dispatch.glScissorIndexed = &impl::glScissorIndexed;
+    dispatch.glScissorIndexedv = &impl::glScissorIndexedv;
+    dispatch.glDepthRangeArrayv = &impl::glDepthRangeArrayv;
+    dispatch.glDepthRangeIndexed = &impl::glDepthRangeIndexed;
+    dispatch.glGetFloati_v = &impl::glGetFloati_v;
+    dispatch.glGetDoublei_v = &impl::glGetDoublei_v;
+    dispatch.glClearDepthf = &impl::glClearDepthf;
+    // GL 4.1 — shader precision (Group 13).
+    dispatch.glGetShaderPrecisionFormat = &impl::glGetShaderPrecisionFormat;
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
@@ -409,6 +449,24 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glUniformMatrix4fv, "mat4 uniforms are live.");
     coverage.markImplemented(FunctionId::glDrawArrays, "Solid-color draw path (Phase A Group 7 MVP).");
     coverage.markImplemented(FunctionId::glDrawElements, "Solid-color indexed draw path (Phase A Group 7 MVP).");
+    // Phase 4 Pass A — GL 4.0/4.1 state-only additions.
+    coverage.markImplemented(FunctionId::glPatchParameteri, "Tessellation patch vertex count state tracked.");
+    coverage.markImplemented(FunctionId::glPatchParameterfv, "Tessellation default outer/inner levels tracked.");
+    coverage.markImplemented(FunctionId::glBeginQueryIndexed, "Indexed query begin stub (CPU-only).");
+    coverage.markImplemented(FunctionId::glEndQueryIndexed, "Indexed query end stub (CPU-only).");
+    coverage.markImplemented(FunctionId::glGetQueryIndexediv, "Indexed query get stub returns defaults.");
+    coverage.markImplemented(FunctionId::glViewportArrayv, "Per-viewport-index array state tracked.");
+    coverage.markImplemented(FunctionId::glViewportIndexedf, "Per-viewport-index state tracked.");
+    coverage.markImplemented(FunctionId::glViewportIndexedfv, "Per-viewport-index state tracked.");
+    coverage.markImplemented(FunctionId::glScissorArrayv, "Per-scissor-index array state tracked.");
+    coverage.markImplemented(FunctionId::glScissorIndexed, "Per-scissor-index state tracked.");
+    coverage.markImplemented(FunctionId::glScissorIndexedv, "Per-scissor-index state tracked.");
+    coverage.markImplemented(FunctionId::glDepthRangeArrayv, "Per-depth-range-index array state tracked.");
+    coverage.markImplemented(FunctionId::glDepthRangeIndexed, "Per-depth-range-index state tracked.");
+    coverage.markImplemented(FunctionId::glGetFloati_v, "Indexed float state query returns tracked values.");
+    coverage.markImplemented(FunctionId::glGetDoublei_v, "Indexed double state query returns tracked values.");
+    coverage.markImplemented(FunctionId::glClearDepthf, "Float-precision depth clear state tracked.");
+    coverage.markImplemented(FunctionId::glGetShaderPrecisionFormat, "Shader precision query returns Metal-appropriate ranges.");
 
     // Phase A Group 8: wire the remaining <=3.3 entry points so the dispatch
     // table has no unimplementedReturn<> fallback for any manifest function in

@@ -29,6 +29,23 @@ public:
     void setViewport(GLint x, GLint y, GLsizei width, GLsizei height);
     void setScissor(GLint x, GLint y, GLsizei width, GLsizei height);
     void setDepthRange(GLdouble nearValue, GLdouble farValue);
+
+    // Per-viewport-index state (GL 4.1 ARB_viewport_array).
+    void setViewportIndexed(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h);
+    void setViewportArray(GLuint first, GLsizei count, const GLfloat* v);
+    void setScissorIndexed(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height);
+    void setScissorArray(GLuint first, GLsizei count, const GLint* v);
+    void setDepthRangeIndexed(GLuint index, GLdouble nearVal, GLdouble farVal);
+    void setDepthRangeArray(GLuint first, GLsizei count, const GLdouble* v);
+    bool queryFloatIndexed(GLenum target, GLuint index, GLfloat* data);
+    bool queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data);
+
+    // Tessellation state (GL 4.0).
+    void setPatchParameteri(GLenum pname, GLint value);
+    void setPatchParameterfv(GLenum pname, const GLfloat* values);
+
+    // Shader precision query (GL 4.1).
+    void getShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype, GLint* range, GLint* precision);
     void setBlendFuncSeparate(GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
     void setBlendFuncSeparatei(GLuint index, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
     void setBlendEquationSeparate(GLenum equationRGB, GLenum equationAlpha);
@@ -181,10 +198,13 @@ public:
     bool getUniformfv(GLuint program, GLint location, GLfloat* params);
     bool getUniformiv(GLuint program, GLint location, GLint* params);
     bool getUniformuiv(GLuint program, GLint location, GLuint* params);
+    bool getUniformdv(GLuint program, GLint location, GLdouble* params);
 
     enum class UniformElementType { Float, Int, UnsignedInt };
     bool setUniformScalarVector(GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values);
     bool setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLfloat* values);
+    bool setUniformDouble(GLint location, GLint vectorSize, GLsizei count, const GLdouble* values);
+    bool setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, GLsizei count, GLboolean transpose, const GLdouble* values);
 
     // Phase A Group 7 — drawing. See MetalFrameGraph::encodeSolidColorDraw for
     // the minimal pipeline state we currently support. Additional draw variants
