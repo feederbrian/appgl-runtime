@@ -149,6 +149,7 @@ struct MetalFrameGraph::Impl {
         pass.stencilAttachment.loadAction = MTLLoadActionLoad;
         pass.stencilAttachment.storeAction = MTLStoreActionStore;
         currentRenderEncoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        resetCachedEncoderState();
     }
 
     void* renderEncoder() const {
@@ -642,28 +643,45 @@ struct MetalFrameGraph::Impl {
             }
             readbackSourceTexture = colorTexture;
             readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+            resetCachedEncoderState();
         }
 
         // Encode the draw into the shared render encoder.
-        [currentRenderEncoder setRenderPipelineState:pipelineState];
+        // OPT-6: skip redundant state calls when consecutive draws share
+        // the same pipeline / depth-stencil / raster state.
+        if (pipelineState != cachedPipelineState) {
+            [currentRenderEncoder setRenderPipelineState:pipelineState];
+            cachedPipelineState = pipelineState;
+        }
 
         if (depthStencilTexture != nil) {
             MetalDrawInfo fakeInfo;
             fakeInfo.depthTestEnabled = info.depthTestEnabled;
             fakeInfo.depthFunc = info.depthFunc;
             id<MTLDepthStencilState> dsState = depthStencilStateForDraw(fakeInfo);
-            if (dsState != nil) {
+            if (dsState != nil && dsState != cachedDepthStencilState) {
                 [currentRenderEncoder setDepthStencilState:dsState];
+                cachedDepthStencilState = dsState;
             }
         }
 
-        if (info.cullFaceEnabled) {
-            [currentRenderEncoder setCullMode:(info.cullFaceMode == GL_FRONT ? MTLCullModeFront : MTLCullModeBack)];
-        } else {
-            [currentRenderEncoder setCullMode:MTLCullModeNone];
+        const MTLCullMode desiredCull = info.cullFaceEnabled
+            ? (info.cullFaceMode == GL_FRONT ? MTLCullModeFront : MTLCullModeBack)
+            : MTLCullModeNone;
+        if (desiredCull != cachedCullMode) {
+            [currentRenderEncoder setCullMode:desiredCull];
+            cachedCullMode = desiredCull;
         }
-        [currentRenderEncoder setFrontFacingWinding:info.frontFace == GL_CW ? MTLWindingClockwise : MTLWindingCounterClockwise];
-        [currentRenderEncoder setTriangleFillMode:info.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
+        const MTLWinding desiredWinding = info.frontFace == GL_CW ? MTLWindingClockwise : MTLWindingCounterClockwise;
+        if (desiredWinding != cachedFrontFaceWinding) {
+            [currentRenderEncoder setFrontFacingWinding:desiredWinding];
+            cachedFrontFaceWinding = desiredWinding;
+        }
+        const MTLTriangleFillMode desiredFill = info.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill;
+        if (desiredFill != cachedFillMode) {
+            [currentRenderEncoder setTriangleFillMode:desiredFill];
+            cachedFillMode = desiredFill;
+        }
 
         // Bind vertex data at buffer index 0.
         // OPT-5: when the VBO has a pre-uploaded Metal buffer, bind it
@@ -1223,6 +1241,7 @@ private:
         currentDrawable = nil;
         pendingPresent = false;
         hasPendingClear = false;
+        resetCachedEncoderState();
     }
 
     CAMetalLayer* layer = nil;
@@ -1261,6 +1280,25 @@ private:
     // The state space is tiny (~16 combinations); after warmup every draw is
     // a pure hash-table hit with zero Metal allocations.
     std::unordered_map<std::uint32_t, id<MTLDepthStencilState>> depthStencilCache;
+
+    // ── Encoder state deduplication (OPT-6) ──
+    // Track what was last set on the current render encoder. Skip redundant
+    // Metal API calls when consecutive draws share the same state — typical
+    // for batches of objects using the same shader/material.  Reset to
+    // sentinel values whenever a new render encoder is created.
+    id<MTLRenderPipelineState> cachedPipelineState = nil;
+    id<MTLDepthStencilState> cachedDepthStencilState = nil;
+    MTLCullMode cachedCullMode = static_cast<MTLCullMode>(0xFFFFFFFF);
+    MTLWinding cachedFrontFaceWinding = static_cast<MTLWinding>(0xFFFFFFFF);
+    MTLTriangleFillMode cachedFillMode = static_cast<MTLTriangleFillMode>(0xFFFFFFFF);
+
+    void resetCachedEncoderState() {
+        cachedPipelineState = nil;
+        cachedDepthStencilState = nil;
+        cachedCullMode = static_cast<MTLCullMode>(0xFFFFFFFF);
+        cachedFrontFaceWinding = static_cast<MTLWinding>(0xFFFFFFFF);
+        cachedFillMode = static_cast<MTLTriangleFillMode>(0xFFFFFFFF);
+    }
 
     // ── Ring buffer for per-draw vertex/index data (OPT-1) ──
     // Triple-buffered: 3 large MTLBuffers rotate each frame. Within a frame,
