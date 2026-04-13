@@ -9,6 +9,29 @@
 
 int main(int argc, char** argv) {
     const std::string phaseFilter = argc > 1 ? argv[1] : "phase-a";
+
+    // Benchmark mode: ./appgl_gauntlet_cli benchmark [output.json]
+    if (phaseFilter == "benchmark") {
+        const std::string payload = appgl::tests::runBenchmarkJSON();
+        if (payload.empty()) {
+            std::cerr << "Failed to generate benchmark report.\n";
+            return 1;
+        }
+        std::cout << payload << '\n';
+
+        // Optional: write to file.
+        if (argc > 2) {
+            const std::string outPath = argv[2];
+            std::ofstream out(outPath, std::ios::binary);
+            if (!out) {
+                std::cerr << "Failed to open output path: " << outPath << "\n";
+                return 3;
+            }
+            out << payload;
+        }
+        return 0;
+    }
+
     const std::string payload = appgl::tests::runGauntletJSON(phaseFilter);
     if (payload.empty()) {
         std::cerr << "Failed to generate gauntlet report.\n";

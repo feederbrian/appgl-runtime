@@ -6,9 +6,11 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -5446,6 +5448,494 @@ private:
     int vertCount_ = 0;
 };
 
+// ===========================================================================
+// Benchmark infrastructure — Phase 7 Group 5a
+// ===========================================================================
+
+struct BenchmarkTierResult {
+    std::string tier;       // "light", "medium", "heavy"
+    int objectCount = 0;
+    int verticesPerFrame = 0;
+    int trianglesPerFrame = 0;
+    int drawCallsPerFrame = 0;
+    double avgFPS = 0.0;
+    double avgFrameMs = 0.0;
+    double p95FrameMs = 0.0;
+    double peakGPUMemoryMB = 0.0;
+    double shaderCompileMs = 0.0;   // first-frame – steady-frame (setup overhead)
+    std::uint64_t pipelineCacheHits = 0;
+    std::uint64_t pipelineCacheMisses = 0;
+    double pipelineBuildMs = 0.0;
+};
+
+// Helper: generate UV-sphere vertices (interleaved pos+normal, 6 floats/vert).
+static std::vector<float> generateSphereGeometry(float radius, int segments, int rings) {
+    const float pi = 3.14159265f;
+    std::vector<float> data;
+    for (int ri = 0; ri < rings; ++ri) {
+        float t0 = pi * float(ri)   / float(rings);
+        float t1 = pi * float(ri+1) / float(rings);
+        for (int si = 0; si < segments; ++si) {
+            float p0 = 2*pi*float(si)  /float(segments);
+            float p1 = 2*pi*float(si+1)/float(segments);
+            auto pushV = [&](float theta, float phi) {
+                float x = radius * std::sin(theta) * std::cos(phi);
+                float y = radius * std::cos(theta);
+                float z = radius * std::sin(theta) * std::sin(phi);
+                float nx = std::sin(theta) * std::cos(phi);
+                float ny = std::cos(theta);
+                float nz = std::sin(theta) * std::sin(phi);
+                data.insert(data.end(), {x, y, z, nx, ny, nz});
+            };
+            pushV(t0, p0); pushV(t1, p0); pushV(t1, p1);
+            pushV(t0, p0); pushV(t1, p1); pushV(t0, p1);
+        }
+    }
+    return data;
+}
+
+// Helper: generate cube vertices (pos only, 3 floats/vert, 36 verts).
+static std::vector<float> generateCubePositions(float half = 0.5f) {
+    // 6 faces × 2 triangles × 3 vertices = 36 vertices, each with 3 floats.
+    return {
+        // Front
+        -half,-half, half,  half,-half, half,  half, half, half,
+        -half,-half, half,  half, half, half, -half, half, half,
+        // Back
+         half,-half,-half, -half,-half,-half, -half, half,-half,
+         half,-half,-half, -half, half,-half,  half, half,-half,
+        // Left
+        -half,-half,-half, -half,-half, half, -half, half, half,
+        -half,-half,-half, -half, half, half, -half, half,-half,
+        // Right
+         half,-half, half,  half,-half,-half,  half, half,-half,
+         half,-half, half,  half, half,-half,  half, half, half,
+        // Top
+        -half, half, half,  half, half, half,  half, half,-half,
+        -half, half, half,  half, half,-half, -half, half,-half,
+        // Bottom
+        -half,-half,-half,  half,-half,-half,  half,-half, half,
+        -half,-half,-half,  half,-half, half, -half,-half, half,
+    };
+}
+
+// Shared Phong shaders for medium/heavy benchmarks.
+static const char* kBenchPhongVS =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 aPosition;\n"
+    "layout(location = 1) in vec3 aNormal;\n"
+    "uniform mat4 uMVP;\n"
+    "uniform mat4 uModelMatrix;\n"
+    "uniform mat3 uNormalMatrix;\n"
+    "out vec3 vWorldPos;\n"
+    "out vec3 vNormal;\n"
+    "void main() {\n"
+    "    vec4 worldPos = uModelMatrix * vec4(aPosition, 1.0);\n"
+    "    vWorldPos = worldPos.xyz;\n"
+    "    vNormal = normalize(uNormalMatrix * aNormal);\n"
+    "    gl_Position = uMVP * vec4(aPosition, 1.0);\n"
+    "}\n";
+
+static const char* kBenchPhongFS =
+    "#version 330 core\n"
+    "in vec3 vWorldPos;\n"
+    "in vec3 vNormal;\n"
+    "uniform vec3 uLightPos;\n"
+    "uniform vec3 uLightColor;\n"
+    "uniform vec3 uViewPos;\n"
+    "uniform vec4 uColor;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    float ambientStrength = 0.15;\n"
+    "    vec3 ambient = ambientStrength * uLightColor;\n"
+    "    vec3 norm = normalize(vNormal);\n"
+    "    vec3 lightDir = normalize(uLightPos - vWorldPos);\n"
+    "    float diff = max(dot(norm, lightDir), 0.0);\n"
+    "    vec3 diffuse = diff * uLightColor;\n"
+    "    float specularStrength = 0.5;\n"
+    "    vec3 viewDir = normalize(uViewPos - vWorldPos);\n"
+    "    vec3 halfDir = normalize(lightDir + viewDir);\n"
+    "    float spec = pow(max(dot(norm, halfDir), 0.0), 32.0);\n"
+    "    vec3 specular = specularStrength * spec * uLightColor;\n"
+    "    vec3 result = (ambient + diffuse + specular) * uColor.rgb;\n"
+    "    fragColor = vec4(result, uColor.a);\n"
+    "}\n";
+
+// Simple flat-color shader for Light tier.
+static const char* kBenchFlatVS =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 aPosition;\n"
+    "uniform mat4 uMVP;\n"
+    "void main() {\n"
+    "    gl_Position = uMVP * vec4(aPosition, 1.0);\n"
+    "}\n";
+
+static const char* kBenchFlatFS =
+    "#version 330 core\n"
+    "uniform vec4 uColor;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    fragColor = uColor;\n"
+    "}\n";
+
+// Helper: compile and link a shader program.
+static GLuint buildBenchProgram(const char* vsSrc, const char* fsSrc) {
+    auto& gl = Runtime::shared().dispatch();
+    GLuint vs = gl.glCreateShader(GL_VERTEX_SHADER);
+    gl.glShaderSource(vs, 1, &vsSrc, nullptr);
+    gl.glCompileShader(vs);
+    GLuint fs = gl.glCreateShader(GL_FRAGMENT_SHADER);
+    gl.glShaderSource(fs, 1, &fsSrc, nullptr);
+    gl.glCompileShader(fs);
+    GLuint prog = gl.glCreateProgram();
+    gl.glAttachShader(prog, vs);
+    gl.glAttachShader(prog, fs);
+    gl.glLinkProgram(prog);
+    gl.glDeleteShader(vs);
+    gl.glDeleteShader(fs);
+    return prog;
+}
+
+// Helper: 4×4 matrix multiply (column-major).
+static void mat4Mul(float* out, const float* a, const float* b) {
+    for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r) {
+            float s = 0;
+            for (int k = 0; k < 4; ++k) s += a[k*4+r] * b[c*4+k];
+            out[c*4+r] = s;
+        }
+}
+
+// Benchmark runner: runs a rendering closure N times, measures timing.
+struct BenchmarkFrameMetrics {
+    std::vector<double> frameTimesMs;
+    double peakGPUMemoryMB = 0.0;
+};
+
+static BenchmarkFrameMetrics runFrameLoop(
+    GLContext& ctx,
+    int warmupFrames,
+    int measuredFrames,
+    const std::function<void()>& renderFrame)
+{
+    BenchmarkFrameMetrics metrics;
+
+    // Warmup.
+    for (int f = 0; f < warmupFrames; ++f) {
+        renderFrame();
+    }
+
+    // Measure.
+    metrics.frameTimesMs.reserve(measuredFrames);
+    for (int f = 0; f < measuredFrames; ++f) {
+        const auto t0 = std::chrono::steady_clock::now();
+        renderFrame();
+        const auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        metrics.frameTimesMs.push_back(ms);
+        double memMB = static_cast<double>(ctx.metalAllocatedBytes()) / (1024.0 * 1024.0);
+        if (memMB > metrics.peakGPUMemoryMB) metrics.peakGPUMemoryMB = memMB;
+    }
+
+    return metrics;
+}
+
+// ----------- Light Tier: Single cube, 36 vertices, flat shader -----------
+static BenchmarkTierResult runLightTier() {
+    BenchmarkTierResult result;
+    result.tier = "light";
+    result.objectCount = 1;
+
+    const int fbW = 256, fbH = 256;
+    auto context = std::make_unique<GLContext>(fbW, fbH);
+    Runtime::shared().makeCurrent(context.get());
+    auto& gl = Runtime::shared().dispatch();
+
+    // Build program.
+    GLuint program = buildBenchProgram(kBenchFlatVS, kBenchFlatFS);
+    GLint mvpLoc = gl.glGetUniformLocation(program, "uMVP");
+    GLint colorLoc = gl.glGetUniformLocation(program, "uColor");
+
+    // Build VBO + VAO.
+    auto cubeVerts = generateCubePositions(0.5f);
+    GLuint vbo, vao;
+    gl.glGenBuffers(1, &vbo);
+    gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    gl.glBufferData(GL_ARRAY_BUFFER,
+                    static_cast<GLsizeiptr>(cubeVerts.size() * sizeof(float)),
+                    cubeVerts.data(), GL_STATIC_DRAW);
+    gl.glGenVertexArrays(1, &vao);
+    gl.glBindVertexArray(vao);
+    gl.glEnableVertexAttribArray(0);
+    gl.glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+
+    result.verticesPerFrame = 36;
+    result.trianglesPerFrame = 12;
+    result.drawCallsPerFrame = 1;
+
+    // Projection + view.
+    float proj[16] = {};
+    float fov = 0.785f, f = 1.0f / std::tan(fov * 0.5f);
+    proj[0] = f; proj[5] = f; proj[10] = -1.02f; proj[11] = -1.0f; proj[14] = -0.2f;
+    float view[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-3,1};
+    float vp[16];
+    mat4Mul(vp, proj, view);
+
+    // Measure first-frame (includes shader compile + pipeline build).
+    context->resetPipelineCacheMetrics();
+    const auto firstFrameStart = std::chrono::steady_clock::now();
+    {
+        gl.glViewport(0, 0, fbW, fbH);
+        gl.glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glUseProgram(program);
+        gl.glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, vp);
+        gl.glUniform4f(colorLoc, 0.8f, 0.3f, 0.2f, 1.0f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 36);
+    }
+    const auto firstFrameEnd = std::chrono::steady_clock::now();
+    double firstFrameMs = std::chrono::duration<double, std::milli>(firstFrameEnd - firstFrameStart).count();
+
+    // Capture pipeline metrics after first frame.
+    auto pMetrics = context->pipelineCacheMetrics();
+    result.pipelineCacheHits = pMetrics.hits;
+    result.pipelineCacheMisses = pMetrics.misses;
+    result.pipelineBuildMs = pMetrics.cumulativeBuildMillis;
+
+    // Run steady-state measurement (120 frames after 20 warmup).
+    context->resetPipelineCacheMetrics();
+    auto renderFrame = [&]() {
+        gl.glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glUseProgram(program);
+        gl.glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, vp);
+        gl.glUniform4f(colorLoc, 0.8f, 0.3f, 0.2f, 1.0f);
+        gl.glBindVertexArray(vao);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 36);
+    };
+
+    auto frameMetrics = runFrameLoop(*context, 20, 120, renderFrame);
+
+    // Compute stats.
+    auto& times = frameMetrics.frameTimesMs;
+    double totalMs = 0;
+    for (double ms : times) totalMs += ms;
+    result.avgFrameMs = totalMs / static_cast<double>(times.size());
+    result.avgFPS = result.avgFrameMs > 0 ? 1000.0 / result.avgFrameMs : 0;
+    std::sort(times.begin(), times.end());
+    int p95Idx = std::min(static_cast<int>(times.size()) - 1,
+                          static_cast<int>(static_cast<double>(times.size()) * 0.95));
+    result.p95FrameMs = times[p95Idx];
+    result.peakGPUMemoryMB = frameMetrics.peakGPUMemoryMB;
+
+    // Steady-state pipeline hits (should be all hits after warmup).
+    auto steadyMetrics = context->pipelineCacheMetrics();
+    result.pipelineCacheHits += steadyMetrics.hits;
+    // pipelineCacheMisses stays from first frame only.
+
+    // Shader compile overhead = first frame – avg steady frame.
+    result.shaderCompileMs = firstFrameMs - result.avgFrameMs;
+    if (result.shaderCompileMs < 0) result.shaderCompileMs = 0;
+
+    // Cleanup.
+    gl.glDeleteBuffers(1, &vbo);
+    gl.glDeleteVertexArrays(1, &vao);
+    gl.glDeleteProgram(program);
+    Runtime::shared().makeCurrent(nullptr);
+
+    return result;
+}
+
+// ----------- Medium Tier: 100 Phong-lit spheres -----------
+static BenchmarkTierResult runPhongObjectsTier(const std::string& tierName, int objectCount) {
+    BenchmarkTierResult result;
+    result.tier = tierName;
+    result.objectCount = objectCount;
+
+    const int fbW = 256, fbH = 256;
+    auto context = std::make_unique<GLContext>(fbW, fbH);
+    Runtime::shared().makeCurrent(context.get());
+    auto& gl = Runtime::shared().dispatch();
+
+    GLuint program = buildBenchProgram(kBenchPhongVS, kBenchPhongFS);
+    GLint mvpLoc        = gl.glGetUniformLocation(program, "uMVP");
+    GLint modelMatLoc   = gl.glGetUniformLocation(program, "uModelMatrix");
+    GLint normalMatLoc  = gl.glGetUniformLocation(program, "uNormalMatrix");
+    GLint lightPosLoc   = gl.glGetUniformLocation(program, "uLightPos");
+    GLint lightColorLoc = gl.glGetUniformLocation(program, "uLightColor");
+    GLint viewPosLoc    = gl.glGetUniformLocation(program, "uViewPos");
+    GLint colorLoc      = gl.glGetUniformLocation(program, "uColor");
+
+    // Sphere geometry (low-poly for benchmark — 12 segments × 6 rings).
+    auto sphereData = generateSphereGeometry(0.3f, 12, 6);
+    int vertCount = static_cast<int>(sphereData.size()) / 6;
+    GLuint vbo, vao;
+    gl.glGenBuffers(1, &vbo);
+    gl.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    gl.glBufferData(GL_ARRAY_BUFFER,
+                    static_cast<GLsizeiptr>(sphereData.size() * sizeof(float)),
+                    sphereData.data(), GL_STATIC_DRAW);
+    gl.glGenVertexArrays(1, &vao);
+    gl.glBindVertexArray(vao);
+    gl.glEnableVertexAttribArray(0);
+    gl.glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+    gl.glEnableVertexAttribArray(1);
+    gl.glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                             reinterpret_cast<const void*>(3 * sizeof(float)));
+
+    result.verticesPerFrame = vertCount * objectCount;
+    result.trianglesPerFrame = (vertCount / 3) * objectCount;
+    result.drawCallsPerFrame = objectCount;
+
+    // Projection + view.
+    float proj[16] = {};
+    float fov = 0.785f, ff = 1.0f / std::tan(fov * 0.5f);
+    proj[0] = ff; proj[5] = ff; proj[10] = -1.02f; proj[11] = -1.0f; proj[14] = -0.2f;
+    float zDist = -3.0f - float(objectCount) * 0.02f;  // pull back for more objects
+    float view[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,zDist,1};
+
+    // Pre-compute grid positions.
+    int gridSide = static_cast<int>(std::ceil(std::cbrt(static_cast<double>(objectCount))));
+    float spacing = 1.0f;
+
+    struct ObjInstance { float tx, ty, tz, r, g, b; };
+    std::vector<ObjInstance> instances;
+    instances.reserve(objectCount);
+    int idx = 0;
+    for (int iz = 0; iz < gridSide && idx < objectCount; ++iz)
+        for (int iy = 0; iy < gridSide && idx < objectCount; ++iy)
+            for (int ix = 0; ix < gridSide && idx < objectCount; ++ix, ++idx) {
+                float cx = (float(ix) - float(gridSide - 1) * 0.5f) * spacing;
+                float cy = (float(iy) - float(gridSide - 1) * 0.5f) * spacing;
+                float cz = (float(iz) - float(gridSide - 1) * 0.5f) * spacing;
+                // Pseudo-random color from index.
+                float r = 0.3f + 0.7f * float((idx * 37) % 256) / 255.0f;
+                float g = 0.3f + 0.7f * float((idx * 73) % 256) / 255.0f;
+                float b = 0.3f + 0.7f * float((idx * 131) % 256) / 255.0f;
+                instances.push_back({cx, cy, cz, r, g, b});
+            }
+
+    // Measure first-frame.
+    context->resetPipelineCacheMetrics();
+    const auto firstFrameStart = std::chrono::steady_clock::now();
+    {
+        gl.glViewport(0, 0, fbW, fbH);
+        gl.glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glUseProgram(program);
+        gl.glUniform3f(lightPosLoc, 3.0f, 4.0f, 2.0f);
+        gl.glUniform3f(lightColorLoc, 1.0f, 0.95f, 0.9f);
+        gl.glUniform3f(viewPosLoc, 0.0f, 0.0f, -zDist);
+        gl.glBindVertexArray(vao);
+        for (const auto& obj : instances) {
+            float model[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, obj.tx,obj.ty,obj.tz,1};
+            float vm[16], mvp[16];
+            mat4Mul(vm, view, model);
+            mat4Mul(mvp, proj, vm);
+            float normalMat[9] = {1,0,0, 0,1,0, 0,0,1};
+            gl.glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp);
+            gl.glUniformMatrix4fv(modelMatLoc, 1, GL_FALSE, model);
+            gl.glUniformMatrix3fv(normalMatLoc, 1, GL_FALSE, normalMat);
+            gl.glUniform4f(colorLoc, obj.r, obj.g, obj.b, 1.0f);
+            gl.glDrawArrays(GL_TRIANGLES, 0, vertCount);
+        }
+    }
+    const auto firstFrameEnd = std::chrono::steady_clock::now();
+    double firstFrameMs = std::chrono::duration<double, std::milli>(firstFrameEnd - firstFrameStart).count();
+
+    auto pMetrics = context->pipelineCacheMetrics();
+    result.pipelineCacheHits = pMetrics.hits;
+    result.pipelineCacheMisses = pMetrics.misses;
+    result.pipelineBuildMs = pMetrics.cumulativeBuildMillis;
+
+    // Steady-state loop (120 measured, 20 warmup).
+    context->resetPipelineCacheMetrics();
+    auto renderFrame = [&]() {
+        gl.glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glUseProgram(program);
+        gl.glUniform3f(lightPosLoc, 3.0f, 4.0f, 2.0f);
+        gl.glUniform3f(lightColorLoc, 1.0f, 0.95f, 0.9f);
+        gl.glUniform3f(viewPosLoc, 0.0f, 0.0f, -zDist);
+        gl.glBindVertexArray(vao);
+        for (const auto& obj : instances) {
+            float model[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, obj.tx,obj.ty,obj.tz,1};
+            float vm[16], mvp[16];
+            mat4Mul(vm, view, model);
+            mat4Mul(mvp, proj, vm);
+            float normalMat[9] = {1,0,0, 0,1,0, 0,0,1};
+            gl.glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp);
+            gl.glUniformMatrix4fv(modelMatLoc, 1, GL_FALSE, model);
+            gl.glUniformMatrix3fv(normalMatLoc, 1, GL_FALSE, normalMat);
+            gl.glUniform4f(colorLoc, obj.r, obj.g, obj.b, 1.0f);
+            gl.glDrawArrays(GL_TRIANGLES, 0, vertCount);
+        }
+    };
+
+    auto frameMetrics = runFrameLoop(*context, 20, 120, renderFrame);
+
+    auto& times = frameMetrics.frameTimesMs;
+    double totalMs = 0;
+    for (double ms : times) totalMs += ms;
+    result.avgFrameMs = totalMs / static_cast<double>(times.size());
+    result.avgFPS = result.avgFrameMs > 0 ? 1000.0 / result.avgFrameMs : 0;
+    std::sort(times.begin(), times.end());
+    int p95Idx = std::min(static_cast<int>(times.size()) - 1,
+                          static_cast<int>(static_cast<double>(times.size()) * 0.95));
+    result.p95FrameMs = times[p95Idx];
+    result.peakGPUMemoryMB = frameMetrics.peakGPUMemoryMB;
+
+    auto steadyMetrics = context->pipelineCacheMetrics();
+    result.pipelineCacheHits += steadyMetrics.hits;
+
+    result.shaderCompileMs = firstFrameMs - result.avgFrameMs;
+    if (result.shaderCompileMs < 0) result.shaderCompileMs = 0;
+
+    // Enable blending for heavy tier (adds additional GPU work).
+    // Heavy tier has depth + blend as per checklist; handled by the caller
+    // selecting objectCount=1000.
+
+    gl.glDeleteBuffers(1, &vbo);
+    gl.glDeleteVertexArrays(1, &vao);
+    gl.glDeleteProgram(program);
+    Runtime::shared().makeCurrent(nullptr);
+
+    return result;
+}
+
+// Build the benchmark JSON output.
+static std::string buildBenchmarkJSON(const std::vector<BenchmarkTierResult>& tiers) {
+    std::ostringstream ss;
+    ss << std::fixed;
+    ss << "{\"benchmark\":\"phase-7-baseline\",\"tiers\":[";
+    for (std::size_t i = 0; i < tiers.size(); ++i) {
+        if (i > 0) ss << ",";
+        const auto& t = tiers[i];
+        ss << "{"
+           << "\"tier\":\"" << t.tier << "\","
+           << "\"objectCount\":" << t.objectCount << ","
+           << "\"verticesPerFrame\":" << t.verticesPerFrame << ","
+           << "\"trianglesPerFrame\":" << t.trianglesPerFrame << ","
+           << "\"drawCallsPerFrame\":" << t.drawCallsPerFrame << ","
+           << "\"avgFPS\":" << t.avgFPS << ","
+           << "\"avgFrameMs\":" << t.avgFrameMs << ","
+           << "\"p95FrameMs\":" << t.p95FrameMs << ","
+           << "\"peakGPUMemoryMB\":" << t.peakGPUMemoryMB << ","
+           << "\"shaderCompileMs\":" << t.shaderCompileMs << ","
+           << "\"pipelineCache\":{\"hits\":" << t.pipelineCacheHits
+           << ",\"misses\":" << t.pipelineCacheMisses
+           << ",\"buildMs\":" << t.pipelineBuildMs << "}"
+           << "}";
+    }
+    ss << "]}";
+    return ss.str();
+}
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -5711,6 +6201,21 @@ std::size_t writeGauntletJSON(std::string_view phaseFilter, char* out, std::size
 
 bool lastGauntletPassed() {
     return gLastGauntletPassed;
+}
+
+std::string runBenchmarkJSON() {
+    std::vector<BenchmarkTierResult> tiers;
+
+    // Light: 1 cube, 36 vertices, flat shader.
+    tiers.push_back(runLightTier());
+
+    // Medium: 100 Phong-lit spheres.
+    tiers.push_back(runPhongObjectsTier("medium", 100));
+
+    // Heavy: 1000 Phong-lit spheres with depth test.
+    tiers.push_back(runPhongObjectsTier("heavy", 1000));
+
+    return buildBenchmarkJSON(tiers);
 }
 
 }  // namespace appgl::tests

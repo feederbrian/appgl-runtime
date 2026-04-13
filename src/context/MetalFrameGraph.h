@@ -155,6 +155,18 @@ public:
     bool copyRGBA8Pixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels);
     bool hasValidAttachments() const;
 
+    // Pipeline cache metrics for benchmarking.
+    struct PipelineCacheMetrics {
+        std::uint64_t hits = 0;
+        std::uint64_t misses = 0;
+        double cumulativeBuildMillis = 0.0;
+    };
+    PipelineCacheMetrics pipelineCacheMetrics() const;
+    void resetPipelineCacheMetrics();
+
+    // Metal device allocated memory (bytes).  Returns 0 if device unavailable.
+    std::uint64_t metalAllocatedBytes() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

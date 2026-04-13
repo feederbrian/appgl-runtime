@@ -7,6 +7,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -372,7 +373,9 @@ struct MetalFrameGraph::Impl {
             info.pipelineColorFormatOut != nullptr &&
             *info.pipelineColorFormatOut == static_cast<std::uint32_t>(colorFormat)) {
             pipelineState = (__bridge id<MTLRenderPipelineState>)(*info.pipelineStateOut);
+            ++pipelineCacheHits;
         } else {
+            const auto buildStart = std::chrono::steady_clock::now();
             // Compile vertex MSL.
             NSError* error = nil;
             NSString* vertSrc = [NSString stringWithUTF8String:info.vertexMSL->c_str()];
@@ -491,6 +494,10 @@ struct MetalFrameGraph::Impl {
             if (pipelineState == nil) {
                 return false;
             }
+
+            const auto buildEnd = std::chrono::steady_clock::now();
+            pipelineCumulativeBuildMs += std::chrono::duration<double, std::milli>(buildEnd - buildStart).count();
+            ++pipelineCacheMisses;
 
             // Cache on the program object.
             if (info.pipelineStateOut != nullptr) {
@@ -949,6 +956,18 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
         return device != nil && commandQueue != nil && depthStencilTexture != nil && (layer != nil || offscreenColorTexture != nil);
     }
 
+    // Benchmark metric accessors.
+    std::uint64_t getPipelineCacheHits() const { return pipelineCacheHits; }
+    std::uint64_t getPipelineCacheMisses() const { return pipelineCacheMisses; }
+    double getPipelineBuildMs() const { return pipelineCumulativeBuildMs; }
+    void resetMetrics() { pipelineCacheHits = 0; pipelineCacheMisses = 0; pipelineCumulativeBuildMs = 0.0; }
+    std::uint64_t getMetalAllocatedBytes() const {
+        if (device != nil && [device respondsToSelector:@selector(currentAllocatedSize)]) {
+            return static_cast<std::uint64_t>(device.currentAllocatedSize);
+        }
+        return 0;
+    }
+
 private:
     void ensureDrawableResources() {
         if (device == nil) {
@@ -1127,6 +1146,11 @@ private:
     bool pendingPresent = false;
     bool readbackSourceIsBGRA = false;
     bool hasHeadlessReadback = false;
+
+    // Pipeline cache metrics (for benchmark instrumentation).
+    std::uint64_t pipelineCacheHits = 0;
+    std::uint64_t pipelineCacheMisses = 0;
+    double pipelineCumulativeBuildMs = 0.0;
 };
 
 MetalFrameGraph::MetalFrameGraph(void* layer, void* device, void* commandQueue)
@@ -1189,6 +1213,22 @@ bool MetalFrameGraph::copyRGBA8Pixels(GLint x, GLint y, GLsizei width, GLsizei h
 
 bool MetalFrameGraph::hasValidAttachments() const {
     return impl_->isReady();
+}
+
+MetalFrameGraph::PipelineCacheMetrics MetalFrameGraph::pipelineCacheMetrics() const {
+    PipelineCacheMetrics m;
+    m.hits = impl_->getPipelineCacheHits();
+    m.misses = impl_->getPipelineCacheMisses();
+    m.cumulativeBuildMillis = impl_->getPipelineBuildMs();
+    return m;
+}
+
+void MetalFrameGraph::resetPipelineCacheMetrics() {
+    impl_->resetMetrics();
+}
+
+std::uint64_t MetalFrameGraph::metalAllocatedBytes() const {
+    return impl_->getMetalAllocatedBytes();
 }
 
 }  // namespace appgl

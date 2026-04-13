@@ -4559,6 +4559,30 @@ GLStateTracker& GLContext::state() {
     return *impl_->state;
 }
 
+GLContext::PipelineCacheMetrics GLContext::pipelineCacheMetrics() const {
+    PipelineCacheMetrics result;
+    if (impl_->frameGraph) {
+        auto m = impl_->frameGraph->pipelineCacheMetrics();
+        result.hits = m.hits;
+        result.misses = m.misses;
+        result.cumulativeBuildMillis = m.cumulativeBuildMillis;
+    }
+    return result;
+}
+
+void GLContext::resetPipelineCacheMetrics() {
+    if (impl_->frameGraph) {
+        impl_->frameGraph->resetPipelineCacheMetrics();
+    }
+}
+
+std::uint64_t GLContext::metalAllocatedBytes() const {
+    if (impl_->frameGraph) {
+        return impl_->frameGraph->metalAllocatedBytes();
+    }
+    return 0;
+}
+
 // ============================================================================
 // Phase A Group 6 — Shaders and Programs
 // ============================================================================

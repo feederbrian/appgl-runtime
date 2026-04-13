@@ -463,6 +463,16 @@ public:
     GLObjectStore& objects();
     GLStateTracker& state();
 
+    // Benchmark instrumentation — pipeline cache metrics.
+    struct PipelineCacheMetrics {
+        std::uint64_t hits = 0;
+        std::uint64_t misses = 0;
+        double cumulativeBuildMillis = 0.0;
+    };
+    PipelineCacheMetrics pipelineCacheMetrics() const;
+    void resetPipelineCacheMetrics();
+    std::uint64_t metalAllocatedBytes() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
