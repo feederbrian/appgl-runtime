@@ -5671,20 +5671,28 @@ namespace {
 // SPIRV-Cross struct members (with their std140 offsets/sizes) against the
 // program's named GL uniform values.  Handles the mat3 column-padding case
 // (GL stores 9 floats; Metal/std140 stores 3 columns × 4 floats = 12).
-std::vector<std::uint8_t> buildStageUniformBuffer(
+//
+// The output is written into |outBuffer|, which is resized via assign().
+// Callers should pass a thread-local vector so that the allocation persists
+// across draw calls — after the first frame this is a zero-alloc operation.
+void buildStageUniformBuffer(
+    std::vector<std::uint8_t>& outBuffer,
     const ShaderReflection& reflection,
     const std::vector<GLProgramUniformInfo>& uniforms,
     const std::unordered_map<GLint, GLProgramUniformValue>& uniformValues)
 {
-    if (reflection.uniformBlocks.empty()) return {};
+    outBuffer.clear();
+    if (reflection.uniformBlocks.empty()) return;
     const auto& block = reflection.uniformBlocks[0];
-    if (block.byteSize == 0) return {};
+    if (block.byteSize == 0) return;
 
     // SPIRV-Cross reports the struct size without trailing padding, but
     // Metal's MSL compiler pads constant-buffer structs to 16-byte alignment.
-    // Allocate the buffer at the padded size so Metal validation passes.
+    // Resize the buffer at the padded size so Metal validation passes.
+    // assign() reuses existing capacity when the buffer is large enough,
+    // avoiding heap allocation after the first draw call.
     const std::size_t paddedSize = (block.byteSize + 15u) & ~std::size_t(15u);
-    std::vector<std::uint8_t> buffer(paddedSize, 0);
+    outBuffer.assign(paddedSize, 0);
 
     for (const auto& member : block.members) {
         // Find the GL uniform with this name.
@@ -5716,7 +5724,7 @@ std::vector<std::uint8_t> buildStageUniformBuffer(
             continue; // no data
         }
 
-        std::uint8_t* dst = buffer.data() + member.offset;
+        std::uint8_t* dst = outBuffer.data() + member.offset;
 
         // mat3 needs special handling: GL stores 9 tightly-packed floats
         // (3 columns × 3 rows).  Metal std140 stores 3 columns of vec4
@@ -5742,8 +5750,6 @@ std::vector<std::uint8_t> buildStageUniformBuffer(
         // General case: memcpy the smaller of source data and member size.
         std::memcpy(dst, srcData, std::min(srcBytes, member.size));
     }
-
-    return buffer;
 }
 
 // Phase A Group 7 — MVP draw path. Until the GLSL→MSL translator is wired up,
@@ -5963,10 +5969,18 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
 
                     // Build per-stage uniform buffers using SPIRV-Cross
                     // reflection to match the GPU-side struct layout.
-                    tdi.vertexUniformBuffer = buildStageUniformBuffer(
+                    // Thread-local scratch buffers retain their allocation
+                    // across draw calls — zero heap allocs after warmup.
+                    thread_local std::vector<std::uint8_t> vtxUniformScratch;
+                    thread_local std::vector<std::uint8_t> fragUniformScratch;
+                    buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniforms, program->uniformValues);
-                    tdi.fragmentUniformBuffer = buildStageUniformBuffer(
+                    buildStageUniformBuffer(fragUniformScratch,
                         program->fragmentReflection, program->uniforms, program->uniformValues);
+                    tdi.vertexUniformData = vtxUniformScratch.data();
+                    tdi.vertexUniformSize = vtxUniformScratch.size();
+                    tdi.fragmentUniformData = fragUniformScratch.data();
+                    tdi.fragmentUniformSize = fragUniformScratch.size();
 
                     const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
                     if (ok) {
@@ -6125,10 +6139,16 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                         }
                     }
 
-                    tdi.vertexUniformBuffer = buildStageUniformBuffer(
+                    thread_local std::vector<std::uint8_t> vtxUniformScratch;
+                    thread_local std::vector<std::uint8_t> fragUniformScratch;
+                    buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniforms, program->uniformValues);
-                    tdi.fragmentUniformBuffer = buildStageUniformBuffer(
+                    buildStageUniformBuffer(fragUniformScratch,
                         program->fragmentReflection, program->uniforms, program->uniformValues);
+                    tdi.vertexUniformData = vtxUniformScratch.data();
+                    tdi.vertexUniformSize = vtxUniformScratch.size();
+                    tdi.fragmentUniformData = fragUniformScratch.data();
+                    tdi.fragmentUniformSize = fragUniformScratch.size();
 
                     const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
                     if (ok) {
@@ -6264,10 +6284,16 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         tdi.vertexAttributeLayouts.push_back(layout);
                     }
 
-                    tdi.vertexUniformBuffer = buildStageUniformBuffer(
+                    thread_local std::vector<std::uint8_t> vtxUniformScratch;
+                    thread_local std::vector<std::uint8_t> fragUniformScratch;
+                    buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniforms, program->uniformValues);
-                    tdi.fragmentUniformBuffer = buildStageUniformBuffer(
+                    buildStageUniformBuffer(fragUniformScratch,
                         program->fragmentReflection, program->uniforms, program->uniformValues);
+                    tdi.vertexUniformData = vtxUniformScratch.data();
+                    tdi.vertexUniformSize = vtxUniformScratch.size();
+                    tdi.fragmentUniformData = fragUniformScratch.data();
+                    tdi.fragmentUniformSize = fragUniformScratch.size();
 
                     const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
                     if (ok) {

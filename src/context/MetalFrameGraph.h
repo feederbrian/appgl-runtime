@@ -98,8 +98,12 @@ struct TranslatedDrawInfo {
     // push-constant struct.  Each stage gets its own buffer because the
     // vertex and fragment stages may declare different subsets of the
     // program's bare uniforms, producing different struct layouts.
-    std::vector<std::uint8_t> vertexUniformBuffer;
-    std::vector<std::uint8_t> fragmentUniformBuffer;
+    // Non-owning: the caller keeps the backing storage alive until
+    // encodeTranslatedDraw returns (typically thread-local scratch buffers).
+    const std::uint8_t* vertexUniformData = nullptr;
+    std::size_t vertexUniformSize = 0;
+    const std::uint8_t* fragmentUniformData = nullptr;
+    std::size_t fragmentUniformSize = 0;
 
     // Pipeline state toggles.
     bool depthTestEnabled = false;

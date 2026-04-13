@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 // Diagnostic tracing — set to 1 to enable, 0 to silence.
@@ -652,14 +653,14 @@ struct MetalFrameGraph::Impl {
         // Bind per-stage uniform buffers at Metal buffer index 16.
         // Each stage has its own push-constant struct layout (they may
         // declare different subsets of the program's bare GL uniforms).
-        if (!info.vertexUniformBuffer.empty()) {
-            [currentRenderEncoder setVertexBytes:info.vertexUniformBuffer.data()
-                                          length:info.vertexUniformBuffer.size()
+        if (info.vertexUniformData != nullptr && info.vertexUniformSize > 0) {
+            [currentRenderEncoder setVertexBytes:info.vertexUniformData
+                                          length:info.vertexUniformSize
                                          atIndex:16];
         }
-        if (!info.fragmentUniformBuffer.empty()) {
-            [currentRenderEncoder setFragmentBytes:info.fragmentUniformBuffer.data()
-                                            length:info.fragmentUniformBuffer.size()
+        if (info.fragmentUniformData != nullptr && info.fragmentUniformSize > 0) {
+            [currentRenderEncoder setFragmentBytes:info.fragmentUniformData
+                                            length:info.fragmentUniformSize
                                            atIndex:16];
         }
 
@@ -793,6 +794,17 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
     }
 
     id<MTLDepthStencilState> depthStencilStateForDraw(const MetalDrawInfo& info) {
+        // Cache key: pack (depthTestEnabled, depthFunc) into a single uint32.
+        // The state space is tiny (~16 combinations), so after the first frame
+        // this is a pure hash-table lookup with zero Metal allocations.
+        const std::uint32_t key = (info.depthTestEnabled ? 0x10000u : 0u)
+                                | (static_cast<std::uint32_t>(info.depthFunc) & 0xFFFFu);
+
+        auto it = depthStencilCache.find(key);
+        if (it != depthStencilCache.end()) {
+            return it->second;
+        }
+
         MTLDepthStencilDescriptor* desc = [[MTLDepthStencilDescriptor alloc] init];
         desc.depthWriteEnabled = info.depthTestEnabled;
         if (info.depthTestEnabled) {
@@ -809,7 +821,10 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
         } else {
             desc.depthCompareFunction = MTLCompareFunctionAlways;
         }
-        return [device newDepthStencilStateWithDescriptor:desc];
+
+        id<MTLDepthStencilState> state = [device newDepthStencilStateWithDescriptor:desc];
+        depthStencilCache[key] = state;
+        return state;
     }
 
     void endFrame(GLObjectStore& objects) {
@@ -1158,6 +1173,11 @@ private:
     bool pendingPresent = false;
     bool readbackSourceIsBGRA = false;
     bool hasHeadlessReadback = false;
+
+    // Depth/stencil state cache — keyed by packed (depthTestEnabled, depthFunc).
+    // The state space is tiny (~16 combinations); after warmup every draw is
+    // a pure hash-table hit with zero Metal allocations.
+    std::unordered_map<std::uint32_t, id<MTLDepthStencilState>> depthStencilCache;
 
     // Pipeline cache metrics (for benchmark instrumentation).
     std::uint64_t pipelineCacheHits = 0;
