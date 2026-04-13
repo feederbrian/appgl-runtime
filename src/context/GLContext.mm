@@ -5656,7 +5656,11 @@ std::vector<std::uint8_t> buildStageUniformBuffer(
     const auto& block = reflection.uniformBlocks[0];
     if (block.byteSize == 0) return {};
 
-    std::vector<std::uint8_t> buffer(block.byteSize, 0);
+    // SPIRV-Cross reports the struct size without trailing padding, but
+    // Metal's MSL compiler pads constant-buffer structs to 16-byte alignment.
+    // Allocate the buffer at the padded size so Metal validation passes.
+    const std::size_t paddedSize = (block.byteSize + 15u) & ~std::size_t(15u);
+    std::vector<std::uint8_t> buffer(paddedSize, 0);
 
     for (const auto& member : block.members) {
         // Find the GL uniform with this name.

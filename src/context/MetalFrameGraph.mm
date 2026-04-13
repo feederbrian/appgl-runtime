@@ -12,7 +12,7 @@
 #include <vector>
 
 // Diagnostic tracing — set to 1 to enable, 0 to silence.
-#define APPGL_TRACE_FRAMEGRAPH 1
+#define APPGL_TRACE_FRAMEGRAPH 0
 
 #if APPGL_TRACE_FRAMEGRAPH
 #define FG_TRACE(fmt, ...) NSLog(@"[FG] " fmt, ##__VA_ARGS__)
@@ -497,6 +497,28 @@ struct MetalFrameGraph::Impl {
                 return false;
             }
 
+            // Ensure depth/stencil texture matches color attachment dimensions.
+            // A mismatch here triggers Metal validation assertions on draw.
+            if (depthStencilTexture != nil &&
+                (depthStencilTexture.width != colorTexture.width ||
+                 depthStencilTexture.height != colorTexture.height)) {
+                NSLog(@"[FG] depth/color size MISMATCH: depth=%lux%lu color=%lux%lu — rebuilding depth",
+                      (unsigned long)depthStencilTexture.width,
+                      (unsigned long)depthStencilTexture.height,
+                      (unsigned long)colorTexture.width,
+                      (unsigned long)colorTexture.height);
+                MTLTextureDescriptor* dd = [MTLTextureDescriptor
+                    texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                width:colorTexture.width
+                                               height:colorTexture.height
+                                            mipmapped:NO];
+                dd.storageMode = MTLStorageModePrivate;
+                dd.usage = MTLTextureUsageRenderTarget;
+                depthStencilTexture = [device newTextureWithDescriptor:dd];
+                drawableWidth = static_cast<GLsizei>(colorTexture.width);
+                drawableHeight = static_cast<GLsizei>(colorTexture.height);
+            }
+
             MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
             pass.colorAttachments[0].texture = colorTexture;
             pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -540,13 +562,9 @@ struct MetalFrameGraph::Impl {
         [currentRenderEncoder setTriangleFillMode:info.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
 
         // Bind vertex data at buffer index 0.
-        // For instanced draws, always use a proper MTLBuffer — Metal's debug
-        // validation layer can assert when setVertexBytes inline data is used
-        // with drawPrimitives:instanceCount: variants.
-        const bool forceBuffer = (info.instanceCount > 1);
-        if (!forceBuffer && info.vertexDataByteCount <= 4096) {
-            [currentRenderEncoder setVertexBytes:info.vertexData length:info.vertexDataByteCount atIndex:0];
-        } else {
+        // Always use a proper MTLBuffer for vertex data — Metal's debug
+        // validation layer can assert with setVertexBytes + instanced draws.
+        {
             id<MTLBuffer> vb = [device newBufferWithBytes:info.vertexData
                                                    length:info.vertexDataByteCount
                                                   options:MTLResourceStorageModeShared];
