@@ -32,6 +32,27 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // Version comparison mode: ./appgl_gauntlet_cli compare [output.json]
+    if (phaseFilter == "compare") {
+        const std::string payload = appgl::tests::runVersionComparisonJSON();
+        if (payload.empty()) {
+            std::cerr << "Failed to generate version comparison report.\n";
+            return 1;
+        }
+        std::cout << payload << '\n';
+
+        if (argc > 2) {
+            const std::string outPath = argv[2];
+            std::ofstream out(outPath, std::ios::binary);
+            if (!out) {
+                std::cerr << "Failed to open output path: " << outPath << "\n";
+                return 3;
+            }
+            out << payload;
+        }
+        return 0;
+    }
+
     const std::string payload = appgl::tests::runGauntletJSON(phaseFilter);
     if (payload.empty()) {
         std::cerr << "Failed to generate gauntlet report.\n";

@@ -5767,6 +5767,38 @@ static void buildStageUniformBuffer(
 // vec3 position attribute at location 0 plus a vec4 uniform named "uColor".
 // Anything outside that envelope is rejected here so the caller can emit a
 // debug message and bail cleanly instead of producing garbage pixels.
+// Resolve the effective VBO name, stride, and byte offset for a vertex
+// attribute, handling both classic (glVertexAttribPointer) and separated
+// (GL 4.3/4.5 glVertexAttribFormat + glVertexArrayVertexBuffer) formats.
+struct ResolvedVertexAttrib {
+    GLuint bufferName = 0;
+    std::size_t stride = 0;
+    std::size_t offset = 0;
+};
+
+static ResolvedVertexAttrib resolveVertexAttrib(
+    const GLVertexAttributeState& attr,
+    const GLVertexArrayObject& vao)
+{
+    ResolvedVertexAttrib r;
+    if (attr.useSeparatedFormat && attr.bindingIndex < vao.bindingPoints.size()) {
+        const auto& bp = vao.bindingPoints[attr.bindingIndex];
+        r.bufferName = bp.buffer;
+        r.stride = bp.stride > 0
+            ? static_cast<std::size_t>(bp.stride)
+            : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
+        r.offset = static_cast<std::size_t>(bp.offset)
+                 + static_cast<std::size_t>(attr.relativeOffset);
+    } else {
+        r.bufferName = attr.buffer;
+        r.stride = attr.stride > 0
+            ? static_cast<std::size_t>(attr.stride)
+            : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
+        r.offset = static_cast<std::size_t>(attr.pointer);
+    }
+    return r;
+}
+
 struct SolidColorDrawSetup {
     bool ok = false;
     MetalDrawInfo info;
@@ -5808,23 +5840,27 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStor
     }
 
     const auto& positionAttr = vao->attributes[0];
-    if (!positionAttr.enabled || positionAttr.type != GL_FLOAT || positionAttr.size != 3 || positionAttr.buffer == 0) {
+    if (!positionAttr.enabled || positionAttr.type != GL_FLOAT || positionAttr.size != 3) {
         return setup;
     }
-    GLBufferObject* vbo = objects.buffers().get(positionAttr.buffer);
+    // Resolve through binding point for GL 4.3+ separated vertex format,
+    // falling back to legacy attribute fields for classic glVertexAttribPointer.
+    ResolvedVertexAttrib resolved = resolveVertexAttrib(positionAttr, *vao);
+    if (resolved.bufferName == 0) {
+        return setup;
+    }
+    GLBufferObject* vbo = objects.buffers().get(resolved.bufferName);
     if (vbo == nullptr || vbo->shadowBytes.empty()) {
         return setup;
     }
-    const std::size_t positionStride = positionAttr.stride > 0
-        ? static_cast<std::size_t>(positionAttr.stride)
-        : sizeof(GLfloat) * 3;
-    if (static_cast<std::size_t>(positionAttr.pointer) > vbo->shadowBytes.size()) {
+    const std::size_t positionStride = resolved.stride;
+    if (resolved.offset > vbo->shadowBytes.size()) {
         return setup;
     }
 
     setup.info.mode = mode;
-    setup.info.positions = vbo->shadowBytes.data() + static_cast<std::size_t>(positionAttr.pointer);
-    setup.info.positionByteCount = vbo->shadowBytes.size() - static_cast<std::size_t>(positionAttr.pointer);
+    setup.info.positions = vbo->shadowBytes.data() + resolved.offset;
+    setup.info.positionByteCount = vbo->shadowBytes.size() - resolved.offset;
     setup.info.positionStride = positionStride;
     setup.info.positionComponents = 3;
     setup.positionShadow = vbo->shadowBytes.data();
@@ -5867,38 +5903,6 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStor
 }
 
 }  // namespace
-
-// Resolve the effective VBO name, stride, and byte offset for a vertex
-// attribute, handling both classic (glVertexAttribPointer) and separated
-// (GL 4.3/4.5 glVertexAttribFormat + glVertexArrayVertexBuffer) formats.
-struct ResolvedVertexAttrib {
-    GLuint bufferName = 0;
-    std::size_t stride = 0;
-    std::size_t offset = 0;
-};
-
-static ResolvedVertexAttrib resolveVertexAttrib(
-    const GLVertexAttributeState& attr,
-    const GLVertexArrayObject& vao)
-{
-    ResolvedVertexAttrib r;
-    if (attr.useSeparatedFormat && attr.bindingIndex < vao.bindingPoints.size()) {
-        const auto& bp = vao.bindingPoints[attr.bindingIndex];
-        r.bufferName = bp.buffer;
-        r.stride = bp.stride > 0
-            ? static_cast<std::size_t>(bp.stride)
-            : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
-        r.offset = static_cast<std::size_t>(bp.offset)
-                 + static_cast<std::size_t>(attr.relativeOffset);
-    } else {
-        r.bufferName = attr.buffer;
-        r.stride = attr.stride > 0
-            ? static_cast<std::size_t>(attr.stride)
-            : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
-        r.offset = static_cast<std::size_t>(attr.pointer);
-    }
-    return r;
-}
 
 bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     if (count < 0) {
@@ -7331,14 +7335,16 @@ bool GLContext::bufferStorage(GLenum target, GLsizeiptr size, const void* data, 
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    buf->size = size;
-    buf->usage = GL_STATIC_DRAW; // immutable
-    buf->immutable = true;
-    buf->shadowBytes.resize(static_cast<std::size_t>(size), 0);
-    if (data) {
-        std::memcpy(buf->shadowBytes.data(), data, static_cast<std::size_t>(size));
+    // Delegate to replaceBufferStorage to create both shadow bytes and Metal
+    // buffer, then layer immutability flags on top.  Without this the Metal
+    // buffer would remain null and draws would render black.
+    if (!impl_->replaceBufferStorage(*buf, size, data, GL_STATIC_DRAW)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
     }
-    buf->instantiated = false;
+    buf->immutable = true;
+    buf->storageFlags = flags;
+    buf->instantiated = true;
     return true;
 }
 

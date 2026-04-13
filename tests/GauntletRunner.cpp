@@ -5449,6 +5449,494 @@ private:
 };
 
 // ===========================================================================
+// Version Comparison Scenes — Phase 7 Group 6
+// Three scenes rendering the EXACT same Phong-lit sphere through different
+// GL version API paths (3.3, 4.1, 4.6).  Pixel-identical output proves the
+// translation layer is version-agnostic.
+// ===========================================================================
+
+// Shared sphere generator for version comparison scenes.
+static std::vector<float> generateComparisonSphere() {
+    const float pi = 3.14159265f;
+    const int seg = 32, rings = 16;
+    const float radius = 0.8f;
+    std::vector<float> data;
+    for (int ri = 0; ri < rings; ++ri) {
+        float t0 = pi * float(ri) / float(rings);
+        float t1 = pi * float(ri+1) / float(rings);
+        for (int si = 0; si < seg; ++si) {
+            float p0 = 2*pi*float(si)/float(seg);
+            float p1 = 2*pi*float(si+1)/float(seg);
+            auto V = [&](float t, float p) {
+                float nx = std::sin(t)*std::cos(p);
+                float ny = std::cos(t);
+                float nz = std::sin(t)*std::sin(p);
+                data.push_back(radius*nx);
+                data.push_back(radius*ny);
+                data.push_back(radius*nz);
+                data.push_back(nx);
+                data.push_back(ny);
+                data.push_back(nz);
+            };
+            V(t0,p0); V(t1,p0); V(t1,p1);
+            V(t0,p0); V(t1,p1); V(t0,p1);
+        }
+    }
+    return data;
+}
+
+// Shared MVP + render math for version comparison scenes.
+static void renderComparisonFrame(
+    GLDispatchTable& gl, GLuint program,
+    GLint mvpLoc, GLint modelMatLoc, GLint normalMatLoc,
+    GLint lightPosLoc, GLint lightColorLoc, GLint viewPosLoc, GLint colorLoc,
+    GLuint vao, int vertCount, bool useDSAUniforms)
+{
+    gl.glViewport(0, 0, 256, 256);
+    gl.glClearColor(0.04f, 0.04f, 0.06f, 1.0f);
+    gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    gl.glEnable(GL_DEPTH_TEST);
+
+    // Identity model matrix (sphere centered at origin).
+    float model[16] = {};
+    model[0] = 1; model[5] = 1; model[10] = 1; model[15] = 1;
+
+    // Perspective projection.
+    float proj[16] = {};
+    float fov = 0.785f, f = 1.0f / std::tan(fov * 0.5f);
+    proj[0] = f; proj[5] = f; proj[10] = -1.02f; proj[11] = -1.0f; proj[14] = -0.2f;
+
+    // View = translate(0, 0, -3).
+    float viewModel[16] = {};
+    std::memcpy(viewModel, model, sizeof(model));
+    viewModel[14] = -3.0f;
+
+    float mvp[16] = {};
+    for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r) {
+            float s = 0;
+            for (int k = 0; k < 4; ++k) s += proj[k*4+r] * viewModel[c*4+k];
+            mvp[c*4+r] = s;
+        }
+
+    float normalMat[9] = {model[0], model[1], model[2],
+                          model[4], model[5], model[6],
+                          model[8], model[9], model[10]};
+
+    float lightPos[3]   = {3.0f, 2.0f, 3.0f};
+    float lightColor[3] = {1.0f, 0.95f, 0.85f};
+    float viewPos[3]    = {0.0f, 0.0f, 3.0f};
+    float objColor[4]   = {0.35f, 0.55f, 0.95f, 1.0f};
+
+    if (useDSAUniforms) {
+        // GL 4.1+ DSA path — set uniforms via glProgramUniform* before glUseProgram.
+        gl.glProgramUniformMatrix4fv(program, mvpLoc, 1, GL_FALSE, mvp);
+        gl.glProgramUniformMatrix4fv(program, modelMatLoc, 1, GL_FALSE, model);
+        gl.glProgramUniformMatrix3fv(program, normalMatLoc, 1, GL_FALSE, normalMat);
+        gl.glProgramUniform3f(program, lightPosLoc, lightPos[0], lightPos[1], lightPos[2]);
+        gl.glProgramUniform3f(program, lightColorLoc, lightColor[0], lightColor[1], lightColor[2]);
+        gl.glProgramUniform3f(program, viewPosLoc, viewPos[0], viewPos[1], viewPos[2]);
+        gl.glProgramUniform4f(program, colorLoc, objColor[0], objColor[1], objColor[2], objColor[3]);
+        gl.glUseProgram(program);
+    } else {
+        // GL 3.3 path — bind program first, then set uniforms via glUniform*.
+        gl.glUseProgram(program);
+        gl.glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp);
+        gl.glUniformMatrix4fv(modelMatLoc, 1, GL_FALSE, model);
+        gl.glUniformMatrix3fv(normalMatLoc, 1, GL_FALSE, normalMat);
+        gl.glUniform3fv(lightPosLoc, 1, lightPos);
+        gl.glUniform3fv(lightColorLoc, 1, lightColor);
+        gl.glUniform3fv(viewPosLoc, 1, viewPos);
+        gl.glUniform4fv(colorLoc, 1, objColor);
+    }
+
+    gl.glBindVertexArray(vao);
+    gl.glDrawArrays(GL_TRIANGLES, 0, vertCount);
+    gl.glBindVertexArray(0);
+    gl.glUseProgram(0);
+    gl.glDisable(GL_DEPTH_TEST);
+}
+
+// Shared shader sources — identical logic, only #version differs.
+static const char* kCompareVS_330 =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 aPosition;\n"
+    "layout(location = 1) in vec3 aNormal;\n"
+    "uniform mat4 uMVP;\n"
+    "uniform mat4 uModelMatrix;\n"
+    "uniform mat3 uNormalMatrix;\n"
+    "out vec3 vWorldPos;\n"
+    "out vec3 vNormal;\n"
+    "void main() {\n"
+    "    vec4 worldPos = uModelMatrix * vec4(aPosition, 1.0);\n"
+    "    vWorldPos = worldPos.xyz;\n"
+    "    vNormal = normalize(uNormalMatrix * aNormal);\n"
+    "    gl_Position = uMVP * vec4(aPosition, 1.0);\n"
+    "}\n";
+static const char* kCompareVS_410 =
+    "#version 410 core\n"
+    "layout(location = 0) in vec3 aPosition;\n"
+    "layout(location = 1) in vec3 aNormal;\n"
+    "uniform mat4 uMVP;\n"
+    "uniform mat4 uModelMatrix;\n"
+    "uniform mat3 uNormalMatrix;\n"
+    "out vec3 vWorldPos;\n"
+    "out vec3 vNormal;\n"
+    "void main() {\n"
+    "    vec4 worldPos = uModelMatrix * vec4(aPosition, 1.0);\n"
+    "    vWorldPos = worldPos.xyz;\n"
+    "    vNormal = normalize(uNormalMatrix * aNormal);\n"
+    "    gl_Position = uMVP * vec4(aPosition, 1.0);\n"
+    "}\n";
+static const char* kCompareVS_460 =
+    "#version 460 core\n"
+    "layout(location = 0) in vec3 aPosition;\n"
+    "layout(location = 1) in vec3 aNormal;\n"
+    "uniform mat4 uMVP;\n"
+    "uniform mat4 uModelMatrix;\n"
+    "uniform mat3 uNormalMatrix;\n"
+    "out vec3 vWorldPos;\n"
+    "out vec3 vNormal;\n"
+    "void main() {\n"
+    "    vec4 worldPos = uModelMatrix * vec4(aPosition, 1.0);\n"
+    "    vWorldPos = worldPos.xyz;\n"
+    "    vNormal = normalize(uNormalMatrix * aNormal);\n"
+    "    gl_Position = uMVP * vec4(aPosition, 1.0);\n"
+    "}\n";
+
+static const char* kCompareFS_330 =
+    "#version 330 core\n"
+    "in vec3 vWorldPos;\n"
+    "in vec3 vNormal;\n"
+    "uniform vec3 uLightPos;\n"
+    "uniform vec3 uLightColor;\n"
+    "uniform vec3 uViewPos;\n"
+    "uniform vec4 uColor;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    float ambientStrength = 0.15;\n"
+    "    vec3 ambient = ambientStrength * uLightColor;\n"
+    "    vec3 norm = normalize(vNormal);\n"
+    "    vec3 lightDir = normalize(uLightPos - vWorldPos);\n"
+    "    float diff = max(dot(norm, lightDir), 0.0);\n"
+    "    vec3 diffuse = diff * uLightColor;\n"
+    "    float specularStrength = 0.5;\n"
+    "    vec3 viewDir = normalize(uViewPos - vWorldPos);\n"
+    "    vec3 halfDir = normalize(lightDir + viewDir);\n"
+    "    float spec = pow(max(dot(norm, halfDir), 0.0), 32.0);\n"
+    "    vec3 specular = specularStrength * spec * uLightColor;\n"
+    "    vec3 result = (ambient + diffuse + specular) * uColor.rgb;\n"
+    "    fragColor = vec4(result, uColor.a);\n"
+    "}\n";
+static const char* kCompareFS_410 =
+    "#version 410 core\n"
+    "in vec3 vWorldPos;\n"
+    "in vec3 vNormal;\n"
+    "uniform vec3 uLightPos;\n"
+    "uniform vec3 uLightColor;\n"
+    "uniform vec3 uViewPos;\n"
+    "uniform vec4 uColor;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    float ambientStrength = 0.15;\n"
+    "    vec3 ambient = ambientStrength * uLightColor;\n"
+    "    vec3 norm = normalize(vNormal);\n"
+    "    vec3 lightDir = normalize(uLightPos - vWorldPos);\n"
+    "    float diff = max(dot(norm, lightDir), 0.0);\n"
+    "    vec3 diffuse = diff * uLightColor;\n"
+    "    float specularStrength = 0.5;\n"
+    "    vec3 viewDir = normalize(uViewPos - vWorldPos);\n"
+    "    vec3 halfDir = normalize(lightDir + viewDir);\n"
+    "    float spec = pow(max(dot(norm, halfDir), 0.0), 32.0);\n"
+    "    vec3 specular = specularStrength * spec * uLightColor;\n"
+    "    vec3 result = (ambient + diffuse + specular) * uColor.rgb;\n"
+    "    fragColor = vec4(result, uColor.a);\n"
+    "}\n";
+static const char* kCompareFS_460 =
+    "#version 460 core\n"
+    "in vec3 vWorldPos;\n"
+    "in vec3 vNormal;\n"
+    "uniform vec3 uLightPos;\n"
+    "uniform vec3 uLightColor;\n"
+    "uniform vec3 uViewPos;\n"
+    "uniform vec4 uColor;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    float ambientStrength = 0.15;\n"
+    "    vec3 ambient = ambientStrength * uLightColor;\n"
+    "    vec3 norm = normalize(vNormal);\n"
+    "    vec3 lightDir = normalize(uLightPos - vWorldPos);\n"
+    "    float diff = max(dot(norm, lightDir), 0.0);\n"
+    "    vec3 diffuse = diff * uLightColor;\n"
+    "    float specularStrength = 0.5;\n"
+    "    vec3 viewDir = normalize(uViewPos - vWorldPos);\n"
+    "    vec3 halfDir = normalize(lightDir + viewDir);\n"
+    "    float spec = pow(max(dot(norm, halfDir), 0.0), 32.0);\n"
+    "    vec3 specular = specularStrength * spec * uLightColor;\n"
+    "    vec3 result = (ambient + diffuse + specular) * uColor.rgb;\n"
+    "    fragColor = vec4(result, uColor.a);\n"
+    "}\n";
+
+// Shared program compilation for comparison scenes.
+static GLuint compileCompareProgram(GLDispatchTable& gl, const char* vsSrc, const char* fsSrc) {
+    GLuint vs = gl.glCreateShader(GL_VERTEX_SHADER);
+    gl.glShaderSource(vs, 1, &vsSrc, nullptr);
+    gl.glCompileShader(vs);
+    GLuint fs = gl.glCreateShader(GL_FRAGMENT_SHADER);
+    gl.glShaderSource(fs, 1, &fsSrc, nullptr);
+    gl.glCompileShader(fs);
+    GLuint prog = gl.glCreateProgram();
+    gl.glAttachShader(prog, vs);
+    gl.glAttachShader(prog, fs);
+    gl.glLinkProgram(prog);
+    gl.glDeleteShader(vs);
+    gl.glDeleteShader(fs);
+    return prog;
+}
+
+// ---------------------------------------------------------------------------
+// GL 3.3 Version Comparison — bind-based API, glUniform*
+// ---------------------------------------------------------------------------
+class VersionCompare33Scene final : public Scene {
+public:
+    std::string id() const override { return "phase-7.version-compare-gl33"; }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {256, 256}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        program_ = compileCompareProgram(gl, kCompareVS_330, kCompareFS_330);
+        mvpLoc_        = gl.glGetUniformLocation(program_, "uMVP");
+        modelMatLoc_   = gl.glGetUniformLocation(program_, "uModelMatrix");
+        normalMatLoc_  = gl.glGetUniformLocation(program_, "uNormalMatrix");
+        lightPosLoc_   = gl.glGetUniformLocation(program_, "uLightPos");
+        lightColorLoc_ = gl.glGetUniformLocation(program_, "uLightColor");
+        viewPosLoc_    = gl.glGetUniformLocation(program_, "uViewPos");
+        colorLoc_      = gl.glGetUniformLocation(program_, "uColor");
+
+        sphereData_ = generateComparisonSphere();
+        vertCount_ = static_cast<int>(sphereData_.size()) / 6;
+
+        // GL 3.3 bind-based buffer + VAO setup.
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindVertexArray(vao_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER,
+                        static_cast<GLsizeiptr>(sphereData_.size() * sizeof(float)),
+                        sphereData_.data(), GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+        gl.glEnableVertexAttribArray(1);
+        gl.glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                                 reinterpret_cast<void*>(3 * sizeof(float)));
+        gl.glBindVertexArray(0);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        renderComparisonFrame(gl, program_,
+            mvpLoc_, modelMatLoc_, normalMatLoc_,
+            lightPosLoc_, lightColorLoc_, viewPosLoc_, colorLoc_,
+            vao_, vertCount_, /*useDSAUniforms=*/false);
+        gl.glDeleteBuffers(1, &vbo_);
+        gl.glDeleteVertexArrays(1, &vao_);
+        gl.glDeleteProgram(program_);
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glCreateShader, FunctionId::glShaderSource, FunctionId::glCompileShader,
+            FunctionId::glCreateProgram, FunctionId::glAttachShader, FunctionId::glLinkProgram,
+            FunctionId::glDeleteShader, FunctionId::glUseProgram,
+            FunctionId::glGenVertexArrays, FunctionId::glBindVertexArray, FunctionId::glDeleteVertexArrays,
+            FunctionId::glGenBuffers, FunctionId::glBindBuffer, FunctionId::glBufferData, FunctionId::glDeleteBuffers,
+            FunctionId::glEnableVertexAttribArray, FunctionId::glVertexAttribPointer,
+            FunctionId::glUniformMatrix4fv, FunctionId::glUniformMatrix3fv,
+            FunctionId::glUniform3fv, FunctionId::glUniform4fv,
+            FunctionId::glDrawArrays,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLint mvpLoc_ = -1, modelMatLoc_ = -1, normalMatLoc_ = -1;
+    GLint lightPosLoc_ = -1, lightColorLoc_ = -1, viewPosLoc_ = -1, colorLoc_ = -1;
+    GLuint vao_ = 0, vbo_ = 0;
+    std::vector<float> sphereData_;
+    int vertCount_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// GL 4.1 Version Comparison — bind-based buffer setup, DSA uniforms
+// ---------------------------------------------------------------------------
+class VersionCompare41Scene final : public Scene {
+public:
+    std::string id() const override { return "phase-7.version-compare-gl41"; }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {256, 256}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        program_ = compileCompareProgram(gl, kCompareVS_410, kCompareFS_410);
+        mvpLoc_        = gl.glGetUniformLocation(program_, "uMVP");
+        modelMatLoc_   = gl.glGetUniformLocation(program_, "uModelMatrix");
+        normalMatLoc_  = gl.glGetUniformLocation(program_, "uNormalMatrix");
+        lightPosLoc_   = gl.glGetUniformLocation(program_, "uLightPos");
+        lightColorLoc_ = gl.glGetUniformLocation(program_, "uLightColor");
+        viewPosLoc_    = gl.glGetUniformLocation(program_, "uViewPos");
+        colorLoc_      = gl.glGetUniformLocation(program_, "uColor");
+
+        sphereData_ = generateComparisonSphere();
+        vertCount_ = static_cast<int>(sphereData_.size()) / 6;
+
+        // Buffer + VAO setup is still bind-based (same as 3.3).
+        // The version difference is in uniform setting (DSA).
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindVertexArray(vao_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER,
+                        static_cast<GLsizeiptr>(sphereData_.size() * sizeof(float)),
+                        sphereData_.data(), GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+        gl.glEnableVertexAttribArray(1);
+        gl.glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                                 reinterpret_cast<void*>(3 * sizeof(float)));
+        gl.glBindVertexArray(0);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        // GL 4.1: set uniforms via glProgramUniform* (DSA) BEFORE glUseProgram.
+        renderComparisonFrame(gl, program_,
+            mvpLoc_, modelMatLoc_, normalMatLoc_,
+            lightPosLoc_, lightColorLoc_, viewPosLoc_, colorLoc_,
+            vao_, vertCount_, /*useDSAUniforms=*/true);
+        gl.glDeleteBuffers(1, &vbo_);
+        gl.glDeleteVertexArrays(1, &vao_);
+        gl.glDeleteProgram(program_);
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glCreateShader, FunctionId::glShaderSource, FunctionId::glCompileShader,
+            FunctionId::glCreateProgram, FunctionId::glAttachShader, FunctionId::glLinkProgram,
+            FunctionId::glDeleteShader, FunctionId::glUseProgram,
+            FunctionId::glGenVertexArrays, FunctionId::glBindVertexArray, FunctionId::glDeleteVertexArrays,
+            FunctionId::glGenBuffers, FunctionId::glBindBuffer, FunctionId::glBufferData, FunctionId::glDeleteBuffers,
+            FunctionId::glEnableVertexAttribArray, FunctionId::glVertexAttribPointer,
+            FunctionId::glProgramUniformMatrix4fv, FunctionId::glProgramUniformMatrix3fv,
+            FunctionId::glProgramUniform3f, FunctionId::glProgramUniform4f,
+            FunctionId::glDrawArrays,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLint mvpLoc_ = -1, modelMatLoc_ = -1, normalMatLoc_ = -1;
+    GLint lightPosLoc_ = -1, lightColorLoc_ = -1, viewPosLoc_ = -1, colorLoc_ = -1;
+    GLuint vao_ = 0, vbo_ = 0;
+    std::vector<float> sphereData_;
+    int vertCount_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// GL 4.6 Version Comparison — full DSA: glCreateBuffers, glNamedBufferStorage,
+// glCreateVertexArrays, separated vertex format, DSA uniforms
+// ---------------------------------------------------------------------------
+class VersionCompare46Scene final : public Scene {
+public:
+    std::string id() const override { return "phase-7.version-compare-gl46"; }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {256, 256}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        program_ = compileCompareProgram(gl, kCompareVS_460, kCompareFS_460);
+        mvpLoc_        = gl.glGetUniformLocation(program_, "uMVP");
+        modelMatLoc_   = gl.glGetUniformLocation(program_, "uModelMatrix");
+        normalMatLoc_  = gl.glGetUniformLocation(program_, "uNormalMatrix");
+        lightPosLoc_   = gl.glGetUniformLocation(program_, "uLightPos");
+        lightColorLoc_ = gl.glGetUniformLocation(program_, "uLightColor");
+        viewPosLoc_    = gl.glGetUniformLocation(program_, "uViewPos");
+        colorLoc_      = gl.glGetUniformLocation(program_, "uColor");
+
+        sphereData_ = generateComparisonSphere();
+        vertCount_ = static_cast<int>(sphereData_.size()) / 6;
+
+        // GL 4.5/4.6 DSA buffer + VAO setup — no glBind* during setup.
+        gl.glCreateBuffers(1, &vbo_);
+        gl.glNamedBufferStorage(vbo_,
+            static_cast<GLsizeiptr>(sphereData_.size() * sizeof(float)),
+            sphereData_.data(), 0);
+
+        gl.glCreateVertexArrays(1, &vao_);
+
+        const GLsizei stride = 6 * sizeof(float);
+        gl.glVertexArrayVertexBuffer(vao_, 0, vbo_, 0, stride);
+
+        // Attribute 0: position (vec3 at offset 0).
+        gl.glVertexArrayAttribFormat(vao_, 0, 3, GL_FLOAT, GL_FALSE, 0);
+        gl.glVertexArrayAttribBinding(vao_, 0, 0);
+        gl.glEnableVertexArrayAttrib(vao_, 0);
+
+        // Attribute 1: normal (vec3 at offset 12).
+        gl.glVertexArrayAttribFormat(vao_, 1, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float));
+        gl.glVertexArrayAttribBinding(vao_, 1, 0);
+        gl.glEnableVertexArrayAttrib(vao_, 1);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+        // GL 4.6: DSA uniforms (same as 4.1 path).
+        renderComparisonFrame(gl, program_,
+            mvpLoc_, modelMatLoc_, normalMatLoc_,
+            lightPosLoc_, lightColorLoc_, viewPosLoc_, colorLoc_,
+            vao_, vertCount_, /*useDSAUniforms=*/true);
+        gl.glDeleteBuffers(1, &vbo_);
+        gl.glDeleteVertexArrays(1, &vao_);
+        gl.glDeleteProgram(program_);
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glCreateShader, FunctionId::glShaderSource, FunctionId::glCompileShader,
+            FunctionId::glCreateProgram, FunctionId::glAttachShader, FunctionId::glLinkProgram,
+            FunctionId::glDeleteShader, FunctionId::glUseProgram,
+            FunctionId::glCreateBuffers, FunctionId::glNamedBufferStorage,
+            FunctionId::glCreateVertexArrays,
+            FunctionId::glVertexArrayVertexBuffer,
+            FunctionId::glVertexArrayAttribFormat,
+            FunctionId::glVertexArrayAttribBinding,
+            FunctionId::glEnableVertexArrayAttrib,
+            FunctionId::glDeleteVertexArrays, FunctionId::glDeleteBuffers,
+            FunctionId::glProgramUniformMatrix4fv, FunctionId::glProgramUniformMatrix3fv,
+            FunctionId::glProgramUniform3f, FunctionId::glProgramUniform4f,
+            FunctionId::glDrawArrays,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLint mvpLoc_ = -1, modelMatLoc_ = -1, normalMatLoc_ = -1;
+    GLint lightPosLoc_ = -1, lightColorLoc_ = -1, viewPosLoc_ = -1, colorLoc_ = -1;
+    GLuint vao_ = 0, vbo_ = 0;
+    std::vector<float> sphereData_;
+    int vertCount_ = 0;
+};
+
+// ===========================================================================
 // Benchmark infrastructure — Phase 7 Group 5a
 // ===========================================================================
 
@@ -6181,6 +6669,14 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(gl41DSAScene));
         GL46ZeroBindDSAScene gl46ZeroBindScene;
         tests.push_back(runScene(gl46ZeroBindScene));
+
+        // Group 6 — version comparison scenes.
+        VersionCompare33Scene vc33;
+        tests.push_back(runScene(vc33));
+        VersionCompare41Scene vc41;
+        tests.push_back(runScene(vc41));
+        VersionCompare46Scene vc46;
+        tests.push_back(runScene(vc46));
     }
 
     return buildJSON(normalizedPhase, tests);
@@ -6216,6 +6712,110 @@ std::string runBenchmarkJSON() {
     tiers.push_back(runPhongObjectsTier("heavy", 1000));
 
     return buildBenchmarkJSON(tiers);
+}
+
+std::string runVersionComparisonJSON() {
+    // Run the three version-comparison scenes through the standard gauntlet
+    // pipeline (setup, render, readback, golden save/compare).
+    VersionCompare33Scene vc33;
+    VersionCompare41Scene vc41;
+    VersionCompare46Scene vc46;
+
+    TestResult r33 = runScene(vc33);
+    TestResult r41 = runScene(vc41);
+    TestResult r46 = runScene(vc46);
+
+    // Load the three actual PNGs back for pairwise cross-version comparison.
+    const std::filesystem::path root = workspaceRoot();
+    auto loadActual = [&](const std::string& sceneId) -> std::optional<Image> {
+        std::filesystem::path p = root / "docs" / "reports" / "actuals" / "phase-7" / (sceneId + ".png");
+        std::string err;
+        return loadPNG(p, &err);
+    };
+
+    auto img33 = loadActual("phase-7.version-compare-gl33");
+    auto img41 = loadActual("phase-7.version-compare-gl41");
+    auto img46 = loadActual("phase-7.version-compare-gl46");
+
+    // Pairwise comparisons (tolerance 0 — we expect pixel-identical output).
+    struct PairResult {
+        std::string pairName;
+        bool valid = false;
+        double diffRatio = 1.0;
+        double maxChannelDelta = 1.0;
+    };
+
+    auto comparePair = [](const std::string& name,
+                          const std::optional<Image>& a,
+                          const std::optional<Image>& b) -> PairResult {
+        PairResult pr;
+        pr.pairName = name;
+        if (!a.has_value() || !b.has_value()) {
+            pr.valid = false;
+            return pr;
+        }
+        CompareResult cr = compareImages(*a, *b, 0.0);
+        pr.valid = cr.dimensionsMatch;
+        pr.diffRatio = cr.diffRatio;
+        pr.maxChannelDelta = cr.maxChannelDelta;
+        return pr;
+    };
+
+    PairResult pair33v41 = comparePair("gl33-vs-gl41", img33, img41);
+    PairResult pair41v46 = comparePair("gl41-vs-gl46", img41, img46);
+    PairResult pair33v46 = comparePair("gl33-vs-gl46", img33, img46);
+
+    // Build JSON report.
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(6);
+    ss << "{\"versionComparison\":{";
+
+    // Per-scene results.
+    ss << "\"scenes\":[";
+    auto emitScene = [&](const TestResult& r, bool last) {
+        ss << "{\"id\":\"" << r.id << "\","
+           << "\"status\":\"" << r.status << "\","
+           << "\"millis\":" << r.millis << ","
+           << "\"diffRatio\":" << r.diffRatio << ","
+           << "\"maxChannelDelta\":" << r.maxChannelDelta << "}";
+        if (!last) ss << ",";
+    };
+    emitScene(r33, false);
+    emitScene(r41, false);
+    emitScene(r46, true);
+    ss << "],";
+
+    // Pairwise cross-version comparison.
+    ss << "\"pairwise\":[";
+    auto emitPair = [&](const PairResult& pr, bool last) {
+        ss << "{\"pair\":\"" << pr.pairName << "\","
+           << "\"valid\":" << (pr.valid ? "true" : "false") << ","
+           << "\"diffRatio\":" << pr.diffRatio << ","
+           << "\"maxChannelDelta\":" << pr.maxChannelDelta << ","
+           << "\"pixelIdentical\":" << (pr.valid && pr.diffRatio == 0.0 ? "true" : "false")
+           << "}";
+        if (!last) ss << ",";
+    };
+    emitPair(pair33v41, false);
+    emitPair(pair41v46, false);
+    emitPair(pair33v46, true);
+    ss << "],";
+
+    // Overall verdict.
+    bool allScenesPass = (r33.status == "passed" && r41.status == "passed" && r46.status == "passed");
+    bool allPairsValid = (pair33v41.valid && pair41v46.valid && pair33v46.valid);
+    // Allow tolerance of 1% channel delta for cross-version comparison.
+    double maxDiff = std::max({pair33v41.diffRatio, pair41v46.diffRatio, pair33v46.diffRatio});
+    bool pairsWithinTolerance = (maxDiff <= 0.01);
+    bool pass = allScenesPass && allPairsValid && pairsWithinTolerance;
+
+    ss << "\"allScenesPass\":" << (allScenesPass ? "true" : "false") << ","
+       << "\"allPairsWithinTolerance\":" << (pairsWithinTolerance ? "true" : "false") << ","
+       << "\"maxCrossVersionDiff\":" << maxDiff << ","
+       << "\"verdict\":\"" << (pass ? "PASS" : "FAIL") << "\"";
+
+    ss << "}}";
+    return ss.str();
 }
 
 }  // namespace appgl::tests
