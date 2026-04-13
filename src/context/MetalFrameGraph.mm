@@ -36,6 +36,7 @@ struct MetalFrameGraph::Impl {
             layer.displaySyncEnabled = NO;
         }
         ensureDrawableResources();
+        acquireRingSlot();  // OPT-8: acquire initial ring buffer slot (slot 0)
     }
 
     ~Impl() {
@@ -47,6 +48,14 @@ struct MetalFrameGraph::Impl {
             [currentCommandBuffer commit];
             [currentCommandBuffer waitUntilCompleted];
             currentCommandBuffer = nil;
+        }
+        // OPT-8: Release any acquired ring slot to balance the semaphore.
+        // All in-flight completion handlers have fired (Metal processes CBs
+        // in commit order, and waitUntilCompleted on the last ensures all
+        // prior CBs completed).
+        if (ringSlotAcquired) {
+            dispatch_semaphore_signal(frameSemaphore);
+            ringSlotAcquired = false;
         }
     }
 
@@ -89,6 +98,9 @@ struct MetalFrameGraph::Impl {
 
         FG_TRACE(@"encodeClear: enter (deferred)  encoder=%p cmdBuf=%p", currentRenderEncoder, currentCommandBuffer);
 
+        // OPT-8: Acquire a ring buffer slot before any GPU work.
+        acquireRingSlot();
+
         // Close any open render encoder and flush the prior command buffer.
         // This serves as a frame boundary: Metal can start executing the
         // previous frame's work while we set up the next one.  The pending
@@ -96,11 +108,12 @@ struct MetalFrameGraph::Impl {
         // eliminating the old separate clear-only render pass (OPT-4).
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            [currentCommandBuffer commit];
+            commitWithFrameSignal(currentCommandBuffer);  // OPT-8
             currentCommandBuffer = nil;
             currentDrawable = nil;
             pendingPresent = false;
             advanceRingBuffer();
+            acquireRingSlot();  // OPT-8: acquire the next slot for this frame
         }
         ensureDrawableResources();
 
@@ -121,6 +134,7 @@ struct MetalFrameGraph::Impl {
         if (device == nil || commandQueue == nil) {
             return;
         }
+        acquireRingSlot();  // OPT-8
         FG_TRACE(@"beginRenderPass: enter  encoder=%p cmdBuf=%p", currentRenderEncoder, currentCommandBuffer);
         endRenderPass();
         ensureDrawableResources();
@@ -234,6 +248,7 @@ struct MetalFrameGraph::Impl {
         if (device == nil || commandQueue == nil) {
             return false;
         }
+        acquireRingSlot();  // OPT-8
         if (info.vertexCount <= 0 || info.positions == nullptr || info.positionByteCount == 0) {
             return false;
         }
@@ -395,6 +410,7 @@ struct MetalFrameGraph::Impl {
         if (device == nil || commandQueue == nil) {
             return false;
         }
+        acquireRingSlot();  // OPT-8
         if (info.vertexCount <= 0 || info.vertexData == nullptr || info.vertexDataByteCount == 0) {
             FG_TRACE(@"encodeTranslatedDraw: bad vertex data, returning false");
             return false;
@@ -914,10 +930,12 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
             if (!usesOffscreenTarget && currentDrawable != nil) {
                 [currentCommandBuffer presentDrawable:currentDrawable];
             }
-            [currentCommandBuffer commit];
+            commitWithFrameSignal(currentCommandBuffer);  // OPT-8
+            invalidateTransientState();
+            advanceRingBuffer();
+        } else {
+            invalidateTransientState();
         }
-        invalidateTransientState();
-        advanceRingBuffer();
     }
 
     void present() {
@@ -934,10 +952,11 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
         if (!usesOffscreenTarget && currentDrawable != nil) {
             [currentCommandBuffer presentDrawable:currentDrawable];
         }
-        [currentCommandBuffer commit];
-        if (usesOffscreenTarget) {
-            [currentCommandBuffer waitUntilCompleted];
-        }
+        // OPT-8: async commit — the completion handler signals the frame
+        // semaphore, allowing the CPU to encode the next frame while the GPU
+        // processes this one.  Replaces the old waitUntilCompleted which
+        // serialised CPU and GPU completely for offscreen targets.
+        commitWithFrameSignal(currentCommandBuffer);
         invalidateTransientState();
         advanceRingBuffer();
     }
@@ -991,6 +1010,12 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
             if (currentCommandBuffer != nil) {
                 [currentCommandBuffer commit];
                 [currentCommandBuffer waitUntilCompleted];
+                // OPT-8: GPU finished synchronously — release the ring slot
+                // so the semaphore stays balanced (no completion handler here).
+                if (ringSlotAcquired) {
+                    dispatch_semaphore_signal(frameSemaphore);
+                    ringSlotAcquired = false;
+                }
                 if (currentCommandBuffer.status == MTLCommandBufferStatusError) {
                     invalidateTransientState();
                     return false;
@@ -1032,6 +1057,11 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
             const bool consumedCurrentCommandBuffer = commandBuffer == currentCommandBuffer;
             [commandBuffer commit];
             [commandBuffer waitUntilCompleted];
+            // OPT-8: release ring slot if we consumed the current CB synchronously.
+            if (consumedCurrentCommandBuffer && ringSlotAcquired) {
+                dispatch_semaphore_signal(frameSemaphore);
+                ringSlotAcquired = false;
+            }
             if (commandBuffer.status == MTLCommandBufferStatusError) {
                 if (consumedCurrentCommandBuffer) {
                     invalidateTransientState();
@@ -1309,6 +1339,15 @@ private:
     static constexpr std::size_t kRingBufferSize = 16 * 1024 * 1024; // 16 MB
     static constexpr std::size_t kRingBufferAlign = 256;
 
+    // OPT-8: Semaphore-based frame pacing.  Initialized to kRingBufferCount
+    // so the CPU can fill up to 3 ring slots before blocking.  Each frame
+    // waits (acquireRingSlot) before writing, and the GPU completion handler
+    // signals when it finishes the command buffer for that slot.  This
+    // overlaps CPU encoding with GPU rendering — the key optimization that
+    // replaces the old waitUntilCompleted serialisation.
+    dispatch_semaphore_t frameSemaphore = dispatch_semaphore_create(kRingBufferCount);
+    bool ringSlotAcquired = false;
+
     id<MTLBuffer> ringBuffers[kRingBufferCount] = { nil, nil, nil };
     int ringBufferIndex = 0;
     std::size_t ringBufferOffset = 0;
@@ -1350,9 +1389,31 @@ private:
         return { fallback, 0 };
     }
 
+    // OPT-8: Acquire the current ring buffer slot, blocking if all slots
+    // are in-flight with the GPU.  Idempotent within a frame — only waits
+    // once per ring-buffer generation.
+    void acquireRingSlot() {
+        if (!ringSlotAcquired) {
+            dispatch_semaphore_wait(frameSemaphore, DISPATCH_TIME_FOREVER);
+            ringSlotAcquired = true;
+        }
+    }
+
+    // OPT-8: Commit a command buffer with a completion handler that signals
+    // the frame semaphore when the GPU finishes.  Use this (instead of raw
+    // [cb commit]) whenever the commit releases a ring buffer slot.
+    void commitWithFrameSignal(id<MTLCommandBuffer> cb) {
+        dispatch_semaphore_t sem = frameSemaphore;
+        [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
+            dispatch_semaphore_signal(sem);
+        }];
+        [cb commit];
+    }
+
     void advanceRingBuffer() {
         ringBufferIndex = (ringBufferIndex + 1) % kRingBufferCount;
         ringBufferOffset = 0;
+        ringSlotAcquired = false;  // OPT-8: next frame must re-acquire
     }
 
     // Pipeline cache metrics (for benchmark instrumentation).
