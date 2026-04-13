@@ -5940,6 +5940,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
+                    // OPT-5: pass pre-uploaded Metal buffer for direct bind.
+                    tdi.metalVertexBuffer = vbo->metalBuffer;
+                    tdi.metalVertexBufferOffset = startOff;
                     tdi.depthTestEnabled = impl_->state->isEnabled(GL_DEPTH_TEST);
                     tdi.depthFunc = impl_->state->depthState().func;
                     tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);
@@ -6075,6 +6078,9 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
+                    // OPT-5: pass pre-uploaded Metal buffer for direct bind.
+                    tdi.metalVertexBuffer = vbo->metalBuffer;
+                    tdi.metalVertexBufferOffset = startOff;
                     tdi.depthTestEnabled = impl_->state->isEnabled(GL_DEPTH_TEST);
                     tdi.depthFunc = impl_->state->depthState().func;
                     tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);
@@ -6127,6 +6133,9 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                                 evb.byteCount = extraVbo->shadowBytes.size();
                                 evb.stride = attrRes.stride;
                                 evb.divisor = attrDivisor;
+                                // OPT-5: direct Metal buffer for extra VBOs.
+                                evb.metalBuffer = extraVbo->metalBuffer;
+                                evb.metalBufferOffset = 0;
                                 tdi.extraVertexBuffers.push_back(std::move(evb));
                             } else {
                                 idx = it->second;
@@ -6256,9 +6265,18 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
+                    // OPT-5: pass pre-uploaded Metal buffer for direct bind.
+                    tdi.metalVertexBuffer = vbo->metalBuffer;
+                    tdi.metalVertexBufferOffset = startOff;
                     tdi.indices = effectivePtr;
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
+                    // OPT-5: pass Metal index buffer when indices weren't
+                    // expanded (UINT16/UINT32 pass-through from element VBO).
+                    if (expanded.empty() && elementBuffer->metalBuffer != nullptr) {
+                        tdi.metalIndexBuffer = elementBuffer->metalBuffer;
+                        tdi.metalIndexBufferOffset = indexOffset;
+                    }
                     tdi.depthTestEnabled = impl_->state->isEnabled(GL_DEPTH_TEST);
                     tdi.depthFunc = impl_->state->depthState().func;
                     tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);

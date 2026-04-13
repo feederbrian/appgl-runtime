@@ -58,9 +58,15 @@ struct TranslatedDrawInfo {
     GLsizei baseVertex = 0;
 
     // Raw vertex buffer bytes at the attribute start offset.
+    // Used as fallback when metalVertexBuffer is null (headless / no VBO).
     const void* vertexData = nullptr;
     std::size_t vertexDataByteCount = 0;
     std::size_t vertexStride = 0;
+
+    // Direct Metal buffer binding (OPT-5).  When non-null the pre-uploaded
+    // VBO Metal buffer is bound directly, bypassing the ring-buffer memcpy.
+    void* metalVertexBuffer = nullptr;
+    std::size_t metalVertexBufferOffset = 0;
 
     // Per-attribute layout within the interleaved vertex buffer.  Each entry
     // describes one enabled vertex attribute's location and its byte offset
@@ -82,6 +88,9 @@ struct TranslatedDrawInfo {
         std::size_t stride = 0;
         GLuint divisor = 0;  // 0=per-vertex, 1+=per-instance
         std::vector<VertexAttributeLayout> attributes;
+        // Direct Metal buffer binding (OPT-5).
+        void* metalBuffer = nullptr;
+        std::size_t metalBufferOffset = 0;
     };
     std::vector<ExtraVertexBuffer> extraVertexBuffers;
 
@@ -93,6 +102,10 @@ struct TranslatedDrawInfo {
     const void* indices = nullptr;
     GLsizei indexCount = 0;
     GLenum indexType = 0;
+
+    // Direct Metal index buffer binding (OPT-5).
+    void* metalIndexBuffer = nullptr;
+    std::size_t metalIndexBufferOffset = 0;
 
     // Per-stage uniform data laid out to match the SPIRV-Cross-generated
     // push-constant struct.  Each stage gets its own buffer because the

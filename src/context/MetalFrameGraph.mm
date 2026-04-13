@@ -666,9 +666,15 @@ struct MetalFrameGraph::Impl {
         [currentRenderEncoder setTriangleFillMode:info.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
 
         // Bind vertex data at buffer index 0.
-        // Sub-allocate from the ring buffer to avoid per-draw Metal buffer
-        // creation — the dominant per-draw overhead (OPT-1).
-        {
+        // OPT-5: when the VBO has a pre-uploaded Metal buffer, bind it
+        // directly — zero memcpy.  Otherwise fall back to the ring buffer
+        // sub-allocation path (OPT-1).
+        if (info.metalVertexBuffer != nullptr) {
+            id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)info.metalVertexBuffer;
+            [currentRenderEncoder setVertexBuffer:mtlBuf
+                                           offset:static_cast<NSUInteger>(info.metalVertexBufferOffset)
+                                          atIndex:0];
+        } else {
             auto alloc = ringSuballocate(info.vertexData, info.vertexDataByteCount);
             if (alloc.buffer == nil) {
                 return false;
@@ -680,13 +686,20 @@ struct MetalFrameGraph::Impl {
         // attribute data from glVertexAttribDivisor.
         for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
             const auto& evb = info.extraVertexBuffers[ei];
-            auto alloc = ringSuballocate(evb.data, evb.byteCount);
-            if (alloc.buffer == nil) {
-                return false;
+            if (evb.metalBuffer != nullptr) {
+                id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)evb.metalBuffer;
+                [currentRenderEncoder setVertexBuffer:mtlBuf
+                                               offset:static_cast<NSUInteger>(evb.metalBufferOffset)
+                                              atIndex:static_cast<NSUInteger>(ei + 1)];
+            } else {
+                auto alloc = ringSuballocate(evb.data, evb.byteCount);
+                if (alloc.buffer == nil) {
+                    return false;
+                }
+                [currentRenderEncoder setVertexBuffer:alloc.buffer
+                                               offset:alloc.offset
+                                              atIndex:static_cast<NSUInteger>(ei + 1)];
             }
-            [currentRenderEncoder setVertexBuffer:alloc.buffer
-                                           offset:alloc.offset
-                                          atIndex:static_cast<NSUInteger>(ei + 1)];
         }
 
         // Bind per-stage uniform buffers at Metal buffer index 16.
@@ -716,17 +729,29 @@ struct MetalFrameGraph::Impl {
                 metalIndexType = MTLIndexTypeUInt32;
                 bytesPerIndex = 4;
             }
-            const std::size_t indexBytes = static_cast<std::size_t>(info.indexCount) * bytesPerIndex;
-            auto iAlloc = ringSuballocate(info.indices, indexBytes);
-            if (iAlloc.buffer == nil) {
-                return false;
+
+            // OPT-5: use direct Metal index buffer when available.
+            id<MTLBuffer> idxBuffer = nil;
+            NSUInteger idxOffset = 0;
+            if (info.metalIndexBuffer != nullptr) {
+                idxBuffer = (__bridge id<MTLBuffer>)info.metalIndexBuffer;
+                idxOffset = static_cast<NSUInteger>(info.metalIndexBufferOffset);
+            } else {
+                const std::size_t indexBytes = static_cast<std::size_t>(info.indexCount) * bytesPerIndex;
+                auto iAlloc = ringSuballocate(info.indices, indexBytes);
+                if (iAlloc.buffer == nil) {
+                    return false;
+                }
+                idxBuffer = iAlloc.buffer;
+                idxOffset = iAlloc.offset;
             }
+
             if (info.instanceCount > 1) {
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(info.indexCount)
                                      indexType:metalIndexType
-                                   indexBuffer:iAlloc.buffer
-                             indexBufferOffset:iAlloc.offset
+                                   indexBuffer:idxBuffer
+                             indexBufferOffset:idxOffset
                                  instanceCount:static_cast<NSUInteger>(info.instanceCount)
                                     baseVertex:0
                                   baseInstance:static_cast<NSUInteger>(info.baseInstance)];
@@ -734,8 +759,8 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(info.indexCount)
                                      indexType:metalIndexType
-                                   indexBuffer:iAlloc.buffer
-                             indexBufferOffset:iAlloc.offset];
+                                   indexBuffer:idxBuffer
+                             indexBufferOffset:idxOffset];
             }
         } else {
             if (info.instanceCount > 1) {
