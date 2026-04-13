@@ -5828,6 +5828,38 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStor
 
 }  // namespace
 
+// Resolve the effective VBO name, stride, and byte offset for a vertex
+// attribute, handling both classic (glVertexAttribPointer) and separated
+// (GL 4.3/4.5 glVertexAttribFormat + glVertexArrayVertexBuffer) formats.
+struct ResolvedVertexAttrib {
+    GLuint bufferName = 0;
+    std::size_t stride = 0;
+    std::size_t offset = 0;
+};
+
+static ResolvedVertexAttrib resolveVertexAttrib(
+    const GLVertexAttributeState& attr,
+    const GLVertexArrayObject& vao)
+{
+    ResolvedVertexAttrib r;
+    if (attr.useSeparatedFormat && attr.bindingIndex < vao.bindingPoints.size()) {
+        const auto& bp = vao.bindingPoints[attr.bindingIndex];
+        r.bufferName = bp.buffer;
+        r.stride = bp.stride > 0
+            ? static_cast<std::size_t>(bp.stride)
+            : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
+        r.offset = static_cast<std::size_t>(bp.offset)
+                 + static_cast<std::size_t>(attr.relativeOffset);
+    } else {
+        r.bufferName = attr.buffer;
+        r.stride = attr.stride > 0
+            ? static_cast<std::size_t>(attr.stride)
+            : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
+        r.offset = static_cast<std::size_t>(attr.pointer);
+    }
+    return r;
+}
+
 bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
@@ -5863,13 +5895,13 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         if (vao != nullptr && !vao->attributes.empty()) {
             const auto& posAttr = vao->attributes[0];
-            GLBufferObject* vbo = (posAttr.buffer != 0) ? impl_->objects->buffers().get(posAttr.buffer) : nullptr;
+            auto resolved = resolveVertexAttrib(posAttr, *vao);
+            GLBufferObject* vbo = (resolved.bufferName != 0)
+                ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
-                const std::size_t posStride = posAttr.stride > 0
-                    ? static_cast<std::size_t>(posAttr.stride)
-                    : sizeof(GLfloat) * static_cast<std::size_t>(posAttr.size);
+                const std::size_t posStride = resolved.stride;
                 const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
-                const std::size_t startOff = static_cast<std::size_t>(posAttr.pointer) + firstOff;
+                const std::size_t startOff = resolved.offset + firstOff;
 
                 if (startOff <= vbo->shadowBytes.size()) {
                     TranslatedDrawInfo tdi;
@@ -5891,16 +5923,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
 
-                    // Collect per-attribute interleaved layout from the VAO.
-                    // All enabled attributes sharing the same VBO are collapsed
-                    // into Metal buffer 0; their offsets are relative to posAttr.
-                    const std::size_t basePointer = static_cast<std::size_t>(posAttr.pointer);
+                    // Collect per-attribute layout from the VAO.  All enabled
+                    // attributes whose resolved buffer matches the primary VBO
+                    // go into vertexAttributeLayouts (Metal buffer 0).
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
                         const auto& attr = vao->attributes[ai];
-                        if (!attr.enabled || attr.buffer != posAttr.buffer) continue;
+                        if (!attr.enabled) continue;
+                        auto attrRes = resolveVertexAttrib(attr, *vao);
+                        if (attrRes.bufferName != resolved.bufferName) continue;
                         TranslatedDrawInfo::VertexAttributeLayout layout;
                         layout.location = static_cast<GLuint>(ai);
-                        layout.offset = static_cast<std::size_t>(attr.pointer) - basePointer;
+                        layout.offset = attrRes.offset - resolved.offset;
                         tdi.vertexAttributeLayouts.push_back(layout);
                     }
 
@@ -5988,13 +6021,13 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         if (vao != nullptr && !vao->attributes.empty()) {
             const auto& posAttr = vao->attributes[0];
-            GLBufferObject* vbo = (posAttr.buffer != 0) ? impl_->objects->buffers().get(posAttr.buffer) : nullptr;
+            auto resolved = resolveVertexAttrib(posAttr, *vao);
+            GLBufferObject* vbo = (resolved.bufferName != 0)
+                ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
-                const std::size_t posStride = posAttr.stride > 0
-                    ? static_cast<std::size_t>(posAttr.stride)
-                    : sizeof(GLfloat) * static_cast<std::size_t>(posAttr.size);
+                const std::size_t posStride = resolved.stride;
                 const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
-                const std::size_t startOff = static_cast<std::size_t>(posAttr.pointer) + firstOff;
+                const std::size_t startOff = resolved.offset + firstOff;
 
                 if (startOff <= vbo->shadowBytes.size()) {
                     TranslatedDrawInfo tdi;
@@ -6021,39 +6054,41 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // attribute 0 (per-vertex) go into vertexAttributeLayouts
                     // (Metal buffer 0).  Attributes in OTHER VBOs (e.g. per-instance
                     // data with glVertexAttribDivisor) become extraVertexBuffers.
-                    const std::size_t basePointer = static_cast<std::size_t>(posAttr.pointer);
                     std::unordered_map<GLuint, std::size_t> extraBufferMap;
 
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
                         const auto& attr = vao->attributes[ai];
                         if (!attr.enabled) continue;
 
-                        if (attr.buffer == posAttr.buffer && attr.divisor == 0) {
+                        auto attrRes = resolveVertexAttrib(attr, *vao);
+                        GLuint attrDivisor = attr.useSeparatedFormat
+                            ? (attr.bindingIndex < vao->bindingPoints.size()
+                                ? vao->bindingPoints[attr.bindingIndex].divisor
+                                : attr.divisor)
+                            : attr.divisor;
+
+                        if (attrRes.bufferName == resolved.bufferName && attrDivisor == 0) {
                             // Same VBO as primary, per-vertex — buffer 0.
                             TranslatedDrawInfo::VertexAttributeLayout layout;
                             layout.location = static_cast<GLuint>(ai);
-                            layout.offset = static_cast<std::size_t>(attr.pointer) - basePointer;
+                            layout.offset = attrRes.offset - resolved.offset;
                             tdi.vertexAttributeLayouts.push_back(layout);
-                        } else if (attr.buffer != posAttr.buffer) {
+                        } else if (attrRes.bufferName != resolved.bufferName) {
                             // Different VBO — group by GL buffer name.
-                            GLBufferObject* extraVbo = impl_->objects->buffers().get(attr.buffer);
+                            GLBufferObject* extraVbo = impl_->objects->buffers().get(attrRes.bufferName);
                             if (extraVbo == nullptr || extraVbo->shadowBytes.empty()) continue;
 
-                            auto it = extraBufferMap.find(attr.buffer);
+                            auto it = extraBufferMap.find(attrRes.bufferName);
                             std::size_t idx;
                             if (it == extraBufferMap.end()) {
                                 idx = tdi.extraVertexBuffers.size();
-                                extraBufferMap[attr.buffer] = idx;
-
-                                const std::size_t extraStride = attr.stride > 0
-                                    ? static_cast<std::size_t>(attr.stride)
-                                    : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
+                                extraBufferMap[attrRes.bufferName] = idx;
 
                                 TranslatedDrawInfo::ExtraVertexBuffer evb;
                                 evb.data = extraVbo->shadowBytes.data();
                                 evb.byteCount = extraVbo->shadowBytes.size();
-                                evb.stride = extraStride;
-                                evb.divisor = attr.divisor;
+                                evb.stride = attrRes.stride;
+                                evb.divisor = attrDivisor;
                                 tdi.extraVertexBuffers.push_back(std::move(evb));
                             } else {
                                 idx = it->second;
@@ -6061,7 +6096,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
 
                             TranslatedDrawInfo::VertexAttributeLayout layout;
                             layout.location = static_cast<GLuint>(ai);
-                            layout.offset = static_cast<std::size_t>(attr.pointer);
+                            layout.offset = attrRes.offset;
                             tdi.extraVertexBuffers[idx].attributes.push_back(layout);
                         }
                     }
@@ -6163,12 +6198,12 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     if (program != nullptr && program->hasTranslatedPipeline) {
         if (!vao->attributes.empty()) {
             const auto& posAttr = vao->attributes[0];
-            GLBufferObject* vbo = (posAttr.buffer != 0) ? impl_->objects->buffers().get(posAttr.buffer) : nullptr;
+            auto resolved = resolveVertexAttrib(posAttr, *vao);
+            GLBufferObject* vbo = (resolved.bufferName != 0)
+                ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
-                const std::size_t posStride = posAttr.stride > 0
-                    ? static_cast<std::size_t>(posAttr.stride)
-                    : sizeof(GLfloat) * static_cast<std::size_t>(posAttr.size);
-                const std::size_t startOff = static_cast<std::size_t>(posAttr.pointer);
+                const std::size_t posStride = resolved.stride;
+                const std::size_t startOff = resolved.offset;
 
                 if (startOff <= vbo->shadowBytes.size()) {
                     TranslatedDrawInfo tdi;
@@ -6193,14 +6228,15 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
 
-                    // Collect per-attribute interleaved layout from the VAO.
-                    const std::size_t basePointer = static_cast<std::size_t>(posAttr.pointer);
+                    // Collect per-attribute layout from the VAO.
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
                         const auto& attr = vao->attributes[ai];
-                        if (!attr.enabled || attr.buffer != posAttr.buffer) continue;
+                        if (!attr.enabled) continue;
+                        auto attrRes = resolveVertexAttrib(attr, *vao);
+                        if (attrRes.bufferName != resolved.bufferName) continue;
                         TranslatedDrawInfo::VertexAttributeLayout layout;
                         layout.location = static_cast<GLuint>(ai);
-                        layout.offset = static_cast<std::size_t>(attr.pointer) - basePointer;
+                        layout.offset = attrRes.offset - resolved.offset;
                         tdi.vertexAttributeLayouts.push_back(layout);
                     }
 
