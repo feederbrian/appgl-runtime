@@ -299,14 +299,12 @@ struct MetalFrameGraph::Impl {
         if (info.positionByteCount <= 4096) {
             [encoder setVertexBytes:info.positions length:info.positionByteCount atIndex:0];
         } else {
-            id<MTLBuffer> vb = [device newBufferWithBytes:info.positions
-                                                   length:info.positionByteCount
-                                                  options:MTLResourceStorageModeShared];
-            if (vb == nil) {
+            auto alloc = ringSuballocate(info.positions, info.positionByteCount);
+            if (alloc.buffer == nil) {
                 [encoder endEncoding];
                 return false;
             }
-            [encoder setVertexBuffer:vb offset:0 atIndex:0];
+            [encoder setVertexBuffer:alloc.buffer offset:alloc.offset atIndex:0];
         }
         // Uniform color lives in fragment buffer 0.
         [encoder setFragmentBytes:info.uniformColor length:sizeof(info.uniformColor) atIndex:0];
@@ -332,18 +330,16 @@ struct MetalFrameGraph::Impl {
                     return false;
             }
             const std::size_t indexBytes = static_cast<std::size_t>(info.indexCount) * bytesPerIndex;
-            id<MTLBuffer> ib = [device newBufferWithBytes:info.indices
-                                                    length:indexBytes
-                                                   options:MTLResourceStorageModeShared];
-            if (ib == nil) {
+            auto iAlloc = ringSuballocate(info.indices, indexBytes);
+            if (iAlloc.buffer == nil) {
                 [encoder endEncoding];
                 return false;
             }
             [encoder drawIndexedPrimitives:primitive
                                 indexCount:static_cast<NSUInteger>(info.indexCount)
                                  indexType:metalIndexType
-                               indexBuffer:ib
-                         indexBufferOffset:0];
+                               indexBuffer:iAlloc.buffer
+                         indexBufferOffset:iAlloc.offset];
         } else {
             [encoder drawPrimitives:primitive
                         vertexStart:static_cast<NSUInteger>(info.baseVertex)
@@ -623,30 +619,26 @@ struct MetalFrameGraph::Impl {
         [currentRenderEncoder setTriangleFillMode:info.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
 
         // Bind vertex data at buffer index 0.
-        // Always use a proper MTLBuffer for vertex data — Metal's debug
-        // validation layer can assert with setVertexBytes + instanced draws.
+        // Sub-allocate from the ring buffer to avoid per-draw Metal buffer
+        // creation — the dominant per-draw overhead (OPT-1).
         {
-            id<MTLBuffer> vb = [device newBufferWithBytes:info.vertexData
-                                                   length:info.vertexDataByteCount
-                                                  options:MTLResourceStorageModeShared];
-            if (vb == nil) {
+            auto alloc = ringSuballocate(info.vertexData, info.vertexDataByteCount);
+            if (alloc.buffer == nil) {
                 return false;
             }
-            [currentRenderEncoder setVertexBuffer:vb offset:0 atIndex:0];
+            [currentRenderEncoder setVertexBuffer:alloc.buffer offset:alloc.offset atIndex:0];
         }
 
         // Bind extra vertex buffers (buffer index 1+) — e.g. per-instance
         // attribute data from glVertexAttribDivisor.
         for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
             const auto& evb = info.extraVertexBuffers[ei];
-            id<MTLBuffer> eb = [device newBufferWithBytes:evb.data
-                                                   length:evb.byteCount
-                                                  options:MTLResourceStorageModeShared];
-            if (eb == nil) {
+            auto alloc = ringSuballocate(evb.data, evb.byteCount);
+            if (alloc.buffer == nil) {
                 return false;
             }
-            [currentRenderEncoder setVertexBuffer:eb
-                                           offset:0
+            [currentRenderEncoder setVertexBuffer:alloc.buffer
+                                           offset:alloc.offset
                                           atIndex:static_cast<NSUInteger>(ei + 1)];
         }
 
@@ -678,18 +670,16 @@ struct MetalFrameGraph::Impl {
                 bytesPerIndex = 4;
             }
             const std::size_t indexBytes = static_cast<std::size_t>(info.indexCount) * bytesPerIndex;
-            id<MTLBuffer> ib = [device newBufferWithBytes:info.indices
-                                                    length:indexBytes
-                                                   options:MTLResourceStorageModeShared];
-            if (ib == nil) {
+            auto iAlloc = ringSuballocate(info.indices, indexBytes);
+            if (iAlloc.buffer == nil) {
                 return false;
             }
             if (info.instanceCount > 1) {
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(info.indexCount)
                                      indexType:metalIndexType
-                                   indexBuffer:ib
-                             indexBufferOffset:0
+                                   indexBuffer:iAlloc.buffer
+                             indexBufferOffset:iAlloc.offset
                                  instanceCount:static_cast<NSUInteger>(info.instanceCount)
                                     baseVertex:0
                                   baseInstance:static_cast<NSUInteger>(info.baseInstance)];
@@ -697,8 +687,8 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(info.indexCount)
                                      indexType:metalIndexType
-                                   indexBuffer:ib
-                             indexBufferOffset:0];
+                                   indexBuffer:iAlloc.buffer
+                             indexBufferOffset:iAlloc.offset];
             }
         } else {
             if (info.instanceCount > 1) {
@@ -837,6 +827,7 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
             [currentCommandBuffer commit];
         }
         invalidateTransientState();
+        advanceRingBuffer();
     }
 
     void present() {
@@ -854,6 +845,7 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
             [currentCommandBuffer waitUntilCompleted];
         }
         invalidateTransientState();
+        advanceRingBuffer();
     }
 
     bool copyPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels) {
@@ -1178,6 +1170,61 @@ private:
     // The state space is tiny (~16 combinations); after warmup every draw is
     // a pure hash-table hit with zero Metal allocations.
     std::unordered_map<std::uint32_t, id<MTLDepthStencilState>> depthStencilCache;
+
+    // ── Ring buffer for per-draw vertex/index data (OPT-1) ──
+    // Triple-buffered: 3 large MTLBuffers rotate each frame. Within a frame,
+    // sub-allocations bump a write offset with 256-byte alignment. This
+    // eliminates per-draw [device newBufferWithBytes:] calls — the dominant
+    // per-draw overhead (~15-20µs each).
+    static constexpr int kRingBufferCount = 3;
+    static constexpr std::size_t kRingBufferSize = 16 * 1024 * 1024; // 16 MB
+    static constexpr std::size_t kRingBufferAlign = 256;
+
+    id<MTLBuffer> ringBuffers[kRingBufferCount] = { nil, nil, nil };
+    int ringBufferIndex = 0;
+    std::size_t ringBufferOffset = 0;
+
+    void ensureRingBuffers() {
+        if (ringBuffers[0] != nil) return;
+        for (int i = 0; i < kRingBufferCount; ++i) {
+            ringBuffers[i] = [device newBufferWithLength:kRingBufferSize
+                                                 options:MTLResourceStorageModeShared];
+        }
+    }
+
+    // Sub-allocate from the active ring buffer. Returns the buffer and the
+    // byte offset of the allocation. Copies |byteCount| bytes from |src|.
+    // If the ring buffer is full, falls back to a one-off allocation.
+    struct RingAlloc {
+        id<MTLBuffer> buffer;
+        std::size_t offset;
+    };
+
+    RingAlloc ringSuballocate(const void* src, std::size_t byteCount) {
+        ensureRingBuffers();
+        const std::size_t aligned = (byteCount + kRingBufferAlign - 1) & ~(kRingBufferAlign - 1);
+        id<MTLBuffer> active = ringBuffers[ringBufferIndex];
+
+        if (active != nil && ringBufferOffset + byteCount <= kRingBufferSize) {
+            // Fast path: bump-allocate from ring buffer.
+            std::memcpy(static_cast<std::uint8_t*>([active contents]) + ringBufferOffset,
+                        src, byteCount);
+            std::size_t thisOffset = ringBufferOffset;
+            ringBufferOffset += aligned;
+            return { active, thisOffset };
+        }
+
+        // Overflow fallback: single draw exceeds remaining space.
+        id<MTLBuffer> fallback = [device newBufferWithBytes:src
+                                                      length:byteCount
+                                                     options:MTLResourceStorageModeShared];
+        return { fallback, 0 };
+    }
+
+    void advanceRingBuffer() {
+        ringBufferIndex = (ringBufferIndex + 1) % kRingBufferCount;
+        ringBufferOffset = 0;
+    }
 
     // Pipeline cache metrics (for benchmark instrumentation).
     std::uint64_t pipelineCacheHits = 0;
