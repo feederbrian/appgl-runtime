@@ -1,0 +1,58 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.clangd/
+.cache/
+compile_commands.json
+
+# Xcode
+*.xcuserstate
+*.xcscmblueprint
+*.xcresult
+*.xcactivitylog
+*.dSYM/
+xcuserdata/
+DerivedData/
+.DerivedData*/
+
+# CMake / build outputs
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.ninja
+*.ninja_*
+install_manifest.txt
+
+# Object files and libraries (except intentionally committed stuff)
+*.o
+*.obj
+*.d
+*.pdb
+
+# Test harness actuals
+tests/reports/actuals/
+tests/reports/gauntlet-*.json
+
+# Python caches (codegen tool)
+__pycache__/
+*.pyc
+
+# Accidental CLI artifacts
+/phase-7
+/phase-c
+/phase-a
+/phase-d
+/gl33-instanced
+/--test
