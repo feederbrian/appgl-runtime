@@ -73,6 +73,10 @@ struct TranslatedDrawInfo {
     };
     std::vector<VertexAttributeLayout> vertexAttributeLayouts;
 
+    // Instanced draws.
+    GLsizei instanceCount = 1;
+    GLuint baseInstance = 0;
+
     // Indexed draws (nullptr for glDrawArrays).
     const void* indices = nullptr;
     GLsizei indexCount = 0;

@@ -344,8 +344,8 @@ struct MetalFrameGraph::Impl {
     }
 
     bool encodeTranslatedDraw(TranslatedDrawInfo& info) {
-        FG_TRACE(@"encodeTranslatedDraw: enter  mode=0x%X verts=%d encoder=%p cmdBuf=%p",
-                 info.mode, info.vertexCount, currentRenderEncoder, currentCommandBuffer);
+        FG_TRACE(@"encodeTranslatedDraw: enter  mode=0x%X verts=%d instances=%d encoder=%p cmdBuf=%p",
+                 info.mode, info.vertexCount, info.instanceCount, currentRenderEncoder, currentCommandBuffer);
         if (device == nil || commandQueue == nil) {
             return false;
         }
@@ -586,15 +586,34 @@ struct MetalFrameGraph::Impl {
             if (ib == nil) {
                 return false;
             }
-            [currentRenderEncoder drawIndexedPrimitives:primitive
-                                indexCount:static_cast<NSUInteger>(info.indexCount)
-                                 indexType:metalIndexType
-                               indexBuffer:ib
-                         indexBufferOffset:0];
+            if (info.instanceCount > 1) {
+                [currentRenderEncoder drawIndexedPrimitives:primitive
+                                    indexCount:static_cast<NSUInteger>(info.indexCount)
+                                     indexType:metalIndexType
+                                   indexBuffer:ib
+                             indexBufferOffset:0
+                                 instanceCount:static_cast<NSUInteger>(info.instanceCount)
+                                    baseVertex:0
+                                  baseInstance:static_cast<NSUInteger>(info.baseInstance)];
+            } else {
+                [currentRenderEncoder drawIndexedPrimitives:primitive
+                                    indexCount:static_cast<NSUInteger>(info.indexCount)
+                                     indexType:metalIndexType
+                                   indexBuffer:ib
+                             indexBufferOffset:0];
+            }
         } else {
-            [currentRenderEncoder drawPrimitives:primitive
-                        vertexStart:0
-                        vertexCount:static_cast<NSUInteger>(info.vertexCount)];
+            if (info.instanceCount > 1) {
+                [currentRenderEncoder drawPrimitives:primitive
+                            vertexStart:0
+                            vertexCount:static_cast<NSUInteger>(info.vertexCount)
+                          instanceCount:static_cast<NSUInteger>(info.instanceCount)
+                           baseInstance:static_cast<NSUInteger>(info.baseInstance)];
+            } else {
+                [currentRenderEncoder drawPrimitives:primitive
+                            vertexStart:0
+                            vertexCount:static_cast<NSUInteger>(info.vertexCount)];
+            }
         }
 
         pendingPresent = true;

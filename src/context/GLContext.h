@@ -230,6 +230,7 @@ public:
     // the minimal pipeline state we currently support. Additional draw variants
     // (instanced, base-vertex, multi-draw) ship in Group 8.
     bool drawArrays(GLenum mode, GLint first, GLsizei count);
+    bool drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount);
     bool drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
 
     // GL 4.2/4.3 — compute shaders and memory barriers.

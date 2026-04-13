@@ -717,10 +717,8 @@ static const GLubyte * APIENTRY glGetStringi(GLenum name, GLuint index) {
 }
 
 static void APIENTRY glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount) {
-    (void)mode;
-    (void)first;
-    (void)count;
-    (void)instancecount;
+    auto* ctx = currentContextOrNull();
+    if (ctx) ctx->drawArraysInstanced(mode, first, count, instancecount);
 }
 
 static void APIENTRY glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount) {

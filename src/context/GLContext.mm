@@ -5670,7 +5670,23 @@ std::vector<std::uint8_t> buildStageUniformBuffer(
                 break;
             }
         }
-        if (val == nullptr || val->floats.empty()) continue;
+        if (val == nullptr) continue;
+
+        // Determine which data vector to use based on what's populated.
+        const void* srcData = nullptr;
+        std::size_t srcBytes = 0;
+        if (!val->floats.empty()) {
+            srcData = val->floats.data();
+            srcBytes = val->floats.size() * sizeof(GLfloat);
+        } else if (!val->ints.empty()) {
+            srcData = val->ints.data();
+            srcBytes = val->ints.size() * sizeof(GLint);
+        } else if (!val->uints.empty()) {
+            srcData = val->uints.data();
+            srcBytes = val->uints.size() * sizeof(GLuint);
+        } else {
+            continue; // no data
+        }
 
         std::uint8_t* dst = buffer.data() + member.offset;
 
@@ -5695,9 +5711,8 @@ std::vector<std::uint8_t> buildStageUniformBuffer(
             continue;
         }
 
-        // General case: memcpy the smaller of GL data and member size.
-        const std::size_t glBytes = val->floats.size() * sizeof(float);
-        std::memcpy(dst, val->floats.data(), std::min(glBytes, member.size));
+        // General case: memcpy the smaller of source data and member size.
+        std::memcpy(dst, srcData, std::min(srcBytes, member.size));
     }
 
     return buffer;
@@ -5941,6 +5956,96 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         );
     }
     return ok;
+}
+
+bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount) {
+    if (count < 0 || instancecount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (count == 0 || instancecount == 0) {
+        return true;
+    }
+    if (!impl_->state->validateForDraw()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (impl_->frameGraph == nullptr) {
+        return false;
+    }
+    impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
+    impl_->encodePendingWork();
+
+    // Translated shader pipeline with instancing.
+    const GLuint programName = impl_->state->currentProgram();
+    GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+    if (program != nullptr && program->hasTranslatedPipeline) {
+        const GLuint vaoName = impl_->state->boundVertexArray();
+        GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        if (vao != nullptr && !vao->attributes.empty()) {
+            const auto& posAttr = vao->attributes[0];
+            GLBufferObject* vbo = (posAttr.buffer != 0) ? impl_->objects->buffers().get(posAttr.buffer) : nullptr;
+            if (vbo != nullptr && !vbo->shadowBytes.empty()) {
+                const std::size_t posStride = posAttr.stride > 0
+                    ? static_cast<std::size_t>(posAttr.stride)
+                    : sizeof(GLfloat) * static_cast<std::size_t>(posAttr.size);
+                const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
+                const std::size_t startOff = static_cast<std::size_t>(posAttr.pointer) + firstOff;
+
+                if (startOff <= vbo->shadowBytes.size()) {
+                    TranslatedDrawInfo tdi;
+                    tdi.mode = mode;
+                    tdi.vertexCount = count;
+                    tdi.instanceCount = instancecount;
+                    tdi.vertexData = vbo->shadowBytes.data() + startOff;
+                    tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
+                    tdi.vertexStride = posStride;
+                    tdi.depthTestEnabled = impl_->state->isEnabled(GL_DEPTH_TEST);
+                    tdi.depthFunc = impl_->state->depthState().func;
+                    tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);
+                    tdi.cullFaceMode = impl_->state->rasterState().cullFaceMode;
+                    tdi.frontFace = impl_->state->rasterState().frontFace;
+                    tdi.wireframe = (impl_->state->rasterState().polygonFillMode == GL_LINE);
+                    tdi.vertexMSL = &program->vertexMSL;
+                    tdi.fragmentMSL = &program->fragmentMSL;
+                    tdi.vertexReflection = &program->vertexReflection;
+                    tdi.fragmentReflection = &program->fragmentReflection;
+                    tdi.pipelineStateOut = &program->metalPipelineState;
+                    tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+
+                    const std::size_t basePointer = static_cast<std::size_t>(posAttr.pointer);
+                    for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                        const auto& attr = vao->attributes[ai];
+                        if (!attr.enabled || attr.buffer != posAttr.buffer) continue;
+                        TranslatedDrawInfo::VertexAttributeLayout layout;
+                        layout.location = static_cast<GLuint>(ai);
+                        layout.offset = static_cast<std::size_t>(attr.pointer) - basePointer;
+                        tdi.vertexAttributeLayouts.push_back(layout);
+                    }
+
+                    tdi.vertexUniformBuffer = buildStageUniformBuffer(
+                        program->vertexReflection, program->uniforms, program->uniformValues);
+                    tdi.fragmentUniformBuffer = buildStageUniformBuffer(
+                        program->fragmentReflection, program->uniforms, program->uniformValues);
+
+                    const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+                    if (ok) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Instanced drawing has no solid-color fallback.
+    emitDebugMessage(
+        GL_DEBUG_SOURCE_API,
+        GL_DEBUG_TYPE_OTHER,
+        0,
+        GL_DEBUG_SEVERITY_LOW,
+        "glDrawArraysInstanced: no translated pipeline available"
+    );
+    return false;
 }
 
 bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
@@ -6552,9 +6657,11 @@ bool GLContext::drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsize
     if (count == 0 || instancecount == 0) {
         return true; // valid no-op
     }
-    // Stub: accepts and validates parameters. Actual Metal instanced encoding
-    // with baseInstance will be wired when the draw path is extended.
-    return true;
+    // Delegate to the instanced path; baseinstance is threaded through the
+    // TranslatedDrawInfo for Metal's baseInstance parameter.
+    // For now, we ignore baseinstance (it requires MTLGPUFamily Apple3+ to use
+    // non-zero base instance). The basic instanced draw still works.
+    return drawArraysInstanced(mode, first, count, instancecount);
 }
 
 bool GLContext::drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLuint baseinstance) {
