@@ -6017,14 +6017,53 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
 
+                    // Gather vertex attributes.  Attributes in the same VBO as
+                    // attribute 0 (per-vertex) go into vertexAttributeLayouts
+                    // (Metal buffer 0).  Attributes in OTHER VBOs (e.g. per-instance
+                    // data with glVertexAttribDivisor) become extraVertexBuffers.
                     const std::size_t basePointer = static_cast<std::size_t>(posAttr.pointer);
+                    std::unordered_map<GLuint, std::size_t> extraBufferMap;
+
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
                         const auto& attr = vao->attributes[ai];
-                        if (!attr.enabled || attr.buffer != posAttr.buffer) continue;
-                        TranslatedDrawInfo::VertexAttributeLayout layout;
-                        layout.location = static_cast<GLuint>(ai);
-                        layout.offset = static_cast<std::size_t>(attr.pointer) - basePointer;
-                        tdi.vertexAttributeLayouts.push_back(layout);
+                        if (!attr.enabled) continue;
+
+                        if (attr.buffer == posAttr.buffer && attr.divisor == 0) {
+                            // Same VBO as primary, per-vertex — buffer 0.
+                            TranslatedDrawInfo::VertexAttributeLayout layout;
+                            layout.location = static_cast<GLuint>(ai);
+                            layout.offset = static_cast<std::size_t>(attr.pointer) - basePointer;
+                            tdi.vertexAttributeLayouts.push_back(layout);
+                        } else if (attr.buffer != posAttr.buffer) {
+                            // Different VBO — group by GL buffer name.
+                            GLBufferObject* extraVbo = impl_->objects->buffers().get(attr.buffer);
+                            if (extraVbo == nullptr || extraVbo->shadowBytes.empty()) continue;
+
+                            auto it = extraBufferMap.find(attr.buffer);
+                            std::size_t idx;
+                            if (it == extraBufferMap.end()) {
+                                idx = tdi.extraVertexBuffers.size();
+                                extraBufferMap[attr.buffer] = idx;
+
+                                const std::size_t extraStride = attr.stride > 0
+                                    ? static_cast<std::size_t>(attr.stride)
+                                    : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
+
+                                TranslatedDrawInfo::ExtraVertexBuffer evb;
+                                evb.data = extraVbo->shadowBytes.data();
+                                evb.byteCount = extraVbo->shadowBytes.size();
+                                evb.stride = extraStride;
+                                evb.divisor = attr.divisor;
+                                tdi.extraVertexBuffers.push_back(std::move(evb));
+                            } else {
+                                idx = it->second;
+                            }
+
+                            TranslatedDrawInfo::VertexAttributeLayout layout;
+                            layout.location = static_cast<GLuint>(ai);
+                            layout.offset = static_cast<std::size_t>(attr.pointer);
+                            tdi.extraVertexBuffers[idx].attributes.push_back(layout);
+                        }
                     }
 
                     tdi.vertexUniformBuffer = buildStageUniformBuffer(

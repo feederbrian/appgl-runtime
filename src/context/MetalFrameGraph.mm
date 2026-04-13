@@ -397,46 +397,87 @@ struct MetalFrameGraph::Impl {
                 return false;
             }
 
-            // Build vertex descriptor from reflection data.  All vertex
-            // attributes share a single interleaved VBO at Metal buffer 0.
-            // The per-attribute byte offsets within one stride come from the
-            // VAO layout captured in vertexAttributeLayouts.
+            // Build vertex descriptor from reflection data.  Primary vertex
+            // attributes (buffer 0) are per-vertex.  Extra vertex buffers
+            // (buffer 1+) may use per-instance stepping (glVertexAttribDivisor).
             MTLVertexDescriptor* vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+
+            // Helper: map GL type to MTLVertexFormat.
+            auto glTypeToMTLFormat = [](GLenum type) -> MTLVertexFormat {
+                switch (type) {
+                    case GL_FLOAT:      return MTLVertexFormatFloat;
+                    case GL_FLOAT_VEC2: return MTLVertexFormatFloat2;
+                    case GL_FLOAT_VEC3: return MTLVertexFormatFloat3;
+                    case GL_FLOAT_VEC4: return MTLVertexFormatFloat4;
+                    case GL_INT:        return MTLVertexFormatInt;
+                    case GL_INT_VEC2:   return MTLVertexFormatInt2;
+                    case GL_INT_VEC3:   return MTLVertexFormatInt3;
+                    case GL_INT_VEC4:   return MTLVertexFormatInt4;
+                    default:            return MTLVertexFormatFloat3;
+                }
+            };
+
             if (info.vertexReflection != nullptr) {
                 for (const auto& input : info.vertexReflection->vertexInputs) {
-                    MTLVertexFormat format = MTLVertexFormatFloat3;
-                    switch (input.type) {
-                        case GL_FLOAT:      format = MTLVertexFormatFloat;  break;
-                        case GL_FLOAT_VEC2: format = MTLVertexFormatFloat2; break;
-                        case GL_FLOAT_VEC3: format = MTLVertexFormatFloat3; break;
-                        case GL_FLOAT_VEC4: format = MTLVertexFormatFloat4; break;
-                        case GL_INT:        format = MTLVertexFormatInt;    break;
-                        case GL_INT_VEC2:   format = MTLVertexFormatInt2;   break;
-                        case GL_INT_VEC3:   format = MTLVertexFormatInt3;   break;
-                        case GL_INT_VEC4:   format = MTLVertexFormatInt4;   break;
-                        default:            format = MTLVertexFormatFloat3; break;
-                    }
+                    MTLVertexFormat format = glTypeToMTLFormat(input.type);
 
-                    // Look up the byte offset for this attribute from the VAO.
+                    // Determine which Metal buffer this attribute lives in.
+                    NSUInteger metalBuf = 0;
                     NSUInteger attrOffset = 0;
+
+                    // Check primary (buffer 0) attributes first.
+                    bool found = false;
                     for (const auto& layout : info.vertexAttributeLayouts) {
                         if (layout.location == input.location) {
+                            metalBuf = 0;
                             attrOffset = static_cast<NSUInteger>(layout.offset);
+                            found = true;
                             break;
+                        }
+                    }
+
+                    // Check extra vertex buffers (buffer 1+).
+                    if (!found) {
+                        for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
+                            for (const auto& layout : info.extraVertexBuffers[ei].attributes) {
+                                if (layout.location == input.location) {
+                                    metalBuf = static_cast<NSUInteger>(ei + 1);
+                                    attrOffset = static_cast<NSUInteger>(layout.offset);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found) break;
                         }
                     }
 
                     vertexDescriptor.attributes[input.location].format = format;
                     vertexDescriptor.attributes[input.location].offset = attrOffset;
-                    vertexDescriptor.attributes[input.location].bufferIndex = 0;
+                    vertexDescriptor.attributes[input.location].bufferIndex = metalBuf;
                 }
             }
+
+            // Buffer 0 layout: primary per-vertex data.
             const NSUInteger stride = info.vertexStride > 0
                 ? info.vertexStride
                 : sizeof(float) * 3u;
             vertexDescriptor.layouts[0].stride = stride;
             vertexDescriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
             vertexDescriptor.layouts[0].stepRate = 1;
+
+            // Extra buffer layouts (1+): per-instance or additional per-vertex.
+            for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
+                const auto& evb = info.extraVertexBuffers[ei];
+                NSUInteger metalBuf = static_cast<NSUInteger>(ei + 1);
+                vertexDescriptor.layouts[metalBuf].stride = static_cast<NSUInteger>(evb.stride);
+                if (evb.divisor > 0) {
+                    vertexDescriptor.layouts[metalBuf].stepFunction = MTLVertexStepFunctionPerInstance;
+                    vertexDescriptor.layouts[metalBuf].stepRate = static_cast<NSUInteger>(evb.divisor);
+                } else {
+                    vertexDescriptor.layouts[metalBuf].stepFunction = MTLVertexStepFunctionPerVertex;
+                    vertexDescriptor.layouts[metalBuf].stepRate = 1;
+                }
+            }
 
             MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
             desc.vertexFunction = vertFn;
@@ -572,6 +613,21 @@ struct MetalFrameGraph::Impl {
                 return false;
             }
             [currentRenderEncoder setVertexBuffer:vb offset:0 atIndex:0];
+        }
+
+        // Bind extra vertex buffers (buffer index 1+) — e.g. per-instance
+        // attribute data from glVertexAttribDivisor.
+        for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
+            const auto& evb = info.extraVertexBuffers[ei];
+            id<MTLBuffer> eb = [device newBufferWithBytes:evb.data
+                                                   length:evb.byteCount
+                                                  options:MTLResourceStorageModeShared];
+            if (eb == nil) {
+                return false;
+            }
+            [currentRenderEncoder setVertexBuffer:eb
+                                           offset:0
+                                          atIndex:static_cast<NSUInteger>(ei + 1)];
         }
 
         // Bind per-stage uniform buffers at Metal buffer index 16.

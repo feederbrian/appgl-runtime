@@ -73,6 +73,18 @@ struct TranslatedDrawInfo {
     };
     std::vector<VertexAttributeLayout> vertexAttributeLayouts;
 
+    // Additional vertex buffer bindings for multi-VBO setups (e.g. per-instance
+    // attribute buffers with glVertexAttribDivisor).  Buffer index 0 is the
+    // primary vertexData above; these start at Metal buffer index 1.
+    struct ExtraVertexBuffer {
+        const void* data = nullptr;
+        std::size_t byteCount = 0;
+        std::size_t stride = 0;
+        GLuint divisor = 0;  // 0=per-vertex, 1+=per-instance
+        std::vector<VertexAttributeLayout> attributes;
+    };
+    std::vector<ExtraVertexBuffer> extraVertexBuffers;
+
     // Instanced draws.
     GLsizei instanceCount = 1;
     GLuint baseInstance = 0;
