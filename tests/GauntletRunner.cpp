@@ -263,8 +263,8 @@ void expectGLError(GLDispatchTable& gl, GLenum expected, std::string_view label)
 std::filesystem::path workspaceRoot() {
     const auto isRoot = [](const std::filesystem::path& path) {
         std::error_code error;
-        return std::filesystem::exists(path / "runtime" / "CMakeLists.txt", error)
-            && std::filesystem::exists(path / "docs" / "goldens" / "phase-a" / "README.md", error);
+        return std::filesystem::exists(path / "CMakeLists.txt", error)
+            && std::filesystem::exists(path / "tests" / "goldens" / "phase-a" / "README.md", error);
     };
 
     const auto canonicalOrAbsolute = [](std::filesystem::path path) {
@@ -6483,8 +6483,8 @@ TestResult runScene(Scene& scene) {
 
     const Image actual = makeRGBA8Image(size.width, size.height, std::move(pixels));
     const std::filesystem::path root = workspaceRoot();
-    const std::filesystem::path goldenPath = root / "docs" / "goldens" / scene.phase() / (scene.id() + ".png");
-    const std::filesystem::path actualPath = root / "docs" / "reports" / "actuals" / scene.phase() / (scene.id() + ".png");
+    const std::filesystem::path goldenPath = root / "tests" / "goldens" / scene.phase() / (scene.id() + ".png");
+    const std::filesystem::path actualPath = root / "tests" / "reports" / "actuals" / scene.phase() / (scene.id() + ".png");
     result.goldenPath = goldenPath.string();
     result.actualPath = actualPath.string();
 
@@ -6728,7 +6728,7 @@ std::string runVersionComparisonJSON() {
     // Load the three actual PNGs back for pairwise cross-version comparison.
     const std::filesystem::path root = workspaceRoot();
     auto loadActual = [&](const std::string& sceneId) -> std::optional<Image> {
-        std::filesystem::path p = root / "docs" / "reports" / "actuals" / "phase-7" / (sceneId + ".png");
+        std::filesystem::path p = root / "tests" / "reports" / "actuals" / "phase-7" / (sceneId + ".png");
         std::string err;
         return loadPNG(p, &err);
     };
