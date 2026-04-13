@@ -540,7 +540,11 @@ struct MetalFrameGraph::Impl {
         [currentRenderEncoder setTriangleFillMode:info.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
 
         // Bind vertex data at buffer index 0.
-        if (info.vertexDataByteCount <= 4096) {
+        // For instanced draws, always use a proper MTLBuffer — Metal's debug
+        // validation layer can assert when setVertexBytes inline data is used
+        // with drawPrimitives:instanceCount: variants.
+        const bool forceBuffer = (info.instanceCount > 1);
+        if (!forceBuffer && info.vertexDataByteCount <= 4096) {
             [currentRenderEncoder setVertexBytes:info.vertexData length:info.vertexDataByteCount atIndex:0];
         } else {
             id<MTLBuffer> vb = [device newBufferWithBytes:info.vertexData
