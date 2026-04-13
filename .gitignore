@@ -49,6 +49,10 @@ tests/reports/gauntlet-*.json
 __pycache__/
 *.pyc
 
+# Vendored third-party (fetched via scripts/fetch_third_party.sh)
+third_party/glslang/
+third_party/SPIRV-Cross/
+
 # Accidental CLI artifacts
 /phase-7
 /phase-c
