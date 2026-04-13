@@ -87,51 +87,31 @@ struct MetalFrameGraph::Impl {
             return;
         }
 
-        FG_TRACE(@"encodeClear: enter  encoder=%p cmdBuf=%p", currentRenderEncoder, currentCommandBuffer);
-        ensureDrawableResources();
+        FG_TRACE(@"encodeClear: enter (deferred)  encoder=%p cmdBuf=%p", currentRenderEncoder, currentCommandBuffer);
 
-        // Close any open render encoder and flush the prior command buffer
-        // before starting a new clear pass.
+        // Close any open render encoder and flush the prior command buffer.
+        // This serves as a frame boundary: Metal can start executing the
+        // previous frame's work while we set up the next one.  The pending
+        // clear will be merged into the NEXT render pass as a load action,
+        // eliminating the old separate clear-only render pass (OPT-4).
         endRenderPass();
         if (currentCommandBuffer != nil) {
-            FG_TRACE(@"encodeClear: committing prior cmdBuf %p", currentCommandBuffer);
             [currentCommandBuffer commit];
             currentCommandBuffer = nil;
+            currentDrawable = nil;
+            pendingPresent = false;
+            advanceRingBuffer();
         }
+        ensureDrawableResources();
 
-        if (!usesOffscreenTarget && currentDrawable == nil) {
-            currentDrawable = [layer nextDrawable];
-            if (currentDrawable == nil) {
-                return;
-            }
-        }
+        // Store the clear parameters; they'll be consumed when the next
+        // render pass opens (in encodeTranslatedDraw or encodeSolidColorDraw).
+        hasPendingClear = true;
+        pendingClearMask = mask;
+        pendingClearColor = MTLClearColorMake(clearRed, clearGreen, clearBlue, clearAlpha);
+        pendingClearDepth = clearDepth;
+        pendingClearStencil = static_cast<std::uint32_t>(clearStencil);
 
-        currentCommandBuffer = [commandQueue commandBuffer];
-        attachErrorHandler(currentCommandBuffer, @"clear");
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
-        pass.colorAttachments[0].texture = colorTexture;
-        pass.colorAttachments[0].loadAction = (mask & GL_COLOR_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
-        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(clearRed, clearGreen, clearBlue, clearAlpha);
-        readbackSourceTexture = colorTexture;
-        readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
-
-        if (depthStencilTexture != nil) {
-            pass.depthAttachment.texture = depthStencilTexture;
-            pass.depthAttachment.loadAction = (mask & GL_DEPTH_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
-            pass.depthAttachment.storeAction = MTLStoreActionStore;
-            pass.depthAttachment.clearDepth = clearDepth;
-
-            pass.stencilAttachment.texture = depthStencilTexture;
-            pass.stencilAttachment.loadAction = (mask & GL_STENCIL_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
-            pass.stencilAttachment.storeAction = MTLStoreActionStore;
-            pass.stencilAttachment.clearStencil = clearStencil;
-        }
-
-        id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
-        [encoder endEncoding];
-        enqueueOffscreenClearUpload(mask, clearRed, clearGreen, clearBlue, clearAlpha);
         pendingPresent = true;
     }
 
@@ -197,6 +177,49 @@ struct MetalFrameGraph::Impl {
         }
     }
 
+    // Flush a deferred clear into a standalone render pass. Called by
+    // copyPixels and present when a clear is pending but no draws occurred.
+    void flushPendingClear() {
+        if (!hasPendingClear || device == nil) return;
+
+        ensureDrawableResources();
+        if (currentCommandBuffer == nil) {
+            currentCommandBuffer = [commandQueue commandBuffer];
+            attachErrorHandler(currentCommandBuffer, @"flushClear");
+            if (currentCommandBuffer == nil) { hasPendingClear = false; return; }
+        }
+        if (!usesOffscreenTarget && currentDrawable == nil) {
+            currentDrawable = [layer nextDrawable];
+            if (currentDrawable == nil) { hasPendingClear = false; return; }
+        }
+
+        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        if (colorTexture == nil) { hasPendingClear = false; return; }
+
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = colorTexture;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[0].loadAction = (pendingClearMask & GL_COLOR_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
+        pass.colorAttachments[0].clearColor = pendingClearColor;
+        if (depthStencilTexture != nil) {
+            pass.depthAttachment.texture = depthStencilTexture;
+            pass.depthAttachment.storeAction = MTLStoreActionStore;
+            pass.depthAttachment.loadAction = (pendingClearMask & GL_DEPTH_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
+            pass.depthAttachment.clearDepth = pendingClearDepth;
+            pass.stencilAttachment.texture = depthStencilTexture;
+            pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            pass.stencilAttachment.loadAction = (pendingClearMask & GL_STENCIL_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
+            pass.stencilAttachment.clearStencil = pendingClearStencil;
+        }
+
+        id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        [encoder endEncoding];
+        readbackSourceTexture = colorTexture;
+        readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        hasPendingClear = false;
+        pendingPresent = true;
+    }
+
     // Solid-color fallback draw path.
     //
     // Hand-written "solid color" MSL pipeline consuming one float3 position
@@ -229,21 +252,16 @@ struct MetalFrameGraph::Impl {
             return false;
         }
 
-        // Close any open render encoder before committing.
+        // Close any open render encoder before starting the solid-color pass.
         endRenderPass();
 
-        // If a prior clear is sitting unflushed in currentCommandBuffer, commit
-        // it before starting the draw pass. Metal command queue ordering
-        // guarantees the clear completes before the next command buffer runs.
-        if (currentCommandBuffer != nil) {
-            FG_TRACE(@"encodeSolidColorDraw: committing prior cmdBuf %p", currentCommandBuffer);
-            [currentCommandBuffer commit];
-            currentCommandBuffer = nil;
-        }
-        currentCommandBuffer = [commandQueue commandBuffer];
-        attachErrorHandler(currentCommandBuffer, @"solidColorDraw");
+        // Reuse the current command buffer if one exists, otherwise create new.
         if (currentCommandBuffer == nil) {
-            return false;
+            currentCommandBuffer = [commandQueue commandBuffer];
+            attachErrorHandler(currentCommandBuffer, @"solidColorDraw");
+            if (currentCommandBuffer == nil) {
+                return false;
+            }
         }
 
         if (!usesOffscreenTarget && currentDrawable == nil) {
@@ -259,18 +277,35 @@ struct MetalFrameGraph::Impl {
             return false;
         }
 
+        // Merge any pending clear into this render pass's load action (OPT-4).
         MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
         pass.colorAttachments[0].texture = colorTexture;
-        pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].clearColor = pendingClearColor;
+        } else {
+            pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        }
         if (depthStencilTexture != nil) {
             pass.depthAttachment.texture = depthStencilTexture;
-            pass.depthAttachment.loadAction = MTLLoadActionLoad;
             pass.depthAttachment.storeAction = MTLStoreActionStore;
             pass.stencilAttachment.texture = depthStencilTexture;
-            pass.stencilAttachment.loadAction = MTLLoadActionLoad;
             pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            if (hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
+                pass.depthAttachment.loadAction = MTLLoadActionClear;
+                pass.depthAttachment.clearDepth = pendingClearDepth;
+            } else {
+                pass.depthAttachment.loadAction = MTLLoadActionLoad;
+            }
+            if (hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
+                pass.stencilAttachment.loadAction = MTLLoadActionClear;
+                pass.stencilAttachment.clearStencil = pendingClearStencil;
+            } else {
+                pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+            }
         }
+        hasPendingClear = false;
 
         id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         if (encoder == nil) {
@@ -521,25 +556,19 @@ struct MetalFrameGraph::Impl {
             }
         }
 
-        // Ensure a render encoder is open. If a prior clear left a pending
-        // command buffer we must flush it first (see encodeSolidColorDraw for
-        // the rationale), but we only do this once — subsequent draws reuse
-        // the same encoder without any GPU sync.
+        // Ensure a render encoder is open. Subsequent draws reuse the same
+        // encoder without any GPU sync.
         if (currentRenderEncoder == nil) {
-            FG_TRACE(@"encodeTranslatedDraw: opening new render pass (prior cmdBuf=%p)", currentCommandBuffer);
-            // Flush any pending clear command buffer. Metal command queue
-            // ordering guarantees that the clear completes before the next
-            // command buffer's render pass starts — no waitUntilCompleted
-            // needed.
-            if (currentCommandBuffer != nil) {
-                FG_TRACE(@"encodeTranslatedDraw: committing prior cmdBuf %p", currentCommandBuffer);
-                [currentCommandBuffer commit];
-                currentCommandBuffer = nil;
-            }
-            currentCommandBuffer = [commandQueue commandBuffer];
-            attachErrorHandler(currentCommandBuffer, @"translatedDraw");
+            FG_TRACE(@"encodeTranslatedDraw: opening new render pass (prior cmdBuf=%p pendingClear=%d)",
+                     currentCommandBuffer, hasPendingClear);
+            // Reuse the current command buffer if one exists (e.g. from a
+            // prior solid-color draw), otherwise create a new one.
             if (currentCommandBuffer == nil) {
-                return false;
+                currentCommandBuffer = [commandQueue commandBuffer];
+                attachErrorHandler(currentCommandBuffer, @"translatedDraw");
+                if (currentCommandBuffer == nil) {
+                    return false;
+                }
             }
 
             if (!usesOffscreenTarget && currentDrawable == nil) {
@@ -576,18 +605,36 @@ struct MetalFrameGraph::Impl {
                 drawableHeight = static_cast<GLsizei>(colorTexture.height);
             }
 
+            // Build the render pass, merging any pending clear into the load
+            // action so clear+draws share a single render pass (OPT-4).
             MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
             pass.colorAttachments[0].texture = colorTexture;
-            pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
+                pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                pass.colorAttachments[0].clearColor = pendingClearColor;
+            } else {
+                pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            }
             if (depthStencilTexture != nil) {
                 pass.depthAttachment.texture = depthStencilTexture;
-                pass.depthAttachment.loadAction = MTLLoadActionLoad;
                 pass.depthAttachment.storeAction = MTLStoreActionStore;
                 pass.stencilAttachment.texture = depthStencilTexture;
-                pass.stencilAttachment.loadAction = MTLLoadActionLoad;
                 pass.stencilAttachment.storeAction = MTLStoreActionStore;
+                if (hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
+                    pass.depthAttachment.loadAction = MTLLoadActionClear;
+                    pass.depthAttachment.clearDepth = pendingClearDepth;
+                } else {
+                    pass.depthAttachment.loadAction = MTLLoadActionLoad;
+                }
+                if (hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
+                    pass.stencilAttachment.loadAction = MTLLoadActionClear;
+                    pass.stencilAttachment.clearStencil = pendingClearStencil;
+                } else {
+                    pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+                }
             }
+            hasPendingClear = false;
 
             currentRenderEncoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
             if (currentRenderEncoder == nil) {
@@ -833,6 +880,10 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
     void present() {
         FG_TRACE(@"present: enter  pendingPresent=%d encoder=%p cmdBuf=%p drawable=%p",
                  pendingPresent, currentRenderEncoder, currentCommandBuffer, currentDrawable);
+        // Flush any deferred clear that wasn't consumed by a draw call.
+        if (hasPendingClear) {
+            flushPendingClear();
+        }
         if (!pendingPresent || currentCommandBuffer == nil) {
             return;
         }
@@ -858,6 +909,10 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
         }
         if (device == nil || commandQueue == nil) {
             return copyHeadlessPixels(x, y, width, height, outPixels);
+        }
+        // Flush any deferred clear before readback.
+        if (hasPendingClear) {
+            flushPendingClear();
         }
         // Close any open render encoder before we commit the command buffer
         // for readback — otherwise Metal asserts on uncommitted encoder.
@@ -1142,6 +1197,7 @@ private:
         currentCommandBuffer = nil;
         currentDrawable = nil;
         pendingPresent = false;
+        hasPendingClear = false;
     }
 
     CAMetalLayer* layer = nil;
@@ -1165,6 +1221,16 @@ private:
     bool pendingPresent = false;
     bool readbackSourceIsBGRA = false;
     bool hasHeadlessReadback = false;
+
+    // Deferred clear state (OPT-4). Stored by encodeClear(), consumed by
+    // the next render pass that opens in encodeTranslatedDraw or
+    // encodeSolidColorDraw. Flushed standalone by copyPixels/present
+    // if no draw occurs between clear and readback/present.
+    bool hasPendingClear = false;
+    GLbitfield pendingClearMask = 0;
+    MTLClearColor pendingClearColor = MTLClearColorMake(0, 0, 0, 0);
+    double pendingClearDepth = 1.0;
+    std::uint32_t pendingClearStencil = 0;
 
     // Depth/stencil state cache — keyed by packed (depthTestEnabled, depthFunc).
     // The state space is tiny (~16 combinations); after warmup every draw is
