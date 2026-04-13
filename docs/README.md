@@ -72,7 +72,7 @@ applications that cannot tolerate the default f64 -> f32 narrowing.
 ## Project layout
 
 ```
-runtime/
+appgl-runtime/
   CMakeLists.txt            CMake build definition
   include/AppGL/            Public C headers
   src/                      Library source (caps, context, state, shader, ...)

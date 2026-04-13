@@ -1,6 +1,6 @@
 # Phase A Goldens
 
-Phase A goldens are captured from offscreen AppGL contexts with `glReadPixels(GL_RGBA, GL_UNSIGNED_BYTE)` and compared by `runtime/tests/GoldenCompare.cpp`.
+Phase A goldens are captured from offscreen AppGL contexts with `glReadPixels(GL_RGBA, GL_UNSIGNED_BYTE)` and compared by `appgl-runtime/tests/GoldenCompare.cpp`.
 
 | Scene ID | Golden | Coverage Purpose | Tolerance |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@ Phase A goldens are captured from offscreen AppGL contexts with `glReadPixels(GL
 To refresh goldens intentionally:
 
 ```sh
-APPGL_WORKSPACE_ROOT="$PWD" APPGL_WRITE_GOLDENS=1 runtime/build/appgl_gauntlet_cli phase-a
+APPGL_WORKSPACE_ROOT="$PWD" APPGL_WRITE_GOLDENS=1 appgl-runtime/build/appgl_gauntlet_cli phase-a
 ```
 
 Normal gauntlet runs must not set `APPGL_WRITE_GOLDENS`; missing or mismatched PNGs fail the CLI.

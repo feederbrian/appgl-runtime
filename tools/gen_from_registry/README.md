@@ -16,5 +16,5 @@ The generator:
 - emits the public filtered API header plus the runtime's generated dispatch,
   enums, function IDs, entry points, and coverage manifest.
 
-The generated output under `runtime/src/generated/` is deterministic and must
-never be edited by hand.
+The generated output under `appgl-runtime/src/generated/` is deterministic
+and must never be edited by hand.

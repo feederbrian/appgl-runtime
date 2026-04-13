@@ -1,6 +1,6 @@
 # AppGL Third-Party Sources
 
-These source drops are vendored under `runtime/third_party/` so the runtime build remains app-bundled and user-space only. They are not shipping artifacts by themselves.
+These source drops are vendored under `appgl-runtime/third_party/` so the runtime build remains app-bundled and user-space only. They are not shipping artifacts by themselves.
 
 | Dependency | Upstream | Pinned commit | License |
 | --- | --- | --- | --- |
