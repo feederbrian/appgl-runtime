@@ -5672,83 +5672,93 @@ namespace {
 // program's named GL uniform values.  Handles the mat3 column-padding case
 // (GL stores 9 floats; Metal/std140 stores 3 columns × 4 floats = 12).
 //
+// ── OPT-7: precomputed uniform layout ──
+// computeStageUniformLayout() runs once per program per stage, mapping each
+// push-constant struct member to its GL uniform location.  This eliminates
+// the O(N*M) string comparison from the per-draw packing path.
+static void computeStageUniformLayout(
+    std::vector<GLProgramObject::UniformLayoutEntry>& layout,
+    const ShaderReflection& reflection,
+    const std::vector<GLProgramUniformInfo>& uniforms)
+{
+    layout.clear();
+    if (reflection.uniformBlocks.empty()) return;
+    const auto& block = reflection.uniformBlocks[0];
+    if (block.byteSize == 0) return;
+
+    layout.reserve(block.members.size());
+    for (const auto& member : block.members) {
+        GLProgramObject::UniformLayoutEntry entry;
+        entry.memberOffset = member.offset;
+        entry.copyBytes = member.size;
+        entry.location = -1;
+        entry.isMat3Padded = (member.type == GL_FLOAT_MAT3 && member.size == 48);
+
+        // One-time name lookup: find the GL uniform location for this member.
+        for (const auto& u : uniforms) {
+            if (u.name == member.name) {
+                entry.location = u.location;
+                break;
+            }
+        }
+        layout.push_back(entry);
+    }
+}
+
 // The output is written into |outBuffer|, which is resized via assign().
 // Callers should pass a thread-local vector so that the allocation persists
 // across draw calls — after the first frame this is a zero-alloc operation.
-void buildStageUniformBuffer(
+//
+// OPT-7: uses the precomputed layout to avoid per-draw string comparisons.
+// The layout maps struct members directly to uniform locations.
+static void buildStageUniformBuffer(
     std::vector<std::uint8_t>& outBuffer,
     const ShaderReflection& reflection,
-    const std::vector<GLProgramUniformInfo>& uniforms,
-    const std::unordered_map<GLint, GLProgramUniformValue>& uniformValues)
+    const std::unordered_map<GLint, GLProgramUniformValue>& uniformValues,
+    const std::vector<GLProgramObject::UniformLayoutEntry>& layout)
 {
     outBuffer.clear();
     if (reflection.uniformBlocks.empty()) return;
     const auto& block = reflection.uniformBlocks[0];
     if (block.byteSize == 0) return;
 
-    // SPIRV-Cross reports the struct size without trailing padding, but
-    // Metal's MSL compiler pads constant-buffer structs to 16-byte alignment.
-    // Resize the buffer at the padded size so Metal validation passes.
-    // assign() reuses existing capacity when the buffer is large enough,
-    // avoiding heap allocation after the first draw call.
     const std::size_t paddedSize = (block.byteSize + 15u) & ~std::size_t(15u);
     outBuffer.assign(paddedSize, 0);
 
-    for (const auto& member : block.members) {
-        // Find the GL uniform with this name.
-        const GLProgramUniformValue* val = nullptr;
-        for (const auto& u : uniforms) {
-            if (u.name == member.name) {
-                auto it = uniformValues.find(u.location);
-                if (it != uniformValues.end()) {
-                    val = &it->second;
-                }
-                break;
-            }
-        }
-        if (val == nullptr) continue;
+    for (const auto& entry : layout) {
+        if (entry.location < 0) continue;
+
+        auto it = uniformValues.find(entry.location);
+        if (it == uniformValues.end()) continue;
+        const auto& val = it->second;
 
         // Determine which data vector to use based on what's populated.
         const void* srcData = nullptr;
         std::size_t srcBytes = 0;
-        if (!val->floats.empty()) {
-            srcData = val->floats.data();
-            srcBytes = val->floats.size() * sizeof(GLfloat);
-        } else if (!val->ints.empty()) {
-            srcData = val->ints.data();
-            srcBytes = val->ints.size() * sizeof(GLint);
-        } else if (!val->uints.empty()) {
-            srcData = val->uints.data();
-            srcBytes = val->uints.size() * sizeof(GLuint);
+        if (!val.floats.empty()) {
+            srcData = val.floats.data();
+            srcBytes = val.floats.size() * sizeof(GLfloat);
+        } else if (!val.ints.empty()) {
+            srcData = val.ints.data();
+            srcBytes = val.ints.size() * sizeof(GLint);
+        } else if (!val.uints.empty()) {
+            srcData = val.uints.data();
+            srcBytes = val.uints.size() * sizeof(GLuint);
         } else {
-            continue; // no data
+            continue;
         }
 
-        std::uint8_t* dst = outBuffer.data() + member.offset;
+        std::uint8_t* dst = outBuffer.data() + entry.memberOffset;
 
-        // mat3 needs special handling: GL stores 9 tightly-packed floats
-        // (3 columns × 3 rows).  Metal std140 stores 3 columns of vec4
-        // (each column padded from 12 to 16 bytes) = 48 bytes total.
-        if (member.type == GL_FLOAT_MAT3 && val->floats.size() >= 9 && member.size == 48) {
+        // mat3: GL stores 9 packed floats; Metal std140 stores 3 vec4 columns.
+        if (entry.isMat3Padded && val.floats.size() >= 9) {
             for (int col = 0; col < 3; ++col) {
-                const float* src = val->floats.data() + col * 3;
-                std::memcpy(dst + col * 16, src, 3 * sizeof(float));
-                // 4th float (pad) stays zero
+                std::memcpy(dst + col * 16, val.floats.data() + col * 3, 3 * sizeof(float));
             }
             continue;
         }
 
-        // mat2 (2 columns of vec4-padded vec2) — 32 bytes std140.
-        if (member.type == GL_FLOAT_MAT2 && val->floats.size() >= 4 && member.size == 32) {
-            for (int col = 0; col < 2; ++col) {
-                const float* src = val->floats.data() + col * 2;
-                std::memcpy(dst + col * 16, src, 2 * sizeof(float));
-            }
-            continue;
-        }
-
-        // General case: memcpy the smaller of source data and member size.
-        std::memcpy(dst, srcData, std::min(srcBytes, member.size));
+        std::memcpy(dst, srcData, std::min(srcBytes, entry.copyBytes));
     }
 }
 
@@ -5970,16 +5980,26 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                         tdi.vertexAttributeLayouts.push_back(layout);
                     }
 
-                    // Build per-stage uniform buffers using SPIRV-Cross
-                    // reflection to match the GPU-side struct layout.
+                    // OPT-7: compute uniform layout once, reuse every draw.
+                    if (!program->uniformLayoutComputed) {
+                        computeStageUniformLayout(program->vertexUniformLayout,
+                            program->vertexReflection, program->uniforms);
+                        computeStageUniformLayout(program->fragmentUniformLayout,
+                            program->fragmentReflection, program->uniforms);
+                        program->uniformLayoutComputed = true;
+                    }
+
+                    // Build per-stage uniform buffers using the cached layout.
                     // Thread-local scratch buffers retain their allocation
                     // across draw calls — zero heap allocs after warmup.
                     thread_local std::vector<std::uint8_t> vtxUniformScratch;
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
                     buildStageUniformBuffer(vtxUniformScratch,
-                        program->vertexReflection, program->uniforms, program->uniformValues);
+                        program->vertexReflection, program->uniformValues,
+                        program->vertexUniformLayout);
                     buildStageUniformBuffer(fragUniformScratch,
-                        program->fragmentReflection, program->uniforms, program->uniformValues);
+                        program->fragmentReflection, program->uniformValues,
+                        program->fragmentUniformLayout);
                     tdi.vertexUniformData = vtxUniformScratch.data();
                     tdi.vertexUniformSize = vtxUniformScratch.size();
                     tdi.fragmentUniformData = fragUniformScratch.data();
@@ -6148,12 +6168,23 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                         }
                     }
 
+                    // OPT-7: compute uniform layout once, reuse every draw.
+                    if (!program->uniformLayoutComputed) {
+                        computeStageUniformLayout(program->vertexUniformLayout,
+                            program->vertexReflection, program->uniforms);
+                        computeStageUniformLayout(program->fragmentUniformLayout,
+                            program->fragmentReflection, program->uniforms);
+                        program->uniformLayoutComputed = true;
+                    }
+
                     thread_local std::vector<std::uint8_t> vtxUniformScratch;
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
                     buildStageUniformBuffer(vtxUniformScratch,
-                        program->vertexReflection, program->uniforms, program->uniformValues);
+                        program->vertexReflection, program->uniformValues,
+                        program->vertexUniformLayout);
                     buildStageUniformBuffer(fragUniformScratch,
-                        program->fragmentReflection, program->uniforms, program->uniformValues);
+                        program->fragmentReflection, program->uniformValues,
+                        program->fragmentUniformLayout);
                     tdi.vertexUniformData = vtxUniformScratch.data();
                     tdi.vertexUniformSize = vtxUniformScratch.size();
                     tdi.fragmentUniformData = fragUniformScratch.data();
@@ -6302,12 +6333,23 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         tdi.vertexAttributeLayouts.push_back(layout);
                     }
 
+                    // OPT-7: compute uniform layout once, reuse every draw.
+                    if (!program->uniformLayoutComputed) {
+                        computeStageUniformLayout(program->vertexUniformLayout,
+                            program->vertexReflection, program->uniforms);
+                        computeStageUniformLayout(program->fragmentUniformLayout,
+                            program->fragmentReflection, program->uniforms);
+                        program->uniformLayoutComputed = true;
+                    }
+
                     thread_local std::vector<std::uint8_t> vtxUniformScratch;
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
                     buildStageUniformBuffer(vtxUniformScratch,
-                        program->vertexReflection, program->uniforms, program->uniformValues);
+                        program->vertexReflection, program->uniformValues,
+                        program->vertexUniformLayout);
                     buildStageUniformBuffer(fragUniformScratch,
-                        program->fragmentReflection, program->uniforms, program->uniformValues);
+                        program->fragmentReflection, program->uniformValues,
+                        program->fragmentUniformLayout);
                     tdi.vertexUniformData = vtxUniformScratch.data();
                     tdi.vertexUniformSize = vtxUniformScratch.size();
                     tdi.fragmentUniformData = fragUniformScratch.data();

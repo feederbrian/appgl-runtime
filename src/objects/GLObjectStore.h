@@ -279,6 +279,20 @@ struct GLProgramObject {
 
     // GL 4.3 SSBO binding remapping (block index → user-specified binding).
     std::unordered_map<GLuint, GLuint> ssboBindingRemap;
+
+    // ── Precomputed uniform layout (OPT-7) ──
+    // Maps push-constant struct members to GL uniform locations, eliminating
+    // O(N*M) string comparisons from the per-draw uniform packing path.
+    // Computed lazily on first draw and reused for all subsequent draws.
+    struct UniformLayoutEntry {
+        std::size_t memberOffset = 0;   // byte offset in push-constant struct
+        std::size_t copyBytes = 0;      // bytes to memcpy (0 = skip)
+        GLint location = -1;            // GL uniform location for value lookup
+        bool isMat3Padded = false;      // needs col-by-col padding (12->16 bytes/col)
+    };
+    std::vector<UniformLayoutEntry> vertexUniformLayout;
+    std::vector<UniformLayoutEntry> fragmentUniformLayout;
+    bool uniformLayoutComputed = false;
 };
 
 struct GLQueryObject {
