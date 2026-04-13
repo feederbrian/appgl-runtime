@@ -5204,6 +5204,248 @@ private:
     int vertCount_ = 0;
 };
 
+// ---------------------------------------------------------------------------
+// GL 4.6 Zero-Bind DSA Scene — exercises GL 4.5 DSA creation + separated
+// vertex format + GL 4.1 glProgramUniform* + GL 4.6 glPolygonOffsetClamp.
+// Three Phong-lit spheres set up entirely without glBind* at init time.
+// ---------------------------------------------------------------------------
+class GL46ZeroBindDSAScene final : public Scene {
+public:
+    std::string id() const override { return "phase-7.gl46-zero-bind-dsa"; }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {256, 256}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        const char* vsSrc =
+            "#version 460 core\n"
+            "layout(location = 0) in vec3 aPosition;\n"
+            "layout(location = 1) in vec3 aNormal;\n"
+            "uniform mat4 uMVP;\n"
+            "uniform mat4 uModelMatrix;\n"
+            "uniform mat3 uNormalMatrix;\n"
+            "out vec3 vWorldPos;\n"
+            "out vec3 vNormal;\n"
+            "void main() {\n"
+            "    vec4 worldPos = uModelMatrix * vec4(aPosition, 1.0);\n"
+            "    vWorldPos = worldPos.xyz;\n"
+            "    vNormal = normalize(uNormalMatrix * aNormal);\n"
+            "    gl_Position = uMVP * vec4(aPosition, 1.0);\n"
+            "}\n";
+        const char* fsSrc =
+            "#version 460 core\n"
+            "in vec3 vWorldPos;\n"
+            "in vec3 vNormal;\n"
+            "uniform vec3 uLightPos;\n"
+            "uniform vec3 uLightColor;\n"
+            "uniform vec3 uViewPos;\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    float ambientStrength = 0.15;\n"
+            "    vec3 ambient = ambientStrength * uLightColor;\n"
+            "    vec3 norm = normalize(vNormal);\n"
+            "    vec3 lightDir = normalize(uLightPos - vWorldPos);\n"
+            "    float diff = max(dot(norm, lightDir), 0.0);\n"
+            "    vec3 diffuse = diff * uLightColor;\n"
+            "    float specularStrength = 0.6;\n"
+            "    vec3 viewDir = normalize(uViewPos - vWorldPos);\n"
+            "    vec3 halfDir = normalize(lightDir + viewDir);\n"
+            "    float spec = pow(max(dot(norm, halfDir), 0.0), 64.0);\n"
+            "    vec3 specular = specularStrength * spec * uLightColor;\n"
+            "    vec3 result = (ambient + diffuse + specular) * uColor.rgb;\n"
+            "    fragColor = vec4(result, uColor.a);\n"
+            "}\n";
+
+        GLuint vs = gl.glCreateShader(GL_VERTEX_SHADER);
+        gl.glShaderSource(vs, 1, &vsSrc, nullptr);
+        gl.glCompileShader(vs);
+        GLuint fs = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(fs, 1, &fsSrc, nullptr);
+        gl.glCompileShader(fs);
+        program_ = gl.glCreateProgram();
+        gl.glAttachShader(program_, vs);
+        gl.glAttachShader(program_, fs);
+        gl.glLinkProgram(program_);
+        gl.glDeleteShader(vs);
+        gl.glDeleteShader(fs);
+
+        mvpLoc_        = gl.glGetUniformLocation(program_, "uMVP");
+        modelMatLoc_   = gl.glGetUniformLocation(program_, "uModelMatrix");
+        normalMatLoc_  = gl.glGetUniformLocation(program_, "uNormalMatrix");
+        lightPosLoc_   = gl.glGetUniformLocation(program_, "uLightPos");
+        lightColorLoc_ = gl.glGetUniformLocation(program_, "uLightColor");
+        viewPosLoc_    = gl.glGetUniformLocation(program_, "uViewPos");
+        colorLoc_      = gl.glGetUniformLocation(program_, "uColor");
+
+        // Generate sphere geometry (interleaved pos + normal).
+        const float pi = 3.14159265f;
+        const int seg = 24, rings = 12;
+        const float radius = 0.6f;
+        for (int ri = 0; ri < rings; ++ri) {
+            float t0 = pi * float(ri)   / float(rings);
+            float t1 = pi * float(ri+1) / float(rings);
+            for (int si = 0; si < seg; ++si) {
+                float p0 = 2*pi*float(si)  /float(seg);
+                float p1 = 2*pi*float(si+1)/float(seg);
+                auto pushV = [&](float theta, float phi) {
+                    float x = radius * std::sin(theta) * std::cos(phi);
+                    float y = radius * std::cos(theta);
+                    float z = radius * std::sin(theta) * std::sin(phi);
+                    float nx = std::sin(theta) * std::cos(phi);
+                    float ny = std::cos(theta);
+                    float nz = std::sin(theta) * std::sin(phi);
+                    sphereData_.insert(sphereData_.end(), {x, y, z, nx, ny, nz});
+                };
+                pushV(t0, p0); pushV(t1, p0); pushV(t1, p1);
+                pushV(t0, p0); pushV(t1, p1); pushV(t0, p1);
+            }
+        }
+        vertCount_ = static_cast<int>(sphereData_.size()) / 6;
+
+        // ── GL 4.5 Zero-Bind DSA buffer + VAO setup ──
+        // No glBindBuffer or glBindVertexArray during setup.
+        gl.glCreateBuffers(1, &vbo_);                              // GL 4.5
+        gl.glNamedBufferStorage(vbo_,                              // GL 4.4/4.5
+            static_cast<GLsizeiptr>(sphereData_.size() * sizeof(float)),
+            sphereData_.data(), 0);
+
+        gl.glCreateVertexArrays(1, &vao_);                         // GL 4.5
+
+        const GLsizei stride = 6 * sizeof(float);
+        gl.glVertexArrayVertexBuffer(vao_, 0, vbo_, 0, stride);    // GL 4.5
+
+        // Attribute 0: position (vec3 at offset 0)
+        gl.glVertexArrayAttribFormat(vao_, 0, 3, GL_FLOAT, GL_FALSE, 0);
+        gl.glVertexArrayAttribBinding(vao_, 0, 0);
+        gl.glEnableVertexArrayAttrib(vao_, 0);
+
+        // Attribute 1: normal (vec3 at offset 12)
+        gl.glVertexArrayAttribFormat(vao_, 1, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float));
+        gl.glVertexArrayAttribBinding(vao_, 1, 0);
+        gl.glEnableVertexArrayAttrib(vao_, 1);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        gl.glViewport(0, 0, 256, 256);
+
+        // GL 4.1 float-precision depth functions
+        gl.glClearDepthf(1.0f);                                    // GL 4.1
+        gl.glDepthRangef(0.0f, 1.0f);                             // GL 4.1
+
+        gl.glClearColor(0.06f, 0.04f, 0.10f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        gl.glEnable(GL_DEPTH_TEST);
+
+        // Shared lighting — set via DSA before glUseProgram.
+        gl.glProgramUniform3f(program_, lightPosLoc_,  3.0f, 4.0f, 2.0f);
+        gl.glProgramUniform3f(program_, lightColorLoc_, 1.0f, 0.95f, 0.9f);
+        gl.glProgramUniform3f(program_, viewPosLoc_,   0.0f, 0.0f, 5.0f);
+
+        gl.glUseProgram(program_);
+
+        // GL 4.6: polygon offset with clamp
+        gl.glEnable(GL_POLYGON_OFFSET_FILL);
+        gl.glPolygonOffsetClamp(1.0f, 1.0f, 0.01f);              // GL 4.6
+
+        gl.glBindVertexArray(vao_);
+
+        // Projection matrix
+        float proj[16] = {};
+        float fov = 0.785f, f = 1.0f / std::tan(fov * 0.5f);
+        proj[0] = f; proj[5] = f; proj[10] = -1.02f; proj[11] = -1.0f; proj[14] = -0.2f;
+
+        // View translation (z = -5)
+        float viewT[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-5,1};
+
+        // Draw three spheres: ruby, emerald, sapphire
+        struct ObjDef { float tx; float r, g, b; };
+        ObjDef objects[] = {
+            { -1.5f,  0.85f, 0.25f, 0.30f },
+            {  0.0f,  0.25f, 0.80f, 0.35f },
+            {  1.5f,  0.30f, 0.35f, 0.90f },
+        };
+
+        for (const auto& obj : objects) {
+            // Model: translate by (tx, 0, 0)
+            float model[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, obj.tx,0,0,1};
+
+            // view * model
+            float vm[16] = {};
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 4; ++r) {
+                    float s = 0;
+                    for (int k = 0; k < 4; ++k) s += viewT[k*4+r] * model[c*4+k];
+                    vm[c*4+r] = s;
+                }
+
+            // proj * vm
+            float mvp[16] = {};
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 4; ++r) {
+                    float s = 0;
+                    for (int k = 0; k < 4; ++k) s += proj[k*4+r] * vm[c*4+k];
+                    mvp[c*4+r] = s;
+                }
+
+            float normalMat[9] = {model[0], model[1], model[2],
+                                  model[4], model[5], model[6],
+                                  model[8], model[9], model[10]};
+
+            gl.glProgramUniformMatrix4fv(program_, mvpLoc_,      1, GL_FALSE, mvp);
+            gl.glProgramUniformMatrix4fv(program_, modelMatLoc_, 1, GL_FALSE, model);
+            gl.glProgramUniformMatrix3fv(program_, normalMatLoc_,1, GL_FALSE, normalMat);
+            gl.glProgramUniform4f(program_, colorLoc_, obj.r, obj.g, obj.b, 1.0f);
+
+            gl.glDrawArrays(GL_TRIANGLES, 0, vertCount_);
+        }
+
+        gl.glBindVertexArray(0);
+        gl.glDisable(GL_POLYGON_OFFSET_FILL);
+        gl.glUseProgram(0);
+        gl.glDisable(GL_DEPTH_TEST);
+
+        gl.glDeleteBuffers(1, &vbo_);
+        gl.glDeleteVertexArrays(1, &vao_);
+        gl.glDeleteProgram(program_);
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            // GL 4.5 DSA buffer + VAO creation
+            FunctionId::glCreateBuffers, FunctionId::glNamedBufferStorage,
+            FunctionId::glCreateVertexArrays,
+            FunctionId::glVertexArrayVertexBuffer,
+            FunctionId::glVertexArrayAttribFormat,
+            FunctionId::glVertexArrayAttribBinding,
+            FunctionId::glEnableVertexArrayAttrib,
+            // GL 4.1 DSA uniforms
+            FunctionId::glProgramUniformMatrix4fv, FunctionId::glProgramUniformMatrix3fv,
+            FunctionId::glProgramUniform3f, FunctionId::glProgramUniform4f,
+            // GL 4.1 float-precision depth
+            FunctionId::glClearDepthf, FunctionId::glDepthRangef,
+            // GL 4.6
+            FunctionId::glPolygonOffsetClamp,
+            // Core draw
+            FunctionId::glDrawArrays,
+            FunctionId::glClearColor, FunctionId::glClear, FunctionId::glViewport,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLint mvpLoc_ = -1, modelMatLoc_ = -1, normalMatLoc_ = -1;
+    GLint lightPosLoc_ = -1, lightColorLoc_ = -1, viewPosLoc_ = -1, colorLoc_ = -1;
+    GLuint vao_ = 0, vbo_ = 0;
+    std::vector<float> sphereData_;
+    int vertCount_ = 0;
+};
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -5447,6 +5689,8 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(gl33InstancedScene));
         GL41DSAUniformsScene gl41DSAScene;
         tests.push_back(runScene(gl41DSAScene));
+        GL46ZeroBindDSAScene gl46ZeroBindScene;
+        tests.push_back(runScene(gl46ZeroBindScene));
     }
 
     return buildJSON(normalizedPhase, tests);
