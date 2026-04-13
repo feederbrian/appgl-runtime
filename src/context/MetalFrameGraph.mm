@@ -37,6 +37,18 @@ struct MetalFrameGraph::Impl {
         ensureDrawableResources();
     }
 
+    ~Impl() {
+        // End any open render encoder before the autorelease pool reclaims it.
+        // Without this, destroying a context with an in-flight render pass
+        // triggers "Command encoder released without endEncoding".
+        endRenderPass();
+        if (currentCommandBuffer != nil) {
+            [currentCommandBuffer commit];
+            [currentCommandBuffer waitUntilCompleted];
+            currentCommandBuffer = nil;
+        }
+    }
+
     void resize(GLsizei width, GLsizei height) {
         GLsizei newW = width > 0 ? width : 1;
         GLsizei newH = height > 0 ? height : 1;
