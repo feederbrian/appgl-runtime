@@ -6223,3 +6223,15 @@ std::string runBenchmarkJSON() {
 extern "C" std::size_t appglRunGauntletJSON(const char* phaseFilter, char* out, std::size_t cap) {
     return appgl::tests::writeGauntletJSON(phaseFilter != nullptr ? phaseFilter : "", out, cap);
 }
+
+extern "C" std::size_t appglRunBenchmarkJSON(char* out, std::size_t cap) {
+    const std::string payload = appgl::tests::runBenchmarkJSON();
+    const std::size_t required = payload.size() + 1;
+    if (out == nullptr || cap == 0) {
+        return required;
+    }
+    const std::size_t bytesToCopy = std::min(required - 1, cap - 1);
+    std::memcpy(out, payload.data(), bytesToCopy);
+    out[bytesToCopy] = '\0';
+    return required;
+}
