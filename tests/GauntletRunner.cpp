@@ -4416,6 +4416,415 @@ private:
     GLuint vao_ = 0, vbo_ = 0;
 };
 
+// Scene: Physics Collision — runs a simple 5-body bouncing simulation for 120
+// frames and captures the final state. Tests dynamic per-frame uniform updates
+// (one MVP per body per frame) through the translated draw pipeline.
+class PhysicsCollisionScene final : public Scene {
+public:
+    std::string id() const override { return "phase-7.physics-collision"; }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {256, 256}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        const char* vsSrc =
+            "#version 330 core\n"
+            "layout(location = 0) in vec3 aPosition;\n"
+            "uniform mat4 uMVP;\n"
+            "void main() { gl_Position = uMVP * vec4(aPosition, 1.0); }\n";
+        const char* fsSrc =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() { fragColor = uColor; }\n";
+
+        GLuint vs = gl.glCreateShader(GL_VERTEX_SHADER);
+        gl.glShaderSource(vs, 1, &vsSrc, nullptr);
+        gl.glCompileShader(vs);
+        GLuint fs = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(fs, 1, &fsSrc, nullptr);
+        gl.glCompileShader(fs);
+        program_ = gl.glCreateProgram();
+        gl.glAttachShader(program_, vs);
+        gl.glAttachShader(program_, fs);
+        gl.glLinkProgram(program_);
+        gl.glDeleteShader(vs);
+        gl.glDeleteShader(fs);
+
+        colorLoc_ = gl.glGetUniformLocation(program_, "uColor");
+        mvpLoc_   = gl.glGetUniformLocation(program_, "uMVP");
+
+        // Build a small sphere VBO (16 segments × 8 rings)
+        const float pi = 3.14159265f;
+        const int seg = 16, rings = 8;
+        const float r = 1.0f;  // unit sphere, scaled per body
+        for (int ri = 0; ri < rings; ++ri) {
+            float t0 = pi * float(ri) / float(rings);
+            float t1 = pi * float(ri+1) / float(rings);
+            for (int si = 0; si < seg; ++si) {
+                float p0 = 2*pi*float(si)/float(seg);
+                float p1 = 2*pi*float(si+1)/float(seg);
+                auto P = [&](float t, float p) {
+                    sphereVerts_.push_back(r*std::sin(t)*std::cos(p));
+                    sphereVerts_.push_back(r*std::cos(t));
+                    sphereVerts_.push_back(r*std::sin(t)*std::sin(p));
+                };
+                P(t0,p0); P(t1,p0); P(t1,p1);
+                P(t0,p0); P(t1,p1); P(t0,p1);
+            }
+        }
+        sphereVertCount_ = static_cast<int>(sphereVerts_.size()) / 3;
+
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindVertexArray(vao_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(sphereVerts_.size() * sizeof(float)),
+                        sphereVerts_.data(), GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+        gl.glBindVertexArray(0);
+
+        // Initialize 5 bodies
+        struct Init { float px,py,pz,vx,vy,vz; };
+        Init inits[5] = {
+            {-0.8f,  0.5f,  0.0f,  0.8f,  0.5f,  0.3f},
+            { 0.7f, -0.3f,  0.4f, -0.6f,  0.7f, -0.4f},
+            { 0.0f,  0.8f, -0.5f,  0.4f, -0.8f,  0.5f},
+            {-0.5f, -0.6f,  0.6f,  0.7f,  0.3f, -0.6f},
+            { 0.4f,  0.2f, -0.7f, -0.5f, -0.4f,  0.8f},
+        };
+        const float colors[5][4] = {
+            {0.95f, 0.30f, 0.30f, 1.0f}, {0.30f, 0.90f, 0.40f, 1.0f},
+            {0.35f, 0.50f, 0.95f, 1.0f}, {0.95f, 0.85f, 0.30f, 1.0f},
+            {0.80f, 0.35f, 0.90f, 1.0f},
+        };
+        for (int i = 0; i < 5; ++i) {
+            Body b;
+            b.px = inits[i].px; b.py = inits[i].py; b.pz = inits[i].pz;
+            b.vx = inits[i].vx; b.vy = inits[i].vy; b.vz = inits[i].vz;
+            b.radius = 0.18f;
+            std::memcpy(b.color, colors[i], sizeof(b.color));
+            bodies_.push_back(b);
+        }
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        // Run 120 physics steps (deterministic, fixed dt)
+        const float dt = 1.0f / 60.0f;
+        const float ext = 1.5f;
+        for (int frame = 0; frame < 120; ++frame) {
+            for (auto& b : bodies_) {
+                b.px += b.vx * dt; b.py += b.vy * dt; b.pz += b.vz * dt;
+            }
+            // Wall bounce
+            for (auto& b : bodies_) {
+                auto bounce = [&](float& p, float& v) {
+                    if (p - b.radius < -ext) { p = -ext + b.radius; v = std::abs(v); }
+                    if (p + b.radius >  ext) { p =  ext - b.radius; v = -std::abs(v); }
+                };
+                bounce(b.px, b.vx); bounce(b.py, b.vy); bounce(b.pz, b.vz);
+            }
+            // Sphere-sphere collision
+            for (int i = 0; i < 5; ++i) {
+                for (int j = i+1; j < 5; ++j) {
+                    float dx = bodies_[j].px - bodies_[i].px;
+                    float dy = bodies_[j].py - bodies_[i].py;
+                    float dz = bodies_[j].pz - bodies_[i].pz;
+                    float d2 = dx*dx + dy*dy + dz*dz;
+                    float md = bodies_[i].radius + bodies_[j].radius;
+                    if (d2 < md*md && d2 > 1e-6f) {
+                        float d = std::sqrt(d2);
+                        float nx=dx/d, ny=dy/d, nz=dz/d;
+                        float vi = bodies_[i].vx*nx + bodies_[i].vy*ny + bodies_[i].vz*nz;
+                        float vj = bodies_[j].vx*nx + bodies_[j].vy*ny + bodies_[j].vz*nz;
+                        bodies_[i].vx += (vj-vi)*nx; bodies_[i].vy += (vj-vi)*ny; bodies_[i].vz += (vj-vi)*nz;
+                        bodies_[j].vx += (vi-vj)*nx; bodies_[j].vy += (vi-vj)*ny; bodies_[j].vz += (vi-vj)*nz;
+                        float ov = md - d;
+                        bodies_[i].px -= nx*ov*0.5f; bodies_[i].py -= ny*ov*0.5f; bodies_[i].pz -= nz*ov*0.5f;
+                        bodies_[j].px += nx*ov*0.5f; bodies_[j].py += ny*ov*0.5f; bodies_[j].pz += nz*ov*0.5f;
+                    }
+                }
+            }
+        }
+
+        // Render final state
+        gl.glViewport(0, 0, 256, 256);
+        gl.glClearColor(0.06f, 0.06f, 0.08f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        gl.glEnable(GL_DEPTH_TEST);
+        gl.glUseProgram(program_);
+        gl.glBindVertexArray(vao_);
+
+        // Perspective + view
+        float proj[16] = {};
+        float fov = 0.785f, f = 1.0f / std::tan(fov * 0.5f);
+        proj[0] = f; proj[5] = f; proj[10] = -1.02f; proj[11] = -1.0f; proj[14] = -0.2f;
+
+        for (int i = 0; i < 5; ++i) {
+            const auto& b = bodies_[i];
+            float model[16] = {};
+            model[0] = b.radius; model[5] = b.radius; model[10] = b.radius; model[15] = 1;
+            model[12] = b.px; model[13] = b.py; model[14] = b.pz - 5.0f;
+            float mvp[16] = {};
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 4; ++r) {
+                    float s = 0; for (int k = 0; k < 4; ++k) s += proj[k*4+r] * model[c*4+k];
+                    mvp[c*4+r] = s;
+                }
+            gl.glUniformMatrix4fv(mvpLoc_, 1, GL_FALSE, mvp);
+            gl.glUniform4fv(colorLoc_, 1, b.color);
+            gl.glDrawArrays(GL_TRIANGLES, 0, sphereVertCount_);
+        }
+
+        gl.glBindVertexArray(0);
+        gl.glUseProgram(0);
+        gl.glDisable(GL_DEPTH_TEST);
+        gl.glDeleteBuffers(1, &vbo_);
+        gl.glDeleteVertexArrays(1, &vao_);
+        gl.glDeleteProgram(program_);
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glCreateShader, FunctionId::glShaderSource, FunctionId::glCompileShader,
+            FunctionId::glCreateProgram, FunctionId::glAttachShader, FunctionId::glLinkProgram,
+            FunctionId::glDeleteShader, FunctionId::glUseProgram,
+            FunctionId::glGenVertexArrays, FunctionId::glBindVertexArray, FunctionId::glDeleteVertexArrays,
+            FunctionId::glGenBuffers, FunctionId::glBindBuffer, FunctionId::glBufferData, FunctionId::glDeleteBuffers,
+            FunctionId::glEnableVertexAttribArray, FunctionId::glVertexAttribPointer,
+            FunctionId::glUniformMatrix4fv, FunctionId::glUniform4fv,
+            FunctionId::glDrawArrays,
+            FunctionId::glEnable, FunctionId::glDisable,
+            FunctionId::glClearColor, FunctionId::glClear,
+            FunctionId::glViewport,
+            FunctionId::glGetUniformLocation,
+        };
+    }
+
+private:
+    struct Body { float px,py,pz,vx,vy,vz,radius; float color[4]; };
+    GLuint program_ = 0;
+    GLint colorLoc_ = -1, mvpLoc_ = -1;
+    GLuint vao_ = 0, vbo_ = 0;
+    std::vector<float> sphereVerts_;
+    int sphereVertCount_ = 0;
+    std::vector<Body> bodies_;
+};
+
+// Scene: Lighting Phong — renders a Blinn-Phong lit sphere with per-fragment
+// shading. Tests the multi-uniform pipeline: uMVP, uModelMatrix, uNormalMatrix
+// (mat3), uLightPos, uLightColor, uViewPos (vec3), uColor (vec4) all flowing
+// through GLSL→SPIR-V→MSL translation. Uses interleaved pos+normal vertex data
+// with two vertex attributes.
+class LightingPhongScene final : public Scene {
+public:
+    std::string id() const override { return "phase-7.lighting-phong"; }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {256, 256}; }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        const char* vsSrc =
+            "#version 330 core\n"
+            "layout(location = 0) in vec3 aPosition;\n"
+            "layout(location = 1) in vec3 aNormal;\n"
+            "uniform mat4 uMVP;\n"
+            "uniform mat4 uModelMatrix;\n"
+            "uniform mat3 uNormalMatrix;\n"
+            "out vec3 vWorldPos;\n"
+            "out vec3 vNormal;\n"
+            "void main() {\n"
+            "    vec4 worldPos = uModelMatrix * vec4(aPosition, 1.0);\n"
+            "    vWorldPos = worldPos.xyz;\n"
+            "    vNormal = normalize(uNormalMatrix * aNormal);\n"
+            "    gl_Position = uMVP * vec4(aPosition, 1.0);\n"
+            "}\n";
+        const char* fsSrc =
+            "#version 330 core\n"
+            "in vec3 vWorldPos;\n"
+            "in vec3 vNormal;\n"
+            "uniform vec3 uLightPos;\n"
+            "uniform vec3 uLightColor;\n"
+            "uniform vec3 uViewPos;\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    float ambientStrength = 0.15;\n"
+            "    vec3 ambient = ambientStrength * uLightColor;\n"
+            "    vec3 norm = normalize(vNormal);\n"
+            "    vec3 lightDir = normalize(uLightPos - vWorldPos);\n"
+            "    float diff = max(dot(norm, lightDir), 0.0);\n"
+            "    vec3 diffuse = diff * uLightColor;\n"
+            "    float specularStrength = 0.5;\n"
+            "    vec3 viewDir = normalize(uViewPos - vWorldPos);\n"
+            "    vec3 halfDir = normalize(lightDir + viewDir);\n"
+            "    float spec = pow(max(dot(norm, halfDir), 0.0), 32.0);\n"
+            "    vec3 specular = specularStrength * spec * uLightColor;\n"
+            "    vec3 result = (ambient + diffuse + specular) * uColor.rgb;\n"
+            "    fragColor = vec4(result, uColor.a);\n"
+            "}\n";
+
+        GLuint vs = gl.glCreateShader(GL_VERTEX_SHADER);
+        gl.glShaderSource(vs, 1, &vsSrc, nullptr);
+        gl.glCompileShader(vs);
+        GLuint fs = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(fs, 1, &fsSrc, nullptr);
+        gl.glCompileShader(fs);
+        program_ = gl.glCreateProgram();
+        gl.glAttachShader(program_, vs);
+        gl.glAttachShader(program_, fs);
+        gl.glLinkProgram(program_);
+        gl.glDeleteShader(vs);
+        gl.glDeleteShader(fs);
+
+        mvpLoc_         = gl.glGetUniformLocation(program_, "uMVP");
+        modelMatLoc_    = gl.glGetUniformLocation(program_, "uModelMatrix");
+        normalMatLoc_   = gl.glGetUniformLocation(program_, "uNormalMatrix");
+        lightPosLoc_    = gl.glGetUniformLocation(program_, "uLightPos");
+        lightColorLoc_  = gl.glGetUniformLocation(program_, "uLightColor");
+        viewPosLoc_     = gl.glGetUniformLocation(program_, "uViewPos");
+        colorLoc_       = gl.glGetUniformLocation(program_, "uColor");
+
+        // Generate sphere with interleaved pos+normal (stride = 6 floats)
+        const float pi = 3.14159265f;
+        const int seg = 32, rings = 16;
+        const float radius = 0.8f;
+        for (int ri = 0; ri < rings; ++ri) {
+            float t0 = pi * float(ri) / float(rings);
+            float t1 = pi * float(ri+1) / float(rings);
+            for (int si = 0; si < seg; ++si) {
+                float p0 = 2*pi*float(si)/float(seg);
+                float p1 = 2*pi*float(si+1)/float(seg);
+                auto V = [&](float t, float p) {
+                    float nx = std::sin(t)*std::cos(p);
+                    float ny = std::cos(t);
+                    float nz = std::sin(t)*std::sin(p);
+                    sphereData_.push_back(radius*nx);
+                    sphereData_.push_back(radius*ny);
+                    sphereData_.push_back(radius*nz);
+                    sphereData_.push_back(nx);
+                    sphereData_.push_back(ny);
+                    sphereData_.push_back(nz);
+                };
+                V(t0,p0); V(t1,p0); V(t1,p1);
+                V(t0,p0); V(t1,p1); V(t0,p1);
+            }
+        }
+        vertCount_ = static_cast<int>(sphereData_.size()) / 6;
+
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindVertexArray(vao_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(sphereData_.size() * sizeof(float)),
+                        sphereData_.data(), GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), nullptr);
+        gl.glEnableVertexAttribArray(1);
+        gl.glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                                 reinterpret_cast<void*>(3 * sizeof(float)));
+        gl.glBindVertexArray(0);
+    }
+
+    void render(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        gl.glViewport(0, 0, 256, 256);
+        gl.glClearColor(0.04f, 0.04f, 0.06f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        gl.glEnable(GL_DEPTH_TEST);
+
+        gl.glUseProgram(program_);
+
+        // Identity model matrix (sphere centered at origin)
+        float model[16] = {};
+        model[0] = 1; model[5] = 1; model[10] = 1; model[15] = 1;
+
+        // Perspective + view (z = -3)
+        float proj[16] = {};
+        float fov = 0.785f, f = 1.0f / std::tan(fov * 0.5f);
+        proj[0] = f; proj[5] = f; proj[10] = -1.02f; proj[11] = -1.0f; proj[14] = -0.2f;
+
+        float viewModel[16] = {};
+        std::memcpy(viewModel, model, sizeof(model));
+        viewModel[14] = -3.0f;  // translate z
+
+        float mvp[16] = {};
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r) {
+                float s = 0;
+                for (int k = 0; k < 4; ++k) s += proj[k*4+r] * viewModel[c*4+k];
+                mvp[c*4+r] = s;
+            }
+
+        gl.glUniformMatrix4fv(mvpLoc_, 1, GL_FALSE, mvp);
+        gl.glUniformMatrix4fv(modelMatLoc_, 1, GL_FALSE, model);
+
+        // Normal matrix = upper-left 3×3 of model (identity for unit sphere)
+        float normalMat[9] = {model[0], model[1], model[2],
+                              model[4], model[5], model[6],
+                              model[8], model[9], model[10]};
+        gl.glUniformMatrix3fv(normalMatLoc_, 1, GL_FALSE, normalMat);
+
+        // Fixed light at upper-right-front
+        float lightPos[3] = {3.0f, 2.0f, 3.0f};
+        float lightColor[3] = {1.0f, 0.95f, 0.85f};
+        float viewPos[3] = {0.0f, 0.0f, 3.0f};
+        float objColor[4] = {0.35f, 0.55f, 0.95f, 1.0f};
+
+        gl.glUniform3fv(lightPosLoc_, 1, lightPos);
+        gl.glUniform3fv(lightColorLoc_, 1, lightColor);
+        gl.glUniform3fv(viewPosLoc_, 1, viewPos);
+        gl.glUniform4fv(colorLoc_, 1, objColor);
+
+        gl.glBindVertexArray(vao_);
+        gl.glDrawArrays(GL_TRIANGLES, 0, vertCount_);
+        gl.glBindVertexArray(0);
+
+        gl.glUseProgram(0);
+        gl.glDisable(GL_DEPTH_TEST);
+
+        gl.glDeleteBuffers(1, &vbo_);
+        gl.glDeleteVertexArrays(1, &vao_);
+        gl.glDeleteProgram(program_);
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glCreateShader, FunctionId::glShaderSource, FunctionId::glCompileShader,
+            FunctionId::glCreateProgram, FunctionId::glAttachShader, FunctionId::glLinkProgram,
+            FunctionId::glDeleteShader, FunctionId::glUseProgram,
+            FunctionId::glGenVertexArrays, FunctionId::glBindVertexArray, FunctionId::glDeleteVertexArrays,
+            FunctionId::glGenBuffers, FunctionId::glBindBuffer, FunctionId::glBufferData, FunctionId::glDeleteBuffers,
+            FunctionId::glEnableVertexAttribArray, FunctionId::glVertexAttribPointer,
+            FunctionId::glUniformMatrix4fv, FunctionId::glUniformMatrix3fv,
+            FunctionId::glUniform3fv, FunctionId::glUniform4fv,
+            FunctionId::glDrawArrays,
+            FunctionId::glEnable, FunctionId::glDisable,
+            FunctionId::glClearColor, FunctionId::glClear,
+            FunctionId::glViewport,
+            FunctionId::glGetUniformLocation,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLint mvpLoc_ = -1, modelMatLoc_ = -1, normalMatLoc_ = -1;
+    GLint lightPosLoc_ = -1, lightColorLoc_ = -1, viewPosLoc_ = -1, colorLoc_ = -1;
+    GLuint vao_ = 0, vbo_ = 0;
+    std::vector<float> sphereData_;
+    int vertCount_ = 0;
+};
+
 void appendCoverageDelta(TestResult& result, const std::string& phase) {
     // Bootstrap coverage checks only apply to phase-a scenes. Phase-c and later
     // scenes validate their own scenarioCoverage() list; requiring the full
@@ -4651,6 +5060,10 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(polygonObjectsScene));
         ObjectCountStressScene objectCountStressScene;
         tests.push_back(runScene(objectCountStressScene));
+        PhysicsCollisionScene physicsCollisionScene;
+        tests.push_back(runScene(physicsCollisionScene));
+        LightingPhongScene lightingPhongScene;
+        tests.push_back(runScene(lightingPhongScene));
     }
 
     return buildJSON(normalizedPhase, tests);

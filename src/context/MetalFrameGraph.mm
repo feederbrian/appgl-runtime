@@ -278,6 +278,7 @@ struct MetalFrameGraph::Impl {
             [encoder setCullMode:MTLCullModeNone];
         }
         [encoder setFrontFacingWinding:info.frontFace == GL_CW ? MTLWindingClockwise : MTLWindingCounterClockwise];
+        [encoder setTriangleFillMode:info.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
 
         // Vertex positions are pushed as inline bytes (fits in Metal's 4KB limit
         // for every fixture we ship in Phase A). Attribute 0 lives in buffer 0.
@@ -396,7 +397,10 @@ struct MetalFrameGraph::Impl {
                 return false;
             }
 
-            // Build vertex descriptor from reflection data.
+            // Build vertex descriptor from reflection data.  All vertex
+            // attributes share a single interleaved VBO at Metal buffer 0.
+            // The per-attribute byte offsets within one stride come from the
+            // VAO layout captured in vertexAttributeLayouts.
             MTLVertexDescriptor* vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
             if (info.vertexReflection != nullptr) {
                 for (const auto& input : info.vertexReflection->vertexInputs) {
@@ -412,15 +416,21 @@ struct MetalFrameGraph::Impl {
                         case GL_INT_VEC4:   format = MTLVertexFormatInt4;   break;
                         default:            format = MTLVertexFormatFloat3; break;
                     }
+
+                    // Look up the byte offset for this attribute from the VAO.
+                    NSUInteger attrOffset = 0;
+                    for (const auto& layout : info.vertexAttributeLayouts) {
+                        if (layout.location == input.location) {
+                            attrOffset = static_cast<NSUInteger>(layout.offset);
+                            break;
+                        }
+                    }
+
                     vertexDescriptor.attributes[input.location].format = format;
-                    vertexDescriptor.attributes[input.location].offset = 0;
-                    vertexDescriptor.attributes[input.location].bufferIndex = input.location;
+                    vertexDescriptor.attributes[input.location].offset = attrOffset;
+                    vertexDescriptor.attributes[input.location].bufferIndex = 0;
                 }
             }
-            // For now, all vertex attributes share buffer index 0 with interleaved layout.
-            // Override: single VBO at index 0 with the position stride.
-            vertexDescriptor.attributes[0].bufferIndex = 0;
-            vertexDescriptor.attributes[0].offset = 0;
             const NSUInteger stride = info.vertexStride > 0
                 ? info.vertexStride
                 : sizeof(float) * 3u;
@@ -527,6 +537,7 @@ struct MetalFrameGraph::Impl {
             [currentRenderEncoder setCullMode:MTLCullModeNone];
         }
         [currentRenderEncoder setFrontFacingWinding:info.frontFace == GL_CW ? MTLWindingClockwise : MTLWindingCounterClockwise];
+        [currentRenderEncoder setTriangleFillMode:info.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
 
         // Bind vertex data at buffer index 0.
         if (info.vertexDataByteCount <= 4096) {
@@ -541,13 +552,18 @@ struct MetalFrameGraph::Impl {
             [currentRenderEncoder setVertexBuffer:vb offset:0 atIndex:0];
         }
 
-        // Bind uniform buffer at the uniformBufferBase slot (Metal buffer 16).
-        // SPIRV-Cross maps the global uniform block (wrapping bare uniforms)
-        // to this UBO slot.
-        if (!info.uniformBuffer.empty()) {
-            const std::size_t uniformBytes = info.uniformBuffer.size() * sizeof(float);
-            [currentRenderEncoder setVertexBytes:info.uniformBuffer.data() length:uniformBytes atIndex:16];
-            [currentRenderEncoder setFragmentBytes:info.uniformBuffer.data() length:uniformBytes atIndex:16];
+        // Bind per-stage uniform buffers at Metal buffer index 16.
+        // Each stage has its own push-constant struct layout (they may
+        // declare different subsets of the program's bare GL uniforms).
+        if (!info.vertexUniformBuffer.empty()) {
+            [currentRenderEncoder setVertexBytes:info.vertexUniformBuffer.data()
+                                          length:info.vertexUniformBuffer.size()
+                                         atIndex:16];
+        }
+        if (!info.fragmentUniformBuffer.empty()) {
+            [currentRenderEncoder setFragmentBytes:info.fragmentUniformBuffer.data()
+                                            length:info.fragmentUniformBuffer.size()
+                                           atIndex:16];
         }
 
         const MTLPrimitiveType primitive = (info.mode == GL_TRIANGLE_STRIP)

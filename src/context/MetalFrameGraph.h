@@ -46,6 +46,7 @@ struct MetalDrawInfo {
     bool cullFaceEnabled = false;
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
+    bool wireframe = false;
     // Diagnostic string that identifies the caller for error messages.
     std::string debugLabel;
 };
@@ -61,14 +62,28 @@ struct TranslatedDrawInfo {
     std::size_t vertexDataByteCount = 0;
     std::size_t vertexStride = 0;
 
+    // Per-attribute layout within the interleaved vertex buffer.  Each entry
+    // describes one enabled vertex attribute's location and its byte offset
+    // within a single stride.  When non-empty, all attributes map to Metal
+    // buffer index 0 with these offsets; when empty, the legacy single-
+    // attribute (position-only, offset 0) behaviour is used.
+    struct VertexAttributeLayout {
+        GLuint location = 0;
+        std::size_t offset = 0;
+    };
+    std::vector<VertexAttributeLayout> vertexAttributeLayouts;
+
     // Indexed draws (nullptr for glDrawArrays).
     const void* indices = nullptr;
     GLsizei indexCount = 0;
     GLenum indexType = 0;
 
-    // Uniform data — packed floats for the push-constant buffer.  The layout
-    // matches the SPIRV-Cross-generated struct order.
-    std::vector<float> uniformBuffer;
+    // Per-stage uniform data laid out to match the SPIRV-Cross-generated
+    // push-constant struct.  Each stage gets its own buffer because the
+    // vertex and fragment stages may declare different subsets of the
+    // program's bare uniforms, producing different struct layouts.
+    std::vector<std::uint8_t> vertexUniformBuffer;
+    std::vector<std::uint8_t> fragmentUniformBuffer;
 
     // Pipeline state toggles.
     bool depthTestEnabled = false;
@@ -76,6 +91,7 @@ struct TranslatedDrawInfo {
     bool cullFaceEnabled = false;
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
+    bool wireframe = false;
 
     // Translated MSL + reflection (borrowed from GLProgramObject).
     const std::string* vertexMSL = nullptr;

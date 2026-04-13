@@ -2087,6 +2087,11 @@ void GLContext::setFrontFace(GLenum mode) {
     impl_->state->setFrontFace(mode);
 }
 
+void GLContext::setPolygonMode(GLenum face, GLenum mode) {
+    (void)face;  // Metal doesn't distinguish front/back fill modes
+    impl_->state->setPolygonFillMode(mode);
+}
+
 void GLContext::setPolygonOffset(GLfloat factor, GLfloat units) {
     impl_->state->setPolygonOffset(factor, units);
 }
@@ -5638,6 +5643,66 @@ bool GLContext::getUniformdv(GLuint program, GLint location, GLdouble* params) {
 
 namespace {
 
+// Build a correctly-laid-out uniform buffer for one shader stage by matching
+// SPIRV-Cross struct members (with their std140 offsets/sizes) against the
+// program's named GL uniform values.  Handles the mat3 column-padding case
+// (GL stores 9 floats; Metal/std140 stores 3 columns × 4 floats = 12).
+std::vector<std::uint8_t> buildStageUniformBuffer(
+    const ShaderReflection& reflection,
+    const std::vector<GLProgramUniformInfo>& uniforms,
+    const std::unordered_map<GLint, GLProgramUniformValue>& uniformValues)
+{
+    if (reflection.uniformBlocks.empty()) return {};
+    const auto& block = reflection.uniformBlocks[0];
+    if (block.byteSize == 0) return {};
+
+    std::vector<std::uint8_t> buffer(block.byteSize, 0);
+
+    for (const auto& member : block.members) {
+        // Find the GL uniform with this name.
+        const GLProgramUniformValue* val = nullptr;
+        for (const auto& u : uniforms) {
+            if (u.name == member.name) {
+                auto it = uniformValues.find(u.location);
+                if (it != uniformValues.end()) {
+                    val = &it->second;
+                }
+                break;
+            }
+        }
+        if (val == nullptr || val->floats.empty()) continue;
+
+        std::uint8_t* dst = buffer.data() + member.offset;
+
+        // mat3 needs special handling: GL stores 9 tightly-packed floats
+        // (3 columns × 3 rows).  Metal std140 stores 3 columns of vec4
+        // (each column padded from 12 to 16 bytes) = 48 bytes total.
+        if (member.type == GL_FLOAT_MAT3 && val->floats.size() >= 9 && member.size == 48) {
+            for (int col = 0; col < 3; ++col) {
+                const float* src = val->floats.data() + col * 3;
+                std::memcpy(dst + col * 16, src, 3 * sizeof(float));
+                // 4th float (pad) stays zero
+            }
+            continue;
+        }
+
+        // mat2 (2 columns of vec4-padded vec2) — 32 bytes std140.
+        if (member.type == GL_FLOAT_MAT2 && val->floats.size() >= 4 && member.size == 32) {
+            for (int col = 0; col < 2; ++col) {
+                const float* src = val->floats.data() + col * 2;
+                std::memcpy(dst + col * 16, src, 2 * sizeof(float));
+            }
+            continue;
+        }
+
+        // General case: memcpy the smaller of GL data and member size.
+        const std::size_t glBytes = val->floats.size() * sizeof(float);
+        std::memcpy(dst, val->floats.data(), std::min(glBytes, member.size));
+    }
+
+    return buffer;
+}
+
 // Phase A Group 7 — MVP draw path. Until the GLSL→MSL translator is wired up,
 // the runtime supports one hand-written "solid color" pipeline: a single
 // vec3 position attribute at location 0 plus a vec4 uniform named "uColor".
@@ -5731,6 +5796,7 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStor
     setup.info.cullFaceEnabled = state.isEnabled(GL_CULL_FACE);
     setup.info.cullFaceMode = state.rasterState().cullFaceMode;
     setup.info.frontFace = state.rasterState().frontFace;
+    setup.info.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
     if (debugLabel != nullptr) {
         setup.info.debugLabel = debugLabel;
     }
@@ -5798,6 +5864,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);
                     tdi.cullFaceMode = impl_->state->rasterState().cullFaceMode;
                     tdi.frontFace = impl_->state->rasterState().frontFace;
+                    tdi.wireframe = (impl_->state->rasterState().polygonFillMode == GL_LINE);
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -5805,25 +5872,25 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
 
-                    // Pack all uniform values into a single buffer matching the
-                    // SPIRV-Cross push-constant struct layout.  For simple programs
-                    // the uniforms are laid out in declaration order.
-                    for (const auto& uniform : program->uniforms) {
-                        auto it = program->uniformValues.find(uniform.location);
-                        if (it != program->uniformValues.end()) {
-                            const auto& val = it->second;
-                            if (!val.floats.empty()) {
-                                tdi.uniformBuffer.insert(tdi.uniformBuffer.end(),
-                                    val.floats.begin(), val.floats.end());
-                            } else if (!val.ints.empty()) {
-                                for (GLint v : val.ints) {
-                                    float fv;
-                                    std::memcpy(&fv, &v, sizeof(float));
-                                    tdi.uniformBuffer.push_back(fv);
-                                }
-                            }
-                        }
+                    // Collect per-attribute interleaved layout from the VAO.
+                    // All enabled attributes sharing the same VBO are collapsed
+                    // into Metal buffer 0; their offsets are relative to posAttr.
+                    const std::size_t basePointer = static_cast<std::size_t>(posAttr.pointer);
+                    for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                        const auto& attr = vao->attributes[ai];
+                        if (!attr.enabled || attr.buffer != posAttr.buffer) continue;
+                        TranslatedDrawInfo::VertexAttributeLayout layout;
+                        layout.location = static_cast<GLuint>(ai);
+                        layout.offset = static_cast<std::size_t>(attr.pointer) - basePointer;
+                        tdi.vertexAttributeLayouts.push_back(layout);
                     }
+
+                    // Build per-stage uniform buffers using SPIRV-Cross
+                    // reflection to match the GPU-side struct layout.
+                    tdi.vertexUniformBuffer = buildStageUniformBuffer(
+                        program->vertexReflection, program->uniforms, program->uniformValues);
+                    tdi.fragmentUniformBuffer = buildStageUniformBuffer(
+                        program->fragmentReflection, program->uniforms, program->uniformValues);
 
                     const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
                     if (ok) {
@@ -5970,6 +6037,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);
                     tdi.cullFaceMode = impl_->state->rasterState().cullFaceMode;
                     tdi.frontFace = impl_->state->rasterState().frontFace;
+                    tdi.wireframe = (impl_->state->rasterState().polygonFillMode == GL_LINE);
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -5977,22 +6045,21 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
 
-                    for (const auto& uniform : program->uniforms) {
-                        auto it = program->uniformValues.find(uniform.location);
-                        if (it != program->uniformValues.end()) {
-                            const auto& val = it->second;
-                            if (!val.floats.empty()) {
-                                tdi.uniformBuffer.insert(tdi.uniformBuffer.end(),
-                                    val.floats.begin(), val.floats.end());
-                            } else if (!val.ints.empty()) {
-                                for (GLint v : val.ints) {
-                                    float fv;
-                                    std::memcpy(&fv, &v, sizeof(float));
-                                    tdi.uniformBuffer.push_back(fv);
-                                }
-                            }
-                        }
+                    // Collect per-attribute interleaved layout from the VAO.
+                    const std::size_t basePointer = static_cast<std::size_t>(posAttr.pointer);
+                    for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                        const auto& attr = vao->attributes[ai];
+                        if (!attr.enabled || attr.buffer != posAttr.buffer) continue;
+                        TranslatedDrawInfo::VertexAttributeLayout layout;
+                        layout.location = static_cast<GLuint>(ai);
+                        layout.offset = static_cast<std::size_t>(attr.pointer) - basePointer;
+                        tdi.vertexAttributeLayouts.push_back(layout);
                     }
+
+                    tdi.vertexUniformBuffer = buildStageUniformBuffer(
+                        program->vertexReflection, program->uniforms, program->uniformValues);
+                    tdi.fragmentUniformBuffer = buildStageUniformBuffer(
+                        program->fragmentReflection, program->uniforms, program->uniformValues);
 
                     const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
                     if (ok) {

@@ -92,6 +92,7 @@ struct GLStencilState {
 struct GLRasterState {
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
+    GLenum polygonFillMode = GL_FILL;   // GL_FILL, GL_LINE, or GL_POINT
     GLfloat polygonOffsetFactor = 0.0f;
     GLfloat polygonOffsetUnits = 0.0f;
     GLfloat lineWidth = 1.0f;
@@ -189,6 +190,7 @@ public:
 
     void setCullFace(GLenum mode);
     void setFrontFace(GLenum mode);
+    void setPolygonFillMode(GLenum mode);
     void setPolygonOffset(GLfloat factor, GLfloat units);
     void setLineWidth(GLfloat width);
     void setPointSize(GLfloat size);

@@ -61,6 +61,7 @@ public:
     void setStencilMaskSeparate(GLenum face, GLuint mask);
     void setCullFace(GLenum mode);
     void setFrontFace(GLenum mode);
+    void setPolygonMode(GLenum face, GLenum mode);
     void setPolygonOffset(GLfloat factor, GLfloat units);
     void setLineWidth(GLfloat width);
     void setPointSize(GLfloat size);

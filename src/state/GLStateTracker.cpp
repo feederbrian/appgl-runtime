@@ -787,6 +787,11 @@ void GLStateTracker::setFrontFace(GLenum mode) {
     markDirty(DirtyBit::RasterState);
 }
 
+void GLStateTracker::setPolygonFillMode(GLenum mode) {
+    raster_.polygonFillMode = mode;
+    markDirty(DirtyBit::RasterState);
+}
+
 void GLStateTracker::setPolygonOffset(GLfloat factor, GLfloat units) {
     raster_.polygonOffsetFactor = factor;
     raster_.polygonOffsetUnits = units;

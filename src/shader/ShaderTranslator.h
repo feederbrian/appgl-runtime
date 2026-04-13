@@ -30,11 +30,23 @@ struct ShaderReflection {
         std::string name;
     };
 
+    // Describes one member inside a UBO / push-constant block.  The offset
+    // and size follow the GPU-side std140 / Metal buffer layout, which may
+    // differ from the tightly packed GL uniform values (e.g. mat3 = 48
+    // bytes on the GPU vs. 36 bytes in GL, vec3 columns padded to 16).
+    struct UniformMember {
+        std::string name;
+        std::size_t offset = 0;   // byte offset within the struct
+        std::size_t size = 0;     // byte size (includes column padding)
+        GLenum type = 0;          // GL type (GL_FLOAT_MAT4, GL_FLOAT_VEC3…)
+    };
+
     struct ResourceBinding {
         GLuint glBinding = 0;
         std::uint32_t metalBinding = 0;
         std::size_t byteSize = 0;
         std::string name;
+        std::vector<UniformMember> members;
     };
 
     std::vector<VertexInput> vertexInputs;

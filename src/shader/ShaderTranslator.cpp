@@ -241,6 +241,18 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             rb.name = ubo.name;
             const auto& type = compiler.get_type(ubo.base_type_id);
             rb.byteSize = compiler.get_declared_struct_size(type);
+
+            // Enumerate struct members for per-stage uniform buffer packing.
+            for (std::uint32_t mi = 0; mi < type.member_types.size(); ++mi) {
+                ShaderReflection::UniformMember member;
+                member.name = compiler.get_member_name(type.self, mi);
+                member.offset = compiler.type_struct_member_offset(type, mi);
+                member.size = compiler.get_declared_struct_member_size(type, mi);
+                const auto& memberType = compiler.get_type(type.member_types[mi]);
+                member.type = spirvBaseTypeToGL(memberType);
+                rb.members.push_back(std::move(member));
+            }
+
             result.uniformBlocks.push_back(std::move(rb));
         }
 
@@ -252,6 +264,19 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             rb.name = pc.name;
             const auto& type = compiler.get_type(pc.base_type_id);
             rb.byteSize = compiler.get_declared_struct_size(type);
+
+            // Enumerate struct members so the draw path can build a
+            // correctly-laid-out buffer for each shader stage.
+            for (std::uint32_t mi = 0; mi < type.member_types.size(); ++mi) {
+                ShaderReflection::UniformMember member;
+                member.name = compiler.get_member_name(type.self, mi);
+                member.offset = compiler.type_struct_member_offset(type, mi);
+                member.size = compiler.get_declared_struct_member_size(type, mi);
+                const auto& memberType = compiler.get_type(type.member_types[mi]);
+                member.type = spirvBaseTypeToGL(memberType);
+                rb.members.push_back(std::move(member));
+            }
+
             result.uniformBlocks.push_back(std::move(rb));
         }
 

@@ -27,8 +27,9 @@ GLContext* currentContextOrNull() {
 // --- Phase 8 stubs (non-query) ---------------------------------------------
 
 static void APIENTRY glPolygonMode(GLenum face, GLenum mode) {
-    (void)face;
-    (void)mode;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->setPolygonMode(face, mode);
 }
 
 static void APIENTRY glFinish(void) {
