@@ -44,6 +44,7 @@ set(APPGL_SOURCES
   src/state/IndexExpansion.cpp
   src/state/MetalVertexDescriptorBuilder.mm
   src/generated/gl_entrypoints.gen.cpp
+  src/generated/gl_procaddress.gen.cpp
 )
 
 set(APPGL_TEST_SUPPORT_SOURCES

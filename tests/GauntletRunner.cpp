@@ -949,6 +949,45 @@ public:
         expectCondition(gl.glGetError() == GL_NO_ERROR,
                         "glTexStorage2D(GL_RGBA16F) accepts the new float format");
         gl.glDeleteTextures(1, &floatTexture);
+
+        // Landing C 3f: appglGetProcAddress is the canonical loader entry
+        // point. Verify a handful of well-known names resolve to non-null
+        // function pointers that match the generated extern "C" symbols,
+        // that unknown names resolve to null, and that a null name is
+        // handled gracefully rather than dereferenced. External loaders
+        // (glad / GLEW / in-engine loaders in BAR/Recoil) depend on all
+        // three behaviors.
+        expectCondition(appglGetProcAddress("glClearColor") != nullptr,
+                        "appglGetProcAddress resolves glClearColor");
+        expectCondition(appglGetProcAddress("glDrawArrays") != nullptr,
+                        "appglGetProcAddress resolves glDrawArrays");
+        expectCondition(appglGetProcAddress("glTexStorage2D") != nullptr,
+                        "appglGetProcAddress resolves glTexStorage2D");
+        expectCondition(appglGetProcAddress("glCullFace") != nullptr,
+                        "appglGetProcAddress resolves glCullFace (table lower bound)");
+        expectCondition(appglGetProcAddress("glWaitSync") != nullptr,
+                        "appglGetProcAddress resolves glWaitSync (table upper bound)");
+        expectCondition(appglGetProcAddress("glBogusEntryPoint") == nullptr,
+                        "appglGetProcAddress returns null for unknown names");
+        expectCondition(appglGetProcAddress(nullptr) == nullptr,
+                        "appglGetProcAddress returns null for a null name");
+
+        // Cross-check that the resolved pointer is actually callable and
+        // routes through the runtime's dispatch table. We drive glClearColor
+        // via the returned function pointer and confirm the subsequent
+        // glGetFloatv(GL_COLOR_CLEAR_VALUE) reflects the new value.
+        using ClearColorFn = void(APIENTRY *)(GLfloat, GLfloat, GLfloat, GLfloat);
+        AppGLProc rawClear = appglGetProcAddress("glClearColor");
+        ClearColorFn resolvedClear = reinterpret_cast<ClearColorFn>(rawClear);
+        expectCondition(resolvedClear != nullptr,
+                        "glClearColor resolved pointer is non-null before cast");
+        const GLfloat probeColor[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+        resolvedClear(probeColor[0], probeColor[1], probeColor[2], probeColor[3]);
+        GLfloat readbackColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        gl.glGetFloatv(GL_COLOR_CLEAR_VALUE, readbackColor);
+        expectCondition(readbackColor[0] == probeColor[0] && readbackColor[1] == probeColor[1]
+                            && readbackColor[2] == probeColor[2] && readbackColor[3] == probeColor[3],
+                        "appglGetProcAddress-resolved glClearColor drives the runtime state");
     }
 
     void render(GLContext& context) override {
