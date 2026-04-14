@@ -1234,6 +1234,78 @@ struct GLContext::Impl {
             ? metalCompareFunction(object.params.compareFunc)
             : MTLCompareFunctionNever;
 
+        // Phase 8X Group 4d follow-up⁹ — targeted override for compat
+        // single-channel glyph formats.
+        //
+        // BAR's followup⁸ capture (docs/phase-8x-group-4d-followup8-
+        // verification.md §Findings) showed that programs 5/8/10 bind
+        // cleanly through the followup⁷/⁸ path but with sampler state
+        // that would plausibly corrupt glyph sampling on a single-
+        // channel atlas:
+        //
+        //   texName=1 (prog  5): LINEAR / CLAMP_TO_BORDER / maxLevel=1000
+        //   texName=3 (prog  8): LINEAR / REPEAT           / maxLevel=0
+        //   texName=4 (prog 10): LINEAR_MIPMAP_LINEAR /
+        //                        REPEAT / maxLevel=10 (no mip chain
+        //                        uploaded — would sample outside the
+        //                        valid LOD range, which Apple Silicon
+        //                        returns as zero)
+        //
+        // BAR asked for a "loud fix": when we detect a compat glyph
+        // atlas format (GL_ALPHA / GL_LUMINANCE / GL_LUMINANCE_ALPHA /
+        // GL_INTENSITY and their sized ALPHA8 / LUMINANCE8 /
+        // LUMINANCE8_ALPHA8 / INTENSITY8 variants), override the
+        // descriptor to the known-safe configuration for glyph
+        // sampling:
+        //
+        //   min/mag    = Linear   (Recoil's default; text looks right)
+        //   mipFilter  = NotMipmapped
+        //   wrap s/t/r = ClampToEdge
+        //   lodMin     = 0.0
+        //   lodMax     = 0.25     (effectively "level 0 only",
+        //                          defensive against Recoil mistakenly
+        //                          computing an LOD > 0 even with
+        //                          NotMipmapped)
+        //   compare    = Never
+        //
+        // This is intentionally a sledgehammer — if a non-glyph code
+        // path uses GL_ALPHA for an off-screen render target or a
+        // noise lookup we'd override that too, and if BAR reports a
+        // regression on a scene that relies on wrap=repeat on a
+        // single-channel texture we'll narrow the gate. The format
+        // list is the compat-profile single-channel family that
+        // predates GL_RED, and Recoil's glyph path still uses them
+        // (the hot-swap to core GL_R8 never landed on the Spring fork
+        // we ship).
+        //
+        // The override is unconditional within the format gate — it
+        // does not inspect `object.params` before clobbering. BAR
+        // explicitly asked for this: "I'd rather we sample a glyph
+        // atlas as LINEAR/CLAMP/no-mip even if Recoil asked for
+        // something weirder, than honor the weird setting and
+        // render illegible text" (followup⁸ §Primary).
+        const GLenum internalFormat = object.desc.internalFormat;
+        const bool isCompatGlyphFormat =
+            internalFormat == GL_ALPHA ||
+            internalFormat == GL_ALPHA8 ||
+            internalFormat == GL_LUMINANCE ||
+            internalFormat == GL_LUMINANCE8 ||
+            internalFormat == GL_LUMINANCE_ALPHA ||
+            internalFormat == GL_LUMINANCE8_ALPHA8 ||
+            internalFormat == GL_INTENSITY ||
+            internalFormat == GL_INTENSITY8;
+        if (isCompatGlyphFormat) {
+            descriptor.minFilter = MTLSamplerMinMagFilterLinear;
+            descriptor.magFilter = MTLSamplerMinMagFilterLinear;
+            descriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+            descriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
+            descriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+            descriptor.rAddressMode = MTLSamplerAddressModeClampToEdge;
+            descriptor.lodMinClamp = 0.0f;
+            descriptor.lodMaxClamp = 0.25f;
+            descriptor.compareFunction = MTLCompareFunctionNever;
+        }
+
         id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:descriptor];
         if (sampler == nil) {
             return false;
@@ -1254,12 +1326,23 @@ struct GLContext::Impl {
         // check against expected Recoil defaults.
         if (texName != 0 &&
             loggedSamplerBuildTextures.insert(texName).second) {
+            // Phase 8X Group 4d follow-up⁹ — the log reports BOTH the
+            // GL-side `params` values that the app set AND the
+            // override decision. BAR needs both: the params line tells
+            // them what Recoil asked for, the override tag tells them
+            // what we actually bound. On a happy path these agree; on
+            // the compat glyph path the override tag will be
+            // `glyph-compat` and the params readout will show the
+            // (ignored) Recoil-set values.
             NSLog(@"[GL] rebuildTextureSamplerState first-build texName=%u"
+                  @" internalFormat=0x%04X override=%s"
                   @" minFilter=0x%04X magFilter=0x%04X"
                   @" wrapS=0x%04X wrapT=0x%04X wrapR=0x%04X"
                   @" minLod=%.2f maxLod=%.2f baseLevel=%d maxLevel=%d"
                   @" compareMode=0x%04X compareFunc=0x%04X",
                   texName,
+                  static_cast<unsigned>(internalFormat),
+                  isCompatGlyphFormat ? "glyph-compat" : "none",
                   static_cast<unsigned>(object.params.minFilter),
                   static_cast<unsigned>(object.params.magFilter),
                   static_cast<unsigned>(object.params.wrapS),
@@ -1452,12 +1535,54 @@ struct GLContext::Impl {
                 outBindings.push_back(binding);
 
                 if (logThisCall) {
+                    // Phase 8X Group 4d follow-up⁹ — first-bind
+                    // diagnostic: dump the texObject->params snapshot
+                    // AT DRAW TIME alongside the BOUND record. This
+                    // closes the ambiguity BAR flagged in followup⁸:
+                    // the first-build log only reports the params
+                    // state at the moment of the *first* sampler
+                    // rebuild. If Recoil mutates params via
+                    // glTexParameter after that first build (before
+                    // the dirty flag flips — or on a code path that
+                    // doesn't go through texParameter*) then the
+                    // draw-time sampler could disagree with what the
+                    // first-build log says and we'd never see it.
+                    //
+                    // By dumping params here, in the resolve step,
+                    // right next to the BOUND record, BAR can
+                    // cross-check in one capture whether the sampler
+                    // state that reached the encoder matches what the
+                    // first-build log reported, and whether any
+                    // override=glyph-compat gate fired on this
+                    // texture's format.
+                    const GLenum fmt = texObject->desc.internalFormat;
+                    const bool isCompat =
+                        fmt == GL_ALPHA || fmt == GL_ALPHA8 ||
+                        fmt == GL_LUMINANCE || fmt == GL_LUMINANCE8 ||
+                        fmt == GL_LUMINANCE_ALPHA ||
+                        fmt == GL_LUMINANCE8_ALPHA8 ||
+                        fmt == GL_INTENSITY || fmt == GL_INTENSITY8;
                     NSLog(@"[GL]   %s sampler='%s' metalSlot=%u BOUND"
                           @" glUnit=%d uniformLoc=%d valueSet=%d texName=%u"
-                          @" standAloneSampler=%u",
+                          @" standAloneSampler=%u internalFormat=0x%04X"
+                          @" override=%s drawTimeParams{"
+                          @"minFilter=0x%04X magFilter=0x%04X"
+                          @" wrapS=0x%04X wrapT=0x%04X wrapR=0x%04X"
+                          @" baseLevel=%d maxLevel=%d"
+                          @" compareMode=0x%04X}",
                           stageTag, sampledTex.name.c_str(),
                           sampledTex.metalBinding, glUnit, uniformLocation,
-                          uniformValueWasSet ? 1 : 0, texName, samplerName);
+                          uniformValueWasSet ? 1 : 0, texName, samplerName,
+                          static_cast<unsigned>(fmt),
+                          isCompat ? "glyph-compat" : "none",
+                          static_cast<unsigned>(texObject->params.minFilter),
+                          static_cast<unsigned>(texObject->params.magFilter),
+                          static_cast<unsigned>(texObject->params.wrapS),
+                          static_cast<unsigned>(texObject->params.wrapT),
+                          static_cast<unsigned>(texObject->params.wrapR),
+                          texObject->params.baseLevel,
+                          texObject->params.maxLevel,
+                          static_cast<unsigned>(texObject->params.compareMode));
                 }
             }
         };
