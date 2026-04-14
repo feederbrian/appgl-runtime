@@ -159,6 +159,131 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     return std::vector<std::uint32_t>(spirv.begin(), spirv.end());
 }
 
+LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
+    std::string_view vertexSource, std::string_view fragmentSource,
+    int version, std::string* log) const {
+    LinkedProgramSpirv result;
+    ensureGlslangInit();
+
+    glslang::TShader vsShader(EShLangVertex);
+    glslang::TShader fsShader(EShLangFragment);
+
+    // Configure both shaders identically to the per-stage `compileGLSL`
+    // path so glslang sees the same dialect / target / global-uniform
+    // settings for both halves of the program. The only thing different
+    // about this path is that both shaders are eventually attached to the
+    // SAME `glslang::TProgram` so the cross-stage interface matcher can
+    // see vertex outputs and fragment inputs together.
+    //
+    // Critical: glslang::TShader::setStringsWithLengths stores the
+    // POINTERS we pass in (not the strings) and dereferences them at
+    // parse() time. The `sourcePtr` / `sourceLen` locals must therefore
+    // outlive the parse() call below — keeping them in this function's
+    // stack frame rather than a nested helper lambda is required. (An
+    // earlier draft used a configureShader lambda; glslang then read
+    // dangling stack memory after the lambda returned, yielding parse
+    // errors like `'Ä' : unexpected token` and link errors like
+    // `Missing entry point`.)
+    const char* vsSourcePtr = vertexSource.data();
+    const int vsSourceLen = static_cast<int>(vertexSource.size());
+    const char* fsSourcePtr = fragmentSource.data();
+    const int fsSourceLen = static_cast<int>(fragmentSource.size());
+
+    vsShader.setStringsWithLengths(&vsSourcePtr, &vsSourceLen, 1);
+    vsShader.setEnvInput(glslang::EShSourceGlsl, EShLangVertex,
+                         glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
+    vsShader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
+    vsShader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
+    vsShader.setEnvInputVulkanRulesRelaxed();
+    vsShader.setAutoMapLocations(true);
+    vsShader.setAutoMapBindings(true);
+    vsShader.setGlobalUniformBlockName("_DefaultUniforms");
+    vsShader.setGlobalUniformSet(0);
+    vsShader.setGlobalUniformBinding(0);
+
+    fsShader.setStringsWithLengths(&fsSourcePtr, &fsSourceLen, 1);
+    fsShader.setEnvInput(glslang::EShSourceGlsl, EShLangFragment,
+                         glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
+    fsShader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_0);
+    fsShader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_0);
+    fsShader.setEnvInputVulkanRulesRelaxed();
+    fsShader.setAutoMapLocations(true);
+    fsShader.setAutoMapBindings(true);
+    fsShader.setGlobalUniformBlockName("_DefaultUniforms");
+    fsShader.setGlobalUniformSet(0);
+    fsShader.setGlobalUniformBinding(0);
+
+    const TBuiltInResource* resources = GetDefaultResources();
+    EShMessages messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
+
+    if (!vsShader.parse(resources, version, false, messages)) {
+        if (log != nullptr) {
+            *log = std::string("vertex parse: ") + vsShader.getInfoLog();
+        }
+        return result;
+    }
+    if (!fsShader.parse(resources, version, false, messages)) {
+        if (log != nullptr) {
+            *log = std::string("fragment parse: ") + fsShader.getInfoLog();
+        }
+        return result;
+    }
+
+    glslang::TProgram program;
+    program.addShader(&vsShader);
+    program.addShader(&fsShader);
+
+    if (!program.link(messages)) {
+        if (log != nullptr) {
+            *log = std::string("link: ") + program.getInfoLog();
+        }
+        return result;
+    }
+
+    // Run cross-stage IO mapping so glslang's default GLSL IO resolver
+    // assigns matching `DecorationLocation` values to vertex outputs and
+    // fragment inputs that share a name. The resolver walks the pipeline
+    // in-order, sees both stages because we attached them to the same
+    // TProgram above, and produces a coherent location table — which is
+    // exactly what BAR observed missing in the followup⁴ Metal NSErrors.
+    //
+    // Without this pass, varyings in the SPIR-V come out either
+    // unlocated or with per-stage-independent locations, and SPIRV-Cross
+    // emits the mangled `m_NN_<name>` member form without `[[user(locN)]]`
+    // attributes — which Metal rejects at `MTLRenderPipelineState`
+    // creation time with a varying-mismatch error.
+    if (!program.mapIO()) {
+        if (log != nullptr) {
+            *log = std::string("mapIO: ") + program.getInfoLog();
+        }
+        return result;
+    }
+
+    glslang::SpvOptions spvOptions;
+    spvOptions.disableOptimizer = false;
+    spvOptions.optimizeSize = true;
+
+    std::vector<unsigned int> vsSpirv;
+    std::vector<unsigned int> fsSpirv;
+    glslang::GlslangToSpv(*program.getIntermediate(EShLangVertex), vsSpirv, &spvOptions);
+    glslang::GlslangToSpv(*program.getIntermediate(EShLangFragment), fsSpirv, &spvOptions);
+
+    if (vsSpirv.empty() || fsSpirv.empty()) {
+        if (log != nullptr) {
+            *log = "GlslangToSpv produced empty output for at least one stage";
+        }
+        return result;
+    }
+
+    result.vertexSpirv.assign(vsSpirv.begin(), vsSpirv.end());
+    result.fragmentSpirv.assign(fsSpirv.begin(), fsSpirv.end());
+    result.linkSucceeded = true;
+    if (log != nullptr) {
+        *log = "ok";
+    }
+    return result;
+}
+
 std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const {
     try {
         spirv_cross::CompilerMSL compiler(spirv, wordCount);
@@ -332,6 +457,18 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
     (void)bindings;
     if (log != nullptr) {
         *log = "SPIR-V to MSL translation is not enabled in the bootstrap build yet.";
+    }
+    return {};
+}
+
+LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
+    std::string_view vertexSource, std::string_view fragmentSource,
+    int version, std::string* log) const {
+    (void)vertexSource;
+    (void)fragmentSource;
+    (void)version;
+    if (log != nullptr) {
+        *log = "Cross-stage GLSL link is not enabled in the bootstrap build yet.";
     }
     return {};
 }

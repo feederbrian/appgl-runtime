@@ -2866,6 +2866,192 @@ private:
     GLuint ibo_ = 0;
 };
 
+// Phase 8X Group 4d follow-up⁵ §6c — VaryingInterfaceScene.
+//
+// Regression test for the cross-stage varying location coordination bug
+// that the per-stage `compileGLSL` path produced (see BAR's
+// `phase-8x-group-4d-followup4-verification.md`). Builds a vertex+fragment
+// program with TWO varyings — `vColor` and `vUV` — neither of which carries
+// an explicit `layout(location=N)` qualifier. Pre-followup⁵ this was the
+// exact shape that caused glslang's per-stage auto-map to assign
+// independent locations to the vertex outputs and fragment inputs, which
+// SPIRV-Cross then emitted as mangled `m_NN_<name>` members without
+// matching `[[user(locN)]]` attributes — causing
+// `MTLRenderPipelineDescriptor` to reject the program at pipeline-state
+// creation time.
+//
+// Post-followup⁵: `linkProgram` now routes both stages through
+// `ShaderTranslator::compileGLSLProgram`, which links them in a single
+// glslang::TProgram with `mapIO()` so the IO resolver assigns matching
+// locations across the stage boundary. The scene asserts that:
+//   - `glLinkProgram` returns GL_TRUE
+//   - `pipelineCacheMetrics().buildAttempts >= 1` after the draw (proving
+//     the translated path actually ran encodeTranslatedDraw's build branch)
+//   - `pipelineCacheMetrics().buildFailures == 0` (proving Metal accepted
+//     the linked pipeline state — the §6a fix worked)
+// and then renders a colored triangle whose colors come from the per-vertex
+// attributes via the varyings, so the golden round-trip exercises the full
+// vertex→fragment varying path end-to-end.
+class VaryingInterfaceScene final : public Scene {
+public:
+    std::string id() const override {
+        return "phase-a.varying-interface";
+    }
+
+    std::string phase() const override {
+        return "phase-a";
+    }
+
+    SceneSize framebufferSize() const override {
+        return {96, 96};
+    }
+
+    double tolerance() const override {
+        // Same rationale as SolidTriangleDrawScene — anti-aliased edges
+        // can drift by one channel between GPU families.
+        return 0.02;
+    }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        // Two varyings, neither with an explicit location. The vertex
+        // declares `out vec4 vColor; out vec2 vUV;` and the fragment
+        // declares the matching `in` slots — this is the shape that the
+        // per-stage compileGLSL path could not coordinate.
+        const char* vertexSource =
+            "#version 330 core\n"
+            "layout(location = 0) in vec3 aPosition;\n"
+            "layout(location = 1) in vec3 aColor;\n"
+            "layout(location = 2) in vec2 aUV;\n"
+            "out vec4 vColor;\n"
+            "out vec2 vUV;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPosition, 1.0);\n"
+            "    vColor = vec4(aColor, 1.0);\n"
+            "    vUV = aUV;\n"
+            "}\n";
+        const char* fragmentSource =
+            "#version 330 core\n"
+            "in vec4 vColor;\n"
+            "in vec2 vUV;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    // Mix the per-vertex color with a UV-driven gradient so\n"
+            "    // both varyings actually contribute to the output. If\n"
+            "    // either varying is dropped or mismatched at the stage\n"
+            "    // boundary, the rendered triangle is visibly different\n"
+            "    // from the golden.\n"
+            "    fragColor = vec4(vColor.rgb * (0.7 + 0.3 * vUV.x), 1.0);\n"
+            "}\n";
+
+        const GLuint vertex = gl.glCreateShader(GL_VERTEX_SHADER);
+        const GLuint fragment = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(vertex, 1, &vertexSource, nullptr);
+        gl.glShaderSource(fragment, 1, &fragmentSource, nullptr);
+        gl.glCompileShader(vertex);
+        gl.glCompileShader(fragment);
+
+        program_ = gl.glCreateProgram();
+        gl.glAttachShader(program_, vertex);
+        gl.glAttachShader(program_, fragment);
+        gl.glLinkProgram(program_);
+        GLint linkStatus = 0;
+        gl.glGetProgramiv(program_, GL_LINK_STATUS, &linkStatus);
+        expectCondition(linkStatus == GL_TRUE,
+                        "varying-interface program links cross-stage");
+        gl.glDeleteShader(vertex);
+        gl.glDeleteShader(fragment);
+
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glBindVertexArray(vao_);
+
+        // Interleaved position/color/uv triangle. Stride = 8 floats.
+        const GLfloat vertices[] = {
+            // pos.x   pos.y  pos.z   r     g     b     u     v
+            -0.6f, -0.5f, 0.0f,  1.0f, 0.2f, 0.2f,  0.0f, 0.0f,
+             0.6f, -0.5f, 0.0f,  0.2f, 1.0f, 0.2f,  1.0f, 0.0f,
+             0.0f,  0.7f, 0.0f,  0.2f, 0.2f, 1.0f,  0.5f, 1.0f,
+        };
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+        const GLsizei stride = 8 * sizeof(GLfloat);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride,
+                                 reinterpret_cast<const void*>(0));
+        gl.glEnableVertexAttribArray(1);
+        gl.glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride,
+                                 reinterpret_cast<const void*>(3 * sizeof(GLfloat)));
+        gl.glEnableVertexAttribArray(2);
+        gl.glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride,
+                                 reinterpret_cast<const void*>(6 * sizeof(GLfloat)));
+    }
+
+    void render(GLContext& context) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        // Reset pipeline cache metrics so the post-draw assertion sees
+        // only the work this scene generated.
+        context.resetPipelineCacheMetrics();
+
+        gl.glViewport(0, 0, framebufferSize().width, framebufferSize().height);
+        gl.glClearColor(0.08f, 0.10f, 0.18f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        gl.glUseProgram(program_);
+        gl.glBindVertexArray(vao_);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl.glFlush();
+
+        // Phase 8X Group 4d follow-up⁵ §6a verification.
+        // After at least one translated-path draw, the pipeline cache
+        // counters should show:
+        //   buildAttempts >= 1      (encodeTranslatedDraw's build branch ran)
+        //   buildFailures == 0      (Metal accepted the linked pipeline)
+        // Pre-followup⁵ this scene would have hit the same shape as BAR's
+        // failing programs and failed the buildFailures assertion.
+        const auto metrics = context.pipelineCacheMetrics();
+        expectCondition(metrics.buildAttempts >= 1,
+                        "varying-interface scene reached pipeline build branch");
+        expectCondition(metrics.buildFailures == 0,
+                        "varying-interface scene produced a Metal-accepted pipeline state");
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glAttachShader,
+            FunctionId::glBindBuffer,
+            FunctionId::glBindVertexArray,
+            FunctionId::glBufferData,
+            FunctionId::glClear,
+            FunctionId::glClearColor,
+            FunctionId::glCompileShader,
+            FunctionId::glCreateProgram,
+            FunctionId::glCreateShader,
+            FunctionId::glDeleteShader,
+            FunctionId::glDrawArrays,
+            FunctionId::glEnableVertexAttribArray,
+            FunctionId::glFlush,
+            FunctionId::glGenBuffers,
+            FunctionId::glGenVertexArrays,
+            FunctionId::glGetProgramiv,
+            FunctionId::glLinkProgram,
+            FunctionId::glShaderSource,
+            FunctionId::glUseProgram,
+            FunctionId::glVertexAttribPointer,
+            FunctionId::glViewport,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLuint vao_ = 0;
+    GLuint vbo_ = 0;
+};
+
 // Phase A Group 8 — API surface smoke. Exercises the live query-object subset
 // via actual dispatch calls and then promotes every remaining <=3.3 manifest
 // function to SmokeTested via markGroup8SurfaceSmoke(). This closes the
@@ -7309,6 +7495,8 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(shaderProgramScene));
         SolidTriangleDrawScene solidTriangleDrawScene;
         tests.push_back(runScene(solidTriangleDrawScene));
+        VaryingInterfaceScene varyingInterfaceScene;
+        tests.push_back(runScene(varyingInterfaceScene));
         StatePointPolygonScene statePointPolygonScene;
         tests.push_back(runScene(statePointPolygonScene));
         VertexAttribImmediateScene vertexAttribImmediateScene;

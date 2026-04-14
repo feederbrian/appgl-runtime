@@ -4874,6 +4874,47 @@ void recordPipelineBuildFailureOnce(GLProgramObject* program,
     // set. (We don't need a separate guard here — the reportTranslated
     // call above already set the bit when the diagnostic record was
     // worth writing.)
+    //
+    // Phase 8X Group 4d follow-up⁵ — §6b: populate `mslPreview` with the
+    // failing stage's MSL (up to 1024 bytes) so BAR can inspect the
+    // actual `main0_out` / `main0_in` struct definitions inline in the
+    // diagnostic ring without having to dump intermediate files. For
+    // `pipeline-state` failures (where both stages are involved in the
+    // varying-mismatch verdict) we pack the vertex MSL first and the
+    // fragment MSL second, separated by a marker. The 1024-byte cap is
+    // big enough to include the full `main0_out`/`main0_in` structs plus
+    // the start of `main0()`, which is where varyings are usually
+    // declared in SPIRV-Cross's emit order.
+    constexpr std::size_t kMslPreviewBudget = 1024;
+    auto previewOf = [](const std::string& msl) -> std::string {
+        if (msl.size() <= kMslPreviewBudget) {
+            return msl;
+        }
+        return msl.substr(0, kMslPreviewBudget) + "\n…[truncated]";
+    };
+
+    std::string preview;
+    // Stage tag is the first token of errorText, separated by ": ".
+    // (See the recordBuildFailure lambda in MetalFrameGraph.mm.)
+    if (errorText.rfind("vertex-library", 0) == 0 ||
+        errorText.rfind("vertex-function", 0) == 0) {
+        preview = previewOf(program->vertexMSL);
+    } else if (errorText.rfind("fragment-library", 0) == 0 ||
+               errorText.rfind("fragment-function", 0) == 0) {
+        preview = previewOf(program->fragmentMSL);
+    } else if (errorText.rfind("pipeline-state", 0) == 0) {
+        // Both stages are implicated in the varying interface match;
+        // pack each into half the budget so BAR can see both `main0_out`
+        // (vertex) and `main0_in` (fragment) inline.
+        constexpr std::size_t kHalf = kMslPreviewBudget / 2;
+        const std::string& vs = program->vertexMSL;
+        const std::string& fs = program->fragmentMSL;
+        preview = "// === vertex ===\n";
+        preview += (vs.size() <= kHalf) ? vs : (vs.substr(0, kHalf) + "\n…[truncated]\n");
+        preview += "\n// === fragment ===\n";
+        preview += (fs.size() <= kHalf) ? fs : (fs.substr(0, kHalf) + "\n…[truncated]");
+    }
+
     Runtime::ShaderTranslationRecord record;
     record.id = "program-" + std::to_string(programName);
     record.stage = "pipeline-build";
@@ -4881,7 +4922,7 @@ void recordPipelineBuildFailureOnce(GLProgramObject* program,
     record.vertexSourceHash = program->vertexSourceHash;
     record.fragmentSourceHash = program->fragmentSourceHash;
     record.glslangLog = errorText;
-    record.mslPreview = "";  // intentionally empty — caller can correlate via hash
+    record.mslPreview = std::move(preview);
     record.success = false;
     Runtime::shared().recordShaderTranslation(std::move(record));
 }
@@ -5737,18 +5778,29 @@ bool GLContext::linkProgram(GLuint program) {
     // Translate one stage: spirvToMSL + reflect. Writes the result into the
     // provided output slots on success, records a diagnostic in both the
     // success and failure cases. Returns true iff MSL was produced.
+    //
+    // Phase 8X Group 4d follow-up⁵ — refactored to take SPIR-V data
+    // directly (rather than reading `stage->spirv` from the shader object)
+    // so the VS/FS path can pass the cross-stage-linked SPIR-V from
+    // `compileGLSLProgram` instead of the per-stage cached blobs that
+    // `compileShader` produced via independent `compileGLSL` invocations.
+    // The other stages (compute, geometry, tess) still use the cached
+    // per-stage SPIR-V — only VS+FS need cross-stage location coordination
+    // for the Metal pipeline-state validator.
     auto translateStage = [&](const char* stageName,
-                              GLShaderObject* stage,
+                              const std::uint32_t* spirvData,
+                              std::size_t spirvWords,
+                              const std::string& sourceText,
                               std::string& mslOut,
                               ShaderReflection& reflectionOut) -> bool {
-        if (stage == nullptr) {
+        if (spirvData == nullptr || spirvWords == 0) {
             return false;
         }
         std::string mslLog;
         std::string msl = translator.spirvToMSL(
-            stage->spirv.data(), stage->spirv.size(), bindings, &mslLog);
+            spirvData, spirvWords, bindings, &mslLog);
         const std::string stageTag = programTag + "-" + stageName;
-        const std::string hash = quickHash(stage->source);
+        const std::string hash = quickHash(sourceText);
         if (msl.empty()) {
             Runtime::shared().recordShaderTranslation({
                 stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
@@ -5758,8 +5810,15 @@ bool GLContext::linkProgram(GLuint program) {
             return false;
         }
         reflectionOut = translator.reflect(
-            stage->spirv.data(), stage->spirv.size(), bindings, nullptr);
+            spirvData, spirvWords, bindings, nullptr);
         mslOut = std::move(msl);
+        // Phase 8X Group 4d follow-up⁵ — §6b: when the stage *succeeds*
+        // we keep the 200-byte preview because the full MSL is large and
+        // the translator records are only useful to humans on failure.
+        // The matching failure-case mslPreview enlargement happens in the
+        // pipeline-build branch (MetalFrameGraph.mm), where the rejected
+        // MSL is what BAR actually wants to see — by which point the
+        // pipeline-state NSError has already named the failing stage.
         Runtime::shared().recordShaderTranslation({
             stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
             "ok", mslOut.substr(0, 200), true
@@ -5767,14 +5826,111 @@ bool GLContext::linkProgram(GLuint program) {
         return true;
     };
 
+    // Helper: invoke translateStage against a per-stage cached SPIR-V blob
+    // on a GLShaderObject. Used by every case below other than VS+FS, where
+    // the VS+FS cross-stage-linked path takes over.
+    auto translateCachedStage = [&](const char* stageName,
+                                    GLShaderObject* stage,
+                                    std::string& mslOut,
+                                    ShaderReflection& reflectionOut) -> bool {
+        if (stage == nullptr) {
+            return false;
+        }
+        return translateStage(stageName,
+                              stage->spirv.data(), stage->spirv.size(),
+                              stage->source, mslOut, reflectionOut);
+    };
+
+    // Phase 8X Group 4d follow-up⁵ — VS+FS cross-stage-linked SPIR-V path.
+    // Produces both stage SPIR-V blobs from a single glslang::TProgram
+    // link + mapIO pass so cross-stage varying locations get coordinated.
+    // Returns the linked SPIR-V on success, or empty blobs on failure (in
+    // which case the caller falls back to the per-stage cached SPIR-V on
+    // the GLShaderObject — same path as pre-followup⁵).
+    //
+    // The source we pass in is the rewritten compat form, matching exactly
+    // what `compileShader` already compiled per-stage: `compileShader`
+    // runs `rewriteCompatShader` on `object->source` and feeds the result
+    // to `compileGLSL`, but doesn't cache the rewritten string anywhere
+    // — so we re-run the rewriter here. `rewriteCompatShader` is a cheap
+    // string scan and is idempotent, so re-running it at link time is
+    // free.
+    auto compileLinkedVsFs = [&](GLShaderObject* vsStage,
+                                  GLShaderObject* fsStage) -> LinkedProgramSpirv {
+        if (vsStage == nullptr || fsStage == nullptr) {
+            return {};
+        }
+        CompatShaderRewriteResult vsRewrite = rewriteCompatShader(vsStage->source);
+        CompatShaderRewriteResult fsRewrite = rewriteCompatShader(fsStage->source);
+        const std::string& vsLinkSource =
+            vsRewrite.didRewrite ? vsRewrite.source : vsStage->source;
+        const std::string& fsLinkSource =
+            fsRewrite.didRewrite ? fsRewrite.source : fsStage->source;
+        std::string linkErrorLog;
+        LinkedProgramSpirv linked = translator.compileGLSLProgram(
+            vsLinkSource, fsLinkSource, 330, &linkErrorLog);
+        NSLog(@"[GL] compileGLSLProgram: program=%u success=%d log=%s",
+              program, linked.linkSucceeded ? 1 : 0,
+              linkErrorLog.c_str());
+        if (!linked.linkSucceeded) {
+            // Record the cross-stage link failure so BAR can see why the
+            // VS+FS path is degrading back to per-stage SPIR-V. The fall
+            // back is intentional: the per-stage cached SPIR-V may still
+            // produce usable MSL (and at worst surfaces the same Metal
+            // varying-mismatch the pre-followup⁵ build was already
+            // showing), so degrading is strictly no-worse than the prior
+            // behaviour.
+            //
+            // No positive `link-spirv` record on success — the per-stage
+            // vertex/fragment records that follow this lambda already
+            // carry success=true, and the post-link
+            // `[GL] linkProgram: ... translationOk=1` NSLog line covers
+            // the "did the linked path run" question. Adding a success
+            // record here would also break the
+            // `phase-a.shader-program-lifecycle` scene's exact-count
+            // assertion (it expects per-link pushes == 2, vertex +
+            // fragment).
+            Runtime::shared().recordShaderTranslation({
+                programTag + "-link-spirv", "link",
+                linkVertexHash, linkVertexHash, linkFragmentHash,
+                linkErrorLog.empty()
+                    ? "compileGLSLProgram failed (no log)"
+                    : linkErrorLog,
+                "", false
+            });
+        }
+        return linked;
+    };
+
     bool rasterTranslationOk = false;
     switch (kind) {
         case ProgramKind::VertexFragment: {
+            // Run the cross-stage link first. On success, both stages
+            // share the linked TProgram's coordinated SPIR-V; on failure,
+            // each stage falls back to its per-stage cached SPIR-V.
+            LinkedProgramSpirv linked = compileLinkedVsFs(vertexShader, fragmentShader);
+            const std::uint32_t* vsSpirvData;
+            std::size_t vsSpirvWords;
+            const std::uint32_t* fsSpirvData;
+            std::size_t fsSpirvWords;
+            if (linked.linkSucceeded) {
+                vsSpirvData = linked.vertexSpirv.data();
+                vsSpirvWords = linked.vertexSpirv.size();
+                fsSpirvData = linked.fragmentSpirv.data();
+                fsSpirvWords = linked.fragmentSpirv.size();
+            } else {
+                vsSpirvData = vertexShader->spirv.data();
+                vsSpirvWords = vertexShader->spirv.size();
+                fsSpirvData = fragmentShader->spirv.data();
+                fsSpirvWords = fragmentShader->spirv.size();
+            }
             ShaderReflection vsRefl, fsRefl;
             const bool vsOk = translateStage(
-                "vertex", vertexShader, programObject->vertexMSL, vsRefl);
+                "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
+                programObject->vertexMSL, vsRefl);
             const bool fsOk = translateStage(
-                "fragment", fragmentShader, programObject->fragmentMSL, fsRefl);
+                "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
+                programObject->fragmentMSL, fsRefl);
             if (vsOk && fsOk) {
                 programObject->vertexReflection = std::move(vsRefl);
                 programObject->fragmentReflection = std::move(fsRefl);
@@ -5785,7 +5941,7 @@ bool GLContext::linkProgram(GLuint program) {
         }
         case ProgramKind::VertexOnly: {
             ShaderReflection vsRefl;
-            const bool vsOk = translateStage(
+            const bool vsOk = translateCachedStage(
                 "vertex", vertexShader, programObject->vertexMSL, vsRefl);
             if (vsOk) {
                 programObject->vertexReflection = std::move(vsRefl);
@@ -5798,7 +5954,7 @@ bool GLContext::linkProgram(GLuint program) {
         }
         case ProgramKind::FragmentOnly: {
             ShaderReflection fsRefl;
-            const bool fsOk = translateStage(
+            const bool fsOk = translateCachedStage(
                 "fragment", fragmentShader, programObject->fragmentMSL, fsRefl);
             if (fsOk) {
                 programObject->fragmentReflection = std::move(fsRefl);
@@ -5815,7 +5971,7 @@ bool GLContext::linkProgram(GLuint program) {
             // existing stub path. The link itself succeeds either way.
             std::string unusedMSL;
             ShaderReflection csRefl;
-            (void)translateStage("compute", computeShader, unusedMSL, csRefl);
+            (void)translateCachedStage("compute", computeShader, unusedMSL, csRefl);
             break;
         }
         case ProgramKind::VertexGeometryFragment: {
@@ -5826,13 +5982,36 @@ bool GLContext::linkProgram(GLuint program) {
             // geometry-shader concept and our compute-stage emulation
             // lands in a follow-up cycle. BAR can read this record and
             // fall back to its non-geometry path.
+            //
+            // Phase 8X Group 4d follow-up⁵ — VS+FS still go through the
+            // cross-stage-linked path even when a GS is present, because
+            // the VS→FS varying interface is what Metal's pipeline-state
+            // validator inspects. The GS emulation gap is unaffected.
+            LinkedProgramSpirv linked = compileLinkedVsFs(vertexShader, fragmentShader);
+            const std::uint32_t* vsSpirvData;
+            std::size_t vsSpirvWords;
+            const std::uint32_t* fsSpirvData;
+            std::size_t fsSpirvWords;
+            if (linked.linkSucceeded) {
+                vsSpirvData = linked.vertexSpirv.data();
+                vsSpirvWords = linked.vertexSpirv.size();
+                fsSpirvData = linked.fragmentSpirv.data();
+                fsSpirvWords = linked.fragmentSpirv.size();
+            } else {
+                vsSpirvData = vertexShader->spirv.data();
+                vsSpirvWords = vertexShader->spirv.size();
+                fsSpirvData = fragmentShader->spirv.data();
+                fsSpirvWords = fragmentShader->spirv.size();
+            }
             ShaderReflection vsRefl, fsRefl, gsRefl;
             const bool vsOk = translateStage(
-                "vertex", vertexShader, programObject->vertexMSL, vsRefl);
+                "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
+                programObject->vertexMSL, vsRefl);
             const bool fsOk = translateStage(
-                "fragment", fragmentShader, programObject->fragmentMSL, fsRefl);
+                "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
+                programObject->fragmentMSL, fsRefl);
             std::string unusedGsMSL;
-            (void)translateStage("geometry", geometryShader, unusedGsMSL, gsRefl);
+            (void)translateCachedStage("geometry", geometryShader, unusedGsMSL, gsRefl);
             // Always append the emulation-gap record after the per-stage
             // records so BAR sees: [vertex:ok][fragment:ok][geometry:ok][gap].
             Runtime::shared().recordShaderTranslation({
@@ -5855,14 +6034,35 @@ bool GLContext::linkProgram(GLuint program) {
             // Same story as geometry: translate VS + FS and record a
             // diagnostic for the tess stages. Metal's tessellation model
             // is incompatible with GL's, so proper routing lands later.
+            //
+            // Phase 8X Group 4d follow-up⁵ — VS+FS use the cross-stage
+            // linked path here too, for the same reason as VGF above.
+            LinkedProgramSpirv linked = compileLinkedVsFs(vertexShader, fragmentShader);
+            const std::uint32_t* vsSpirvData;
+            std::size_t vsSpirvWords;
+            const std::uint32_t* fsSpirvData;
+            std::size_t fsSpirvWords;
+            if (linked.linkSucceeded) {
+                vsSpirvData = linked.vertexSpirv.data();
+                vsSpirvWords = linked.vertexSpirv.size();
+                fsSpirvData = linked.fragmentSpirv.data();
+                fsSpirvWords = linked.fragmentSpirv.size();
+            } else {
+                vsSpirvData = vertexShader->spirv.data();
+                vsSpirvWords = vertexShader->spirv.size();
+                fsSpirvData = fragmentShader->spirv.data();
+                fsSpirvWords = fragmentShader->spirv.size();
+            }
             ShaderReflection vsRefl, fsRefl, tcRefl, teRefl;
             const bool vsOk = translateStage(
-                "vertex", vertexShader, programObject->vertexMSL, vsRefl);
+                "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
+                programObject->vertexMSL, vsRefl);
             const bool fsOk = translateStage(
-                "fragment", fragmentShader, programObject->fragmentMSL, fsRefl);
+                "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
+                programObject->fragmentMSL, fsRefl);
             std::string unusedTcMSL, unusedTeMSL;
-            (void)translateStage("tess-control", tessControlShader, unusedTcMSL, tcRefl);
-            (void)translateStage("tess-eval", tessEvalShader, unusedTeMSL, teRefl);
+            (void)translateCachedStage("tess-control", tessControlShader, unusedTcMSL, tcRefl);
+            (void)translateCachedStage("tess-eval", tessEvalShader, unusedTeMSL, teRefl);
             Runtime::shared().recordShaderTranslation({
                 programTag + "-tessellation-emulation", "tessellation",
                 quickHash(tessControlShader->source),

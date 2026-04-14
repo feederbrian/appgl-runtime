@@ -55,11 +55,51 @@ struct ShaderReflection {
     bool usesPointSize = false;
 };
 
+// Phase 8X Group 4d follow-up⁵ — output of `compileGLSLProgram`. Both
+// blobs come from a single `glslang::TProgram::link()` + `mapIO()` pass,
+// so cross-stage varying interface variables get coordinated SPIR-V
+// `DecorationLocation` values even when the original GLSL source carries
+// no explicit `layout(location=N)` qualifiers on the varyings. This is
+// required for SPIRV-Cross to subsequently emit matching `[[user(locN)]]`
+// Metal attributes on `main0_out` (vertex) and `main0_in` (fragment).
+//
+// Why this matters: when each stage is compiled through its own private
+// TProgram (the per-stage `compileGLSL` path used at glCompileShader time),
+// glslang's auto-location pass runs over each stage in isolation. Even
+// though the assignment algorithm is deterministic per-stage, the resulting
+// vertex-output and fragment-input locations only match by accident — and
+// SPIRV-Cross's de-duplicating member-name mangler then emits structs like
+// `main0_out { float4 m_27_color; }` (vertex) vs `main0_in { float4
+// m_31_color; }` (fragment) where the member-id prefix differs and the
+// `[[user(locN)]]` attributes are either missing or mismatched. Metal then
+// rejects the pipeline at `MTLRenderPipelineState` creation time with a
+// "vertex output ... does not match fragment input" error. See BAR's
+// `phase-8x-group-4d-followup4-verification.md` for the captured NSError
+// text and the per-program failure shape.
+struct LinkedProgramSpirv {
+    std::vector<std::uint32_t> vertexSpirv;
+    std::vector<std::uint32_t> fragmentSpirv;
+    bool linkSucceeded = false;
+};
+
 class ShaderTranslator {
 public:
     std::vector<std::uint32_t> compileGLSL(std::string_view source, GLenum stage, int version, std::string* log) const;
     std::string spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const;
     ShaderReflection reflect(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const;
+
+    // Phase 8X Group 4d follow-up⁵ — link-time co-compile entry point.
+    // Re-parses both vertex and fragment GLSL into a single
+    // `glslang::TProgram` and runs `link()` followed by `mapIO()` so the
+    // cross-stage varying interface gets coordinated location decorations.
+    // Returns `linkSucceeded == false` on any failure (parse, link, or IO
+    // map) with `log` populated with the failing stage tag and glslang's
+    // info log; callers may then fall back to the per-stage cached SPIR-V
+    // path that `compileShader` already produced via `compileGLSL`.
+    LinkedProgramSpirv compileGLSLProgram(std::string_view vertexSource,
+                                           std::string_view fragmentSource,
+                                           int version,
+                                           std::string* log) const;
 };
 
 }  // namespace appgl
