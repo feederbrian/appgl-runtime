@@ -7,6 +7,14 @@
 // non-void entries return conservative defaults: glGenLists → 0,
 // glIsList → GL_FALSE, glAreTexturesResident → GL_FALSE,
 // glRenderMode → 0 (the GL_RENDER feedback rendering mode).
+//
+// A small set of fixed-function entries listed in
+// MANUAL_FIXED_FUNCTION_OVERRIDES (see generate_from_registry.py)
+// is intentionally absent from this file. Those entries are defined
+// by hand in a runtime translation unit so they can route into the
+// real per-context state — the matrix stack mirror, in particular,
+// feeds the synthesized fixed-function shader uniforms produced by
+// the compat-shader rewriter.
 
 #include "../../include/AppGL/glcorearb.h"
 #include "../runtime/AppGLRuntime.h"
@@ -592,17 +600,6 @@ extern "C" void APIENTRY glFogiv(GLenum pname, const GLint *params) {
     return;
 }
 
-extern "C" void APIENTRY glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
-    (void)left;
-    (void)right;
-    (void)bottom;
-    (void)top;
-    (void)zNear;
-    (void)zFar;
-    appgl::Runtime::shared().recordFixedFunctionStub("glFrustum");
-    return;
-}
-
 extern "C" GLuint APIENTRY glGenLists(GLsizei range) {
     (void)range;
     appgl::Runtime::shared().recordFixedFunctionStub("glGenLists");
@@ -1018,38 +1015,9 @@ extern "C" void APIENTRY glListBase(GLuint base) {
     return;
 }
 
-extern "C" void APIENTRY glLoadIdentity(void) {
-    appgl::Runtime::shared().recordFixedFunctionStub("glLoadIdentity");
-    return;
-}
-
-extern "C" void APIENTRY glLoadMatrixd(const GLdouble *m) {
-    (void)m;
-    appgl::Runtime::shared().recordFixedFunctionStub("glLoadMatrixd");
-    return;
-}
-
-extern "C" void APIENTRY glLoadMatrixf(const GLfloat *m) {
-    (void)m;
-    appgl::Runtime::shared().recordFixedFunctionStub("glLoadMatrixf");
-    return;
-}
-
 extern "C" void APIENTRY glLoadName(GLuint name) {
     (void)name;
     appgl::Runtime::shared().recordFixedFunctionStub("glLoadName");
-    return;
-}
-
-extern "C" void APIENTRY glLoadTransposeMatrixd(const GLdouble *m) {
-    (void)m;
-    appgl::Runtime::shared().recordFixedFunctionStub("glLoadTransposeMatrixd");
-    return;
-}
-
-extern "C" void APIENTRY glLoadTransposeMatrixf(const GLfloat *m) {
-    (void)m;
-    appgl::Runtime::shared().recordFixedFunctionStub("glLoadTransposeMatrixf");
     return;
 }
 
@@ -1172,36 +1140,6 @@ extern "C" void APIENTRY glMaterialiv(GLenum face, GLenum pname, const GLint *pa
     (void)pname;
     (void)params;
     appgl::Runtime::shared().recordFixedFunctionStub("glMaterialiv");
-    return;
-}
-
-extern "C" void APIENTRY glMatrixMode(GLenum mode) {
-    (void)mode;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMatrixMode");
-    return;
-}
-
-extern "C" void APIENTRY glMultMatrixd(const GLdouble *m) {
-    (void)m;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultMatrixd");
-    return;
-}
-
-extern "C" void APIENTRY glMultMatrixf(const GLfloat *m) {
-    (void)m;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultMatrixf");
-    return;
-}
-
-extern "C" void APIENTRY glMultTransposeMatrixd(const GLdouble *m) {
-    (void)m;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultTransposeMatrixd");
-    return;
-}
-
-extern "C" void APIENTRY glMultTransposeMatrixf(const GLfloat *m) {
-    (void)m;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultTransposeMatrixf");
     return;
 }
 
@@ -1616,17 +1554,6 @@ extern "C" void APIENTRY glNormalPointer(GLenum type, GLsizei stride, const void
     return;
 }
 
-extern "C" void APIENTRY glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
-    (void)left;
-    (void)right;
-    (void)bottom;
-    (void)top;
-    (void)zNear;
-    (void)zFar;
-    appgl::Runtime::shared().recordFixedFunctionStub("glOrtho");
-    return;
-}
-
 extern "C" void APIENTRY glPassThrough(GLfloat token) {
     (void)token;
     appgl::Runtime::shared().recordFixedFunctionStub("glPassThrough");
@@ -1694,11 +1621,6 @@ extern "C" void APIENTRY glPopClientAttrib(void) {
     return;
 }
 
-extern "C" void APIENTRY glPopMatrix(void) {
-    appgl::Runtime::shared().recordFixedFunctionStub("glPopMatrix");
-    return;
-}
-
 extern "C" void APIENTRY glPopName(void) {
     appgl::Runtime::shared().recordFixedFunctionStub("glPopName");
     return;
@@ -1721,11 +1643,6 @@ extern "C" void APIENTRY glPushAttrib(GLbitfield mask) {
 extern "C" void APIENTRY glPushClientAttrib(GLbitfield mask) {
     (void)mask;
     appgl::Runtime::shared().recordFixedFunctionStub("glPushClientAttrib");
-    return;
-}
-
-extern "C" void APIENTRY glPushMatrix(void) {
-    appgl::Runtime::shared().recordFixedFunctionStub("glPushMatrix");
     return;
 }
 
@@ -1971,40 +1888,6 @@ extern "C" GLint APIENTRY glRenderMode(GLenum mode) {
     (void)mode;
     appgl::Runtime::shared().recordFixedFunctionStub("glRenderMode");
     return 0;
-}
-
-extern "C" void APIENTRY glRotated(GLdouble angle, GLdouble x, GLdouble y, GLdouble z) {
-    (void)angle;
-    (void)x;
-    (void)y;
-    (void)z;
-    appgl::Runtime::shared().recordFixedFunctionStub("glRotated");
-    return;
-}
-
-extern "C" void APIENTRY glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z) {
-    (void)angle;
-    (void)x;
-    (void)y;
-    (void)z;
-    appgl::Runtime::shared().recordFixedFunctionStub("glRotatef");
-    return;
-}
-
-extern "C" void APIENTRY glScaled(GLdouble x, GLdouble y, GLdouble z) {
-    (void)x;
-    (void)y;
-    (void)z;
-    appgl::Runtime::shared().recordFixedFunctionStub("glScaled");
-    return;
-}
-
-extern "C" void APIENTRY glScalef(GLfloat x, GLfloat y, GLfloat z) {
-    (void)x;
-    (void)y;
-    (void)z;
-    appgl::Runtime::shared().recordFixedFunctionStub("glScalef");
-    return;
 }
 
 extern "C" void APIENTRY glSecondaryColor3b(GLbyte red, GLbyte green, GLbyte blue) {
@@ -2513,22 +2396,6 @@ extern "C" void APIENTRY glTexGeniv(GLenum coord, GLenum pname, const GLint *par
     (void)pname;
     (void)params;
     appgl::Runtime::shared().recordFixedFunctionStub("glTexGeniv");
-    return;
-}
-
-extern "C" void APIENTRY glTranslated(GLdouble x, GLdouble y, GLdouble z) {
-    (void)x;
-    (void)y;
-    (void)z;
-    appgl::Runtime::shared().recordFixedFunctionStub("glTranslated");
-    return;
-}
-
-extern "C" void APIENTRY glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
-    (void)x;
-    (void)y;
-    (void)z;
-    appgl::Runtime::shared().recordFixedFunctionStub("glTranslatef");
     return;
 }
 

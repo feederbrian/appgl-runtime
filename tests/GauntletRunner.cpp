@@ -1097,46 +1097,96 @@ public:
 
         // Fixed-function stub resolution: classic GL 1.x entry points
         // that core removed but extension-probing engines still touch.
-        expectCondition(appglGetProcAddress("glMatrixMode") != nullptr,
-                        "appglGetProcAddress resolves glMatrixMode (fixed-function stub)");
+        // The matrix family (glMatrixMode, glLoadIdentity, glPushMatrix, ...)
+        // is now backed by AppGLMatrixOverrides.cpp + MatrixStateMirror, so
+        // it no longer counts as a "stub" — those are exercised separately
+        // below. The remaining names here are still pure no-op stubs.
         expectCondition(appglGetProcAddress("glBegin") != nullptr,
                         "appglGetProcAddress resolves glBegin (fixed-function stub)");
-        expectCondition(appglGetProcAddress("glLoadIdentity") != nullptr,
-                        "appglGetProcAddress resolves glLoadIdentity (fixed-function stub)");
+        expectCondition(appglGetProcAddress("glEnd") != nullptr,
+                        "appglGetProcAddress resolves glEnd (fixed-function stub)");
         expectCondition(appglGetProcAddress("glGenLists") != nullptr,
                         "appglGetProcAddress resolves glGenLists (fixed-function stub, non-void return)");
+        // Real (non-stub) fixed-function matrix entry points still resolve
+        // through the proc address table. The forward declarations live in
+        // gl_procaddress.gen.cpp and the bodies live in
+        // src/runtime/AppGLMatrixOverrides.cpp.
+        expectCondition(appglGetProcAddress("glMatrixMode") != nullptr,
+                        "appglGetProcAddress resolves glMatrixMode (matrix mirror entry)");
+        expectCondition(appglGetProcAddress("glLoadIdentity") != nullptr,
+                        "appglGetProcAddress resolves glLoadIdentity (matrix mirror entry)");
+        expectCondition(appglGetProcAddress("glPushMatrix") != nullptr,
+                        "appglGetProcAddress resolves glPushMatrix (matrix mirror entry)");
 
-        // Drive a fixed-function stub and verify (a) it does not crash,
-        // (b) it records a diagnostic ring entry with the right function
-        // tag, and (c) it does NOT inject a GL error into the glGetError
-        // queue — the stub is deliberately silent so extension probing
-        // doesn't fail downstream error checks.
+        // Drive a real fixed-function stub (glBegin) and verify (a) it
+        // does not crash, (b) it records a diagnostic ring entry with the
+        // right function tag, and (c) it does NOT inject a GL error into
+        // the glGetError queue — the stub is deliberately silent so
+        // extension probing doesn't fail downstream error checks.
         while (gl.glGetError() != GL_NO_ERROR) {
         }
         const std::uint64_t errorEventsBeforeFixedFunction = Runtime::shared().errorLogCount();
-        using MatrixModeFn = void(APIENTRY *)(GLenum);
-        AppGLProc rawMatrixMode = appglGetProcAddress("glMatrixMode");
-        MatrixModeFn matrixMode = reinterpret_cast<MatrixModeFn>(rawMatrixMode);
-        // GL_MODELVIEW (0x1700) is a compat-profile enum that core's
-        // glcorearb.h doesn't export, so we pass the raw literal here.
-        // The stub is a no-op and ignores the argument anyway.
-        constexpr GLenum kModelviewMatrixMode = 0x1700;
-        matrixMode(kModelviewMatrixMode);
+        using BeginFn = void(APIENTRY *)(GLenum);
+        AppGLProc rawBegin = appglGetProcAddress("glBegin");
+        BeginFn beginFn = reinterpret_cast<BeginFn>(rawBegin);
+        // GL_TRIANGLES is in core, but glBegin itself is the compat-only
+        // immediate-mode stub. Its body is a no-op + diagnostic ring trace.
+        beginFn(GL_TRIANGLES);
         expectCondition(gl.glGetError() == GL_NO_ERROR,
-                        "glMatrixMode fixed-function stub does not pollute glGetError queue");
+                        "glBegin fixed-function stub does not pollute glGetError queue");
         const std::uint64_t errorEventsAfterFixedFunction = Runtime::shared().errorLogCount();
         auto postFixedFunction = Runtime::shared().errorLogSnapshot();
         expectCondition(errorEventsAfterFixedFunction > errorEventsBeforeFixedFunction,
-                        "glMatrixMode fixed-function stub grew the runtime diagnostic ring");
+                        "glBegin fixed-function stub grew the runtime diagnostic ring");
         bool foundFixedFunctionRecord = false;
         for (auto it = postFixedFunction.rbegin(); it != postFixedFunction.rend(); ++it) {
-            if (it->function == "glMatrixMode" && it->errorEnum == 0) {
+            if (it->function == "glBegin" && it->errorEnum == 0) {
                 foundFixedFunctionRecord = true;
                 break;
             }
         }
         expectCondition(foundFixedFunctionRecord,
-                        "runtime diagnostic ring records glMatrixMode fixed-function stub");
+                        "runtime diagnostic ring records glBegin fixed-function stub");
+
+        // Real fixed-function matrix path: glMatrixMode now routes through
+        // the per-context MatrixStateMirror. A valid mode (GL_MODELVIEW,
+        // 0x1700) must NOT push a diagnostic ring entry and must NOT
+        // pollute glGetError. An invalid mode MUST push GL_INVALID_ENUM
+        // through GLContext::pushError, which surfaces in BOTH the
+        // per-context glGetError queue AND the runtime diagnostic ring.
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+        const std::uint64_t errorEventsBeforeMatrixMode = Runtime::shared().errorLogCount();
+        using MatrixModeFn = void(APIENTRY *)(GLenum);
+        AppGLProc rawMatrixMode = appglGetProcAddress("glMatrixMode");
+        MatrixModeFn matrixMode = reinterpret_cast<MatrixModeFn>(rawMatrixMode);
+        // GL_MODELVIEW (0x1700) is a compat-profile enum that core's
+        // glcorearb.h doesn't export, so we pass the raw literal here.
+        constexpr GLenum kModelviewMatrixMode = 0x1700;
+        matrixMode(kModelviewMatrixMode);
+        expectCondition(gl.glGetError() == GL_NO_ERROR,
+                        "glMatrixMode(GL_MODELVIEW) does not pollute glGetError queue");
+        const std::uint64_t errorEventsAfterValidMatrixMode = Runtime::shared().errorLogCount();
+        expectCondition(errorEventsAfterValidMatrixMode == errorEventsBeforeMatrixMode,
+                        "glMatrixMode(GL_MODELVIEW) does not record into the runtime diagnostic ring");
+        // Invalid mode → GL_INVALID_ENUM in the glGetError queue + ring.
+        constexpr GLenum kBogusMatrixMode = 0xDEAD;
+        matrixMode(kBogusMatrixMode);
+        expectCondition(gl.glGetError() == GL_INVALID_ENUM,
+                        "glMatrixMode(invalid) pushes GL_INVALID_ENUM into glGetError queue");
+        const std::uint64_t errorEventsAfterInvalidMatrixMode = Runtime::shared().errorLogCount();
+        expectCondition(errorEventsAfterInvalidMatrixMode > errorEventsAfterValidMatrixMode,
+                        "glMatrixMode(invalid) records into the runtime diagnostic ring");
+        auto postMatrixMode = Runtime::shared().errorLogSnapshot();
+        bool foundMatrixModeError = false;
+        for (auto it = postMatrixMode.rbegin(); it != postMatrixMode.rend(); ++it) {
+            if (it->function == "glMatrixMode" && it->errorEnum == GL_INVALID_ENUM) {
+                foundMatrixModeError = true;
+                break;
+            }
+        }
+        expectCondition(foundMatrixModeError,
+                        "runtime diagnostic ring records glMatrixMode GL_INVALID_ENUM");
 
         // Non-void fixed-function return: glGenLists should return 0
         // (the conservative default). Engines checking the returned id

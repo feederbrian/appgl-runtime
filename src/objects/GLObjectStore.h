@@ -239,6 +239,37 @@ struct GLProgramResourceEntry {
     GLbitfield referencedBy = 0; // bitmask: 1=vertex, 2=fragment, 4=compute, etc.
 };
 
+// Cached uniform locations for the synthesized `appgl_*` fixed-function
+// matrix uniforms produced by the compat-shader rewriter (see
+// src/shader/CompatShaderRewrite.h). Filled in at link time by scanning
+// programObject->uniforms by name; the draw-time matrix push reads each
+// non-negative slot and writes the corresponding Matrix4 from the
+// per-context MatrixStateMirror into programObject->uniformValues. A
+// slot stays at -1 when the original (compat) shader source did not
+// reference the corresponding gl_* identifier — there's nothing to push
+// for that program in that case.
+struct GLSynthesizedMatrixSlots {
+    GLint modelView = -1;
+    GLint projection = -1;
+    GLint modelViewProjection = -1;
+    GLint modelViewInverse = -1;
+    GLint projectionInverse = -1;
+    GLint modelViewProjectionInverse = -1;
+    GLint normal = -1;
+    // Texture matrix is stored in the rewriter as `mat4 appgl_TextureMatrix[8]`.
+    // GL's uniform reflection assigns one location to the array's first
+    // element and contiguous locations to subsequent elements; this slot
+    // holds the location of `[0]`, and the draw-time push iterates
+    // texture units via `texture + i`.
+    GLint texture = -1;
+
+    bool hasAny() const {
+        return modelView >= 0 || projection >= 0 || modelViewProjection >= 0 ||
+               modelViewInverse >= 0 || projectionInverse >= 0 ||
+               modelViewProjectionInverse >= 0 || normal >= 0 || texture >= 0;
+    }
+};
+
 struct GLProgramObject {
     std::vector<GLuint> attachedShaders;
     std::string linkLog;
@@ -250,6 +281,7 @@ struct GLProgramObject {
     std::vector<GLProgramAttributeInfo> attributes;
     std::unordered_map<GLint, GLProgramUniformValue> uniformValues;
     std::unordered_map<std::string, GLuint> requestedAttribLocations;
+    GLSynthesizedMatrixSlots synthesizedMatrixSlots;
 
     // Translated shader pipeline (populated at link time when the shader
     // compiler is available).  The MSL sources are consumed by MetalFrameGraph

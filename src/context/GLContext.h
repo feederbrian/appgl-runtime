@@ -12,6 +12,7 @@ namespace appgl {
 class GLCapabilities;
 class GLObjectStore;
 class GLStateTracker;
+class MatrixStateMirror;
 
 class GLContext {
 public:
@@ -474,6 +475,16 @@ public:
     GLCapabilities& capabilities();
     GLObjectStore& objects();
     GLStateTracker& state();
+
+    // Per-context fixed-function matrix mirror. Compat-profile entry
+    // points (glMatrixMode / glLoadIdentity / glLoadMatrix* / glMult* /
+    // glPushMatrix / glPopMatrix / glTranslate* / glRotate* / glScale*
+    // / glOrtho / glFrustum) route through this mirror, and the draw
+    // path reads from it to push synthesized `appgl_*` matrix uniforms
+    // (created by the compat-shader rewriter) into the per-program
+    // uniform value buffer at draw time.
+    MatrixStateMirror& matrixState();
+    const MatrixStateMirror& matrixState() const;
 
     // Benchmark instrumentation — pipeline cache metrics.
     struct PipelineCacheMetrics {

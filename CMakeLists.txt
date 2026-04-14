@@ -43,6 +43,7 @@ add_custom_target(appgl-codegen
 set(APPGL_SOURCES
   src/runtime/AppGLRuntime.cpp
   src/runtime/AppGLGroup8.cpp
+  src/runtime/AppGLMatrixOverrides.cpp
   src/caps/GLCapabilities.mm
   src/context/GLContext.mm
   src/context/MetalFrameGraph.mm
@@ -50,11 +51,13 @@ set(APPGL_SOURCES
   src/debug/TraceLog.cpp
   src/loader/DispatchInstall.cpp
   src/objects/GLObjectStore.cpp
+  src/shader/CompatShaderRewrite.cpp
   src/shader/GLSLReflection.cpp
   src/shader/PipelineCache.cpp
   src/shader/ShaderTranslator.cpp
   src/state/GLStateTracker.cpp
   src/state/IndexExpansion.cpp
+  src/state/MatrixStateMirror.cpp
   src/state/MetalVertexDescriptorBuilder.mm
   src/generated/gl_entrypoints.gen.cpp
   src/generated/gl_procaddress.gen.cpp

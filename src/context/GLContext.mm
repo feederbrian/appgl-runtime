@@ -3,10 +3,12 @@
 #include "../caps/GLCapabilities.h"
 #include "../objects/GLObjectStore.h"
 #include "../runtime/AppGLRuntime.h"
+#include "../shader/CompatShaderRewrite.h"
 #include "../shader/GLSLReflection.h"
 #include "../shader/ShaderTranslator.h"
 #include "../state/GLStateTracker.h"
 #include "../state/IndexExpansion.h"
+#include "../state/MatrixStateMirror.h"
 #include "../state/MetalVertexDescriptorBuilder.h"
 
 #import <AppKit/AppKit.h>
@@ -1978,6 +1980,12 @@ struct GLContext::Impl {
     std::unique_ptr<GLCapabilities> capabilities;
     std::unique_ptr<GLObjectStore> objects;
     std::unique_ptr<GLStateTracker> state;
+    // Per-context fixed-function matrix mirror. Compat-profile matrix
+    // entry points (defined in src/runtime/AppGLMatrixOverrides.cpp)
+    // route through this member, and the draw path reads from it to
+    // populate the synthesized `appgl_*` shader uniforms produced by
+    // the compat-shader rewriter (src/shader/CompatShaderRewrite.h).
+    MatrixStateMirror matrixState;
     GLbitfield pendingMask = GL_COLOR_BUFFER_BIT;
     bool pendingClear = true;
     GLint viewportX = 0;
@@ -4802,6 +4810,14 @@ GLStateTracker& GLContext::state() {
     return *impl_->state;
 }
 
+MatrixStateMirror& GLContext::matrixState() {
+    return impl_->matrixState;
+}
+
+const MatrixStateMirror& GLContext::matrixState() const {
+    return impl_->matrixState;
+}
+
 GLContext::PipelineCacheMetrics GLContext::pipelineCacheMetrics() const {
     PipelineCacheMetrics result;
     if (impl_->frameGraph) {
@@ -4966,19 +4982,36 @@ bool GLContext::compileShader(GLuint shader) {
         return false;
     }
 
-    // 1. Lightweight scanner pass. Still needed for declared attribute inputs
+    // 1. Compat-shader rewrite. Glslang's SPIR-V backend rejects
+    //    `#version NNN compatibility` outright and rejects every
+    //    fixed-function `gl_*` matrix identifier even in compat mode.
+    //    The rewriter downgrades the version directive to `core` and
+    //    synthesizes `appgl_*` uniforms (paired with `#define`s) for any
+    //    referenced matrix builtin. Non-compat shaders that don't
+    //    reference any legacy identifier come back unchanged.
+    //
+    //    Both passes (the lightweight scanner and the real glslang
+    //    compile) operate on the rewritten source so the synthesized
+    //    uniforms get picked up by the scanner and end up in
+    //    declaredUniforms — which linkProgram lifts into
+    //    programObject->uniforms with normal sequential locations.
+    CompatShaderRewriteResult rewrite = rewriteCompatShader(object->source);
+    const std::string& compileSource =
+        rewrite.didRewrite ? rewrite.source : object->source;
+
+    // 2. Lightweight scanner pass. Still needed for declared attribute inputs
     //    so the vertex-input binding path (glBindAttribLocation /
     //    layout(location=...)) can be resolved without going through
     //    SPIRV-Cross reflection. The scanner's uniform output is now
     //    secondary — link time pulls UBO members from SPIR-V reflection
     //    directly so interface blocks are visible even though the scanner
     //    ignores them.
-    GLSLReflectionResult reflection = reflectGLSL(object->source, object->stage);
+    GLSLReflectionResult reflection = reflectGLSL(compileSource, object->stage);
     object->declaredUniforms = std::move(reflection.uniforms);
     object->declaredInputs = std::move(reflection.inputs);
     object->declaredOutputs = std::move(reflection.outputs);
 
-    // 2. Real glslang compile. This is the authoritative verdict that
+    // 3. Real glslang compile. This is the authoritative verdict that
     //    glGetShaderiv(GL_COMPILE_STATUS) and glGetShaderInfoLog now
     //    surface to the engine — the scanner result above only shapes the
     //    explicit-location metadata, not the compile status.
@@ -4991,7 +5024,7 @@ bool GLContext::compileShader(GLuint shader) {
     ShaderTranslator translator;
     std::string compileLog;
     std::vector<std::uint32_t> spirv =
-        translator.compileGLSL(object->source, object->stage, 330, &compileLog);
+        translator.compileGLSL(compileSource, object->stage, 330, &compileLog);
 
     object->compileLog = std::move(compileLog);
     if (spirv.empty()) {
@@ -5295,6 +5328,47 @@ bool GLContext::linkProgram(GLuint program) {
         }
         programObject->uniformValues[nextLocation] = std::move(value);
         nextLocation += std::max<GLint>(uniform.arraySize, 1);
+    }
+
+    // Cache synthesized fixed-function matrix uniform locations. The
+    // compat-shader rewriter (CompatShaderRewrite.h) prepends `appgl_*`
+    // uniform declarations into the rewritten source for every legacy
+    // matrix identifier referenced by the original compat-profile
+    // shader. Those synthesized uniforms flowed through the scanner
+    // above and now have real GL locations in `programObject->uniforms`.
+    // Caching them once here means the per-draw matrix push is an O(1)
+    // index lookup into `uniformValues` instead of a string scan over
+    // the uniform table on every frame.
+    {
+        namespace SUN = appgl::SynthesizedUniformNames;
+        auto findLocByName = [&](const char* name) -> GLint {
+            for (const auto& u : programObject->uniforms) {
+                if (u.name == name) {
+                    return u.location;
+                }
+            }
+            return -1;
+        };
+        // gl_TextureMatrix expands to `appgl_TextureMatrix[8]`; the
+        // scanner records the array under its base name with arraySize
+        // populated, so the lookup matches the bare base name.
+        programObject->synthesizedMatrixSlots = GLSynthesizedMatrixSlots{};
+        programObject->synthesizedMatrixSlots.modelView =
+            findLocByName(SUN::kModelViewMatrix);
+        programObject->synthesizedMatrixSlots.projection =
+            findLocByName(SUN::kProjectionMatrix);
+        programObject->synthesizedMatrixSlots.modelViewProjection =
+            findLocByName(SUN::kModelViewProjectionMatrix);
+        programObject->synthesizedMatrixSlots.modelViewInverse =
+            findLocByName(SUN::kModelViewMatrixInverse);
+        programObject->synthesizedMatrixSlots.projectionInverse =
+            findLocByName(SUN::kProjectionMatrixInverse);
+        programObject->synthesizedMatrixSlots.modelViewProjectionInverse =
+            findLocByName(SUN::kModelViewProjectionMatrixInverse);
+        programObject->synthesizedMatrixSlots.normal =
+            findLocByName(SUN::kNormalMatrix);
+        programObject->synthesizedMatrixSlots.texture =
+            findLocByName(SUN::kTextureMatrix);
     }
 
     programObject->linked = true;
@@ -6200,6 +6274,91 @@ static void computeStageUniformLayout(
 //
 // OPT-7: uses the precomputed layout to avoid per-draw string comparisons.
 // The layout maps struct members directly to uniform locations.
+// Push synthesized fixed-function matrix uniform values into the
+// program's uniformValues map so the next buildStageUniformBuffer
+// pack picks them up. Reads from the per-context MatrixStateMirror
+// and writes only the slots that the link-time scan found in
+// programObject->synthesizedMatrixSlots — slots whose original
+// (compat-profile) shader source did not reference the corresponding
+// gl_* identifier stay at -1 and get skipped. When no slots are set
+// at all (the typical case for core-profile programs), this returns
+// in O(1) and the per-draw cost is a single bool check.
+static void pushSynthesizedMatrixUniforms(
+    GLProgramObject& program,
+    const MatrixStateMirror& matrixState)
+{
+    const auto& slots = program.synthesizedMatrixSlots;
+    if (!slots.hasAny()) {
+        return;
+    }
+
+    auto storeMat4 = [&](GLint loc, const Matrix4& matrix) {
+        if (loc < 0) return;
+        auto& value = program.uniformValues[loc];
+        value.type = GL_FLOAT_MAT4;
+        value.arraySize = 1;
+        value.floats.assign(matrix.m.begin(), matrix.m.end());
+    };
+    auto storeMat3 = [&](GLint loc, const Matrix4& matrix) {
+        if (loc < 0) return;
+        auto& value = program.uniformValues[loc];
+        value.type = GL_FLOAT_MAT3;
+        value.arraySize = 1;
+        // GL stores mat3 as 9 packed floats (3 columns × 3 rows). The
+        // GPU side uses 3 vec4 columns; buildStageUniformBuffer's
+        // `isMat3Padded` path repacks 9 → 12 floats when the layout
+        // entry is flagged. We store the 9-float canonical form here.
+        value.floats.assign(9, 0.0f);
+        for (int col = 0; col < 3; ++col) {
+            for (int row = 0; row < 3; ++row) {
+                value.floats[col * 3 + row] = matrix.m[col * 4 + row];
+            }
+        }
+    };
+
+    if (slots.modelView >= 0) {
+        storeMat4(slots.modelView, matrixState.modelView());
+    }
+    if (slots.projection >= 0) {
+        storeMat4(slots.projection, matrixState.projection());
+    }
+    if (slots.modelViewProjection >= 0) {
+        storeMat4(slots.modelViewProjection, matrixState.modelViewProjection());
+    }
+    if (slots.modelViewInverse >= 0) {
+        storeMat4(slots.modelViewInverse, matrixState.modelViewInverse());
+    }
+    if (slots.projectionInverse >= 0) {
+        storeMat4(slots.projectionInverse, matrixState.projectionInverse());
+    }
+    if (slots.modelViewProjectionInverse >= 0) {
+        storeMat4(slots.modelViewProjectionInverse,
+                  matrixState.modelViewProjectionInverse());
+    }
+    if (slots.normal >= 0) {
+        storeMat3(slots.normal, matrixState.normalMatrix());
+    }
+    if (slots.texture >= 0) {
+        // Texture matrix is `mat4 appgl_TextureMatrix[N]`. The link
+        // pass treats it as a single uniform whose value buffer holds
+        // N * 16 packed floats. Fill all N entries from the per-unit
+        // texture stack tops; unused units come back as identity from
+        // MatrixStateMirror::textureMatrix() so the GPU-side array is
+        // always fully populated.
+        auto& value = program.uniformValues[slots.texture];
+        value.type = GL_FLOAT_MAT4;
+        value.arraySize = static_cast<GLint>(kSynthesizedTextureMatrixCount);
+        value.floats.assign(
+            static_cast<std::size_t>(kSynthesizedTextureMatrixCount) * 16, 0.0f);
+        for (unsigned int i = 0; i < kSynthesizedTextureMatrixCount; ++i) {
+            const Matrix4 m = matrixState.textureMatrix(i);
+            std::memcpy(value.floats.data() + i * 16,
+                        m.m.data(),
+                        16 * sizeof(float));
+        }
+    }
+}
+
 static void buildStageUniformBuffer(
     std::vector<std::uint8_t>& outBuffer,
     const ShaderReflection& reflection,
@@ -6487,6 +6646,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // across draw calls — zero heap allocs after warmup.
                     thread_local std::vector<std::uint8_t> vtxUniformScratch;
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
+                    // Push synthesized fixed-function matrix uniforms into
+                    // program->uniformValues for compat-rewritten shaders.
+                    // Early-out for the common (core-profile) case.
+                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
                     buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniformValues,
                         program->vertexUniformLayout);
@@ -6672,6 +6835,9 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
 
                     thread_local std::vector<std::uint8_t> vtxUniformScratch;
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
+                    // Push synthesized fixed-function matrix uniforms (compat
+                    // shader path). Early-out for the common core-profile case.
+                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
                     buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniformValues,
                         program->vertexUniformLayout);
@@ -6837,6 +7003,9 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
 
                     thread_local std::vector<std::uint8_t> vtxUniformScratch;
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
+                    // Push synthesized fixed-function matrix uniforms (compat
+                    // shader path). Early-out for the common core-profile case.
+                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
                     buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniformValues,
                         program->vertexUniformLayout);

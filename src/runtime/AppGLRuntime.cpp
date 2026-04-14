@@ -122,6 +122,13 @@ bool isValidEnableCap(GLenum cap) {
         case GL_STENCIL_TEST:
         case GL_TEXTURE_CUBE_MAP_SEAMLESS:
         case GL_FRAMEBUFFER_SRGB:
+        // GL 4.0 sample-rate shading. BAR's deferred-shading path probes
+        // GL_SAMPLE_SHADING during its multisample-quality init step. The
+        // toggle is a real core enum (added in GL_ARB_sample_shading) so
+        // it belongs in the spec-valid list rather than the compat no-op
+        // list. AppGL has no MSAA backend yet, so the enable simply
+        // updates the state mirror without affecting the Metal pass.
+        case GL_SAMPLE_SHADING:
             return true;
         default:
             return false;
@@ -147,12 +154,25 @@ bool isValidEnableCap(GLenum cap) {
 //
 // Currently:
 //   GL_ALPHA_TEST (0x0BC0) — alpha-test stage from compat fragment pipeline
+//   GL_LIGHTING   (0x0B50) — fixed-function lighting (compat-only since 3.1)
+//   GL_TEXTURE_2D (0x0DE1) — fixed-function texture-target enable; in core
+//                            profile texture binding alone is sufficient,
+//                            but compat engines still toggle it during
+//                            init (e.g. BAR's CompoundDraw / TextureUtils).
 #ifndef GL_ALPHA_TEST
 #define GL_ALPHA_TEST 0x0BC0
+#endif
+#ifndef GL_LIGHTING
+#define GL_LIGHTING 0x0B50
+#endif
+#ifndef GL_TEXTURE_2D
+#define GL_TEXTURE_2D 0x0DE1
 #endif
 bool isCompatNoOpEnableCap(GLenum cap) {
     switch (cap) {
         case GL_ALPHA_TEST:
+        case GL_LIGHTING:
+        case GL_TEXTURE_2D:
             return true;
         default:
             return false;
