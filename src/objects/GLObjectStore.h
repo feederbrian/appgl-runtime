@@ -199,7 +199,24 @@ struct GLShaderObject {
     std::vector<std::uint32_t> spirv;
     std::string compileLog;
     bool compiled = false;
+    // GL spec: glDeleteShader on a shader still attached to one or more
+    // programs flags the object for deletion but does NOT remove it from the
+    // object store — the actual erase is deferred until the last detach (or
+    // until glDeleteProgram on the final attached program). `attachmentCount`
+    // tracks the number of live program attachments, and the entry points in
+    // GLContext.mm (attachShader / detachShader / deleteShader / deleteProgram)
+    // perform the maybe-erase pass when both deleteRequested is true and the
+    // attachment count drops to zero.
+    //
+    // BAR's standard shader path (rts/Rendering/Shaders/Shader.cpp) follows
+    // the `attach → glDeleteShader (RAII deleter at scope exit) → glLinkProgram`
+    // ordering — under the eager-erase Phase A behaviour the link-time lookup
+    // saw nullptr and bailed with "attached shader is not compiled", masking
+    // every real compile result. The deferred-erase semantics restore the
+    // spec-mandated behaviour and let the real compileLog reach the diagnostic
+    // ring.
     bool deleteRequested = false;
+    int attachmentCount = 0;
     std::vector<GLShaderDeclaration> declaredUniforms;
     std::vector<GLShaderDeclaration> declaredInputs;
     std::vector<GLShaderDeclaration> declaredOutputs;

@@ -2414,6 +2414,140 @@ public:
             gl.glDeleteProgram(failProgram);
             gl.glDeleteShader(badShader);
         }
+
+        // Phase 8X Group 4d: shader-lifetime BAR pattern.
+        //
+        // Engines using RAII shader handles (BAR's
+        // `rts/Rendering/Shaders/Shader.cpp` is the motivating example)
+        // call `glDeleteShader` between `glAttachShader` and
+        // `glLinkProgram`, because the unique_ptr deleter that wraps the
+        // shader handle fires at scope exit on the very next line. The
+        // GL spec is clear on this: a shader still attached to one or
+        // more programs is *flagged for deletion* but not erased — the
+        // attachment count pins it until the last detach (or the owning
+        // program tear-down). Phase A's eager erase broke that pattern
+        // and masked every BAR shader compile result with the dummy
+        // "attached shader is not compiled" link log; this block locks
+        // the spec-compliant behaviour into the gauntlet so the
+        // regression cannot re-emerge silently.
+        {
+            const std::uint64_t recordsBefore =
+                Runtime::shared().shaderTranslationCount();
+
+            const GLuint raiiVS = gl.glCreateShader(GL_VERTEX_SHADER);
+            const GLuint raiiFS = gl.glCreateShader(GL_FRAGMENT_SHADER);
+            const char* raiiVSSource =
+                "#version 330 core\n"
+                "void main() { gl_Position = vec4(0.0); }\n";
+            const char* raiiFSSource =
+                "#version 330 core\n"
+                "out vec4 fragColor;\n"
+                "void main() { fragColor = vec4(1.0); }\n";
+            gl.glShaderSource(raiiVS, 1, &raiiVSSource, nullptr);
+            gl.glShaderSource(raiiFS, 1, &raiiFSSource, nullptr);
+            gl.glCompileShader(raiiVS);
+            gl.glCompileShader(raiiFS);
+
+            GLint raiiVSCompileStatus = GL_FALSE;
+            GLint raiiFSCompileStatus = GL_FALSE;
+            gl.glGetShaderiv(raiiVS, GL_COMPILE_STATUS, &raiiVSCompileStatus);
+            gl.glGetShaderiv(raiiFS, GL_COMPILE_STATUS, &raiiFSCompileStatus);
+            expectCondition(raiiVSCompileStatus == GL_TRUE,
+                            "lifetime-raii vertex shader compiles");
+            expectCondition(raiiFSCompileStatus == GL_TRUE,
+                            "lifetime-raii fragment shader compiles");
+
+            // Verify the new compile-stage diagnostic-ring records exist.
+            // The Group 4d follow-up makes compileShader push a record on
+            // every call (success or failure) so BAR-side observers don't
+            // need to wait for a downstream link to learn what compileLog
+            // said. Walk back from the snapshot tail looking for the two
+            // shader IDs we just compiled.
+            {
+                const auto snapshot =
+                    Runtime::shared().shaderTranslationSnapshot();
+                const std::string vsTag = "shader-" + std::to_string(raiiVS);
+                const std::string fsTag = "shader-" + std::to_string(raiiFS);
+                bool foundVSCompile = false;
+                bool foundFSCompile = false;
+                for (auto it = snapshot.rbegin(); it != snapshot.rend(); ++it) {
+                    if (it->stage == "compile" && it->success) {
+                        if (it->id == vsTag) foundVSCompile = true;
+                        if (it->id == fsTag) foundFSCompile = true;
+                    }
+                    if (foundVSCompile && foundFSCompile) {
+                        break;
+                    }
+                }
+                expectCondition(foundVSCompile,
+                                "compile-stage record present for lifetime-raii vertex");
+                expectCondition(foundFSCompile,
+                                "compile-stage record present for lifetime-raii fragment");
+            }
+
+            const GLuint raiiProgram = gl.glCreateProgram();
+            gl.glAttachShader(raiiProgram, raiiVS);
+            gl.glAttachShader(raiiProgram, raiiFS);
+
+            // The motivating ordering: delete BEFORE link. The shader
+            // objects must remain resident because of the live attachment.
+            gl.glDeleteShader(raiiVS);
+            gl.glDeleteShader(raiiFS);
+
+            // Spec: glIsShader returns GL_FALSE the moment glDeleteShader
+            // marks the name, even though the underlying object is still
+            // present in the store.
+            expectCondition(gl.glIsShader(raiiVS) == GL_FALSE,
+                            "deleted-but-attached vertex glIsShader returns GL_FALSE");
+            expectCondition(gl.glIsShader(raiiFS) == GL_FALSE,
+                            "deleted-but-attached fragment glIsShader returns GL_FALSE");
+
+            // Spec: glGetShaderiv(GL_DELETE_STATUS) is still queryable on
+            // a marked-but-resident shader, and reports GL_TRUE.
+            GLint vsDeleteStatus = GL_FALSE;
+            gl.glGetShaderiv(raiiVS, GL_DELETE_STATUS, &vsDeleteStatus);
+            expectCondition(vsDeleteStatus == GL_TRUE,
+                            "deleted-but-attached vertex GL_DELETE_STATUS=GL_TRUE");
+
+            // The critical assertion: link must succeed even though both
+            // attached shaders have already been glDeleteShader'd. Under
+            // Phase A's eager-erase code path linkProgram saw nullptr on
+            // both lookups and bailed with "attached shader is not compiled".
+            gl.glLinkProgram(raiiProgram);
+            GLint raiiLinkStatus = GL_FALSE;
+            gl.glGetProgramiv(raiiProgram, GL_LINK_STATUS, &raiiLinkStatus);
+            expectCondition(raiiLinkStatus == GL_TRUE,
+                            "RAII attach->delete->link cycle succeeds");
+
+            // Detach the vertex shader. This was the last attachment for
+            // raiiVS and the deleteRequested flag is set, so the deferred
+            // erase fires here. Subsequent glGetShaderiv on the freed name
+            // must report GL_INVALID_VALUE (the standard glGetError surface
+            // for unknown object IDs).
+            gl.glDetachShader(raiiProgram, raiiVS);
+            while (gl.glGetError() != GL_NO_ERROR) {}
+            GLint freedVSStatus = -1;
+            gl.glGetShaderiv(raiiVS, GL_DELETE_STATUS, &freedVSStatus);
+            expectGLError(gl, GL_INVALID_VALUE,
+                          "freed vertex shader name reports GL_INVALID_VALUE on glGetShaderiv");
+
+            // Tearing down the program should walk the still-attached
+            // shader list and erase the marked fragment shader. After this
+            // call, glGetShaderiv on raiiFS must also fail.
+            gl.glDeleteProgram(raiiProgram);
+            while (gl.glGetError() != GL_NO_ERROR) {}
+            GLint freedFSStatus = -1;
+            gl.glGetShaderiv(raiiFS, GL_DELETE_STATUS, &freedFSStatus);
+            expectGLError(gl, GL_INVALID_VALUE,
+                          "freed fragment shader name reports GL_INVALID_VALUE post-deleteProgram");
+
+            // Sanity: at minimum two compile-stage records and one link-stage
+            // record were pushed during this block.
+            const std::uint64_t recordsAfter =
+                Runtime::shared().shaderTranslationCount();
+            expectCondition(recordsAfter - recordsBefore >= 3,
+                            "RAII lifetime cycle pushed >=3 shader translation records");
+        }
     }
 
     void render(GLContext& context) override {

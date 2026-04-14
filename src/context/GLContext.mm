@@ -4918,15 +4918,32 @@ bool GLContext::deleteShader(GLuint shader) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    // GL allows the name to remain valid until detached from all programs.
-    // Phase A's gauntlet flow always detaches before deleting, so we just remove.
+    // Spec: a shader still attached to one or more programs is *flagged for
+    // deletion* but not erased from the object store. The actual erase is
+    // performed by detachShader / deleteProgram once the attachment count
+    // reaches zero. (See `struct GLShaderObject` in GLObjectStore.h for the
+    // BAR-side rationale — engines using RAII deleters call glDeleteShader
+    // between glAttachShader and glLinkProgram, and the eager-erase Phase A
+    // behaviour was masking every real compile result with the dummy
+    // "attached shader is not compiled" link-log.)
     object->deleteRequested = true;
-    impl_->objects->shaders().erase(shader);
+    if (object->attachmentCount == 0) {
+        impl_->objects->shaders().erase(shader);
+    }
     return true;
 }
 
 bool GLContext::isShader(GLuint shader) const {
-    return impl_->objects->shaders().contains(shader);
+    // Spec: glIsShader returns GL_FALSE for a shader name that has been
+    // marked for deletion, even if the underlying object is still resident
+    // because of outstanding program attachments. The object store still
+    // holds the name (so the link path can resolve it) but the public
+    // identity of the shader is gone the moment glDeleteShader runs.
+    const GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        return false;
+    }
+    return !object->deleteRequested;
 }
 
 bool GLContext::shaderSource(GLuint shader, GLsizei count, const GLchar* const* strings, const GLint* length) {
@@ -4977,10 +4994,28 @@ bool GLContext::compileShader(GLuint shader) {
     object->declaredInputs.clear();
     object->declaredOutputs.clear();
 
+    // Diagnostic-ring tag and source hash used by the compile-stage record
+    // pushed at the bottom of this function on both success and failure.
+    // Hash uses std::hash<std::string> for cheapness — it isn't a
+    // cryptographic identity, just a per-source key BAR can compare across
+    // log samples to tell whether two compile attempts saw the same source.
+    const std::string shaderTag = "shader-" + std::to_string(shader);
+    auto compileSourceHash = [](const std::string& s) -> std::string {
+        std::size_t h = std::hash<std::string>{}(s);
+        char buf[18];
+        std::snprintf(buf, sizeof(buf), "%016zx", h);
+        return buf;
+    };
+
     if (object->source.empty()) {
         object->compileLog = "shader source is empty";
+        Runtime::shared().recordShaderTranslation({
+            shaderTag, "compile", "", object->compileLog, "", false
+        });
         return false;
     }
+
+    const std::string sourceHash = compileSourceHash(object->source);
 
     // 1. Compat-shader rewrite. Glslang's SPIR-V backend rejects
     //    `#version NNN compatibility` outright and rejects every
@@ -5029,15 +5064,29 @@ bool GLContext::compileShader(GLuint shader) {
     object->compileLog = std::move(compileLog);
     if (spirv.empty()) {
         // Glslang failed. compileLog contains the real diagnostic text,
-        // which getShaderInfoLog will now return verbatim. The link-time
-        // early return ("attached shader is not compiled") will push the
-        // failure into Runtime::shaderTranslations_ so it shows up in the
-        // diagnostic dump with the glslang log attached.
+        // which getShaderInfoLog will now return verbatim. Push the failure
+        // to the diagnostic ring as a compile-stage record so BAR sees the
+        // glslang log directly without having to wait for a downstream
+        // glLinkProgram lift. (Pre-Group-4d the only path was via
+        // linkProgram's "attached shader is not compiled" branch, which
+        // could not survive the eager-erase shader lifetime bug — see
+        // GLObjectStore.h::GLShaderObject for the full story.)
+        Runtime::shared().recordShaderTranslation({
+            shaderTag, "compile", sourceHash, object->compileLog, "", false
+        });
         return false;
     }
 
     object->spirv = std::move(spirv);
     object->compiled = true;
+    // Push a positive compile-stage record. mslPreview is intentionally
+    // empty here — MSL transpilation runs at link time, not compile time —
+    // but the presence of the record (with success=true and a stable
+    // sourceHash) is enough for BAR-side observation to confirm the compat
+    // rewriter / glslang pipeline ran end-to-end on this shader.
+    Runtime::shared().recordShaderTranslation({
+        shaderTag, "compile", sourceHash, "", "", true
+    });
     return true;
 }
 
@@ -5106,6 +5155,27 @@ bool GLContext::deleteProgram(GLuint program) {
     if (impl_->state->currentProgram() == program) {
         impl_->state->useProgram(0);
     }
+    // Walk the attached-shader list and run the same decrement-and-maybe-erase
+    // pass detachShader uses. A program tear-down counts as a synthetic
+    // detach for every shader it still holds, and any shader whose
+    // deleteRequested flag was set earlier (and is now down to zero
+    // attachments) finally gets erased here. Snapshot the IDs first so the
+    // shader-table mutation inside the loop can't invalidate the program's
+    // attached-shader vector — though the program itself is about to be
+    // erased so the mutation is harmless either way.
+    std::vector<GLuint> attached = object->attachedShaders;
+    for (GLuint shaderId : attached) {
+        GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
+        if (shaderObject == nullptr) {
+            continue;
+        }
+        if (shaderObject->attachmentCount > 0) {
+            --shaderObject->attachmentCount;
+        }
+        if (shaderObject->deleteRequested && shaderObject->attachmentCount == 0) {
+            impl_->objects->shaders().erase(shaderId);
+        }
+    }
     impl_->objects->programs().erase(program);
     return true;
 }
@@ -5127,6 +5197,12 @@ bool GLContext::attachShader(GLuint program, GLuint shader) {
         return false;
     }
     programObject->attachedShaders.push_back(shader);
+    // See `GLShaderObject::attachmentCount` in GLObjectStore.h. This counter
+    // is the entire reason the deferred-erase path works: it pins the shader
+    // object in the store across the (engine-scope) glDeleteShader call so
+    // glLinkProgram can still see the compiled SPIR-V and the real
+    // compileLog when something fails.
+    ++shaderObject->attachmentCount;
     return true;
 }
 
@@ -5142,6 +5218,20 @@ bool GLContext::detachShader(GLuint program, GLuint shader) {
         return false;
     }
     programObject->attachedShaders.erase(it);
+    // Mirror the attach-time increment, then perform the deferred erase if
+    // both conditions are now met (delete was requested earlier and this was
+    // the last live attachment). The shader object pointer must be looked up
+    // *before* the potential erase, otherwise the dereference of a stale
+    // entry would race with the table mutation.
+    GLShaderObject* shaderObject = impl_->objects->shaders().get(shader);
+    if (shaderObject != nullptr) {
+        if (shaderObject->attachmentCount > 0) {
+            --shaderObject->attachmentCount;
+        }
+        if (shaderObject->deleteRequested && shaderObject->attachmentCount == 0) {
+            impl_->objects->shaders().erase(shader);
+        }
+    }
     return true;
 }
 
@@ -5187,13 +5277,19 @@ bool GLContext::linkProgram(GLuint program) {
 
     for (GLuint shaderId : programObject->attachedShaders) {
         GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
+        // Under deferred-erase semantics (see GLObjectStore.h::GLShaderObject)
+        // a nullptr lookup here is essentially unreachable from real engine
+        // code — glAttachShader rejects unknown IDs upfront, the attachment
+        // count keeps the shader resident across glDeleteShader, and a
+        // detach pulls the ID out of attachedShaders before the maybe-erase
+        // pass. The check is left for defence in depth. The remaining real
+        // failure mode is `!shaderObject->compiled`, which now reliably
+        // carries the real glslang `compileLog` text through to the
+        // diagnostic ring (the upstream `compileShader` call also pushes a
+        // `stage: "compile"` record with the same log, but the link-time
+        // record makes the failure visible at the program level too).
         if (shaderObject == nullptr || !shaderObject->compiled) {
             programObject->linkLog = "attached shader is not compiled";
-            // Pull the glslang diagnostic off the shader object if we have
-            // one so the link-time record carries the compile-time failure
-            // text through to the diagnostic dump. Without this the BAR
-            // operator sees "not compiled" with no hint at *why* the
-            // upstream compileShader call failed.
             const std::string log = shaderObject
                 ? shaderObject->compileLog
                 : programObject->linkLog;
