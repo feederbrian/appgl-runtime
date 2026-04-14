@@ -727,6 +727,13 @@ public:
         std::uint64_t renderbufferBytes = 0;
         std::uint64_t pipelineCacheHits = 0;
         std::uint64_t pipelineCacheMisses = 0;
+        // Phase 8X Group 4d follow-up⁴ — split the build counters so the
+        // {hits:0,misses:0} state is unambiguous between "never tried to
+        // build" (attempts==0) and "tried every time and failed every time"
+        // (attempts>0, failures==attempts, misses==0). Invariant after every
+        // draw: attempts == misses + failures.
+        std::uint64_t pipelineBuildAttempts = 0;
+        std::uint64_t pipelineBuildFailures = 0;
         double pipelineCumulativeBuildMillis = 0.0;
     };
 

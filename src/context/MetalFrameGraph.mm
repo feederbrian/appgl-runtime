@@ -436,28 +436,79 @@ struct MetalFrameGraph::Impl {
             pipelineState = (__bridge id<MTLRenderPipelineState>)(*info.pipelineStateOut);
             ++pipelineCacheHits;
         } else {
+            // Phase 8X Group 4d follow-up⁴ — every entry into the build branch
+            // bumps `pipelineBuildAttempts`, separately from the success-only
+            // `pipelineCacheMisses` counter. This lets BAR-side tooling
+            // distinguish "never tried" (attempts==0) from "tried and failed
+            // every time" (attempts>0, failures==attempts, misses==0). Prior
+            // to this round, the {hits:0, misses:0} state was ambiguous.
+            ++pipelineBuildAttempts;
             const auto buildStart = std::chrono::steady_clock::now();
+
+            // Phase 8X Group 4d follow-up⁴ — local helper for the five
+            // Metal-side failure paths below. Captures the NSError
+            // description AND a stage tag ("vertex-library",
+            // "fragment-library", "vertex-function", "fragment-function",
+            // "pipeline-state") into the caller-supplied output string so
+            // GLContext can route it into the diagnostic ring as a
+            // `pipeline-build` ShaderTranslationRecord. The first token in
+            // the string is always the stage tag, so BAR can grep-aggregate
+            // by failing stage even though the record stores the full text.
+            //
+            // The build-failure counter is bumped once per failure path so
+            // PipelineCacheMetrics::buildFailures stays in lockstep with
+            // the number of populated records (modulo first-time gating on
+            // the GLContext side).
+            auto recordBuildFailure = [&info, this](const char* stageTag, NSError* err) {
+                ++pipelineBuildFailures;
+                if (info.pipelineBuildErrorOut == nullptr) {
+                    return;
+                }
+                std::string& out = *info.pipelineBuildErrorOut;
+                out.assign(stageTag);
+                out.append(": ");
+                if (err != nil) {
+                    NSString* desc = [err localizedDescription];
+                    if (desc != nil) {
+                        out.append([desc UTF8String] ? [desc UTF8String] : "(nil description)");
+                    } else {
+                        out.append("(nil description)");
+                    }
+                } else {
+                    out.append("(nil error)");
+                }
+            };
+
             // Compile vertex MSL.
             NSError* error = nil;
             NSString* vertSrc = [NSString stringWithUTF8String:info.vertexMSL->c_str()];
             id<MTLLibrary> vertLib = [device newLibraryWithSource:vertSrc options:nil error:&error];
             if (vertLib == nil) {
+                FG_TRACE(@"encodeTranslatedDraw: newLibraryWithSource(vertex) failed: %@", error);
+                recordBuildFailure("vertex-library", error);
                 return false;
             }
             // SPIRV-Cross names the entry points "main0" by default.
             id<MTLFunction> vertFn = [vertLib newFunctionWithName:@"main0"];
             if (vertFn == nil) {
+                FG_TRACE(@"encodeTranslatedDraw: newFunctionWithName(vertex,main0) failed");
+                recordBuildFailure("vertex-function", nil);
                 return false;
             }
 
             // Compile fragment MSL.
+            error = nil;  // reset before the next failable Metal call
             NSString* fragSrc = [NSString stringWithUTF8String:info.fragmentMSL->c_str()];
             id<MTLLibrary> fragLib = [device newLibraryWithSource:fragSrc options:nil error:&error];
             if (fragLib == nil) {
+                FG_TRACE(@"encodeTranslatedDraw: newLibraryWithSource(fragment) failed: %@", error);
+                recordBuildFailure("fragment-library", error);
                 return false;
             }
             id<MTLFunction> fragFn = [fragLib newFunctionWithName:@"main0"];
             if (fragFn == nil) {
+                FG_TRACE(@"encodeTranslatedDraw: newFunctionWithName(fragment,main0) failed");
+                recordBuildFailure("fragment-function", nil);
                 return false;
             }
 
@@ -551,8 +602,11 @@ struct MetalFrameGraph::Impl {
             desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
 
+            error = nil;  // reset before the final failable Metal call
             pipelineState = [device newRenderPipelineStateWithDescriptor:desc error:&error];
             if (pipelineState == nil) {
+                FG_TRACE(@"encodeTranslatedDraw: newRenderPipelineStateWithDescriptor failed: %@", error);
+                recordBuildFailure("pipeline-state", error);
                 return false;
             }
 
@@ -1106,8 +1160,16 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
     // Benchmark metric accessors.
     std::uint64_t getPipelineCacheHits() const { return pipelineCacheHits; }
     std::uint64_t getPipelineCacheMisses() const { return pipelineCacheMisses; }
+    std::uint64_t getPipelineBuildAttempts() const { return pipelineBuildAttempts; }
+    std::uint64_t getPipelineBuildFailures() const { return pipelineBuildFailures; }
     double getPipelineBuildMs() const { return pipelineCumulativeBuildMs; }
-    void resetMetrics() { pipelineCacheHits = 0; pipelineCacheMisses = 0; pipelineCumulativeBuildMs = 0.0; }
+    void resetMetrics() {
+        pipelineCacheHits = 0;
+        pipelineCacheMisses = 0;
+        pipelineBuildAttempts = 0;
+        pipelineBuildFailures = 0;
+        pipelineCumulativeBuildMs = 0.0;
+    }
     std::uint64_t getMetalAllocatedBytes() const {
         if (device != nil && [device respondsToSelector:@selector(currentAllocatedSize)]) {
             return static_cast<std::uint64_t>(device.currentAllocatedSize);
@@ -1417,8 +1479,16 @@ private:
     }
 
     // Pipeline cache metrics (for benchmark instrumentation).
+    //
+    // Phase 8X Group 4d follow-up⁴ — `pipelineBuildAttempts` /
+    // `pipelineBuildFailures` are added so the {hits, misses} pair stays
+    // a clean cache-effectiveness signal while the new pair tells BAR
+    // whether the build branch is even being entered (and how often it's
+    // failing). Invariant: `attempts == misses + failures` for every draw.
     std::uint64_t pipelineCacheHits = 0;
     std::uint64_t pipelineCacheMisses = 0;
+    std::uint64_t pipelineBuildAttempts = 0;
+    std::uint64_t pipelineBuildFailures = 0;
     double pipelineCumulativeBuildMs = 0.0;
 };
 
@@ -1488,6 +1558,8 @@ MetalFrameGraph::PipelineCacheMetrics MetalFrameGraph::pipelineCacheMetrics() co
     PipelineCacheMetrics m;
     m.hits = impl_->getPipelineCacheHits();
     m.misses = impl_->getPipelineCacheMisses();
+    m.buildAttempts = impl_->getPipelineBuildAttempts();
+    m.buildFailures = impl_->getPipelineBuildFailures();
     m.cumulativeBuildMillis = impl_->getPipelineBuildMs();
     return m;
 }

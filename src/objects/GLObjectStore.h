@@ -309,6 +309,16 @@ struct GLProgramObject {
     ShaderReflection fragmentReflection;
     bool hasTranslatedPipeline = false;
 
+    // Phase 8X Group 4d follow-up⁴ — per-stage source hashes captured at
+    // link time. Used by the pipeline-build failure path in the translated
+    // draw entry points to stamp the failing program's source hashes onto
+    // the diagnostic-ring `pipeline-build` record, so BAR-side tooling can
+    // correlate the Metal NSError back to the original GLSL source via the
+    // same hash that the link-stage records carry. Empty for stages that
+    // don't exist (compute-only programs leave both empty).
+    std::string vertexSourceHash;
+    std::string fragmentSourceHash;
+
     // Opaque pipeline state handle, owned by MetalFrameGraph.  Stored here so
     // repeated draws skip pipeline creation.  Type-erased to avoid ObjC in this
     // header — cast to id<MTLRenderPipelineState> in .mm files.

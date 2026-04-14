@@ -135,6 +135,30 @@ struct TranslatedDrawInfo {
     // Pipeline state cache (stored on GLProgramObject, updated by MetalFrameGraph).
     void** pipelineStateOut = nullptr;
     std::uint32_t* pipelineColorFormatOut = nullptr;
+
+    // Phase 8X Group 4d follow-up⁴ — pipeline-build failure surfacing.
+    //
+    // Non-owning. When non-null, encodeTranslatedDraw populates this string
+    // on each of the five Metal-side failure paths (newLibraryWithSource for
+    // vertex/fragment, newFunctionWithName for vertex/fragment, and
+    // newRenderPipelineStateWithDescriptor) before returning false. The
+    // first token in the populated string identifies the failing stage so
+    // BAR-side tooling can grep-aggregate by stage name even though the
+    // record stores the full text. On a successful build path the string
+    // is left untouched. On the early-return paths above the build branch
+    // (device==nil / bad vertex data / empty MSL) the string is also left
+    // untouched, since none of those produce an NSError to surface — the
+    // existing translatedFallbackGatesReported bitmask is already enough
+    // signal to name them. Only the encode-failed gate (which runs the
+    // actual Metal calls) populates this field.
+    //
+    // The caller (GLContext::drawArrays / drawArraysInstanced /
+    // drawElements) inspects the string after the false return and pushes
+    // it to Runtime::recordShaderTranslation as a `pipeline-build`
+    // ShaderTranslationRecord, gated by the existing first-time-per-program
+    // EncodeFailed bit so the record fires once per program rather than
+    // once per draw.
+    std::string* pipelineBuildErrorOut = nullptr;
 };
 
 class MetalFrameGraph {
@@ -173,9 +197,27 @@ public:
     bool hasValidAttachments() const;
 
     // Pipeline cache metrics for benchmarking.
+    //
+    // `hits` and `misses` retain their original meanings: a hit is a draw
+    // where the cached MTLRenderPipelineState on the program object was
+    // reused; a miss is a draw where the build branch ran AND succeeded
+    // (so the new state is now cached). `misses` is therefore equivalent
+    // to "successful first-time builds", which is what most miss-counter
+    // consumers expect.
+    //
+    // Phase 8X Group 4d follow-up⁴ adds two attempt/failure counters so
+    // BAR-side tooling can distinguish "never tried to build" (attempts==0)
+    // from "tried every time and failed every time" (attempts>0,
+    // failures==attempts, misses==0). Pre-this-round the {hits=0, misses=0}
+    // metric was ambiguous between those two states, which sent the
+    // previous diagnosis round chasing a non-issue.
+    //
+    // Invariant after every draw: `attempts == misses + failures`.
     struct PipelineCacheMetrics {
         std::uint64_t hits = 0;
-        std::uint64_t misses = 0;
+        std::uint64_t misses = 0;             // successful first-time builds
+        std::uint64_t buildAttempts = 0;      // every entry into the build branch
+        std::uint64_t buildFailures = 0;      // builds that returned false
         double cumulativeBuildMillis = 0.0;
     };
     PipelineCacheMetrics pipelineCacheMetrics() const;

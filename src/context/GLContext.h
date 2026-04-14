@@ -495,9 +495,19 @@ public:
     const MatrixStateMirror& matrixState() const;
 
     // Benchmark instrumentation — pipeline cache metrics.
+    //
+    // Phase 8X Group 4d follow-up⁴ — `buildAttempts` and `buildFailures`
+    // are surfaced alongside `hits`/`misses` so BAR-side tooling can
+    // disambiguate {hits:0,misses:0} between "translated path never
+    // reached encodeTranslatedDraw's build branch" (attempts==0) and
+    // "build branch ran every time and Metal rejected the result every
+    // time" (attempts>0, failures==attempts). Invariant after every draw:
+    // buildAttempts == misses + buildFailures.
     struct PipelineCacheMetrics {
         std::uint64_t hits = 0;
         std::uint64_t misses = 0;
+        std::uint64_t buildAttempts = 0;
+        std::uint64_t buildFailures = 0;
         double cumulativeBuildMillis = 0.0;
     };
     PipelineCacheMetrics pipelineCacheMetrics() const;

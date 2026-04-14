@@ -971,6 +971,24 @@ static bool isSilentlyAcceptedFixedFunctionStub(std::string_view functionName) {
     // never reads it back through GL — it ends up driving an immediate-mode
     // vertex stream that the translated pipeline doesn't sample.
     if (functionName == "glColor3f") return true;
+    // Phase 8X Group 4d follow-up⁴ §6d — three more legacy compat entry
+    // points BAR's verification round flagged as steady-state noise:
+    //
+    //   glColor4f    — same rationale as glColor3f, just the alpha-bearing
+    //                  variant. The fixed-function colour register has no
+    //                  Metal analogue and translated draws never sample it.
+    //   glShadeModel — flat vs smooth shading is a vertex-output decoration
+    //                  the translator handles via vertex-stage attribute
+    //                  qualifiers, not a runtime toggle. The compat call is
+    //                  a true no-op for translated programs.
+    //   glRectf      — emits an immediate-mode quad. The translated path
+    //                  never reaches the immediate-mode vertex stream the
+    //                  compat profile would push, so there's no draw to
+    //                  drop on the floor — the call is silently absorbed
+    //                  the same way glBegin/glEnd are.
+    if (functionName == "glColor4f") return true;
+    if (functionName == "glShadeModel") return true;
+    if (functionName == "glRectf") return true;
     return false;
 }
 
@@ -1073,6 +1091,12 @@ void Runtime::snapshotContextInventoryLocked(GLContext* context) {
     const auto metrics = context->pipelineCacheMetrics();
     snap.pipelineCacheHits = metrics.hits;
     snap.pipelineCacheMisses = metrics.misses;
+    // Phase 8X Group 4d follow-up⁴ — capture the new build attempt/failure
+    // counters so the post-mortem snapshot disambiguates "never tried"
+    // (attempts==0) from "tried and always failed" (attempts>0,
+    // failures==attempts) at teardown time too.
+    snap.pipelineBuildAttempts = metrics.buildAttempts;
+    snap.pipelineBuildFailures = metrics.buildFailures;
     snap.pipelineCumulativeBuildMillis = metrics.cumulativeBuildMillis;
     lastKnownInventory_ = snap;
 }
@@ -1212,6 +1236,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     stream << "\"objectStore\":{";
     std::uint64_t pipelineCacheHits = 0;
     std::uint64_t pipelineCacheMisses = 0;
+    std::uint64_t pipelineBuildAttempts = 0;
+    std::uint64_t pipelineBuildFailures = 0;
     double pipelineCumulativeBuildMillis = 0.0;
     if (contextIsLive) {
         auto& store = currentContext->objects();
@@ -1253,6 +1279,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         const auto metrics = currentContext->pipelineCacheMetrics();
         pipelineCacheHits = metrics.hits;
         pipelineCacheMisses = metrics.misses;
+        pipelineBuildAttempts = metrics.buildAttempts;
+        pipelineBuildFailures = metrics.buildFailures;
         pipelineCumulativeBuildMillis = metrics.cumulativeBuildMillis;
     } else if (lastKnownInventory_.valid) {
         const auto& snap = lastKnownInventory_;
@@ -1273,6 +1301,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
 
         pipelineCacheHits = snap.pipelineCacheHits;
         pipelineCacheMisses = snap.pipelineCacheMisses;
+        pipelineBuildAttempts = snap.pipelineBuildAttempts;
+        pipelineBuildFailures = snap.pipelineBuildFailures;
         pipelineCumulativeBuildMillis = snap.pipelineCumulativeBuildMillis;
     } else {
         stream << "\"buffers\":0,\"textures\":0,\"samplers\":0,\"renderbuffers\":0,"
@@ -1286,6 +1316,14 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     // Entries = total misses (every miss constructs a new MTLRenderPipelineState,
     // and the frame graph currently does not evict entries, so this count is
     // monotonic over the context's lifetime).
+    //
+    // Phase 8X Group 4d follow-up⁴ — `buildAttempts` and `buildFailures` are
+    // emitted alongside hits/misses so BAR-side tooling can disambiguate
+    // {hits:0,misses:0}: attempts==0 means "translated path never reached
+    // the build branch" (one of the four pre-encode gates fired); attempts>0
+    // with failures==attempts means "build branch ran every time and Metal
+    // rejected the result every time" (the encode-failed gate). Invariant
+    // after every draw: buildAttempts == misses + buildFailures.
     const std::uint64_t pipelineEntries = pipelineCacheMisses;
     const double averageBuildMillis = pipelineCacheMisses > 0
         ? pipelineCumulativeBuildMillis / static_cast<double>(pipelineCacheMisses)
@@ -1294,6 +1332,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"entries\":" << pipelineEntries << ","
            << "\"hits\":" << pipelineCacheHits << ","
            << "\"misses\":" << pipelineCacheMisses << ","
+           << "\"buildAttempts\":" << pipelineBuildAttempts << ","
+           << "\"buildFailures\":" << pipelineBuildFailures << ","
            << "\"averageBuildMillis\":" << averageBuildMillis
            << "},";
 
@@ -1364,6 +1404,8 @@ std::size_t Runtime::writeLiveDiagnosticsJSON(char* out, std::size_t cap) {
     // 1. Pipeline cache metrics (held briefly).
     std::uint64_t pipelineCacheHits = 0;
     std::uint64_t pipelineCacheMisses = 0;
+    std::uint64_t pipelineBuildAttempts = 0;
+    std::uint64_t pipelineBuildFailures = 0;
     double pipelineCumulativeBuildMillis = 0.0;
     bool haveMetrics = false;
     bool contextIsLive = false;
@@ -1376,11 +1418,15 @@ std::size_t Runtime::writeLiveDiagnosticsJSON(char* out, std::size_t cap) {
             const auto m = gCurrentContext->pipelineCacheMetrics();
             pipelineCacheHits = m.hits;
             pipelineCacheMisses = m.misses;
+            pipelineBuildAttempts = m.buildAttempts;
+            pipelineBuildFailures = m.buildFailures;
             pipelineCumulativeBuildMillis = m.cumulativeBuildMillis;
             haveMetrics = true;
         } else if (lastKnownInventory_.valid) {
             pipelineCacheHits = lastKnownInventory_.pipelineCacheHits;
             pipelineCacheMisses = lastKnownInventory_.pipelineCacheMisses;
+            pipelineBuildAttempts = lastKnownInventory_.pipelineBuildAttempts;
+            pipelineBuildFailures = lastKnownInventory_.pipelineBuildFailures;
             pipelineCumulativeBuildMillis = lastKnownInventory_.pipelineCumulativeBuildMillis;
             haveMetrics = true;
         }
@@ -1394,6 +1440,8 @@ std::size_t Runtime::writeLiveDiagnosticsJSON(char* out, std::size_t cap) {
            << (contextIsLive ? "live" : (haveMetrics ? "post-mortem-snapshot" : "empty"))
            << "\",";
 
+    // Phase 8X Group 4d follow-up⁴ — see writeDiagnosticsJSON for the full
+    // rationale on the buildAttempts/buildFailures emission.
     const std::uint64_t pipelineEntries = pipelineCacheMisses;
     const double averageBuildMillis = pipelineCacheMisses > 0
         ? pipelineCumulativeBuildMillis / static_cast<double>(pipelineCacheMisses)
@@ -1402,6 +1450,8 @@ std::size_t Runtime::writeLiveDiagnosticsJSON(char* out, std::size_t cap) {
            << "\"entries\":" << pipelineEntries << ","
            << "\"hits\":" << pipelineCacheHits << ","
            << "\"misses\":" << pipelineCacheMisses << ","
+           << "\"buildAttempts\":" << pipelineBuildAttempts << ","
+           << "\"buildFailures\":" << pipelineBuildFailures << ","
            << "\"averageBuildMillis\":" << averageBuildMillis
            << "},";
 

@@ -2321,7 +2321,16 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
 
 bool GLContext::queryInteger(GLenum pname, GLint* data) {
     if (data == nullptr) {
-        pushError(GL_INVALID_VALUE);
+        // Phase 8X Group 4d follow-up⁴ §6c — capture the pname so BAR can
+        // name the steady-state firer instead of seeing a bare
+        // <internal@GLContext.mm:LINE> entry. The internal call-site tag
+        // is still synthesised (functionName left empty) so the file:line
+        // breadcrumb survives.
+        char pnameBuf[48];
+        std::snprintf(pnameBuf, sizeof(pnameBuf),
+            "queryInteger: pname=0x%04X data=nullptr",
+            static_cast<unsigned>(pname));
+        pushError(GL_INVALID_VALUE, "", pnameBuf);
         return false;
     }
     if (pname == GL_DEBUG_GROUP_STACK_DEPTH) {
@@ -2351,7 +2360,16 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         return true;
     }
     if (impl_->capabilities == nullptr || !impl_->capabilities->queryInteger(pname, data)) {
-        pushError(GL_INVALID_ENUM);
+        // Phase 8X Group 4d follow-up⁴ §6c — name the unknown pname in
+        // the diagnostic ring so BAR can see WHICH enum its widget code
+        // is querying. The previous bare `pushError(GL_INVALID_ENUM)`
+        // produced a steady stream of untagged errorLog entries that
+        // BAR-side tooling could only count, not act on.
+        char pnameBuf[48];
+        std::snprintf(pnameBuf, sizeof(pnameBuf),
+            "queryInteger: pname=0x%04X unknown",
+            static_cast<unsigned>(pname));
+        pushError(GL_INVALID_ENUM, "", pnameBuf);
         return false;
     }
     return true;
@@ -4791,7 +4809,11 @@ const char* translatedFallbackGateName(TranslatedFallbackGate gate) {
     return "unknown";
 }
 
-void reportTranslatedFallbackOnce(GLProgramObject* program,
+// Returns true when the bit was newly set (i.e., the NSLog actually fired
+// on this call). Callers chain the diagnostic-ring push on the same edge so
+// the heavier "pipeline-build" ShaderTranslationRecord write happens once
+// per (program, gate) pair too, rather than every draw.
+bool reportTranslatedFallbackOnce(GLProgramObject* program,
                                   GLuint programName,
                                   TranslatedFallbackGate gate,
                                   const char* siteName,
@@ -4800,11 +4822,11 @@ void reportTranslatedFallbackOnce(GLProgramObject* program,
                                   GLuint vboName,
                                   std::size_t shadowBytesSize) {
     if (program == nullptr || siteName == nullptr) {
-        return;
+        return false;
     }
     const std::uint32_t bit = static_cast<std::uint32_t>(gate);
     if ((program->translatedFallbackGatesReported & bit) != 0) {
-        return;
+        return false;
     }
     program->translatedFallbackGatesReported |= bit;
     NSLog(@"[GL] %s-fallback: program=%u gate=%s vao=%u vbo=%u attrCount=%zu shadowBytes=%zu",
@@ -4815,6 +4837,53 @@ void reportTranslatedFallbackOnce(GLProgramObject* program,
           static_cast<unsigned>(vboName),
           attrCount,
           shadowBytesSize);
+    return true;
+}
+
+// Phase 8X Group 4d follow-up⁴ — record a pipeline-build failure in the
+// shader-translation diagnostic ring so BAR-side tooling can see Metal's
+// rejection text in the same JSON channel it already parses for compile
+// and link records.
+//
+// `errorText` carries the stage tag + NSError description that
+// MetalFrameGraph::encodeTranslatedDraw populated into
+// TranslatedDrawInfo::pipelineBuildErrorOut on the failing path. The
+// stage tag is the first colon-separated token (e.g. "vertex-library:
+// program_source: error: ..."), so BAR can grep-aggregate by stage even
+// though the record carries the full text.
+//
+// Called from the EncodeFailed branch in each draw entry point AFTER
+// reportTranslatedFallbackOnce has already gated the NSLog. We use a
+// SEPARATE per-program bit because the diagnostic-ring record is a
+// heavier-weight signal than the NSLog and we don't want to lose it in a
+// world where the gate bit was set by a non-failure code path. In
+// practice both bits track each other exactly today — the separation is
+// future-proofing.
+void recordPipelineBuildFailureOnce(GLProgramObject* program,
+                                    GLuint programName,
+                                    const std::string& errorText) {
+    if (program == nullptr || errorText.empty()) {
+        return;
+    }
+    // Reuse the EncodeFailed bit as the gate. The reportTranslatedFallbackOnce
+    // call above sets it; this function only fires when that gate just
+    // transitioned from clear to set on this draw. Concretely: if the
+    // caller invokes both helpers in order on the same draw, the NSLog
+    // fires once and the diagnostic record fires once. Subsequent draws
+    // that hit the same failure path skip both, because the bit is already
+    // set. (We don't need a separate guard here — the reportTranslated
+    // call above already set the bit when the diagnostic record was
+    // worth writing.)
+    Runtime::ShaderTranslationRecord record;
+    record.id = "program-" + std::to_string(programName);
+    record.stage = "pipeline-build";
+    record.sourceHash = program->vertexSourceHash;  // primary stage for raster programs
+    record.vertexSourceHash = program->vertexSourceHash;
+    record.fragmentSourceHash = program->fragmentSourceHash;
+    record.glslangLog = errorText;
+    record.mslPreview = "";  // intentionally empty — caller can correlate via hash
+    record.success = false;
+    Runtime::shared().recordShaderTranslation(std::move(record));
 }
 
 }  // namespace
@@ -4931,6 +5000,9 @@ GLContext::PipelineCacheMetrics GLContext::pipelineCacheMetrics() const {
         auto m = impl_->frameGraph->pipelineCacheMetrics();
         result.hits = m.hits;
         result.misses = m.misses;
+        // Phase 8X Group 4d follow-up⁴ — forward the new build counters.
+        result.buildAttempts = m.buildAttempts;
+        result.buildFailures = m.buildFailures;
         result.cumulativeBuildMillis = m.cumulativeBuildMillis;
     }
     return result;
@@ -5507,6 +5579,15 @@ bool GLContext::linkProgram(GLuint program) {
         (vertexShader != nullptr) ? quickHash(vertexShader->source) : std::string();
     const std::string linkFragmentHash =
         (fragmentShader != nullptr) ? quickHash(fragmentShader->source) : std::string();
+
+    // Phase 8X Group 4d follow-up⁴ — cache the source hashes on the program
+    // object so the draw-time pipeline-build failure path (encodeTranslatedDraw
+    // returning false from one of the Metal failure sites) can stamp them onto
+    // the diagnostic ring without having to re-walk the attached shader list.
+    // The link record path above and the failure record path below both pull
+    // from the same canonical strings.
+    programObject->vertexSourceHash = linkVertexHash;
+    programObject->fragmentSourceHash = linkFragmentHash;
 
     // Assign sequential dense uniform locations and seed default values.
     GLint nextLocation = 0;
@@ -6903,14 +6984,25 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     tdi.fragmentUniformData = fragUniformScratch.data();
                     tdi.fragmentUniformSize = fragUniformScratch.size();
 
+                    // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
+                    // pipeline-build error text plumbed out of the encode-failed
+                    // path. Thread-local so we don't reallocate per draw; clear
+                    // before every call so a stale string from a prior frame's
+                    // failure doesn't shadow a later success on the same thread.
+                    thread_local std::string pipelineBuildError;
+                    pipelineBuildError.clear();
+                    tdi.pipelineBuildErrorOut = &pipelineBuildError;
+
                     const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
                     if (ok) {
                         return true;
                     }
-                    reportTranslatedFallbackOnce(program, programName,
-                        TranslatedFallbackGate::EncodeFailed, "drawArrays",
-                        vaoName, vao->attributes.size(), resolved.bufferName,
-                        vbo->shadowBytes.size());
+                    if (reportTranslatedFallbackOnce(program, programName,
+                            TranslatedFallbackGate::EncodeFailed, "drawArrays",
+                            vaoName, vao->attributes.size(), resolved.bufferName,
+                            vbo->shadowBytes.size())) {
+                        recordPipelineBuildFailureOnce(program, programName, pipelineBuildError);
+                    }
                     // Fall through to solid-color path on failure.
                 }
             }
@@ -7116,14 +7208,23 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     tdi.fragmentUniformData = fragUniformScratch.data();
                     tdi.fragmentUniformSize = fragUniformScratch.size();
 
+                    // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
+                    // pipeline-build error text plumbed out of the encode-failed
+                    // path. See the matching comment in drawArrays for rationale.
+                    thread_local std::string pipelineBuildError;
+                    pipelineBuildError.clear();
+                    tdi.pipelineBuildErrorOut = &pipelineBuildError;
+
                     const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
                     if (ok) {
                         return true;
                     }
-                    reportTranslatedFallbackOnce(program, programName,
-                        TranslatedFallbackGate::EncodeFailed, "drawArraysInstanced",
-                        vaoName, vao->attributes.size(), resolved.bufferName,
-                        vbo->shadowBytes.size());
+                    if (reportTranslatedFallbackOnce(program, programName,
+                            TranslatedFallbackGate::EncodeFailed, "drawArraysInstanced",
+                            vaoName, vao->attributes.size(), resolved.bufferName,
+                            vbo->shadowBytes.size())) {
+                        recordPipelineBuildFailureOnce(program, programName, pipelineBuildError);
+                    }
                 }
             }
         }
@@ -7309,14 +7410,23 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.fragmentUniformData = fragUniformScratch.data();
                     tdi.fragmentUniformSize = fragUniformScratch.size();
 
+                    // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
+                    // pipeline-build error text plumbed out of the encode-failed
+                    // path. See the matching comment in drawArrays for rationale.
+                    thread_local std::string pipelineBuildError;
+                    pipelineBuildError.clear();
+                    tdi.pipelineBuildErrorOut = &pipelineBuildError;
+
                     const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
                     if (ok) {
                         return true;
                     }
-                    reportTranslatedFallbackOnce(program, programName,
-                        TranslatedFallbackGate::EncodeFailed, "drawElements",
-                        vaoName, vao->attributes.size(), resolved.bufferName,
-                        vbo->shadowBytes.size());
+                    if (reportTranslatedFallbackOnce(program, programName,
+                            TranslatedFallbackGate::EncodeFailed, "drawElements",
+                            vaoName, vao->attributes.size(), resolved.bufferName,
+                            vbo->shadowBytes.size())) {
+                        recordPipelineBuildFailureOnce(program, programName, pipelineBuildError);
+                    }
                     // Fall through to solid-color path on failure.
                 }
             }
