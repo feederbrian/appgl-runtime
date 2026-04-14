@@ -622,11 +622,30 @@ public:
     CoverageStore& coverageStore();
     TraceLog& traceLog();
 
-    // Shader translation diagnostics. Called from GLContext::linkProgram().
+    // Shader translation diagnostics. Called from GLContext::linkProgram() and
+    // GLContext::compileShader().
+    //
+    // `sourceHash` carries the per-stage source hash for compile-stage and
+    // per-stage link records, and is intentionally empty for whole-program
+    // failure records (e.g. "no shaders attached") that don't have a single
+    // stage to point at.
+    //
+    // `vertexSourceHash` / `fragmentSourceHash` are populated on every
+    // link-stage record produced by linkProgram for a raster program (vertex,
+    // fragment, vertex+fragment, vertex+geometry+fragment, vertex+tess+fragment),
+    // so a single stage record is self-contained: BAR-side tooling can map a
+    // vertex-stage record to its predecessor compile-stage record by hash
+    // without searching backwards through the ring (which can wrap and evict
+    // the compile entry before the link record lands). They stay empty for
+    // compile-stage records (which are pushed before the program-level link
+    // call where the pairing is established) and for compute-only programs
+    // (no raster pair).
     struct ShaderTranslationRecord {
         std::string id;       // e.g. "program-3-vertex"
         std::string stage;    // "vertex" or "fragment"
         std::string sourceHash;
+        std::string vertexSourceHash;
+        std::string fragmentSourceHash;
         std::string glslangLog;
         std::string mslPreview; // first ~200 chars of MSL
         bool success = false;

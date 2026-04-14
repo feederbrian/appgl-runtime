@@ -2,6 +2,7 @@
 
 #include <deque>
 #include <memory>
+#include <source_location>
 #include <string>
 #include <string_view>
 
@@ -461,12 +462,19 @@ public:
     // error ring buffer so external diagnostics tooling can see every
     // raised error — not just the ones that route through the runtime's
     // recordValidationError helper. functionName and message are
-    // optional; when empty the ring-buffer record is tagged as
-    // "<internal>" so the source is still distinguishable from genuinely
-    // unknown entries. Landing C 3g wires the cross-feed.
+    // optional; when functionName is empty the ring-buffer record is
+    // tagged as `<internal@<file>:<line>>` using std::source_location
+    // captured at the call site, so external diagnostics tooling can
+    // name the call site even when the deep GLContext.mm code path
+    // doesn't supply its own function name (Phase 8X Group 4d follow-up
+    // §3a — BAR identified the steady-state untagged GL_INVALID_ENUM
+    // entries and asked for a file:line breadcrumb so they can be
+    // diagnosed from the BAR side without source greps). Landing C 3g
+    // wired the original cross-feed.
     void pushError(GLenum error,
                    std::string_view functionName = std::string_view{},
-                   std::string_view message = std::string_view{});
+                   std::string_view message = std::string_view{},
+                   std::source_location loc = std::source_location::current());
     GLenum popError();
 
     const GLubyte* getString(GLenum name);

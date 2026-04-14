@@ -4688,14 +4688,33 @@ bool GLContext::getSamplerParameterFloat(GLuint sampler, GLenum pname, GLfloat* 
 
 namespace {
 
+// Strip a source-location file path down to its basename for the
+// `<internal@<file>:<line>>` ring-buffer tag emitted by pushError() when no
+// explicit functionName was supplied. The full path (e.g. "<redacted-other-user-home>/
+// appgl-runtime/src/context/GLContext.mm") is unhelpful in the BAR-side log
+// — only the trailing filename matters for naming the call site, and a path
+// prefix would also leak the local build environment into the diagnostic
+// stream.
+std::string sourceLocationBasename(const char* path) {
+    if (path == nullptr) {
+        return std::string("?");
+    }
+    std::string_view view(path);
+    const std::size_t slash = view.find_last_of('/');
+    if (slash != std::string_view::npos) {
+        view.remove_prefix(slash + 1);
+    }
+    return std::string(view);
+}
+
 // Translate a raw GL error enum into its canonical spec name. Used as a
 // fallback message when pushError() is invoked from a deep call site that
 // doesn't supply its own description — without this, ring-buffer records
-// would land as `{function: "<internal>", errorEnum: 1282, message: ""}`
-// and external diagnostics tooling has nothing to render. With it, the
-// same record reads `{... message: "GL_INVALID_OPERATION (raised
-// internally; specific call site not tagged)"}` which still flags the
-// missing tag for follow-up but at least carries the spec name.
+// would land as `{function: "<internal@GLContext.mm:1234>", errorEnum: 1282,
+// message: ""}` and external diagnostics tooling has nothing to render. With
+// it, the same record reads `{... message: "GL_INVALID_OPERATION (raised
+// internally; tag is the source location)"}` so the message is at least the
+// spec name even when the call site doesn't supply richer text.
 const char* glErrorEnumName(GLenum error) {
     switch (error) {
         case GL_NO_ERROR:                       return "GL_NO_ERROR";
@@ -4721,14 +4740,17 @@ std::string defaultErrorMessage(GLenum error, bool internalCallSite) {
         base.assign(buf);
     }
     if (internalCallSite) {
-        base.append(" (raised internally; specific call site not tagged)");
+        base.append(" (raised internally; tag is the source location)");
     }
     return base;
 }
 
 }  // namespace
 
-void GLContext::pushError(GLenum error, std::string_view functionName, std::string_view message) {
+void GLContext::pushError(GLenum error,
+                          std::string_view functionName,
+                          std::string_view message,
+                          std::source_location loc) {
     // Mirror the raised error into BOTH surfaces:
     //  * The per-context enum queue drained by glGetError() — the
     //    engine-facing GL contract requires a FIFO of pure enums.
@@ -4736,8 +4758,12 @@ void GLContext::pushError(GLenum error, std::string_view functionName, std::stri
     //    external tooling wants the function name and human-readable
     //    message, which the raw enum queue doesn't carry.
     // Call sites that don't know the function name (e.g. deep inside
-    // GLContext.mm) get a "<internal>" fallback so the entry still
-    // shows up in the diagnostic dump rather than being dropped.
+    // GLContext.mm) leave functionName empty; we then synthesise a tag
+    // from std::source_location captured at the call site, formatted as
+    //   `<internal@<basename>:<line>>`
+    // so external diagnostics tooling can name the call site directly
+    // (Phase 8X Group 4d follow-up §3a — BAR's ask for a file:line
+    // breadcrumb on the steady-state untagged GL_INVALID_ENUM entries).
     // When the message is also empty, default-fill it with the canonical
     // GL spec name for the enum so external tooling has at least the
     // error class to render — empty-message records dropped on the floor
@@ -4746,7 +4772,16 @@ void GLContext::pushError(GLenum error, std::string_view functionName, std::stri
     impl_->errors.push_back(error);
     Runtime::ErrorRecord record;
     const bool internalCallSite = functionName.empty();
-    record.function = internalCallSite ? std::string("<internal>") : std::string(functionName);
+    if (internalCallSite) {
+        std::string tag("<internal@");
+        tag.append(sourceLocationBasename(loc.file_name()));
+        tag.append(":");
+        tag.append(std::to_string(loc.line()));
+        tag.append(">");
+        record.function = std::move(tag);
+    } else {
+        record.function = std::string(functionName);
+    }
     record.errorEnum = error;
     if (message.empty()) {
         record.message = defaultErrorMessage(error, internalCallSite);
@@ -5010,7 +5045,7 @@ bool GLContext::compileShader(GLuint shader) {
     if (object->source.empty()) {
         object->compileLog = "shader source is empty";
         Runtime::shared().recordShaderTranslation({
-            shaderTag, "compile", "", object->compileLog, "", false
+            shaderTag, "compile", "", "", "", object->compileLog, "", false
         });
         return false;
     }
@@ -5072,7 +5107,7 @@ bool GLContext::compileShader(GLuint shader) {
         // could not survive the eager-erase shader lifetime bug — see
         // GLObjectStore.h::GLShaderObject for the full story.)
         Runtime::shared().recordShaderTranslation({
-            shaderTag, "compile", sourceHash, object->compileLog, "", false
+            shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
         });
         return false;
     }
@@ -5085,7 +5120,7 @@ bool GLContext::compileShader(GLuint shader) {
     // sourceHash) is enough for BAR-side observation to confirm the compat
     // rewriter / glslang pipeline ran end-to-end on this shader.
     Runtime::shared().recordShaderTranslation({
-        shaderTag, "compile", sourceHash, "", "", true
+        shaderTag, "compile", sourceHash, "", "", "", "", true
     });
     return true;
 }
@@ -5259,7 +5294,7 @@ bool GLContext::linkProgram(GLuint program) {
     if (programObject->attachedShaders.empty()) {
         programObject->linkLog = "no shaders attached";
         Runtime::shared().recordShaderTranslation({
-            programTag, "link", "", programObject->linkLog, "", false
+            programTag, "link", "", "", "", programObject->linkLog, "", false
         });
         return false;
     }
@@ -5294,7 +5329,7 @@ bool GLContext::linkProgram(GLuint program) {
                 ? shaderObject->compileLog
                 : programObject->linkLog;
             Runtime::shared().recordShaderTranslation({
-                programTag, "link", "", log, "", false
+                programTag, "link", "", "", "", log, "", false
             });
             return false;
         }
@@ -5382,10 +5417,24 @@ bool GLContext::linkProgram(GLuint program) {
     if (kind == ProgramKind::Unknown) {
         programObject->linkLog = "program has no supported shader stage combination";
         Runtime::shared().recordShaderTranslation({
-            programTag, "link", "", programObject->linkLog, "", false
+            programTag, "link", "", "", "", programObject->linkLog, "", false
         });
         return false;
     }
+
+    // Precompute the per-stage source hashes that get stamped onto every
+    // link/vertex/fragment-stage record below. This is BAR's §4 ask #1 — the
+    // diagnostic ring is bounded, and a search-back from a per-stage record to
+    // its predecessor compile-stage record can fail when the ring wraps and
+    // evicts the compile entry first. Carrying both hashes on every link-stage
+    // record makes the mapping ring-eviction-proof.
+    //
+    // Empty for stages that don't exist (compute-only programs leave both
+    // empty, vertex-only programs leave fragment empty, etc.).
+    const std::string linkVertexHash =
+        (vertexShader != nullptr) ? quickHash(vertexShader->source) : std::string();
+    const std::string linkFragmentHash =
+        (fragmentShader != nullptr) ? quickHash(fragmentShader->source) : std::string();
 
     // Assign sequential dense uniform locations and seed default values.
     GLint nextLocation = 0;
@@ -5549,7 +5598,7 @@ bool GLContext::linkProgram(GLuint program) {
         const std::string hash = quickHash(stage->source);
         if (msl.empty()) {
             Runtime::shared().recordShaderTranslation({
-                stageTag, stageName, hash,
+                stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
                 mslLog.empty() ? "spirvToMSL returned empty MSL" : mslLog,
                 "", false
             });
@@ -5559,7 +5608,8 @@ bool GLContext::linkProgram(GLuint program) {
             stage->spirv.data(), stage->spirv.size(), bindings, nullptr);
         mslOut = std::move(msl);
         Runtime::shared().recordShaderTranslation({
-            stageTag, stageName, hash, "ok", mslOut.substr(0, 200), true
+            stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+            "ok", mslOut.substr(0, 200), true
         });
         return true;
     };
@@ -5635,6 +5685,7 @@ bool GLContext::linkProgram(GLuint program) {
             Runtime::shared().recordShaderTranslation({
                 programTag + "-geometry-emulation", "geometry",
                 quickHash(geometryShader->source),
+                linkVertexHash, linkFragmentHash,
                 "geometry shader emulation not yet available on Metal; "
                 "program translated VS+FS only, falls back to raster-without-GS",
                 "", false
@@ -5662,6 +5713,7 @@ bool GLContext::linkProgram(GLuint program) {
             Runtime::shared().recordShaderTranslation({
                 programTag + "-tessellation-emulation", "tessellation",
                 quickHash(tessControlShader->source),
+                linkVertexHash, linkFragmentHash,
                 "tessellation emulation not yet available on Metal; "
                 "program translated VS+FS only, falls back to raster-without-tess",
                 "", false

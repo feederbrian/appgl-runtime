@@ -1037,7 +1037,11 @@ public:
         // GLContext::readPixels's internal pushError(GL_INVALID_ENUM) — no
         // runtime-layer recordValidationError involved. Before 3g this
         // raised error reached glGetError but was INVISIBLE to the runtime
-        // ring buffer. After 3g it shows up as an "<internal>" record.
+        // ring buffer. After 3g it shows up as a synthesised
+        // `<internal@<file>:<line>>` record (Phase 8X Group 4d follow-up
+        // §3a — the source-location upgrade replaced the bare "<internal>"
+        // tag with a file:line breadcrumb so BAR-side tooling can name the
+        // call site directly).
         while (gl.glGetError() != GL_NO_ERROR) {
         }
         const std::uint64_t errorEventsBeforeContextError = Runtime::shared().errorLogCount();
@@ -1051,7 +1055,13 @@ public:
                         "glReadPixels context-level pushError grew the runtime error ring");
         bool foundInternalRecord = false;
         for (auto it = postContextSnapshot.rbegin(); it != postContextSnapshot.rend(); ++it) {
-            if (it->errorEnum == GL_INVALID_ENUM && (it->function == "<internal>" || it->function == "glReadPixels")) {
+            // The function tag is either an explicit name (e.g. "glReadPixels")
+            // when the call site supplied one, or a synthesised
+            // "<internal@<basename>:<line>>" tag when it didn't. Match either
+            // shape — the test only cares that the record landed in the ring.
+            const bool internalTagged =
+                it->function.rfind("<internal@", 0) == 0 || it->function == "<internal>";
+            if (it->errorEnum == GL_INVALID_ENUM && (internalTagged || it->function == "glReadPixels")) {
                 foundInternalRecord = true;
                 break;
             }

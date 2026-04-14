@@ -948,6 +948,32 @@ void Runtime::recordUnimplemented(FunctionId id, std::string_view functionName) 
     }
 }
 
+// Names that should silently no-op rather than push a fixed-function-stub
+// ring entry. These are compat-profile entry points BAR (and other engines)
+// expect to work as no-ops under a core-profile-translated context — keeping
+// them in the diagnostic ring is pure noise. Matches the spirit of
+// `isCompatNoOpEnableCap` for cap enums.
+//
+// The bootstrap trace line still fires so coverage tooling can prove the
+// stub was called; only the error-log push is skipped.
+//
+// To add a name: append it here, document why in a one-line comment, and the
+// next BAR-side run will see one fewer steady-state errorLog entry.
+static bool isSilentlyAcceptedFixedFunctionStub(std::string_view functionName) {
+    // glPushAttrib / glPopAttrib: BAR's Lua bindings wrap every widget draw
+    // in a save/restore-state pair, ~14 hits per frame in the select-menu
+    // smoke. The underlying state mirror already absorbs the relevant
+    // toggles, so the push/pop pair is a true no-op for the translated path.
+    if (functionName == "glPushAttrib") return true;
+    if (functionName == "glPopAttrib") return true;
+    // glColor3f: rare hit from a single Lua widget code path (~1 per run).
+    // The fixed-function colour register has no Metal analogue and BAR
+    // never reads it back through GL — it ends up driving an immediate-mode
+    // vertex stream that the translated pipeline doesn't sample.
+    if (functionName == "glColor3f") return true;
+    return false;
+}
+
 void Runtime::recordFixedFunctionStub(std::string_view functionName) {
     // Fixed-function compat-profile entry points intentionally no-op.
     // We publish a diagnostic ring entry (errorEnum = 0 so it doesn't
@@ -956,12 +982,18 @@ void Runtime::recordFixedFunctionStub(std::string_view functionName) {
     // symbols a client is touching. The ErrorRecord dedupe collapses
     // per-frame spam so a 120 Hz caller hitting glMatrixMode still
     // only produces a single ring entry with a bumped count.
-    ErrorRecord record;
-    record.function = std::string(functionName);
-    record.errorEnum = 0;
-    record.message = std::string(functionName) +
-                     " is a fixed-function compat-profile entry point and is stubbed in AppGL.";
-    recordError(std::move(record));
+    //
+    // Names on the silent-accept allowlist skip the ring push entirely —
+    // the bootstrap trace line still fires so the call is observable to
+    // coverage tooling, but the steady-state error log stays clean.
+    if (!isSilentlyAcceptedFixedFunctionStub(functionName)) {
+        ErrorRecord record;
+        record.function = std::string(functionName);
+        record.errorEnum = 0;
+        record.message = std::string(functionName) +
+                         " is a fixed-function compat-profile entry point and is stubbed in AppGL.";
+        recordError(std::move(record));
+    }
     traceLog_.append(std::string(functionName) + " -> fixed-function stub");
 }
 
@@ -1276,6 +1308,8 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
                    << "\"id\":\"" << jsonEscape(rec.id) << "\","
                    << "\"stage\":\"" << jsonEscape(rec.stage) << "\","
                    << "\"sourceHash\":\"" << jsonEscape(rec.sourceHash) << "\","
+                   << "\"vertexSourceHash\":\"" << jsonEscape(rec.vertexSourceHash) << "\","
+                   << "\"fragmentSourceHash\":\"" << jsonEscape(rec.fragmentSourceHash) << "\","
                    << "\"glslangLog\":\"" << jsonEscape(rec.glslangLog) << "\","
                    << "\"mslPreview\":\"" << jsonEscape(rec.mslPreview) << "\","
                    << "\"success\":" << (rec.success ? "true" : "false")
@@ -1382,6 +1416,8 @@ std::size_t Runtime::writeLiveDiagnosticsJSON(char* out, std::size_t cap) {
                    << "\"id\":\"" << jsonEscape(rec.id) << "\","
                    << "\"stage\":\"" << jsonEscape(rec.stage) << "\","
                    << "\"sourceHash\":\"" << jsonEscape(rec.sourceHash) << "\","
+                   << "\"vertexSourceHash\":\"" << jsonEscape(rec.vertexSourceHash) << "\","
+                   << "\"fragmentSourceHash\":\"" << jsonEscape(rec.fragmentSourceHash) << "\","
                    << "\"glslangLog\":\"" << jsonEscape(rec.glslangLog) << "\","
                    << "\"mslPreview\":\"" << jsonEscape(rec.mslPreview) << "\","
                    << "\"success\":" << (rec.success ? "true" : "false")
