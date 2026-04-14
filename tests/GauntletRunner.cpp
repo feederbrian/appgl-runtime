@@ -860,6 +860,95 @@ public:
         gl.glGetIntegerv(GL_MAX_FRAMEBUFFER_WIDTH, &maxFramebufferWidth);
         expectCondition(maxFramebufferWidth >= 8192,
                         "GL_MAX_FRAMEBUFFER_WIDTH reports at least 8192");
+
+        // Landing C 3b format-table assertions. Before 3b the format table
+        // held only 8 entries (8-bit color + depth/stencil), so BAR's
+        // HDR render targets, deferred G-buffers, and ID-buffer paths all
+        // hit GL_INVALID_ENUM inside texStorage. The new table adds the
+        // full float / packed / integer / compressed / sRGB surface, and
+        // getInternalformativ now consults GLCapabilities::format() so the
+        // engine can probe rendertarget feasibility per-format.
+        auto assertFormatSupported = [&](GLenum fmt, const char* label) {
+            GLint supported = GL_FALSE;
+            gl.glGetInternalformativ(GL_TEXTURE_2D, fmt, GL_INTERNALFORMAT_SUPPORTED, 1, &supported);
+            expectCondition(supported == GL_TRUE, std::string(label) + " is in the capabilities format table");
+        };
+        assertFormatSupported(GL_RGBA16F, "GL_RGBA16F");
+        assertFormatSupported(GL_RGBA32F, "GL_RGBA32F");
+        assertFormatSupported(GL_R16F, "GL_R16F");
+        assertFormatSupported(GL_R32F, "GL_R32F");
+        assertFormatSupported(GL_RG16F, "GL_RG16F");
+        assertFormatSupported(GL_RG32F, "GL_RG32F");
+        assertFormatSupported(GL_RGB10_A2, "GL_RGB10_A2");
+        assertFormatSupported(GL_RGB10_A2UI, "GL_RGB10_A2UI");
+        assertFormatSupported(GL_R11F_G11F_B10F, "GL_R11F_G11F_B10F");
+        assertFormatSupported(GL_R8I, "GL_R8I");
+        assertFormatSupported(GL_R8UI, "GL_R8UI");
+        assertFormatSupported(GL_RG16UI, "GL_RG16UI");
+        assertFormatSupported(GL_RGBA32UI, "GL_RGBA32UI");
+        assertFormatSupported(GL_SRGB8, "GL_SRGB8");
+        assertFormatSupported(GL_SRGB8_ALPHA8, "GL_SRGB8_ALPHA8");
+        assertFormatSupported(GL_DEPTH_COMPONENT16, "GL_DEPTH_COMPONENT16");
+        assertFormatSupported(GL_DEPTH_COMPONENT32F, "GL_DEPTH_COMPONENT32F");
+        assertFormatSupported(GL_DEPTH32F_STENCIL8, "GL_DEPTH32F_STENCIL8");
+        assertFormatSupported(GL_STENCIL_INDEX8, "GL_STENCIL_INDEX8");
+        assertFormatSupported(GL_R8_SNORM, "GL_R8_SNORM");
+        assertFormatSupported(GL_RGBA16_SNORM, "GL_RGBA16_SNORM");
+        assertFormatSupported(GL_RGBA16, "GL_RGBA16");
+
+        // Per-format capability flags. FRAMEBUFFER_RENDERABLE reports
+        // GL_FULL_SUPPORT for formats we mark renderable, GL_CAVEAT_SUPPORT
+        // for sampleable-only formats, and GL_NONE for unknown ones.
+        GLint renderable16F = 0;
+        gl.glGetInternalformativ(GL_TEXTURE_2D, GL_RGBA16F, GL_FRAMEBUFFER_RENDERABLE, 1, &renderable16F);
+        expectCondition(renderable16F == GL_FULL_SUPPORT,
+                        "GL_RGBA16F reports GL_FRAMEBUFFER_RENDERABLE = GL_FULL_SUPPORT");
+
+        GLint blendable16F = 0;
+        gl.glGetInternalformativ(GL_TEXTURE_2D, GL_RGBA16F, GL_FRAMEBUFFER_BLEND, 1, &blendable16F);
+        expectCondition(blendable16F == GL_FULL_SUPPORT,
+                        "GL_RGBA16F reports GL_FRAMEBUFFER_BLEND = GL_FULL_SUPPORT");
+
+        // 32F is renderable but not blendable on Metal — report that
+        // faithfully so deferred renderers can size accumulation passes.
+        GLint blendable32F = 0;
+        gl.glGetInternalformativ(GL_TEXTURE_2D, GL_RGBA32F, GL_FRAMEBUFFER_BLEND, 1, &blendable32F);
+        expectCondition(blendable32F == GL_CAVEAT_SUPPORT,
+                        "GL_RGBA32F reports GL_FRAMEBUFFER_BLEND = GL_CAVEAT_SUPPORT");
+
+        GLint colorEncoding = 0;
+        gl.glGetInternalformativ(GL_TEXTURE_2D, GL_SRGB8_ALPHA8, GL_COLOR_ENCODING, 1, &colorEncoding);
+        expectCondition(colorEncoding == GL_SRGB,
+                        "GL_SRGB8_ALPHA8 reports GL_COLOR_ENCODING = GL_SRGB");
+
+        GLint linearEncoding = 0;
+        gl.glGetInternalformativ(GL_TEXTURE_2D, GL_RGBA8, GL_COLOR_ENCODING, 1, &linearEncoding);
+        expectCondition(linearEncoding == GL_LINEAR,
+                        "GL_RGBA8 reports GL_COLOR_ENCODING = GL_LINEAR");
+
+        // Unknown format — the table must reject cleanly rather than
+        // defaulting to GL_FULL_SUPPORT. 0x12345678 is not a GL enum and
+        // will never match anything the spec defines.
+        GLint unknownSupported = GL_TRUE;
+        gl.glGetInternalformativ(GL_TEXTURE_2D, static_cast<GLenum>(0x12345678), GL_INTERNALFORMAT_SUPPORTED, 1, &unknownSupported);
+        expectCondition(unknownSupported == GL_FALSE,
+                        "unknown internalformat reports GL_INTERNALFORMAT_SUPPORTED = GL_FALSE");
+
+        // texStorage2D acceptance for a new format. Before 3b this would
+        // return GL_INVALID_ENUM from the hardcoded isValidTextureInternal-
+        // Format switches in GLContext.mm AND AppGLRuntime.cpp; now both
+        // validators delegate through the capabilities format table and
+        // accept every registered entry.
+        GLuint floatTexture = 0;
+        gl.glGenTextures(1, &floatTexture);
+        gl.glBindTexture(GL_TEXTURE_2D, floatTexture);
+        // Drain any stale error state before exercising the new path.
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+        gl.glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA16F, 4, 4);
+        expectCondition(gl.glGetError() == GL_NO_ERROR,
+                        "glTexStorage2D(GL_RGBA16F) accepts the new float format");
+        gl.glDeleteTextures(1, &floatTexture);
     }
 
     void render(GLContext& context) override {

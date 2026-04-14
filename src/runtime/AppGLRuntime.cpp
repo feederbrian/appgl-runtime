@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include "../../include/AppGL/AppGL.h"
+#include "../caps/GLCapabilities.h"
 #include "../loader/DispatchInstall.h"
 #include "../objects/GLObjectStore.h"
 #include "../shared/JsonUtil.h"
@@ -443,7 +444,11 @@ bool isValidTextureTarget(GLenum target) {
     return target == GL_TEXTURE_1D || target == GL_TEXTURE_2D || target == GL_TEXTURE_3D;
 }
 
-bool isValidTextureInternalFormat(GLenum internalFormat) {
+bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
+    // Narrower 8-bit-only whitelist used by glTexImage*. These entry points
+    // carry pixel data alongside the internal format, and the current
+    // driver-edge upload path only handles the RGBA8 shadow — so they must
+    // reject anything that would require a higher-precision upload.
     switch (internalFormat) {
         case GL_RED:
         case GL_RG:
@@ -457,6 +462,27 @@ bool isValidTextureInternalFormat(GLenum internalFormat) {
         default:
             return false;
     }
+}
+
+bool isValidStorageInternalFormat(GLContext* context, GLenum internalFormat) {
+    // Permissive validator used by glTexStorage* / glTexBufferRange — the
+    // internal-format set here is anything the capabilities format table
+    // registers (Phase 8X Landing C 3b: float / packed / integer /
+    // compressed / sRGB / depth formats), plus the unsized named color
+    // aliases that GL 4.6 still accepts on allocation entry points.
+    switch (internalFormat) {
+        case GL_RED:
+        case GL_RG:
+        case GL_RGB:
+        case GL_RGBA:
+            return true;
+        default:
+            break;
+    }
+    if (context == nullptr) {
+        return false;
+    }
+    return context->capabilities().isSupportedInternalFormat(internalFormat);
 }
 
 bool isValidTextureUploadFormat(GLenum format) {
@@ -2147,7 +2173,7 @@ void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat, GLs
         recordValidationError(context, "glTexImage1D", GL_INVALID_ENUM, "target must be GL_TEXTURE_1D");
         return;
     }
-    if (!isValidTextureInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
+    if (!isValidLegacyUploadInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexImage1D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
         return;
     }
@@ -2166,7 +2192,7 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLs
         recordValidationError(context, "glTexImage2D", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D");
         return;
     }
-    if (!isValidTextureInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
+    if (!isValidLegacyUploadInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexImage2D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
         return;
     }
@@ -2196,7 +2222,7 @@ void APIENTRY glTexImage3D(
         recordValidationError(context, "glTexImage3D", GL_INVALID_ENUM, "target must be GL_TEXTURE_3D");
         return;
     }
-    if (!isValidTextureInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
+    if (!isValidLegacyUploadInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexImage3D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
         return;
     }
@@ -2441,7 +2467,7 @@ void APIENTRY glTexStorage1D(GLenum target, GLsizei levels, GLenum internalforma
         recordValidationError(context, "glTexStorage1D", GL_INVALID_ENUM, "target must be GL_TEXTURE_1D");
         return;
     }
-    if (!isValidTextureInternalFormat(internalformat)) {
+    if (!isValidStorageInternalFormat(context, internalformat)) {
         recordValidationError(context, "glTexStorage1D", GL_INVALID_ENUM, "internalformat is not a supported texture format");
         return;
     }
@@ -2460,7 +2486,7 @@ void APIENTRY glTexStorage2D(GLenum target, GLsizei levels, GLenum internalforma
         recordValidationError(context, "glTexStorage2D", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D or GL_TEXTURE_CUBE_MAP");
         return;
     }
-    if (!isValidTextureInternalFormat(internalformat)) {
+    if (!isValidStorageInternalFormat(context, internalformat)) {
         recordValidationError(context, "glTexStorage2D", GL_INVALID_ENUM, "internalformat is not a supported texture format");
         return;
     }
@@ -2479,7 +2505,7 @@ void APIENTRY glTexStorage3D(GLenum target, GLsizei levels, GLenum internalforma
         recordValidationError(context, "glTexStorage3D", GL_INVALID_ENUM, "target must be GL_TEXTURE_3D or GL_TEXTURE_2D_ARRAY");
         return;
     }
-    if (!isValidTextureInternalFormat(internalformat)) {
+    if (!isValidStorageInternalFormat(context, internalformat)) {
         recordValidationError(context, "glTexStorage3D", GL_INVALID_ENUM, "internalformat is not a supported texture format");
         return;
     }
@@ -2498,7 +2524,7 @@ void APIENTRY glTexStorage2DMultisample(GLenum target, GLsizei samples, GLenum i
         recordValidationError(context, "glTexStorage2DMultisample", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D_MULTISAMPLE");
         return;
     }
-    if (!isValidTextureInternalFormat(internalformat)) {
+    if (!isValidStorageInternalFormat(context, internalformat)) {
         recordValidationError(context, "glTexStorage2DMultisample", GL_INVALID_ENUM, "internalformat is not a supported texture format");
         return;
     }
@@ -2517,7 +2543,7 @@ void APIENTRY glTexStorage3DMultisample(GLenum target, GLsizei samples, GLenum i
         recordValidationError(context, "glTexStorage3DMultisample", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D_MULTISAMPLE_ARRAY");
         return;
     }
-    if (!isValidTextureInternalFormat(internalformat)) {
+    if (!isValidStorageInternalFormat(context, internalformat)) {
         recordValidationError(context, "glTexStorage3DMultisample", GL_INVALID_ENUM, "internalformat is not a supported texture format");
         return;
     }
@@ -2536,7 +2562,7 @@ void APIENTRY glTexBufferRange(GLenum target, GLenum internalformat, GLuint buff
         recordValidationError(context, "glTexBufferRange", GL_INVALID_ENUM, "target must be GL_TEXTURE_BUFFER");
         return;
     }
-    if (!isValidTextureInternalFormat(internalformat)) {
+    if (!isValidStorageInternalFormat(context, internalformat)) {
         recordValidationError(context, "glTexBufferRange", GL_INVALID_ENUM, "internalformat is not a supported texture format");
         return;
     }

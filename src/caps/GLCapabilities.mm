@@ -9,7 +9,7 @@
 namespace appgl {
 
 GLCapabilities::GLCapabilities(void* metalDevice) {
-    initializeFormatTable();
+    initializeFormatTable(metalDevice);
     initializeLimits(metalDevice);
     initializeExtensions();
 }
@@ -143,7 +143,26 @@ std::optional<GLFormatCapability> GLCapabilities::format(GLenum internalFormat) 
     return found->second;
 }
 
-void GLCapabilities::initializeFormatTable() {
+bool GLCapabilities::isSupportedInternalFormat(GLenum internalFormat) const {
+    return formats_.find(internalFormat) != formats_.end();
+}
+
+void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)rawMetalDevice;
+
+    // GPU-family probes so compressed formats can be gated on real hardware
+    // support. Apple Silicon (Apple family) supports ETC2/EAC and — on
+    // macOS 11+ — BC texture compression via the unified family. Intel Macs
+    // report MTLGPUFamilyMac2 and historically support BC but not ETC.
+    const bool supportsApple = device != nil && [device supportsFamily:MTLGPUFamilyApple1];
+    bool supportsBC = device != nil && [device supportsFamily:MTLGPUFamilyMac2];
+    if (device != nil && [device respondsToSelector:@selector(supportsBCTextureCompression)]) {
+        // supportsBCTextureCompression (macOS 11+) is the canonical probe
+        // for BC format support, and it returns YES on Apple Silicon too
+        // when the OS ships hardware support.
+        supportsBC = supportsBC || [device supportsBCTextureCompression];
+    }
+
     auto add = [&](GLenum glFormat, MTLPixelFormat metalFormat, bool renderable, bool filterable, bool blendable, bool srgb, bool compressed) {
         formats_[glFormat] = GLFormatCapability{
             glFormat,
@@ -156,14 +175,157 @@ void GLCapabilities::initializeFormatTable() {
         };
     };
 
+    // ------------------------------------------------------------------
+    // 8-bit unorm color (legacy baseline + additions)
+    // ------------------------------------------------------------------
     add(GL_R8, MTLPixelFormatR8Unorm, true, true, false, false, false);
     add(GL_RG8, MTLPixelFormatRG8Unorm, true, true, false, false, false);
+    // GL_RGB8 has no direct Metal equivalent — Metal only exposes RGBA on
+    // the unorm path, so we re-route to RGBA8 and mark non-renderable so
+    // framebuffer-attachment validation still catches engines trying to use
+    // it as a color target. Texture sampling works because the upload path
+    // expands RGB→RGBA at the driver edge.
     add(GL_RGB8, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
     add(GL_RGBA8, MTLPixelFormatRGBA8Unorm, true, true, true, false, false);
+
+    // ------------------------------------------------------------------
+    // 8-bit snorm — signed [-1, +1] texel coding used for tangent-frame
+    // storage by many engines (BAR normal maps included).
+    // ------------------------------------------------------------------
+    add(GL_R8_SNORM, MTLPixelFormatR8Snorm, false, true, false, false, false);
+    add(GL_RG8_SNORM, MTLPixelFormatRG8Snorm, false, true, false, false, false);
+    add(GL_RGB8_SNORM, MTLPixelFormatRGBA8Snorm, false, true, false, false, false);
+    add(GL_RGBA8_SNORM, MTLPixelFormatRGBA8Snorm, false, true, false, false, false);
+
+    // ------------------------------------------------------------------
+    // 16-bit unorm color — heightmaps and displacement fields.
+    // ------------------------------------------------------------------
+    add(GL_R16, MTLPixelFormatR16Unorm, true, true, false, false, false);
+    add(GL_RG16, MTLPixelFormatRG16Unorm, true, true, false, false, false);
+    add(GL_RGBA16, MTLPixelFormatRGBA16Unorm, true, true, false, false, false);
+
+    // 16-bit snorm
+    add(GL_R16_SNORM, MTLPixelFormatR16Snorm, false, true, false, false, false);
+    add(GL_RG16_SNORM, MTLPixelFormatRG16Snorm, false, true, false, false, false);
+    add(GL_RGBA16_SNORM, MTLPixelFormatRGBA16Snorm, false, true, false, false, false);
+
+    // ------------------------------------------------------------------
+    // Float color — the HDR pipeline's bread and butter.
+    // 16F is renderable + blendable everywhere; 32F blending is not
+    // universally supported on Metal so we mark it non-blendable.
+    // ------------------------------------------------------------------
+    add(GL_R16F, MTLPixelFormatR16Float, true, true, true, false, false);
+    add(GL_RG16F, MTLPixelFormatRG16Float, true, true, true, false, false);
+    add(GL_RGBA16F, MTLPixelFormatRGBA16Float, true, true, true, false, false);
+    add(GL_R32F, MTLPixelFormatR32Float, true, false, false, false, false);
+    add(GL_RG32F, MTLPixelFormatRG32Float, true, false, false, false, false);
+    add(GL_RGBA32F, MTLPixelFormatRGBA32Float, true, false, false, false, false);
+
+    // ------------------------------------------------------------------
+    // Packed color — 10/10/10/2 and 11/11/10 float. Renderable on Metal;
+    // used by many engines for deferred-rendering G-buffers.
+    // ------------------------------------------------------------------
+    add(GL_RGB10_A2, MTLPixelFormatRGB10A2Unorm, true, true, true, false, false);
+    add(GL_RGB10_A2UI, MTLPixelFormatRGB10A2Uint, true, false, false, false, false);
+    add(GL_R11F_G11F_B10F, MTLPixelFormatRG11B10Float, true, true, true, false, false);
+
+    // ------------------------------------------------------------------
+    // Integer formats (8 / 16 / 32 bit, signed and unsigned). These are
+    // required for GPU-side ID buffers, instance selectors, and image
+    // load/store paths. Integer textures are never filterable per spec.
+    // ------------------------------------------------------------------
+    add(GL_R8UI, MTLPixelFormatR8Uint, true, false, false, false, false);
+    add(GL_RG8UI, MTLPixelFormatRG8Uint, true, false, false, false, false);
+    add(GL_RGBA8UI, MTLPixelFormatRGBA8Uint, true, false, false, false, false);
+    add(GL_R8I, MTLPixelFormatR8Sint, true, false, false, false, false);
+    add(GL_RG8I, MTLPixelFormatRG8Sint, true, false, false, false, false);
+    add(GL_RGBA8I, MTLPixelFormatRGBA8Sint, true, false, false, false, false);
+
+    add(GL_R16UI, MTLPixelFormatR16Uint, true, false, false, false, false);
+    add(GL_RG16UI, MTLPixelFormatRG16Uint, true, false, false, false, false);
+    add(GL_RGBA16UI, MTLPixelFormatRGBA16Uint, true, false, false, false, false);
+    add(GL_R16I, MTLPixelFormatR16Sint, true, false, false, false, false);
+    add(GL_RG16I, MTLPixelFormatRG16Sint, true, false, false, false, false);
+    add(GL_RGBA16I, MTLPixelFormatRGBA16Sint, true, false, false, false, false);
+
+    add(GL_R32UI, MTLPixelFormatR32Uint, true, false, false, false, false);
+    add(GL_RG32UI, MTLPixelFormatRG32Uint, true, false, false, false, false);
+    add(GL_RGBA32UI, MTLPixelFormatRGBA32Uint, true, false, false, false, false);
+    add(GL_R32I, MTLPixelFormatR32Sint, true, false, false, false, false);
+    add(GL_RG32I, MTLPixelFormatRG32Sint, true, false, false, false, false);
+    add(GL_RGBA32I, MTLPixelFormatRGBA32Sint, true, false, false, false, false);
+
+    // ------------------------------------------------------------------
+    // sRGB variants. GL_SRGB8 has no direct Metal mapping (same RGB→RGBA
+    // promotion as the linear path) — engines that sample SRGB8 textures
+    // go through the RGBA8_sRGB Metal format and the driver edge handles
+    // the channel fill.
+    // ------------------------------------------------------------------
+    add(GL_SRGB8, MTLPixelFormatRGBA8Unorm_sRGB, false, true, false, true, false);
     add(GL_SRGB8_ALPHA8, MTLPixelFormatRGBA8Unorm_sRGB, true, true, true, true, false);
+
+    // ------------------------------------------------------------------
+    // Depth / stencil. DEPTH_COMPONENT24 maps to Depth32Float because Metal
+    // has no native 24-bit depth — precision goes up, sample semantics are
+    // the same. STENCIL_INDEX8 is a dedicated Metal format.
+    // ------------------------------------------------------------------
+    add(GL_DEPTH_COMPONENT16, MTLPixelFormatDepth16Unorm, true, false, false, false, false);
     add(GL_DEPTH_COMPONENT24, MTLPixelFormatDepth32Float, true, false, false, false, false);
     add(GL_DEPTH_COMPONENT32F, MTLPixelFormatDepth32Float, true, false, false, false, false);
     add(GL_DEPTH24_STENCIL8, MTLPixelFormatDepth32Float_Stencil8, true, false, false, false, false);
+    add(GL_DEPTH32F_STENCIL8, MTLPixelFormatDepth32Float_Stencil8, true, false, false, false, false);
+    add(GL_STENCIL_INDEX8, MTLPixelFormatStencil8, true, false, false, false, false);
+
+    // ------------------------------------------------------------------
+    // Compressed formats — gated by GPU family.
+    //
+    // Apple family (M1+, iPhone) supports ETC2/EAC natively. BC formats
+    // are supported on all Intel Macs and on Apple Silicon running
+    // macOS 11+ (probed via supportsBCTextureCompression).
+    //
+    // All compressed formats are marked non-renderable — compressed
+    // render targets are not a Metal feature, and GL engines should never
+    // use them as attachments anyway. Filterable is true because sampling
+    // works; blendable is false because compressed sources cannot be in
+    // the color-blend path.
+    // ------------------------------------------------------------------
+    if (supportsBC) {
+        // BPTC (BC6H floating-point HDR, BC7 8-bit RGBA). BAR uses BC7 for
+        // its high-quality texture atlas.
+        add(GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT, MTLPixelFormatBC6H_RGBFloat, false, true, false, false, true);
+        add(GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT, MTLPixelFormatBC6H_RGBUfloat, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_BPTC_UNORM, MTLPixelFormatBC7_RGBAUnorm, false, true, false, false, true);
+        add(GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, MTLPixelFormatBC7_RGBAUnorm_sRGB, false, true, false, true, true);
+
+        // RGTC (BC4 single-channel, BC5 two-channel). The canonical choice
+        // for tangent-space normal maps on Desktop GL.
+        add(GL_COMPRESSED_RED_RGTC1, MTLPixelFormatBC4_RUnorm, false, true, false, false, true);
+        add(GL_COMPRESSED_SIGNED_RED_RGTC1, MTLPixelFormatBC4_RSnorm, false, true, false, false, true);
+        add(GL_COMPRESSED_RG_RGTC2, MTLPixelFormatBC5_RGUnorm, false, true, false, false, true);
+        add(GL_COMPRESSED_SIGNED_RG_RGTC2, MTLPixelFormatBC5_RGSnorm, false, true, false, false, true);
+
+        // S3TC (BC1/BC2/BC3) is not in the AppGL generated enum header yet
+        // — S3TC is an optional extension that BAR doesn't currently use.
+        // Skipping registration here keeps the cap table aligned with the
+        // symbols the engine can actually reference.
+    }
+
+    if (supportsApple) {
+        // ETC2 / EAC — forward compatibility with mobile GL and the Vulkan
+        // asset pipeline. BAR doesn't currently ship ETC2 assets but the
+        // extension list advertises ETC2 support, so the format table
+        // needs to answer consistently.
+        add(GL_COMPRESSED_RGB8_ETC2, MTLPixelFormatETC2_RGB8, false, true, false, false, true);
+        add(GL_COMPRESSED_SRGB8_ETC2, MTLPixelFormatETC2_RGB8_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2, MTLPixelFormatETC2_RGB8A1, false, true, false, false, true);
+        add(GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2, MTLPixelFormatETC2_RGB8A1_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_RGBA8_ETC2_EAC, MTLPixelFormatEAC_RGBA8, false, true, false, false, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC, MTLPixelFormatEAC_RGBA8_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_R11_EAC, MTLPixelFormatEAC_R11Unorm, false, true, false, false, true);
+        add(GL_COMPRESSED_SIGNED_R11_EAC, MTLPixelFormatEAC_R11Snorm, false, true, false, false, true);
+        add(GL_COMPRESSED_RG11_EAC, MTLPixelFormatEAC_RG11Unorm, false, true, false, false, true);
+        add(GL_COMPRESSED_SIGNED_RG11_EAC, MTLPixelFormatEAC_RG11Snorm, false, true, false, false, true);
+    }
 }
 
 void GLCapabilities::initializeLimits(void* rawMetalDevice) {

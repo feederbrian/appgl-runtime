@@ -42,8 +42,14 @@ public:
 
     std::optional<GLFormatCapability> format(GLenum internalFormat) const;
 
+    // Returns true if the GL internal format has a Metal mapping registered
+    // in the format table. The hardcoded texStorage / texImage validators in
+    // GLContext.mm delegate here so that adding a new format to the format
+    // table automatically unlocks the texture-allocation path.
+    bool isSupportedInternalFormat(GLenum internalFormat) const;
+
 private:
-    void initializeFormatTable();
+    void initializeFormatTable(void* metalDevice);
     void initializeLimits(void* metalDevice);
     void initializeExtensions();
 

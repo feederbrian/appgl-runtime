@@ -248,20 +248,25 @@ bool isTextureTarget(GLenum target) {
     return target == GL_TEXTURE_1D || target == GL_TEXTURE_2D || target == GL_TEXTURE_3D;
 }
 
-bool isSupportedInternalTextureFormat(GLenum internalFormat) {
+bool isSupportedInternalTextureFormat(const GLCapabilities& caps, GLenum internalFormat) {
+    // Accept the unsized "named color" formats that desktop GL 4.6 spec
+    // still considers valid as internal-format aliases on texture
+    // allocation entry points. They resolve to RGBA8 on the Metal side.
     switch (internalFormat) {
         case GL_RED:
         case GL_RG:
         case GL_RGB:
         case GL_RGBA:
-        case GL_R8:
-        case GL_RG8:
-        case GL_RGB8:
-        case GL_RGBA8:
             return true;
         default:
-            return false;
+            break;
     }
+    // Every other internal format is registered in the capabilities format
+    // table by initializeFormatTable — delegating here means new additions
+    // to the table (Landing C 3b: float / packed / integer / compressed /
+    // sRGB / depth formats) automatically unlock the texture-allocation
+    // path without touching this helper.
+    return caps.isSupportedInternalFormat(internalFormat);
 }
 
 std::size_t componentCountForFormat(GLenum format) {
@@ -3482,7 +3487,7 @@ bool GLContext::texImage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (!isSupportedInternalTextureFormat(static_cast<GLenum>(internalformat)) || componentCountForFormat(format) == 0 || type != GL_UNSIGNED_BYTE) {
+    if (!isSupportedInternalTextureFormat(*impl_->capabilities, static_cast<GLenum>(internalformat)) || componentCountForFormat(format) == 0 || type != GL_UNSIGNED_BYTE) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -3624,7 +3629,7 @@ bool GLContext::texStorage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (!isSupportedInternalTextureFormat(internalformat)) {
+    if (!isSupportedInternalTextureFormat(*impl_->capabilities, internalformat)) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -3680,7 +3685,7 @@ bool GLContext::texStorageMultisample(
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (!isSupportedInternalTextureFormat(internalformat)) {
+    if (!isSupportedInternalTextureFormat(*impl_->capabilities, internalformat)) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -3734,7 +3739,7 @@ bool GLContext::texBufferRange(
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (!isSupportedInternalTextureFormat(internalformat)) {
+    if (!isSupportedInternalTextureFormat(*impl_->capabilities, internalformat)) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -7533,6 +7538,11 @@ bool GLContext::getInternalformativ(GLenum target, GLenum internalformat, GLenum
     if (count == 0) {
         return true;
     }
+    // Phase 8X Landing C 3b — consult the capabilities format table so
+    // format-dependent queries (SUPPORTED, COLOR_ENCODING, RENDERABLE,
+    // BLEND) reflect the actual entries that initializeFormatTable() puts
+    // on the device, rather than returning GL_FULL_SUPPORT unconditionally.
+    std::optional<GLFormatCapability> capability = impl_->capabilities->format(internalformat);
     switch (pname) {
         case GL_NUM_SAMPLE_COUNTS:
             params[0] = 3; // Metal typically supports 1, 2, 4 samples
@@ -7544,7 +7554,7 @@ bool GLContext::getInternalformativ(GLenum target, GLenum internalformat, GLenum
             if (count >= 3) params[2] = 1;
             return true;
         case GL_INTERNALFORMAT_SUPPORTED:
-            params[0] = GL_TRUE;
+            params[0] = capability.has_value() ? GL_TRUE : GL_FALSE;
             return true;
         case GL_INTERNALFORMAT_PREFERRED:
             params[0] = static_cast<GLint>(internalformat);
@@ -7571,9 +7581,25 @@ bool GLContext::getInternalformativ(GLenum target, GLenum internalformat, GLenum
             params[0] = 16384;
             return true;
         case GL_FRAMEBUFFER_RENDERABLE:
+            if (!capability.has_value()) {
+                params[0] = GL_NONE;
+            } else {
+                params[0] = capability->renderable ? GL_FULL_SUPPORT : GL_CAVEAT_SUPPORT;
+            }
+            return true;
         case GL_FRAMEBUFFER_BLEND:
+            if (!capability.has_value()) {
+                params[0] = GL_NONE;
+            } else {
+                params[0] = capability->blendable ? GL_FULL_SUPPORT : GL_CAVEAT_SUPPORT;
+            }
+            return true;
         case GL_COLOR_ENCODING:
-            params[0] = GL_FULL_SUPPORT;
+            if (capability.has_value() && capability->srgbCapable) {
+                params[0] = GL_SRGB;
+            } else {
+                params[0] = GL_LINEAR;
+            }
             return true;
         default:
             // For unrecognized pnames, return 0 rather than erroring — apps
