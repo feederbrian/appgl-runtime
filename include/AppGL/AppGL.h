@@ -19,6 +19,18 @@ size_t appglCoverageSnapshotJSON(char* out, size_t cap);
 size_t appglRunGauntletJSON(const char* phaseFilter, char* out, size_t cap);
 size_t appglRunBenchmarkJSON(char* out, size_t cap);
 size_t appglDiagnosticsJSON(char* out, size_t cap);
+/**
+ * Lightweight poll-friendly diagnostics dump. Emits only the fields that can
+ * change frame-to-frame (pipeline cache metrics, shader translations, error
+ * log) without walking the object store. Safe to call every frame from an
+ * engine integration hook — the cost is bounded by the internal ring buffer
+ * sizes (32 shader translations + 64 error records) and a single metrics read.
+ *
+ * Prefer this over appglDiagnosticsJSON for in-frame polling; use the full
+ * variant for startup/shutdown snapshots where the O(N) object-store walk
+ * is acceptable.
+ */
+size_t appglLiveDiagnosticsJSON(char* out, size_t cap);
 
 #ifdef __cplusplus
 }

@@ -61,6 +61,11 @@ void recordValidationError(GLContext* context, std::string_view functionName, GL
     Runtime::shared().recordBootstrapTrace(
         std::string(functionName) + " -> error " + std::to_string(error) + ": " + std::string(message)
     );
+    Runtime::ErrorRecord record;
+    record.function = std::string(functionName);
+    record.errorEnum = error;
+    record.message = std::string(message);
+    Runtime::shared().recordError(std::move(record));
 }
 
 void markStateFunction(FunctionId id, std::string_view note) {
@@ -792,6 +797,11 @@ void Runtime::recordUnimplemented(FunctionId id, std::string_view functionName) 
             std::string(functionName) + " is not implemented in AppGL yet."
         );
     }
+    ErrorRecord record;
+    record.function = std::string(functionName);
+    record.errorEnum = GL_INVALID_OPERATION;
+    record.message = std::string(functionName) + " is not implemented in AppGL yet.";
+    recordError(std::move(record));
 }
 
 void Runtime::makeCurrent(GLContext* context) {
@@ -819,6 +829,12 @@ void Runtime::unregisterContext(GLContext* context) {
         return;
     }
     std::lock_guard<std::mutex> lock(contextMutex_);
+    // Capture a final inventory BEFORE the context leaves the live set so a
+    // post-mortem diagnostic dump (like the BAR engine's DestroyWindowAndContext
+    // hook) can report non-zero counts even though the context is gone by the
+    // time the writer runs. Runs under contextMutex_ so we know `context` is
+    // still a live pointer; we cannot simply re-query after erase.
+    snapshotContextInventoryLocked(context);
     liveContexts_.erase(context);
     // Clear the current-context slot on THIS thread if it still points at the
     // context being destroyed. Other threads cannot be reached through thread_local
@@ -827,6 +843,45 @@ void Runtime::unregisterContext(GLContext* context) {
     if (gCurrentContext == context) {
         gCurrentContext = nullptr;
     }
+}
+
+void Runtime::snapshotContextInventoryLocked(GLContext* context) {
+    if (context == nullptr) {
+        return;
+    }
+    auto& store = context->objects();
+    InventorySnapshot snap;
+    snap.valid = true;
+    snap.buffers = store.buffers().size();
+    snap.textures = store.textures().size();
+    snap.samplers = store.samplers().size();
+    snap.renderbuffers = store.renderbuffers().size();
+    snap.framebuffers = store.framebuffers().size();
+    snap.vertexArrays = store.vertexArrays().size();
+    snap.shaders = store.shaders().size();
+    snap.programs = store.programs().size();
+    snap.queries = store.queries().size();
+    snap.syncs = store.syncs().size();
+    snap.transformFeedbacks = store.transformFeedbacks().size();
+    store.buffers().forEach([&snap](GLuint, GLBufferObject& buffer) {
+        snap.bufferBytes += static_cast<std::uint64_t>(buffer.size > 0 ? buffer.size : 0);
+    });
+    store.textures().forEach([&snap](GLuint, GLTextureObject& texture) {
+        for (const auto& [level, image] : texture.levels) {
+            (void)level;
+            snap.textureBytes += static_cast<std::uint64_t>(image.rgba8.size());
+        }
+    });
+    store.renderbuffers().forEach([&snap](GLuint, GLRenderbufferObject& rb) {
+        snap.renderbufferBytes += static_cast<std::uint64_t>(rb.rgba8.size())
+            + static_cast<std::uint64_t>(rb.depth32.size() * sizeof(GLfloat))
+            + static_cast<std::uint64_t>(rb.stencil8.size());
+    });
+    const auto metrics = context->pipelineCacheMetrics();
+    snap.pipelineCacheHits = metrics.hits;
+    snap.pipelineCacheMisses = metrics.misses;
+    snap.pipelineCumulativeBuildMillis = metrics.cumulativeBuildMillis;
+    lastKnownInventory_ = snap;
 }
 
 bool Runtime::isContextLiveLocked(GLContext* context) const {
@@ -863,6 +918,26 @@ void Runtime::recordShaderTranslation(ShaderTranslationRecord record) {
     shaderTranslations_.push_back(std::move(record));
 }
 
+void Runtime::recordError(ErrorRecord record) {
+    std::lock_guard<std::mutex> lock(errorLogMutex_);
+    // Collapse into the previous entry if it's the same function+error enum.
+    // Spammy stub paths (e.g. a thousand copies of "glFoo is not implemented"
+    // fired every frame) otherwise fill the 64-entry ring immediately and hide
+    // everything that came before them.
+    if (!errorLog_.empty()) {
+        auto& back = errorLog_.back();
+        if (back.function == record.function && back.errorEnum == record.errorEnum) {
+            ++back.count;
+            return;
+        }
+    }
+    if (errorLog_.size() >= 64) {
+        errorLog_.erase(errorLog_.begin());
+    }
+    record.count = 1;
+    errorLog_.push_back(std::move(record));
+}
+
 std::size_t Runtime::writeCoverageSnapshotJSON(char* out, std::size_t cap) {
     const std::string payload = coverageStore_.buildSnapshotJson(rendererString_, traceLog_.snapshot());
     const std::size_t required = payload.size() + 1;
@@ -888,9 +963,23 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     stream << "{";
     stream << "\"renderer\":\"" << jsonEscape(rendererString_) << "\",";
     stream << "\"hasCurrentContext\":" << (contextIsLive ? "true" : "false") << ",";
+    // Tells external tooling whether the objectStore/pipelineCache fields
+    // reflect the CURRENT live context or the most recently destroyed context's
+    // final snapshot. This is how BAR can distinguish an honest post-mortem
+    // dump from a cold-boot dump with nothing to report.
+    stream << "\"inventorySource\":\""
+           << (contextIsLive ? "live" : (lastKnownInventory_.valid ? "post-mortem-snapshot" : "empty"))
+           << "\",";
 
-    // ── Object store inventory (current context only) ──
+    // ── Object store inventory ──
+    // Live path: walk the current context's object store directly.
+    // Post-mortem path: replay the snapshot captured at unregisterContext,
+    // which reflects the most recently destroyed context's final state.
+    // Cold-boot fallthrough: no live context, no snapshot — genuinely empty.
     stream << "\"objectStore\":{";
+    std::uint64_t pipelineCacheHits = 0;
+    std::uint64_t pipelineCacheMisses = 0;
+    double pipelineCumulativeBuildMillis = 0.0;
     if (contextIsLive) {
         auto& store = currentContext->objects();
 
@@ -927,6 +1016,31 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         stream << "\"bufferBytes\":" << bufferBytes << ",";
         stream << "\"textureBytes\":" << textureBytes << ",";
         stream << "\"renderbufferBytes\":" << renderbufferBytes;
+
+        const auto metrics = currentContext->pipelineCacheMetrics();
+        pipelineCacheHits = metrics.hits;
+        pipelineCacheMisses = metrics.misses;
+        pipelineCumulativeBuildMillis = metrics.cumulativeBuildMillis;
+    } else if (lastKnownInventory_.valid) {
+        const auto& snap = lastKnownInventory_;
+        stream << "\"buffers\":" << snap.buffers << ",";
+        stream << "\"textures\":" << snap.textures << ",";
+        stream << "\"samplers\":" << snap.samplers << ",";
+        stream << "\"renderbuffers\":" << snap.renderbuffers << ",";
+        stream << "\"framebuffers\":" << snap.framebuffers << ",";
+        stream << "\"vertexArrays\":" << snap.vertexArrays << ",";
+        stream << "\"shaders\":" << snap.shaders << ",";
+        stream << "\"programs\":" << snap.programs << ",";
+        stream << "\"queries\":" << snap.queries << ",";
+        stream << "\"syncs\":" << snap.syncs << ",";
+        stream << "\"transformFeedbacks\":" << snap.transformFeedbacks << ",";
+        stream << "\"bufferBytes\":" << snap.bufferBytes << ",";
+        stream << "\"textureBytes\":" << snap.textureBytes << ",";
+        stream << "\"renderbufferBytes\":" << snap.renderbufferBytes;
+
+        pipelineCacheHits = snap.pipelineCacheHits;
+        pipelineCacheMisses = snap.pipelineCacheMisses;
+        pipelineCumulativeBuildMillis = snap.pipelineCumulativeBuildMillis;
     } else {
         stream << "\"buffers\":0,\"textures\":0,\"samplers\":0,\"renderbuffers\":0,"
                   "\"framebuffers\":0,\"vertexArrays\":0,\"shaders\":0,\"programs\":0,"
@@ -935,8 +1049,20 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     }
     stream << "},";
 
-    // ── Pipeline cache metrics — populated in Phase A Group 7. ──
-    stream << "\"pipelineCache\":{\"entries\":0,\"hits\":0,\"misses\":0,\"averageBuildMillis\":0.0},";
+    // ── Pipeline cache metrics ──
+    // Entries = total misses (every miss constructs a new MTLRenderPipelineState,
+    // and the frame graph currently does not evict entries, so this count is
+    // monotonic over the context's lifetime).
+    const std::uint64_t pipelineEntries = pipelineCacheMisses;
+    const double averageBuildMillis = pipelineCacheMisses > 0
+        ? pipelineCumulativeBuildMillis / static_cast<double>(pipelineCacheMisses)
+        : 0.0;
+    stream << "\"pipelineCache\":{"
+           << "\"entries\":" << pipelineEntries << ","
+           << "\"hits\":" << pipelineCacheHits << ","
+           << "\"misses\":" << pipelineCacheMisses << ","
+           << "\"averageBuildMillis\":" << averageBuildMillis
+           << "},";
 
     // ── Shader translation log ──
     {
@@ -957,8 +1083,128 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
         stream << "],";
     }
 
-    // ── GL error stream — populated when error history is wired. ──
-    stream << "\"errorLog\":[]";
+    // ── GL error stream ──
+    // Ring buffer of the last 64 distinct (function, error enum) pairs seen by
+    // recordValidationError() or recordUnimplemented(). Consecutive duplicates
+    // collapse into a single record with a `count` field so a single frame of
+    // unimplemented-stub spam cannot wipe older context from the ring.
+    {
+        std::lock_guard<std::mutex> lock(errorLogMutex_);
+        stream << "\"errorLog\":[";
+        for (std::size_t i = 0; i < errorLog_.size(); ++i) {
+            if (i != 0) stream << ",";
+            const auto& rec = errorLog_[i];
+            stream << "{"
+                   << "\"function\":\"" << jsonEscape(rec.function) << "\","
+                   << "\"errorEnum\":" << rec.errorEnum << ","
+                   << "\"message\":\"" << jsonEscape(rec.message) << "\","
+                   << "\"count\":" << rec.count
+                   << "}";
+        }
+        stream << "]";
+    }
+
+    stream << "}";
+
+    const std::string payload = stream.str();
+    const std::size_t required = payload.size() + 1;
+    if (out == nullptr || cap == 0) {
+        return required;
+    }
+    const std::size_t bytesToCopy = std::min(required - 1, cap - 1);
+    std::memcpy(out, payload.data(), bytesToCopy);
+    out[bytesToCopy] = '\0';
+    return required;
+}
+
+std::size_t Runtime::writeLiveDiagnosticsJSON(char* out, std::size_t cap) {
+    // Lightweight poll-friendly subset of writeDiagnosticsJSON. Skips the
+    // object-store inventory walk entirely so the cost is bounded by the size
+    // of the ring buffers (32 shader translations + 64 error records) plus
+    // a single pipelineCacheMetrics() read.
+    //
+    // Locks are taken in sequence — not nested — so this entry point is safe
+    // to call from any thread concurrently with any other diagnostics path.
+
+    // 1. Pipeline cache metrics (held briefly).
+    std::uint64_t pipelineCacheHits = 0;
+    std::uint64_t pipelineCacheMisses = 0;
+    double pipelineCumulativeBuildMillis = 0.0;
+    bool haveMetrics = false;
+    bool contextIsLive = false;
+    std::string rendererCopy;
+    {
+        std::lock_guard<std::mutex> contextLock(contextMutex_);
+        rendererCopy = rendererString_;
+        contextIsLive = isContextLiveLocked(gCurrentContext);
+        if (contextIsLive) {
+            const auto m = gCurrentContext->pipelineCacheMetrics();
+            pipelineCacheHits = m.hits;
+            pipelineCacheMisses = m.misses;
+            pipelineCumulativeBuildMillis = m.cumulativeBuildMillis;
+            haveMetrics = true;
+        } else if (lastKnownInventory_.valid) {
+            pipelineCacheHits = lastKnownInventory_.pipelineCacheHits;
+            pipelineCacheMisses = lastKnownInventory_.pipelineCacheMisses;
+            pipelineCumulativeBuildMillis = lastKnownInventory_.pipelineCumulativeBuildMillis;
+            haveMetrics = true;
+        }
+    }
+
+    std::ostringstream stream;
+    stream << "{";
+    stream << "\"renderer\":\"" << jsonEscape(rendererCopy) << "\",";
+    stream << "\"hasCurrentContext\":" << (contextIsLive ? "true" : "false") << ",";
+    stream << "\"metricsSource\":\""
+           << (contextIsLive ? "live" : (haveMetrics ? "post-mortem-snapshot" : "empty"))
+           << "\",";
+
+    const std::uint64_t pipelineEntries = pipelineCacheMisses;
+    const double averageBuildMillis = pipelineCacheMisses > 0
+        ? pipelineCumulativeBuildMillis / static_cast<double>(pipelineCacheMisses)
+        : 0.0;
+    stream << "\"pipelineCache\":{"
+           << "\"entries\":" << pipelineEntries << ","
+           << "\"hits\":" << pipelineCacheHits << ","
+           << "\"misses\":" << pipelineCacheMisses << ","
+           << "\"averageBuildMillis\":" << averageBuildMillis
+           << "},";
+
+    // 2. Shader translations (held briefly, in isolation).
+    {
+        std::lock_guard<std::mutex> lock(translationMutex_);
+        stream << "\"shaderTranslations\":[";
+        for (std::size_t i = 0; i < shaderTranslations_.size(); ++i) {
+            if (i != 0) stream << ",";
+            const auto& rec = shaderTranslations_[i];
+            stream << "{"
+                   << "\"id\":\"" << jsonEscape(rec.id) << "\","
+                   << "\"stage\":\"" << jsonEscape(rec.stage) << "\","
+                   << "\"sourceHash\":\"" << jsonEscape(rec.sourceHash) << "\","
+                   << "\"glslangLog\":\"" << jsonEscape(rec.glslangLog) << "\","
+                   << "\"mslPreview\":\"" << jsonEscape(rec.mslPreview) << "\","
+                   << "\"success\":" << (rec.success ? "true" : "false")
+                   << "}";
+        }
+        stream << "],";
+    }
+
+    // 3. Error log (held briefly, in isolation).
+    {
+        std::lock_guard<std::mutex> lock(errorLogMutex_);
+        stream << "\"errorLog\":[";
+        for (std::size_t i = 0; i < errorLog_.size(); ++i) {
+            if (i != 0) stream << ",";
+            const auto& rec = errorLog_[i];
+            stream << "{"
+                   << "\"function\":\"" << jsonEscape(rec.function) << "\","
+                   << "\"errorEnum\":" << rec.errorEnum << ","
+                   << "\"message\":\"" << jsonEscape(rec.message) << "\","
+                   << "\"count\":" << rec.count
+                   << "}";
+        }
+        stream << "]";
+    }
 
     stream << "}";
 
@@ -6133,4 +6379,8 @@ extern "C" std::size_t appglCoverageSnapshotJSON(char* out, std::size_t cap) {
 
 extern "C" std::size_t appglDiagnosticsJSON(char* out, std::size_t cap) {
     return appgl::Runtime::shared().writeDiagnosticsJSON(out, cap);
+}
+
+extern "C" std::size_t appglLiveDiagnosticsJSON(char* out, std::size_t cap) {
+    return appgl::Runtime::shared().writeLiveDiagnosticsJSON(out, cap);
 }

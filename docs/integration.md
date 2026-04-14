@@ -144,8 +144,22 @@ The public headers expose two layers:
    size_t        appglRunGauntletJSON(const char* phaseFilter, char* out, size_t cap);
    size_t        appglRunBenchmarkJSON(char* out, size_t cap);
    size_t        appglDiagnosticsJSON(char* out, size_t cap);
+   size_t        appglLiveDiagnosticsJSON(char* out, size_t cap);
    ```
 
-The four `*JSON` entry points use the size-probe convention: call
+All five `*JSON` entry points use the size-probe convention: call
 with `out == NULL` to get the required buffer size, then call again
 with a caller-owned buffer of at least that size.
+
+`appglDiagnosticsJSON` is the full dump — it walks the current context's
+object store and reports buffer/texture/renderbuffer bytes alongside the
+ring-buffered fields. Use it for startup/shutdown snapshots. If called
+after context destruction it falls back to the last-known inventory captured
+during `unregisterContext`, so BAR-style post-mortem hooks (fired from
+`DestroyWindowAndContext`) still report the final session state instead of
+all-zeros.
+
+`appglLiveDiagnosticsJSON` is a lightweight poll variant — it skips the
+object-store walk entirely and emits only the pipeline cache metrics, the
+shader translation log, and the error log. Use it for end-of-frame polling
+where walking tens of thousands of objects per frame would be wasteful.

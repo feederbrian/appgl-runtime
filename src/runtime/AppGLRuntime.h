@@ -599,6 +599,15 @@ public:
     void noteRenderer(std::string renderer);
     std::size_t writeCoverageSnapshotJSON(char* out, std::size_t cap);
     std::size_t writeDiagnosticsJSON(char* out, std::size_t cap);
+    // Lightweight end-of-frame diagnostics poll. Emits pipeline cache metrics,
+    // shader translation log, and error log only — no object-store walk, no
+    // byte accounting. Designed to be safe to call every frame from an engine
+    // integration hook without paying the O(N) inventory cost of the full
+    // diagnostics dump. The locks held are: contextMutex_ (briefly, to read
+    // pipeline metrics), then released; translationMutex_; errorLogMutex_.
+    // Lock ordering is not nested, so this entry point cannot deadlock against
+    // any entry point that takes those locks in a different order.
+    std::size_t writeLiveDiagnosticsJSON(char* out, std::size_t cap);
 
     CoverageStore& coverageStore();
     TraceLog& traceLog();
@@ -614,9 +623,52 @@ public:
     };
     void recordShaderTranslation(ShaderTranslationRecord record);
 
+    // Error log. A ring buffer of recent GL error events (validation failures,
+    // unimplemented-entry-point hits, backend errors). Surfaced in the diagnostic
+    // JSON so external tooling can diagnose AppGL-internal problems — the
+    // engine-facing glGetError() queue only carries enums, not context.
+    //
+    // Consecutive duplicate entries collapse into a single record with a bumped
+    // `count` field so spammy stub paths cannot wipe the ring in one frame.
+    struct ErrorRecord {
+        std::string function;
+        GLenum errorEnum = 0;
+        std::string message;
+        std::uint64_t count = 1;
+    };
+    void recordError(ErrorRecord record);
+
+    // Last-known object-store inventory for the most recently destroyed context.
+    // Captured inside unregisterContext() so post-mortem diagnostics dumps (fired
+    // from DestroyWindowAndContext on the engine side) can report what the
+    // context actually held just before teardown instead of a ream of zeros.
+    struct InventorySnapshot {
+        bool valid = false;
+        std::size_t buffers = 0;
+        std::size_t textures = 0;
+        std::size_t samplers = 0;
+        std::size_t renderbuffers = 0;
+        std::size_t framebuffers = 0;
+        std::size_t vertexArrays = 0;
+        std::size_t shaders = 0;
+        std::size_t programs = 0;
+        std::size_t queries = 0;
+        std::size_t syncs = 0;
+        std::size_t transformFeedbacks = 0;
+        std::uint64_t bufferBytes = 0;
+        std::uint64_t textureBytes = 0;
+        std::uint64_t renderbufferBytes = 0;
+        std::uint64_t pipelineCacheHits = 0;
+        std::uint64_t pipelineCacheMisses = 0;
+        double pipelineCumulativeBuildMillis = 0.0;
+    };
+
 private:
     Runtime();
     void initializeDispatch();
+    // Must be called with contextMutex_ held, and with `context` still pointing
+    // at a live, fully-constructed GLContext. Refreshes lastKnownInventory_.
+    void snapshotContextInventoryLocked(GLContext* context);
 
     GLDispatchTable dispatch_;
     CoverageStore coverageStore_;
@@ -626,6 +678,9 @@ private:
     std::unordered_set<GLContext*> liveContexts_;
     std::mutex translationMutex_;
     std::vector<ShaderTranslationRecord> shaderTranslations_;
+    std::mutex errorLogMutex_;
+    std::vector<ErrorRecord> errorLog_;
+    InventorySnapshot lastKnownInventory_;
 };
 
 template <typename ReturnType>

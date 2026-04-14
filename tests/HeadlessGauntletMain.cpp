@@ -93,5 +93,19 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Optional fourth argument: write post-run live diagnostics JSON to the given
+    // path. This exercises the lightweight poll variant end-to-end so Landing A
+    // regression catches any drift between it and the full writeDiagnosticsJSON.
+    if (argc > 4) {
+        const std::string liveDiagPath = argv[4];
+        std::size_t liveRequired = appgl::Runtime::shared().writeLiveDiagnosticsJSON(nullptr, 0);
+        std::vector<char> liveBuffer(liveRequired);
+        appgl::Runtime::shared().writeLiveDiagnosticsJSON(liveBuffer.data(), liveBuffer.size());
+        std::ofstream liveOut(liveDiagPath, std::ios::binary);
+        if (liveOut) {
+            liveOut.write(liveBuffer.data(), static_cast<std::streamsize>(liveRequired - 1));
+        }
+    }
+
     return appgl::tests::lastGauntletPassed() ? 0 : 2;
 }
