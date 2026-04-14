@@ -1090,7 +1090,7 @@ static void APIENTRY glBeginQuery(GLenum target, GLuint id) {
     }
     auto* query = context->objects().queries().get(id);
     if (query == nullptr) {
-        context->pushError(GL_INVALID_OPERATION);
+        context->pushError(GL_INVALID_OPERATION, "glBeginQuery", "query id is not a valid query object");
         return;
     }
     query->target = target;
@@ -1217,7 +1217,7 @@ static void APIENTRY glQueryCounter(GLuint id, GLenum target) {
     }
     auto* query = context->objects().queries().get(id);
     if (query == nullptr) {
-        context->pushError(GL_INVALID_OPERATION);
+        context->pushError(GL_INVALID_OPERATION, "glQueryCounter", "query id is not a valid query object");
         return;
     }
     query->target = target;

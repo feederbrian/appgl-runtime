@@ -51,7 +51,10 @@ void recordValidationError(GLContext* context, std::string_view functionName, GL
     if (context == nullptr) {
         return;
     }
-    context->pushError(error);
+    // Landing C 3g: pushError now forwards into Runtime::recordError so
+    // the single call reaches both the per-context GL error queue and the
+    // runtime diagnostics ring buffer. No more double-pushing.
+    context->pushError(error, functionName, message);
     context->emitDebugMessage(
         GL_DEBUG_SOURCE_APPLICATION,
         GL_DEBUG_TYPE_ERROR,
@@ -62,11 +65,6 @@ void recordValidationError(GLContext* context, std::string_view functionName, GL
     Runtime::shared().recordBootstrapTrace(
         std::string(functionName) + " -> error " + std::to_string(error) + ": " + std::string(message)
     );
-    Runtime::ErrorRecord record;
-    record.function = std::string(functionName);
-    record.errorEnum = error;
-    record.message = std::string(message);
-    Runtime::shared().recordError(std::move(record));
 }
 
 void markStateFunction(FunctionId id, std::string_view note) {
@@ -870,20 +868,33 @@ void Runtime::recordUnimplemented(FunctionId id, std::string_view functionName) 
     coverageStore_.recordUnimplementedHit(id);
     traceLog_.append(std::string(functionName) + " -> stubbed");
     if (gCurrentContext != nullptr) {
-        gCurrentContext->pushError(GL_INVALID_OPERATION);
+        // Landing C 3g: pushError forwards into Runtime::recordError, so a
+        // single cross-wired call reaches both the glGetError queue and the
+        // runtime ring buffer with the correct function tag. No more
+        // separate recordError fan-out — the previous implementation
+        // double-counted unimplemented hits because the context-level
+        // pushError would emit an "<internal>" record alongside the
+        // explicit named record.
+        const std::string stubMessage =
+            std::string(functionName) + " is not implemented in AppGL yet.";
+        gCurrentContext->pushError(GL_INVALID_OPERATION, functionName, stubMessage);
         gCurrentContext->emitDebugMessage(
             GL_DEBUG_SOURCE_APPLICATION,
             GL_DEBUG_TYPE_ERROR,
             1,
             GL_DEBUG_SEVERITY_HIGH,
-            std::string(functionName) + " is not implemented in AppGL yet."
+            stubMessage
         );
+    } else {
+        // No current context — fall back to direct ring buffer recording
+        // so the unimplemented hit is still visible in the diagnostics
+        // dump even when the failing call happened outside a live context.
+        ErrorRecord record;
+        record.function = std::string(functionName);
+        record.errorEnum = GL_INVALID_OPERATION;
+        record.message = std::string(functionName) + " is not implemented in AppGL yet.";
+        recordError(std::move(record));
     }
-    ErrorRecord record;
-    record.function = std::string(functionName);
-    record.errorEnum = GL_INVALID_OPERATION;
-    record.message = std::string(functionName) + " is not implemented in AppGL yet.";
-    recordError(std::move(record));
 }
 
 void Runtime::makeCurrent(GLContext* context) {
@@ -1031,6 +1042,16 @@ void Runtime::recordError(ErrorRecord record) {
     }
     record.count = 1;
     errorLog_.push_back(std::move(record));
+}
+
+std::size_t Runtime::errorLogCount() {
+    std::lock_guard<std::mutex> lock(errorLogMutex_);
+    return errorLog_.size();
+}
+
+std::vector<Runtime::ErrorRecord> Runtime::errorLogSnapshot() {
+    std::lock_guard<std::mutex> lock(errorLogMutex_);
+    return errorLog_;
 }
 
 std::size_t Runtime::writeCoverageSnapshotJSON(char* out, std::size_t cap) {

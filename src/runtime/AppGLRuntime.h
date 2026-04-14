@@ -646,6 +646,15 @@ public:
     };
     void recordError(ErrorRecord record);
 
+    // Read-only snapshot accessors for the runtime error log. The
+    // gauntlet test harness uses these in the Landing C 3g assertions
+    // that verify raised errors actually reach the ring buffer — not
+    // just the per-context glGetError queue. The snapshot is a copy
+    // taken under errorLogMutex_ so callers don't have to worry about
+    // concurrent mutation.
+    std::size_t errorLogCount();
+    std::vector<ErrorRecord> errorLogSnapshot();
+
     // Last-known object-store inventory for the most recently destroyed context.
     // Captured inside unregisterContext() so post-mortem diagnostics dumps (fired
     // from DestroyWindowAndContext on the engine side) can report what the

@@ -455,7 +455,17 @@ public:
     bool specializeShader(GLuint shader, const GLchar* pEntryPoint, GLuint numSpecializationConstants, const GLuint* pConstantIndex, const GLuint* pConstantValue);
     bool polygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp);
 
-    void pushError(GLenum error);
+    // Push a GL error onto the context-level error queue (drained by
+    // glGetError) and simultaneously mirror the record into the runtime
+    // error ring buffer so external diagnostics tooling can see every
+    // raised error — not just the ones that route through the runtime's
+    // recordValidationError helper. functionName and message are
+    // optional; when empty the ring-buffer record is tagged as
+    // "<internal>" so the source is still distinguishable from genuinely
+    // unknown entries. Landing C 3g wires the cross-feed.
+    void pushError(GLenum error,
+                   std::string_view functionName = std::string_view{},
+                   std::string_view message = std::string_view{});
     GLenum popError();
 
     const GLubyte* getString(GLenum name);

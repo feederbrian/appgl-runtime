@@ -4567,8 +4567,22 @@ bool GLContext::getSamplerParameterFloat(GLuint sampler, GLenum pname, GLfloat* 
     return true;
 }
 
-void GLContext::pushError(GLenum error) {
+void GLContext::pushError(GLenum error, std::string_view functionName, std::string_view message) {
+    // Mirror the raised error into BOTH surfaces:
+    //  * The per-context enum queue drained by glGetError() — the
+    //    engine-facing GL contract requires a FIFO of pure enums.
+    //  * The runtime ring buffer drained by appglLiveDiagnosticsJSON —
+    //    external tooling wants the function name and human-readable
+    //    message, which the raw enum queue doesn't carry.
+    // Call sites that don't know the function name (e.g. deep inside
+    // GLContext.mm) get a "<internal>" fallback so the entry still
+    // shows up in the diagnostic dump rather than being dropped.
     impl_->errors.push_back(error);
+    Runtime::ErrorRecord record;
+    record.function = functionName.empty() ? std::string("<internal>") : std::string(functionName);
+    record.errorEnum = error;
+    record.message = std::string(message);
+    Runtime::shared().recordError(std::move(record));
 }
 
 GLenum GLContext::popError() {

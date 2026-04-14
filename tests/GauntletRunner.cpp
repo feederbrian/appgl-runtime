@@ -988,6 +988,71 @@ public:
         expectCondition(readbackColor[0] == probeColor[0] && readbackColor[1] == probeColor[1]
                             && readbackColor[2] == probeColor[2] && readbackColor[3] == probeColor[3],
                         "appglGetProcAddress-resolved glClearColor drives the runtime state");
+
+        // Landing C 3g: prove that raised errors reach BOTH surfaces:
+        //  * The per-context GL error queue drained by glGetError()
+        //  * The runtime error ring buffer drained by appglLiveDiagnosticsJSON
+        //    / Runtime::errorLogSnapshot()
+        // Before 3g, context-level pushError calls only populated the first
+        // surface and the runtime ring buffer was blind to anything raised
+        // from inside GLContext.mm. The cross-wire closes that gap so that
+        // engine-side tooling that reads the diagnostics JSON sees every
+        // raised error — not just the ones routed through the runtime-layer
+        // recordValidationError helper.
+
+        // Drain both surfaces to a known-clean baseline.
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+        const std::size_t errorLogBaseline = Runtime::shared().errorLogCount();
+
+        // Runtime-layer path: glBindBuffer with an invalid target goes
+        // through recordValidationError -> context->pushError with the full
+        // "glBindBuffer" function tag and a human-readable message.
+        constexpr GLenum kBogusBufferTarget = 0xDEAD;
+        gl.glBindBuffer(kBogusBufferTarget, 0);
+        expectCondition(gl.glGetError() == GL_INVALID_ENUM,
+                        "glBindBuffer(bogus target) raises GL_INVALID_ENUM on the glGetError queue");
+        auto snapshot = Runtime::shared().errorLogSnapshot();
+        expectCondition(snapshot.size() > errorLogBaseline,
+                        "glBindBuffer(bogus target) grew the runtime error ring");
+        bool foundBindBufferRecord = false;
+        for (auto it = snapshot.rbegin(); it != snapshot.rend(); ++it) {
+            if (it->function == "glBindBuffer" && it->errorEnum == GL_INVALID_ENUM) {
+                foundBindBufferRecord = true;
+                break;
+            }
+        }
+        expectCondition(foundBindBufferRecord,
+                        "runtime error ring records glBindBuffer/GL_INVALID_ENUM");
+
+        // Context-layer path: glReadPixels with an unsupported format hits
+        // GLContext::readPixels's internal pushError(GL_INVALID_ENUM) — no
+        // runtime-layer recordValidationError involved. Before 3g this
+        // raised error reached glGetError but was INVISIBLE to the runtime
+        // ring buffer. After 3g it shows up as an "<internal>" record.
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+        const std::size_t ringBeforeContextError = Runtime::shared().errorLogCount();
+        GLuint probeByte = 0;
+        gl.glReadPixels(0, 0, 1, 1, GL_RED, GL_BYTE, &probeByte);
+        expectCondition(gl.glGetError() == GL_INVALID_ENUM,
+                        "glReadPixels(GL_RED, GL_BYTE) raises GL_INVALID_ENUM on the glGetError queue");
+        auto postContextSnapshot = Runtime::shared().errorLogSnapshot();
+        expectCondition(postContextSnapshot.size() > ringBeforeContextError,
+                        "glReadPixels context-level pushError grew the runtime error ring");
+        bool foundInternalRecord = false;
+        for (auto it = postContextSnapshot.rbegin(); it != postContextSnapshot.rend(); ++it) {
+            if (it->errorEnum == GL_INVALID_ENUM && (it->function == "<internal>" || it->function == "glReadPixels")) {
+                foundInternalRecord = true;
+                break;
+            }
+        }
+        expectCondition(foundInternalRecord,
+                        "runtime error ring records context-level pushError(GL_INVALID_ENUM)");
+
+        // Drain before returning so the render pass starts clean.
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
     }
 
     void render(GLContext& context) override {
