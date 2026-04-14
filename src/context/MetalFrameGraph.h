@@ -155,6 +155,16 @@ struct TranslatedDrawInfo {
     std::vector<TextureBinding> fragmentTextures;
     std::vector<TextureBinding> vertexTextures;
 
+    // Phase 8X Group 4d follow-up⁸ — diagnostic-only GL program name,
+    // populated by GLContext::drawArrays / drawArraysInstanced /
+    // drawElements alongside the other tdi fields. Used exclusively by
+    // the first-draw-per-program NSLog in `encodeTranslatedDraw` so
+    // BAR-side grep can correlate binding output back to the program
+    // identity they already see in their `drawArrays` instrumentation.
+    // Not used for any correctness decision — leaving it at 0 is safe
+    // (the log will read "program=0" for that draw). Non-owning.
+    GLuint program = 0;
+
     // Pipeline state toggles.
     bool depthTestEnabled = false;
     GLenum depthFunc = GL_LESS;

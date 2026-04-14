@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Diagnostic tracing — set to 1 to enable, 0 to silence.
@@ -821,6 +822,62 @@ struct MetalFrameGraph::Impl {
         // in the smoke run. BAR's select-menu fragment shaders sample
         // one texture per draw (the glyph atlas page), so every call
         // here populates one binding in `fragmentTextures`.
+        //
+        // Phase 8X Group 4d follow-up⁸ — diagnostic instrumentation for
+        // BAR's followup⁷ verification "byte-identical screenshot"
+        // finding. The binding fix landed structurally clean (gauntlet
+        // green, no regressions) but produced zero pixel-level change in
+        // the select-menu render. Three hypotheses (BAR followup⁷ §Visual):
+        //   A. bindings are emitted but all metalTexture/metalSamplerState
+        //      pointers are nullptr, so every entry hits the skip-guard
+        //      below and the encoder stays in the unbound state.
+        //   B. `resolveSamplerBindings` finds zero reflection entries so
+        //      `fragmentTextures` is empty on arrival — see matching log
+        //      in `GLContext::Impl::resolveSamplerBindings`.
+        //   C. BAR's text rendering runs through a program that never
+        //      reaches this encoder (fall-through to solid-color path
+        //      before the translated gate).
+        // This one-shot-per-program log distinguishes A from B and C:
+        //   - if this line never logs for programs 5/6/8/10 → hypothesis C
+        //   - if it logs with sizes (0/0) → hypothesis B (zero bindings
+        //     arrived on the tdi; check resolve log)
+        //   - if it logs with sizes > 0 and hasTexture=0 or hasSampler=0 →
+        //     hypothesis A (bindings arrived but were null)
+        //   - if it logs with sizes > 0 and hasTexture=1 hasSampler=1 →
+        //     bindings are real but pixels are still unchanged; means
+        //     the issue is downstream of binding (shader texture coord,
+        //     missing color-attachment write, etc.)
+        // Keyed on info.program so the log fires exactly once per GL
+        // program name per MetalFrameGraph instance (one per
+        // GLContext). Single-threaded GL context means no mutex is
+        // needed. See `loggedBindingPrograms` on Impl for the
+        // multi-context rationale.
+        {
+            if (info.program != 0 &&
+                loggedBindingPrograms.insert(info.program).second) {
+                NSLog(@"[GL] encodeTranslatedDraw first-draw program=%u"
+                      @" fragmentTextures.size=%zu vertexTextures.size=%zu",
+                      info.program,
+                      info.fragmentTextures.size(),
+                      info.vertexTextures.size());
+                for (std::size_t i = 0; i < info.fragmentTextures.size(); ++i) {
+                    const auto& b = info.fragmentTextures[i];
+                    NSLog(@"[GL]   frag[%zu] slot=%u hasTexture=%d hasSampler=%d",
+                          i,
+                          static_cast<unsigned>(b.metalSlot),
+                          b.metalTexture != nullptr ? 1 : 0,
+                          b.metalSamplerState != nullptr ? 1 : 0);
+                }
+                for (std::size_t i = 0; i < info.vertexTextures.size(); ++i) {
+                    const auto& b = info.vertexTextures[i];
+                    NSLog(@"[GL]   vert[%zu] slot=%u hasTexture=%d hasSampler=%d",
+                          i,
+                          static_cast<unsigned>(b.metalSlot),
+                          b.metalTexture != nullptr ? 1 : 0,
+                          b.metalSamplerState != nullptr ? 1 : 0);
+                }
+            }
+        }
         for (const auto& binding : info.fragmentTextures) {
             if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
                 continue;
@@ -1412,6 +1469,17 @@ private:
     // The state space is tiny (~16 combinations); after warmup every draw is
     // a pure hash-table hit with zero Metal allocations.
     std::unordered_map<std::uint32_t, id<MTLDepthStencilState>> depthStencilCache;
+
+    // Phase 8X Group 4d follow-up⁸ — per-context dedup for the
+    // first-draw-per-program binding diagnostic NSLog in
+    // `encodeTranslatedDraw`. Lives on the Impl rather than as a
+    // function-local static so multi-context test runs (gauntlet
+    // phase-a/c/d/7) don't cross-pollute: each GLContext owns its own
+    // MetalFrameGraph and therefore its own set, and each scene's
+    // program=1 gets logged exactly once. Under single-context
+    // workloads (BAR/Recoil) the behavior is identical to a static set
+    // but without the cross-run leak.
+    std::unordered_set<GLuint> loggedBindingPrograms;
 
     // ── Encoder state deduplication (OPT-6) ──
     // Track what was last set on the current render encoder. Skip redundant

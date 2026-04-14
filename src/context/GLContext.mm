@@ -1210,7 +1210,7 @@ struct GLContext::Impl {
     // Every parameter mutation in `texParameterInteger` /
     // `texParameterFloat` flips `samplerDirty = true` so the next draw
     // rebuilds on demand.
-    bool rebuildTextureSamplerState(GLTextureObject& object) {
+    bool rebuildTextureSamplerState(GLuint texName, GLTextureObject& object) {
         if (!object.samplerDirty && object.metalSampler != nullptr) {
             return true;
         }
@@ -1240,6 +1240,36 @@ struct GLContext::Impl {
         }
         object.metalSampler = transferRetainedMetalObject(sampler);
         object.samplerDirty = false;
+
+        // Phase 8X Group 4d follow-up⁸ — first-rebuild-per-texture
+        // NSLog so BAR can see whether the glyph atlases get a sampler
+        // at all, and if so with what filter/wrap/lod params. Fires at
+        // most once per GL texture name per process. Keyed on the name
+        // parameter because GLTextureObject does not carry its own
+        // identity — the caller (resolveSamplerBindings, the only
+        // caller today) knows the name from
+        // `state->boundTextureOnUnit(...)`. Subsequent rebuilds caused
+        // by glTexParameter flipping `samplerDirty` are not logged —
+        // the first build sets the baseline, the BAR side can cross
+        // check against expected Recoil defaults.
+        if (texName != 0 &&
+            loggedSamplerBuildTextures.insert(texName).second) {
+            NSLog(@"[GL] rebuildTextureSamplerState first-build texName=%u"
+                  @" minFilter=0x%04X magFilter=0x%04X"
+                  @" wrapS=0x%04X wrapT=0x%04X wrapR=0x%04X"
+                  @" minLod=%.2f maxLod=%.2f baseLevel=%d maxLevel=%d"
+                  @" compareMode=0x%04X compareFunc=0x%04X",
+                  texName,
+                  static_cast<unsigned>(object.params.minFilter),
+                  static_cast<unsigned>(object.params.magFilter),
+                  static_cast<unsigned>(object.params.wrapS),
+                  static_cast<unsigned>(object.params.wrapT),
+                  static_cast<unsigned>(object.params.wrapR),
+                  object.params.minLod, object.params.maxLod,
+                  object.params.baseLevel, object.params.maxLevel,
+                  static_cast<unsigned>(object.params.compareMode),
+                  static_cast<unsigned>(object.params.compareFunc));
+        }
         return true;
     }
 
@@ -1290,7 +1320,28 @@ struct GLContext::Impl {
         GLProgramObject& program,
         TranslatedDrawInfo& info)
     {
-        auto resolveStage = [&](const ShaderReflection* reflection,
+        // Phase 8X Group 4d follow-up⁸ — diagnostic one-shot-per-program
+        // trace so BAR can distinguish "reflection empty", "uniform
+        // missing", "unit empty", "texture not instantiated", and
+        // "sampler build failed" cases without guessing. Fires at most
+        // once per GL program name (zero hot-path cost after first
+        // exercise). Same set guards both stages; the stage tag in the
+        // summary line disambiguates which one is being walked.
+        const bool logThisCall = (info.program != 0) &&
+            loggedSamplerResolvePrograms.insert(info.program).second;
+        if (logThisCall) {
+            const std::size_t fragCount = info.fragmentReflection
+                ? info.fragmentReflection->sampledTextures.size() : 0;
+            const std::size_t vertCount = info.vertexReflection
+                ? info.vertexReflection->sampledTextures.size() : 0;
+            NSLog(@"[GL] resolveSamplerBindings first-call program=%u"
+                  @" fragment.sampledTextures=%zu vertex.sampledTextures=%zu"
+                  @" uniforms=%zu",
+                  info.program, fragCount, vertCount, program.uniforms.size());
+        }
+
+        auto resolveStage = [&](const char* stageTag,
+                                const ShaderReflection* reflection,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outBindings) {
             if (reflection == nullptr || reflection->sampledTextures.empty()) {
                 return;
@@ -1310,13 +1361,21 @@ struct GLContext::Impl {
                 // never called glUniform1i, so a missing entry in
                 // uniformValues also reads as unit 0.
                 GLint glUnit = 0;
+                bool uniformValueWasSet = false;
                 if (uniformLocation >= 0) {
                     auto it = program.uniformValues.find(uniformLocation);
                     if (it != program.uniformValues.end() && !it->second.ints.empty()) {
                         glUnit = it->second.ints[0];
+                        uniformValueWasSet = true;
                     }
                 }
                 if (glUnit < 0) {
+                    if (logThisCall) {
+                        NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
+                              @" SKIP reason=negative-unit glUnit=%d",
+                              stageTag, sampledTex.name.c_str(),
+                              sampledTex.metalBinding, glUnit);
+                    }
                     continue;  // malformed app state; skip silently
                 }
 
@@ -1326,11 +1385,29 @@ struct GLContext::Impl {
                 const GLuint texName = state->boundTextureOnUnit(
                     static_cast<GLuint>(glUnit), GL_TEXTURE_2D);
                 if (texName == 0) {
+                    if (logThisCall) {
+                        NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
+                              @" SKIP reason=unit-empty glUnit=%d uniformLoc=%d"
+                              @" valueSet=%d",
+                              stageTag, sampledTex.name.c_str(),
+                              sampledTex.metalBinding, glUnit,
+                              uniformLocation, uniformValueWasSet ? 1 : 0);
+                    }
                     continue;  // no texture bound to the unit
                 }
                 GLTextureObject* texObject = objects->textures().get(texName);
                 if (texObject == nullptr || !texObject->instantiated ||
                     texObject->metalTexture == nullptr) {
+                    if (logThisCall) {
+                        NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
+                              @" SKIP reason=tex-not-ready glUnit=%d texName=%u"
+                              @" hasObject=%d instantiated=%d hasMetalTex=%d",
+                              stageTag, sampledTex.name.c_str(),
+                              sampledTex.metalBinding, glUnit, texName,
+                              texObject != nullptr ? 1 : 0,
+                              texObject && texObject->instantiated ? 1 : 0,
+                              texObject && texObject->metalTexture ? 1 : 0);
+                    }
                     continue;  // texture not yet populated with storage
                 }
 
@@ -1351,11 +1428,19 @@ struct GLContext::Impl {
                 }
                 if (metalSamplerState == nullptr) {
                     if (texObject->samplerDirty || texObject->metalSampler == nullptr) {
-                        (void)rebuildTextureSamplerState(*texObject);
+                        (void)rebuildTextureSamplerState(texName, *texObject);
                     }
                     metalSamplerState = texObject->metalSampler;
                 }
                 if (metalSamplerState == nullptr) {
+                    if (logThisCall) {
+                        NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
+                              @" SKIP reason=sampler-build-failed glUnit=%d"
+                              @" texName=%u standAloneSampler=%u",
+                              stageTag, sampledTex.name.c_str(),
+                              sampledTex.metalBinding, glUnit, texName,
+                              samplerName);
+                    }
                     continue;  // sampler build failure; nothing to bind
                 }
 
@@ -1365,11 +1450,20 @@ struct GLContext::Impl {
                 binding.metalTexture = texObject->metalTexture;
                 binding.metalSamplerState = metalSamplerState;
                 outBindings.push_back(binding);
+
+                if (logThisCall) {
+                    NSLog(@"[GL]   %s sampler='%s' metalSlot=%u BOUND"
+                          @" glUnit=%d uniformLoc=%d valueSet=%d texName=%u"
+                          @" standAloneSampler=%u",
+                          stageTag, sampledTex.name.c_str(),
+                          sampledTex.metalBinding, glUnit, uniformLocation,
+                          uniformValueWasSet ? 1 : 0, texName, samplerName);
+                }
             }
         };
 
-        resolveStage(info.fragmentReflection, info.fragmentTextures);
-        resolveStage(info.vertexReflection, info.vertexTextures);
+        resolveStage("frag", info.fragmentReflection, info.fragmentTextures);
+        resolveStage("vert", info.vertexReflection, info.vertexTextures);
     }
 
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
@@ -2170,6 +2264,17 @@ struct GLContext::Impl {
     std::unique_ptr<GLCapabilities> capabilities;
     std::unique_ptr<GLObjectStore> objects;
     std::unique_ptr<GLStateTracker> state;
+
+    // Phase 8X Group 4d follow-up⁸ — one-shot-per-key dedup sets for the
+    // sampler-resolution / sampler-build diagnostic logs. Both fire at
+    // most once per key per process so the hot draw path stays quiet
+    // after the first draw that exercises each program / texture. The
+    // existing follow-up³ fall-through instrumentation and follow-up⁴
+    // pipeline-build error surfacing both use identical one-shot dedup
+    // patterns; these sit next to them for the sampler path. See
+    // `resolveSamplerBindings` and `rebuildTextureSamplerState`.
+    std::unordered_set<GLuint> loggedSamplerResolvePrograms;
+    std::unordered_set<GLuint> loggedSamplerBuildTextures;
     // Per-context fixed-function matrix mirror. Compat-profile matrix
     // entry points (defined in src/runtime/AppGLMatrixOverrides.cpp)
     // route through this member, and the draw path reads from it to
@@ -7344,6 +7449,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                    // Phase 8X Group 4d follow-up⁸ — diagnostic-only
+                    // program identifier used by encodeTranslatedDraw's
+                    // first-draw-per-program NSLog. Non-owning, no
+                    // correctness impact; zero is a valid placeholder.
+                    tdi.program = programName;
 
                     // Collect per-attribute layout from the VAO.  All enabled
                     // attributes whose resolved buffer matches the primary VBO
@@ -7545,6 +7655,11 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                    // Phase 8X Group 4d follow-up⁸ — diagnostic-only
+                    // program identifier used by encodeTranslatedDraw's
+                    // first-draw-per-program NSLog. Non-owning, no
+                    // correctness impact; zero is a valid placeholder.
+                    tdi.program = programName;
 
                     // Gather vertex attributes.  Attributes in the same VBO as
                     // attribute 0 (per-vertex) go into vertexAttributeLayouts
@@ -7794,6 +7909,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                    // Phase 8X Group 4d follow-up⁸ — diagnostic-only
+                    // program identifier used by encodeTranslatedDraw's
+                    // first-draw-per-program NSLog. Non-owning, no
+                    // correctness impact; zero is a valid placeholder.
+                    tdi.program = programName;
 
                     // Collect per-attribute layout from the VAO.
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
