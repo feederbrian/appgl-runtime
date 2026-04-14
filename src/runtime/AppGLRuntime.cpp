@@ -73,6 +73,27 @@ void markStateFunction(FunctionId id, std::string_view note) {
     Runtime::shared().refreshCurrentContextClaimedVersion();
 }
 
+// Phase A state mirror allowlist — every cap that glEnable/glDisable/glIsEnabled
+// accepts without raising GL_INVALID_ENUM. Keeping this list explicit means BAR's
+// audit can cross-reference which caps are supported against their InitGLState
+// call sites. New caps land here as soon as a real engine call site needs them.
+//
+// Supported groups:
+//   Raster/blending   : GL_BLEND, GL_CULL_FACE, GL_DEPTH_TEST, GL_STENCIL_TEST,
+//                       GL_SCISSOR_TEST, GL_DITHER, GL_FRAMEBUFFER_SRGB
+//   Polygon offsets   : GL_POLYGON_OFFSET_{FILL,LINE,POINT}
+//   Primitive restart : GL_PRIMITIVE_RESTART, GL_PRIMITIVE_RESTART_FIXED_INDEX
+//   Point/line/smooth : GL_PROGRAM_POINT_SIZE, GL_LINE_SMOOTH, GL_POLYGON_SMOOTH
+//   MSAA              : GL_MULTISAMPLE, GL_SAMPLE_{ALPHA_TO_COVERAGE,
+//                       ALPHA_TO_ONE,COVERAGE,MASK}
+//   Transform fb      : GL_RASTERIZER_DISCARD
+//   Cube map seamless : GL_TEXTURE_CUBE_MAP_SEAMLESS
+//   Debug output      : GL_DEBUG_OUTPUT, GL_DEBUG_OUTPUT_SYNCHRONOUS
+//   Clip distances    : GL_CLIP_DISTANCE0..GL_CLIP_DISTANCE7
+//
+// Anything outside this list pushes GL_INVALID_ENUM. That is the spec-correct
+// behaviour for unknown caps — but the message also reports the raw enum in hex
+// so the caller (or their diagnostic log) knows exactly which cap failed.
 bool isValidEnableCap(GLenum cap) {
     if (cap >= GL_CLIP_DISTANCE0 && cap <= GL_CLIP_DISTANCE7) {
         return true;
@@ -106,6 +127,41 @@ bool isValidEnableCap(GLenum cap) {
         default:
             return false;
     }
+}
+
+// Known enums that real GL applications probe to detect attached debug tools
+// even though they are not spec-valid cap arguments. These MUST still return
+// GL_FALSE from glIsEnabled AND push GL_INVALID_ENUM (because that is how the
+// probing app detects "no debug tool attached" — see e.g. Recoil's RenderDoc
+// check at rts/Rendering/GlobalRendering.cpp:929). The tracked list exists
+// purely so the diagnostic error message can flag the probe as *expected*
+// rather than *unhandled cap in the state mirror*.
+bool isKnownDebugToolProbeEnum(GLenum cap) {
+    switch (cap) {
+        // GL_DEBUG_TOOL_EXT — RenderDoc probe, spec at renderdoc.org/debug_tool.txt
+        case 0x6789:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Build an error message that names the raw cap enum so diagnostic logs point
+// at the exact value the caller passed. Hex is the native GL convention; the
+// helper also flags known probe enums so they're recognizable in the ring.
+std::string buildUnknownCapMessage(GLenum cap) {
+    std::ostringstream hex;
+    hex << "0x" << std::hex << std::uppercase << cap;
+    if (isKnownDebugToolProbeEnum(cap)) {
+        std::ostringstream out;
+        out << "known debug-tool probe enum " << hex.str()
+            << " (e.g. RenderDoc GL_DEBUG_TOOL_EXT; GL_INVALID_ENUM is spec-correct)";
+        return out.str();
+    }
+    std::ostringstream out;
+    out << "unknown cap enum " << hex.str()
+        << " (not in Phase A state mirror allowlist)";
+    return out.str();
 }
 
 bool isValidBlendFactor(GLenum factor) {
@@ -967,9 +1023,15 @@ std::size_t Runtime::writeDiagnosticsJSON(char* out, std::size_t cap) {
     // reflect the CURRENT live context or the most recently destroyed context's
     // final snapshot. This is how BAR can distinguish an honest post-mortem
     // dump from a cold-boot dump with nothing to report.
-    stream << "\"inventorySource\":\""
-           << (contextIsLive ? "live" : (lastKnownInventory_.valid ? "post-mortem-snapshot" : "empty"))
-           << "\",";
+    //
+    // `metricsSource` mirrors `inventorySource` in the full writer (both the
+    // object store and pipeline cache come from the same source). It's emitted
+    // so tooling that polls both `appglDiagnosticsJSON` and
+    // `appglLiveDiagnosticsJSON` can use a single uniform key.
+    const char* const provenance =
+        contextIsLive ? "live" : (lastKnownInventory_.valid ? "post-mortem-snapshot" : "empty");
+    stream << "\"inventorySource\":\"" << provenance << "\",";
+    stream << "\"metricsSource\":\"" << provenance << "\",";
 
     // ── Object store inventory ──
     // Live path: walk the current context's object store directly.
@@ -2998,7 +3060,7 @@ void APIENTRY glEnable(GLenum cap) {
         return;
     }
     if (!isValidEnableCap(cap)) {
-        recordValidationError(context, "glEnable", GL_INVALID_ENUM, "cap is not supported by the Phase A state mirror");
+        recordValidationError(context, "glEnable", GL_INVALID_ENUM, buildUnknownCapMessage(cap));
         return;
     }
     context->setEnabled(cap, true);
@@ -3017,7 +3079,7 @@ void APIENTRY glDisable(GLenum cap) {
         return;
     }
     if (!isValidEnableCap(cap)) {
-        recordValidationError(context, "glDisable", GL_INVALID_ENUM, "cap is not supported by the Phase A state mirror");
+        recordValidationError(context, "glDisable", GL_INVALID_ENUM, buildUnknownCapMessage(cap));
         return;
     }
     context->setEnabled(cap, false);
@@ -3036,7 +3098,7 @@ GLboolean APIENTRY glIsEnabled(GLenum cap) {
         return GL_FALSE;
     }
     if (!isValidEnableCap(cap)) {
-        recordValidationError(context, "glIsEnabled", GL_INVALID_ENUM, "cap is not supported by the Phase A state mirror");
+        recordValidationError(context, "glIsEnabled", GL_INVALID_ENUM, buildUnknownCapMessage(cap));
         return GL_FALSE;
     }
     Runtime::shared().coverageStore().markSmokeTested(
