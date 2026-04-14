@@ -1853,14 +1853,23 @@ public:
         // only fired the call under the hardcoded VS+FS translator block.
         // If either assertion fires after Landing B it means the restructured
         // pipeline silently dropped a record.
-        const std::size_t translationsBeforeLink = Runtime::shared().shaderTranslationCount();
+        //
+        // `shaderTranslationCount()` is a lifetime push counter (see
+        // AppGLRuntime.h) so the delta is meaningful even after the 32-entry
+        // ring has wrapped — which it will have by the time this scene runs,
+        // since every preceding gauntlet scene links at least one program.
+        // The two new records sit at the tail of the snapshot regardless of
+        // where the ring's write cursor is.
+        const std::uint64_t translationsBeforeLink = Runtime::shared().shaderTranslationCount();
         gl.glLinkProgram(program);
-        const auto translationsAfterLink = Runtime::shared().shaderTranslationSnapshot();
-        expectCondition(translationsAfterLink.size() - translationsBeforeLink == 2,
+        const std::uint64_t translationsAfterLink = Runtime::shared().shaderTranslationCount();
+        const auto translationSnapshot = Runtime::shared().shaderTranslationSnapshot();
+        expectCondition(translationsAfterLink - translationsBeforeLink == 2,
                         "linkProgram pushed exactly 2 shader translation records");
-        if (translationsAfterLink.size() >= translationsBeforeLink + 2) {
-            const auto& vertexRecord = translationsAfterLink[translationsBeforeLink];
-            const auto& fragmentRecord = translationsAfterLink[translationsBeforeLink + 1];
+        if (translationSnapshot.size() >= 2 &&
+            translationsAfterLink - translationsBeforeLink == 2) {
+            const auto& vertexRecord = translationSnapshot[translationSnapshot.size() - 2];
+            const auto& fragmentRecord = translationSnapshot[translationSnapshot.size() - 1];
             expectCondition(vertexRecord.success && fragmentRecord.success,
                             "both link-time shader translation records report success=true");
             expectCondition(vertexRecord.stage == "vertex" && fragmentRecord.stage == "fragment",
@@ -2282,8 +2291,12 @@ public:
         // subsequent link attempt must push a "link" failure record into the
         // Runtime shader-translations ring so BAR can see the glslang
         // diagnostic without having to round-trip through getShaderInfoLog.
+        //
+        // Same ring-wrap treatment as the success-path assertion above: use
+        // the lifetime push counter for the delta and index the failure
+        // record from the tail of the post-link snapshot.
         {
-            const std::size_t translationsBeforeFailure =
+            const std::uint64_t translationsBeforeFailure =
                 Runtime::shared().shaderTranslationCount();
 
             const GLuint badShader = gl.glCreateShader(GL_FRAGMENT_SHADER);
@@ -2321,13 +2334,15 @@ public:
             expectCondition(failLinkStatus == GL_FALSE,
                             "program with uncompiled attached shader fails to link");
 
-            const auto translationsAfterFailure =
+            const std::uint64_t translationsAfterFailure =
+                Runtime::shared().shaderTranslationCount();
+            const auto failureSnapshot =
                 Runtime::shared().shaderTranslationSnapshot();
-            expectCondition(translationsAfterFailure.size() > translationsBeforeFailure,
+            expectCondition(translationsAfterFailure > translationsBeforeFailure,
                             "link-of-bad-shader pushed at least one shader translation record");
-            if (translationsAfterFailure.size() > translationsBeforeFailure) {
-                const auto& failureRecord =
-                    translationsAfterFailure[translationsBeforeFailure];
+            if (!failureSnapshot.empty() &&
+                translationsAfterFailure > translationsBeforeFailure) {
+                const auto& failureRecord = failureSnapshot.back();
                 expectCondition(!failureRecord.success,
                                 "link-of-bad-shader record reports success=false");
                 expectCondition(failureRecord.stage == "link",

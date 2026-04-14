@@ -633,12 +633,21 @@ public:
     };
     void recordShaderTranslation(ShaderTranslationRecord record);
 
-    // Ring buffer size for `shaderTranslations_` and a read-only snapshot of
-    // the ring contents. Used by the gauntlet diagnostics tests to assert that
-    // recordShaderTranslation fires on every link attempt. The snapshot is a
-    // copy (taken under the lock) so callers don't need to worry about the
-    // ring mutating under them while they iterate.
-    std::size_t shaderTranslationCount();
+    // Monotonic lifetime counter of how many shader translation records have
+    // been pushed since process start, and a read-only snapshot of the bounded
+    // ring buffer that stores the most recent entries. Used by the gauntlet
+    // diagnostics tests to assert that recordShaderTranslation fires on every
+    // link attempt.
+    //
+    // `shaderTranslationCount()` is a lifetime push counter, *not* the size of
+    // the ring — the ring is capped at 32 entries so tests that compare
+    // "before vs. after" counts get a meaningful delta even after the ring
+    // has wrapped. Callers that want the current ring size should use
+    // `shaderTranslationSnapshot().size()` instead.
+    //
+    // The snapshot is a copy (taken under the lock) so callers don't need to
+    // worry about the ring mutating under them while they iterate.
+    std::uint64_t shaderTranslationCount();
     std::vector<ShaderTranslationRecord> shaderTranslationSnapshot();
 
     // Error log. A ring buffer of recent GL error events (validation failures,
@@ -705,6 +714,7 @@ private:
     std::unordered_set<GLContext*> liveContexts_;
     std::mutex translationMutex_;
     std::vector<ShaderTranslationRecord> shaderTranslations_;
+    std::uint64_t shaderTranslationsEverPushed_ = 0;
     std::mutex errorLogMutex_;
     std::vector<ErrorRecord> errorLog_;
     InventorySnapshot lastKnownInventory_;

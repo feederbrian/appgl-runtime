@@ -1024,16 +1024,20 @@ void Runtime::noteRenderer(std::string renderer) {
 
 void Runtime::recordShaderTranslation(ShaderTranslationRecord record) {
     std::lock_guard<std::mutex> lock(translationMutex_);
-    // Keep last 32 translations to avoid unbounded growth.
+    // Keep last 32 translations to avoid unbounded growth. The lifetime
+    // counter below is intentionally independent of the ring size so test
+    // harnesses can measure "how many records were pushed in this window"
+    // as a simple (after - before) delta even after the ring has wrapped.
     if (shaderTranslations_.size() >= 32) {
         shaderTranslations_.erase(shaderTranslations_.begin());
     }
     shaderTranslations_.push_back(std::move(record));
+    ++shaderTranslationsEverPushed_;
 }
 
-std::size_t Runtime::shaderTranslationCount() {
+std::uint64_t Runtime::shaderTranslationCount() {
     std::lock_guard<std::mutex> lock(translationMutex_);
-    return shaderTranslations_.size();
+    return shaderTranslationsEverPushed_;
 }
 
 std::vector<Runtime::ShaderTranslationRecord> Runtime::shaderTranslationSnapshot() {
