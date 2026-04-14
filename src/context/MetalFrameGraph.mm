@@ -604,6 +604,221 @@ struct MetalFrameGraph::Impl {
             desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
 
+            // Phase 8X Group 4d follow-up¹³ — one-shot per-program
+            // diagnostic dump of the Metal pipeline descriptor shape.
+            // Covers BAR followup¹²-verification §Candidate 1 (blend
+            // state — did the translated-draw pipeline inherit GL
+            // blend enable / src / dst / equation, or is it sitting on
+            // Metal's default-off blend?) and §Candidate 2 (vertex
+            // descriptor format — did `col` arrive as
+            // MTLVertexFormatUChar4Normalized or as Float4? and do
+            // the offsets/bufferIndex match the VBO layout peek dumped
+            // at the first-draw site?). Both dumps fire from here
+            // because the descriptor objects go out of scope after
+            // newRenderPipelineStateWithDescriptor; macOS has no
+            // runtime reflection API to walk a compiled
+            // MTLRenderPipelineState. Gated by
+            // `loggedPipelineBuildPrograms` so the dump fires exactly
+            // once per GL program name per MetalFrameGraph instance
+            // (GLContext) — builds are cached on GLProgramObject so a
+            // program hits this branch at most once in the cache-miss
+            // path anyway; the explicit set protects against theoretical
+            // cache-invalidation cases.
+            //
+            // Format strings match the Metal header names so BAR can
+            // grep for them directly against
+            // reference/OpenGL-Refpages/gl4/glBlendFunc.xml +
+            // glVertexAttribPointer.xml semantics. No decoding tables
+            // here — raw enum values are emitted alongside a short
+            // symbolic name for the common cases so the log stays
+            // self-describing without a lookup table.
+            if (info.program != 0 &&
+                loggedPipelineBuildPrograms.insert(info.program).second) {
+                auto vertexFormatName = [](MTLVertexFormat f) -> const char* {
+                    switch (f) {
+                        case MTLVertexFormatInvalid:          return "Invalid";
+                        case MTLVertexFormatFloat:            return "Float";
+                        case MTLVertexFormatFloat2:           return "Float2";
+                        case MTLVertexFormatFloat3:           return "Float3";
+                        case MTLVertexFormatFloat4:           return "Float4";
+                        case MTLVertexFormatInt:              return "Int";
+                        case MTLVertexFormatInt2:             return "Int2";
+                        case MTLVertexFormatInt3:             return "Int3";
+                        case MTLVertexFormatInt4:             return "Int4";
+                        case MTLVertexFormatUInt:             return "UInt";
+                        case MTLVertexFormatUInt2:            return "UInt2";
+                        case MTLVertexFormatUInt3:            return "UInt3";
+                        case MTLVertexFormatUInt4:            return "UInt4";
+                        case MTLVertexFormatUChar:            return "UChar";
+                        case MTLVertexFormatUChar2:           return "UChar2";
+                        case MTLVertexFormatUChar3:           return "UChar3";
+                        case MTLVertexFormatUChar4:           return "UChar4";
+                        case MTLVertexFormatUCharNormalized:  return "UCharNormalized";
+                        case MTLVertexFormatUChar2Normalized: return "UChar2Normalized";
+                        case MTLVertexFormatUChar3Normalized: return "UChar3Normalized";
+                        case MTLVertexFormatUChar4Normalized: return "UChar4Normalized";
+                        case MTLVertexFormatChar:             return "Char";
+                        case MTLVertexFormatChar2:            return "Char2";
+                        case MTLVertexFormatChar3:            return "Char3";
+                        case MTLVertexFormatChar4:            return "Char4";
+                        case MTLVertexFormatCharNormalized:   return "CharNormalized";
+                        case MTLVertexFormatChar2Normalized:  return "Char2Normalized";
+                        case MTLVertexFormatChar3Normalized:  return "Char3Normalized";
+                        case MTLVertexFormatChar4Normalized:  return "Char4Normalized";
+                        case MTLVertexFormatUShort:           return "UShort";
+                        case MTLVertexFormatUShort2:          return "UShort2";
+                        case MTLVertexFormatUShort3:          return "UShort3";
+                        case MTLVertexFormatUShort4:          return "UShort4";
+                        case MTLVertexFormatUShortNormalized: return "UShortNormalized";
+                        case MTLVertexFormatUShort2Normalized:return "UShort2Normalized";
+                        case MTLVertexFormatUShort3Normalized:return "UShort3Normalized";
+                        case MTLVertexFormatUShort4Normalized:return "UShort4Normalized";
+                        case MTLVertexFormatShort:            return "Short";
+                        case MTLVertexFormatShort2:           return "Short2";
+                        case MTLVertexFormatShort3:           return "Short3";
+                        case MTLVertexFormatShort4:           return "Short4";
+                        case MTLVertexFormatShortNormalized:  return "ShortNormalized";
+                        case MTLVertexFormatShort2Normalized: return "Short2Normalized";
+                        case MTLVertexFormatShort3Normalized: return "Short3Normalized";
+                        case MTLVertexFormatShort4Normalized: return "Short4Normalized";
+                        case MTLVertexFormatHalf:             return "Half";
+                        case MTLVertexFormatHalf2:            return "Half2";
+                        case MTLVertexFormatHalf3:            return "Half3";
+                        case MTLVertexFormatHalf4:            return "Half4";
+                        default:                              return "Other";
+                    }
+                };
+                auto stepFunctionName = [](MTLVertexStepFunction f) -> const char* {
+                    switch (f) {
+                        case MTLVertexStepFunctionConstant:             return "Constant";
+                        case MTLVertexStepFunctionPerVertex:            return "PerVertex";
+                        case MTLVertexStepFunctionPerInstance:          return "PerInstance";
+                        case MTLVertexStepFunctionPerPatch:             return "PerPatch";
+                        case MTLVertexStepFunctionPerPatchControlPoint: return "PerPatchControlPoint";
+                        default:                                         return "Unknown";
+                    }
+                };
+                auto blendFactorName = [](MTLBlendFactor f) -> const char* {
+                    switch (f) {
+                        case MTLBlendFactorZero:                     return "Zero";
+                        case MTLBlendFactorOne:                      return "One";
+                        case MTLBlendFactorSourceColor:              return "SourceColor";
+                        case MTLBlendFactorOneMinusSourceColor:      return "OneMinusSourceColor";
+                        case MTLBlendFactorSourceAlpha:              return "SourceAlpha";
+                        case MTLBlendFactorOneMinusSourceAlpha:      return "OneMinusSourceAlpha";
+                        case MTLBlendFactorDestinationColor:         return "DestinationColor";
+                        case MTLBlendFactorOneMinusDestinationColor: return "OneMinusDestinationColor";
+                        case MTLBlendFactorDestinationAlpha:         return "DestinationAlpha";
+                        case MTLBlendFactorOneMinusDestinationAlpha: return "OneMinusDestinationAlpha";
+                        case MTLBlendFactorSourceAlphaSaturated:     return "SourceAlphaSaturated";
+                        case MTLBlendFactorBlendColor:               return "BlendColor";
+                        case MTLBlendFactorOneMinusBlendColor:       return "OneMinusBlendColor";
+                        case MTLBlendFactorBlendAlpha:               return "BlendAlpha";
+                        case MTLBlendFactorOneMinusBlendAlpha:       return "OneMinusBlendAlpha";
+                        default:                                     return "Other";
+                    }
+                };
+                auto blendOpName = [](MTLBlendOperation op) -> const char* {
+                    switch (op) {
+                        case MTLBlendOperationAdd:             return "Add";
+                        case MTLBlendOperationSubtract:        return "Subtract";
+                        case MTLBlendOperationReverseSubtract: return "ReverseSubtract";
+                        case MTLBlendOperationMin:             return "Min";
+                        case MTLBlendOperationMax:             return "Max";
+                        default:                               return "Other";
+                    }
+                };
+
+                NSLog(@"[GL] pipeline-build first-build program=%u"
+                      @" colorFormat=0x%lX depthFormat=0x%lX",
+                      info.program,
+                      (unsigned long)desc.colorAttachments[0].pixelFormat,
+                      (unsigned long)desc.depthAttachmentPixelFormat);
+
+                // Vertex descriptor: walk attributes 0..15 and layouts
+                // 0..15. A slot with MTLVertexFormatInvalid is either
+                // unused or reserved by the attribute-layout map; we
+                // emit those at a lower verbosity by suppressing them
+                // unless every slot is Invalid.
+                NSLog(@"[GL]   vertexDescriptor attributes:");
+                std::size_t nonInvalidAttrs = 0;
+                for (NSUInteger i = 0; i < 16; ++i) {
+                    MTLVertexAttributeDescriptor* a = vertexDescriptor.attributes[i];
+                    if (a.format == MTLVertexFormatInvalid) {
+                        continue;
+                    }
+                    ++nonInvalidAttrs;
+                    NSLog(@"[GL]     attr[%lu] format=MTLVertexFormat%s(%lu)"
+                          @" offset=%lu bufferIndex=%lu",
+                          (unsigned long)i,
+                          vertexFormatName(a.format),
+                          (unsigned long)a.format,
+                          (unsigned long)a.offset,
+                          (unsigned long)a.bufferIndex);
+                }
+                if (nonInvalidAttrs == 0) {
+                    NSLog(@"[GL]     (no attributes set — vertex stage runs without vertex descriptor input)");
+                }
+                NSLog(@"[GL]   vertexDescriptor layouts:");
+                std::size_t nonEmptyLayouts = 0;
+                for (NSUInteger i = 0; i < 16; ++i) {
+                    MTLVertexBufferLayoutDescriptor* l = vertexDescriptor.layouts[i];
+                    if (l.stride == 0) {
+                        continue;
+                    }
+                    ++nonEmptyLayouts;
+                    NSLog(@"[GL]     layout[%lu] stride=%lu"
+                          @" stepFunction=MTLVertexStepFunction%s(%lu)"
+                          @" stepRate=%lu",
+                          (unsigned long)i,
+                          (unsigned long)l.stride,
+                          stepFunctionName(l.stepFunction),
+                          (unsigned long)l.stepFunction,
+                          (unsigned long)l.stepRate);
+                }
+                if (nonEmptyLayouts == 0) {
+                    NSLog(@"[GL]     (no layouts set — stride=0 on every slot)");
+                }
+
+                // Color attachment 0 blend state. BAR §Candidate 1.
+                // TranslatedDrawInfo currently carries NO blend state
+                // plumbing — the descriptor is untouched past
+                // pixelFormat, so these values are whatever
+                // MTLRenderPipelineColorAttachmentDescriptor defaults
+                // to at init-time. Apple documents those as:
+                //   blendingEnabled                = NO
+                //   rgbBlendOperation              = Add
+                //   alphaBlendOperation            = Add
+                //   sourceRGBBlendFactor           = One
+                //   sourceAlphaBlendFactor         = One
+                //   destinationRGBBlendFactor      = Zero
+                //   destinationAlphaBlendFactor    = Zero
+                //   writeMask                      = All
+                // We dump the live values so BAR can confirm this
+                // holds and reason about whether the default-off blend
+                // is what causes the remaining visual discrepancy.
+                MTLRenderPipelineColorAttachmentDescriptor* ca = desc.colorAttachments[0];
+                NSLog(@"[GL]   colorAttachment[0].blendingEnabled=%d (gl-plumbed=no)",
+                      ca.blendingEnabled ? 1 : 0);
+                NSLog(@"[GL]   colorAttachment[0].rgb   src=%s(%lu) dst=%s(%lu) op=%s(%lu)",
+                      blendFactorName(ca.sourceRGBBlendFactor),
+                      (unsigned long)ca.sourceRGBBlendFactor,
+                      blendFactorName(ca.destinationRGBBlendFactor),
+                      (unsigned long)ca.destinationRGBBlendFactor,
+                      blendOpName(ca.rgbBlendOperation),
+                      (unsigned long)ca.rgbBlendOperation);
+                NSLog(@"[GL]   colorAttachment[0].alpha src=%s(%lu) dst=%s(%lu) op=%s(%lu)",
+                      blendFactorName(ca.sourceAlphaBlendFactor),
+                      (unsigned long)ca.sourceAlphaBlendFactor,
+                      blendFactorName(ca.destinationAlphaBlendFactor),
+                      (unsigned long)ca.destinationAlphaBlendFactor,
+                      blendOpName(ca.alphaBlendOperation),
+                      (unsigned long)ca.alphaBlendOperation);
+                NSLog(@"[GL]   colorAttachment[0].writeMask=0x%lX (all=0xF)",
+                      (unsigned long)ca.writeMask);
+                NSLog(@"[GL] pipeline-build first-build program=%u END", info.program);
+            }
+
             error = nil;  // reset before the final failable Metal call
             pipelineState = [device newRenderPipelineStateWithDescriptor:desc error:&error];
             if (pipelineState == nil) {
@@ -1564,6 +1779,23 @@ private:
     // workloads (BAR/Recoil) the behavior is identical to a static set
     // but without the cross-run leak.
     std::unordered_set<GLuint> loggedBindingPrograms;
+
+    // Phase 8X Group 4d follow-up¹³ — per-context dedup for the
+    // first-build-per-program pipeline diagnostic NSLog. Fires once
+    // per GL program name per MetalFrameGraph instance at the pipeline
+    // build path (just before newRenderPipelineStateWithDescriptor),
+    // where we still have a live MTLRenderPipelineDescriptor +
+    // MTLVertexDescriptor in scope. BAR followup¹²-verification
+    // §Candidate 1 (blend state) and §Candidate 2 (MTLVertexDescriptor
+    // format mismatch) both need the actual Metal-side descriptor
+    // values — we can't reconstruct them from `info` at the first-draw
+    // logging site because the descriptor is gone once
+    // newRenderPipelineStateWithDescriptor returns. Pipeline builds
+    // are cached on GLProgramObject so this fires exactly once per
+    // program per process (matching the existing `loggedBindingPrograms`
+    // granularity and the `loggedSamplerResolvePrograms` one on
+    // GLContext's Impl). Keyed on info.program.
+    std::unordered_set<GLuint> loggedPipelineBuildPrograms;
 
     // ── Encoder state deduplication (OPT-6) ──
     // Track what was last set on the current render encoder. Skip redundant
