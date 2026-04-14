@@ -4722,17 +4722,62 @@ bool GLContext::compileShader(GLuint shader) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+
+    // Clear any prior compile state so a re-compile of the same shader ID
+    // starts from a clean slate (matches the GL spec, which allows source
+    // replacement followed by another glCompileShader call).
+    object->compiled = false;
+    object->compileLog.clear();
+    object->spirv.clear();
+    object->declaredUniforms.clear();
+    object->declaredInputs.clear();
+    object->declaredOutputs.clear();
+
+    if (object->source.empty()) {
+        object->compileLog = "shader source is empty";
+        return false;
+    }
+
+    // 1. Lightweight scanner pass. Still needed for declared attribute inputs
+    //    so the vertex-input binding path (glBindAttribLocation /
+    //    layout(location=...)) can be resolved without going through
+    //    SPIRV-Cross reflection. The scanner's uniform output is now
+    //    secondary — link time pulls UBO members from SPIR-V reflection
+    //    directly so interface blocks are visible even though the scanner
+    //    ignores them.
     GLSLReflectionResult reflection = reflectGLSL(object->source, object->stage);
     object->declaredUniforms = std::move(reflection.uniforms);
     object->declaredInputs = std::move(reflection.inputs);
     object->declaredOutputs = std::move(reflection.outputs);
-    object->compiled = reflection.ok;
-    object->compileLog = reflection.log;
-    if (object->source.empty()) {
-        object->compiled = false;
-        object->compileLog = "shader source is empty";
+
+    // 2. Real glslang compile. This is the authoritative verdict that
+    //    glGetShaderiv(GL_COMPILE_STATUS) and glGetShaderInfoLog now
+    //    surface to the engine — the scanner result above only shapes the
+    //    explicit-location metadata, not the compile status.
+    //
+    //    Version 330 matches what linkProgram used to pass in the old
+    //    "compile at link time" path. Engines that target 4.x cores still
+    //    use #version 330 / 410 / 460 in their source headers; glslang
+    //    respects the in-source directive, so the integer passed here is
+    //    only the fallback when the source has no #version line.
+    ShaderTranslator translator;
+    std::string compileLog;
+    std::vector<std::uint32_t> spirv =
+        translator.compileGLSL(object->source, object->stage, 330, &compileLog);
+
+    object->compileLog = std::move(compileLog);
+    if (spirv.empty()) {
+        // Glslang failed. compileLog contains the real diagnostic text,
+        // which getShaderInfoLog will now return verbatim. The link-time
+        // early return ("attached shader is not compiled") will push the
+        // failure into Runtime::shaderTranslations_ so it shows up in the
+        // diagnostic dump with the glslang log attached.
+        return false;
     }
-    return object->compiled;
+
+    object->spirv = std::move(spirv);
+    object->compiled = true;
+    return true;
 }
 
 bool GLContext::getShaderiv(GLuint shader, GLenum pname, GLint* params) {
@@ -4851,51 +4896,137 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->linkLog.clear();
     programObject->linked = false;
 
+    // Small helper used in several diagnostic-recording sites below.
+    const std::string programTag = "program-" + std::to_string(program);
+    auto quickHash = [](const std::string& s) -> std::string {
+        std::size_t h = std::hash<std::string>{}(s);
+        char buf[18];
+        std::snprintf(buf, sizeof(buf), "%016zx", h);
+        return buf;
+    };
+
     if (programObject->attachedShaders.empty()) {
         programObject->linkLog = "no shaders attached";
+        Runtime::shared().recordShaderTranslation({
+            programTag, "link", "", programObject->linkLog, "", false
+        });
         return false;
     }
 
-    bool sawVertex = false;
-    bool sawFragment = false;
-    GLuint nextAttribLocation = 0;
+    // Classify the attached stages. Pointers stay null when a stage isn't
+    // present. Everything downstream dispatches on which pointers are set
+    // rather than re-scanning the attached list.
+    GLShaderObject* vertexShader = nullptr;
+    GLShaderObject* fragmentShader = nullptr;
+    GLShaderObject* computeShader = nullptr;
+    GLShaderObject* geometryShader = nullptr;
+    GLShaderObject* tessControlShader = nullptr;
+    GLShaderObject* tessEvalShader = nullptr;
+    int shaderCount = 0;
 
     for (GLuint shaderId : programObject->attachedShaders) {
         GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
         if (shaderObject == nullptr || !shaderObject->compiled) {
             programObject->linkLog = "attached shader is not compiled";
+            // Pull the glslang diagnostic off the shader object if we have
+            // one so the link-time record carries the compile-time failure
+            // text through to the diagnostic dump. Without this the BAR
+            // operator sees "not compiled" with no hint at *why* the
+            // upstream compileShader call failed.
+            const std::string log = shaderObject
+                ? shaderObject->compileLog
+                : programObject->linkLog;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", log, "", false
+            });
             return false;
         }
-        if (shaderObject->stage == GL_VERTEX_SHADER) {
-            sawVertex = true;
-            for (const auto& input : shaderObject->declaredInputs) {
-                GLProgramAttributeInfo attrib;
-                attrib.name = input.name;
-                attrib.type = input.type;
-                if (input.explicitLocation >= 0) {
-                    attrib.location = input.explicitLocation;
-                } else {
-                    auto requested = programObject->requestedAttribLocations.find(input.name);
-                    if (requested != programObject->requestedAttribLocations.end()) {
-                        attrib.location = static_cast<GLint>(requested->second);
-                    } else {
-                        attrib.location = static_cast<GLint>(nextAttribLocation++);
-                    }
-                }
-                if (static_cast<GLuint>(attrib.location) >= nextAttribLocation) {
-                    nextAttribLocation = static_cast<GLuint>(attrib.location) + 1;
-                }
-                programObject->attributes.push_back(std::move(attrib));
-            }
-        }
-        if (shaderObject->stage == GL_FRAGMENT_SHADER) {
-            sawFragment = true;
+        ++shaderCount;
+        switch (shaderObject->stage) {
+            case GL_VERTEX_SHADER:          vertexShader = shaderObject; break;
+            case GL_FRAGMENT_SHADER:        fragmentShader = shaderObject; break;
+            case GL_COMPUTE_SHADER:         computeShader = shaderObject; break;
+            case GL_GEOMETRY_SHADER:        geometryShader = shaderObject; break;
+            case GL_TESS_CONTROL_SHADER:    tessControlShader = shaderObject; break;
+            case GL_TESS_EVALUATION_SHADER: tessEvalShader = shaderObject; break;
+            default: break;
         }
         appendDeclarationsAsUniforms(programObject->uniforms, shaderObject->declaredUniforms);
     }
 
-    if (!sawVertex || !sawFragment) {
-        programObject->linkLog = "program requires both vertex and fragment shaders";
+    // Build the vertex attribute table from the scanner's declared inputs
+    // on the vertex stage. The scanner-driven path honours
+    // glBindAttribLocation requests (via requestedAttribLocations) which
+    // SPIRV-Cross reflection cannot see, so we keep it as the authoritative
+    // source for attribute locations.
+    GLuint nextAttribLocation = 0;
+    if (vertexShader != nullptr) {
+        for (const auto& input : vertexShader->declaredInputs) {
+            GLProgramAttributeInfo attrib;
+            attrib.name = input.name;
+            attrib.type = input.type;
+            if (input.explicitLocation >= 0) {
+                attrib.location = input.explicitLocation;
+            } else {
+                auto requested = programObject->requestedAttribLocations.find(input.name);
+                if (requested != programObject->requestedAttribLocations.end()) {
+                    attrib.location = static_cast<GLint>(requested->second);
+                } else {
+                    attrib.location = static_cast<GLint>(nextAttribLocation++);
+                }
+            }
+            if (static_cast<GLuint>(attrib.location) >= nextAttribLocation) {
+                nextAttribLocation = static_cast<GLuint>(attrib.location) + 1;
+            }
+            programObject->attributes.push_back(std::move(attrib));
+        }
+    }
+
+    // Stage combination must be one of:
+    //   - Compute-only                          (1x GL_COMPUTE_SHADER)
+    //   - Vertex + Fragment                     (standard raster pipeline)
+    //   - Vertex + Geometry + Fragment          (geometry path; emulation gap
+    //                                            flagged in translator block)
+    //   - Vertex + TessControl + TessEval + F   (tess path, same story)
+    //   - Vertex-only / Fragment-only           (separable via
+    //                                            glCreateShaderProgramv)
+    // Anything else bails. The "unknown combination" branch also records a
+    // diagnostic so BAR sees why the program didn't link.
+    enum class ProgramKind {
+        Unknown,
+        Compute,
+        VertexFragment,
+        VertexGeometryFragment,
+        VertexTessellationFragment,
+        VertexOnly,
+        FragmentOnly,
+    };
+    ProgramKind kind = ProgramKind::Unknown;
+    if (computeShader != nullptr && shaderCount == 1) {
+        kind = ProgramKind::Compute;
+    } else if (vertexShader != nullptr && fragmentShader != nullptr &&
+               tessControlShader == nullptr && tessEvalShader == nullptr &&
+               geometryShader == nullptr) {
+        kind = ProgramKind::VertexFragment;
+    } else if (vertexShader != nullptr && fragmentShader != nullptr &&
+               geometryShader != nullptr) {
+        kind = ProgramKind::VertexGeometryFragment;
+    } else if (vertexShader != nullptr && fragmentShader != nullptr &&
+               tessControlShader != nullptr && tessEvalShader != nullptr) {
+        kind = ProgramKind::VertexTessellationFragment;
+    } else if (vertexShader != nullptr && fragmentShader == nullptr &&
+               computeShader == nullptr && geometryShader == nullptr) {
+        kind = ProgramKind::VertexOnly;
+    } else if (fragmentShader != nullptr && vertexShader == nullptr &&
+               computeShader == nullptr && geometryShader == nullptr) {
+        kind = ProgramKind::FragmentOnly;
+    }
+
+    if (kind == ProgramKind::Unknown) {
+        programObject->linkLog = "program has no supported shader stage combination";
+        Runtime::shared().recordShaderTranslation({
+            programTag, "link", "", programObject->linkLog, "", false
+        });
         return false;
     }
 
@@ -4990,105 +5121,220 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
 
-    // Attempt GLSL→SPIR-V→MSL translation for the GPU pipeline. This is
-    // best-effort: if it fails the program still links and falls back to the
-    // hardcoded solid-color draw path.
+    // Run SPIRV-Cross on each attached stage's cached SPIR-V (compiled by
+    // GLContext::compileShader and stashed on the shader object). This is
+    // best-effort: if translation fails the program still links and falls
+    // back to the hardcoded solid-color draw path, but the diagnostic
+    // record captures the SPIRV-Cross error so BAR sees what happened.
     programObject->hasTranslatedPipeline = false;
     programObject->vertexMSL.clear();
     programObject->fragmentMSL.clear();
     programObject->metalPipelineState = nullptr;
 
-    {
-        ShaderTranslator translator;
-        BindingMap bindings;
-        std::string vertexSource, fragmentSource;
-        GLenum vertexStage = 0, fragmentStage = 0;
+    ShaderTranslator translator;
+    BindingMap bindings;
 
-        for (GLuint shaderId : programObject->attachedShaders) {
-            GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
-            if (shaderObject == nullptr) continue;
-            if (shaderObject->stage == GL_VERTEX_SHADER) {
-                vertexSource = shaderObject->source;
-                vertexStage = shaderObject->stage;
-            } else if (shaderObject->stage == GL_FRAGMENT_SHADER) {
-                fragmentSource = shaderObject->source;
-                fragmentStage = shaderObject->stage;
-            }
+    // Translate one stage: spirvToMSL + reflect. Writes the result into the
+    // provided output slots on success, records a diagnostic in both the
+    // success and failure cases. Returns true iff MSL was produced.
+    auto translateStage = [&](const char* stageName,
+                              GLShaderObject* stage,
+                              std::string& mslOut,
+                              ShaderReflection& reflectionOut) -> bool {
+        if (stage == nullptr) {
+            return false;
         }
+        std::string mslLog;
+        std::string msl = translator.spirvToMSL(
+            stage->spirv.data(), stage->spirv.size(), bindings, &mslLog);
+        const std::string stageTag = programTag + "-" + stageName;
+        const std::string hash = quickHash(stage->source);
+        if (msl.empty()) {
+            Runtime::shared().recordShaderTranslation({
+                stageTag, stageName, hash,
+                mslLog.empty() ? "spirvToMSL returned empty MSL" : mslLog,
+                "", false
+            });
+            return false;
+        }
+        reflectionOut = translator.reflect(
+            stage->spirv.data(), stage->spirv.size(), bindings, nullptr);
+        mslOut = std::move(msl);
+        Runtime::shared().recordShaderTranslation({
+            stageTag, stageName, hash, "ok", mslOut.substr(0, 200), true
+        });
+        return true;
+    };
 
-        if (!vertexSource.empty() && !fragmentSource.empty()) {
-            // Simple hash for diagnostics display.
-            auto quickHash = [](const std::string& s) -> std::string {
-                std::size_t h = std::hash<std::string>{}(s);
-                char buf[18];
-                std::snprintf(buf, sizeof(buf), "%016zx", h);
-                return buf;
-            };
-            const std::string programTag = "program-" + std::to_string(program);
+    bool rasterTranslationOk = false;
+    switch (kind) {
+        case ProgramKind::VertexFragment: {
+            ShaderReflection vsRefl, fsRefl;
+            const bool vsOk = translateStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl);
+            const bool fsOk = translateStage(
+                "fragment", fragmentShader, programObject->fragmentMSL, fsRefl);
+            if (vsOk && fsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                programObject->fragmentReflection = std::move(fsRefl);
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::VertexOnly: {
+            ShaderReflection vsRefl;
+            const bool vsOk = translateStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl);
+            if (vsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                // No fragment stage, so `hasTranslatedPipeline` stays false
+                // — separable vertex programs are pipeline-state components,
+                // not standalone pipelines.
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::FragmentOnly: {
+            ShaderReflection fsRefl;
+            const bool fsOk = translateStage(
+                "fragment", fragmentShader, programObject->fragmentMSL, fsRefl);
+            if (fsOk) {
+                programObject->fragmentReflection = std::move(fsRefl);
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::Compute: {
+            // Translate compute to MSL + record the diagnostic so BAR sees
+            // the compute path is live on the translator side. Creating an
+            // MTLComputePipelineState from the MSL is a follow-up (the
+            // sibling path in MetalFrameGraph.mm doesn't exist yet);
+            // without it `glDispatchCompute` will still go through the
+            // existing stub path. The link itself succeeds either way.
+            std::string unusedMSL;
+            ShaderReflection csRefl;
+            (void)translateStage("compute", computeShader, unusedMSL, csRefl);
+            break;
+        }
+        case ProgramKind::VertexGeometryFragment: {
+            // Translate VS + FS (they're still usable even without the GS)
+            // and attempt GS translation so SPIRV-Cross's reflection at
+            // least reports what the geometry stage wants. Then record a
+            // diagnostic flagging the emulation gap — Metal has no native
+            // geometry-shader concept and our compute-stage emulation
+            // lands in a follow-up cycle. BAR can read this record and
+            // fall back to its non-geometry path.
+            ShaderReflection vsRefl, fsRefl, gsRefl;
+            const bool vsOk = translateStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl);
+            const bool fsOk = translateStage(
+                "fragment", fragmentShader, programObject->fragmentMSL, fsRefl);
+            std::string unusedGsMSL;
+            (void)translateStage("geometry", geometryShader, unusedGsMSL, gsRefl);
+            // Always append the emulation-gap record after the per-stage
+            // records so BAR sees: [vertex:ok][fragment:ok][geometry:ok][gap].
+            Runtime::shared().recordShaderTranslation({
+                programTag + "-geometry-emulation", "geometry",
+                quickHash(geometryShader->source),
+                "geometry shader emulation not yet available on Metal; "
+                "program translated VS+FS only, falls back to raster-without-GS",
+                "", false
+            });
+            if (vsOk && fsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                programObject->fragmentReflection = std::move(fsRefl);
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::VertexTessellationFragment: {
+            // Same story as geometry: translate VS + FS and record a
+            // diagnostic for the tess stages. Metal's tessellation model
+            // is incompatible with GL's, so proper routing lands later.
+            ShaderReflection vsRefl, fsRefl, tcRefl, teRefl;
+            const bool vsOk = translateStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl);
+            const bool fsOk = translateStage(
+                "fragment", fragmentShader, programObject->fragmentMSL, fsRefl);
+            std::string unusedTcMSL, unusedTeMSL;
+            (void)translateStage("tess-control", tessControlShader, unusedTcMSL, tcRefl);
+            (void)translateStage("tess-eval", tessEvalShader, unusedTeMSL, teRefl);
+            Runtime::shared().recordShaderTranslation({
+                programTag + "-tessellation-emulation", "tessellation",
+                quickHash(tessControlShader->source),
+                "tessellation emulation not yet available on Metal; "
+                "program translated VS+FS only, falls back to raster-without-tess",
+                "", false
+            });
+            if (vsOk && fsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                programObject->fragmentReflection = std::move(fsRefl);
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::Unknown:
+            break;  // Already handled above; kept so -Wswitch stays happy.
+    }
 
-            std::string compileLog;
-            auto vertexSPIRV = translator.compileGLSL(vertexSource, vertexStage, 330, &compileLog);
-            NSLog(@"[GL] linkProgram: vertex SPIRV %s (%zu words) log: %s",
-                  vertexSPIRV.empty() ? "FAILED" : "ok", vertexSPIRV.size(), compileLog.c_str());
-            auto fragmentSPIRV = translator.compileGLSL(fragmentSource, fragmentStage, 330, &compileLog);
-            NSLog(@"[GL] linkProgram: fragment SPIRV %s (%zu words) log: %s",
-                  fragmentSPIRV.empty() ? "FAILED" : "ok", fragmentSPIRV.size(), compileLog.c_str());
+    NSLog(@"[GL] linkProgram: program=%u kind=%d translationOk=%d "
+          @"vertexInputs=%zu vsUniformBlocks=%zu fsUniformBlocks=%zu",
+          program, static_cast<int>(kind), rasterTranslationOk ? 1 : 0,
+          programObject->vertexReflection.vertexInputs.size(),
+          programObject->vertexReflection.uniformBlocks.size(),
+          programObject->fragmentReflection.uniformBlocks.size());
 
-            if (!vertexSPIRV.empty() && !fragmentSPIRV.empty()) {
-                std::string mslLog;
-                std::string vertMSL = translator.spirvToMSL(vertexSPIRV.data(), vertexSPIRV.size(), bindings, &mslLog);
-                NSLog(@"[GL] linkProgram: vertex MSL %s (%zu chars) log: %s",
-                      vertMSL.empty() ? "FAILED" : "ok", vertMSL.size(), mslLog.c_str());
-                std::string fragMSL = translator.spirvToMSL(fragmentSPIRV.data(), fragmentSPIRV.size(), bindings, &mslLog);
-                NSLog(@"[GL] linkProgram: fragment MSL %s (%zu chars) log: %s",
-                      fragMSL.empty() ? "FAILED" : "ok", fragMSL.size(), mslLog.c_str());
-
-                if (!vertMSL.empty() && !fragMSL.empty()) {
-                    programObject->vertexMSL = std::move(vertMSL);
-                    programObject->fragmentMSL = std::move(fragMSL);
-
-                    // Reflect vertex stage for attribute layout.
-                    programObject->vertexReflection = translator.reflect(
-                        vertexSPIRV.data(), vertexSPIRV.size(), bindings, nullptr);
-                    programObject->fragmentReflection = translator.reflect(
-                        fragmentSPIRV.data(), fragmentSPIRV.size(), bindings, nullptr);
-                    programObject->hasTranslatedPipeline = true;
-                    NSLog(@"[GL] linkProgram: *** TRANSLATION SUCCEEDED *** vertexInputs=%zu uniformBlocks=%zu",
-                          programObject->vertexReflection.vertexInputs.size(),
-                          programObject->vertexReflection.uniformBlocks.size());
-
-                    // Record successful translations for diagnostics card.
-                    Runtime::shared().recordShaderTranslation({
-                        programTag + "-vertex", "vertex", quickHash(vertexSource),
-                        "ok", programObject->vertexMSL.substr(0, 200), true
-                    });
-                    Runtime::shared().recordShaderTranslation({
-                        programTag + "-fragment", "fragment", quickHash(fragmentSource),
-                        "ok", programObject->fragmentMSL.substr(0, 200), true
-                    });
-                } else {
-                    // Record failed MSL translations.
-                    Runtime::shared().recordShaderTranslation({
-                        programTag + "-vertex", "vertex", quickHash(vertexSource),
-                        mslLog, "", vertMSL.empty() ? false : true
-                    });
-                    Runtime::shared().recordShaderTranslation({
-                        programTag + "-fragment", "fragment", quickHash(fragmentSource),
-                        mslLog, "", fragMSL.empty() ? false : true
-                    });
+    // ── Merge SPIRV-Cross uniform block reflection into the program's
+    //    resource introspection tables ──
+    //
+    // The scanner doesn't see interface blocks (see 2d / GLSLReflection
+    // brace-depth bug), so SPIRV-Cross reflection is the authoritative
+    // source for UBO member metadata. Blocks that appear in both the
+    // vertex and fragment reflection (BAR's per-view uniforms are shared
+    // across stages) dedup by name, OR-ing the referencedBy bits together.
+    //
+    // Each block also pushes its members into resourceBufferVariables with
+    // `blockIndex` pointing back to the block entry so
+    // glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...) can find them.
+    if (rasterTranslationOk || kind == ProgramKind::Compute) {
+        auto mergeBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
+                               GLbitfield stageBit) {
+            for (const auto& block : blocks) {
+                auto existing = std::find_if(
+                    programObject->resourceUniformBlocks.begin(),
+                    programObject->resourceUniformBlocks.end(),
+                    [&](const GLProgramResourceEntry& e) { return e.name == block.name; });
+                if (existing != programObject->resourceUniformBlocks.end()) {
+                    existing->referencedBy |= stageBit;
+                    continue;
                 }
-            } else {
-                // Record failed SPIR-V compilations.
-                Runtime::shared().recordShaderTranslation({
-                    programTag + "-vertex", "vertex", quickHash(vertexSource),
-                    compileLog, "", !vertexSPIRV.empty()
-                });
-                Runtime::shared().recordShaderTranslation({
-                    programTag + "-fragment", "fragment", quickHash(fragmentSource),
-                    compileLog, "", !fragmentSPIRV.empty()
-                });
+                GLProgramResourceEntry blockEntry;
+                blockEntry.name = block.name;
+                blockEntry.type = 0;  // blocks have no scalar type
+                blockEntry.location = static_cast<GLint>(block.glBinding);
+                blockEntry.arraySize = 1;
+                blockEntry.referencedBy = stageBit;
+                programObject->resourceUniformBlocks.push_back(std::move(blockEntry));
+
+                const GLint blockIndex =
+                    static_cast<GLint>(programObject->resourceUniformBlocks.size() - 1);
+                for (const auto& member : block.members) {
+                    GLProgramResourceEntry memberEntry;
+                    memberEntry.name = block.name + "." + member.name;
+                    memberEntry.type = member.type;
+                    memberEntry.location = -1;  // not queryable via glGetUniformLocation
+                    memberEntry.offset = static_cast<GLint>(member.offset);
+                    memberEntry.blockIndex = blockIndex;
+                    memberEntry.referencedBy = stageBit;
+                    programObject->resourceBufferVariables.push_back(std::move(memberEntry));
+                }
             }
-        }
+        };
+        mergeBlocks(programObject->vertexReflection.uniformBlocks, 0x01);    // vertex
+        mergeBlocks(programObject->fragmentReflection.uniformBlocks, 0x02);  // fragment
     }
 
     return true;

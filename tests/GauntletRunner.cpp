@@ -1459,7 +1459,30 @@ public:
                         "program attached shader contents");
 
         gl.glBindAttribLocation(program, 5, "aTexCoord");
+
+        // Landing B diagnostic-coverage assertion: after a successful link,
+        // exactly two new shader translation records must have been pushed
+        // into Runtime::shaderTranslations_ (one vertex, one fragment),
+        // both with success=true. The old scanner-only path never called
+        // recordShaderTranslation for compileShader, and the old linkProgram
+        // only fired the call under the hardcoded VS+FS translator block.
+        // If either assertion fires after Landing B it means the restructured
+        // pipeline silently dropped a record.
+        const std::size_t translationsBeforeLink = Runtime::shared().shaderTranslationCount();
         gl.glLinkProgram(program);
+        const auto translationsAfterLink = Runtime::shared().shaderTranslationSnapshot();
+        expectCondition(translationsAfterLink.size() - translationsBeforeLink == 2,
+                        "linkProgram pushed exactly 2 shader translation records");
+        if (translationsAfterLink.size() >= translationsBeforeLink + 2) {
+            const auto& vertexRecord = translationsAfterLink[translationsBeforeLink];
+            const auto& fragmentRecord = translationsAfterLink[translationsBeforeLink + 1];
+            expectCondition(vertexRecord.success && fragmentRecord.success,
+                            "both link-time shader translation records report success=true");
+            expectCondition(vertexRecord.stage == "vertex" && fragmentRecord.stage == "fragment",
+                            "link-time shader translation stages are vertex+fragment");
+            expectCondition(!vertexRecord.mslPreview.empty() && !fragmentRecord.mslPreview.empty(),
+                            "link-time shader translation records carry non-empty mslPreview");
+        }
 
         GLint linkStatus = 0;
         gl.glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
@@ -1867,6 +1890,70 @@ public:
         gl.glDeleteShader(fragment);
         expectCondition(gl.glIsProgram(program) == GL_FALSE, "deleted program handle is no longer live");
         expectCondition(gl.glIsShader(vertex) == GL_FALSE, "deleted shader handle is no longer live");
+
+        // Landing B diagnostic-coverage assertion (failure path): compile a
+        // deliberately malformed fragment shader, attach it to a program, and
+        // link. The compile must fail with a non-empty glslang log, and the
+        // subsequent link attempt must push a "link" failure record into the
+        // Runtime shader-translations ring so BAR can see the glslang
+        // diagnostic without having to round-trip through getShaderInfoLog.
+        {
+            const std::size_t translationsBeforeFailure =
+                Runtime::shared().shaderTranslationCount();
+
+            const GLuint badShader = gl.glCreateShader(GL_FRAGMENT_SHADER);
+            const char* badSource =
+                "#version 330 core\n"
+                "out vec4 fragColor;\n"
+                "void main() { fragColor = this_identifier_does_not_exist; }\n";
+            gl.glShaderSource(badShader, 1, &badSource, nullptr);
+            gl.glCompileShader(badShader);
+
+            GLint compileStatus = GL_TRUE;
+            gl.glGetShaderiv(badShader, GL_COMPILE_STATUS, &compileStatus);
+            expectCondition(compileStatus == GL_FALSE,
+                            "deliberately bad fragment shader reports GL_COMPILE_STATUS = GL_FALSE");
+
+            GLint infoLogLength = 0;
+            gl.glGetShaderiv(badShader, GL_INFO_LOG_LENGTH, &infoLogLength);
+            expectCondition(infoLogLength > 0,
+                            "bad fragment shader info log length is non-zero");
+
+            char infoLogBuffer[512] = {};
+            GLsizei infoLogWritten = 0;
+            gl.glGetShaderInfoLog(badShader, sizeof(infoLogBuffer), &infoLogWritten, infoLogBuffer);
+            expectCondition(infoLogWritten > 0,
+                            "bad fragment shader info log is non-empty");
+
+            // Attach to a fresh program and try to link. Link must fail and
+            // push one record tagged stage="link" with success=false.
+            const GLuint failProgram = gl.glCreateProgram();
+            gl.glAttachShader(failProgram, badShader);
+            gl.glLinkProgram(failProgram);
+
+            GLint failLinkStatus = GL_TRUE;
+            gl.glGetProgramiv(failProgram, GL_LINK_STATUS, &failLinkStatus);
+            expectCondition(failLinkStatus == GL_FALSE,
+                            "program with uncompiled attached shader fails to link");
+
+            const auto translationsAfterFailure =
+                Runtime::shared().shaderTranslationSnapshot();
+            expectCondition(translationsAfterFailure.size() > translationsBeforeFailure,
+                            "link-of-bad-shader pushed at least one shader translation record");
+            if (translationsAfterFailure.size() > translationsBeforeFailure) {
+                const auto& failureRecord =
+                    translationsAfterFailure[translationsBeforeFailure];
+                expectCondition(!failureRecord.success,
+                                "link-of-bad-shader record reports success=false");
+                expectCondition(failureRecord.stage == "link",
+                                "link-of-bad-shader record stage tag is \"link\"");
+                expectCondition(!failureRecord.glslangLog.empty(),
+                                "link-of-bad-shader record carries non-empty glslangLog");
+            }
+
+            gl.glDeleteProgram(failProgram);
+            gl.glDeleteShader(badShader);
+        }
     }
 
     void render(GLContext& context) override {

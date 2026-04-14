@@ -974,6 +974,16 @@ void Runtime::recordShaderTranslation(ShaderTranslationRecord record) {
     shaderTranslations_.push_back(std::move(record));
 }
 
+std::size_t Runtime::shaderTranslationCount() {
+    std::lock_guard<std::mutex> lock(translationMutex_);
+    return shaderTranslations_.size();
+}
+
+std::vector<Runtime::ShaderTranslationRecord> Runtime::shaderTranslationSnapshot() {
+    std::lock_guard<std::mutex> lock(translationMutex_);
+    return shaderTranslations_;
+}
+
 void Runtime::recordError(ErrorRecord record) {
     std::lock_guard<std::mutex> lock(errorLogMutex_);
     // Collapse into the previous entry if it's the same function+error enum.
