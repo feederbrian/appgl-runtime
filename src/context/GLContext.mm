@@ -2256,6 +2256,50 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
     return true;
 }
 
+bool GLContext::queryIntegerIndexed(GLenum pname, GLuint index, GLint* data) {
+    // Indexed integer query (glGetIntegeri_v). Phase 8X Landing C 3a. Used
+    // primarily for compute work-group count/size tuples where the GL spec
+    // defines separate per-dimension values addressed by index 0/1/2.
+    //
+    // We still honour the bound-buffer index queries that live on the state
+    // tracker (indexed buffer bindings, array-drawbuffer state). Capability
+    // caps flow through GLCapabilities::queryIntegerIndexed which knows
+    // about the x/y/z compute tuples and also serves scalar caps at
+    // index 0 for GL-spec leniency.
+    if (data == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->capabilities != nullptr
+        && impl_->capabilities->queryIntegerIndexed(pname, index, data)) {
+        return true;
+    }
+    // Fall back to the scalar state tracker path for state that has a
+    // per-index representation (buffer binding stacks) — match the existing
+    // queryInteger behaviour when no indexed handler exists.
+    if (index == 0 && impl_->state->queryInteger(pname, data)) {
+        return true;
+    }
+    pushError(GL_INVALID_ENUM);
+    return false;
+}
+
+bool GLContext::queryInteger64Indexed(GLenum pname, GLuint index, GLint64* data) {
+    if (data == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->capabilities != nullptr
+        && impl_->capabilities->queryInteger64Indexed(pname, index, data)) {
+        return true;
+    }
+    if (index == 0 && impl_->state->queryInteger64(pname, data)) {
+        return true;
+    }
+    pushError(GL_INVALID_ENUM);
+    return false;
+}
+
 bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
     if (data == nullptr) {
         pushError(GL_INVALID_VALUE);

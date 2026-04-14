@@ -844,9 +844,17 @@ static void APIENTRY glUniformBlockBinding(GLuint program, GLuint uniformBlockIn
 }
 
 static void APIENTRY glGetIntegeri_v(GLenum target, GLuint index, GLint *data) {
-    (void)target;
-    (void)index;
-    (void)data;
+    // Phase 8X Landing C 3a — route indexed integer queries through the
+    // capability layer so engines probing GL_MAX_COMPUTE_WORK_GROUP_COUNT /
+    // _SIZE / etc. receive real per-dimension values. Prior to Landing C
+    // this was a silent no-op and the engine would see whatever garbage
+    // happened to be in *data, which is what made Recoil report "compute
+    // dispatch limits unknown" in its startup log.
+    auto* context = currentContextOrNull();
+    if (context == nullptr || data == nullptr) {
+        return;
+    }
+    (void)context->queryIntegerIndexed(target, index, data);
 }
 
 static void APIENTRY glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void *indices, GLint basevertex) {
@@ -926,9 +934,15 @@ static void APIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei count, GLsiz
 }
 
 static void APIENTRY glGetInteger64i_v(GLenum target, GLuint index, GLint64 *data) {
-    (void)target;
-    (void)index;
-    (void)data;
+    // Phase 8X Landing C 3a — 64-bit counterpart to glGetIntegeri_v above.
+    // Same rationale: route through the capability layer so indexed
+    // compute/geometry cap queries report meaningful values instead of
+    // being swallowed.
+    auto* context = currentContextOrNull();
+    if (context == nullptr || data == nullptr) {
+        return;
+    }
+    (void)context->queryInteger64Indexed(target, index, data);
 }
 
 static void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {

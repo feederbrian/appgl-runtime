@@ -72,6 +72,8 @@ public:
     bool queryBoolean(GLenum pname, GLboolean* data);
     bool queryInteger(GLenum pname, GLint* data);
     bool queryInteger64(GLenum pname, GLint64* data);
+    bool queryIntegerIndexed(GLenum pname, GLuint index, GLint* data);
+    bool queryInteger64Indexed(GLenum pname, GLuint index, GLint64* data);
     bool queryFloat(GLenum pname, GLfloat* data);
     bool queryDouble(GLenum pname, GLdouble* data);
     void setEnabled(GLenum cap, bool enabled);

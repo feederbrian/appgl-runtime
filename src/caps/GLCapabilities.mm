@@ -4,6 +4,8 @@
 
 #include <algorithm>
 
+#include "../shader/ShaderTranslator.h"
+
 namespace appgl {
 
 GLCapabilities::GLCapabilities(void* metalDevice) {
@@ -31,11 +33,22 @@ bool GLCapabilities::queryInteger(GLenum pname, GLint* out) const {
     }
 
     const auto value = integerLimits_.find(pname);
-    if (value == integerLimits_.end()) {
-        return false;
+    if (value != integerLimits_.end()) {
+        *out = static_cast<GLint>(value->second);
+        return true;
     }
-    *out = static_cast<GLint>(value->second);
-    return true;
+
+    // Indexed caps reached via the scalar path: report the index-0 value
+    // so legacy code that calls glGetIntegerv(GL_MAX_COMPUTE_WORK_GROUP_*)
+    // without the indexed variant sees at least the x-axis limit rather
+    // than a GL_INVALID_ENUM. Indexed callers should still use the
+    // dedicated queryIntegerIndexed path.
+    const auto indexed = indexedIntegerLimits_.find(pname);
+    if (indexed != indexedIntegerLimits_.end()) {
+        *out = static_cast<GLint>(indexed->second[0]);
+        return true;
+    }
+    return false;
 }
 
 bool GLCapabilities::queryInteger64(GLenum pname, GLint64* out) const {
@@ -53,11 +66,58 @@ bool GLCapabilities::queryInteger64(GLenum pname, GLint64* out) const {
     }
 
     const auto value = integerLimits_.find(pname);
-    if (value == integerLimits_.end()) {
+    if (value != integerLimits_.end()) {
+        *out = value->second;
+        return true;
+    }
+
+    // Same scalar-path fallback as queryInteger — see comment there.
+    const auto indexed = indexedIntegerLimits_.find(pname);
+    if (indexed != indexedIntegerLimits_.end()) {
+        *out = indexed->second[0];
+        return true;
+    }
+    return false;
+}
+
+bool GLCapabilities::queryIntegerIndexed(GLenum pname, GLuint index, GLint* out) const {
+    if (out == nullptr) {
         return false;
     }
-    *out = value->second;
-    return true;
+    const auto indexed = indexedIntegerLimits_.find(pname);
+    if (indexed != indexedIntegerLimits_.end()) {
+        if (index >= indexed->second.size()) {
+            return false;
+        }
+        *out = static_cast<GLint>(indexed->second[index]);
+        return true;
+    }
+    // Scalar caps answer the index-0 indexed query too. Desktop GL treats
+    // glGetIntegeri_v on a scalar state as INVALID_ENUM, but being lenient
+    // here matches what most loaders expect when they probe caps via the
+    // indexed path without knowing which enums are indexed.
+    if (index != 0) {
+        return false;
+    }
+    return queryInteger(pname, out);
+}
+
+bool GLCapabilities::queryInteger64Indexed(GLenum pname, GLuint index, GLint64* out) const {
+    if (out == nullptr) {
+        return false;
+    }
+    const auto indexed = indexedIntegerLimits_.find(pname);
+    if (indexed != indexedIntegerLimits_.end()) {
+        if (index >= indexed->second.size()) {
+            return false;
+        }
+        *out = indexed->second[index];
+        return true;
+    }
+    if (index != 0) {
+        return false;
+    }
+    return queryInteger64(pname, out);
 }
 
 bool GLCapabilities::queryFloat(GLenum pname, GLfloat* out) const {
@@ -168,6 +228,132 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MINOR_VERSION]   = 6;
     integerLimits_[GL_CONTEXT_FLAGS]   = 0;
     integerLimits_[GL_CONTEXT_PROFILE_MASK] = 0x00000001 /* GL_CONTEXT_CORE_PROFILE_BIT */;
+
+    // Phase 8X Landing C 3a — binding counts derived from the AppGL binding
+    // layout. Metal exposes 31 buffer slots per stage and we partition them
+    // into vertex / uniform / storage ranges; this makes the binding caps
+    // the authoritative source of truth, not a hardcoded magic number.
+    // BindingMap lives in ShaderTranslator.h and is shared with
+    // ShaderTranslator + MetalVertexDescriptorBuilder.
+    constexpr BindingMap kBindingMap{};
+    constexpr std::uint32_t kBufferSlotsPerStage = 30u;  // [0..30), slot 30 is the argument-buffer stash
+    const GLint64 uniformBindings = static_cast<GLint64>(
+        kBindingMap.storageBufferBase - kBindingMap.uniformBufferBase);
+    const GLint64 storageBindings = static_cast<GLint64>(
+        kBufferSlotsPerStage - kBindingMap.storageBufferBase);
+    integerLimits_[GL_MAX_UNIFORM_BUFFER_BINDINGS] = uniformBindings;
+    integerLimits_[GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS] = storageBindings;
+    integerLimits_[GL_MAX_SHADER_STORAGE_BLOCK_SIZE] = std::min<GLint64>(
+        maxBufferLength, static_cast<GLint64>(128ull * 1024ull * 1024ull));
+    integerLimits_[GL_MAX_VERTEX_ATTRIB_BINDINGS] = 16;
+
+    // Varying / stage-interface components. Metal's fragment shader accepts
+    // up to 128 input components per stage; the GL 4.6 spec floor is 64.
+    integerLimits_[GL_MAX_VERTEX_OUTPUT_COMPONENTS] = 128;
+    integerLimits_[GL_MAX_FRAGMENT_INPUT_COMPONENTS] = 128;
+
+    // Per-stage texture image units. Missing GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS
+    // is what produces BAR's "max texture slots: 2" diagnostic in its version
+    // log — the engine walks several MAX_* variants and the *first one that
+    // comes back false stops the probe, so the two that do answer (COMBINED
+    // + fragment) get reported.
+    integerLimits_[GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS] = 16;
+    integerLimits_[GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS] = 16;
+    integerLimits_[GL_MAX_COMPUTE_TEXTURE_IMAGE_UNITS] = 16;
+    integerLimits_[GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS] = 16;
+    integerLimits_[GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS] = 16;
+
+    // Texture filter anisotropy. Metal's upper limit is 16. GL 4.6 promoted
+    // the ARB/EXT name to core as GL_MAX_TEXTURE_MAX_ANISOTROPY (no suffix);
+    // the generated enum header uses that core spelling.
+    integerLimits_[GL_MAX_TEXTURE_MAX_ANISOTROPY] = 16;
+
+    // Legacy vector-style uniform/varying queries still used by GLSL 330-era
+    // tooling (GLAD in particular). Equivalent to the component forms
+    // divided by 4.
+    integerLimits_[GL_MAX_VERTEX_UNIFORM_VECTORS] = 1024;
+    integerLimits_[GL_MAX_FRAGMENT_UNIFORM_VECTORS] = 1024;
+    integerLimits_[GL_MAX_VARYING_VECTORS] = 32;
+    integerLimits_[GL_MAX_VARYING_COMPONENTS] = 128;
+    integerLimits_[GL_MAX_VARYING_FLOATS] = 128;
+
+    // Texel offset window for textureOffset / textureLodOffset. GL 4.6 spec
+    // floor is [-8, +7], which is what Metal supports.
+    integerLimits_[GL_MIN_PROGRAM_TEXEL_OFFSET] = -8;
+    integerLimits_[GL_MAX_PROGRAM_TEXEL_OFFSET] = 7;
+
+    // Geometry-shader caps. Metal has no native geometry shader stage —
+    // the AppGL translator flags GS programs as emulation-gap in Landing B —
+    // but engines still read these to *gate their codepaths* on whether a
+    // geometry pipeline is plausible. Report GL 4.6 spec floors so engines
+    // that probe caps before attempting a GS link don't give up prematurely.
+    integerLimits_[GL_MAX_GEOMETRY_OUTPUT_VERTICES] = 256;
+    integerLimits_[GL_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS] = 1024;
+    integerLimits_[GL_MAX_GEOMETRY_UNIFORM_COMPONENTS] = 1024;
+    integerLimits_[GL_MAX_GEOMETRY_INPUT_COMPONENTS] = 64;
+    integerLimits_[GL_MAX_GEOMETRY_OUTPUT_COMPONENTS] = 128;
+    integerLimits_[GL_MAX_GEOMETRY_UNIFORM_BLOCKS] = uniformBindings;
+    integerLimits_[GL_MAX_GEOMETRY_SHADER_INVOCATIONS] = 32;
+
+    // Tessellation caps. Same emulation-gap caveat as geometry: the
+    // translator will eventually lower these onto Metal's tessellator via
+    // MTLComputePipelineState + tessellation factor buffers, but the cap
+    // numbers need to be reported now so engines don't fall back.
+    integerLimits_[GL_MAX_TESS_CONTROL_INPUT_COMPONENTS] = 128;
+    integerLimits_[GL_MAX_TESS_CONTROL_OUTPUT_COMPONENTS] = 128;
+    integerLimits_[GL_MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS] = 4096;
+    integerLimits_[GL_MAX_TESS_CONTROL_UNIFORM_COMPONENTS] = 1024;
+    integerLimits_[GL_MAX_TESS_CONTROL_UNIFORM_BLOCKS] = uniformBindings;
+    integerLimits_[GL_MAX_TESS_EVALUATION_INPUT_COMPONENTS] = 128;
+    integerLimits_[GL_MAX_TESS_EVALUATION_OUTPUT_COMPONENTS] = 128;
+    integerLimits_[GL_MAX_TESS_EVALUATION_UNIFORM_COMPONENTS] = 1024;
+    integerLimits_[GL_MAX_TESS_EVALUATION_UNIFORM_BLOCKS] = uniformBindings;
+    integerLimits_[GL_MAX_TESS_GEN_LEVEL] = 64;
+    integerLimits_[GL_MAX_TESS_PATCH_COMPONENTS] = 120;
+    integerLimits_[GL_MAX_PATCH_VERTICES] = 32;
+
+    // Compute caps. Metal's threadgroup limits are 1024 invocations total
+    // with shared memory tiers of 16K/32K depending on GPU family; use the
+    // high value so engines sizing compute passes don't under-subscribe.
+    integerLimits_[GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS] = 1024;
+    integerLimits_[GL_MAX_COMPUTE_SHARED_MEMORY_SIZE] = 32768;
+    integerLimits_[GL_MAX_COMPUTE_UNIFORM_COMPONENTS] = 1024;
+    integerLimits_[GL_MAX_COMPUTE_UNIFORM_BLOCKS] = uniformBindings;
+    integerLimits_[GL_MAX_COMPUTE_ATOMIC_COUNTERS] = 8;
+    integerLimits_[GL_MAX_COMPUTE_ATOMIC_COUNTER_BUFFERS] = 8;
+
+    // Indexed compute caps. x/y/z tuples — glGetIntegeri_v(pname, i) picks
+    // the per-dimension value. Scalar glGetIntegerv falls through to the
+    // index-0 entry via queryInteger's indexedIntegerLimits_ scan so
+    // engines that probe via the scalar path still see a sensible number.
+    indexedIntegerLimits_[GL_MAX_COMPUTE_WORK_GROUP_COUNT] = {65535, 65535, 65535};
+    indexedIntegerLimits_[GL_MAX_COMPUTE_WORK_GROUP_SIZE] = {1024, 1024, 64};
+
+    // Combined uniform-component ceilings. GL 4.6 spec:
+    //   GL_MAX_COMBINED_{stage}_UNIFORM_COMPONENTS =
+    //     GL_MAX_{stage}_UNIFORM_COMPONENTS +
+    //     GL_MAX_UNIFORM_BUFFER_BINDINGS * GL_MAX_UNIFORM_BLOCK_SIZE / 4
+    // We publish that exact derivation so engines using the floor don't
+    // see a smaller number than spec.
+    const GLint64 combinedUniforms = 4096 + uniformBindings * (maxUniformBlockSize / 4);
+    integerLimits_[GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS] = combinedUniforms;
+    integerLimits_[GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS] = combinedUniforms;
+    integerLimits_[GL_MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS] = combinedUniforms;
+    integerLimits_[GL_MAX_COMBINED_COMPUTE_UNIFORM_COMPONENTS] = combinedUniforms;
+    integerLimits_[GL_MAX_COMBINED_TESS_CONTROL_UNIFORM_COMPONENTS] = combinedUniforms;
+    integerLimits_[GL_MAX_COMBINED_TESS_EVALUATION_UNIFORM_COMPONENTS] = combinedUniforms;
+    integerLimits_[GL_MAX_COMBINED_UNIFORM_BLOCKS] = uniformBindings * 6;
+
+    // GL_MAX_UNIFORM_LOCATIONS — the total number of discrete location
+    // slots an explicit-location uniform can occupy. Spec floor is 1024;
+    // AppGL has no hard internal ceiling so we report the floor.
+    integerLimits_[GL_MAX_UNIFORM_LOCATIONS] = 1024;
+
+    // Framebuffer object dimensions. Match the viewport limits.
+    integerLimits_[GL_MAX_FRAMEBUFFER_WIDTH] = maxViewportDimension;
+    integerLimits_[GL_MAX_FRAMEBUFFER_HEIGHT] = maxViewportDimension;
+    integerLimits_[GL_MAX_FRAMEBUFFER_LAYERS] = 2048;
+    integerLimits_[GL_MAX_FRAMEBUFFER_SAMPLES] = maxSamples;
 }
 
 void GLCapabilities::initializeExtensions() {

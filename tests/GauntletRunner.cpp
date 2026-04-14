@@ -776,6 +776,90 @@ public:
             expectCondition(glslText == "4.60",
                             "GL_SHADING_LANGUAGE_VERSION reports \"4.60\"");
         }
+
+        // Landing C 3a assertions. These caps were all returning false from
+        // GLCapabilities::queryInteger before the 3a pass, which made BAR's
+        // version log show "max texture slots: 2" (it walks several cap
+        // enums and stops on the first one that answers) and hid the
+        // compute-dispatch limits entirely. Pinning them in the gauntlet
+        // makes sure future edits to the cap table don't silently regress.
+        GLint maxUboBindings = 0;
+        gl.glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS, &maxUboBindings);
+        expectCondition(maxUboBindings == 12,
+                        "GL_MAX_UNIFORM_BUFFER_BINDINGS reports AppGL binding partition (12)");
+
+        GLint maxSsboBindings = 0;
+        gl.glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxSsboBindings);
+        expectCondition(maxSsboBindings >= 2,
+                        "GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS reports at least 2 slots");
+
+        GLint maxVertexTextureUnits = 0;
+        gl.glGetIntegerv(GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS, &maxVertexTextureUnits);
+        expectCondition(maxVertexTextureUnits == 16,
+                        "GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS reports 16 (fix for BAR \"max texture slots: 2\")");
+
+        GLint maxVertexAttribBindings = 0;
+        gl.glGetIntegerv(GL_MAX_VERTEX_ATTRIB_BINDINGS, &maxVertexAttribBindings);
+        expectCondition(maxVertexAttribBindings == 16,
+                        "GL_MAX_VERTEX_ATTRIB_BINDINGS reports 16");
+
+        GLint maxAnisotropy = 0;
+        gl.glGetIntegerv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &maxAnisotropy);
+        expectCondition(maxAnisotropy == 16,
+                        "GL_MAX_TEXTURE_MAX_ANISOTROPY reports 16 (Metal limit)");
+
+        GLint minTexelOffset = 0;
+        GLint maxTexelOffset = 0;
+        gl.glGetIntegerv(GL_MIN_PROGRAM_TEXEL_OFFSET, &minTexelOffset);
+        gl.glGetIntegerv(GL_MAX_PROGRAM_TEXEL_OFFSET, &maxTexelOffset);
+        expectCondition(minTexelOffset == -8 && maxTexelOffset == 7,
+                        "GL_{MIN,MAX}_PROGRAM_TEXEL_OFFSET reports [-8, 7]");
+
+        GLint maxGeomOutVerts = 0;
+        gl.glGetIntegerv(GL_MAX_GEOMETRY_OUTPUT_VERTICES, &maxGeomOutVerts);
+        expectCondition(maxGeomOutVerts >= 256,
+                        "GL_MAX_GEOMETRY_OUTPUT_VERTICES reports at least spec floor (256)");
+
+        GLint maxComputeInvocations = 0;
+        gl.glGetIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &maxComputeInvocations);
+        expectCondition(maxComputeInvocations == 1024,
+                        "GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS reports 1024");
+
+        GLint maxComputeSharedMem = 0;
+        gl.glGetIntegerv(GL_MAX_COMPUTE_SHARED_MEMORY_SIZE, &maxComputeSharedMem);
+        expectCondition(maxComputeSharedMem == 32768,
+                        "GL_MAX_COMPUTE_SHARED_MEMORY_SIZE reports 32768 bytes");
+
+        // Indexed compute cap queries. GL_MAX_COMPUTE_WORK_GROUP_COUNT and
+        // GL_MAX_COMPUTE_WORK_GROUP_SIZE each report three per-dimension
+        // values (x/y/z) via glGetIntegeri_v. Scalar glGetIntegerv is
+        // intentionally lenient and returns the index-0 value.
+        GLint computeGroupCountX = 0;
+        GLint computeGroupCountY = 0;
+        GLint computeGroupCountZ = 0;
+        gl.glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &computeGroupCountX);
+        gl.glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 1, &computeGroupCountY);
+        gl.glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 2, &computeGroupCountZ);
+        expectCondition(computeGroupCountX == 65535
+                        && computeGroupCountY == 65535
+                        && computeGroupCountZ == 65535,
+                        "GL_MAX_COMPUTE_WORK_GROUP_COUNT indexed query returns (65535, 65535, 65535)");
+
+        GLint computeGroupSizeX = 0;
+        GLint computeGroupSizeY = 0;
+        GLint computeGroupSizeZ = 0;
+        gl.glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 0, &computeGroupSizeX);
+        gl.glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 1, &computeGroupSizeY);
+        gl.glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 2, &computeGroupSizeZ);
+        expectCondition(computeGroupSizeX == 1024
+                        && computeGroupSizeY == 1024
+                        && computeGroupSizeZ == 64,
+                        "GL_MAX_COMPUTE_WORK_GROUP_SIZE indexed query returns (1024, 1024, 64)");
+
+        GLint maxFramebufferWidth = 0;
+        gl.glGetIntegerv(GL_MAX_FRAMEBUFFER_WIDTH, &maxFramebufferWidth);
+        expectCondition(maxFramebufferWidth >= 8192,
+                        "GL_MAX_FRAMEBUFFER_WIDTH reports at least 8192");
     }
 
     void render(GLContext& context) override {
