@@ -17,12 +17,55 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+// Compat-profile upload-format enums removed from the core glcorearb.h
+// surface in GL 3.2. AppGL still accepts them as upload aliases via
+// componentCountForFormat + buildRGBA8Upload; defining them here with
+// #ifndef guards keeps the compat-profile texture path self-contained
+// without polluting the public header surface or the codegen tables.
+// See GLCapabilities.mm for the matching format-table registrations
+// and the upload channel-fill rules in buildRGBA8Upload.
+#ifndef GL_ALPHA8
+#define GL_ALPHA8 0x803C
+#endif
+#ifndef GL_LUMINANCE
+#define GL_LUMINANCE 0x1909
+#endif
+#ifndef GL_LUMINANCE_ALPHA
+#define GL_LUMINANCE_ALPHA 0x190A
+#endif
+#ifndef GL_LUMINANCE8
+#define GL_LUMINANCE8 0x8040
+#endif
+#ifndef GL_LUMINANCE8_ALPHA8
+#define GL_LUMINANCE8_ALPHA8 0x8045
+#endif
+#ifndef GL_INTENSITY
+#define GL_INTENSITY 0x8049
+#endif
+#ifndef GL_INTENSITY8
+#define GL_INTENSITY8 0x804B
+#endif
+
+// GL_DEPTH_TEXTURE_MODE is a compat-profile glTexParameteri pname that
+// existed from GL 1.4 to 3.0 to control how shadow-map textures sampled
+// their depth values into RGBA channels (typically GL_LUMINANCE so the
+// red, green, and blue channels would all contain the depth comparison
+// result). Core profile removed it because shaders read the depth
+// channel directly via texture(), and AppGL has no compat-profile
+// fixed-function pipeline that would honor the parameter anyway. We
+// accept it as a silent no-op so legacy compat-profile shadow-map
+// initialization doesn't trip on GL_INVALID_ENUM during boot.
+#ifndef GL_DEPTH_TEXTURE_MODE
+#define GL_DEPTH_TEXTURE_MODE 0x884B
+#endif
 
 namespace appgl {
 namespace {
@@ -279,6 +322,18 @@ std::size_t componentCountForFormat(GLenum format) {
             return 3;
         case GL_RGBA:
             return 4;
+        // Compat-profile upload formats. componentCountForFormat is the
+        // byte-stride helper used by buildRGBA8Upload to walk the source
+        // pixel buffer; the channel-fill rule that decides which RGBA
+        // slots receive each source byte is in buildRGBA8Upload itself.
+        // GL_ALPHA, GL_LUMINANCE, and GL_INTENSITY are single-byte uploads,
+        // GL_LUMINANCE_ALPHA is a two-byte upload (luminance then alpha).
+        case GL_ALPHA:
+        case GL_LUMINANCE:
+        case GL_INTENSITY:
+            return 1;
+        case GL_LUMINANCE_ALPHA:
+            return 2;
         default:
             return 0;
     }
@@ -568,6 +623,15 @@ bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const
                 static_cast<GLfloat>(values[3])
             };
             return true;
+        case GL_DEPTH_TEXTURE_MODE:
+            // Compat-profile shadow-map channel-routing pname (GL 1.4..3.0).
+            // No-op in AppGL: there is no fixed-function pipeline that
+            // would sample the depth channel into RGBA, and core-profile
+            // shaders read the depth channel directly. Silently accept
+            // and discard so legacy initializers don't trip GL_INVALID_ENUM.
+            (void)params;
+            (void)values;
+            return true;
         default:
             return false;
     }
@@ -851,6 +915,27 @@ struct GLContext::Impl {
             + static_cast<std::size_t>(store.unpackSkipPixels) * components;
         const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
 
+        // Channel-fill rules. Most uploads (GL_RED / GL_RG / GL_RGB /
+        // GL_RGBA) use the natural byte-position-to-channel mapping with
+        // sentinel fill (zero for unused color channels, 255 for the
+        // unused alpha channel). The compat-profile aliases need
+        // bespoke routing because their byte-stride doesn't match the
+        // RGBA8 storage layout:
+        //
+        //   GL_ALPHA          (1 byte)  → (0, 0, 0, S0)
+        //   GL_LUMINANCE      (1 byte)  → (S0, S0, S0, 255)
+        //   GL_INTENSITY      (1 byte)  → (S0, S0, S0, S0)
+        //   GL_LUMINANCE_ALPHA(2 bytes) → (S0, S0, S0, S1)
+        //
+        // After this pass the downstream Metal upload sees a normal
+        // RGBA8 texture with the spec-correct sampling result, so no
+        // per-texture swizzle table is required and the existing
+        // shader code path doesn't need to learn about luminance.
+        const bool isAlphaOnly = (format == GL_ALPHA);
+        const bool isLuminance = (format == GL_LUMINANCE);
+        const bool isIntensity = (format == GL_INTENSITY);
+        const bool isLuminanceAlpha = (format == GL_LUMINANCE_ALPHA);
+
         for (GLsizei z = 0; z < depth; ++z) {
             for (GLsizei y = 0; y < height; ++y) {
                 for (GLsizei x = 0; x < width; ++x) {
@@ -864,10 +949,36 @@ struct GLContext::Impl {
                             * static_cast<std::size_t>(width)
                             + static_cast<std::size_t>(x))
                         * 4u;
-                    rgba8[destIndex + 0] = source[sourceIndex + 0];
-                    rgba8[destIndex + 1] = components > 1 ? source[sourceIndex + 1] : 0;
-                    rgba8[destIndex + 2] = components > 2 ? source[sourceIndex + 2] : 0;
-                    rgba8[destIndex + 3] = components > 3 ? source[sourceIndex + 3] : 255;
+                    if (isAlphaOnly) {
+                        rgba8[destIndex + 0] = 0;
+                        rgba8[destIndex + 1] = 0;
+                        rgba8[destIndex + 2] = 0;
+                        rgba8[destIndex + 3] = source[sourceIndex + 0];
+                    } else if (isLuminance) {
+                        const std::uint8_t luminance = source[sourceIndex + 0];
+                        rgba8[destIndex + 0] = luminance;
+                        rgba8[destIndex + 1] = luminance;
+                        rgba8[destIndex + 2] = luminance;
+                        rgba8[destIndex + 3] = 255;
+                    } else if (isIntensity) {
+                        const std::uint8_t intensity = source[sourceIndex + 0];
+                        rgba8[destIndex + 0] = intensity;
+                        rgba8[destIndex + 1] = intensity;
+                        rgba8[destIndex + 2] = intensity;
+                        rgba8[destIndex + 3] = intensity;
+                    } else if (isLuminanceAlpha) {
+                        const std::uint8_t luminance = source[sourceIndex + 0];
+                        const std::uint8_t alpha = source[sourceIndex + 1];
+                        rgba8[destIndex + 0] = luminance;
+                        rgba8[destIndex + 1] = luminance;
+                        rgba8[destIndex + 2] = luminance;
+                        rgba8[destIndex + 3] = alpha;
+                    } else {
+                        rgba8[destIndex + 0] = source[sourceIndex + 0];
+                        rgba8[destIndex + 1] = components > 1 ? source[sourceIndex + 1] : 0;
+                        rgba8[destIndex + 2] = components > 2 ? source[sourceIndex + 2] : 0;
+                        rgba8[destIndex + 3] = components > 3 ? source[sourceIndex + 3] : 255;
+                    }
                 }
             }
         }
@@ -4567,6 +4678,48 @@ bool GLContext::getSamplerParameterFloat(GLuint sampler, GLenum pname, GLfloat* 
     return true;
 }
 
+namespace {
+
+// Translate a raw GL error enum into its canonical spec name. Used as a
+// fallback message when pushError() is invoked from a deep call site that
+// doesn't supply its own description — without this, ring-buffer records
+// would land as `{function: "<internal>", errorEnum: 1282, message: ""}`
+// and external diagnostics tooling has nothing to render. With it, the
+// same record reads `{... message: "GL_INVALID_OPERATION (raised
+// internally; specific call site not tagged)"}` which still flags the
+// missing tag for follow-up but at least carries the spec name.
+const char* glErrorEnumName(GLenum error) {
+    switch (error) {
+        case GL_NO_ERROR:                       return "GL_NO_ERROR";
+        case GL_INVALID_ENUM:                   return "GL_INVALID_ENUM";
+        case GL_INVALID_VALUE:                  return "GL_INVALID_VALUE";
+        case GL_INVALID_OPERATION:              return "GL_INVALID_OPERATION";
+        case GL_INVALID_FRAMEBUFFER_OPERATION:  return "GL_INVALID_FRAMEBUFFER_OPERATION";
+        case GL_OUT_OF_MEMORY:                  return "GL_OUT_OF_MEMORY";
+        case GL_STACK_UNDERFLOW:                return "GL_STACK_UNDERFLOW";
+        case GL_STACK_OVERFLOW:                 return "GL_STACK_OVERFLOW";
+        default:                                return nullptr;
+    }
+}
+
+std::string defaultErrorMessage(GLenum error, bool internalCallSite) {
+    const char* name = glErrorEnumName(error);
+    std::string base;
+    if (name != nullptr) {
+        base.assign(name);
+    } else {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "GLenum 0x%04X", static_cast<unsigned>(error));
+        base.assign(buf);
+    }
+    if (internalCallSite) {
+        base.append(" (raised internally; specific call site not tagged)");
+    }
+    return base;
+}
+
+}  // namespace
+
 void GLContext::pushError(GLenum error, std::string_view functionName, std::string_view message) {
     // Mirror the raised error into BOTH surfaces:
     //  * The per-context enum queue drained by glGetError() — the
@@ -4577,11 +4730,21 @@ void GLContext::pushError(GLenum error, std::string_view functionName, std::stri
     // Call sites that don't know the function name (e.g. deep inside
     // GLContext.mm) get a "<internal>" fallback so the entry still
     // shows up in the diagnostic dump rather than being dropped.
+    // When the message is also empty, default-fill it with the canonical
+    // GL spec name for the enum so external tooling has at least the
+    // error class to render — empty-message records dropped on the floor
+    // were unactionable for downstream consumers (BAR worker feedback,
+    // Phase 8X Group 4c handoff §2c).
     impl_->errors.push_back(error);
     Runtime::ErrorRecord record;
-    record.function = functionName.empty() ? std::string("<internal>") : std::string(functionName);
+    const bool internalCallSite = functionName.empty();
+    record.function = internalCallSite ? std::string("<internal>") : std::string(functionName);
     record.errorEnum = error;
-    record.message = std::string(message);
+    if (message.empty()) {
+        record.message = defaultErrorMessage(error, internalCallSite);
+    } else {
+        record.message = std::string(message);
+    }
     Runtime::shared().recordError(std::move(record));
 }
 

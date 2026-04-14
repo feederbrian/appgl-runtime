@@ -41,6 +41,24 @@ SUPPORTED_FEATURES = [
     )
 ]
 
+# Registry omissions: aliases the Khronos gl.xml does not declare with an
+# explicit <alias> child element, but which the EXT/ARB extension specs
+# document as behaviorally identical to a core target. As of the vendored
+# gl.xml snapshot, every other FBO/RB EXT command HAS the alias
+# declaration — these two are isolated registry holes, not a missing
+# extension family. Without these overrides, hosts that load the legacy
+# EXT_framebuffer_object names through appglGetProcAddress (e.g. glad's
+# default loader) get NULL function pointers and crash at first bind.
+#
+# Any entry added here must reference a `target` that resolves into the
+# core profile command set (so the forwarder has a real implementation
+# to delegate into). Use this list sparingly — it exists to paper over
+# Khronos registry bugs, not to invent new aliases.
+EXTRA_ALIASES = [
+    ("glBindFramebufferEXT", "glBindFramebuffer"),
+    ("glBindRenderbufferEXT", "glBindRenderbuffer"),
+]
+
 IMPLEMENTED_FUNCTIONS = {
     "glClearColor": {
         "state": "Smoke-tested",
@@ -246,6 +264,7 @@ def parse_registry() -> tuple[
         commands.append(signature)
 
     core_names = set(ordered_commands.keys())
+    fixed_function_names = all_feature_commands - core_names
 
     # --- Landing C 3e: aliases forwarding into the core set ---------------
     # Walk every command in the registry; if it declares <alias name="X"/>
@@ -255,35 +274,111 @@ def parse_registry() -> tuple[
     # name — C linkage means only the symbol name matters at link time,
     # and external loaders resolve these via appglGetProcAddress and cast
     # the returned function pointer to whatever type they need.
+    #
+    # Aliases whose target lives in the FIXED-FUNCTION set (e.g.
+    # glClientActiveTextureARB → glClientActiveTexture, the entire
+    # glMultiTexCoord*ARB family → glMultiTexCoord*) are also emitted as
+    # forwarders. The fixed-function target is itself a no-op stub from
+    # generate_fixed_function_cpp(), so the alias forwarder ends up as a
+    # no-op-via-indirection — but it resolves through appglGetProcAddress
+    # to a real function pointer instead of NULL, which is the only
+    # contract glad's loader cares about. Without this, hosts that probe
+    # the ARB names crash on first call.
     aliases: list[dict[str, object]] = []
+    fixed_function_signatures: dict[str, dict[str, object]] = {}
+
+    def lookup_target_signature(target_name: str) -> dict[str, object] | None:
+        target_signature = next(
+            (c for c in commands if c["name"] == target_name), None
+        )
+        if target_signature is not None:
+            return target_signature
+        if target_name in fixed_function_names:
+            cached = fixed_function_signatures.get(target_name)
+            if cached is None:
+                target_command = commands_by_name.get(target_name)
+                if target_command is None:
+                    return None
+                cached = extract_command_signature(target_command)
+                fixed_function_signatures[target_name] = cached
+            return cached
+        return None
+
     for alias_name, alias_cmd in commands_by_name.items():
         alias_node = alias_cmd.find("alias")
         if alias_node is None:
             continue
         target_name = alias_node.attrib.get("name")
-        if target_name is None or target_name not in core_names:
+        if target_name is None:
+            continue
+        if target_name not in core_names and target_name not in fixed_function_names:
             continue
         if alias_name in core_names:
             # Both the alias and its target are already core — no stub
             # needed, they share the same canonical entry point.
             continue
-        target_signature = next(
-            (c for c in commands if c["name"] == target_name), None
-        )
+        if alias_name in fixed_function_names:
+            # The alias name is itself in the compat-only feature set, so
+            # generate_fixed_function_cpp() already emits a no-op stub for
+            # it. Avoid colliding by skipping the forwarder.
+            continue
+        target_signature = lookup_target_signature(target_name)
         if target_signature is None:
             raise RuntimeError(
-                f"Alias {alias_name} targets core command {target_name} "
-                f"but the core signature table has no entry for it."
+                f"Alias {alias_name} targets command {target_name} "
+                f"but no signature is available in either the core or "
+                f"fixed-function tables."
             )
         aliases.append(
             {
                 "name": alias_name,
                 "target": target_name,
+                "target_is_core": target_name in core_names,
                 "return_type": target_signature["return_type"],
                 "args_decl": target_signature["args_decl"],
                 "params": target_signature["params"],
             }
         )
+
+    # Inject EXTRA_ALIASES — registry omissions documented at the top of
+    # this file. Each entry must point at a core target; the lookup will
+    # error out if the override references a non-existent or fixed-function
+    # target (use the regular registry path for fixed-function aliases).
+    existing_alias_names = {entry["name"] for entry in aliases}
+    for alias_name, target_name in EXTRA_ALIASES:
+        if alias_name in core_names:
+            continue
+        if alias_name in existing_alias_names:
+            # Registry has caught up — the override is now redundant. Skip
+            # silently rather than failing so this list can stay in place
+            # across registry updates.
+            continue
+        if target_name not in core_names:
+            raise RuntimeError(
+                f"EXTRA_ALIASES entry {alias_name} -> {target_name} "
+                f"references a non-core target. Overrides must point at "
+                f"the canonical core symbol."
+            )
+        target_signature = next(
+            (c for c in commands if c["name"] == target_name), None
+        )
+        if target_signature is None:
+            raise RuntimeError(
+                f"EXTRA_ALIASES entry {alias_name} -> {target_name} "
+                f"references unknown core command."
+            )
+        aliases.append(
+            {
+                "name": alias_name,
+                "target": target_name,
+                "target_is_core": True,
+                "return_type": target_signature["return_type"],
+                "args_decl": target_signature["args_decl"],
+                "params": target_signature["params"],
+            }
+        )
+        existing_alias_names.add(alias_name)
+
     aliases.sort(key=lambda entry: entry["name"])
 
     # --- Landing C 3e: fixed-function compat-only entry points ------------
@@ -295,7 +390,7 @@ def parse_registry() -> tuple[
     # so appglGetProcAddress returns a valid (if inert) function pointer
     # instead of null, letting extension checks complete cleanly.
     fixed_function: list[dict[str, object]] = []
-    for name in sorted(all_feature_commands - core_names):
+    for name in sorted(fixed_function_names):
         command = commands_by_name.get(name)
         if command is None:
             raise RuntimeError(
@@ -928,13 +1023,15 @@ def generate_proc_address_cpp(
 
 def generate_aliases_cpp(aliases: list[dict[str, object]]) -> str:
     # Emits extern "C" forwarders from each EXT/ARB alias name into its
-    # canonical core target. Every stub is a straight pass-through — the
-    # alias entry points share semantics with their core targets by
-    # definition (that's what <alias> means in the registry), so the stub
-    # need only re-emit the core call with the same arguments.
+    # canonical target. Most aliases delegate into a core entry point
+    # declared in glcorearb.h; the rest delegate into a fixed-function
+    # compat-profile stub emitted by generate_fixed_function_cpp() — for
+    # those, we forward-declare the target inside the same extern "C"
+    # block so the forwarder body can call it without pulling in a
+    # second generated header.
     #
-    # Signatures use the core target's parameter types, not the alias's.
-    # 27 of the 481 aliases have type-mismatched legacy parameters
+    # Signatures use the target's parameter types, not the alias's.
+    # 27 aliases have type-mismatched legacy parameters
     # (GLhandleARB, GLsizeiptrARB, GLcharARB, ...) — because extern "C"
     # linkage matches only on symbol name and the underlying ABI types
     # are identical (khronos_ssize_t / GLuint / char), engines that
@@ -944,13 +1041,41 @@ def generate_aliases_cpp(aliases: list[dict[str, object]]) -> str:
         "// Generated by appgl-runtime/tools/gen_from_registry/generate_from_registry.py",
         "//",
         "// EXT/ARB alias forwarders — each extern \"C\" entry point below",
-        "// delegates into its canonical core target. External loaders can",
-        "// resolve these legacy names via appglGetProcAddress and get a",
+        "// delegates into its canonical target (core entry point or",
+        "// fixed-function compat stub). External loaders can resolve",
+        "// these legacy names via appglGetProcAddress and get a",
         "// functional (not null) function pointer.",
         "",
         '#include "../../include/AppGL/glcorearb.h"',
         "",
     ]
+
+    # Forward declarations for fixed-function targets. These live in
+    # gl_fixed_function.gen.cpp (linked into the same library), so the
+    # forwarders only need a name + signature visible at compile time.
+    fixed_function_targets: dict[str, dict[str, object]] = {}
+    for entry in aliases:
+        if entry.get("target_is_core"):
+            continue
+        target = str(entry["target"])
+        if target in fixed_function_targets:
+            continue
+        fixed_function_targets[target] = entry
+
+    if fixed_function_targets:
+        lines.append("// Forward declarations for fixed-function targets defined in")
+        lines.append("// gl_fixed_function.gen.cpp. The alias forwarder body needs the")
+        lines.append("// target's prototype visible at compile time; the actual symbol")
+        lines.append("// is resolved at link time within libAppGL.")
+        lines.append('extern "C" {')
+        for target_name in sorted(fixed_function_targets.keys()):
+            entry = fixed_function_targets[target_name]
+            lines.append(
+                f'{entry["return_type"]} APIENTRY {target_name}({entry["args_decl"]});'
+            )
+        lines.append('}  // extern "C"')
+        lines.append("")
+
     for entry in aliases:
         call_args = ", ".join(param["name"] for param in entry["params"])
         lines.append(

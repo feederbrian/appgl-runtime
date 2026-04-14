@@ -12,6 +12,7 @@
 // keeps the codegen graph simple and avoids a second include layer.
 extern "C" {
 void APIENTRY glActiveTextureARB(GLenum texture);
+void APIENTRY glArrayElementEXT(GLint i);
 void APIENTRY glAttachObjectARB(GLuint program, GLuint shader);
 void APIENTRY glBeginConditionalRenderNV(GLuint id, GLenum mode);
 void APIENTRY glBeginQueryARB(GLenum target, GLuint id);
@@ -25,6 +26,8 @@ void APIENTRY glBindBufferRangeEXT(GLenum target, GLuint index, GLuint buffer, G
 void APIENTRY glBindBufferRangeNV(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size);
 void APIENTRY glBindFragDataLocationEXT(GLuint program, GLuint color, const GLchar *name);
 void APIENTRY glBindFragDataLocationIndexedEXT(GLuint program, GLuint colorNumber, GLuint index, const GLchar *name);
+void APIENTRY glBindFramebufferEXT(GLenum target, GLuint framebuffer);
+void APIENTRY glBindRenderbufferEXT(GLenum target, GLuint renderbuffer);
 void APIENTRY glBindTextureEXT(GLenum target, GLuint texture);
 void APIENTRY glBindVertexArrayOES(GLuint array);
 void APIENTRY glBlendColorEXT(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
@@ -58,6 +61,7 @@ void APIENTRY glClampColorARB(GLenum target, GLenum clamp);
 void APIENTRY glClearDepthfOES(GLfloat d);
 void APIENTRY glClearTexImageEXT(GLuint texture, GLint level, GLenum format, GLenum type, const void *data);
 void APIENTRY glClearTexSubImageEXT(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *data);
+void APIENTRY glClientActiveTextureARB(GLenum texture);
 GLenum APIENTRY glClientWaitSyncAPPLE(GLsync sync, GLbitfield flags, GLuint64 timeout);
 void APIENTRY glClipControlEXT(GLenum origin, GLenum depth);
 void APIENTRY glColorMaskIndexedEXT(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
@@ -139,6 +143,11 @@ void APIENTRY glEndTransformFeedbackNV(void);
 GLsync APIENTRY glFenceSyncAPPLE(GLenum condition, GLbitfield flags);
 void APIENTRY glFlushMappedBufferRangeAPPLE(GLenum target, GLintptr offset, GLsizeiptr length);
 void APIENTRY glFlushMappedBufferRangeEXT(GLenum target, GLintptr offset, GLsizeiptr length);
+void APIENTRY glFogCoordPointerEXT(GLenum type, GLsizei stride, const void *pointer);
+void APIENTRY glFogCoorddEXT(GLdouble coord);
+void APIENTRY glFogCoorddvEXT(const GLdouble *coord);
+void APIENTRY glFogCoordfEXT(GLfloat coord);
+void APIENTRY glFogCoordfvEXT(const GLfloat *coord);
 void APIENTRY glFramebufferRenderbufferEXT(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
 void APIENTRY glFramebufferTexture1DEXT(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
 void APIENTRY glFramebufferTexture2DEXT(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
@@ -238,12 +247,16 @@ GLboolean APIENTRY glIsTransformFeedbackNV(GLuint id);
 GLboolean APIENTRY glIsVertexArrayAPPLE(GLuint array);
 GLboolean APIENTRY glIsVertexArrayOES(GLuint array);
 void APIENTRY glLinkProgramARB(GLuint program);
+void APIENTRY glLoadTransposeMatrixdARB(const GLdouble *m);
+void APIENTRY glLoadTransposeMatrixfARB(const GLfloat *m);
 void * APIENTRY glMapBufferARB(GLenum target, GLenum access);
 void * APIENTRY glMapBufferOES(GLenum target, GLenum access);
 void * APIENTRY glMapBufferRangeEXT(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access);
 void APIENTRY glMemoryBarrierEXT(GLbitfield barriers);
 void APIENTRY glMinSampleShadingARB(GLfloat value);
 void APIENTRY glMinSampleShadingOES(GLfloat value);
+void APIENTRY glMultTransposeMatrixdARB(const GLdouble *m);
+void APIENTRY glMultTransposeMatrixfARB(const GLfloat *m);
 void APIENTRY glMultiDrawArraysEXT(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount);
 void APIENTRY glMultiDrawArraysIndirectAMD(GLenum mode, const void *indirect, GLsizei drawcount, GLsizei stride);
 void APIENTRY glMultiDrawArraysIndirectCountARB(GLenum mode, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
@@ -253,6 +266,38 @@ void APIENTRY glMultiDrawElementsEXT(GLenum mode, const GLsizei *count, GLenum t
 void APIENTRY glMultiDrawElementsIndirectAMD(GLenum mode, GLenum type, const void *indirect, GLsizei drawcount, GLsizei stride);
 void APIENTRY glMultiDrawElementsIndirectCountARB(GLenum mode, GLenum type, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
 void APIENTRY glMultiDrawElementsIndirectEXT(GLenum mode, GLenum type, const void *indirect, GLsizei drawcount, GLsizei stride);
+void APIENTRY glMultiTexCoord1dARB(GLenum target, GLdouble s);
+void APIENTRY glMultiTexCoord1dvARB(GLenum target, const GLdouble *v);
+void APIENTRY glMultiTexCoord1fARB(GLenum target, GLfloat s);
+void APIENTRY glMultiTexCoord1fvARB(GLenum target, const GLfloat *v);
+void APIENTRY glMultiTexCoord1iARB(GLenum target, GLint s);
+void APIENTRY glMultiTexCoord1ivARB(GLenum target, const GLint *v);
+void APIENTRY glMultiTexCoord1sARB(GLenum target, GLshort s);
+void APIENTRY glMultiTexCoord1svARB(GLenum target, const GLshort *v);
+void APIENTRY glMultiTexCoord2dARB(GLenum target, GLdouble s, GLdouble t);
+void APIENTRY glMultiTexCoord2dvARB(GLenum target, const GLdouble *v);
+void APIENTRY glMultiTexCoord2fARB(GLenum target, GLfloat s, GLfloat t);
+void APIENTRY glMultiTexCoord2fvARB(GLenum target, const GLfloat *v);
+void APIENTRY glMultiTexCoord2iARB(GLenum target, GLint s, GLint t);
+void APIENTRY glMultiTexCoord2ivARB(GLenum target, const GLint *v);
+void APIENTRY glMultiTexCoord2sARB(GLenum target, GLshort s, GLshort t);
+void APIENTRY glMultiTexCoord2svARB(GLenum target, const GLshort *v);
+void APIENTRY glMultiTexCoord3dARB(GLenum target, GLdouble s, GLdouble t, GLdouble r);
+void APIENTRY glMultiTexCoord3dvARB(GLenum target, const GLdouble *v);
+void APIENTRY glMultiTexCoord3fARB(GLenum target, GLfloat s, GLfloat t, GLfloat r);
+void APIENTRY glMultiTexCoord3fvARB(GLenum target, const GLfloat *v);
+void APIENTRY glMultiTexCoord3iARB(GLenum target, GLint s, GLint t, GLint r);
+void APIENTRY glMultiTexCoord3ivARB(GLenum target, const GLint *v);
+void APIENTRY glMultiTexCoord3sARB(GLenum target, GLshort s, GLshort t, GLshort r);
+void APIENTRY glMultiTexCoord3svARB(GLenum target, const GLshort *v);
+void APIENTRY glMultiTexCoord4dARB(GLenum target, GLdouble s, GLdouble t, GLdouble r, GLdouble q);
+void APIENTRY glMultiTexCoord4dvARB(GLenum target, const GLdouble *v);
+void APIENTRY glMultiTexCoord4fARB(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q);
+void APIENTRY glMultiTexCoord4fvARB(GLenum target, const GLfloat *v);
+void APIENTRY glMultiTexCoord4iARB(GLenum target, GLint s, GLint t, GLint r, GLint q);
+void APIENTRY glMultiTexCoord4ivARB(GLenum target, const GLint *v);
+void APIENTRY glMultiTexCoord4sARB(GLenum target, GLshort s, GLshort t, GLshort r, GLshort q);
+void APIENTRY glMultiTexCoord4svARB(GLenum target, const GLshort *v);
 void APIENTRY glNamedBufferStorageEXT(GLuint buffer, GLsizeiptr size, const void *data, GLbitfield flags);
 void APIENTRY glNamedBufferSubDataEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, const void *data);
 void APIENTRY glObjectLabelKHR(GLenum identifier, GLuint name, GLsizei length, const GLchar *label);
@@ -271,6 +316,7 @@ void APIENTRY glPointParameterivNV(GLenum pname, const GLint *params);
 void APIENTRY glPolygonModeNV(GLenum face, GLenum mode);
 void APIENTRY glPolygonOffsetClampEXT(GLfloat factor, GLfloat units, GLfloat clamp);
 void APIENTRY glPopDebugGroupKHR(void);
+void APIENTRY glPrioritizeTexturesEXT(GLsizei n, const GLuint *textures, const GLfloat *priorities);
 void APIENTRY glProgramBinaryOES(GLuint program, GLenum binaryFormat, const void *binary, GLsizei length);
 void APIENTRY glProgramParameteriARB(GLuint program, GLenum pname, GLint value);
 void APIENTRY glProgramParameteriEXT(GLuint program, GLenum pname, GLint value);
@@ -328,6 +374,23 @@ void APIENTRY glScissorIndexedNV(GLuint index, GLint left, GLint bottom, GLsizei
 void APIENTRY glScissorIndexedOES(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height);
 void APIENTRY glScissorIndexedvNV(GLuint index, const GLint *v);
 void APIENTRY glScissorIndexedvOES(GLuint index, const GLint *v);
+void APIENTRY glSecondaryColor3bEXT(GLbyte red, GLbyte green, GLbyte blue);
+void APIENTRY glSecondaryColor3bvEXT(const GLbyte *v);
+void APIENTRY glSecondaryColor3dEXT(GLdouble red, GLdouble green, GLdouble blue);
+void APIENTRY glSecondaryColor3dvEXT(const GLdouble *v);
+void APIENTRY glSecondaryColor3fEXT(GLfloat red, GLfloat green, GLfloat blue);
+void APIENTRY glSecondaryColor3fvEXT(const GLfloat *v);
+void APIENTRY glSecondaryColor3iEXT(GLint red, GLint green, GLint blue);
+void APIENTRY glSecondaryColor3ivEXT(const GLint *v);
+void APIENTRY glSecondaryColor3sEXT(GLshort red, GLshort green, GLshort blue);
+void APIENTRY glSecondaryColor3svEXT(const GLshort *v);
+void APIENTRY glSecondaryColor3ubEXT(GLubyte red, GLubyte green, GLubyte blue);
+void APIENTRY glSecondaryColor3ubvEXT(const GLubyte *v);
+void APIENTRY glSecondaryColor3uiEXT(GLuint red, GLuint green, GLuint blue);
+void APIENTRY glSecondaryColor3uivEXT(const GLuint *v);
+void APIENTRY glSecondaryColor3usEXT(GLushort red, GLushort green, GLushort blue);
+void APIENTRY glSecondaryColor3usvEXT(const GLushort *v);
+void APIENTRY glSecondaryColorPointerEXT(GLint size, GLenum type, GLsizei stride, const void *pointer);
 void APIENTRY glShaderSourceARB(GLuint shader, GLsizei count, const GLchar *const*string, const GLint *length);
 void APIENTRY glSpecializeShaderARB(GLuint shader, const GLchar *pEntryPoint, GLuint numSpecializationConstants, const GLuint *pConstantIndex, const GLuint *pConstantValue);
 void APIENTRY glStencilOpSeparateATI(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass);
@@ -492,6 +555,38 @@ void APIENTRY glViewportIndexedfOES(GLuint index, GLfloat x, GLfloat y, GLfloat 
 void APIENTRY glViewportIndexedfvNV(GLuint index, const GLfloat *v);
 void APIENTRY glViewportIndexedfvOES(GLuint index, const GLfloat *v);
 void APIENTRY glWaitSyncAPPLE(GLsync sync, GLbitfield flags, GLuint64 timeout);
+void APIENTRY glWindowPos2dARB(GLdouble x, GLdouble y);
+void APIENTRY glWindowPos2dMESA(GLdouble x, GLdouble y);
+void APIENTRY glWindowPos2dvARB(const GLdouble *v);
+void APIENTRY glWindowPos2dvMESA(const GLdouble *v);
+void APIENTRY glWindowPos2fARB(GLfloat x, GLfloat y);
+void APIENTRY glWindowPos2fMESA(GLfloat x, GLfloat y);
+void APIENTRY glWindowPos2fvARB(const GLfloat *v);
+void APIENTRY glWindowPos2fvMESA(const GLfloat *v);
+void APIENTRY glWindowPos2iARB(GLint x, GLint y);
+void APIENTRY glWindowPos2iMESA(GLint x, GLint y);
+void APIENTRY glWindowPos2ivARB(const GLint *v);
+void APIENTRY glWindowPos2ivMESA(const GLint *v);
+void APIENTRY glWindowPos2sARB(GLshort x, GLshort y);
+void APIENTRY glWindowPos2sMESA(GLshort x, GLshort y);
+void APIENTRY glWindowPos2svARB(const GLshort *v);
+void APIENTRY glWindowPos2svMESA(const GLshort *v);
+void APIENTRY glWindowPos3dARB(GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glWindowPos3dMESA(GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glWindowPos3dvARB(const GLdouble *v);
+void APIENTRY glWindowPos3dvMESA(const GLdouble *v);
+void APIENTRY glWindowPos3fARB(GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glWindowPos3fMESA(GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glWindowPos3fvARB(const GLfloat *v);
+void APIENTRY glWindowPos3fvMESA(const GLfloat *v);
+void APIENTRY glWindowPos3iARB(GLint x, GLint y, GLint z);
+void APIENTRY glWindowPos3iMESA(GLint x, GLint y, GLint z);
+void APIENTRY glWindowPos3ivARB(const GLint *v);
+void APIENTRY glWindowPos3ivMESA(const GLint *v);
+void APIENTRY glWindowPos3sARB(GLshort x, GLshort y, GLshort z);
+void APIENTRY glWindowPos3sMESA(GLshort x, GLshort y, GLshort z);
+void APIENTRY glWindowPos3svARB(const GLshort *v);
+void APIENTRY glWindowPos3svMESA(const GLshort *v);
 void APIENTRY glAccum(GLenum op, GLfloat value);
 void APIENTRY glAlphaFunc(GLenum func, GLfloat ref);
 GLboolean APIENTRY glAreTexturesResident(GLsizei n, const GLuint *textures, GLboolean *residences);
@@ -905,6 +1000,7 @@ const ProcEntry kProcTable[] = {
     {"glAlphaFunc", reinterpret_cast<AppGLProc>(&::glAlphaFunc)},
     {"glAreTexturesResident", reinterpret_cast<AppGLProc>(&::glAreTexturesResident)},
     {"glArrayElement", reinterpret_cast<AppGLProc>(&::glArrayElement)},
+    {"glArrayElementEXT", reinterpret_cast<AppGLProc>(&::glArrayElementEXT)},
     {"glAttachObjectARB", reinterpret_cast<AppGLProc>(&::glAttachObjectARB)},
     {"glAttachShader", reinterpret_cast<AppGLProc>(&::glAttachShader)},
     {"glBegin", reinterpret_cast<AppGLProc>(&::glBegin)},
@@ -933,10 +1029,12 @@ const ProcEntry kProcTable[] = {
     {"glBindFragDataLocationIndexed", reinterpret_cast<AppGLProc>(&::glBindFragDataLocationIndexed)},
     {"glBindFragDataLocationIndexedEXT", reinterpret_cast<AppGLProc>(&::glBindFragDataLocationIndexedEXT)},
     {"glBindFramebuffer", reinterpret_cast<AppGLProc>(&::glBindFramebuffer)},
+    {"glBindFramebufferEXT", reinterpret_cast<AppGLProc>(&::glBindFramebufferEXT)},
     {"glBindImageTexture", reinterpret_cast<AppGLProc>(&::glBindImageTexture)},
     {"glBindImageTextures", reinterpret_cast<AppGLProc>(&::glBindImageTextures)},
     {"glBindProgramPipeline", reinterpret_cast<AppGLProc>(&::glBindProgramPipeline)},
     {"glBindRenderbuffer", reinterpret_cast<AppGLProc>(&::glBindRenderbuffer)},
+    {"glBindRenderbufferEXT", reinterpret_cast<AppGLProc>(&::glBindRenderbufferEXT)},
     {"glBindSampler", reinterpret_cast<AppGLProc>(&::glBindSampler)},
     {"glBindSamplers", reinterpret_cast<AppGLProc>(&::glBindSamplers)},
     {"glBindTexture", reinterpret_cast<AppGLProc>(&::glBindTexture)},
@@ -1021,6 +1119,7 @@ const ProcEntry kProcTable[] = {
     {"glClearTexSubImage", reinterpret_cast<AppGLProc>(&::glClearTexSubImage)},
     {"glClearTexSubImageEXT", reinterpret_cast<AppGLProc>(&::glClearTexSubImageEXT)},
     {"glClientActiveTexture", reinterpret_cast<AppGLProc>(&::glClientActiveTexture)},
+    {"glClientActiveTextureARB", reinterpret_cast<AppGLProc>(&::glClientActiveTextureARB)},
     {"glClientWaitSync", reinterpret_cast<AppGLProc>(&::glClientWaitSync)},
     {"glClientWaitSyncAPPLE", reinterpret_cast<AppGLProc>(&::glClientWaitSyncAPPLE)},
     {"glClipControl", reinterpret_cast<AppGLProc>(&::glClipControl)},
@@ -1263,10 +1362,15 @@ const ProcEntry kProcTable[] = {
     {"glFlushMappedBufferRangeEXT", reinterpret_cast<AppGLProc>(&::glFlushMappedBufferRangeEXT)},
     {"glFlushMappedNamedBufferRange", reinterpret_cast<AppGLProc>(&::glFlushMappedNamedBufferRange)},
     {"glFogCoordPointer", reinterpret_cast<AppGLProc>(&::glFogCoordPointer)},
+    {"glFogCoordPointerEXT", reinterpret_cast<AppGLProc>(&::glFogCoordPointerEXT)},
     {"glFogCoordd", reinterpret_cast<AppGLProc>(&::glFogCoordd)},
+    {"glFogCoorddEXT", reinterpret_cast<AppGLProc>(&::glFogCoorddEXT)},
     {"glFogCoorddv", reinterpret_cast<AppGLProc>(&::glFogCoorddv)},
+    {"glFogCoorddvEXT", reinterpret_cast<AppGLProc>(&::glFogCoorddvEXT)},
     {"glFogCoordf", reinterpret_cast<AppGLProc>(&::glFogCoordf)},
+    {"glFogCoordfEXT", reinterpret_cast<AppGLProc>(&::glFogCoordfEXT)},
     {"glFogCoordfv", reinterpret_cast<AppGLProc>(&::glFogCoordfv)},
+    {"glFogCoordfvEXT", reinterpret_cast<AppGLProc>(&::glFogCoordfvEXT)},
     {"glFogf", reinterpret_cast<AppGLProc>(&::glFogf)},
     {"glFogfv", reinterpret_cast<AppGLProc>(&::glFogfv)},
     {"glFogi", reinterpret_cast<AppGLProc>(&::glFogi)},
@@ -1603,7 +1707,9 @@ const ProcEntry kProcTable[] = {
     {"glLoadMatrixf", reinterpret_cast<AppGLProc>(&::glLoadMatrixf)},
     {"glLoadName", reinterpret_cast<AppGLProc>(&::glLoadName)},
     {"glLoadTransposeMatrixd", reinterpret_cast<AppGLProc>(&::glLoadTransposeMatrixd)},
+    {"glLoadTransposeMatrixdARB", reinterpret_cast<AppGLProc>(&::glLoadTransposeMatrixdARB)},
     {"glLoadTransposeMatrixf", reinterpret_cast<AppGLProc>(&::glLoadTransposeMatrixf)},
+    {"glLoadTransposeMatrixfARB", reinterpret_cast<AppGLProc>(&::glLoadTransposeMatrixfARB)},
     {"glLogicOp", reinterpret_cast<AppGLProc>(&::glLogicOp)},
     {"glMap1d", reinterpret_cast<AppGLProc>(&::glMap1d)},
     {"glMap1f", reinterpret_cast<AppGLProc>(&::glMap1f)},
@@ -1634,7 +1740,9 @@ const ProcEntry kProcTable[] = {
     {"glMultMatrixd", reinterpret_cast<AppGLProc>(&::glMultMatrixd)},
     {"glMultMatrixf", reinterpret_cast<AppGLProc>(&::glMultMatrixf)},
     {"glMultTransposeMatrixd", reinterpret_cast<AppGLProc>(&::glMultTransposeMatrixd)},
+    {"glMultTransposeMatrixdARB", reinterpret_cast<AppGLProc>(&::glMultTransposeMatrixdARB)},
     {"glMultTransposeMatrixf", reinterpret_cast<AppGLProc>(&::glMultTransposeMatrixf)},
+    {"glMultTransposeMatrixfARB", reinterpret_cast<AppGLProc>(&::glMultTransposeMatrixfARB)},
     {"glMultiDrawArrays", reinterpret_cast<AppGLProc>(&::glMultiDrawArrays)},
     {"glMultiDrawArraysEXT", reinterpret_cast<AppGLProc>(&::glMultiDrawArraysEXT)},
     {"glMultiDrawArraysIndirect", reinterpret_cast<AppGLProc>(&::glMultiDrawArraysIndirect)},
@@ -1652,37 +1760,69 @@ const ProcEntry kProcTable[] = {
     {"glMultiDrawElementsIndirectCountARB", reinterpret_cast<AppGLProc>(&::glMultiDrawElementsIndirectCountARB)},
     {"glMultiDrawElementsIndirectEXT", reinterpret_cast<AppGLProc>(&::glMultiDrawElementsIndirectEXT)},
     {"glMultiTexCoord1d", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1d)},
+    {"glMultiTexCoord1dARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1dARB)},
     {"glMultiTexCoord1dv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1dv)},
+    {"glMultiTexCoord1dvARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1dvARB)},
     {"glMultiTexCoord1f", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1f)},
+    {"glMultiTexCoord1fARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1fARB)},
     {"glMultiTexCoord1fv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1fv)},
+    {"glMultiTexCoord1fvARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1fvARB)},
     {"glMultiTexCoord1i", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1i)},
+    {"glMultiTexCoord1iARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1iARB)},
     {"glMultiTexCoord1iv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1iv)},
+    {"glMultiTexCoord1ivARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1ivARB)},
     {"glMultiTexCoord1s", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1s)},
+    {"glMultiTexCoord1sARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1sARB)},
     {"glMultiTexCoord1sv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1sv)},
+    {"glMultiTexCoord1svARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1svARB)},
     {"glMultiTexCoord2d", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2d)},
+    {"glMultiTexCoord2dARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2dARB)},
     {"glMultiTexCoord2dv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2dv)},
+    {"glMultiTexCoord2dvARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2dvARB)},
     {"glMultiTexCoord2f", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2f)},
+    {"glMultiTexCoord2fARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2fARB)},
     {"glMultiTexCoord2fv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2fv)},
+    {"glMultiTexCoord2fvARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2fvARB)},
     {"glMultiTexCoord2i", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2i)},
+    {"glMultiTexCoord2iARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2iARB)},
     {"glMultiTexCoord2iv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2iv)},
+    {"glMultiTexCoord2ivARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2ivARB)},
     {"glMultiTexCoord2s", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2s)},
+    {"glMultiTexCoord2sARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2sARB)},
     {"glMultiTexCoord2sv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2sv)},
+    {"glMultiTexCoord2svARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2svARB)},
     {"glMultiTexCoord3d", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3d)},
+    {"glMultiTexCoord3dARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3dARB)},
     {"glMultiTexCoord3dv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3dv)},
+    {"glMultiTexCoord3dvARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3dvARB)},
     {"glMultiTexCoord3f", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3f)},
+    {"glMultiTexCoord3fARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3fARB)},
     {"glMultiTexCoord3fv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3fv)},
+    {"glMultiTexCoord3fvARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3fvARB)},
     {"glMultiTexCoord3i", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3i)},
+    {"glMultiTexCoord3iARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3iARB)},
     {"glMultiTexCoord3iv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3iv)},
+    {"glMultiTexCoord3ivARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3ivARB)},
     {"glMultiTexCoord3s", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3s)},
+    {"glMultiTexCoord3sARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3sARB)},
     {"glMultiTexCoord3sv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3sv)},
+    {"glMultiTexCoord3svARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3svARB)},
     {"glMultiTexCoord4d", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4d)},
+    {"glMultiTexCoord4dARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4dARB)},
     {"glMultiTexCoord4dv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4dv)},
+    {"glMultiTexCoord4dvARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4dvARB)},
     {"glMultiTexCoord4f", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4f)},
+    {"glMultiTexCoord4fARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4fARB)},
     {"glMultiTexCoord4fv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4fv)},
+    {"glMultiTexCoord4fvARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4fvARB)},
     {"glMultiTexCoord4i", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4i)},
+    {"glMultiTexCoord4iARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4iARB)},
     {"glMultiTexCoord4iv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4iv)},
+    {"glMultiTexCoord4ivARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4ivARB)},
     {"glMultiTexCoord4s", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4s)},
+    {"glMultiTexCoord4sARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4sARB)},
     {"glMultiTexCoord4sv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4sv)},
+    {"glMultiTexCoord4svARB", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4svARB)},
     {"glMultiTexCoordP1ui", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP1ui)},
     {"glMultiTexCoordP1uiv", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP1uiv)},
     {"glMultiTexCoordP2ui", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP2ui)},
@@ -1766,6 +1906,7 @@ const ProcEntry kProcTable[] = {
     {"glPopName", reinterpret_cast<AppGLProc>(&::glPopName)},
     {"glPrimitiveRestartIndex", reinterpret_cast<AppGLProc>(&::glPrimitiveRestartIndex)},
     {"glPrioritizeTextures", reinterpret_cast<AppGLProc>(&::glPrioritizeTextures)},
+    {"glPrioritizeTexturesEXT", reinterpret_cast<AppGLProc>(&::glPrioritizeTexturesEXT)},
     {"glProgramBinary", reinterpret_cast<AppGLProc>(&::glProgramBinary)},
     {"glProgramBinaryOES", reinterpret_cast<AppGLProc>(&::glProgramBinaryOES)},
     {"glProgramParameteri", reinterpret_cast<AppGLProc>(&::glProgramParameteri)},
@@ -1939,24 +2080,41 @@ const ProcEntry kProcTable[] = {
     {"glScissorIndexedvNV", reinterpret_cast<AppGLProc>(&::glScissorIndexedvNV)},
     {"glScissorIndexedvOES", reinterpret_cast<AppGLProc>(&::glScissorIndexedvOES)},
     {"glSecondaryColor3b", reinterpret_cast<AppGLProc>(&::glSecondaryColor3b)},
+    {"glSecondaryColor3bEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3bEXT)},
     {"glSecondaryColor3bv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3bv)},
+    {"glSecondaryColor3bvEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3bvEXT)},
     {"glSecondaryColor3d", reinterpret_cast<AppGLProc>(&::glSecondaryColor3d)},
+    {"glSecondaryColor3dEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3dEXT)},
     {"glSecondaryColor3dv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3dv)},
+    {"glSecondaryColor3dvEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3dvEXT)},
     {"glSecondaryColor3f", reinterpret_cast<AppGLProc>(&::glSecondaryColor3f)},
+    {"glSecondaryColor3fEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3fEXT)},
     {"glSecondaryColor3fv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3fv)},
+    {"glSecondaryColor3fvEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3fvEXT)},
     {"glSecondaryColor3i", reinterpret_cast<AppGLProc>(&::glSecondaryColor3i)},
+    {"glSecondaryColor3iEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3iEXT)},
     {"glSecondaryColor3iv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3iv)},
+    {"glSecondaryColor3ivEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3ivEXT)},
     {"glSecondaryColor3s", reinterpret_cast<AppGLProc>(&::glSecondaryColor3s)},
+    {"glSecondaryColor3sEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3sEXT)},
     {"glSecondaryColor3sv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3sv)},
+    {"glSecondaryColor3svEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3svEXT)},
     {"glSecondaryColor3ub", reinterpret_cast<AppGLProc>(&::glSecondaryColor3ub)},
+    {"glSecondaryColor3ubEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3ubEXT)},
     {"glSecondaryColor3ubv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3ubv)},
+    {"glSecondaryColor3ubvEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3ubvEXT)},
     {"glSecondaryColor3ui", reinterpret_cast<AppGLProc>(&::glSecondaryColor3ui)},
+    {"glSecondaryColor3uiEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3uiEXT)},
     {"glSecondaryColor3uiv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3uiv)},
+    {"glSecondaryColor3uivEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3uivEXT)},
     {"glSecondaryColor3us", reinterpret_cast<AppGLProc>(&::glSecondaryColor3us)},
+    {"glSecondaryColor3usEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3usEXT)},
     {"glSecondaryColor3usv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3usv)},
+    {"glSecondaryColor3usvEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColor3usvEXT)},
     {"glSecondaryColorP3ui", reinterpret_cast<AppGLProc>(&::glSecondaryColorP3ui)},
     {"glSecondaryColorP3uiv", reinterpret_cast<AppGLProc>(&::glSecondaryColorP3uiv)},
     {"glSecondaryColorPointer", reinterpret_cast<AppGLProc>(&::glSecondaryColorPointer)},
+    {"glSecondaryColorPointerEXT", reinterpret_cast<AppGLProc>(&::glSecondaryColorPointerEXT)},
     {"glSelectBuffer", reinterpret_cast<AppGLProc>(&::glSelectBuffer)},
     {"glShadeModel", reinterpret_cast<AppGLProc>(&::glShadeModel)},
     {"glShaderBinary", reinterpret_cast<AppGLProc>(&::glShaderBinary)},
@@ -2412,21 +2570,53 @@ const ProcEntry kProcTable[] = {
     {"glWaitSync", reinterpret_cast<AppGLProc>(&::glWaitSync)},
     {"glWaitSyncAPPLE", reinterpret_cast<AppGLProc>(&::glWaitSyncAPPLE)},
     {"glWindowPos2d", reinterpret_cast<AppGLProc>(&::glWindowPos2d)},
+    {"glWindowPos2dARB", reinterpret_cast<AppGLProc>(&::glWindowPos2dARB)},
+    {"glWindowPos2dMESA", reinterpret_cast<AppGLProc>(&::glWindowPos2dMESA)},
     {"glWindowPos2dv", reinterpret_cast<AppGLProc>(&::glWindowPos2dv)},
+    {"glWindowPos2dvARB", reinterpret_cast<AppGLProc>(&::glWindowPos2dvARB)},
+    {"glWindowPos2dvMESA", reinterpret_cast<AppGLProc>(&::glWindowPos2dvMESA)},
     {"glWindowPos2f", reinterpret_cast<AppGLProc>(&::glWindowPos2f)},
+    {"glWindowPos2fARB", reinterpret_cast<AppGLProc>(&::glWindowPos2fARB)},
+    {"glWindowPos2fMESA", reinterpret_cast<AppGLProc>(&::glWindowPos2fMESA)},
     {"glWindowPos2fv", reinterpret_cast<AppGLProc>(&::glWindowPos2fv)},
+    {"glWindowPos2fvARB", reinterpret_cast<AppGLProc>(&::glWindowPos2fvARB)},
+    {"glWindowPos2fvMESA", reinterpret_cast<AppGLProc>(&::glWindowPos2fvMESA)},
     {"glWindowPos2i", reinterpret_cast<AppGLProc>(&::glWindowPos2i)},
+    {"glWindowPos2iARB", reinterpret_cast<AppGLProc>(&::glWindowPos2iARB)},
+    {"glWindowPos2iMESA", reinterpret_cast<AppGLProc>(&::glWindowPos2iMESA)},
     {"glWindowPos2iv", reinterpret_cast<AppGLProc>(&::glWindowPos2iv)},
+    {"glWindowPos2ivARB", reinterpret_cast<AppGLProc>(&::glWindowPos2ivARB)},
+    {"glWindowPos2ivMESA", reinterpret_cast<AppGLProc>(&::glWindowPos2ivMESA)},
     {"glWindowPos2s", reinterpret_cast<AppGLProc>(&::glWindowPos2s)},
+    {"glWindowPos2sARB", reinterpret_cast<AppGLProc>(&::glWindowPos2sARB)},
+    {"glWindowPos2sMESA", reinterpret_cast<AppGLProc>(&::glWindowPos2sMESA)},
     {"glWindowPos2sv", reinterpret_cast<AppGLProc>(&::glWindowPos2sv)},
+    {"glWindowPos2svARB", reinterpret_cast<AppGLProc>(&::glWindowPos2svARB)},
+    {"glWindowPos2svMESA", reinterpret_cast<AppGLProc>(&::glWindowPos2svMESA)},
     {"glWindowPos3d", reinterpret_cast<AppGLProc>(&::glWindowPos3d)},
+    {"glWindowPos3dARB", reinterpret_cast<AppGLProc>(&::glWindowPos3dARB)},
+    {"glWindowPos3dMESA", reinterpret_cast<AppGLProc>(&::glWindowPos3dMESA)},
     {"glWindowPos3dv", reinterpret_cast<AppGLProc>(&::glWindowPos3dv)},
+    {"glWindowPos3dvARB", reinterpret_cast<AppGLProc>(&::glWindowPos3dvARB)},
+    {"glWindowPos3dvMESA", reinterpret_cast<AppGLProc>(&::glWindowPos3dvMESA)},
     {"glWindowPos3f", reinterpret_cast<AppGLProc>(&::glWindowPos3f)},
+    {"glWindowPos3fARB", reinterpret_cast<AppGLProc>(&::glWindowPos3fARB)},
+    {"glWindowPos3fMESA", reinterpret_cast<AppGLProc>(&::glWindowPos3fMESA)},
     {"glWindowPos3fv", reinterpret_cast<AppGLProc>(&::glWindowPos3fv)},
+    {"glWindowPos3fvARB", reinterpret_cast<AppGLProc>(&::glWindowPos3fvARB)},
+    {"glWindowPos3fvMESA", reinterpret_cast<AppGLProc>(&::glWindowPos3fvMESA)},
     {"glWindowPos3i", reinterpret_cast<AppGLProc>(&::glWindowPos3i)},
+    {"glWindowPos3iARB", reinterpret_cast<AppGLProc>(&::glWindowPos3iARB)},
+    {"glWindowPos3iMESA", reinterpret_cast<AppGLProc>(&::glWindowPos3iMESA)},
     {"glWindowPos3iv", reinterpret_cast<AppGLProc>(&::glWindowPos3iv)},
+    {"glWindowPos3ivARB", reinterpret_cast<AppGLProc>(&::glWindowPos3ivARB)},
+    {"glWindowPos3ivMESA", reinterpret_cast<AppGLProc>(&::glWindowPos3ivMESA)},
     {"glWindowPos3s", reinterpret_cast<AppGLProc>(&::glWindowPos3s)},
+    {"glWindowPos3sARB", reinterpret_cast<AppGLProc>(&::glWindowPos3sARB)},
+    {"glWindowPos3sMESA", reinterpret_cast<AppGLProc>(&::glWindowPos3sMESA)},
     {"glWindowPos3sv", reinterpret_cast<AppGLProc>(&::glWindowPos3sv)},
+    {"glWindowPos3svARB", reinterpret_cast<AppGLProc>(&::glWindowPos3svARB)},
+    {"glWindowPos3svMESA", reinterpret_cast<AppGLProc>(&::glWindowPos3svMESA)},
 };
 
 constexpr std::size_t kProcTableSize = sizeof(kProcTable) / sizeof(kProcTable[0]);  // sizeof-based size is still a constant expression.

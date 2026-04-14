@@ -128,6 +128,37 @@ bool isValidEnableCap(GLenum cap) {
     }
 }
 
+// Compat-profile glEnable/glDisable caps that AppGL accepts as silent
+// no-ops. These are GL 1.x-era state toggles whose backing pipeline
+// state was removed from core (3.2+), and which AppGL has no Metal-side
+// equivalent for. Compat-profile engines call glEnable/glDisable with
+// these caps during initialization without checking whether they're
+// supported — silently accepting them keeps boot from tripping
+// GL_INVALID_ENUM on every legacy state probe.
+//
+// "Silent" means: no error pushed, no state mirror update, but a trace
+// is still recorded so diagnostics can show that the legacy cap was
+// touched. glIsEnabled returns GL_FALSE for every cap in this set
+// (matches the spec semantics of a disabled compat feature).
+//
+// Add a cap here only when a real engine call site needs it — keeping
+// the list small means future debugging still has signal from
+// "unhandled cap" errors for genuinely new probes.
+//
+// Currently:
+//   GL_ALPHA_TEST (0x0BC0) — alpha-test stage from compat fragment pipeline
+#ifndef GL_ALPHA_TEST
+#define GL_ALPHA_TEST 0x0BC0
+#endif
+bool isCompatNoOpEnableCap(GLenum cap) {
+    switch (cap) {
+        case GL_ALPHA_TEST:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Known enums that real GL applications probe to detect attached debug tools
 // even though they are not spec-valid cap arguments. These MUST still return
 // GL_FALSE from glIsEnabled AND push GL_INVALID_ENUM (because that is how the
@@ -3147,6 +3178,17 @@ void APIENTRY glEnable(GLenum cap) {
     if (context == nullptr) {
         return;
     }
+    if (isCompatNoOpEnableCap(cap)) {
+        // Compat-profile no-op: trace the call so diagnostics can show
+        // the legacy probe but don't push an error or update state.
+        Runtime::shared().recordBootstrapTrace(
+            "glEnable(0x" + [](GLenum c) {
+                std::ostringstream out;
+                out << std::hex << std::uppercase << c;
+                return out.str();
+            }(cap) + ") -> compat no-op");
+        return;
+    }
     if (!isValidEnableCap(cap)) {
         recordValidationError(context, "glEnable", GL_INVALID_ENUM, buildUnknownCapMessage(cap));
         return;
@@ -3166,6 +3208,15 @@ void APIENTRY glDisable(GLenum cap) {
     if (context == nullptr) {
         return;
     }
+    if (isCompatNoOpEnableCap(cap)) {
+        Runtime::shared().recordBootstrapTrace(
+            "glDisable(0x" + [](GLenum c) {
+                std::ostringstream out;
+                out << std::hex << std::uppercase << c;
+                return out.str();
+            }(cap) + ") -> compat no-op");
+        return;
+    }
     if (!isValidEnableCap(cap)) {
         recordValidationError(context, "glDisable", GL_INVALID_ENUM, buildUnknownCapMessage(cap));
         return;
@@ -3183,6 +3234,18 @@ void APIENTRY glDisable(GLenum cap) {
 GLboolean APIENTRY glIsEnabled(GLenum cap) {
     auto* context = requireCurrentContext("glIsEnabled");
     if (context == nullptr) {
+        return GL_FALSE;
+    }
+    if (isCompatNoOpEnableCap(cap)) {
+        // Compat no-op caps always read as disabled — they have no
+        // backing state because the underlying pipeline stage was
+        // removed in core 3.2. No error pushed.
+        Runtime::shared().recordBootstrapTrace(
+            "glIsEnabled(0x" + [](GLenum c) {
+                std::ostringstream out;
+                out << std::hex << std::uppercase << c;
+                return out.str();
+            }(cap) + ") -> compat no-op (false)");
         return GL_FALSE;
     }
     if (!isValidEnableCap(cap)) {

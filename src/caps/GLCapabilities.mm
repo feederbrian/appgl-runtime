@@ -6,6 +6,37 @@
 
 #include "../shader/ShaderTranslator.h"
 
+// Compat-profile internal format enums. These were removed from the
+// core profile in GL 3.2, so the codegen-emitted glcorearb.h does not
+// expose them. AppGL still accepts them as upload aliases (font caches
+// in particular allocate GL_ALPHA8 / GL_LUMINANCE8_ALPHA8 atlases via
+// stb_truetype, FreeType, and similar libraries), upcasting to RGBA8
+// at the driver edge with channel replication so sampling matches the
+// legacy spec semantics. Defining them locally with #ifndef guards
+// keeps the cap table self-contained without polluting the public
+// glcorearb.h surface.
+#ifndef GL_ALPHA8
+#define GL_ALPHA8 0x803C
+#endif
+#ifndef GL_LUMINANCE
+#define GL_LUMINANCE 0x1909
+#endif
+#ifndef GL_LUMINANCE_ALPHA
+#define GL_LUMINANCE_ALPHA 0x190A
+#endif
+#ifndef GL_LUMINANCE8
+#define GL_LUMINANCE8 0x8040
+#endif
+#ifndef GL_LUMINANCE8_ALPHA8
+#define GL_LUMINANCE8_ALPHA8 0x8045
+#endif
+#ifndef GL_INTENSITY
+#define GL_INTENSITY 0x8049
+#endif
+#ifndef GL_INTENSITY8
+#define GL_INTENSITY8 0x804B
+#endif
+
 namespace appgl {
 
 GLCapabilities::GLCapabilities(void* metalDevice) {
@@ -180,6 +211,37 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
     // ------------------------------------------------------------------
     add(GL_R8, MTLPixelFormatR8Unorm, true, true, false, false, false);
     add(GL_RG8, MTLPixelFormatRG8Unorm, true, true, false, false, false);
+
+    // ------------------------------------------------------------------
+    // Compat-profile alpha / luminance / intensity formats. These are
+    // GL 1.x-era entry points that the core profile removed but which
+    // font caches (FreeType, stb_truetype) and many compat-profile
+    // engines still allocate via texImage2D / texStorage2D. AppGL upcasts
+    // every one of them to RGBA8 at the upload-channel-fill edge — see
+    // GLContext.mm buildRGBA8Upload — replicating the source bytes into
+    // the correct channels so sampling matches the legacy spec without
+    // any per-texture swizzle gymnastics:
+    //
+    //   GL_ALPHA8        : uploaded byte → (0, 0, 0, A)
+    //   GL_LUMINANCE8    : uploaded byte → (L, L, L, 1)
+    //   GL_LUMINANCE8_A8 : two source bytes → (L, L, L, A)
+    //   GL_INTENSITY8    : uploaded byte → (I, I, I, I)
+    //
+    // Marked non-renderable because nobody allocates a font atlas as a
+    // color attachment and the replicated-channel storage would make
+    // round-trip writes nonsensical anyway.
+    add(GL_ALPHA8, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_LUMINANCE8, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_LUMINANCE8_ALPHA8, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_INTENSITY8, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    // Unsized aliases that legacy callers also use as the internalFormat
+    // arg to texImage2D. The spec lets the driver pick the precision; we
+    // pick the 8-bit tier above and reuse the same RGBA8-backed storage.
+    add(GL_ALPHA, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_LUMINANCE, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_LUMINANCE_ALPHA, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_INTENSITY, MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+
     // GL_RGB8 has no direct Metal equivalent — Metal only exposes RGBA on
     // the unorm path, so we re-route to RGBA8 and mark non-renderable so
     // framebuffer-attachment validation still catches engines trying to use
