@@ -952,7 +952,10 @@ std::mutex& Runtime::contextMutex() {
 }
 
 std::string Runtime::claimedVersionString() const {
-    return coverageStore_.highestFullyImplementedVersion();
+    // Declarative constant (Phase 8X Landing C). See
+    // CoverageStore::claimedVersion for the rationale — this is what
+    // glGetString(GL_VERSION) reports, independent of coverage walk.
+    return CoverageStore::claimedVersion();
 }
 
 void Runtime::refreshCurrentContextClaimedVersion() {

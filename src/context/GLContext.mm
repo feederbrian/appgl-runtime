@@ -1894,14 +1894,18 @@ struct GLContext::Impl {
 
     std::string vendorString = "AppGL";
     std::string rendererString = "AppGL on Metal";
-    // Default to a parseable GL version string so loaders that call
-    // glGetString(GL_VERSION) before any coverage-tracking entry point runs
-    // (e.g. GLAD's gladLoadGLLoader -> find_coreGL -> sscanf("%d.%d", ...))
-    // get a non-empty string. Runtime::refreshCurrentContextClaimedVersion()
-    // overwrites this with the coverage-derived value as soon as the first
-    // version-bumping entry point is hit.
-    std::string versionString = "4.6 AppGL bootstrap";
-    std::string shadingLanguageVersion = "3.30 AppGL bootstrap";
+    // Declarative GL version strings. glGetString(GL_VERSION) returns the
+    // claimed version (a compile-time constant — see
+    // CoverageStore::claimedVersion) rather than the coverage-derived
+    // highest-fully-implemented version, so a cold-boot context with no
+    // smoke tests run still advertises the full AppGL surface as "4.6 AppGL
+    // core" rather than the "4.6 AppGL bootstrap" fallback the walker used
+    // to return. Engines such as Recoil parse "M.m" via sscanf and fall
+    // back to a GL3 codepath if they see a 3.x string, so both the version
+    // string and the shading-language-version string must reflect what the
+    // translator is actually capable of accepting.
+    std::string versionString = "4.6 AppGL core";
+    std::string shadingLanguageVersion = "4.60";
     std::string extensionsString;
 };
 
@@ -4550,16 +4554,14 @@ const std::string& GLContext::rendererString() const {
 }
 
 void GLContext::setClaimedVersionString(std::string value) {
-    // Coverage is empty during the GL bootstrap window: the very first call
-    // into a coverage-tracking entry point invokes
-    // Runtime::refreshCurrentContextClaimedVersion() which calls us with an
-    // empty string. Reporting "3.0" here causes loaders/engines that pick GL
-    // capabilities off glGetString(GL_VERSION) to fall back to a GL3 path
-    // even though the AppGL surface advertises 4.6 elsewhere
-    // (glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION) and the static
-    // bootstrap default in Impl). Default the fallback to 4.6 to keep the
-    // string-based and integer-based version reports consistent.
-    impl_->versionString = value.empty() ? "4.6 AppGL bootstrap" : std::move(value);
+    // In Phase 8X Landing C the runtime switched to a declarative
+    // claimed-version constant ("4.6 AppGL core" — see
+    // CoverageStore::claimedVersion). The only empty-string path that
+    // can still reach us is someone calling this method directly with
+    // an empty argument; fall through to the same declarative constant
+    // so the GL_VERSION string never regresses to a "bootstrap" suffix
+    // engines parse as a GL3 context.
+    impl_->versionString = value.empty() ? "4.6 AppGL core" : std::move(value);
 }
 
 GLCapabilities& GLContext::capabilities() {

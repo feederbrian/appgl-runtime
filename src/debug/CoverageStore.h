@@ -40,7 +40,28 @@ public:
     void markStubbed(FunctionId id, std::string_view note = {});
     void recordUnimplementedHit(FunctionId id);
 
-    std::string highestFullyImplementedVersion() const;
+    // Phase 8X Landing C — split into two accessors:
+    //
+    //   claimedVersion()           — compile-time constant. This is what
+    //                                glGetString(GL_VERSION) and
+    //                                Runtime::claimedVersionString consult,
+    //                                independent of coverage-store state.
+    //                                Returns "4.6 AppGL core".
+    //
+    //   fullyImplementedVersion()  — dynamic walk over the coverage table.
+    //                                Reports the highest core version for
+    //                                which every introduced entry point has
+    //                                been smoke-tested. Used by the
+    //                                diagnostic snapshot JSON so the
+    //                                `claimedVersion` field in coverage
+    //                                reports still reflects reality.
+    //
+    // The old highestFullyImplementedVersion() method was a single accessor
+    // doing both jobs. It survived as a thin wrapper for a while but now
+    // its two callers have diverged — the GL_VERSION path must return
+    // declaratively, the coverage JSON must stay dynamic.
+    static const char* claimedVersion();
+    std::string fullyImplementedVersion() const;
     std::string buildSnapshotJson(std::string_view renderer, const std::vector<std::string>& traceTail) const;
 
     const FunctionCoverage& status(FunctionId id) const;

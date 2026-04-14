@@ -67,7 +67,23 @@ void CoverageStore::recordUnimplementedHit(FunctionId id) {
     statuses_[indexOf(id)].unimplementedHitCount += 1;
 }
 
-std::string CoverageStore::highestFullyImplementedVersion() const {
+const char* CoverageStore::claimedVersion() {
+    // Compile-time constant: what AppGL advertises to external GL loaders
+    // via glGetString(GL_VERSION). This is independent of coverage-store
+    // state because engines (Recoil in particular) parse the version string
+    // on context creation — long before any coverage-tracking entry point
+    // has run — and gate entire codepaths on the result. Reporting a
+    // dynamic bootstrap string here caused engines to fall back to GL3
+    // even though the translator actually accepts 4.x source.
+    //
+    // The coverage-derived dynamic walk still exists on the other side of
+    // the split: see fullyImplementedVersion(), consulted by
+    // buildSnapshotJson() to keep the diagnostic coverage JSON honest
+    // about what's been exercised.
+    return "4.6 AppGL core";
+}
+
+std::string CoverageStore::fullyImplementedVersion() const {
     struct VersionRule {
         const char* version;
         const char* claimedString;
@@ -104,17 +120,18 @@ std::string CoverageStore::highestFullyImplementedVersion() const {
             return it->claimedString;
         }
     }
-    // No coverage rules qualified yet (cold-boot or selective tests). Report
-    // 4.6 so external loaders/engines treat the context as the full AppGL
-    // surface; the live coverage store will overwrite this once entry points
-    // start being marked implemented during normal frame submission.
-    return "4.6 AppGL bootstrap";
+    // Coverage table is empty (cold-boot or selective tests). Report a
+    // diagnostic-only "nothing qualified yet" sentinel. This string is
+    // consumed only by the coverage JSON snapshot — glGetString(GL_VERSION)
+    // consults the declarative claimedVersion() path instead, so a cold
+    // boot no longer advertises a bootstrap suffix to engines.
+    return "0.0 AppGL (no coverage)";
 }
 
 std::string CoverageStore::buildSnapshotJson(std::string_view renderer, const std::vector<std::string>& traceTail) const {
     std::ostringstream stream;
     stream << "{";
-    stream << "\"claimedVersion\":\"" << jsonEscape(highestFullyImplementedVersion()) << "\",";
+    stream << "\"claimedVersion\":\"" << jsonEscape(fullyImplementedVersion()) << "\",";
     stream << "\"renderer\":\"" << jsonEscape(renderer) << "\",";
     stream << "\"functions\":[";
     for (std::size_t index = 0; index < kGLFunctionCount; ++index) {

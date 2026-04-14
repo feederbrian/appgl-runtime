@@ -756,7 +756,26 @@ public:
         (void)gl.glGetError();
         gl.glGetIntegerv(static_cast<GLenum>(0xffffffffu), &maxTextureSize);
         (void)gl.glGetError();
-        (void)gl.glGetString(GL_VERSION);
+
+        // Landing C 3c/3d assertions. glGetString(GL_VERSION) must report the
+        // declarative claimed version (no "bootstrap" suffix, independent of
+        // coverage walk) and GL_SHADING_LANGUAGE_VERSION must advertise 4.60
+        // so engines that pick GLSL codepaths off the string don't fall back
+        // to GLSL 330. Engines parse both strings via sscanf("%d.%d", ...).
+        const GLubyte* glVersion = gl.glGetString(GL_VERSION);
+        const GLubyte* glslVersion = gl.glGetString(GL_SHADING_LANGUAGE_VERSION);
+        expectCondition(glVersion != nullptr, "glGetString(GL_VERSION) returns non-null");
+        expectCondition(glslVersion != nullptr, "glGetString(GL_SHADING_LANGUAGE_VERSION) returns non-null");
+        if (glVersion != nullptr) {
+            const std::string versionText(reinterpret_cast<const char*>(glVersion));
+            expectCondition(versionText == "4.6 AppGL core",
+                            "GL_VERSION reports declarative \"4.6 AppGL core\"");
+        }
+        if (glslVersion != nullptr) {
+            const std::string glslText(reinterpret_cast<const char*>(glslVersion));
+            expectCondition(glslText == "4.60",
+                            "GL_SHADING_LANGUAGE_VERSION reports \"4.60\"");
+        }
     }
 
     void render(GLContext& context) override {
