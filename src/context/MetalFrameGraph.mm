@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <unordered_map>
 #include <unordered_set>
@@ -875,6 +876,89 @@ struct MetalFrameGraph::Impl {
                           static_cast<unsigned>(b.metalSlot),
                           b.metalTexture != nullptr ? 1 : 0,
                           b.metalSamplerState != nullptr ? 1 : 0);
+                }
+
+                // Phase 8X Group 4d follow-up¹⁰ — §Secondary VBO peek
+                // for BAR's Theory A/B split. Dump the first 32 bytes
+                // of the vertex data, the stride, and the attribute
+                // layout list so BAR can decide whether the UVs on
+                // programs 8/10 are tightly inside `[0, 1)` (Theory A
+                // out — REPEAT wrap doesn't matter) or whether
+                // they're scrambled / out-of-range (Theory B hint —
+                // VBO upload bug, or Recoil-side vertex data problem).
+                //
+                // The peek reads from `info.vertexData` when non-null
+                // (CPU scratch path) or from the Metal buffer's CPU-
+                // visible contents when the draw path bound a shared-
+                // storage MTLBuffer directly (OPT-5 path). Private-
+                // storage buffers are not readable from CPU so we
+                // silently skip the hex dump in that case — BAR can
+                // still see the stride and layout list to cross-check
+                // against native GL's vertex array setup.
+                //
+                // Also dumps the attribute layout list so BAR knows
+                // which byte offsets inside the stride hold `uv`
+                // attributes — UI quad VBOs typically have something
+                // like (pos.xy, uv.xy) packed tight or
+                // (pos.xyz, uv.xy, color.rgba) in a 36-byte stride.
+                NSLog(@"[GL]   vbo stride=%zu vertexDataByteCount=%zu"
+                      @" metalBuf=%d extraBufs=%zu attrLayouts=%zu",
+                      info.vertexStride,
+                      info.vertexDataByteCount,
+                      info.metalVertexBuffer != nullptr ? 1 : 0,
+                      info.extraVertexBuffers.size(),
+                      info.vertexAttributeLayouts.size());
+                for (std::size_t i = 0; i < info.vertexAttributeLayouts.size(); ++i) {
+                    const auto& a = info.vertexAttributeLayouts[i];
+                    NSLog(@"[GL]     attr[%zu] location=%u offset=%zu",
+                          i, a.location, a.offset);
+                }
+
+                // Resolve a CPU pointer to the start of the vertex
+                // stream we're about to encode.
+                const std::uint8_t* peekPtr = nullptr;
+                if (info.vertexData != nullptr) {
+                    peekPtr = static_cast<const std::uint8_t*>(info.vertexData);
+                } else if (info.metalVertexBuffer != nullptr) {
+                    id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)info.metalVertexBuffer;
+                    // storageMode shared/managed → contents is a
+                    // valid CPU pointer. Private is nil/garbage.
+                    if ([mtlBuf storageMode] == MTLStorageModeShared ||
+                        [mtlBuf storageMode] == MTLStorageModeManaged) {
+                        const std::uint8_t* base =
+                            static_cast<const std::uint8_t*>([mtlBuf contents]);
+                        if (base != nullptr) {
+                            peekPtr = base + info.metalVertexBufferOffset;
+                        }
+                    }
+                }
+
+                if (peekPtr != nullptr) {
+                    // Peek 32 bytes — enough to cover a full 32-byte
+                    // stride (pos.xyz + uv.xy + color.rgba layouts) or
+                    // two 16-byte stride quads (pos.xy + uv.xy). BAR
+                    // can decode by stride; the stride is on the
+                    // preceding line.
+                    const std::size_t peekLen = 32;
+                    char hexBuf[128];
+                    char floatBuf[128];
+                    for (std::size_t i = 0; i < peekLen; ++i) {
+                        std::snprintf(hexBuf + i * 3, sizeof(hexBuf) - i * 3,
+                                      "%02X ", peekPtr[i]);
+                    }
+                    hexBuf[peekLen * 3 - 1] = '\0';
+                    // Also interpret as 8 floats for quick visual
+                    // sanity-check of position/UV ranges.
+                    float asFloats[8];
+                    std::memcpy(asFloats, peekPtr, sizeof(asFloats));
+                    std::snprintf(floatBuf, sizeof(floatBuf),
+                        "%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
+                        asFloats[0], asFloats[1], asFloats[2], asFloats[3],
+                        asFloats[4], asFloats[5], asFloats[6], asFloats[7]);
+                    NSLog(@"[GL]     vbo peek32 hex=[%s]", hexBuf);
+                    NSLog(@"[GL]     vbo peek32 f32=[%s]", floatBuf);
+                } else {
+                    NSLog(@"[GL]     vbo peek32 skip=private-or-null");
                 }
             }
         }

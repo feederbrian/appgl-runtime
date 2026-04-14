@@ -996,7 +996,16 @@ struct GLContext::Impl {
         return true;
     }
 
-    bool replaceMetalTexture(GLTextureObject& object) {
+    // Phase 8X Group 4d follow-up¹⁰ — `texName` is diagnostic-only and
+    // defaults to 0 (no log). The four user-facing upload call sites
+    // (`texImage` / `texSubImage` / `texStorage` / `texStorageMultisample`)
+    // pass the current bound texture name so the fingerprint log can
+    // emit once per GL texture name per process. The three internal
+    // callers (`generateMipmaps`, attachment clear/copy paths) leave
+    // the default — they're downstream transformations of already-
+    // uploaded data, not the initial upload from Recoil we want to
+    // fingerprint.
+    bool replaceMetalTexture(GLTextureObject& object, GLuint texName = 0) {
         const auto baseIt = object.levels.find(0);
         if (baseIt == object.levels.end()) {
             releaseRetainedMetalObject(object.metalTexture);
@@ -1059,6 +1068,118 @@ struct GLContext::Impl {
             }
         }
         object.metalTexture = transferRetainedMetalObject(texture);
+
+        // Phase 8X Group 4d follow-up¹⁰ — §Primary upload-bytes
+        // fingerprint for BAR's Theory A/B split.
+        //
+        // BAR's followup⁹ capture showed the two large glyph atlases
+        // (texName=3 / texName=4) are `GL_RGBA8`, not compat single-
+        // channel, so the followup⁹ compat-glyph sampler override
+        // never touches them. The residual question is whether the
+        // RGBA8 atlas bytes we hand to Metal are byte-identical to
+        // what Recoil's font cache produces on native GL. Two
+        // theories:
+        //
+        //   A (35% weighted) — sampler state (REPEAT wrap + mipmap
+        //       filter without mip chain on texName=4) actually
+        //       matters on Metal in a way it doesn't on native GL.
+        //   B (65% weighted) — the RGBA8 upload bytes are themselves
+        //       wrong. Our `buildRGBA8Upload` channel-fill path
+        //       might swap channels, endianness, or stride for
+        //       inputs that are already RGBA8 with no channel fill
+        //       needed (the most common path for UI atlases).
+        //
+        // The cheap disambiguator is a fingerprint of the bytes we
+        // actually send to Metal. BAR will cross-reference against
+        // the same fingerprint computed on native GL inputs on
+        // their side. Match → Theory B is out, bug is elsewhere.
+        // Mismatch → Theory B is in, the upload path is corrupting
+        // data.
+        //
+        // Fingerprint shape (per BAR's §Primary ask):
+        //   - texName + internalFormat
+        //   - width x height + total RGBA8 byte count
+        //   - FNV-1a 32-bit hash of level-0 byte payload's first 256
+        //     bytes and last 256 bytes (cheap, stable, easy to
+        //     reproduce in any language — BAR can compute the same
+        //     hash on native GL inputs without a library dependency)
+        //   - Nonzero-byte histogram per 1/4 of the level-0 payload
+        //     (four counters — detects all-zero quarters, which
+        //     would reveal a channel-fill bug that blanks one
+        //     channel or a stride bug that leaves gaps)
+        //
+        // One-shot per GL texture name per process. Only fires when
+        // the caller passes a non-zero `texName` — the internal
+        // callers (generateMipmaps / attachment clear) pass 0 so we
+        // don't double-log the same texture on every re-upload.
+        if (texName != 0 && loggedUploadTextures.insert(texName).second) {
+            const auto& levelZero = baseLevel;
+            const std::size_t byteCount = levelZero.rgba8.size();
+            const std::uint8_t* bytes = levelZero.rgba8.data();
+
+            // FNV-1a 32-bit hash — trivial to reproduce, no lib dep.
+            auto fnv1a = [](const std::uint8_t* p, std::size_t n) {
+                std::uint32_t h = 0x811c9dc5u;
+                for (std::size_t i = 0; i < n; ++i) {
+                    h ^= p[i];
+                    h *= 0x01000193u;
+                }
+                return h;
+            };
+            const std::size_t headLen = std::min<std::size_t>(byteCount, 256);
+            const std::size_t tailLen = byteCount > 256 ? 256 : 0;
+            const std::uint32_t headHash = headLen ? fnv1a(bytes, headLen) : 0;
+            const std::uint32_t tailHash = tailLen
+                ? fnv1a(bytes + byteCount - tailLen, tailLen) : 0;
+
+            // Nonzero-byte histogram per 1/4 of the payload. Catches
+            // "channel zero-fill" and "stride-gap" bugs cheaply.
+            std::uint32_t nonzeroQuartiles[4] = {0, 0, 0, 0};
+            if (byteCount > 0) {
+                const std::size_t quarterSize = byteCount / 4;
+                for (int q = 0; q < 4; ++q) {
+                    const std::size_t start = static_cast<std::size_t>(q) * quarterSize;
+                    const std::size_t end = (q == 3) ? byteCount : (start + quarterSize);
+                    std::uint32_t count = 0;
+                    for (std::size_t i = start; i < end; ++i) {
+                        if (bytes[i] != 0) { ++count; }
+                    }
+                    nonzeroQuartiles[q] = count;
+                }
+            }
+
+            // First 16 bytes as hex — a "peek" for visually spotting
+            // obvious channel swaps or zero-fill without computing
+            // anything.
+            char hexPeek[64];
+            const std::size_t peekLen = std::min<std::size_t>(byteCount, 16);
+            for (std::size_t i = 0; i < peekLen; ++i) {
+                std::snprintf(hexPeek + i * 3, sizeof(hexPeek) - i * 3,
+                              "%02X ", bytes[i]);
+            }
+            if (peekLen > 0) {
+                hexPeek[peekLen * 3 - 1] = '\0';
+            } else {
+                hexPeek[0] = '\0';
+            }
+
+            NSLog(@"[GL] replaceMetalTexture first-upload texName=%u"
+                  @" internalFormat=0x%04X sourceFormat=0x%04X sourceType=0x%04X"
+                  @" width=%d height=%d depth=%d rgba8Bytes=%zu"
+                  @" fnv1a_head256=0x%08X fnv1a_tail256=0x%08X"
+                  @" nonzeroQ0=%u nonzeroQ1=%u nonzeroQ2=%u nonzeroQ3=%u"
+                  @" peek16=[%s]",
+                  texName,
+                  static_cast<unsigned>(levelZero.desc.internalFormat),
+                  static_cast<unsigned>(levelZero.desc.sourceFormat),
+                  static_cast<unsigned>(levelZero.desc.sourceType),
+                  levelZero.desc.width, levelZero.desc.height, levelZero.desc.depth,
+                  byteCount,
+                  headHash, tailHash,
+                  nonzeroQuartiles[0], nonzeroQuartiles[1],
+                  nonzeroQuartiles[2], nonzeroQuartiles[3],
+                  hexPeek);
+        }
         return true;
     }
 
@@ -2400,6 +2521,16 @@ struct GLContext::Impl {
     // `resolveSamplerBindings` and `rebuildTextureSamplerState`.
     std::unordered_set<GLuint> loggedSamplerResolvePrograms;
     std::unordered_set<GLuint> loggedSamplerBuildTextures;
+    // Phase 8X Group 4d follow-up¹⁰ — one-shot-per-texture dedup for
+    // the RGBA8 upload-bytes fingerprint log. Keyed on GL texture
+    // name; only the first successful upload per texture fires the
+    // log. Re-uploads (glTexSubImage over an already-logged texture)
+    // are silent after the first fingerprint lands so BAR's grep
+    // stays clean. If BAR needs per-re-upload fingerprints in a
+    // future round we'd widen this to a map keyed on
+    // (texName, level, subregion) but the current ask is "does the
+    // first upload match native GL" which is answered by this set.
+    std::unordered_set<GLuint> loggedUploadTextures;
     // Per-context fixed-function matrix mirror. Compat-profile matrix
     // entry points (defined in src/runtime/AppGLMatrixOverrides.cpp)
     // route through this member, and the draw path reads from it to
@@ -4085,7 +4216,7 @@ bool GLContext::texImage(
     object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
     image.desc.levels = object->desc.levels;
     object->levels[level] = std::move(image);
-    if (!impl_->replaceMetalTexture(*object)) {
+    if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
@@ -4163,7 +4294,7 @@ bool GLContext::texSubImage(
             );
         }
     }
-    if (!impl_->replaceMetalTexture(*object)) {
+    if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
@@ -4218,7 +4349,7 @@ bool GLContext::texStorage(
     baseLevel.rgba8.resize(byteCount, 0);
     object->levels[0] = std::move(baseLevel);
 
-    if (!impl_->replaceMetalTexture(*object)) {
+    if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
@@ -4278,7 +4409,7 @@ bool GLContext::texStorageMultisample(
     baseLevel.rgba8.resize(byteCount, 0);
     object->levels[0] = std::move(baseLevel);
 
-    if (!impl_->replaceMetalTexture(*object)) {
+    if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
     }
