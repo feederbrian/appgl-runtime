@@ -4291,6 +4291,288 @@ public:
     }
 };
 
+// Phase 8X Group 4d follow-up¹⁴ §Tertiary — alpha-blend gauntlet scene.
+//
+// Regression test for the two root causes BAR diagnosed in
+// followup¹³-verification and this round (followup¹⁴) lands:
+//
+//   Candidate 1 — blend state never reached the pipeline descriptor.
+//     Pre-follow-up¹⁴, `encodeTranslatedDraw` left
+//     `MTLRenderPipelineColorAttachmentDescriptor` at its default
+//     (`blendingEnabled=NO, src=One, dst=Zero`), so every translated
+//     draw was opaque on the GPU side regardless of what the GL state
+//     tracker had recorded via `glEnable(GL_BLEND)` + `glBlendFunc(...)`.
+//     This scene draws an opaque blue quad as background, then draws a
+//     semi-transparent red quad over it using the canonical
+//     `(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` over-compositing function
+//     with `glEnable(GL_BLEND)`. Under the pre-follow-up¹⁴ bug the
+//     center pixel would be pure red (the second draw's raw output).
+//     Under the fix the center pixel is `0.5*red + 0.5*blue = purple`.
+//
+//   Candidate 2 — vertex format derivation ignored the VAO and always
+//     returned `Float4/Float3` based on the shader input's scalar type.
+//     This scene is deliberately a single-attribute Float3 position
+//     draw, which already worked before the fix — but the cache-key
+//     expansion and format derivation still route through the same
+//     `vaoTypeToMTLFormat` code path here, so the round-trip golden
+//     also validates that the follow-up¹⁴ change did not regress the
+//     simple Float3 position-only case.
+//
+// The scene also performs a spec-driven round-trip of the full 14-entry
+// GL blend-factor enum table via `glBlendFunc` + `glGetIntegerv`, which
+// is a pure GL-state-tracker test (no Metal translation involved).
+// Together these checks exercise both the state-plumbing path that was
+// broken (Candidate 1) and the state-tracker surface area that the draw
+// builder now reads from.
+class AlphaBlendGauntletScene final : public Scene {
+public:
+    std::string id() const override { return "phase-c.alpha-blend-gauntlet"; }
+    std::string phase() const override { return "phase-c"; }
+    SceneSize framebufferSize() const override { return {96, 96}; }
+
+    double tolerance() const override {
+        // Blend math is deterministic (no rasterisation edges involved
+        // since both quads cover the whole viewport), but leave a one-
+        // channel leeway for sRGB/linear rounding across GPU families.
+        return 0.02;
+    }
+
+    void setup(GLContext& context) override {
+        (void)context;
+        auto& gl = Runtime::shared().dispatch();
+
+        // ---------- Spec round-trip of the GL blend-factor enum table.
+        // Every canonical blend factor must round-trip through
+        // glBlendFunc → glGetIntegerv(GL_BLEND_SRC_RGB) unchanged. The
+        // state-tracker read path was also where Candidate 1's fix
+        // lives in `GLContext::drawArrays`, so we assert it works in
+        // isolation before driving the Metal pipeline.
+        const GLenum blendFactors[] = {
+            GL_ZERO,
+            GL_ONE,
+            GL_SRC_COLOR,
+            GL_ONE_MINUS_SRC_COLOR,
+            GL_DST_COLOR,
+            GL_ONE_MINUS_DST_COLOR,
+            GL_SRC_ALPHA,
+            GL_ONE_MINUS_SRC_ALPHA,
+            GL_DST_ALPHA,
+            GL_ONE_MINUS_DST_ALPHA,
+            GL_CONSTANT_COLOR,
+            GL_ONE_MINUS_CONSTANT_COLOR,
+            GL_CONSTANT_ALPHA,
+            GL_ONE_MINUS_CONSTANT_ALPHA,
+        };
+        for (GLenum factor : blendFactors) {
+            gl.glBlendFunc(factor, GL_ZERO);
+            GLint srcRGB = 0;
+            GLint srcAlpha = 0;
+            gl.glGetIntegerv(GL_BLEND_SRC_RGB, &srcRGB);
+            gl.glGetIntegerv(GL_BLEND_SRC_ALPHA, &srcAlpha);
+            expectCondition(static_cast<GLenum>(srcRGB) == factor,
+                            "GL_BLEND_SRC_RGB round-trips glBlendFunc factor");
+            expectCondition(static_cast<GLenum>(srcAlpha) == factor,
+                            "GL_BLEND_SRC_ALPHA round-trips glBlendFunc factor");
+        }
+
+        // Also round-trip glBlendEquation through the standard four
+        // equations. GL_FUNC_ADD is the draw-time default after reset.
+        const GLenum blendEquations[] = {
+            GL_FUNC_ADD,
+            GL_FUNC_SUBTRACT,
+            GL_FUNC_REVERSE_SUBTRACT,
+            GL_MIN,
+            GL_MAX,
+        };
+        for (GLenum eq : blendEquations) {
+            gl.glBlendEquation(eq);
+            GLint eqRGB = 0;
+            GLint eqAlpha = 0;
+            gl.glGetIntegerv(GL_BLEND_EQUATION_RGB, &eqRGB);
+            gl.glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &eqAlpha);
+            expectCondition(static_cast<GLenum>(eqRGB) == eq,
+                            "GL_BLEND_EQUATION_RGB round-trips glBlendEquation");
+            expectCondition(static_cast<GLenum>(eqAlpha) == eq,
+                            "GL_BLEND_EQUATION_ALPHA round-trips glBlendEquation");
+        }
+
+        // Reset to the over-compositing pair for the actual draw.
+        gl.glBlendEquation(GL_FUNC_ADD);
+        gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        // ---------- Shader program: Float3 position + uniform vec4 color.
+        // Intentionally minimal: the goal is to isolate the blend-state
+        // plumbing, not to exercise every vertex format path (that's
+        // the VaryingInterfaceScene's job). The single Float3 position
+        // attribute still routes through the new `vaoTypeToMTLFormat`
+        // path, so this scene validates that Float3 still produces
+        // `MTLVertexFormatFloat3`.
+        const char* vertexSource =
+            "#version 330 core\n"
+            "layout(location = 0) in vec3 aPosition;\n"
+            "void main() {\n"
+            "    gl_Position = vec4(aPosition, 1.0);\n"
+            "}\n";
+        const char* fragmentSource =
+            "#version 330 core\n"
+            "uniform vec4 uColor;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = uColor;\n"
+            "}\n";
+
+        const GLuint vertex = gl.glCreateShader(GL_VERTEX_SHADER);
+        const GLuint fragment = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(vertex, 1, &vertexSource, nullptr);
+        gl.glShaderSource(fragment, 1, &fragmentSource, nullptr);
+        gl.glCompileShader(vertex);
+        gl.glCompileShader(fragment);
+
+        program_ = gl.glCreateProgram();
+        gl.glAttachShader(program_, vertex);
+        gl.glAttachShader(program_, fragment);
+        gl.glLinkProgram(program_);
+        GLint linkStatus = 0;
+        gl.glGetProgramiv(program_, GL_LINK_STATUS, &linkStatus);
+        expectCondition(linkStatus == GL_TRUE, "alpha-blend gauntlet program links");
+        gl.glDeleteShader(vertex);
+        gl.glDeleteShader(fragment);
+
+        // ---------- Full-viewport quad as two triangles (6 vertices).
+        // Covers the entire clip space so both draws write every pixel,
+        // which makes the center-pixel blend-math assertion trivial:
+        // no rasterisation edges fall on the sample point.
+        const GLfloat positions[18] = {
+            -1.0f, -1.0f, 0.0f,
+             1.0f, -1.0f, 0.0f,
+             1.0f,  1.0f, 0.0f,
+            -1.0f, -1.0f, 0.0f,
+             1.0f,  1.0f, 0.0f,
+            -1.0f,  1.0f, 0.0f,
+        };
+
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glBindVertexArray(vao_);
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(positions), positions, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), nullptr);
+
+        gl.glUseProgram(program_);
+        colorLocation_ = gl.glGetUniformLocation(program_, "uColor");
+        expectCondition(colorLocation_ >= 0,
+                        "uColor is resolvable on alpha-blend gauntlet program");
+    }
+
+    void render(GLContext& context) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        // Reset pipeline cache metrics so the post-draw assertion sees
+        // only the work this scene generated.
+        context.resetPipelineCacheMetrics();
+
+        gl.glViewport(0, 0, framebufferSize().width, framebufferSize().height);
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+
+        gl.glUseProgram(program_);
+        gl.glBindVertexArray(vao_);
+
+        // Draw 1 — opaque blue background (blend disabled).
+        gl.glDisable(GL_BLEND);
+        const GLfloat opaqueBlue[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+        gl.glUniform4fv(colorLocation_, 1, opaqueBlue);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        // Draw 2 — semi-transparent red over-composited with
+        // `(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`. Before follow-up¹⁴
+        // the pipeline descriptor would have ignored the enable and
+        // produced pure red output. After the fix the center pixel is
+        // blended to 50/50 red/blue.
+        gl.glEnable(GL_BLEND);
+        gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        gl.glBlendEquation(GL_FUNC_ADD);
+        const GLfloat halfAlphaRed[4] = {1.0f, 0.0f, 0.0f, 0.5f};
+        gl.glUniform4fv(colorLocation_, 1, halfAlphaRed);
+        gl.glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        gl.glFlush();
+
+        // Follow-up¹⁴ verification — the translated draw path must
+        // have produced (or reused) a pipeline state for each of the
+        // two distinct blend configurations without failing.
+        const auto metrics = context.pipelineCacheMetrics();
+        expectCondition(metrics.buildAttempts >= 1,
+                        "alpha-blend scene reached pipeline build branch");
+        expectCondition(metrics.buildFailures == 0,
+                        "alpha-blend scene produced a Metal-accepted pipeline state");
+
+        // Sample the center pixel and verify the blend math matches
+        // the spec: final = src.rgb * src.a + dst.rgb * (1 - src.a)
+        //                 = (1,0,0) * 0.5 + (0,0,1) * 0.5
+        //                 = (0.5, 0, 0.5)  →  ~(127, 0, 127, 255).
+        const GLsizei cx = framebufferSize().width / 2;
+        const GLsizei cy = framebufferSize().height / 2;
+        std::uint8_t rgba[4] = {0, 0, 0, 0};
+        gl.glReadPixels(cx, cy, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        // Allow ±4 LSB for sRGB/linear rounding + rasterisation rounding.
+        const int r = rgba[0];
+        const int g = rgba[1];
+        const int b = rgba[2];
+        expectCondition(r >= 120 && r <= 135,
+                        "alpha-blend center red channel ≈ 0.5");
+        expectCondition(g <= 4,
+                        "alpha-blend center green channel ≈ 0");
+        expectCondition(b >= 120 && b <= 135,
+                        "alpha-blend center blue channel ≈ 0.5");
+
+        // Restore state so the readback path (run by `runScene` after
+        // this function returns) doesn't inherit an unusual enable.
+        gl.glDisable(GL_BLEND);
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glAttachShader,
+            FunctionId::glBindBuffer,
+            FunctionId::glBindVertexArray,
+            FunctionId::glBlendEquation,
+            FunctionId::glBlendFunc,
+            FunctionId::glBufferData,
+            FunctionId::glClear,
+            FunctionId::glClearColor,
+            FunctionId::glCompileShader,
+            FunctionId::glCreateProgram,
+            FunctionId::glCreateShader,
+            FunctionId::glDeleteShader,
+            FunctionId::glDisable,
+            FunctionId::glDrawArrays,
+            FunctionId::glEnable,
+            FunctionId::glEnableVertexAttribArray,
+            FunctionId::glFlush,
+            FunctionId::glGenBuffers,
+            FunctionId::glGenVertexArrays,
+            FunctionId::glGetIntegerv,
+            FunctionId::glGetProgramiv,
+            FunctionId::glGetUniformLocation,
+            FunctionId::glLinkProgram,
+            FunctionId::glReadPixels,
+            FunctionId::glShaderSource,
+            FunctionId::glUniform4fv,
+            FunctionId::glUseProgram,
+            FunctionId::glVertexAttribPointer,
+            FunctionId::glViewport,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLuint vao_ = 0;
+    GLuint vbo_ = 0;
+    GLint colorLocation_ = -1;
+};
+
 // =========================================================================
 // Phase D — GL 4.4 / 4.5 DSA / 4.6 function coverage scenes
 // =========================================================================
@@ -7520,6 +7802,11 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(advancedDrawScene));
         TextureOpsTFFormatQueryScene textureOpsTFScene;
         tests.push_back(runScene(textureOpsTFScene));
+        // Phase 8X Group 4d follow-up¹⁴ §Tertiary — landed alongside
+        // the blend-state + VAO-format derivation fixes so the round-
+        // trip golden catches regressions in either root cause.
+        AlphaBlendGauntletScene alphaBlendScene;
+        tests.push_back(runScene(alphaBlendScene));
     }
 
     if (normalizedPhase == "all" || normalizedPhase == "phase-d") {

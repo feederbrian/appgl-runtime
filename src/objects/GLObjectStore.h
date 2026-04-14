@@ -361,6 +361,24 @@ struct GLProgramObject {
     // can invalidate if the render target format changes.
     std::uint32_t metalPipelineColorFormat = 0;
 
+    // Phase 8X Group 4d follow-up¹⁴ — map-based pipeline cache. The old
+    // single-slot {metalPipelineState + metalPipelineColorFormat} cache
+    // could only hold one pipeline per program at a time, which
+    // thrashed when spring toggled `GL_BLEND` 15× per frame
+    // (followup¹³-verification §Candidate-1). The new cache keys on a
+    // 64-bit hash of (colorFormat, blend tuple, per-attribute format
+    // tuple) so a program that draws both an opaque first pass and an
+    // alpha-blended second pass keeps both pipelines hot.
+    //
+    // Values are `id<MTLRenderPipelineState>` type-erased to `void*`
+    // and retained via CFBridgingRetain at insert time. The map is
+    // cleared (and entries CFRelease'd) at link time by the existing
+    // pipeline-state reset in `linkProgram`. Entries are leaked on
+    // program delete, matching the prior single-slot cache's behavior
+    // — program deletion is rare, and the static table for this
+    // process lifetime is tens of entries at most.
+    std::unordered_map<std::uint64_t, void*> metalPipelineStateCache;
+
     // Phase 8X Group 4d follow-up³ — diagnostic instrumentation for the
     // translated-draw fall-through path. Each bit corresponds to a
     // TranslatedFallbackGate enumerator (defined in GLContext.mm). The

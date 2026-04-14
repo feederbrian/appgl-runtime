@@ -6757,6 +6757,19 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->vertexMSL.clear();
     programObject->fragmentMSL.clear();
     programObject->metalPipelineState = nullptr;
+    // Phase 8X Group 4d follow-up¹⁴ — release every cached pipeline
+    // on relink so the map doesn't hold stale id<MTLRenderPipelineState>
+    // pointers derived from the old MSL. The scalar `metalPipelineState`
+    // slot above is cleared by assignment (not CFRelease'd) to match
+    // the pre-follow-up¹⁴ leak-on-relink behavior; the map needs
+    // explicit CFRelease because we retained each entry on insert.
+    for (auto& entry : programObject->metalPipelineStateCache) {
+        if (entry.second != nullptr) {
+            CFRelease(entry.second);
+        }
+    }
+    programObject->metalPipelineStateCache.clear();
+    programObject->metalPipelineColorFormat = 0;
 
     ShaderTranslator translator;
     BindingMap bindings;
@@ -7943,6 +7956,59 @@ struct SolidColorDrawSetup {
     std::size_t positionShadowSize = 0;
 };
 
+// Phase 8X Group 4d follow-up¹⁴ — common pipeline state plumbing for
+// the translated-draw path. Centralises the depth/cull/front-face/
+// wireframe/blend reads so every draw entry point captures the same
+// snapshot without drifting. The blend fields come directly from
+// `GLStateTracker::blendState()` — the getter already returns the RGB
+// vs. alpha split, so we just mirror it into the TDI substruct and
+// separately ask `isEnabled(GL_BLEND)` for the enable bit (which lives
+// in `enabledCaps_`, not the blend struct itself).
+static void populateTranslatedDrawFixedFunctionState(
+    TranslatedDrawInfo& tdi, GLStateTracker& state)
+{
+    tdi.depthTestEnabled = state.isEnabled(GL_DEPTH_TEST);
+    tdi.depthFunc = state.depthState().func;
+    tdi.cullFaceEnabled = state.isEnabled(GL_CULL_FACE);
+    tdi.cullFaceMode = state.rasterState().cullFaceMode;
+    tdi.frontFace = state.rasterState().frontFace;
+    tdi.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
+
+    const auto& gl = state.blendState();
+    tdi.blend.enabled = state.isEnabled(GL_BLEND);
+    tdi.blend.srcRGB = gl.srcRGB;
+    tdi.blend.dstRGB = gl.dstRGB;
+    tdi.blend.srcAlpha = gl.srcAlpha;
+    tdi.blend.dstAlpha = gl.dstAlpha;
+    tdi.blend.equationRGB = gl.equationRGB;
+    tdi.blend.equationAlpha = gl.equationAlpha;
+    tdi.blend.colorMaskR = (gl.colorMask[0] != GL_FALSE);
+    tdi.blend.colorMaskG = (gl.colorMask[1] != GL_FALSE);
+    tdi.blend.colorMaskB = (gl.colorMask[2] != GL_FALSE);
+    tdi.blend.colorMaskA = (gl.colorMask[3] != GL_FALSE);
+}
+
+// Phase 8X Group 4d follow-up¹⁴ — VAO → VertexAttributeLayout field
+// copy. The GL `glVertexAttribPointer` (and `glVertexAttribIPointer` /
+// `glVertexAttribFormat`) parameters are the *source of truth* for the
+// MTLVertexFormat of each attribute, not `ShaderReflection::vertexInputs
+// [i].type`. Prior to follow-up¹⁴ the vertex descriptor derived
+// attribute formats from the shader-reflected scalar type, which
+// produced `Float4` for any `in vec4 color` input even when the VBO
+// layout stored 4×UBYTE normalized colors (see followup¹³-verification
+// §Smoking-Gun). Capturing these four fields end-to-end lets
+// `encodeTranslatedDraw` call `vaoTypeToMTLFormat` with the real VBO
+// layout instead of the shader-reflected placeholder.
+static void populateVertexAttributeLayoutVAOFields(
+    TranslatedDrawInfo::VertexAttributeLayout& layout,
+    const GLVertexAttributeState& attr)
+{
+    layout.glType = attr.type;
+    layout.glComponentCount = attr.size;
+    layout.glNormalized = attr.normalized;
+    layout.glIsInteger = attr.integer;
+}
+
 SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStore& objects, GLenum mode, const char* debugLabel) {
     SolidColorDrawSetup setup;
 
@@ -8114,18 +8180,22 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
-                    tdi.depthTestEnabled = impl_->state->isEnabled(GL_DEPTH_TEST);
-                    tdi.depthFunc = impl_->state->depthState().func;
-                    tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);
-                    tdi.cullFaceMode = impl_->state->rasterState().cullFaceMode;
-                    tdi.frontFace = impl_->state->rasterState().frontFace;
-                    tdi.wireframe = (impl_->state->rasterState().polygonFillMode == GL_LINE);
+                    // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
+                    // function state snapshot (depth/cull/front-face/
+                    // wireframe/blend). Replaces the prior inline reads
+                    // so drawArrays / drawArraysInstanced / drawElements
+                    // all capture identical state.
+                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                    // Phase 8X Group 4d follow-up¹⁴ — map-based cache
+                    // so spring's 15×/frame blend toggle doesn't thrash
+                    // the single-slot scalar cache above.
+                    tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
                     // Phase 8X Group 4d follow-up⁸ — diagnostic-only
                     // program identifier used by encodeTranslatedDraw's
                     // first-draw-per-program NSLog. Non-owning, no
@@ -8135,6 +8205,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // Collect per-attribute layout from the VAO.  All enabled
                     // attributes whose resolved buffer matches the primary VBO
                     // go into vertexAttributeLayouts (Metal buffer 0).
+                    //
+                    // Phase 8X Group 4d follow-up¹⁴ — the VAO fields
+                    // (`glType/glComponentCount/glNormalized/glIsInteger`)
+                    // are now carried end-to-end so encodeTranslatedDraw
+                    // can derive the real MTLVertexFormat from the VBO
+                    // layout rather than the shader-reflected scalar type.
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
                         const auto& attr = vao->attributes[ai];
                         if (!attr.enabled) continue;
@@ -8143,6 +8219,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                         TranslatedDrawInfo::VertexAttributeLayout layout;
                         layout.location = static_cast<GLuint>(ai);
                         layout.offset = attrRes.offset - resolved.offset;
+                        populateVertexAttributeLayoutVAOFields(layout, attr);
                         tdi.vertexAttributeLayouts.push_back(layout);
                     }
 
@@ -8320,18 +8397,19 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
-                    tdi.depthTestEnabled = impl_->state->isEnabled(GL_DEPTH_TEST);
-                    tdi.depthFunc = impl_->state->depthState().func;
-                    tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);
-                    tdi.cullFaceMode = impl_->state->rasterState().cullFaceMode;
-                    tdi.frontFace = impl_->state->rasterState().frontFace;
-                    tdi.wireframe = (impl_->state->rasterState().polygonFillMode == GL_LINE);
+                    // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
+                    // function state snapshot. See drawArrays.
+                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                    // Phase 8X Group 4d follow-up¹⁴ — map-based cache
+                    // so spring's 15×/frame blend toggle doesn't thrash
+                    // the single-slot scalar cache above.
+                    tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
                     // Phase 8X Group 4d follow-up⁸ — diagnostic-only
                     // program identifier used by encodeTranslatedDraw's
                     // first-draw-per-program NSLog. Non-owning, no
@@ -8342,6 +8420,12 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // attribute 0 (per-vertex) go into vertexAttributeLayouts
                     // (Metal buffer 0).  Attributes in OTHER VBOs (e.g. per-instance
                     // data with glVertexAttribDivisor) become extraVertexBuffers.
+                    //
+                    // Phase 8X Group 4d follow-up¹⁴ — propagate VAO format
+                    // fields (`glType/glComponentCount/glNormalized/
+                    // glIsInteger`) for both the primary-buffer path and
+                    // the extra-buffer path so encodeTranslatedDraw can
+                    // derive the real MTLVertexFormat.
                     std::unordered_map<GLuint, std::size_t> extraBufferMap;
 
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
@@ -8360,6 +8444,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                             TranslatedDrawInfo::VertexAttributeLayout layout;
                             layout.location = static_cast<GLuint>(ai);
                             layout.offset = attrRes.offset - resolved.offset;
+                            populateVertexAttributeLayoutVAOFields(layout, attr);
                             tdi.vertexAttributeLayouts.push_back(layout);
                         } else if (attrRes.bufferName != resolved.bufferName) {
                             // Different VBO — group by GL buffer name.
@@ -8388,6 +8473,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                             TranslatedDrawInfo::VertexAttributeLayout layout;
                             layout.location = static_cast<GLuint>(ai);
                             layout.offset = attrRes.offset;
+                            populateVertexAttributeLayoutVAOFields(layout, attr);
                             tdi.extraVertexBuffers[idx].attributes.push_back(layout);
                         }
                     }
@@ -8574,18 +8660,19 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
-                    tdi.depthTestEnabled = impl_->state->isEnabled(GL_DEPTH_TEST);
-                    tdi.depthFunc = impl_->state->depthState().func;
-                    tdi.cullFaceEnabled = impl_->state->isEnabled(GL_CULL_FACE);
-                    tdi.cullFaceMode = impl_->state->rasterState().cullFaceMode;
-                    tdi.frontFace = impl_->state->rasterState().frontFace;
-                    tdi.wireframe = (impl_->state->rasterState().polygonFillMode == GL_LINE);
+                    // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
+                    // function state snapshot. See drawArrays.
+                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
                     tdi.fragmentReflection = &program->fragmentReflection;
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                    // Phase 8X Group 4d follow-up¹⁴ — map-based cache
+                    // so spring's 15×/frame blend toggle doesn't thrash
+                    // the single-slot scalar cache above.
+                    tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
                     // Phase 8X Group 4d follow-up⁸ — diagnostic-only
                     // program identifier used by encodeTranslatedDraw's
                     // first-draw-per-program NSLog. Non-owning, no
@@ -8593,6 +8680,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.program = programName;
 
                     // Collect per-attribute layout from the VAO.
+                    //
+                    // Phase 8X Group 4d follow-up¹⁴ — propagate VAO
+                    // format fields so encodeTranslatedDraw derives
+                    // the real MTLVertexFormat from the VBO layout.
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
                         const auto& attr = vao->attributes[ai];
                         if (!attr.enabled) continue;
@@ -8601,6 +8692,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         TranslatedDrawInfo::VertexAttributeLayout layout;
                         layout.location = static_cast<GLuint>(ai);
                         layout.offset = attrRes.offset - resolved.offset;
+                        populateVertexAttributeLayoutVAOFields(layout, attr);
                         tdi.vertexAttributeLayouts.push_back(layout);
                     }
 

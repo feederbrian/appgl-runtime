@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "../../include/AppGL/glcorearb.h"
@@ -73,9 +74,32 @@ struct TranslatedDrawInfo {
     // within a single stride.  When non-empty, all attributes map to Metal
     // buffer index 0 with these offsets; when empty, the legacy single-
     // attribute (position-only, offset 0) behaviour is used.
+    //
+    // Phase 8X Group 4d follow-up¹⁴ — the GL VAO record fields
+    // (`glType/glComponentCount/glNormalized/glIsInteger`) are the
+    // *source of truth* for the MTLVertexFormat of each attribute, not
+    // the shader-reflected scalar type. Before follow-up¹⁴ the vertex
+    // descriptor derived attribute formats from `ShaderReflection::
+    // vertexInputs[i].type` (always `Float4`/`Float3`/etc.), which
+    // produced a structural `MTLVertexFormatFloat4` entry for any
+    // `in vec4 color` input even when the VBO layout stored 4×UBYTE
+    // normalized colors. The GPU then reinterpreted 4 bytes of
+    // UBYTE4 + 12 bytes of the next vertex as `float4`, producing the
+    // NaN-smeared glyph text BAR diagnosed in followup¹³-verification
+    // §Smoking-Gun. The fix is to carry the VAO's `glVertexAttribPointer`
+    // parameters end-to-end and derive the Metal format from
+    // `vaoTypeToMTLFormat(glType, glComponentCount, glNormalized,
+    // glIsInteger)` at encode time.
     struct VertexAttributeLayout {
         GLuint location = 0;
         std::size_t offset = 0;
+        // VAO-derived format hints (follow-up¹⁴). Defaults match the
+        // pre-follow-up¹⁴ shader-reflected `Float4` assumption so that
+        // call sites which have not yet been updated keep working.
+        GLenum glType = GL_FLOAT;
+        GLint glComponentCount = 4;
+        GLboolean glNormalized = GL_FALSE;
+        bool glIsInteger = false;
     };
     std::vector<VertexAttributeLayout> vertexAttributeLayouts;
 
@@ -173,6 +197,44 @@ struct TranslatedDrawInfo {
     GLenum frontFace = GL_CCW;
     bool wireframe = false;
 
+    // Phase 8X Group 4d follow-up¹⁴ — blend state plumbing.
+    //
+    // Before follow-up¹⁴ the pipeline descriptor's
+    // `colorAttachments[0]` was left at Metal's defaults
+    // (`blendingEnabled=NO, src=One, dst=Zero, op=Add, writeMask=All`),
+    // which made *every* draw opaque on the GPU side regardless of
+    // what the GL state tracker had recorded via `glEnable(GL_BLEND)` +
+    // `glBlendFunc(...)`. BAR diagnosed this in followup¹³-verification
+    // §Candidate-1 as the cause of the smeared-text overlay for
+    // programs that relied on premultiplied-alpha over-compositing.
+    //
+    // `GLContext::drawArrays` (and the other draw entry points) now
+    // reads `state->blendState()` + `state->isEnabled(GL_BLEND)` into
+    // this substruct, and `encodeTranslatedDraw` applies it to the
+    // pipeline color attachment descriptor before
+    // `newRenderPipelineStateWithDescriptor`. The pipeline cache key
+    // is also extended to include these fields so a program that
+    // toggles blend mid-frame rebuilds its pipeline correctly instead
+    // of reusing a stale one.
+    //
+    // Defaults match `MTLRenderPipelineColorAttachmentDescriptor`'s
+    // documented defaults so that a zero-initialised TranslatedDrawInfo
+    // still produces a valid opaque pipeline.
+    struct BlendState {
+        bool enabled = false;
+        GLenum srcRGB = GL_ONE;
+        GLenum dstRGB = GL_ZERO;
+        GLenum srcAlpha = GL_ONE;
+        GLenum dstAlpha = GL_ZERO;
+        GLenum equationRGB = GL_FUNC_ADD;
+        GLenum equationAlpha = GL_FUNC_ADD;
+        bool colorMaskR = true;
+        bool colorMaskG = true;
+        bool colorMaskB = true;
+        bool colorMaskA = true;
+    };
+    BlendState blend;
+
     // Translated MSL + reflection (borrowed from GLProgramObject).
     const std::string* vertexMSL = nullptr;
     const std::string* fragmentMSL = nullptr;
@@ -182,6 +244,17 @@ struct TranslatedDrawInfo {
     // Pipeline state cache (stored on GLProgramObject, updated by MetalFrameGraph).
     void** pipelineStateOut = nullptr;
     std::uint32_t* pipelineColorFormatOut = nullptr;
+
+    // Phase 8X Group 4d follow-up¹⁴ — map-based pipeline cache.
+    // Non-owning pointer to the `GLProgramObject::metalPipelineStateCache`
+    // unordered_map. When non-null, `encodeTranslatedDraw` hashes
+    // (colorFormat, blend tuple, per-attribute format tuple) into a
+    // 64-bit key and looks it up here first. On hit the mapped
+    // `id<MTLRenderPipelineState>` is used. On miss the new pipeline
+    // is built and inserted, with the old `pipelineStateOut` scalar
+    // slot also updated so the first-draw-per-program diagnostic
+    // bookkeeping keeps working.
+    std::unordered_map<std::uint64_t, void*>* pipelineStateCacheOut = nullptr;
 
     // Phase 8X Group 4d follow-up⁴ — pipeline-build failure surfacing.
     //

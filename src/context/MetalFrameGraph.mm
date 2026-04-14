@@ -26,6 +26,262 @@
 
 namespace appgl {
 
+// Phase 8X Group 4d follow-up¹⁴ — shared Metal translation helpers.
+//
+// These replace the inline `glTypeToMTLFormat` lambda that used to
+// live inside `encodeTranslatedDraw`. `vaoTypeToMTLFormat` is the
+// source-of-truth format derivation for each vertex attribute — it
+// reads the VAO's `glVertexAttribPointer` parameters (type + size +
+// normalized + integer) and returns the matching MTLVertexFormat. The
+// old path fell back on `ShaderReflection::vertexInputs[i].type`,
+// which only told us the *scalar* type the shader declared
+// (`Float4`, `Int4`, …) and blindly trusted it even when the VBO
+// actually stored packed UBYTE colors. BAR followup¹³-verification
+// §Smoking-Gun showed that is exactly what breaks spring's glyph-
+// text draw: `in vec4 col` reflected as `Float4`, but the VBO held
+// `glVertexAttribPointer(loc, 4, GL_UNSIGNED_BYTE, GL_TRUE, 24, …)`
+// — 4 bytes, not 16, so the GPU reinterpreted 4 bytes of UBYTE4 + 12
+// bytes of the next vertex as `float4` and produced NaN.
+static MTLVertexFormat vaoTypeToMTLFormat(
+    GLenum type, GLint components, GLboolean normalized, bool isInteger)
+{
+    const bool norm = (normalized == GL_TRUE);
+    const int  cc   = components < 1 ? 1 : (components > 4 ? 4 : components);
+
+    switch (type) {
+        case GL_FLOAT:
+            switch (cc) {
+                case 1: return MTLVertexFormatFloat;
+                case 2: return MTLVertexFormatFloat2;
+                case 3: return MTLVertexFormatFloat3;
+                default: return MTLVertexFormatFloat4;
+            }
+        case GL_HALF_FLOAT:
+            switch (cc) {
+                case 1: return MTLVertexFormatHalf;
+                case 2: return MTLVertexFormatHalf2;
+                case 3: return MTLVertexFormatHalf3;
+                default: return MTLVertexFormatHalf4;
+            }
+        case GL_UNSIGNED_BYTE:
+            if (isInteger) {
+                switch (cc) {
+                    case 1: return MTLVertexFormatUChar;
+                    case 2: return MTLVertexFormatUChar2;
+                    case 3: return MTLVertexFormatUChar3;
+                    default: return MTLVertexFormatUChar4;
+                }
+            }
+            if (norm) {
+                switch (cc) {
+                    case 1: return MTLVertexFormatUCharNormalized;
+                    case 2: return MTLVertexFormatUChar2Normalized;
+                    case 3: return MTLVertexFormatUChar3Normalized;
+                    default: return MTLVertexFormatUChar4Normalized;
+                }
+            }
+            // Metal has no float-cast UChar format, so we can't cleanly
+            // represent an unnormalized unsigned byte attribute feeding a
+            // float shader input. Fall back to the normalized form — the
+            // GPU will divide by 255, which is what the shader author
+            // almost certainly wanted if they didn't ask for integer.
+            switch (cc) {
+                case 1: return MTLVertexFormatUCharNormalized;
+                case 2: return MTLVertexFormatUChar2Normalized;
+                case 3: return MTLVertexFormatUChar3Normalized;
+                default: return MTLVertexFormatUChar4Normalized;
+            }
+        case GL_BYTE:
+            if (isInteger) {
+                switch (cc) {
+                    case 1: return MTLVertexFormatChar;
+                    case 2: return MTLVertexFormatChar2;
+                    case 3: return MTLVertexFormatChar3;
+                    default: return MTLVertexFormatChar4;
+                }
+            }
+            switch (cc) {
+                case 1: return MTLVertexFormatCharNormalized;
+                case 2: return MTLVertexFormatChar2Normalized;
+                case 3: return MTLVertexFormatChar3Normalized;
+                default: return MTLVertexFormatChar4Normalized;
+            }
+        case GL_UNSIGNED_SHORT:
+            if (isInteger) {
+                switch (cc) {
+                    case 1: return MTLVertexFormatUShort;
+                    case 2: return MTLVertexFormatUShort2;
+                    case 3: return MTLVertexFormatUShort3;
+                    default: return MTLVertexFormatUShort4;
+                }
+            }
+            switch (cc) {
+                case 1: return MTLVertexFormatUShortNormalized;
+                case 2: return MTLVertexFormatUShort2Normalized;
+                case 3: return MTLVertexFormatUShort3Normalized;
+                default: return MTLVertexFormatUShort4Normalized;
+            }
+        case GL_SHORT:
+            if (isInteger) {
+                switch (cc) {
+                    case 1: return MTLVertexFormatShort;
+                    case 2: return MTLVertexFormatShort2;
+                    case 3: return MTLVertexFormatShort3;
+                    default: return MTLVertexFormatShort4;
+                }
+            }
+            switch (cc) {
+                case 1: return MTLVertexFormatShortNormalized;
+                case 2: return MTLVertexFormatShort2Normalized;
+                case 3: return MTLVertexFormatShort3Normalized;
+                default: return MTLVertexFormatShort4Normalized;
+            }
+        case GL_UNSIGNED_INT:
+            switch (cc) {
+                case 1: return MTLVertexFormatUInt;
+                case 2: return MTLVertexFormatUInt2;
+                case 3: return MTLVertexFormatUInt3;
+                default: return MTLVertexFormatUInt4;
+            }
+        case GL_INT:
+            switch (cc) {
+                case 1: return MTLVertexFormatInt;
+                case 2: return MTLVertexFormatInt2;
+                case 3: return MTLVertexFormatInt3;
+                default: return MTLVertexFormatInt4;
+            }
+        default:
+            return MTLVertexFormatFloat4;
+    }
+}
+
+// Phase 8X Group 4d follow-up¹⁴ — GL → Metal blend factor / equation
+// mapping. GL enum namespace is fragmented across separate color and
+// alpha factors, but the Metal side uses a single `MTLBlendFactor`
+// enum that covers both. We map the common factors and return
+// `MTLBlendFactorZero` (the documented default) for anything we don't
+// recognise.
+static MTLBlendFactor glBlendFactorToMTL(GLenum f) {
+    switch (f) {
+        case GL_ZERO:                     return MTLBlendFactorZero;
+        case GL_ONE:                      return MTLBlendFactorOne;
+        case GL_SRC_COLOR:                return MTLBlendFactorSourceColor;
+        case GL_ONE_MINUS_SRC_COLOR:      return MTLBlendFactorOneMinusSourceColor;
+        case GL_DST_COLOR:                return MTLBlendFactorDestinationColor;
+        case GL_ONE_MINUS_DST_COLOR:      return MTLBlendFactorOneMinusDestinationColor;
+        case GL_SRC_ALPHA:                return MTLBlendFactorSourceAlpha;
+        case GL_ONE_MINUS_SRC_ALPHA:      return MTLBlendFactorOneMinusSourceAlpha;
+        case GL_DST_ALPHA:                return MTLBlendFactorDestinationAlpha;
+        case GL_ONE_MINUS_DST_ALPHA:      return MTLBlendFactorOneMinusDestinationAlpha;
+        case GL_CONSTANT_COLOR:           return MTLBlendFactorBlendColor;
+        case GL_ONE_MINUS_CONSTANT_COLOR: return MTLBlendFactorOneMinusBlendColor;
+        case GL_CONSTANT_ALPHA:           return MTLBlendFactorBlendAlpha;
+        case GL_ONE_MINUS_CONSTANT_ALPHA: return MTLBlendFactorOneMinusBlendAlpha;
+        case GL_SRC_ALPHA_SATURATE:       return MTLBlendFactorSourceAlphaSaturated;
+        default:                          return MTLBlendFactorZero;
+    }
+}
+
+static MTLBlendOperation glBlendEqToMTL(GLenum eq) {
+    switch (eq) {
+        case GL_FUNC_ADD:              return MTLBlendOperationAdd;
+        case GL_FUNC_SUBTRACT:         return MTLBlendOperationSubtract;
+        case GL_FUNC_REVERSE_SUBTRACT: return MTLBlendOperationReverseSubtract;
+        case GL_MIN:                   return MTLBlendOperationMin;
+        case GL_MAX:                   return MTLBlendOperationMax;
+        default:                       return MTLBlendOperationAdd;
+    }
+}
+
+// Phase 8X Group 4d follow-up¹⁴ — pipeline cache key. A 64-bit hash
+// of the state tuple that drives pipeline creation. The key is
+// stable across draws that share the same compiled program and the
+// same effective pipeline descriptor, so a program that draws both
+// an opaque first pass and an alpha-blended second pass keeps both
+// pipelines hot without thrashing. The 64 bits are laid out as:
+//
+//   [63..56] colorFormat low 8 bits  (MTLPixelFormat fits)
+//   [55..55] blend.enabled
+//   [54..54] colorMaskA
+//   [53..53] colorMaskB
+//   [52..52] colorMaskG
+//   [51..51] colorMaskR
+//   [50..48] eqRGB   (3 bits; covers Add/Sub/RevSub/Min/Max)
+//   [47..45] eqAlpha (3 bits)
+//   [44..41] srcRGB low 4 bits of MTLBlendFactor
+//   [40..37] dstRGB low 4 bits
+//   [36..33] srcAlpha low 4 bits
+//   [32..29] dstAlpha low 4 bits
+//   [28..0]  per-attribute format tuple hash (FNV-1a over the active
+//            vertexAttributeLayouts + extraVertexBuffers[*].attributes
+//            `glType/glComponentCount/glNormalized/glIsInteger` fields)
+//
+// Collisions are not catastrophic — the worst case is a wrong
+// pipeline gets reused, which shows up as a validation failure from
+// Metal on the next draw and triggers a rebuild. But the hash is
+// structured so the common toggles (opaque ↔ alpha-blended with
+// identical geometry layout) always produce distinct keys.
+static std::uint64_t computePipelineCacheKey(
+    const TranslatedDrawInfo& info, MTLPixelFormat colorFormat)
+{
+    std::uint64_t key = 0;
+    key |= static_cast<std::uint64_t>(colorFormat & 0xFF) << 56;
+    key |= (info.blend.enabled    ? 1ULL : 0ULL) << 55;
+    key |= (info.blend.colorMaskA ? 1ULL : 0ULL) << 54;
+    key |= (info.blend.colorMaskB ? 1ULL : 0ULL) << 53;
+    key |= (info.blend.colorMaskG ? 1ULL : 0ULL) << 52;
+    key |= (info.blend.colorMaskR ? 1ULL : 0ULL) << 51;
+
+    const std::uint64_t eqRGB = static_cast<std::uint64_t>(
+        glBlendEqToMTL(info.blend.equationRGB)) & 0x7ULL;
+    const std::uint64_t eqA = static_cast<std::uint64_t>(
+        glBlendEqToMTL(info.blend.equationAlpha)) & 0x7ULL;
+    key |= eqRGB << 48;
+    key |= eqA   << 45;
+
+    const std::uint64_t srcRGB = static_cast<std::uint64_t>(
+        glBlendFactorToMTL(info.blend.srcRGB)) & 0xFULL;
+    const std::uint64_t dstRGB = static_cast<std::uint64_t>(
+        glBlendFactorToMTL(info.blend.dstRGB)) & 0xFULL;
+    const std::uint64_t srcA = static_cast<std::uint64_t>(
+        glBlendFactorToMTL(info.blend.srcAlpha)) & 0xFULL;
+    const std::uint64_t dstA = static_cast<std::uint64_t>(
+        glBlendFactorToMTL(info.blend.dstAlpha)) & 0xFULL;
+    key |= srcRGB << 41;
+    key |= dstRGB << 37;
+    key |= srcA   << 33;
+    key |= dstA   << 29;
+
+    // FNV-1a over the per-attribute format tuple. 29 bits is enough
+    // to discriminate the half-dozen distinct layouts BAR's draw
+    // path sees in practice — grow if collisions show up.
+    std::uint32_t hash = 2166136261u;
+    auto mix = [&hash](std::uint32_t v) {
+        hash ^= v;
+        hash *= 16777619u;
+    };
+    auto hashLayout = [&](const TranslatedDrawInfo::VertexAttributeLayout& l) {
+        mix(static_cast<std::uint32_t>(l.location));
+        mix(static_cast<std::uint32_t>(l.offset));
+        mix(static_cast<std::uint32_t>(l.glType));
+        mix(static_cast<std::uint32_t>(l.glComponentCount));
+        mix(static_cast<std::uint32_t>(l.glNormalized));
+        mix(l.glIsInteger ? 1u : 0u);
+    };
+    for (const auto& l : info.vertexAttributeLayouts) {
+        hashLayout(l);
+    }
+    for (const auto& evb : info.extraVertexBuffers) {
+        mix(static_cast<std::uint32_t>(evb.stride));
+        mix(static_cast<std::uint32_t>(evb.divisor));
+        for (const auto& l : evb.attributes) {
+            hashLayout(l);
+        }
+    }
+    key |= static_cast<std::uint64_t>(hash & 0x1FFFFFFFu);
+    return key;
+}
+
 struct MetalFrameGraph::Impl {
     Impl(void* rawLayer, void* rawDevice, void* rawCommandQueue)
         : layer((__bridge CAMetalLayer*)rawLayer),
@@ -431,13 +687,35 @@ struct MetalFrameGraph::Impl {
             ? colorTexture.pixelFormat
             : MTLPixelFormatBGRA8Unorm;
 
+        // Phase 8X Group 4d follow-up¹⁴ — map-based cache lookup.
+        // The cache key encodes (colorFormat, blend tuple, per-
+        // attribute format tuple) so a program that draws with
+        // distinct blend modes or distinct VBO layouts keeps
+        // multiple pipelines hot instead of thrashing on every
+        // `glEnable(GL_BLEND)` ping-pong.
+        const std::uint64_t pipelineCacheKey =
+            computePipelineCacheKey(info, colorFormat);
+
         id<MTLRenderPipelineState> pipelineState = nil;
-        if (info.pipelineStateOut != nullptr && *info.pipelineStateOut != nullptr &&
+        if (info.pipelineStateCacheOut != nullptr) {
+            auto it = info.pipelineStateCacheOut->find(pipelineCacheKey);
+            if (it != info.pipelineStateCacheOut->end() && it->second != nullptr) {
+                pipelineState = (__bridge id<MTLRenderPipelineState>)(it->second);
+                ++pipelineCacheHits;
+            }
+        }
+        // Legacy scalar cache kept as a fallback for the first-draw
+        // diagnostic bookkeeping (`pipelineStateOut` is still read by
+        // BAR tooling) — only honoured when the map path is missing,
+        // which never happens in the current draw builders.
+        if (pipelineState == nil && info.pipelineStateCacheOut == nullptr &&
+            info.pipelineStateOut != nullptr && *info.pipelineStateOut != nullptr &&
             info.pipelineColorFormatOut != nullptr &&
             *info.pipelineColorFormatOut == static_cast<std::uint32_t>(colorFormat)) {
             pipelineState = (__bridge id<MTLRenderPipelineState>)(*info.pipelineStateOut);
             ++pipelineCacheHits;
-        } else {
+        }
+        if (pipelineState == nil) {
             // Phase 8X Group 4d follow-up⁴ — every entry into the build branch
             // bumps `pipelineBuildAttempts`, separately from the success-only
             // `pipelineCacheMisses` counter. This lets BAR-side tooling
@@ -519,8 +797,15 @@ struct MetalFrameGraph::Impl {
             // (buffer 1+) may use per-instance stepping (glVertexAttribDivisor).
             MTLVertexDescriptor* vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
 
-            // Helper: map GL type to MTLVertexFormat.
-            auto glTypeToMTLFormat = [](GLenum type) -> MTLVertexFormat {
+            // Helper: map shader-reflected scalar type to MTLVertexFormat.
+            // Phase 8X Group 4d follow-up¹⁴ — ONLY used as a fallback
+            // when the VAO record is missing (`glType == 0`). The
+            // primary path now reads `vaoTypeToMTLFormat` from the
+            // caller-supplied layout, so the Float4/UByte4 mismatch
+            // BAR diagnosed in followup¹³ is impossible to reach
+            // without a draw builder that forgot to propagate the
+            // VAO fields.
+            auto glTypeToMTLFormatFallback = [](GLenum type) -> MTLVertexFormat {
                 switch (type) {
                     case GL_FLOAT:      return MTLVertexFormatFloat;
                     case GL_FLOAT_VEC2: return MTLVertexFormatFloat2;
@@ -536,36 +821,52 @@ struct MetalFrameGraph::Impl {
 
             if (info.vertexReflection != nullptr) {
                 for (const auto& input : info.vertexReflection->vertexInputs) {
-                    MTLVertexFormat format = glTypeToMTLFormat(input.type);
-
                     // Determine which Metal buffer this attribute lives in.
                     NSUInteger metalBuf = 0;
                     NSUInteger attrOffset = 0;
+                    const TranslatedDrawInfo::VertexAttributeLayout* matched = nullptr;
 
                     // Check primary (buffer 0) attributes first.
-                    bool found = false;
                     for (const auto& layout : info.vertexAttributeLayouts) {
                         if (layout.location == input.location) {
                             metalBuf = 0;
                             attrOffset = static_cast<NSUInteger>(layout.offset);
-                            found = true;
+                            matched = &layout;
                             break;
                         }
                     }
 
                     // Check extra vertex buffers (buffer 1+).
-                    if (!found) {
+                    if (matched == nullptr) {
                         for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
                             for (const auto& layout : info.extraVertexBuffers[ei].attributes) {
                                 if (layout.location == input.location) {
                                     metalBuf = static_cast<NSUInteger>(ei + 1);
                                     attrOffset = static_cast<NSUInteger>(layout.offset);
-                                    found = true;
+                                    matched = &layout;
                                     break;
                                 }
                             }
-                            if (found) break;
+                            if (matched != nullptr) break;
                         }
+                    }
+
+                    // Phase 8X Group 4d follow-up¹⁴ — derive the Metal
+                    // vertex format from the VAO record (the real VBO
+                    // layout) rather than the shader-reflected scalar
+                    // type. The fallback branch only runs when the
+                    // draw builder failed to propagate VAO fields,
+                    // which would indicate a plumbing bug; it preserves
+                    // the pre-follow-up¹⁴ behavior for safety.
+                    MTLVertexFormat format;
+                    if (matched != nullptr && matched->glType != 0) {
+                        format = vaoTypeToMTLFormat(
+                            matched->glType,
+                            matched->glComponentCount,
+                            matched->glNormalized,
+                            matched->glIsInteger);
+                    } else {
+                        format = glTypeToMTLFormatFallback(input.type);
                     }
 
                     vertexDescriptor.attributes[input.location].format = format;
@@ -603,6 +904,34 @@ struct MetalFrameGraph::Impl {
             desc.colorAttachments[0].pixelFormat = colorFormat;
             desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+
+            // Phase 8X Group 4d follow-up¹⁴ — apply the GL blend
+            // state to the Metal pipeline color attachment. Before
+            // follow-up¹⁴ the descriptor was left at Metal's defaults
+            // (`blendingEnabled=NO, src=One, dst=Zero, op=Add,
+            // writeMask=All`), so every translated draw was opaque
+            // regardless of `glEnable(GL_BLEND) + glBlendFunc(...)`.
+            // BAR followup¹³-verification §Candidate-1 traced that
+            // as the reason spring's semi-transparent glyph overlay
+            // composited as a solid rectangle instead of mixing with
+            // the background. The cache key (above) already includes
+            // the blend tuple, so a program that uses the same
+            // shader with two different blend modes builds two
+            // distinct pipelines and keeps both hot.
+            MTLRenderPipelineColorAttachmentDescriptor* colorDesc = desc.colorAttachments[0];
+            colorDesc.blendingEnabled = info.blend.enabled ? YES : NO;
+            colorDesc.sourceRGBBlendFactor        = glBlendFactorToMTL(info.blend.srcRGB);
+            colorDesc.destinationRGBBlendFactor   = glBlendFactorToMTL(info.blend.dstRGB);
+            colorDesc.sourceAlphaBlendFactor      = glBlendFactorToMTL(info.blend.srcAlpha);
+            colorDesc.destinationAlphaBlendFactor = glBlendFactorToMTL(info.blend.dstAlpha);
+            colorDesc.rgbBlendOperation           = glBlendEqToMTL(info.blend.equationRGB);
+            colorDesc.alphaBlendOperation         = glBlendEqToMTL(info.blend.equationAlpha);
+            MTLColorWriteMask writeMask = MTLColorWriteMaskNone;
+            if (info.blend.colorMaskR) writeMask |= MTLColorWriteMaskRed;
+            if (info.blend.colorMaskG) writeMask |= MTLColorWriteMaskGreen;
+            if (info.blend.colorMaskB) writeMask |= MTLColorWriteMaskBlue;
+            if (info.blend.colorMaskA) writeMask |= MTLColorWriteMaskAlpha;
+            colorDesc.writeMask = writeMask;
 
             // Phase 8X Group 4d follow-up¹³ — one-shot per-program
             // diagnostic dump of the Metal pipeline descriptor shape.
@@ -781,24 +1110,20 @@ struct MetalFrameGraph::Impl {
                 }
 
                 // Color attachment 0 blend state. BAR §Candidate 1.
-                // TranslatedDrawInfo currently carries NO blend state
-                // plumbing — the descriptor is untouched past
-                // pixelFormat, so these values are whatever
-                // MTLRenderPipelineColorAttachmentDescriptor defaults
-                // to at init-time. Apple documents those as:
-                //   blendingEnabled                = NO
-                //   rgbBlendOperation              = Add
-                //   alphaBlendOperation            = Add
-                //   sourceRGBBlendFactor           = One
-                //   sourceAlphaBlendFactor         = One
-                //   destinationRGBBlendFactor      = Zero
-                //   destinationAlphaBlendFactor    = Zero
-                //   writeMask                      = All
-                // We dump the live values so BAR can confirm this
-                // holds and reason about whether the default-off blend
-                // is what causes the remaining visual discrepancy.
+                // Phase 8X Group 4d follow-up¹⁴ — the descriptor now
+                // carries the GL blend state snapshot from the draw
+                // site (`GLStateTracker::blendState()` +
+                // `isEnabled(GL_BLEND)`), so these values reflect the
+                // live pipeline rather than the MTLRenderPipeline-
+                // ColorAttachmentDescriptor defaults. The annotation
+                // flipped from `gl-plumbed=no` to `gl-plumbed=yes`
+                // as the verification signal for BAR's follow-up¹³
+                // memo. Apple's defaults (blendingEnabled=NO,
+                // src=One, dst=Zero, op=Add, writeMask=All) are
+                // still what you'd see for an opaque draw that
+                // runs with `glDisable(GL_BLEND)`.
                 MTLRenderPipelineColorAttachmentDescriptor* ca = desc.colorAttachments[0];
-                NSLog(@"[GL]   colorAttachment[0].blendingEnabled=%d (gl-plumbed=no)",
+                NSLog(@"[GL]   colorAttachment[0].blendingEnabled=%d (gl-plumbed=yes)",
                       ca.blendingEnabled ? 1 : 0);
                 NSLog(@"[GL]   colorAttachment[0].rgb   src=%s(%lu) dst=%s(%lu) op=%s(%lu)",
                       blendFactorName(ca.sourceRGBBlendFactor),
@@ -831,9 +1156,33 @@ struct MetalFrameGraph::Impl {
             pipelineCumulativeBuildMs += std::chrono::duration<double, std::milli>(buildEnd - buildStart).count();
             ++pipelineCacheMisses;
 
-            // Cache on the program object.
+            // Phase 8X Group 4d follow-up¹⁴ — insert into the
+            // map-based cache first. The old scalar
+            // {pipelineStateOut, pipelineColorFormatOut} pair is
+            // still populated so the first-draw diagnostic bookkeeping
+            // (and the leak-on-relink reset in `linkProgram`) keeps
+            // seeing the most-recently-built pipeline in the same
+            // slot it has always read from.
+            if (info.pipelineStateCacheOut != nullptr) {
+                void* retained = (void*)CFBridgingRetain(pipelineState);
+                auto inserted = info.pipelineStateCacheOut->emplace(pipelineCacheKey, retained);
+                if (!inserted.second) {
+                    // Key collided with an existing entry — release the
+                    // old one and swap in the new. Shouldn't happen in
+                    // normal operation because the cache miss path is
+                    // only reached when the lookup failed.
+                    if (inserted.first->second != nullptr) {
+                        CFRelease(inserted.first->second);
+                    }
+                    inserted.first->second = retained;
+                }
+            }
             if (info.pipelineStateOut != nullptr) {
-                // Release previous if any.
+                // The scalar slot is a secondary mirror of the most
+                // recently built pipeline. Release the previous
+                // occupant and retain afresh so the scalar cache
+                // stays balanced even when the map path also holds
+                // an entry.
                 if (*info.pipelineStateOut != nullptr) {
                     CFRelease(*info.pipelineStateOut);
                 }
