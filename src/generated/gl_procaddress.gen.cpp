@@ -4,6 +4,886 @@
 #include <cstring>
 
 #include "../../include/AppGL/AppGL.h"
+#include "../../include/AppGL/glcorearb.h"
+
+// Forward declarations for alias + fixed-function stubs emitted in
+// gl_aliases.gen.cpp / gl_fixed_function.gen.cpp. Declaring them
+// here (rather than including those files' generated headers)
+// keeps the codegen graph simple and avoids a second include layer.
+extern "C" {
+void APIENTRY glActiveTextureARB(GLenum texture);
+void APIENTRY glAttachObjectARB(GLuint program, GLuint shader);
+void APIENTRY glBeginConditionalRenderNV(GLuint id, GLenum mode);
+void APIENTRY glBeginQueryARB(GLenum target, GLuint id);
+void APIENTRY glBeginTransformFeedbackEXT(GLenum primitiveMode);
+void APIENTRY glBeginTransformFeedbackNV(GLenum primitiveMode);
+void APIENTRY glBindAttribLocationARB(GLuint program, GLuint index, const GLchar *name);
+void APIENTRY glBindBufferARB(GLenum target, GLuint buffer);
+void APIENTRY glBindBufferBaseEXT(GLenum target, GLuint index, GLuint buffer);
+void APIENTRY glBindBufferBaseNV(GLenum target, GLuint index, GLuint buffer);
+void APIENTRY glBindBufferRangeEXT(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size);
+void APIENTRY glBindBufferRangeNV(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size);
+void APIENTRY glBindFragDataLocationEXT(GLuint program, GLuint color, const GLchar *name);
+void APIENTRY glBindFragDataLocationIndexedEXT(GLuint program, GLuint colorNumber, GLuint index, const GLchar *name);
+void APIENTRY glBindTextureEXT(GLenum target, GLuint texture);
+void APIENTRY glBindVertexArrayOES(GLuint array);
+void APIENTRY glBlendColorEXT(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
+void APIENTRY glBlendEquationEXT(GLenum mode);
+void APIENTRY glBlendEquationIndexedAMD(GLuint buf, GLenum mode);
+void APIENTRY glBlendEquationSeparateEXT(GLenum modeRGB, GLenum modeAlpha);
+void APIENTRY glBlendEquationSeparateIndexedAMD(GLuint buf, GLenum modeRGB, GLenum modeAlpha);
+void APIENTRY glBlendEquationSeparateiARB(GLuint buf, GLenum modeRGB, GLenum modeAlpha);
+void APIENTRY glBlendEquationSeparateiEXT(GLuint buf, GLenum modeRGB, GLenum modeAlpha);
+void APIENTRY glBlendEquationSeparateiOES(GLuint buf, GLenum modeRGB, GLenum modeAlpha);
+void APIENTRY glBlendEquationiARB(GLuint buf, GLenum mode);
+void APIENTRY glBlendEquationiEXT(GLuint buf, GLenum mode);
+void APIENTRY glBlendEquationiOES(GLuint buf, GLenum mode);
+void APIENTRY glBlendFuncIndexedAMD(GLuint buf, GLenum src, GLenum dst);
+void APIENTRY glBlendFuncSeparateEXT(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha);
+void APIENTRY glBlendFuncSeparateINGR(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha);
+void APIENTRY glBlendFuncSeparateIndexedAMD(GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
+void APIENTRY glBlendFuncSeparateiARB(GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
+void APIENTRY glBlendFuncSeparateiEXT(GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
+void APIENTRY glBlendFuncSeparateiOES(GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
+void APIENTRY glBlendFunciARB(GLuint buf, GLenum src, GLenum dst);
+void APIENTRY glBlendFunciEXT(GLuint buf, GLenum src, GLenum dst);
+void APIENTRY glBlendFunciOES(GLuint buf, GLenum src, GLenum dst);
+void APIENTRY glBlitFramebufferEXT(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
+void APIENTRY glBlitFramebufferNV(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
+void APIENTRY glBufferDataARB(GLenum target, GLsizeiptr size, const void *data, GLenum usage);
+void APIENTRY glBufferStorageEXT(GLenum target, GLsizeiptr size, const void *data, GLbitfield flags);
+void APIENTRY glBufferSubDataARB(GLenum target, GLintptr offset, GLsizeiptr size, const void *data);
+GLenum APIENTRY glCheckFramebufferStatusEXT(GLenum target);
+void APIENTRY glClampColorARB(GLenum target, GLenum clamp);
+void APIENTRY glClearDepthfOES(GLfloat d);
+void APIENTRY glClearTexImageEXT(GLuint texture, GLint level, GLenum format, GLenum type, const void *data);
+void APIENTRY glClearTexSubImageEXT(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *data);
+GLenum APIENTRY glClientWaitSyncAPPLE(GLsync sync, GLbitfield flags, GLuint64 timeout);
+void APIENTRY glClipControlEXT(GLenum origin, GLenum depth);
+void APIENTRY glColorMaskIndexedEXT(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
+void APIENTRY glColorMaskiEXT(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
+void APIENTRY glColorMaskiOES(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
+void APIENTRY glCompileShaderARB(GLuint shader);
+void APIENTRY glCompressedTexImage1DARB(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLint border, GLsizei imageSize, const void *data);
+void APIENTRY glCompressedTexImage2DARB(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data);
+void APIENTRY glCompressedTexImage3DARB(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, const void *data);
+void APIENTRY glCompressedTexSubImage1DARB(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void *data);
+void APIENTRY glCompressedTexSubImage2DARB(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data);
+void APIENTRY glCompressedTexSubImage3DARB(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data);
+void APIENTRY glCopyBufferSubDataNV(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
+void APIENTRY glCopyImageSubDataEXT(GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth);
+void APIENTRY glCopyImageSubDataOES(GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth);
+void APIENTRY glCopyTexImage1DEXT(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border);
+void APIENTRY glCopyTexImage2DEXT(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
+void APIENTRY glCopyTexSubImage1DEXT(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width);
+void APIENTRY glCopyTexSubImage2DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+void APIENTRY glCopyTexSubImage3DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+GLuint APIENTRY glCreateProgramObjectARB(void);
+GLuint APIENTRY glCreateShaderObjectARB(GLenum type);
+void APIENTRY glDebugMessageCallbackARB(GLDEBUGPROC callback, const void *userParam);
+void APIENTRY glDebugMessageCallbackKHR(GLDEBUGPROC callback, const void *userParam);
+void APIENTRY glDebugMessageControlARB(GLenum source, GLenum type, GLenum severity, GLsizei count, const GLuint *ids, GLboolean enabled);
+void APIENTRY glDebugMessageControlKHR(GLenum source, GLenum type, GLenum severity, GLsizei count, const GLuint *ids, GLboolean enabled);
+void APIENTRY glDebugMessageInsertARB(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *buf);
+void APIENTRY glDebugMessageInsertKHR(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *buf);
+void APIENTRY glDeleteBuffersARB(GLsizei n, const GLuint *buffers);
+void APIENTRY glDeleteFramebuffersEXT(GLsizei n, const GLuint *framebuffers);
+void APIENTRY glDeleteQueriesARB(GLsizei n, const GLuint *ids);
+void APIENTRY glDeleteRenderbuffersEXT(GLsizei n, const GLuint *renderbuffers);
+void APIENTRY glDeleteSyncAPPLE(GLsync sync);
+void APIENTRY glDeleteTransformFeedbacksNV(GLsizei n, const GLuint *ids);
+void APIENTRY glDeleteVertexArraysAPPLE(GLsizei n, const GLuint *arrays);
+void APIENTRY glDeleteVertexArraysOES(GLsizei n, const GLuint *arrays);
+void APIENTRY glDepthRangefOES(GLfloat n, GLfloat f);
+void APIENTRY glDetachObjectARB(GLuint program, GLuint shader);
+void APIENTRY glDisableIndexedEXT(GLenum target, GLuint index);
+void APIENTRY glDisableVertexAttribArrayARB(GLuint index);
+void APIENTRY glDisableiEXT(GLenum target, GLuint index);
+void APIENTRY glDisableiNV(GLenum target, GLuint index);
+void APIENTRY glDisableiOES(GLenum target, GLuint index);
+void APIENTRY glDrawArraysEXT(GLenum mode, GLint first, GLsizei count);
+void APIENTRY glDrawArraysInstancedANGLE(GLenum mode, GLint first, GLsizei count, GLsizei instancecount);
+void APIENTRY glDrawArraysInstancedARB(GLenum mode, GLint first, GLsizei count, GLsizei instancecount);
+void APIENTRY glDrawArraysInstancedBaseInstanceEXT(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance);
+void APIENTRY glDrawArraysInstancedEXT(GLenum mode, GLint first, GLsizei count, GLsizei instancecount);
+void APIENTRY glDrawArraysInstancedNV(GLenum mode, GLint first, GLsizei count, GLsizei instancecount);
+void APIENTRY glDrawBuffersARB(GLsizei n, const GLenum *bufs);
+void APIENTRY glDrawBuffersATI(GLsizei n, const GLenum *bufs);
+void APIENTRY glDrawBuffersEXT(GLsizei n, const GLenum *bufs);
+void APIENTRY glDrawElementsBaseVertexEXT(GLenum mode, GLsizei count, GLenum type, const void *indices, GLint basevertex);
+void APIENTRY glDrawElementsBaseVertexOES(GLenum mode, GLsizei count, GLenum type, const void *indices, GLint basevertex);
+void APIENTRY glDrawElementsInstancedANGLE(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount);
+void APIENTRY glDrawElementsInstancedARB(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount);
+void APIENTRY glDrawElementsInstancedBaseInstanceEXT(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLuint baseinstance);
+void APIENTRY glDrawElementsInstancedBaseVertexBaseInstanceEXT(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance);
+void APIENTRY glDrawElementsInstancedBaseVertexEXT(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLint basevertex);
+void APIENTRY glDrawElementsInstancedBaseVertexOES(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLint basevertex);
+void APIENTRY glDrawElementsInstancedEXT(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount);
+void APIENTRY glDrawElementsInstancedNV(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount);
+void APIENTRY glDrawRangeElementsBaseVertexEXT(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices, GLint basevertex);
+void APIENTRY glDrawRangeElementsBaseVertexOES(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices, GLint basevertex);
+void APIENTRY glDrawRangeElementsEXT(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices);
+void APIENTRY glDrawTransformFeedbackEXT(GLenum mode, GLuint id);
+void APIENTRY glDrawTransformFeedbackInstancedEXT(GLenum mode, GLuint id, GLsizei instancecount);
+void APIENTRY glDrawTransformFeedbackNV(GLenum mode, GLuint id);
+void APIENTRY glEnableIndexedEXT(GLenum target, GLuint index);
+void APIENTRY glEnableVertexAttribArrayARB(GLuint index);
+void APIENTRY glEnableiEXT(GLenum target, GLuint index);
+void APIENTRY glEnableiNV(GLenum target, GLuint index);
+void APIENTRY glEnableiOES(GLenum target, GLuint index);
+void APIENTRY glEndConditionalRenderNV(void);
+void APIENTRY glEndConditionalRenderNVX(void);
+void APIENTRY glEndQueryARB(GLenum target);
+void APIENTRY glEndTransformFeedbackEXT(void);
+void APIENTRY glEndTransformFeedbackNV(void);
+GLsync APIENTRY glFenceSyncAPPLE(GLenum condition, GLbitfield flags);
+void APIENTRY glFlushMappedBufferRangeAPPLE(GLenum target, GLintptr offset, GLsizeiptr length);
+void APIENTRY glFlushMappedBufferRangeEXT(GLenum target, GLintptr offset, GLsizeiptr length);
+void APIENTRY glFramebufferRenderbufferEXT(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
+void APIENTRY glFramebufferTexture1DEXT(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+void APIENTRY glFramebufferTexture2DEXT(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+void APIENTRY glFramebufferTexture3DEXT(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset);
+void APIENTRY glFramebufferTextureARB(GLenum target, GLenum attachment, GLuint texture, GLint level);
+void APIENTRY glFramebufferTextureEXT(GLenum target, GLenum attachment, GLuint texture, GLint level);
+void APIENTRY glFramebufferTextureLayerARB(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer);
+void APIENTRY glFramebufferTextureLayerEXT(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer);
+void APIENTRY glFramebufferTextureOES(GLenum target, GLenum attachment, GLuint texture, GLint level);
+void APIENTRY glGenBuffersARB(GLsizei n, GLuint *buffers);
+void APIENTRY glGenFramebuffersEXT(GLsizei n, GLuint *framebuffers);
+void APIENTRY glGenQueriesARB(GLsizei n, GLuint *ids);
+void APIENTRY glGenRenderbuffersEXT(GLsizei n, GLuint *renderbuffers);
+void APIENTRY glGenTransformFeedbacksNV(GLsizei n, GLuint *ids);
+void APIENTRY glGenVertexArraysAPPLE(GLsizei n, GLuint *arrays);
+void APIENTRY glGenVertexArraysOES(GLsizei n, GLuint *arrays);
+void APIENTRY glGenerateMipmapEXT(GLenum target);
+void APIENTRY glGetActiveAttribARB(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name);
+void APIENTRY glGetActiveUniformARB(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name);
+GLint APIENTRY glGetAttribLocationARB(GLuint program, const GLchar *name);
+void APIENTRY glGetBooleanIndexedvEXT(GLenum target, GLuint index, GLboolean *data);
+void APIENTRY glGetBufferParameterivARB(GLenum target, GLenum pname, GLint *params);
+void APIENTRY glGetBufferPointervARB(GLenum target, GLenum pname, void **params);
+void APIENTRY glGetBufferPointervOES(GLenum target, GLenum pname, void **params);
+void APIENTRY glGetBufferSubDataARB(GLenum target, GLintptr offset, GLsizeiptr size, void *data);
+void APIENTRY glGetCompressedTexImageARB(GLenum target, GLint level, void *img);
+GLuint APIENTRY glGetDebugMessageLogARB(GLuint count, GLsizei bufSize, GLenum *sources, GLenum *types, GLuint *ids, GLenum *severities, GLsizei *lengths, GLchar *messageLog);
+GLuint APIENTRY glGetDebugMessageLogKHR(GLuint count, GLsizei bufSize, GLenum *sources, GLenum *types, GLuint *ids, GLenum *severities, GLsizei *lengths, GLchar *messageLog);
+void APIENTRY glGetDoubleIndexedvEXT(GLenum target, GLuint index, GLdouble *data);
+void APIENTRY glGetDoublei_vEXT(GLenum target, GLuint index, GLdouble *data);
+void APIENTRY glGetFloatIndexedvEXT(GLenum target, GLuint index, GLfloat *data);
+void APIENTRY glGetFloati_vEXT(GLenum target, GLuint index, GLfloat *data);
+void APIENTRY glGetFloati_vNV(GLenum target, GLuint index, GLfloat *data);
+void APIENTRY glGetFloati_vOES(GLenum target, GLuint index, GLfloat *data);
+GLint APIENTRY glGetFragDataIndexEXT(GLuint program, const GLchar *name);
+GLint APIENTRY glGetFragDataLocationEXT(GLuint program, const GLchar *name);
+void APIENTRY glGetFramebufferAttachmentParameterivEXT(GLenum target, GLenum attachment, GLenum pname, GLint *params);
+GLenum APIENTRY glGetGraphicsResetStatusEXT(void);
+GLenum APIENTRY glGetGraphicsResetStatusKHR(void);
+void APIENTRY glGetInteger64vAPPLE(GLenum pname, GLint64 *data);
+void APIENTRY glGetInteger64vEXT(GLenum pname, GLint64 *data);
+void APIENTRY glGetIntegerIndexedvEXT(GLenum target, GLuint index, GLint *data);
+void APIENTRY glGetMultisamplefvNV(GLenum pname, GLuint index, GLfloat *val);
+void APIENTRY glGetObjectLabelKHR(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label);
+void APIENTRY glGetObjectPtrLabelKHR(const void *ptr, GLsizei bufSize, GLsizei *length, GLchar *label);
+void APIENTRY glGetPointervEXT(GLenum pname, void **params);
+void APIENTRY glGetPointervKHR(GLenum pname, void **params);
+void APIENTRY glGetProgramBinaryOES(GLuint program, GLsizei bufSize, GLsizei *length, GLenum *binaryFormat, void *binary);
+void APIENTRY glGetQueryObjecti64vEXT(GLuint id, GLenum pname, GLint64 *params);
+void APIENTRY glGetQueryObjectivARB(GLuint id, GLenum pname, GLint *params);
+void APIENTRY glGetQueryObjectivEXT(GLuint id, GLenum pname, GLint *params);
+void APIENTRY glGetQueryObjectui64vEXT(GLuint id, GLenum pname, GLuint64 *params);
+void APIENTRY glGetQueryObjectuivARB(GLuint id, GLenum pname, GLuint *params);
+void APIENTRY glGetQueryivARB(GLenum target, GLenum pname, GLint *params);
+void APIENTRY glGetRenderbufferParameterivEXT(GLenum target, GLenum pname, GLint *params);
+void APIENTRY glGetSamplerParameterIivEXT(GLuint sampler, GLenum pname, GLint *params);
+void APIENTRY glGetSamplerParameterIivOES(GLuint sampler, GLenum pname, GLint *params);
+void APIENTRY glGetSamplerParameterIuivEXT(GLuint sampler, GLenum pname, GLuint *params);
+void APIENTRY glGetSamplerParameterIuivOES(GLuint sampler, GLenum pname, GLuint *params);
+void APIENTRY glGetShaderSourceARB(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *source);
+void APIENTRY glGetSyncivAPPLE(GLsync sync, GLenum pname, GLsizei count, GLsizei *length, GLint *values);
+void APIENTRY glGetTexParameterIivEXT(GLenum target, GLenum pname, GLint *params);
+void APIENTRY glGetTexParameterIivOES(GLenum target, GLenum pname, GLint *params);
+void APIENTRY glGetTexParameterIuivEXT(GLenum target, GLenum pname, GLuint *params);
+void APIENTRY glGetTexParameterIuivOES(GLenum target, GLenum pname, GLuint *params);
+void APIENTRY glGetTransformFeedbackVaryingEXT(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name);
+GLint APIENTRY glGetUniformLocationARB(GLuint program, const GLchar *name);
+void APIENTRY glGetUniformfvARB(GLuint program, GLint location, GLfloat *params);
+void APIENTRY glGetUniformivARB(GLuint program, GLint location, GLint *params);
+void APIENTRY glGetUniformuivEXT(GLuint program, GLint location, GLuint *params);
+void APIENTRY glGetVertexAttribIivEXT(GLuint index, GLenum pname, GLint *params);
+void APIENTRY glGetVertexAttribIuivEXT(GLuint index, GLenum pname, GLuint *params);
+void APIENTRY glGetVertexAttribLdvEXT(GLuint index, GLenum pname, GLdouble *params);
+void APIENTRY glGetVertexAttribPointervARB(GLuint index, GLenum pname, void **pointer);
+void APIENTRY glGetVertexAttribPointervNV(GLuint index, GLenum pname, void **pointer);
+void APIENTRY glGetVertexAttribdvARB(GLuint index, GLenum pname, GLdouble *params);
+void APIENTRY glGetVertexAttribdvNV(GLuint index, GLenum pname, GLdouble *params);
+void APIENTRY glGetVertexAttribfvARB(GLuint index, GLenum pname, GLfloat *params);
+void APIENTRY glGetVertexAttribfvNV(GLuint index, GLenum pname, GLfloat *params);
+void APIENTRY glGetVertexAttribivARB(GLuint index, GLenum pname, GLint *params);
+void APIENTRY glGetVertexAttribivNV(GLuint index, GLenum pname, GLint *params);
+void APIENTRY glGetnUniformfvEXT(GLuint program, GLint location, GLsizei bufSize, GLfloat *params);
+void APIENTRY glGetnUniformfvKHR(GLuint program, GLint location, GLsizei bufSize, GLfloat *params);
+void APIENTRY glGetnUniformivEXT(GLuint program, GLint location, GLsizei bufSize, GLint *params);
+void APIENTRY glGetnUniformivKHR(GLuint program, GLint location, GLsizei bufSize, GLint *params);
+void APIENTRY glGetnUniformuivKHR(GLuint program, GLint location, GLsizei bufSize, GLuint *params);
+GLboolean APIENTRY glIsBufferARB(GLuint buffer);
+GLboolean APIENTRY glIsEnabledIndexedEXT(GLenum target, GLuint index);
+GLboolean APIENTRY glIsEnablediEXT(GLenum target, GLuint index);
+GLboolean APIENTRY glIsEnablediNV(GLenum target, GLuint index);
+GLboolean APIENTRY glIsEnablediOES(GLenum target, GLuint index);
+GLboolean APIENTRY glIsFramebufferEXT(GLuint framebuffer);
+GLboolean APIENTRY glIsQueryARB(GLuint id);
+GLboolean APIENTRY glIsRenderbufferEXT(GLuint renderbuffer);
+GLboolean APIENTRY glIsSyncAPPLE(GLsync sync);
+GLboolean APIENTRY glIsTransformFeedbackNV(GLuint id);
+GLboolean APIENTRY glIsVertexArrayAPPLE(GLuint array);
+GLboolean APIENTRY glIsVertexArrayOES(GLuint array);
+void APIENTRY glLinkProgramARB(GLuint program);
+void * APIENTRY glMapBufferARB(GLenum target, GLenum access);
+void * APIENTRY glMapBufferOES(GLenum target, GLenum access);
+void * APIENTRY glMapBufferRangeEXT(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access);
+void APIENTRY glMemoryBarrierEXT(GLbitfield barriers);
+void APIENTRY glMinSampleShadingARB(GLfloat value);
+void APIENTRY glMinSampleShadingOES(GLfloat value);
+void APIENTRY glMultiDrawArraysEXT(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount);
+void APIENTRY glMultiDrawArraysIndirectAMD(GLenum mode, const void *indirect, GLsizei drawcount, GLsizei stride);
+void APIENTRY glMultiDrawArraysIndirectCountARB(GLenum mode, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
+void APIENTRY glMultiDrawArraysIndirectEXT(GLenum mode, const void *indirect, GLsizei drawcount, GLsizei stride);
+void APIENTRY glMultiDrawElementsBaseVertexEXT(GLenum mode, const GLsizei *count, GLenum type, const void *const*indices, GLsizei drawcount, const GLint *basevertex);
+void APIENTRY glMultiDrawElementsEXT(GLenum mode, const GLsizei *count, GLenum type, const void *const*indices, GLsizei drawcount);
+void APIENTRY glMultiDrawElementsIndirectAMD(GLenum mode, GLenum type, const void *indirect, GLsizei drawcount, GLsizei stride);
+void APIENTRY glMultiDrawElementsIndirectCountARB(GLenum mode, GLenum type, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
+void APIENTRY glMultiDrawElementsIndirectEXT(GLenum mode, GLenum type, const void *indirect, GLsizei drawcount, GLsizei stride);
+void APIENTRY glNamedBufferStorageEXT(GLuint buffer, GLsizeiptr size, const void *data, GLbitfield flags);
+void APIENTRY glNamedBufferSubDataEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, const void *data);
+void APIENTRY glObjectLabelKHR(GLenum identifier, GLuint name, GLsizei length, const GLchar *label);
+void APIENTRY glObjectPtrLabelKHR(const void *ptr, GLsizei length, const GLchar *label);
+void APIENTRY glPatchParameteriEXT(GLenum pname, GLint value);
+void APIENTRY glPatchParameteriOES(GLenum pname, GLint value);
+void APIENTRY glPauseTransformFeedbackNV(void);
+void APIENTRY glPointParameterfARB(GLenum pname, GLfloat param);
+void APIENTRY glPointParameterfEXT(GLenum pname, GLfloat param);
+void APIENTRY glPointParameterfSGIS(GLenum pname, GLfloat param);
+void APIENTRY glPointParameterfvARB(GLenum pname, const GLfloat *params);
+void APIENTRY glPointParameterfvEXT(GLenum pname, const GLfloat *params);
+void APIENTRY glPointParameterfvSGIS(GLenum pname, const GLfloat *params);
+void APIENTRY glPointParameteriNV(GLenum pname, GLint param);
+void APIENTRY glPointParameterivNV(GLenum pname, const GLint *params);
+void APIENTRY glPolygonModeNV(GLenum face, GLenum mode);
+void APIENTRY glPolygonOffsetClampEXT(GLfloat factor, GLfloat units, GLfloat clamp);
+void APIENTRY glPopDebugGroupKHR(void);
+void APIENTRY glProgramBinaryOES(GLuint program, GLenum binaryFormat, const void *binary, GLsizei length);
+void APIENTRY glProgramParameteriARB(GLuint program, GLenum pname, GLint value);
+void APIENTRY glProgramParameteriEXT(GLuint program, GLenum pname, GLint value);
+void APIENTRY glProgramUniform1fEXT(GLuint program, GLint location, GLfloat v0);
+void APIENTRY glProgramUniform1fvEXT(GLuint program, GLint location, GLsizei count, const GLfloat *value);
+void APIENTRY glProgramUniform1iEXT(GLuint program, GLint location, GLint v0);
+void APIENTRY glProgramUniform1ivEXT(GLuint program, GLint location, GLsizei count, const GLint *value);
+void APIENTRY glProgramUniform1uiEXT(GLuint program, GLint location, GLuint v0);
+void APIENTRY glProgramUniform1uivEXT(GLuint program, GLint location, GLsizei count, const GLuint *value);
+void APIENTRY glProgramUniform2fEXT(GLuint program, GLint location, GLfloat v0, GLfloat v1);
+void APIENTRY glProgramUniform2fvEXT(GLuint program, GLint location, GLsizei count, const GLfloat *value);
+void APIENTRY glProgramUniform2iEXT(GLuint program, GLint location, GLint v0, GLint v1);
+void APIENTRY glProgramUniform2ivEXT(GLuint program, GLint location, GLsizei count, const GLint *value);
+void APIENTRY glProgramUniform2uiEXT(GLuint program, GLint location, GLuint v0, GLuint v1);
+void APIENTRY glProgramUniform2uivEXT(GLuint program, GLint location, GLsizei count, const GLuint *value);
+void APIENTRY glProgramUniform3fEXT(GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
+void APIENTRY glProgramUniform3fvEXT(GLuint program, GLint location, GLsizei count, const GLfloat *value);
+void APIENTRY glProgramUniform3iEXT(GLuint program, GLint location, GLint v0, GLint v1, GLint v2);
+void APIENTRY glProgramUniform3ivEXT(GLuint program, GLint location, GLsizei count, const GLint *value);
+void APIENTRY glProgramUniform3uiEXT(GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2);
+void APIENTRY glProgramUniform3uivEXT(GLuint program, GLint location, GLsizei count, const GLuint *value);
+void APIENTRY glProgramUniform4fEXT(GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
+void APIENTRY glProgramUniform4fvEXT(GLuint program, GLint location, GLsizei count, const GLfloat *value);
+void APIENTRY glProgramUniform4iEXT(GLuint program, GLint location, GLint v0, GLint v1, GLint v2, GLint v3);
+void APIENTRY glProgramUniform4ivEXT(GLuint program, GLint location, GLsizei count, const GLint *value);
+void APIENTRY glProgramUniform4uiEXT(GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3);
+void APIENTRY glProgramUniform4uivEXT(GLuint program, GLint location, GLsizei count, const GLuint *value);
+void APIENTRY glProgramUniformMatrix2fvEXT(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glProgramUniformMatrix2x3fvEXT(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glProgramUniformMatrix2x4fvEXT(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glProgramUniformMatrix3fvEXT(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glProgramUniformMatrix3x2fvEXT(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glProgramUniformMatrix3x4fvEXT(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glProgramUniformMatrix4fvEXT(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glProgramUniformMatrix4x2fvEXT(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glProgramUniformMatrix4x3fvEXT(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glProvokingVertexEXT(GLenum mode);
+void APIENTRY glPushDebugGroupKHR(GLenum source, GLuint id, GLsizei length, const GLchar *message);
+void APIENTRY glQueryCounterEXT(GLuint id, GLenum target);
+void APIENTRY glReadnPixelsARB(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLsizei bufSize, void *data);
+void APIENTRY glReadnPixelsEXT(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLsizei bufSize, void *data);
+void APIENTRY glReadnPixelsKHR(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLsizei bufSize, void *data);
+void APIENTRY glRenderbufferStorageEXT(GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
+void APIENTRY glRenderbufferStorageMultisampleEXT(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height);
+void APIENTRY glRenderbufferStorageMultisampleNV(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height);
+void APIENTRY glResumeTransformFeedbackNV(void);
+void APIENTRY glSampleCoverageARB(GLfloat value, GLboolean invert);
+void APIENTRY glSamplerParameterIivEXT(GLuint sampler, GLenum pname, const GLint *param);
+void APIENTRY glSamplerParameterIivOES(GLuint sampler, GLenum pname, const GLint *param);
+void APIENTRY glSamplerParameterIuivEXT(GLuint sampler, GLenum pname, const GLuint *param);
+void APIENTRY glSamplerParameterIuivOES(GLuint sampler, GLenum pname, const GLuint *param);
+void APIENTRY glScissorArrayvNV(GLuint first, GLsizei count, const GLint *v);
+void APIENTRY glScissorArrayvOES(GLuint first, GLsizei count, const GLint *v);
+void APIENTRY glScissorIndexedNV(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height);
+void APIENTRY glScissorIndexedOES(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height);
+void APIENTRY glScissorIndexedvNV(GLuint index, const GLint *v);
+void APIENTRY glScissorIndexedvOES(GLuint index, const GLint *v);
+void APIENTRY glShaderSourceARB(GLuint shader, GLsizei count, const GLchar *const*string, const GLint *length);
+void APIENTRY glSpecializeShaderARB(GLuint shader, const GLchar *pEntryPoint, GLuint numSpecializationConstants, const GLuint *pConstantIndex, const GLuint *pConstantValue);
+void APIENTRY glStencilOpSeparateATI(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass);
+void APIENTRY glTexBufferARB(GLenum target, GLenum internalformat, GLuint buffer);
+void APIENTRY glTexBufferEXT(GLenum target, GLenum internalformat, GLuint buffer);
+void APIENTRY glTexBufferOES(GLenum target, GLenum internalformat, GLuint buffer);
+void APIENTRY glTexBufferRangeEXT(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size);
+void APIENTRY glTexBufferRangeOES(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size);
+void APIENTRY glTexImage3DEXT(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void *pixels);
+void APIENTRY glTexParameterIivEXT(GLenum target, GLenum pname, const GLint *params);
+void APIENTRY glTexParameterIivOES(GLenum target, GLenum pname, const GLint *params);
+void APIENTRY glTexParameterIuivEXT(GLenum target, GLenum pname, const GLuint *params);
+void APIENTRY glTexParameterIuivOES(GLenum target, GLenum pname, const GLuint *params);
+void APIENTRY glTexStorage1DEXT(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width);
+void APIENTRY glTexStorage2DEXT(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height);
+void APIENTRY glTexStorage3DEXT(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
+void APIENTRY glTexStorage3DMultisampleOES(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations);
+void APIENTRY glTexSubImage1DEXT(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const void *pixels);
+void APIENTRY glTexSubImage2DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels);
+void APIENTRY glTexSubImage3DEXT(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *pixels);
+void APIENTRY glTextureViewEXT(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat, GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers);
+void APIENTRY glTextureViewOES(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat, GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers);
+void APIENTRY glTransformFeedbackVaryingsEXT(GLuint program, GLsizei count, const GLchar *const*varyings, GLenum bufferMode);
+void APIENTRY glUniform1fARB(GLint location, GLfloat v0);
+void APIENTRY glUniform1fvARB(GLint location, GLsizei count, const GLfloat *value);
+void APIENTRY glUniform1iARB(GLint location, GLint v0);
+void APIENTRY glUniform1ivARB(GLint location, GLsizei count, const GLint *value);
+void APIENTRY glUniform1uiEXT(GLint location, GLuint v0);
+void APIENTRY glUniform1uivEXT(GLint location, GLsizei count, const GLuint *value);
+void APIENTRY glUniform2fARB(GLint location, GLfloat v0, GLfloat v1);
+void APIENTRY glUniform2fvARB(GLint location, GLsizei count, const GLfloat *value);
+void APIENTRY glUniform2iARB(GLint location, GLint v0, GLint v1);
+void APIENTRY glUniform2ivARB(GLint location, GLsizei count, const GLint *value);
+void APIENTRY glUniform2uiEXT(GLint location, GLuint v0, GLuint v1);
+void APIENTRY glUniform2uivEXT(GLint location, GLsizei count, const GLuint *value);
+void APIENTRY glUniform3fARB(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
+void APIENTRY glUniform3fvARB(GLint location, GLsizei count, const GLfloat *value);
+void APIENTRY glUniform3iARB(GLint location, GLint v0, GLint v1, GLint v2);
+void APIENTRY glUniform3ivARB(GLint location, GLsizei count, const GLint *value);
+void APIENTRY glUniform3uiEXT(GLint location, GLuint v0, GLuint v1, GLuint v2);
+void APIENTRY glUniform3uivEXT(GLint location, GLsizei count, const GLuint *value);
+void APIENTRY glUniform4fARB(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
+void APIENTRY glUniform4fvARB(GLint location, GLsizei count, const GLfloat *value);
+void APIENTRY glUniform4iARB(GLint location, GLint v0, GLint v1, GLint v2, GLint v3);
+void APIENTRY glUniform4ivARB(GLint location, GLsizei count, const GLint *value);
+void APIENTRY glUniform4uiEXT(GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3);
+void APIENTRY glUniform4uivEXT(GLint location, GLsizei count, const GLuint *value);
+void APIENTRY glUniformMatrix2fvARB(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glUniformMatrix2x3fvNV(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glUniformMatrix2x4fvNV(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glUniformMatrix3fvARB(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glUniformMatrix3x2fvNV(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glUniformMatrix3x4fvNV(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glUniformMatrix4fvARB(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glUniformMatrix4x2fvNV(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+void APIENTRY glUniformMatrix4x3fvNV(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
+GLboolean APIENTRY glUnmapBufferARB(GLenum target);
+GLboolean APIENTRY glUnmapBufferOES(GLenum target);
+void APIENTRY glUseProgramObjectARB(GLuint program);
+void APIENTRY glValidateProgramARB(GLuint program);
+void APIENTRY glVertexAttrib1dARB(GLuint index, GLdouble x);
+void APIENTRY glVertexAttrib1dNV(GLuint index, GLdouble x);
+void APIENTRY glVertexAttrib1dvARB(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttrib1dvNV(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttrib1fARB(GLuint index, GLfloat x);
+void APIENTRY glVertexAttrib1fNV(GLuint index, GLfloat x);
+void APIENTRY glVertexAttrib1fvARB(GLuint index, const GLfloat *v);
+void APIENTRY glVertexAttrib1fvNV(GLuint index, const GLfloat *v);
+void APIENTRY glVertexAttrib1sARB(GLuint index, GLshort x);
+void APIENTRY glVertexAttrib1sNV(GLuint index, GLshort x);
+void APIENTRY glVertexAttrib1svARB(GLuint index, const GLshort *v);
+void APIENTRY glVertexAttrib1svNV(GLuint index, const GLshort *v);
+void APIENTRY glVertexAttrib2dARB(GLuint index, GLdouble x, GLdouble y);
+void APIENTRY glVertexAttrib2dNV(GLuint index, GLdouble x, GLdouble y);
+void APIENTRY glVertexAttrib2dvARB(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttrib2dvNV(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttrib2fARB(GLuint index, GLfloat x, GLfloat y);
+void APIENTRY glVertexAttrib2fNV(GLuint index, GLfloat x, GLfloat y);
+void APIENTRY glVertexAttrib2fvARB(GLuint index, const GLfloat *v);
+void APIENTRY glVertexAttrib2fvNV(GLuint index, const GLfloat *v);
+void APIENTRY glVertexAttrib2sARB(GLuint index, GLshort x, GLshort y);
+void APIENTRY glVertexAttrib2sNV(GLuint index, GLshort x, GLshort y);
+void APIENTRY glVertexAttrib2svARB(GLuint index, const GLshort *v);
+void APIENTRY glVertexAttrib2svNV(GLuint index, const GLshort *v);
+void APIENTRY glVertexAttrib3dARB(GLuint index, GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glVertexAttrib3dNV(GLuint index, GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glVertexAttrib3dvARB(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttrib3dvNV(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttrib3fARB(GLuint index, GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glVertexAttrib3fNV(GLuint index, GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glVertexAttrib3fvARB(GLuint index, const GLfloat *v);
+void APIENTRY glVertexAttrib3fvNV(GLuint index, const GLfloat *v);
+void APIENTRY glVertexAttrib3sARB(GLuint index, GLshort x, GLshort y, GLshort z);
+void APIENTRY glVertexAttrib3sNV(GLuint index, GLshort x, GLshort y, GLshort z);
+void APIENTRY glVertexAttrib3svARB(GLuint index, const GLshort *v);
+void APIENTRY glVertexAttrib3svNV(GLuint index, const GLshort *v);
+void APIENTRY glVertexAttrib4NbvARB(GLuint index, const GLbyte *v);
+void APIENTRY glVertexAttrib4NivARB(GLuint index, const GLint *v);
+void APIENTRY glVertexAttrib4NsvARB(GLuint index, const GLshort *v);
+void APIENTRY glVertexAttrib4NubARB(GLuint index, GLubyte x, GLubyte y, GLubyte z, GLubyte w);
+void APIENTRY glVertexAttrib4NubvARB(GLuint index, const GLubyte *v);
+void APIENTRY glVertexAttrib4NuivARB(GLuint index, const GLuint *v);
+void APIENTRY glVertexAttrib4NusvARB(GLuint index, const GLushort *v);
+void APIENTRY glVertexAttrib4bvARB(GLuint index, const GLbyte *v);
+void APIENTRY glVertexAttrib4dARB(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w);
+void APIENTRY glVertexAttrib4dNV(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w);
+void APIENTRY glVertexAttrib4dvARB(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttrib4dvNV(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttrib4fARB(GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w);
+void APIENTRY glVertexAttrib4fNV(GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w);
+void APIENTRY glVertexAttrib4fvARB(GLuint index, const GLfloat *v);
+void APIENTRY glVertexAttrib4fvNV(GLuint index, const GLfloat *v);
+void APIENTRY glVertexAttrib4ivARB(GLuint index, const GLint *v);
+void APIENTRY glVertexAttrib4sARB(GLuint index, GLshort x, GLshort y, GLshort z, GLshort w);
+void APIENTRY glVertexAttrib4sNV(GLuint index, GLshort x, GLshort y, GLshort z, GLshort w);
+void APIENTRY glVertexAttrib4svARB(GLuint index, const GLshort *v);
+void APIENTRY glVertexAttrib4svNV(GLuint index, const GLshort *v);
+void APIENTRY glVertexAttrib4ubNV(GLuint index, GLubyte x, GLubyte y, GLubyte z, GLubyte w);
+void APIENTRY glVertexAttrib4ubvARB(GLuint index, const GLubyte *v);
+void APIENTRY glVertexAttrib4ubvNV(GLuint index, const GLubyte *v);
+void APIENTRY glVertexAttrib4uivARB(GLuint index, const GLuint *v);
+void APIENTRY glVertexAttrib4usvARB(GLuint index, const GLushort *v);
+void APIENTRY glVertexAttribDivisorANGLE(GLuint index, GLuint divisor);
+void APIENTRY glVertexAttribDivisorARB(GLuint index, GLuint divisor);
+void APIENTRY glVertexAttribDivisorEXT(GLuint index, GLuint divisor);
+void APIENTRY glVertexAttribDivisorNV(GLuint index, GLuint divisor);
+void APIENTRY glVertexAttribI1iEXT(GLuint index, GLint x);
+void APIENTRY glVertexAttribI1ivEXT(GLuint index, const GLint *v);
+void APIENTRY glVertexAttribI1uiEXT(GLuint index, GLuint x);
+void APIENTRY glVertexAttribI1uivEXT(GLuint index, const GLuint *v);
+void APIENTRY glVertexAttribI2iEXT(GLuint index, GLint x, GLint y);
+void APIENTRY glVertexAttribI2ivEXT(GLuint index, const GLint *v);
+void APIENTRY glVertexAttribI2uiEXT(GLuint index, GLuint x, GLuint y);
+void APIENTRY glVertexAttribI2uivEXT(GLuint index, const GLuint *v);
+void APIENTRY glVertexAttribI3iEXT(GLuint index, GLint x, GLint y, GLint z);
+void APIENTRY glVertexAttribI3ivEXT(GLuint index, const GLint *v);
+void APIENTRY glVertexAttribI3uiEXT(GLuint index, GLuint x, GLuint y, GLuint z);
+void APIENTRY glVertexAttribI3uivEXT(GLuint index, const GLuint *v);
+void APIENTRY glVertexAttribI4bvEXT(GLuint index, const GLbyte *v);
+void APIENTRY glVertexAttribI4iEXT(GLuint index, GLint x, GLint y, GLint z, GLint w);
+void APIENTRY glVertexAttribI4ivEXT(GLuint index, const GLint *v);
+void APIENTRY glVertexAttribI4svEXT(GLuint index, const GLshort *v);
+void APIENTRY glVertexAttribI4ubvEXT(GLuint index, const GLubyte *v);
+void APIENTRY glVertexAttribI4uiEXT(GLuint index, GLuint x, GLuint y, GLuint z, GLuint w);
+void APIENTRY glVertexAttribI4uivEXT(GLuint index, const GLuint *v);
+void APIENTRY glVertexAttribI4usvEXT(GLuint index, const GLushort *v);
+void APIENTRY glVertexAttribIPointerEXT(GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer);
+void APIENTRY glVertexAttribL1dEXT(GLuint index, GLdouble x);
+void APIENTRY glVertexAttribL1dvEXT(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttribL2dEXT(GLuint index, GLdouble x, GLdouble y);
+void APIENTRY glVertexAttribL2dvEXT(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttribL3dEXT(GLuint index, GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glVertexAttribL3dvEXT(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttribL4dEXT(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w);
+void APIENTRY glVertexAttribL4dvEXT(GLuint index, const GLdouble *v);
+void APIENTRY glVertexAttribLPointerEXT(GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer);
+void APIENTRY glVertexAttribPointerARB(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer);
+void APIENTRY glViewportArrayvNV(GLuint first, GLsizei count, const GLfloat *v);
+void APIENTRY glViewportArrayvOES(GLuint first, GLsizei count, const GLfloat *v);
+void APIENTRY glViewportIndexedfNV(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h);
+void APIENTRY glViewportIndexedfOES(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h);
+void APIENTRY glViewportIndexedfvNV(GLuint index, const GLfloat *v);
+void APIENTRY glViewportIndexedfvOES(GLuint index, const GLfloat *v);
+void APIENTRY glWaitSyncAPPLE(GLsync sync, GLbitfield flags, GLuint64 timeout);
+void APIENTRY glAccum(GLenum op, GLfloat value);
+void APIENTRY glAlphaFunc(GLenum func, GLfloat ref);
+GLboolean APIENTRY glAreTexturesResident(GLsizei n, const GLuint *textures, GLboolean *residences);
+void APIENTRY glArrayElement(GLint i);
+void APIENTRY glBegin(GLenum mode);
+void APIENTRY glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig, GLfloat xmove, GLfloat ymove, const GLubyte *bitmap);
+void APIENTRY glCallList(GLuint list);
+void APIENTRY glCallLists(GLsizei n, GLenum type, const void *lists);
+void APIENTRY glClearAccum(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
+void APIENTRY glClearIndex(GLfloat c);
+void APIENTRY glClientActiveTexture(GLenum texture);
+void APIENTRY glClipPlane(GLenum plane, const GLdouble *equation);
+void APIENTRY glColor3b(GLbyte red, GLbyte green, GLbyte blue);
+void APIENTRY glColor3bv(const GLbyte *v);
+void APIENTRY glColor3d(GLdouble red, GLdouble green, GLdouble blue);
+void APIENTRY glColor3dv(const GLdouble *v);
+void APIENTRY glColor3f(GLfloat red, GLfloat green, GLfloat blue);
+void APIENTRY glColor3fv(const GLfloat *v);
+void APIENTRY glColor3i(GLint red, GLint green, GLint blue);
+void APIENTRY glColor3iv(const GLint *v);
+void APIENTRY glColor3s(GLshort red, GLshort green, GLshort blue);
+void APIENTRY glColor3sv(const GLshort *v);
+void APIENTRY glColor3ub(GLubyte red, GLubyte green, GLubyte blue);
+void APIENTRY glColor3ubv(const GLubyte *v);
+void APIENTRY glColor3ui(GLuint red, GLuint green, GLuint blue);
+void APIENTRY glColor3uiv(const GLuint *v);
+void APIENTRY glColor3us(GLushort red, GLushort green, GLushort blue);
+void APIENTRY glColor3usv(const GLushort *v);
+void APIENTRY glColor4b(GLbyte red, GLbyte green, GLbyte blue, GLbyte alpha);
+void APIENTRY glColor4bv(const GLbyte *v);
+void APIENTRY glColor4d(GLdouble red, GLdouble green, GLdouble blue, GLdouble alpha);
+void APIENTRY glColor4dv(const GLdouble *v);
+void APIENTRY glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
+void APIENTRY glColor4fv(const GLfloat *v);
+void APIENTRY glColor4i(GLint red, GLint green, GLint blue, GLint alpha);
+void APIENTRY glColor4iv(const GLint *v);
+void APIENTRY glColor4s(GLshort red, GLshort green, GLshort blue, GLshort alpha);
+void APIENTRY glColor4sv(const GLshort *v);
+void APIENTRY glColor4ub(GLubyte red, GLubyte green, GLubyte blue, GLubyte alpha);
+void APIENTRY glColor4ubv(const GLubyte *v);
+void APIENTRY glColor4ui(GLuint red, GLuint green, GLuint blue, GLuint alpha);
+void APIENTRY glColor4uiv(const GLuint *v);
+void APIENTRY glColor4us(GLushort red, GLushort green, GLushort blue, GLushort alpha);
+void APIENTRY glColor4usv(const GLushort *v);
+void APIENTRY glColorMaterial(GLenum face, GLenum mode);
+void APIENTRY glColorP3ui(GLenum type, GLuint color);
+void APIENTRY glColorP3uiv(GLenum type, const GLuint *color);
+void APIENTRY glColorP4ui(GLenum type, GLuint color);
+void APIENTRY glColorP4uiv(GLenum type, const GLuint *color);
+void APIENTRY glColorPointer(GLint size, GLenum type, GLsizei stride, const void *pointer);
+void APIENTRY glCopyPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type);
+void APIENTRY glDeleteLists(GLuint list, GLsizei range);
+void APIENTRY glDisableClientState(GLenum array);
+void APIENTRY glDrawPixels(GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels);
+void APIENTRY glEdgeFlag(GLboolean flag);
+void APIENTRY glEdgeFlagPointer(GLsizei stride, const void *pointer);
+void APIENTRY glEdgeFlagv(const GLboolean *flag);
+void APIENTRY glEnableClientState(GLenum array);
+void APIENTRY glEnd(void);
+void APIENTRY glEndList(void);
+void APIENTRY glEvalCoord1d(GLdouble u);
+void APIENTRY glEvalCoord1dv(const GLdouble *u);
+void APIENTRY glEvalCoord1f(GLfloat u);
+void APIENTRY glEvalCoord1fv(const GLfloat *u);
+void APIENTRY glEvalCoord2d(GLdouble u, GLdouble v);
+void APIENTRY glEvalCoord2dv(const GLdouble *u);
+void APIENTRY glEvalCoord2f(GLfloat u, GLfloat v);
+void APIENTRY glEvalCoord2fv(const GLfloat *u);
+void APIENTRY glEvalMesh1(GLenum mode, GLint i1, GLint i2);
+void APIENTRY glEvalMesh2(GLenum mode, GLint i1, GLint i2, GLint j1, GLint j2);
+void APIENTRY glEvalPoint1(GLint i);
+void APIENTRY glEvalPoint2(GLint i, GLint j);
+void APIENTRY glFeedbackBuffer(GLsizei size, GLenum type, GLfloat *buffer);
+void APIENTRY glFogCoordPointer(GLenum type, GLsizei stride, const void *pointer);
+void APIENTRY glFogCoordd(GLdouble coord);
+void APIENTRY glFogCoorddv(const GLdouble *coord);
+void APIENTRY glFogCoordf(GLfloat coord);
+void APIENTRY glFogCoordfv(const GLfloat *coord);
+void APIENTRY glFogf(GLenum pname, GLfloat param);
+void APIENTRY glFogfv(GLenum pname, const GLfloat *params);
+void APIENTRY glFogi(GLenum pname, GLint param);
+void APIENTRY glFogiv(GLenum pname, const GLint *params);
+void APIENTRY glFrustum(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar);
+GLuint APIENTRY glGenLists(GLsizei range);
+void APIENTRY glGetClipPlane(GLenum plane, GLdouble *equation);
+void APIENTRY glGetLightfv(GLenum light, GLenum pname, GLfloat *params);
+void APIENTRY glGetLightiv(GLenum light, GLenum pname, GLint *params);
+void APIENTRY glGetMapdv(GLenum target, GLenum query, GLdouble *v);
+void APIENTRY glGetMapfv(GLenum target, GLenum query, GLfloat *v);
+void APIENTRY glGetMapiv(GLenum target, GLenum query, GLint *v);
+void APIENTRY glGetMaterialfv(GLenum face, GLenum pname, GLfloat *params);
+void APIENTRY glGetMaterialiv(GLenum face, GLenum pname, GLint *params);
+void APIENTRY glGetPixelMapfv(GLenum map, GLfloat *values);
+void APIENTRY glGetPixelMapuiv(GLenum map, GLuint *values);
+void APIENTRY glGetPixelMapusv(GLenum map, GLushort *values);
+void APIENTRY glGetPolygonStipple(GLubyte *mask);
+void APIENTRY glGetTexEnvfv(GLenum target, GLenum pname, GLfloat *params);
+void APIENTRY glGetTexEnviv(GLenum target, GLenum pname, GLint *params);
+void APIENTRY glGetTexGendv(GLenum coord, GLenum pname, GLdouble *params);
+void APIENTRY glGetTexGenfv(GLenum coord, GLenum pname, GLfloat *params);
+void APIENTRY glGetTexGeniv(GLenum coord, GLenum pname, GLint *params);
+void APIENTRY glGetnColorTable(GLenum target, GLenum format, GLenum type, GLsizei bufSize, void *table);
+void APIENTRY glGetnConvolutionFilter(GLenum target, GLenum format, GLenum type, GLsizei bufSize, void *image);
+void APIENTRY glGetnHistogram(GLenum target, GLboolean reset, GLenum format, GLenum type, GLsizei bufSize, void *values);
+void APIENTRY glGetnMapdv(GLenum target, GLenum query, GLsizei bufSize, GLdouble *v);
+void APIENTRY glGetnMapfv(GLenum target, GLenum query, GLsizei bufSize, GLfloat *v);
+void APIENTRY glGetnMapiv(GLenum target, GLenum query, GLsizei bufSize, GLint *v);
+void APIENTRY glGetnMinmax(GLenum target, GLboolean reset, GLenum format, GLenum type, GLsizei bufSize, void *values);
+void APIENTRY glGetnPixelMapfv(GLenum map, GLsizei bufSize, GLfloat *values);
+void APIENTRY glGetnPixelMapuiv(GLenum map, GLsizei bufSize, GLuint *values);
+void APIENTRY glGetnPixelMapusv(GLenum map, GLsizei bufSize, GLushort *values);
+void APIENTRY glGetnPolygonStipple(GLsizei bufSize, GLubyte *pattern);
+void APIENTRY glGetnSeparableFilter(GLenum target, GLenum format, GLenum type, GLsizei rowBufSize, void *row, GLsizei columnBufSize, void *column, void *span);
+void APIENTRY glIndexMask(GLuint mask);
+void APIENTRY glIndexPointer(GLenum type, GLsizei stride, const void *pointer);
+void APIENTRY glIndexd(GLdouble c);
+void APIENTRY glIndexdv(const GLdouble *c);
+void APIENTRY glIndexf(GLfloat c);
+void APIENTRY glIndexfv(const GLfloat *c);
+void APIENTRY glIndexi(GLint c);
+void APIENTRY glIndexiv(const GLint *c);
+void APIENTRY glIndexs(GLshort c);
+void APIENTRY glIndexsv(const GLshort *c);
+void APIENTRY glIndexub(GLubyte c);
+void APIENTRY glIndexubv(const GLubyte *c);
+void APIENTRY glInitNames(void);
+void APIENTRY glInterleavedArrays(GLenum format, GLsizei stride, const void *pointer);
+GLboolean APIENTRY glIsList(GLuint list);
+void APIENTRY glLightModelf(GLenum pname, GLfloat param);
+void APIENTRY glLightModelfv(GLenum pname, const GLfloat *params);
+void APIENTRY glLightModeli(GLenum pname, GLint param);
+void APIENTRY glLightModeliv(GLenum pname, const GLint *params);
+void APIENTRY glLightf(GLenum light, GLenum pname, GLfloat param);
+void APIENTRY glLightfv(GLenum light, GLenum pname, const GLfloat *params);
+void APIENTRY glLighti(GLenum light, GLenum pname, GLint param);
+void APIENTRY glLightiv(GLenum light, GLenum pname, const GLint *params);
+void APIENTRY glLineStipple(GLint factor, GLushort pattern);
+void APIENTRY glListBase(GLuint base);
+void APIENTRY glLoadIdentity(void);
+void APIENTRY glLoadMatrixd(const GLdouble *m);
+void APIENTRY glLoadMatrixf(const GLfloat *m);
+void APIENTRY glLoadName(GLuint name);
+void APIENTRY glLoadTransposeMatrixd(const GLdouble *m);
+void APIENTRY glLoadTransposeMatrixf(const GLfloat *m);
+void APIENTRY glMap1d(GLenum target, GLdouble u1, GLdouble u2, GLint stride, GLint order, const GLdouble *points);
+void APIENTRY glMap1f(GLenum target, GLfloat u1, GLfloat u2, GLint stride, GLint order, const GLfloat *points);
+void APIENTRY glMap2d(GLenum target, GLdouble u1, GLdouble u2, GLint ustride, GLint uorder, GLdouble v1, GLdouble v2, GLint vstride, GLint vorder, const GLdouble *points);
+void APIENTRY glMap2f(GLenum target, GLfloat u1, GLfloat u2, GLint ustride, GLint uorder, GLfloat v1, GLfloat v2, GLint vstride, GLint vorder, const GLfloat *points);
+void APIENTRY glMapGrid1d(GLint un, GLdouble u1, GLdouble u2);
+void APIENTRY glMapGrid1f(GLint un, GLfloat u1, GLfloat u2);
+void APIENTRY glMapGrid2d(GLint un, GLdouble u1, GLdouble u2, GLint vn, GLdouble v1, GLdouble v2);
+void APIENTRY glMapGrid2f(GLint un, GLfloat u1, GLfloat u2, GLint vn, GLfloat v1, GLfloat v2);
+void APIENTRY glMaterialf(GLenum face, GLenum pname, GLfloat param);
+void APIENTRY glMaterialfv(GLenum face, GLenum pname, const GLfloat *params);
+void APIENTRY glMateriali(GLenum face, GLenum pname, GLint param);
+void APIENTRY glMaterialiv(GLenum face, GLenum pname, const GLint *params);
+void APIENTRY glMatrixMode(GLenum mode);
+void APIENTRY glMultMatrixd(const GLdouble *m);
+void APIENTRY glMultMatrixf(const GLfloat *m);
+void APIENTRY glMultTransposeMatrixd(const GLdouble *m);
+void APIENTRY glMultTransposeMatrixf(const GLfloat *m);
+void APIENTRY glMultiTexCoord1d(GLenum target, GLdouble s);
+void APIENTRY glMultiTexCoord1dv(GLenum target, const GLdouble *v);
+void APIENTRY glMultiTexCoord1f(GLenum target, GLfloat s);
+void APIENTRY glMultiTexCoord1fv(GLenum target, const GLfloat *v);
+void APIENTRY glMultiTexCoord1i(GLenum target, GLint s);
+void APIENTRY glMultiTexCoord1iv(GLenum target, const GLint *v);
+void APIENTRY glMultiTexCoord1s(GLenum target, GLshort s);
+void APIENTRY glMultiTexCoord1sv(GLenum target, const GLshort *v);
+void APIENTRY glMultiTexCoord2d(GLenum target, GLdouble s, GLdouble t);
+void APIENTRY glMultiTexCoord2dv(GLenum target, const GLdouble *v);
+void APIENTRY glMultiTexCoord2f(GLenum target, GLfloat s, GLfloat t);
+void APIENTRY glMultiTexCoord2fv(GLenum target, const GLfloat *v);
+void APIENTRY glMultiTexCoord2i(GLenum target, GLint s, GLint t);
+void APIENTRY glMultiTexCoord2iv(GLenum target, const GLint *v);
+void APIENTRY glMultiTexCoord2s(GLenum target, GLshort s, GLshort t);
+void APIENTRY glMultiTexCoord2sv(GLenum target, const GLshort *v);
+void APIENTRY glMultiTexCoord3d(GLenum target, GLdouble s, GLdouble t, GLdouble r);
+void APIENTRY glMultiTexCoord3dv(GLenum target, const GLdouble *v);
+void APIENTRY glMultiTexCoord3f(GLenum target, GLfloat s, GLfloat t, GLfloat r);
+void APIENTRY glMultiTexCoord3fv(GLenum target, const GLfloat *v);
+void APIENTRY glMultiTexCoord3i(GLenum target, GLint s, GLint t, GLint r);
+void APIENTRY glMultiTexCoord3iv(GLenum target, const GLint *v);
+void APIENTRY glMultiTexCoord3s(GLenum target, GLshort s, GLshort t, GLshort r);
+void APIENTRY glMultiTexCoord3sv(GLenum target, const GLshort *v);
+void APIENTRY glMultiTexCoord4d(GLenum target, GLdouble s, GLdouble t, GLdouble r, GLdouble q);
+void APIENTRY glMultiTexCoord4dv(GLenum target, const GLdouble *v);
+void APIENTRY glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q);
+void APIENTRY glMultiTexCoord4fv(GLenum target, const GLfloat *v);
+void APIENTRY glMultiTexCoord4i(GLenum target, GLint s, GLint t, GLint r, GLint q);
+void APIENTRY glMultiTexCoord4iv(GLenum target, const GLint *v);
+void APIENTRY glMultiTexCoord4s(GLenum target, GLshort s, GLshort t, GLshort r, GLshort q);
+void APIENTRY glMultiTexCoord4sv(GLenum target, const GLshort *v);
+void APIENTRY glMultiTexCoordP1ui(GLenum texture, GLenum type, GLuint coords);
+void APIENTRY glMultiTexCoordP1uiv(GLenum texture, GLenum type, const GLuint *coords);
+void APIENTRY glMultiTexCoordP2ui(GLenum texture, GLenum type, GLuint coords);
+void APIENTRY glMultiTexCoordP2uiv(GLenum texture, GLenum type, const GLuint *coords);
+void APIENTRY glMultiTexCoordP3ui(GLenum texture, GLenum type, GLuint coords);
+void APIENTRY glMultiTexCoordP3uiv(GLenum texture, GLenum type, const GLuint *coords);
+void APIENTRY glMultiTexCoordP4ui(GLenum texture, GLenum type, GLuint coords);
+void APIENTRY glMultiTexCoordP4uiv(GLenum texture, GLenum type, const GLuint *coords);
+void APIENTRY glNewList(GLuint list, GLenum mode);
+void APIENTRY glNormal3b(GLbyte nx, GLbyte ny, GLbyte nz);
+void APIENTRY glNormal3bv(const GLbyte *v);
+void APIENTRY glNormal3d(GLdouble nx, GLdouble ny, GLdouble nz);
+void APIENTRY glNormal3dv(const GLdouble *v);
+void APIENTRY glNormal3f(GLfloat nx, GLfloat ny, GLfloat nz);
+void APIENTRY glNormal3fv(const GLfloat *v);
+void APIENTRY glNormal3i(GLint nx, GLint ny, GLint nz);
+void APIENTRY glNormal3iv(const GLint *v);
+void APIENTRY glNormal3s(GLshort nx, GLshort ny, GLshort nz);
+void APIENTRY glNormal3sv(const GLshort *v);
+void APIENTRY glNormalP3ui(GLenum type, GLuint coords);
+void APIENTRY glNormalP3uiv(GLenum type, const GLuint *coords);
+void APIENTRY glNormalPointer(GLenum type, GLsizei stride, const void *pointer);
+void APIENTRY glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar);
+void APIENTRY glPassThrough(GLfloat token);
+void APIENTRY glPixelMapfv(GLenum map, GLsizei mapsize, const GLfloat *values);
+void APIENTRY glPixelMapuiv(GLenum map, GLsizei mapsize, const GLuint *values);
+void APIENTRY glPixelMapusv(GLenum map, GLsizei mapsize, const GLushort *values);
+void APIENTRY glPixelTransferf(GLenum pname, GLfloat param);
+void APIENTRY glPixelTransferi(GLenum pname, GLint param);
+void APIENTRY glPixelZoom(GLfloat xfactor, GLfloat yfactor);
+void APIENTRY glPolygonStipple(const GLubyte *mask);
+void APIENTRY glPopAttrib(void);
+void APIENTRY glPopClientAttrib(void);
+void APIENTRY glPopMatrix(void);
+void APIENTRY glPopName(void);
+void APIENTRY glPrioritizeTextures(GLsizei n, const GLuint *textures, const GLfloat *priorities);
+void APIENTRY glPushAttrib(GLbitfield mask);
+void APIENTRY glPushClientAttrib(GLbitfield mask);
+void APIENTRY glPushMatrix(void);
+void APIENTRY glPushName(GLuint name);
+void APIENTRY glRasterPos2d(GLdouble x, GLdouble y);
+void APIENTRY glRasterPos2dv(const GLdouble *v);
+void APIENTRY glRasterPos2f(GLfloat x, GLfloat y);
+void APIENTRY glRasterPos2fv(const GLfloat *v);
+void APIENTRY glRasterPos2i(GLint x, GLint y);
+void APIENTRY glRasterPos2iv(const GLint *v);
+void APIENTRY glRasterPos2s(GLshort x, GLshort y);
+void APIENTRY glRasterPos2sv(const GLshort *v);
+void APIENTRY glRasterPos3d(GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glRasterPos3dv(const GLdouble *v);
+void APIENTRY glRasterPos3f(GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glRasterPos3fv(const GLfloat *v);
+void APIENTRY glRasterPos3i(GLint x, GLint y, GLint z);
+void APIENTRY glRasterPos3iv(const GLint *v);
+void APIENTRY glRasterPos3s(GLshort x, GLshort y, GLshort z);
+void APIENTRY glRasterPos3sv(const GLshort *v);
+void APIENTRY glRasterPos4d(GLdouble x, GLdouble y, GLdouble z, GLdouble w);
+void APIENTRY glRasterPos4dv(const GLdouble *v);
+void APIENTRY glRasterPos4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w);
+void APIENTRY glRasterPos4fv(const GLfloat *v);
+void APIENTRY glRasterPos4i(GLint x, GLint y, GLint z, GLint w);
+void APIENTRY glRasterPos4iv(const GLint *v);
+void APIENTRY glRasterPos4s(GLshort x, GLshort y, GLshort z, GLshort w);
+void APIENTRY glRasterPos4sv(const GLshort *v);
+void APIENTRY glRectd(GLdouble x1, GLdouble y1, GLdouble x2, GLdouble y2);
+void APIENTRY glRectdv(const GLdouble *v1, const GLdouble *v2);
+void APIENTRY glRectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2);
+void APIENTRY glRectfv(const GLfloat *v1, const GLfloat *v2);
+void APIENTRY glRecti(GLint x1, GLint y1, GLint x2, GLint y2);
+void APIENTRY glRectiv(const GLint *v1, const GLint *v2);
+void APIENTRY glRects(GLshort x1, GLshort y1, GLshort x2, GLshort y2);
+void APIENTRY glRectsv(const GLshort *v1, const GLshort *v2);
+GLint APIENTRY glRenderMode(GLenum mode);
+void APIENTRY glRotated(GLdouble angle, GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glRotatef(GLfloat angle, GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glScaled(GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glScalef(GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glSecondaryColor3b(GLbyte red, GLbyte green, GLbyte blue);
+void APIENTRY glSecondaryColor3bv(const GLbyte *v);
+void APIENTRY glSecondaryColor3d(GLdouble red, GLdouble green, GLdouble blue);
+void APIENTRY glSecondaryColor3dv(const GLdouble *v);
+void APIENTRY glSecondaryColor3f(GLfloat red, GLfloat green, GLfloat blue);
+void APIENTRY glSecondaryColor3fv(const GLfloat *v);
+void APIENTRY glSecondaryColor3i(GLint red, GLint green, GLint blue);
+void APIENTRY glSecondaryColor3iv(const GLint *v);
+void APIENTRY glSecondaryColor3s(GLshort red, GLshort green, GLshort blue);
+void APIENTRY glSecondaryColor3sv(const GLshort *v);
+void APIENTRY glSecondaryColor3ub(GLubyte red, GLubyte green, GLubyte blue);
+void APIENTRY glSecondaryColor3ubv(const GLubyte *v);
+void APIENTRY glSecondaryColor3ui(GLuint red, GLuint green, GLuint blue);
+void APIENTRY glSecondaryColor3uiv(const GLuint *v);
+void APIENTRY glSecondaryColor3us(GLushort red, GLushort green, GLushort blue);
+void APIENTRY glSecondaryColor3usv(const GLushort *v);
+void APIENTRY glSecondaryColorP3ui(GLenum type, GLuint color);
+void APIENTRY glSecondaryColorP3uiv(GLenum type, const GLuint *color);
+void APIENTRY glSecondaryColorPointer(GLint size, GLenum type, GLsizei stride, const void *pointer);
+void APIENTRY glSelectBuffer(GLsizei size, GLuint *buffer);
+void APIENTRY glShadeModel(GLenum mode);
+void APIENTRY glTexCoord1d(GLdouble s);
+void APIENTRY glTexCoord1dv(const GLdouble *v);
+void APIENTRY glTexCoord1f(GLfloat s);
+void APIENTRY glTexCoord1fv(const GLfloat *v);
+void APIENTRY glTexCoord1i(GLint s);
+void APIENTRY glTexCoord1iv(const GLint *v);
+void APIENTRY glTexCoord1s(GLshort s);
+void APIENTRY glTexCoord1sv(const GLshort *v);
+void APIENTRY glTexCoord2d(GLdouble s, GLdouble t);
+void APIENTRY glTexCoord2dv(const GLdouble *v);
+void APIENTRY glTexCoord2f(GLfloat s, GLfloat t);
+void APIENTRY glTexCoord2fv(const GLfloat *v);
+void APIENTRY glTexCoord2i(GLint s, GLint t);
+void APIENTRY glTexCoord2iv(const GLint *v);
+void APIENTRY glTexCoord2s(GLshort s, GLshort t);
+void APIENTRY glTexCoord2sv(const GLshort *v);
+void APIENTRY glTexCoord3d(GLdouble s, GLdouble t, GLdouble r);
+void APIENTRY glTexCoord3dv(const GLdouble *v);
+void APIENTRY glTexCoord3f(GLfloat s, GLfloat t, GLfloat r);
+void APIENTRY glTexCoord3fv(const GLfloat *v);
+void APIENTRY glTexCoord3i(GLint s, GLint t, GLint r);
+void APIENTRY glTexCoord3iv(const GLint *v);
+void APIENTRY glTexCoord3s(GLshort s, GLshort t, GLshort r);
+void APIENTRY glTexCoord3sv(const GLshort *v);
+void APIENTRY glTexCoord4d(GLdouble s, GLdouble t, GLdouble r, GLdouble q);
+void APIENTRY glTexCoord4dv(const GLdouble *v);
+void APIENTRY glTexCoord4f(GLfloat s, GLfloat t, GLfloat r, GLfloat q);
+void APIENTRY glTexCoord4fv(const GLfloat *v);
+void APIENTRY glTexCoord4i(GLint s, GLint t, GLint r, GLint q);
+void APIENTRY glTexCoord4iv(const GLint *v);
+void APIENTRY glTexCoord4s(GLshort s, GLshort t, GLshort r, GLshort q);
+void APIENTRY glTexCoord4sv(const GLshort *v);
+void APIENTRY glTexCoordP1ui(GLenum type, GLuint coords);
+void APIENTRY glTexCoordP1uiv(GLenum type, const GLuint *coords);
+void APIENTRY glTexCoordP2ui(GLenum type, GLuint coords);
+void APIENTRY glTexCoordP2uiv(GLenum type, const GLuint *coords);
+void APIENTRY glTexCoordP3ui(GLenum type, GLuint coords);
+void APIENTRY glTexCoordP3uiv(GLenum type, const GLuint *coords);
+void APIENTRY glTexCoordP4ui(GLenum type, GLuint coords);
+void APIENTRY glTexCoordP4uiv(GLenum type, const GLuint *coords);
+void APIENTRY glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const void *pointer);
+void APIENTRY glTexEnvf(GLenum target, GLenum pname, GLfloat param);
+void APIENTRY glTexEnvfv(GLenum target, GLenum pname, const GLfloat *params);
+void APIENTRY glTexEnvi(GLenum target, GLenum pname, GLint param);
+void APIENTRY glTexEnviv(GLenum target, GLenum pname, const GLint *params);
+void APIENTRY glTexGend(GLenum coord, GLenum pname, GLdouble param);
+void APIENTRY glTexGendv(GLenum coord, GLenum pname, const GLdouble *params);
+void APIENTRY glTexGenf(GLenum coord, GLenum pname, GLfloat param);
+void APIENTRY glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params);
+void APIENTRY glTexGeni(GLenum coord, GLenum pname, GLint param);
+void APIENTRY glTexGeniv(GLenum coord, GLenum pname, const GLint *params);
+void APIENTRY glTranslated(GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glTranslatef(GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glVertex2d(GLdouble x, GLdouble y);
+void APIENTRY glVertex2dv(const GLdouble *v);
+void APIENTRY glVertex2f(GLfloat x, GLfloat y);
+void APIENTRY glVertex2fv(const GLfloat *v);
+void APIENTRY glVertex2i(GLint x, GLint y);
+void APIENTRY glVertex2iv(const GLint *v);
+void APIENTRY glVertex2s(GLshort x, GLshort y);
+void APIENTRY glVertex2sv(const GLshort *v);
+void APIENTRY glVertex3d(GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glVertex3dv(const GLdouble *v);
+void APIENTRY glVertex3f(GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glVertex3fv(const GLfloat *v);
+void APIENTRY glVertex3i(GLint x, GLint y, GLint z);
+void APIENTRY glVertex3iv(const GLint *v);
+void APIENTRY glVertex3s(GLshort x, GLshort y, GLshort z);
+void APIENTRY glVertex3sv(const GLshort *v);
+void APIENTRY glVertex4d(GLdouble x, GLdouble y, GLdouble z, GLdouble w);
+void APIENTRY glVertex4dv(const GLdouble *v);
+void APIENTRY glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w);
+void APIENTRY glVertex4fv(const GLfloat *v);
+void APIENTRY glVertex4i(GLint x, GLint y, GLint z, GLint w);
+void APIENTRY glVertex4iv(const GLint *v);
+void APIENTRY glVertex4s(GLshort x, GLshort y, GLshort z, GLshort w);
+void APIENTRY glVertex4sv(const GLshort *v);
+void APIENTRY glVertexP2ui(GLenum type, GLuint value);
+void APIENTRY glVertexP2uiv(GLenum type, const GLuint *value);
+void APIENTRY glVertexP3ui(GLenum type, GLuint value);
+void APIENTRY glVertexP3uiv(GLenum type, const GLuint *value);
+void APIENTRY glVertexP4ui(GLenum type, GLuint value);
+void APIENTRY glVertexP4uiv(GLenum type, const GLuint *value);
+void APIENTRY glVertexPointer(GLint size, GLenum type, GLsizei stride, const void *pointer);
+void APIENTRY glWindowPos2d(GLdouble x, GLdouble y);
+void APIENTRY glWindowPos2dv(const GLdouble *v);
+void APIENTRY glWindowPos2f(GLfloat x, GLfloat y);
+void APIENTRY glWindowPos2fv(const GLfloat *v);
+void APIENTRY glWindowPos2i(GLint x, GLint y);
+void APIENTRY glWindowPos2iv(const GLint *v);
+void APIENTRY glWindowPos2s(GLshort x, GLshort y);
+void APIENTRY glWindowPos2sv(const GLshort *v);
+void APIENTRY glWindowPos3d(GLdouble x, GLdouble y, GLdouble z);
+void APIENTRY glWindowPos3dv(const GLdouble *v);
+void APIENTRY glWindowPos3f(GLfloat x, GLfloat y, GLfloat z);
+void APIENTRY glWindowPos3fv(const GLfloat *v);
+void APIENTRY glWindowPos3i(GLint x, GLint y, GLint z);
+void APIENTRY glWindowPos3iv(const GLint *v);
+void APIENTRY glWindowPos3s(GLshort x, GLshort y, GLshort z);
+void APIENTRY glWindowPos3sv(const GLshort *v);
+}  // extern "C"
 
 namespace {
 
@@ -18,21 +898,40 @@ struct ProcEntry {
 // types is not a constant expression — but function addresses are
 // link-time constants, so the const array still ends up in rodata.
 const ProcEntry kProcTable[] = {
+    {"glAccum", reinterpret_cast<AppGLProc>(&::glAccum)},
     {"glActiveShaderProgram", reinterpret_cast<AppGLProc>(&::glActiveShaderProgram)},
     {"glActiveTexture", reinterpret_cast<AppGLProc>(&::glActiveTexture)},
+    {"glActiveTextureARB", reinterpret_cast<AppGLProc>(&::glActiveTextureARB)},
+    {"glAlphaFunc", reinterpret_cast<AppGLProc>(&::glAlphaFunc)},
+    {"glAreTexturesResident", reinterpret_cast<AppGLProc>(&::glAreTexturesResident)},
+    {"glArrayElement", reinterpret_cast<AppGLProc>(&::glArrayElement)},
+    {"glAttachObjectARB", reinterpret_cast<AppGLProc>(&::glAttachObjectARB)},
     {"glAttachShader", reinterpret_cast<AppGLProc>(&::glAttachShader)},
+    {"glBegin", reinterpret_cast<AppGLProc>(&::glBegin)},
     {"glBeginConditionalRender", reinterpret_cast<AppGLProc>(&::glBeginConditionalRender)},
+    {"glBeginConditionalRenderNV", reinterpret_cast<AppGLProc>(&::glBeginConditionalRenderNV)},
     {"glBeginQuery", reinterpret_cast<AppGLProc>(&::glBeginQuery)},
+    {"glBeginQueryARB", reinterpret_cast<AppGLProc>(&::glBeginQueryARB)},
     {"glBeginQueryIndexed", reinterpret_cast<AppGLProc>(&::glBeginQueryIndexed)},
     {"glBeginTransformFeedback", reinterpret_cast<AppGLProc>(&::glBeginTransformFeedback)},
+    {"glBeginTransformFeedbackEXT", reinterpret_cast<AppGLProc>(&::glBeginTransformFeedbackEXT)},
+    {"glBeginTransformFeedbackNV", reinterpret_cast<AppGLProc>(&::glBeginTransformFeedbackNV)},
     {"glBindAttribLocation", reinterpret_cast<AppGLProc>(&::glBindAttribLocation)},
+    {"glBindAttribLocationARB", reinterpret_cast<AppGLProc>(&::glBindAttribLocationARB)},
     {"glBindBuffer", reinterpret_cast<AppGLProc>(&::glBindBuffer)},
+    {"glBindBufferARB", reinterpret_cast<AppGLProc>(&::glBindBufferARB)},
     {"glBindBufferBase", reinterpret_cast<AppGLProc>(&::glBindBufferBase)},
+    {"glBindBufferBaseEXT", reinterpret_cast<AppGLProc>(&::glBindBufferBaseEXT)},
+    {"glBindBufferBaseNV", reinterpret_cast<AppGLProc>(&::glBindBufferBaseNV)},
     {"glBindBufferRange", reinterpret_cast<AppGLProc>(&::glBindBufferRange)},
+    {"glBindBufferRangeEXT", reinterpret_cast<AppGLProc>(&::glBindBufferRangeEXT)},
+    {"glBindBufferRangeNV", reinterpret_cast<AppGLProc>(&::glBindBufferRangeNV)},
     {"glBindBuffersBase", reinterpret_cast<AppGLProc>(&::glBindBuffersBase)},
     {"glBindBuffersRange", reinterpret_cast<AppGLProc>(&::glBindBuffersRange)},
     {"glBindFragDataLocation", reinterpret_cast<AppGLProc>(&::glBindFragDataLocation)},
+    {"glBindFragDataLocationEXT", reinterpret_cast<AppGLProc>(&::glBindFragDataLocationEXT)},
     {"glBindFragDataLocationIndexed", reinterpret_cast<AppGLProc>(&::glBindFragDataLocationIndexed)},
+    {"glBindFragDataLocationIndexedEXT", reinterpret_cast<AppGLProc>(&::glBindFragDataLocationIndexedEXT)},
     {"glBindFramebuffer", reinterpret_cast<AppGLProc>(&::glBindFramebuffer)},
     {"glBindImageTexture", reinterpret_cast<AppGLProc>(&::glBindImageTexture)},
     {"glBindImageTextures", reinterpret_cast<AppGLProc>(&::glBindImageTextures)},
@@ -41,30 +940,64 @@ const ProcEntry kProcTable[] = {
     {"glBindSampler", reinterpret_cast<AppGLProc>(&::glBindSampler)},
     {"glBindSamplers", reinterpret_cast<AppGLProc>(&::glBindSamplers)},
     {"glBindTexture", reinterpret_cast<AppGLProc>(&::glBindTexture)},
+    {"glBindTextureEXT", reinterpret_cast<AppGLProc>(&::glBindTextureEXT)},
     {"glBindTextureUnit", reinterpret_cast<AppGLProc>(&::glBindTextureUnit)},
     {"glBindTextures", reinterpret_cast<AppGLProc>(&::glBindTextures)},
     {"glBindTransformFeedback", reinterpret_cast<AppGLProc>(&::glBindTransformFeedback)},
     {"glBindVertexArray", reinterpret_cast<AppGLProc>(&::glBindVertexArray)},
+    {"glBindVertexArrayOES", reinterpret_cast<AppGLProc>(&::glBindVertexArrayOES)},
     {"glBindVertexBuffer", reinterpret_cast<AppGLProc>(&::glBindVertexBuffer)},
     {"glBindVertexBuffers", reinterpret_cast<AppGLProc>(&::glBindVertexBuffers)},
+    {"glBitmap", reinterpret_cast<AppGLProc>(&::glBitmap)},
     {"glBlendColor", reinterpret_cast<AppGLProc>(&::glBlendColor)},
+    {"glBlendColorEXT", reinterpret_cast<AppGLProc>(&::glBlendColorEXT)},
     {"glBlendEquation", reinterpret_cast<AppGLProc>(&::glBlendEquation)},
+    {"glBlendEquationEXT", reinterpret_cast<AppGLProc>(&::glBlendEquationEXT)},
+    {"glBlendEquationIndexedAMD", reinterpret_cast<AppGLProc>(&::glBlendEquationIndexedAMD)},
     {"glBlendEquationSeparate", reinterpret_cast<AppGLProc>(&::glBlendEquationSeparate)},
+    {"glBlendEquationSeparateEXT", reinterpret_cast<AppGLProc>(&::glBlendEquationSeparateEXT)},
+    {"glBlendEquationSeparateIndexedAMD", reinterpret_cast<AppGLProc>(&::glBlendEquationSeparateIndexedAMD)},
     {"glBlendEquationSeparatei", reinterpret_cast<AppGLProc>(&::glBlendEquationSeparatei)},
+    {"glBlendEquationSeparateiARB", reinterpret_cast<AppGLProc>(&::glBlendEquationSeparateiARB)},
+    {"glBlendEquationSeparateiEXT", reinterpret_cast<AppGLProc>(&::glBlendEquationSeparateiEXT)},
+    {"glBlendEquationSeparateiOES", reinterpret_cast<AppGLProc>(&::glBlendEquationSeparateiOES)},
     {"glBlendEquationi", reinterpret_cast<AppGLProc>(&::glBlendEquationi)},
+    {"glBlendEquationiARB", reinterpret_cast<AppGLProc>(&::glBlendEquationiARB)},
+    {"glBlendEquationiEXT", reinterpret_cast<AppGLProc>(&::glBlendEquationiEXT)},
+    {"glBlendEquationiOES", reinterpret_cast<AppGLProc>(&::glBlendEquationiOES)},
     {"glBlendFunc", reinterpret_cast<AppGLProc>(&::glBlendFunc)},
+    {"glBlendFuncIndexedAMD", reinterpret_cast<AppGLProc>(&::glBlendFuncIndexedAMD)},
     {"glBlendFuncSeparate", reinterpret_cast<AppGLProc>(&::glBlendFuncSeparate)},
+    {"glBlendFuncSeparateEXT", reinterpret_cast<AppGLProc>(&::glBlendFuncSeparateEXT)},
+    {"glBlendFuncSeparateINGR", reinterpret_cast<AppGLProc>(&::glBlendFuncSeparateINGR)},
+    {"glBlendFuncSeparateIndexedAMD", reinterpret_cast<AppGLProc>(&::glBlendFuncSeparateIndexedAMD)},
     {"glBlendFuncSeparatei", reinterpret_cast<AppGLProc>(&::glBlendFuncSeparatei)},
+    {"glBlendFuncSeparateiARB", reinterpret_cast<AppGLProc>(&::glBlendFuncSeparateiARB)},
+    {"glBlendFuncSeparateiEXT", reinterpret_cast<AppGLProc>(&::glBlendFuncSeparateiEXT)},
+    {"glBlendFuncSeparateiOES", reinterpret_cast<AppGLProc>(&::glBlendFuncSeparateiOES)},
     {"glBlendFunci", reinterpret_cast<AppGLProc>(&::glBlendFunci)},
+    {"glBlendFunciARB", reinterpret_cast<AppGLProc>(&::glBlendFunciARB)},
+    {"glBlendFunciEXT", reinterpret_cast<AppGLProc>(&::glBlendFunciEXT)},
+    {"glBlendFunciOES", reinterpret_cast<AppGLProc>(&::glBlendFunciOES)},
     {"glBlitFramebuffer", reinterpret_cast<AppGLProc>(&::glBlitFramebuffer)},
+    {"glBlitFramebufferEXT", reinterpret_cast<AppGLProc>(&::glBlitFramebufferEXT)},
+    {"glBlitFramebufferNV", reinterpret_cast<AppGLProc>(&::glBlitFramebufferNV)},
     {"glBlitNamedFramebuffer", reinterpret_cast<AppGLProc>(&::glBlitNamedFramebuffer)},
     {"glBufferData", reinterpret_cast<AppGLProc>(&::glBufferData)},
+    {"glBufferDataARB", reinterpret_cast<AppGLProc>(&::glBufferDataARB)},
     {"glBufferStorage", reinterpret_cast<AppGLProc>(&::glBufferStorage)},
+    {"glBufferStorageEXT", reinterpret_cast<AppGLProc>(&::glBufferStorageEXT)},
     {"glBufferSubData", reinterpret_cast<AppGLProc>(&::glBufferSubData)},
+    {"glBufferSubDataARB", reinterpret_cast<AppGLProc>(&::glBufferSubDataARB)},
+    {"glCallList", reinterpret_cast<AppGLProc>(&::glCallList)},
+    {"glCallLists", reinterpret_cast<AppGLProc>(&::glCallLists)},
     {"glCheckFramebufferStatus", reinterpret_cast<AppGLProc>(&::glCheckFramebufferStatus)},
+    {"glCheckFramebufferStatusEXT", reinterpret_cast<AppGLProc>(&::glCheckFramebufferStatusEXT)},
     {"glCheckNamedFramebufferStatus", reinterpret_cast<AppGLProc>(&::glCheckNamedFramebufferStatus)},
     {"glClampColor", reinterpret_cast<AppGLProc>(&::glClampColor)},
+    {"glClampColorARB", reinterpret_cast<AppGLProc>(&::glClampColorARB)},
     {"glClear", reinterpret_cast<AppGLProc>(&::glClear)},
+    {"glClearAccum", reinterpret_cast<AppGLProc>(&::glClearAccum)},
     {"glClearBufferData", reinterpret_cast<AppGLProc>(&::glClearBufferData)},
     {"glClearBufferSubData", reinterpret_cast<AppGLProc>(&::glClearBufferSubData)},
     {"glClearBufferfi", reinterpret_cast<AppGLProc>(&::glClearBufferfi)},
@@ -74,6 +1007,8 @@ const ProcEntry kProcTable[] = {
     {"glClearColor", reinterpret_cast<AppGLProc>(&::glClearColor)},
     {"glClearDepth", reinterpret_cast<AppGLProc>(&::glClearDepth)},
     {"glClearDepthf", reinterpret_cast<AppGLProc>(&::glClearDepthf)},
+    {"glClearDepthfOES", reinterpret_cast<AppGLProc>(&::glClearDepthfOES)},
+    {"glClearIndex", reinterpret_cast<AppGLProc>(&::glClearIndex)},
     {"glClearNamedBufferData", reinterpret_cast<AppGLProc>(&::glClearNamedBufferData)},
     {"glClearNamedBufferSubData", reinterpret_cast<AppGLProc>(&::glClearNamedBufferSubData)},
     {"glClearNamedFramebufferfi", reinterpret_cast<AppGLProc>(&::glClearNamedFramebufferfi)},
@@ -82,163 +1017,371 @@ const ProcEntry kProcTable[] = {
     {"glClearNamedFramebufferuiv", reinterpret_cast<AppGLProc>(&::glClearNamedFramebufferuiv)},
     {"glClearStencil", reinterpret_cast<AppGLProc>(&::glClearStencil)},
     {"glClearTexImage", reinterpret_cast<AppGLProc>(&::glClearTexImage)},
+    {"glClearTexImageEXT", reinterpret_cast<AppGLProc>(&::glClearTexImageEXT)},
     {"glClearTexSubImage", reinterpret_cast<AppGLProc>(&::glClearTexSubImage)},
+    {"glClearTexSubImageEXT", reinterpret_cast<AppGLProc>(&::glClearTexSubImageEXT)},
+    {"glClientActiveTexture", reinterpret_cast<AppGLProc>(&::glClientActiveTexture)},
     {"glClientWaitSync", reinterpret_cast<AppGLProc>(&::glClientWaitSync)},
+    {"glClientWaitSyncAPPLE", reinterpret_cast<AppGLProc>(&::glClientWaitSyncAPPLE)},
     {"glClipControl", reinterpret_cast<AppGLProc>(&::glClipControl)},
+    {"glClipControlEXT", reinterpret_cast<AppGLProc>(&::glClipControlEXT)},
+    {"glClipPlane", reinterpret_cast<AppGLProc>(&::glClipPlane)},
+    {"glColor3b", reinterpret_cast<AppGLProc>(&::glColor3b)},
+    {"glColor3bv", reinterpret_cast<AppGLProc>(&::glColor3bv)},
+    {"glColor3d", reinterpret_cast<AppGLProc>(&::glColor3d)},
+    {"glColor3dv", reinterpret_cast<AppGLProc>(&::glColor3dv)},
+    {"glColor3f", reinterpret_cast<AppGLProc>(&::glColor3f)},
+    {"glColor3fv", reinterpret_cast<AppGLProc>(&::glColor3fv)},
+    {"glColor3i", reinterpret_cast<AppGLProc>(&::glColor3i)},
+    {"glColor3iv", reinterpret_cast<AppGLProc>(&::glColor3iv)},
+    {"glColor3s", reinterpret_cast<AppGLProc>(&::glColor3s)},
+    {"glColor3sv", reinterpret_cast<AppGLProc>(&::glColor3sv)},
+    {"glColor3ub", reinterpret_cast<AppGLProc>(&::glColor3ub)},
+    {"glColor3ubv", reinterpret_cast<AppGLProc>(&::glColor3ubv)},
+    {"glColor3ui", reinterpret_cast<AppGLProc>(&::glColor3ui)},
+    {"glColor3uiv", reinterpret_cast<AppGLProc>(&::glColor3uiv)},
+    {"glColor3us", reinterpret_cast<AppGLProc>(&::glColor3us)},
+    {"glColor3usv", reinterpret_cast<AppGLProc>(&::glColor3usv)},
+    {"glColor4b", reinterpret_cast<AppGLProc>(&::glColor4b)},
+    {"glColor4bv", reinterpret_cast<AppGLProc>(&::glColor4bv)},
+    {"glColor4d", reinterpret_cast<AppGLProc>(&::glColor4d)},
+    {"glColor4dv", reinterpret_cast<AppGLProc>(&::glColor4dv)},
+    {"glColor4f", reinterpret_cast<AppGLProc>(&::glColor4f)},
+    {"glColor4fv", reinterpret_cast<AppGLProc>(&::glColor4fv)},
+    {"glColor4i", reinterpret_cast<AppGLProc>(&::glColor4i)},
+    {"glColor4iv", reinterpret_cast<AppGLProc>(&::glColor4iv)},
+    {"glColor4s", reinterpret_cast<AppGLProc>(&::glColor4s)},
+    {"glColor4sv", reinterpret_cast<AppGLProc>(&::glColor4sv)},
+    {"glColor4ub", reinterpret_cast<AppGLProc>(&::glColor4ub)},
+    {"glColor4ubv", reinterpret_cast<AppGLProc>(&::glColor4ubv)},
+    {"glColor4ui", reinterpret_cast<AppGLProc>(&::glColor4ui)},
+    {"glColor4uiv", reinterpret_cast<AppGLProc>(&::glColor4uiv)},
+    {"glColor4us", reinterpret_cast<AppGLProc>(&::glColor4us)},
+    {"glColor4usv", reinterpret_cast<AppGLProc>(&::glColor4usv)},
     {"glColorMask", reinterpret_cast<AppGLProc>(&::glColorMask)},
+    {"glColorMaskIndexedEXT", reinterpret_cast<AppGLProc>(&::glColorMaskIndexedEXT)},
     {"glColorMaski", reinterpret_cast<AppGLProc>(&::glColorMaski)},
+    {"glColorMaskiEXT", reinterpret_cast<AppGLProc>(&::glColorMaskiEXT)},
+    {"glColorMaskiOES", reinterpret_cast<AppGLProc>(&::glColorMaskiOES)},
+    {"glColorMaterial", reinterpret_cast<AppGLProc>(&::glColorMaterial)},
+    {"glColorP3ui", reinterpret_cast<AppGLProc>(&::glColorP3ui)},
+    {"glColorP3uiv", reinterpret_cast<AppGLProc>(&::glColorP3uiv)},
+    {"glColorP4ui", reinterpret_cast<AppGLProc>(&::glColorP4ui)},
+    {"glColorP4uiv", reinterpret_cast<AppGLProc>(&::glColorP4uiv)},
+    {"glColorPointer", reinterpret_cast<AppGLProc>(&::glColorPointer)},
     {"glCompileShader", reinterpret_cast<AppGLProc>(&::glCompileShader)},
+    {"glCompileShaderARB", reinterpret_cast<AppGLProc>(&::glCompileShaderARB)},
     {"glCompressedTexImage1D", reinterpret_cast<AppGLProc>(&::glCompressedTexImage1D)},
+    {"glCompressedTexImage1DARB", reinterpret_cast<AppGLProc>(&::glCompressedTexImage1DARB)},
     {"glCompressedTexImage2D", reinterpret_cast<AppGLProc>(&::glCompressedTexImage2D)},
+    {"glCompressedTexImage2DARB", reinterpret_cast<AppGLProc>(&::glCompressedTexImage2DARB)},
     {"glCompressedTexImage3D", reinterpret_cast<AppGLProc>(&::glCompressedTexImage3D)},
+    {"glCompressedTexImage3DARB", reinterpret_cast<AppGLProc>(&::glCompressedTexImage3DARB)},
     {"glCompressedTexSubImage1D", reinterpret_cast<AppGLProc>(&::glCompressedTexSubImage1D)},
+    {"glCompressedTexSubImage1DARB", reinterpret_cast<AppGLProc>(&::glCompressedTexSubImage1DARB)},
     {"glCompressedTexSubImage2D", reinterpret_cast<AppGLProc>(&::glCompressedTexSubImage2D)},
+    {"glCompressedTexSubImage2DARB", reinterpret_cast<AppGLProc>(&::glCompressedTexSubImage2DARB)},
     {"glCompressedTexSubImage3D", reinterpret_cast<AppGLProc>(&::glCompressedTexSubImage3D)},
+    {"glCompressedTexSubImage3DARB", reinterpret_cast<AppGLProc>(&::glCompressedTexSubImage3DARB)},
     {"glCompressedTextureSubImage1D", reinterpret_cast<AppGLProc>(&::glCompressedTextureSubImage1D)},
     {"glCompressedTextureSubImage2D", reinterpret_cast<AppGLProc>(&::glCompressedTextureSubImage2D)},
     {"glCompressedTextureSubImage3D", reinterpret_cast<AppGLProc>(&::glCompressedTextureSubImage3D)},
     {"glCopyBufferSubData", reinterpret_cast<AppGLProc>(&::glCopyBufferSubData)},
+    {"glCopyBufferSubDataNV", reinterpret_cast<AppGLProc>(&::glCopyBufferSubDataNV)},
     {"glCopyImageSubData", reinterpret_cast<AppGLProc>(&::glCopyImageSubData)},
+    {"glCopyImageSubDataEXT", reinterpret_cast<AppGLProc>(&::glCopyImageSubDataEXT)},
+    {"glCopyImageSubDataOES", reinterpret_cast<AppGLProc>(&::glCopyImageSubDataOES)},
     {"glCopyNamedBufferSubData", reinterpret_cast<AppGLProc>(&::glCopyNamedBufferSubData)},
+    {"glCopyPixels", reinterpret_cast<AppGLProc>(&::glCopyPixels)},
     {"glCopyTexImage1D", reinterpret_cast<AppGLProc>(&::glCopyTexImage1D)},
+    {"glCopyTexImage1DEXT", reinterpret_cast<AppGLProc>(&::glCopyTexImage1DEXT)},
     {"glCopyTexImage2D", reinterpret_cast<AppGLProc>(&::glCopyTexImage2D)},
+    {"glCopyTexImage2DEXT", reinterpret_cast<AppGLProc>(&::glCopyTexImage2DEXT)},
     {"glCopyTexSubImage1D", reinterpret_cast<AppGLProc>(&::glCopyTexSubImage1D)},
+    {"glCopyTexSubImage1DEXT", reinterpret_cast<AppGLProc>(&::glCopyTexSubImage1DEXT)},
     {"glCopyTexSubImage2D", reinterpret_cast<AppGLProc>(&::glCopyTexSubImage2D)},
+    {"glCopyTexSubImage2DEXT", reinterpret_cast<AppGLProc>(&::glCopyTexSubImage2DEXT)},
     {"glCopyTexSubImage3D", reinterpret_cast<AppGLProc>(&::glCopyTexSubImage3D)},
+    {"glCopyTexSubImage3DEXT", reinterpret_cast<AppGLProc>(&::glCopyTexSubImage3DEXT)},
     {"glCopyTextureSubImage1D", reinterpret_cast<AppGLProc>(&::glCopyTextureSubImage1D)},
     {"glCopyTextureSubImage2D", reinterpret_cast<AppGLProc>(&::glCopyTextureSubImage2D)},
     {"glCopyTextureSubImage3D", reinterpret_cast<AppGLProc>(&::glCopyTextureSubImage3D)},
     {"glCreateBuffers", reinterpret_cast<AppGLProc>(&::glCreateBuffers)},
     {"glCreateFramebuffers", reinterpret_cast<AppGLProc>(&::glCreateFramebuffers)},
     {"glCreateProgram", reinterpret_cast<AppGLProc>(&::glCreateProgram)},
+    {"glCreateProgramObjectARB", reinterpret_cast<AppGLProc>(&::glCreateProgramObjectARB)},
     {"glCreateProgramPipelines", reinterpret_cast<AppGLProc>(&::glCreateProgramPipelines)},
     {"glCreateQueries", reinterpret_cast<AppGLProc>(&::glCreateQueries)},
     {"glCreateRenderbuffers", reinterpret_cast<AppGLProc>(&::glCreateRenderbuffers)},
     {"glCreateSamplers", reinterpret_cast<AppGLProc>(&::glCreateSamplers)},
     {"glCreateShader", reinterpret_cast<AppGLProc>(&::glCreateShader)},
+    {"glCreateShaderObjectARB", reinterpret_cast<AppGLProc>(&::glCreateShaderObjectARB)},
     {"glCreateShaderProgramv", reinterpret_cast<AppGLProc>(&::glCreateShaderProgramv)},
     {"glCreateTextures", reinterpret_cast<AppGLProc>(&::glCreateTextures)},
     {"glCreateTransformFeedbacks", reinterpret_cast<AppGLProc>(&::glCreateTransformFeedbacks)},
     {"glCreateVertexArrays", reinterpret_cast<AppGLProc>(&::glCreateVertexArrays)},
     {"glCullFace", reinterpret_cast<AppGLProc>(&::glCullFace)},
     {"glDebugMessageCallback", reinterpret_cast<AppGLProc>(&::glDebugMessageCallback)},
+    {"glDebugMessageCallbackARB", reinterpret_cast<AppGLProc>(&::glDebugMessageCallbackARB)},
+    {"glDebugMessageCallbackKHR", reinterpret_cast<AppGLProc>(&::glDebugMessageCallbackKHR)},
     {"glDebugMessageControl", reinterpret_cast<AppGLProc>(&::glDebugMessageControl)},
+    {"glDebugMessageControlARB", reinterpret_cast<AppGLProc>(&::glDebugMessageControlARB)},
+    {"glDebugMessageControlKHR", reinterpret_cast<AppGLProc>(&::glDebugMessageControlKHR)},
     {"glDebugMessageInsert", reinterpret_cast<AppGLProc>(&::glDebugMessageInsert)},
+    {"glDebugMessageInsertARB", reinterpret_cast<AppGLProc>(&::glDebugMessageInsertARB)},
+    {"glDebugMessageInsertKHR", reinterpret_cast<AppGLProc>(&::glDebugMessageInsertKHR)},
     {"glDeleteBuffers", reinterpret_cast<AppGLProc>(&::glDeleteBuffers)},
+    {"glDeleteBuffersARB", reinterpret_cast<AppGLProc>(&::glDeleteBuffersARB)},
     {"glDeleteFramebuffers", reinterpret_cast<AppGLProc>(&::glDeleteFramebuffers)},
+    {"glDeleteFramebuffersEXT", reinterpret_cast<AppGLProc>(&::glDeleteFramebuffersEXT)},
+    {"glDeleteLists", reinterpret_cast<AppGLProc>(&::glDeleteLists)},
     {"glDeleteProgram", reinterpret_cast<AppGLProc>(&::glDeleteProgram)},
     {"glDeleteProgramPipelines", reinterpret_cast<AppGLProc>(&::glDeleteProgramPipelines)},
     {"glDeleteQueries", reinterpret_cast<AppGLProc>(&::glDeleteQueries)},
+    {"glDeleteQueriesARB", reinterpret_cast<AppGLProc>(&::glDeleteQueriesARB)},
     {"glDeleteRenderbuffers", reinterpret_cast<AppGLProc>(&::glDeleteRenderbuffers)},
+    {"glDeleteRenderbuffersEXT", reinterpret_cast<AppGLProc>(&::glDeleteRenderbuffersEXT)},
     {"glDeleteSamplers", reinterpret_cast<AppGLProc>(&::glDeleteSamplers)},
     {"glDeleteShader", reinterpret_cast<AppGLProc>(&::glDeleteShader)},
     {"glDeleteSync", reinterpret_cast<AppGLProc>(&::glDeleteSync)},
+    {"glDeleteSyncAPPLE", reinterpret_cast<AppGLProc>(&::glDeleteSyncAPPLE)},
     {"glDeleteTextures", reinterpret_cast<AppGLProc>(&::glDeleteTextures)},
     {"glDeleteTransformFeedbacks", reinterpret_cast<AppGLProc>(&::glDeleteTransformFeedbacks)},
+    {"glDeleteTransformFeedbacksNV", reinterpret_cast<AppGLProc>(&::glDeleteTransformFeedbacksNV)},
     {"glDeleteVertexArrays", reinterpret_cast<AppGLProc>(&::glDeleteVertexArrays)},
+    {"glDeleteVertexArraysAPPLE", reinterpret_cast<AppGLProc>(&::glDeleteVertexArraysAPPLE)},
+    {"glDeleteVertexArraysOES", reinterpret_cast<AppGLProc>(&::glDeleteVertexArraysOES)},
     {"glDepthFunc", reinterpret_cast<AppGLProc>(&::glDepthFunc)},
     {"glDepthMask", reinterpret_cast<AppGLProc>(&::glDepthMask)},
     {"glDepthRange", reinterpret_cast<AppGLProc>(&::glDepthRange)},
     {"glDepthRangeArrayv", reinterpret_cast<AppGLProc>(&::glDepthRangeArrayv)},
     {"glDepthRangeIndexed", reinterpret_cast<AppGLProc>(&::glDepthRangeIndexed)},
     {"glDepthRangef", reinterpret_cast<AppGLProc>(&::glDepthRangef)},
+    {"glDepthRangefOES", reinterpret_cast<AppGLProc>(&::glDepthRangefOES)},
+    {"glDetachObjectARB", reinterpret_cast<AppGLProc>(&::glDetachObjectARB)},
     {"glDetachShader", reinterpret_cast<AppGLProc>(&::glDetachShader)},
     {"glDisable", reinterpret_cast<AppGLProc>(&::glDisable)},
+    {"glDisableClientState", reinterpret_cast<AppGLProc>(&::glDisableClientState)},
+    {"glDisableIndexedEXT", reinterpret_cast<AppGLProc>(&::glDisableIndexedEXT)},
     {"glDisableVertexArrayAttrib", reinterpret_cast<AppGLProc>(&::glDisableVertexArrayAttrib)},
     {"glDisableVertexAttribArray", reinterpret_cast<AppGLProc>(&::glDisableVertexAttribArray)},
+    {"glDisableVertexAttribArrayARB", reinterpret_cast<AppGLProc>(&::glDisableVertexAttribArrayARB)},
     {"glDisablei", reinterpret_cast<AppGLProc>(&::glDisablei)},
+    {"glDisableiEXT", reinterpret_cast<AppGLProc>(&::glDisableiEXT)},
+    {"glDisableiNV", reinterpret_cast<AppGLProc>(&::glDisableiNV)},
+    {"glDisableiOES", reinterpret_cast<AppGLProc>(&::glDisableiOES)},
     {"glDispatchCompute", reinterpret_cast<AppGLProc>(&::glDispatchCompute)},
     {"glDispatchComputeIndirect", reinterpret_cast<AppGLProc>(&::glDispatchComputeIndirect)},
     {"glDrawArrays", reinterpret_cast<AppGLProc>(&::glDrawArrays)},
+    {"glDrawArraysEXT", reinterpret_cast<AppGLProc>(&::glDrawArraysEXT)},
     {"glDrawArraysIndirect", reinterpret_cast<AppGLProc>(&::glDrawArraysIndirect)},
     {"glDrawArraysInstanced", reinterpret_cast<AppGLProc>(&::glDrawArraysInstanced)},
+    {"glDrawArraysInstancedANGLE", reinterpret_cast<AppGLProc>(&::glDrawArraysInstancedANGLE)},
+    {"glDrawArraysInstancedARB", reinterpret_cast<AppGLProc>(&::glDrawArraysInstancedARB)},
     {"glDrawArraysInstancedBaseInstance", reinterpret_cast<AppGLProc>(&::glDrawArraysInstancedBaseInstance)},
+    {"glDrawArraysInstancedBaseInstanceEXT", reinterpret_cast<AppGLProc>(&::glDrawArraysInstancedBaseInstanceEXT)},
+    {"glDrawArraysInstancedEXT", reinterpret_cast<AppGLProc>(&::glDrawArraysInstancedEXT)},
+    {"glDrawArraysInstancedNV", reinterpret_cast<AppGLProc>(&::glDrawArraysInstancedNV)},
     {"glDrawBuffer", reinterpret_cast<AppGLProc>(&::glDrawBuffer)},
     {"glDrawBuffers", reinterpret_cast<AppGLProc>(&::glDrawBuffers)},
+    {"glDrawBuffersARB", reinterpret_cast<AppGLProc>(&::glDrawBuffersARB)},
+    {"glDrawBuffersATI", reinterpret_cast<AppGLProc>(&::glDrawBuffersATI)},
+    {"glDrawBuffersEXT", reinterpret_cast<AppGLProc>(&::glDrawBuffersEXT)},
     {"glDrawElements", reinterpret_cast<AppGLProc>(&::glDrawElements)},
     {"glDrawElementsBaseVertex", reinterpret_cast<AppGLProc>(&::glDrawElementsBaseVertex)},
+    {"glDrawElementsBaseVertexEXT", reinterpret_cast<AppGLProc>(&::glDrawElementsBaseVertexEXT)},
+    {"glDrawElementsBaseVertexOES", reinterpret_cast<AppGLProc>(&::glDrawElementsBaseVertexOES)},
     {"glDrawElementsIndirect", reinterpret_cast<AppGLProc>(&::glDrawElementsIndirect)},
     {"glDrawElementsInstanced", reinterpret_cast<AppGLProc>(&::glDrawElementsInstanced)},
+    {"glDrawElementsInstancedANGLE", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedANGLE)},
+    {"glDrawElementsInstancedARB", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedARB)},
     {"glDrawElementsInstancedBaseInstance", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedBaseInstance)},
+    {"glDrawElementsInstancedBaseInstanceEXT", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedBaseInstanceEXT)},
     {"glDrawElementsInstancedBaseVertex", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedBaseVertex)},
     {"glDrawElementsInstancedBaseVertexBaseInstance", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedBaseVertexBaseInstance)},
+    {"glDrawElementsInstancedBaseVertexBaseInstanceEXT", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedBaseVertexBaseInstanceEXT)},
+    {"glDrawElementsInstancedBaseVertexEXT", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedBaseVertexEXT)},
+    {"glDrawElementsInstancedBaseVertexOES", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedBaseVertexOES)},
+    {"glDrawElementsInstancedEXT", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedEXT)},
+    {"glDrawElementsInstancedNV", reinterpret_cast<AppGLProc>(&::glDrawElementsInstancedNV)},
+    {"glDrawPixels", reinterpret_cast<AppGLProc>(&::glDrawPixels)},
     {"glDrawRangeElements", reinterpret_cast<AppGLProc>(&::glDrawRangeElements)},
     {"glDrawRangeElementsBaseVertex", reinterpret_cast<AppGLProc>(&::glDrawRangeElementsBaseVertex)},
+    {"glDrawRangeElementsBaseVertexEXT", reinterpret_cast<AppGLProc>(&::glDrawRangeElementsBaseVertexEXT)},
+    {"glDrawRangeElementsBaseVertexOES", reinterpret_cast<AppGLProc>(&::glDrawRangeElementsBaseVertexOES)},
+    {"glDrawRangeElementsEXT", reinterpret_cast<AppGLProc>(&::glDrawRangeElementsEXT)},
     {"glDrawTransformFeedback", reinterpret_cast<AppGLProc>(&::glDrawTransformFeedback)},
+    {"glDrawTransformFeedbackEXT", reinterpret_cast<AppGLProc>(&::glDrawTransformFeedbackEXT)},
     {"glDrawTransformFeedbackInstanced", reinterpret_cast<AppGLProc>(&::glDrawTransformFeedbackInstanced)},
+    {"glDrawTransformFeedbackInstancedEXT", reinterpret_cast<AppGLProc>(&::glDrawTransformFeedbackInstancedEXT)},
+    {"glDrawTransformFeedbackNV", reinterpret_cast<AppGLProc>(&::glDrawTransformFeedbackNV)},
     {"glDrawTransformFeedbackStream", reinterpret_cast<AppGLProc>(&::glDrawTransformFeedbackStream)},
     {"glDrawTransformFeedbackStreamInstanced", reinterpret_cast<AppGLProc>(&::glDrawTransformFeedbackStreamInstanced)},
+    {"glEdgeFlag", reinterpret_cast<AppGLProc>(&::glEdgeFlag)},
+    {"glEdgeFlagPointer", reinterpret_cast<AppGLProc>(&::glEdgeFlagPointer)},
+    {"glEdgeFlagv", reinterpret_cast<AppGLProc>(&::glEdgeFlagv)},
     {"glEnable", reinterpret_cast<AppGLProc>(&::glEnable)},
+    {"glEnableClientState", reinterpret_cast<AppGLProc>(&::glEnableClientState)},
+    {"glEnableIndexedEXT", reinterpret_cast<AppGLProc>(&::glEnableIndexedEXT)},
     {"glEnableVertexArrayAttrib", reinterpret_cast<AppGLProc>(&::glEnableVertexArrayAttrib)},
     {"glEnableVertexAttribArray", reinterpret_cast<AppGLProc>(&::glEnableVertexAttribArray)},
+    {"glEnableVertexAttribArrayARB", reinterpret_cast<AppGLProc>(&::glEnableVertexAttribArrayARB)},
     {"glEnablei", reinterpret_cast<AppGLProc>(&::glEnablei)},
+    {"glEnableiEXT", reinterpret_cast<AppGLProc>(&::glEnableiEXT)},
+    {"glEnableiNV", reinterpret_cast<AppGLProc>(&::glEnableiNV)},
+    {"glEnableiOES", reinterpret_cast<AppGLProc>(&::glEnableiOES)},
+    {"glEnd", reinterpret_cast<AppGLProc>(&::glEnd)},
     {"glEndConditionalRender", reinterpret_cast<AppGLProc>(&::glEndConditionalRender)},
+    {"glEndConditionalRenderNV", reinterpret_cast<AppGLProc>(&::glEndConditionalRenderNV)},
+    {"glEndConditionalRenderNVX", reinterpret_cast<AppGLProc>(&::glEndConditionalRenderNVX)},
+    {"glEndList", reinterpret_cast<AppGLProc>(&::glEndList)},
     {"glEndQuery", reinterpret_cast<AppGLProc>(&::glEndQuery)},
+    {"glEndQueryARB", reinterpret_cast<AppGLProc>(&::glEndQueryARB)},
     {"glEndQueryIndexed", reinterpret_cast<AppGLProc>(&::glEndQueryIndexed)},
     {"glEndTransformFeedback", reinterpret_cast<AppGLProc>(&::glEndTransformFeedback)},
+    {"glEndTransformFeedbackEXT", reinterpret_cast<AppGLProc>(&::glEndTransformFeedbackEXT)},
+    {"glEndTransformFeedbackNV", reinterpret_cast<AppGLProc>(&::glEndTransformFeedbackNV)},
+    {"glEvalCoord1d", reinterpret_cast<AppGLProc>(&::glEvalCoord1d)},
+    {"glEvalCoord1dv", reinterpret_cast<AppGLProc>(&::glEvalCoord1dv)},
+    {"glEvalCoord1f", reinterpret_cast<AppGLProc>(&::glEvalCoord1f)},
+    {"glEvalCoord1fv", reinterpret_cast<AppGLProc>(&::glEvalCoord1fv)},
+    {"glEvalCoord2d", reinterpret_cast<AppGLProc>(&::glEvalCoord2d)},
+    {"glEvalCoord2dv", reinterpret_cast<AppGLProc>(&::glEvalCoord2dv)},
+    {"glEvalCoord2f", reinterpret_cast<AppGLProc>(&::glEvalCoord2f)},
+    {"glEvalCoord2fv", reinterpret_cast<AppGLProc>(&::glEvalCoord2fv)},
+    {"glEvalMesh1", reinterpret_cast<AppGLProc>(&::glEvalMesh1)},
+    {"glEvalMesh2", reinterpret_cast<AppGLProc>(&::glEvalMesh2)},
+    {"glEvalPoint1", reinterpret_cast<AppGLProc>(&::glEvalPoint1)},
+    {"glEvalPoint2", reinterpret_cast<AppGLProc>(&::glEvalPoint2)},
+    {"glFeedbackBuffer", reinterpret_cast<AppGLProc>(&::glFeedbackBuffer)},
     {"glFenceSync", reinterpret_cast<AppGLProc>(&::glFenceSync)},
+    {"glFenceSyncAPPLE", reinterpret_cast<AppGLProc>(&::glFenceSyncAPPLE)},
     {"glFinish", reinterpret_cast<AppGLProc>(&::glFinish)},
     {"glFlush", reinterpret_cast<AppGLProc>(&::glFlush)},
     {"glFlushMappedBufferRange", reinterpret_cast<AppGLProc>(&::glFlushMappedBufferRange)},
+    {"glFlushMappedBufferRangeAPPLE", reinterpret_cast<AppGLProc>(&::glFlushMappedBufferRangeAPPLE)},
+    {"glFlushMappedBufferRangeEXT", reinterpret_cast<AppGLProc>(&::glFlushMappedBufferRangeEXT)},
     {"glFlushMappedNamedBufferRange", reinterpret_cast<AppGLProc>(&::glFlushMappedNamedBufferRange)},
+    {"glFogCoordPointer", reinterpret_cast<AppGLProc>(&::glFogCoordPointer)},
+    {"glFogCoordd", reinterpret_cast<AppGLProc>(&::glFogCoordd)},
+    {"glFogCoorddv", reinterpret_cast<AppGLProc>(&::glFogCoorddv)},
+    {"glFogCoordf", reinterpret_cast<AppGLProc>(&::glFogCoordf)},
+    {"glFogCoordfv", reinterpret_cast<AppGLProc>(&::glFogCoordfv)},
+    {"glFogf", reinterpret_cast<AppGLProc>(&::glFogf)},
+    {"glFogfv", reinterpret_cast<AppGLProc>(&::glFogfv)},
+    {"glFogi", reinterpret_cast<AppGLProc>(&::glFogi)},
+    {"glFogiv", reinterpret_cast<AppGLProc>(&::glFogiv)},
     {"glFramebufferParameteri", reinterpret_cast<AppGLProc>(&::glFramebufferParameteri)},
     {"glFramebufferRenderbuffer", reinterpret_cast<AppGLProc>(&::glFramebufferRenderbuffer)},
+    {"glFramebufferRenderbufferEXT", reinterpret_cast<AppGLProc>(&::glFramebufferRenderbufferEXT)},
     {"glFramebufferTexture", reinterpret_cast<AppGLProc>(&::glFramebufferTexture)},
     {"glFramebufferTexture1D", reinterpret_cast<AppGLProc>(&::glFramebufferTexture1D)},
+    {"glFramebufferTexture1DEXT", reinterpret_cast<AppGLProc>(&::glFramebufferTexture1DEXT)},
     {"glFramebufferTexture2D", reinterpret_cast<AppGLProc>(&::glFramebufferTexture2D)},
+    {"glFramebufferTexture2DEXT", reinterpret_cast<AppGLProc>(&::glFramebufferTexture2DEXT)},
     {"glFramebufferTexture3D", reinterpret_cast<AppGLProc>(&::glFramebufferTexture3D)},
+    {"glFramebufferTexture3DEXT", reinterpret_cast<AppGLProc>(&::glFramebufferTexture3DEXT)},
+    {"glFramebufferTextureARB", reinterpret_cast<AppGLProc>(&::glFramebufferTextureARB)},
+    {"glFramebufferTextureEXT", reinterpret_cast<AppGLProc>(&::glFramebufferTextureEXT)},
     {"glFramebufferTextureLayer", reinterpret_cast<AppGLProc>(&::glFramebufferTextureLayer)},
+    {"glFramebufferTextureLayerARB", reinterpret_cast<AppGLProc>(&::glFramebufferTextureLayerARB)},
+    {"glFramebufferTextureLayerEXT", reinterpret_cast<AppGLProc>(&::glFramebufferTextureLayerEXT)},
+    {"glFramebufferTextureOES", reinterpret_cast<AppGLProc>(&::glFramebufferTextureOES)},
     {"glFrontFace", reinterpret_cast<AppGLProc>(&::glFrontFace)},
+    {"glFrustum", reinterpret_cast<AppGLProc>(&::glFrustum)},
     {"glGenBuffers", reinterpret_cast<AppGLProc>(&::glGenBuffers)},
+    {"glGenBuffersARB", reinterpret_cast<AppGLProc>(&::glGenBuffersARB)},
     {"glGenFramebuffers", reinterpret_cast<AppGLProc>(&::glGenFramebuffers)},
+    {"glGenFramebuffersEXT", reinterpret_cast<AppGLProc>(&::glGenFramebuffersEXT)},
+    {"glGenLists", reinterpret_cast<AppGLProc>(&::glGenLists)},
     {"glGenProgramPipelines", reinterpret_cast<AppGLProc>(&::glGenProgramPipelines)},
     {"glGenQueries", reinterpret_cast<AppGLProc>(&::glGenQueries)},
+    {"glGenQueriesARB", reinterpret_cast<AppGLProc>(&::glGenQueriesARB)},
     {"glGenRenderbuffers", reinterpret_cast<AppGLProc>(&::glGenRenderbuffers)},
+    {"glGenRenderbuffersEXT", reinterpret_cast<AppGLProc>(&::glGenRenderbuffersEXT)},
     {"glGenSamplers", reinterpret_cast<AppGLProc>(&::glGenSamplers)},
     {"glGenTextures", reinterpret_cast<AppGLProc>(&::glGenTextures)},
     {"glGenTransformFeedbacks", reinterpret_cast<AppGLProc>(&::glGenTransformFeedbacks)},
+    {"glGenTransformFeedbacksNV", reinterpret_cast<AppGLProc>(&::glGenTransformFeedbacksNV)},
     {"glGenVertexArrays", reinterpret_cast<AppGLProc>(&::glGenVertexArrays)},
+    {"glGenVertexArraysAPPLE", reinterpret_cast<AppGLProc>(&::glGenVertexArraysAPPLE)},
+    {"glGenVertexArraysOES", reinterpret_cast<AppGLProc>(&::glGenVertexArraysOES)},
     {"glGenerateMipmap", reinterpret_cast<AppGLProc>(&::glGenerateMipmap)},
+    {"glGenerateMipmapEXT", reinterpret_cast<AppGLProc>(&::glGenerateMipmapEXT)},
     {"glGenerateTextureMipmap", reinterpret_cast<AppGLProc>(&::glGenerateTextureMipmap)},
     {"glGetActiveAtomicCounterBufferiv", reinterpret_cast<AppGLProc>(&::glGetActiveAtomicCounterBufferiv)},
     {"glGetActiveAttrib", reinterpret_cast<AppGLProc>(&::glGetActiveAttrib)},
+    {"glGetActiveAttribARB", reinterpret_cast<AppGLProc>(&::glGetActiveAttribARB)},
     {"glGetActiveSubroutineName", reinterpret_cast<AppGLProc>(&::glGetActiveSubroutineName)},
     {"glGetActiveSubroutineUniformName", reinterpret_cast<AppGLProc>(&::glGetActiveSubroutineUniformName)},
     {"glGetActiveSubroutineUniformiv", reinterpret_cast<AppGLProc>(&::glGetActiveSubroutineUniformiv)},
     {"glGetActiveUniform", reinterpret_cast<AppGLProc>(&::glGetActiveUniform)},
+    {"glGetActiveUniformARB", reinterpret_cast<AppGLProc>(&::glGetActiveUniformARB)},
     {"glGetActiveUniformBlockName", reinterpret_cast<AppGLProc>(&::glGetActiveUniformBlockName)},
     {"glGetActiveUniformBlockiv", reinterpret_cast<AppGLProc>(&::glGetActiveUniformBlockiv)},
     {"glGetActiveUniformName", reinterpret_cast<AppGLProc>(&::glGetActiveUniformName)},
     {"glGetActiveUniformsiv", reinterpret_cast<AppGLProc>(&::glGetActiveUniformsiv)},
     {"glGetAttachedShaders", reinterpret_cast<AppGLProc>(&::glGetAttachedShaders)},
     {"glGetAttribLocation", reinterpret_cast<AppGLProc>(&::glGetAttribLocation)},
+    {"glGetAttribLocationARB", reinterpret_cast<AppGLProc>(&::glGetAttribLocationARB)},
+    {"glGetBooleanIndexedvEXT", reinterpret_cast<AppGLProc>(&::glGetBooleanIndexedvEXT)},
     {"glGetBooleani_v", reinterpret_cast<AppGLProc>(&::glGetBooleani_v)},
     {"glGetBooleanv", reinterpret_cast<AppGLProc>(&::glGetBooleanv)},
     {"glGetBufferParameteri64v", reinterpret_cast<AppGLProc>(&::glGetBufferParameteri64v)},
     {"glGetBufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetBufferParameteriv)},
+    {"glGetBufferParameterivARB", reinterpret_cast<AppGLProc>(&::glGetBufferParameterivARB)},
     {"glGetBufferPointerv", reinterpret_cast<AppGLProc>(&::glGetBufferPointerv)},
+    {"glGetBufferPointervARB", reinterpret_cast<AppGLProc>(&::glGetBufferPointervARB)},
+    {"glGetBufferPointervOES", reinterpret_cast<AppGLProc>(&::glGetBufferPointervOES)},
     {"glGetBufferSubData", reinterpret_cast<AppGLProc>(&::glGetBufferSubData)},
+    {"glGetBufferSubDataARB", reinterpret_cast<AppGLProc>(&::glGetBufferSubDataARB)},
+    {"glGetClipPlane", reinterpret_cast<AppGLProc>(&::glGetClipPlane)},
     {"glGetCompressedTexImage", reinterpret_cast<AppGLProc>(&::glGetCompressedTexImage)},
+    {"glGetCompressedTexImageARB", reinterpret_cast<AppGLProc>(&::glGetCompressedTexImageARB)},
     {"glGetCompressedTextureImage", reinterpret_cast<AppGLProc>(&::glGetCompressedTextureImage)},
     {"glGetCompressedTextureSubImage", reinterpret_cast<AppGLProc>(&::glGetCompressedTextureSubImage)},
     {"glGetDebugMessageLog", reinterpret_cast<AppGLProc>(&::glGetDebugMessageLog)},
+    {"glGetDebugMessageLogARB", reinterpret_cast<AppGLProc>(&::glGetDebugMessageLogARB)},
+    {"glGetDebugMessageLogKHR", reinterpret_cast<AppGLProc>(&::glGetDebugMessageLogKHR)},
+    {"glGetDoubleIndexedvEXT", reinterpret_cast<AppGLProc>(&::glGetDoubleIndexedvEXT)},
     {"glGetDoublei_v", reinterpret_cast<AppGLProc>(&::glGetDoublei_v)},
+    {"glGetDoublei_vEXT", reinterpret_cast<AppGLProc>(&::glGetDoublei_vEXT)},
     {"glGetDoublev", reinterpret_cast<AppGLProc>(&::glGetDoublev)},
     {"glGetError", reinterpret_cast<AppGLProc>(&::glGetError)},
+    {"glGetFloatIndexedvEXT", reinterpret_cast<AppGLProc>(&::glGetFloatIndexedvEXT)},
     {"glGetFloati_v", reinterpret_cast<AppGLProc>(&::glGetFloati_v)},
+    {"glGetFloati_vEXT", reinterpret_cast<AppGLProc>(&::glGetFloati_vEXT)},
+    {"glGetFloati_vNV", reinterpret_cast<AppGLProc>(&::glGetFloati_vNV)},
+    {"glGetFloati_vOES", reinterpret_cast<AppGLProc>(&::glGetFloati_vOES)},
     {"glGetFloatv", reinterpret_cast<AppGLProc>(&::glGetFloatv)},
     {"glGetFragDataIndex", reinterpret_cast<AppGLProc>(&::glGetFragDataIndex)},
+    {"glGetFragDataIndexEXT", reinterpret_cast<AppGLProc>(&::glGetFragDataIndexEXT)},
     {"glGetFragDataLocation", reinterpret_cast<AppGLProc>(&::glGetFragDataLocation)},
+    {"glGetFragDataLocationEXT", reinterpret_cast<AppGLProc>(&::glGetFragDataLocationEXT)},
     {"glGetFramebufferAttachmentParameteriv", reinterpret_cast<AppGLProc>(&::glGetFramebufferAttachmentParameteriv)},
+    {"glGetFramebufferAttachmentParameterivEXT", reinterpret_cast<AppGLProc>(&::glGetFramebufferAttachmentParameterivEXT)},
     {"glGetFramebufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetFramebufferParameteriv)},
     {"glGetGraphicsResetStatus", reinterpret_cast<AppGLProc>(&::glGetGraphicsResetStatus)},
+    {"glGetGraphicsResetStatusEXT", reinterpret_cast<AppGLProc>(&::glGetGraphicsResetStatusEXT)},
+    {"glGetGraphicsResetStatusKHR", reinterpret_cast<AppGLProc>(&::glGetGraphicsResetStatusKHR)},
     {"glGetInteger64i_v", reinterpret_cast<AppGLProc>(&::glGetInteger64i_v)},
     {"glGetInteger64v", reinterpret_cast<AppGLProc>(&::glGetInteger64v)},
+    {"glGetInteger64vAPPLE", reinterpret_cast<AppGLProc>(&::glGetInteger64vAPPLE)},
+    {"glGetInteger64vEXT", reinterpret_cast<AppGLProc>(&::glGetInteger64vEXT)},
+    {"glGetIntegerIndexedvEXT", reinterpret_cast<AppGLProc>(&::glGetIntegerIndexedvEXT)},
     {"glGetIntegeri_v", reinterpret_cast<AppGLProc>(&::glGetIntegeri_v)},
     {"glGetIntegerv", reinterpret_cast<AppGLProc>(&::glGetIntegerv)},
     {"glGetInternalformati64v", reinterpret_cast<AppGLProc>(&::glGetInternalformati64v)},
     {"glGetInternalformativ", reinterpret_cast<AppGLProc>(&::glGetInternalformativ)},
+    {"glGetLightfv", reinterpret_cast<AppGLProc>(&::glGetLightfv)},
+    {"glGetLightiv", reinterpret_cast<AppGLProc>(&::glGetLightiv)},
+    {"glGetMapdv", reinterpret_cast<AppGLProc>(&::glGetMapdv)},
+    {"glGetMapfv", reinterpret_cast<AppGLProc>(&::glGetMapfv)},
+    {"glGetMapiv", reinterpret_cast<AppGLProc>(&::glGetMapiv)},
+    {"glGetMaterialfv", reinterpret_cast<AppGLProc>(&::glGetMaterialfv)},
+    {"glGetMaterialiv", reinterpret_cast<AppGLProc>(&::glGetMaterialiv)},
     {"glGetMultisamplefv", reinterpret_cast<AppGLProc>(&::glGetMultisamplefv)},
+    {"glGetMultisamplefvNV", reinterpret_cast<AppGLProc>(&::glGetMultisamplefvNV)},
     {"glGetNamedBufferParameteri64v", reinterpret_cast<AppGLProc>(&::glGetNamedBufferParameteri64v)},
     {"glGetNamedBufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetNamedBufferParameteriv)},
     {"glGetNamedBufferPointerv", reinterpret_cast<AppGLProc>(&::glGetNamedBufferPointerv)},
@@ -247,9 +1390,18 @@ const ProcEntry kProcTable[] = {
     {"glGetNamedFramebufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetNamedFramebufferParameteriv)},
     {"glGetNamedRenderbufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetNamedRenderbufferParameteriv)},
     {"glGetObjectLabel", reinterpret_cast<AppGLProc>(&::glGetObjectLabel)},
+    {"glGetObjectLabelKHR", reinterpret_cast<AppGLProc>(&::glGetObjectLabelKHR)},
     {"glGetObjectPtrLabel", reinterpret_cast<AppGLProc>(&::glGetObjectPtrLabel)},
+    {"glGetObjectPtrLabelKHR", reinterpret_cast<AppGLProc>(&::glGetObjectPtrLabelKHR)},
+    {"glGetPixelMapfv", reinterpret_cast<AppGLProc>(&::glGetPixelMapfv)},
+    {"glGetPixelMapuiv", reinterpret_cast<AppGLProc>(&::glGetPixelMapuiv)},
+    {"glGetPixelMapusv", reinterpret_cast<AppGLProc>(&::glGetPixelMapusv)},
     {"glGetPointerv", reinterpret_cast<AppGLProc>(&::glGetPointerv)},
+    {"glGetPointervEXT", reinterpret_cast<AppGLProc>(&::glGetPointervEXT)},
+    {"glGetPointervKHR", reinterpret_cast<AppGLProc>(&::glGetPointervKHR)},
+    {"glGetPolygonStipple", reinterpret_cast<AppGLProc>(&::glGetPolygonStipple)},
     {"glGetProgramBinary", reinterpret_cast<AppGLProc>(&::glGetProgramBinary)},
+    {"glGetProgramBinaryOES", reinterpret_cast<AppGLProc>(&::glGetProgramBinaryOES)},
     {"glGetProgramInfoLog", reinterpret_cast<AppGLProc>(&::glGetProgramInfoLog)},
     {"glGetProgramInterfaceiv", reinterpret_cast<AppGLProc>(&::glGetProgramInterfaceiv)},
     {"glGetProgramPipelineInfoLog", reinterpret_cast<AppGLProc>(&::glGetProgramPipelineInfoLog)},
@@ -267,29 +1419,51 @@ const ProcEntry kProcTable[] = {
     {"glGetQueryBufferObjectuiv", reinterpret_cast<AppGLProc>(&::glGetQueryBufferObjectuiv)},
     {"glGetQueryIndexediv", reinterpret_cast<AppGLProc>(&::glGetQueryIndexediv)},
     {"glGetQueryObjecti64v", reinterpret_cast<AppGLProc>(&::glGetQueryObjecti64v)},
+    {"glGetQueryObjecti64vEXT", reinterpret_cast<AppGLProc>(&::glGetQueryObjecti64vEXT)},
     {"glGetQueryObjectiv", reinterpret_cast<AppGLProc>(&::glGetQueryObjectiv)},
+    {"glGetQueryObjectivARB", reinterpret_cast<AppGLProc>(&::glGetQueryObjectivARB)},
+    {"glGetQueryObjectivEXT", reinterpret_cast<AppGLProc>(&::glGetQueryObjectivEXT)},
     {"glGetQueryObjectui64v", reinterpret_cast<AppGLProc>(&::glGetQueryObjectui64v)},
+    {"glGetQueryObjectui64vEXT", reinterpret_cast<AppGLProc>(&::glGetQueryObjectui64vEXT)},
     {"glGetQueryObjectuiv", reinterpret_cast<AppGLProc>(&::glGetQueryObjectuiv)},
+    {"glGetQueryObjectuivARB", reinterpret_cast<AppGLProc>(&::glGetQueryObjectuivARB)},
     {"glGetQueryiv", reinterpret_cast<AppGLProc>(&::glGetQueryiv)},
+    {"glGetQueryivARB", reinterpret_cast<AppGLProc>(&::glGetQueryivARB)},
     {"glGetRenderbufferParameteriv", reinterpret_cast<AppGLProc>(&::glGetRenderbufferParameteriv)},
+    {"glGetRenderbufferParameterivEXT", reinterpret_cast<AppGLProc>(&::glGetRenderbufferParameterivEXT)},
     {"glGetSamplerParameterIiv", reinterpret_cast<AppGLProc>(&::glGetSamplerParameterIiv)},
+    {"glGetSamplerParameterIivEXT", reinterpret_cast<AppGLProc>(&::glGetSamplerParameterIivEXT)},
+    {"glGetSamplerParameterIivOES", reinterpret_cast<AppGLProc>(&::glGetSamplerParameterIivOES)},
     {"glGetSamplerParameterIuiv", reinterpret_cast<AppGLProc>(&::glGetSamplerParameterIuiv)},
+    {"glGetSamplerParameterIuivEXT", reinterpret_cast<AppGLProc>(&::glGetSamplerParameterIuivEXT)},
+    {"glGetSamplerParameterIuivOES", reinterpret_cast<AppGLProc>(&::glGetSamplerParameterIuivOES)},
     {"glGetSamplerParameterfv", reinterpret_cast<AppGLProc>(&::glGetSamplerParameterfv)},
     {"glGetSamplerParameteriv", reinterpret_cast<AppGLProc>(&::glGetSamplerParameteriv)},
     {"glGetShaderInfoLog", reinterpret_cast<AppGLProc>(&::glGetShaderInfoLog)},
     {"glGetShaderPrecisionFormat", reinterpret_cast<AppGLProc>(&::glGetShaderPrecisionFormat)},
     {"glGetShaderSource", reinterpret_cast<AppGLProc>(&::glGetShaderSource)},
+    {"glGetShaderSourceARB", reinterpret_cast<AppGLProc>(&::glGetShaderSourceARB)},
     {"glGetShaderiv", reinterpret_cast<AppGLProc>(&::glGetShaderiv)},
     {"glGetString", reinterpret_cast<AppGLProc>(&::glGetString)},
     {"glGetStringi", reinterpret_cast<AppGLProc>(&::glGetStringi)},
     {"glGetSubroutineIndex", reinterpret_cast<AppGLProc>(&::glGetSubroutineIndex)},
     {"glGetSubroutineUniformLocation", reinterpret_cast<AppGLProc>(&::glGetSubroutineUniformLocation)},
     {"glGetSynciv", reinterpret_cast<AppGLProc>(&::glGetSynciv)},
+    {"glGetSyncivAPPLE", reinterpret_cast<AppGLProc>(&::glGetSyncivAPPLE)},
+    {"glGetTexEnvfv", reinterpret_cast<AppGLProc>(&::glGetTexEnvfv)},
+    {"glGetTexEnviv", reinterpret_cast<AppGLProc>(&::glGetTexEnviv)},
+    {"glGetTexGendv", reinterpret_cast<AppGLProc>(&::glGetTexGendv)},
+    {"glGetTexGenfv", reinterpret_cast<AppGLProc>(&::glGetTexGenfv)},
+    {"glGetTexGeniv", reinterpret_cast<AppGLProc>(&::glGetTexGeniv)},
     {"glGetTexImage", reinterpret_cast<AppGLProc>(&::glGetTexImage)},
     {"glGetTexLevelParameterfv", reinterpret_cast<AppGLProc>(&::glGetTexLevelParameterfv)},
     {"glGetTexLevelParameteriv", reinterpret_cast<AppGLProc>(&::glGetTexLevelParameteriv)},
     {"glGetTexParameterIiv", reinterpret_cast<AppGLProc>(&::glGetTexParameterIiv)},
+    {"glGetTexParameterIivEXT", reinterpret_cast<AppGLProc>(&::glGetTexParameterIivEXT)},
+    {"glGetTexParameterIivOES", reinterpret_cast<AppGLProc>(&::glGetTexParameterIivOES)},
     {"glGetTexParameterIuiv", reinterpret_cast<AppGLProc>(&::glGetTexParameterIuiv)},
+    {"glGetTexParameterIuivEXT", reinterpret_cast<AppGLProc>(&::glGetTexParameterIuivEXT)},
+    {"glGetTexParameterIuivOES", reinterpret_cast<AppGLProc>(&::glGetTexParameterIuivOES)},
     {"glGetTexParameterfv", reinterpret_cast<AppGLProc>(&::glGetTexParameterfv)},
     {"glGetTexParameteriv", reinterpret_cast<AppGLProc>(&::glGetTexParameteriv)},
     {"glGetTextureImage", reinterpret_cast<AppGLProc>(&::glGetTextureImage)},
@@ -301,34 +1475,81 @@ const ProcEntry kProcTable[] = {
     {"glGetTextureParameteriv", reinterpret_cast<AppGLProc>(&::glGetTextureParameteriv)},
     {"glGetTextureSubImage", reinterpret_cast<AppGLProc>(&::glGetTextureSubImage)},
     {"glGetTransformFeedbackVarying", reinterpret_cast<AppGLProc>(&::glGetTransformFeedbackVarying)},
+    {"glGetTransformFeedbackVaryingEXT", reinterpret_cast<AppGLProc>(&::glGetTransformFeedbackVaryingEXT)},
     {"glGetTransformFeedbacki64_v", reinterpret_cast<AppGLProc>(&::glGetTransformFeedbacki64_v)},
     {"glGetTransformFeedbacki_v", reinterpret_cast<AppGLProc>(&::glGetTransformFeedbacki_v)},
     {"glGetTransformFeedbackiv", reinterpret_cast<AppGLProc>(&::glGetTransformFeedbackiv)},
     {"glGetUniformBlockIndex", reinterpret_cast<AppGLProc>(&::glGetUniformBlockIndex)},
     {"glGetUniformIndices", reinterpret_cast<AppGLProc>(&::glGetUniformIndices)},
     {"glGetUniformLocation", reinterpret_cast<AppGLProc>(&::glGetUniformLocation)},
+    {"glGetUniformLocationARB", reinterpret_cast<AppGLProc>(&::glGetUniformLocationARB)},
     {"glGetUniformSubroutineuiv", reinterpret_cast<AppGLProc>(&::glGetUniformSubroutineuiv)},
     {"glGetUniformdv", reinterpret_cast<AppGLProc>(&::glGetUniformdv)},
     {"glGetUniformfv", reinterpret_cast<AppGLProc>(&::glGetUniformfv)},
+    {"glGetUniformfvARB", reinterpret_cast<AppGLProc>(&::glGetUniformfvARB)},
     {"glGetUniformiv", reinterpret_cast<AppGLProc>(&::glGetUniformiv)},
+    {"glGetUniformivARB", reinterpret_cast<AppGLProc>(&::glGetUniformivARB)},
     {"glGetUniformuiv", reinterpret_cast<AppGLProc>(&::glGetUniformuiv)},
+    {"glGetUniformuivEXT", reinterpret_cast<AppGLProc>(&::glGetUniformuivEXT)},
     {"glGetVertexArrayIndexed64iv", reinterpret_cast<AppGLProc>(&::glGetVertexArrayIndexed64iv)},
     {"glGetVertexArrayIndexediv", reinterpret_cast<AppGLProc>(&::glGetVertexArrayIndexediv)},
     {"glGetVertexArrayiv", reinterpret_cast<AppGLProc>(&::glGetVertexArrayiv)},
     {"glGetVertexAttribIiv", reinterpret_cast<AppGLProc>(&::glGetVertexAttribIiv)},
+    {"glGetVertexAttribIivEXT", reinterpret_cast<AppGLProc>(&::glGetVertexAttribIivEXT)},
     {"glGetVertexAttribIuiv", reinterpret_cast<AppGLProc>(&::glGetVertexAttribIuiv)},
+    {"glGetVertexAttribIuivEXT", reinterpret_cast<AppGLProc>(&::glGetVertexAttribIuivEXT)},
     {"glGetVertexAttribLdv", reinterpret_cast<AppGLProc>(&::glGetVertexAttribLdv)},
+    {"glGetVertexAttribLdvEXT", reinterpret_cast<AppGLProc>(&::glGetVertexAttribLdvEXT)},
     {"glGetVertexAttribPointerv", reinterpret_cast<AppGLProc>(&::glGetVertexAttribPointerv)},
+    {"glGetVertexAttribPointervARB", reinterpret_cast<AppGLProc>(&::glGetVertexAttribPointervARB)},
+    {"glGetVertexAttribPointervNV", reinterpret_cast<AppGLProc>(&::glGetVertexAttribPointervNV)},
     {"glGetVertexAttribdv", reinterpret_cast<AppGLProc>(&::glGetVertexAttribdv)},
+    {"glGetVertexAttribdvARB", reinterpret_cast<AppGLProc>(&::glGetVertexAttribdvARB)},
+    {"glGetVertexAttribdvNV", reinterpret_cast<AppGLProc>(&::glGetVertexAttribdvNV)},
     {"glGetVertexAttribfv", reinterpret_cast<AppGLProc>(&::glGetVertexAttribfv)},
+    {"glGetVertexAttribfvARB", reinterpret_cast<AppGLProc>(&::glGetVertexAttribfvARB)},
+    {"glGetVertexAttribfvNV", reinterpret_cast<AppGLProc>(&::glGetVertexAttribfvNV)},
     {"glGetVertexAttribiv", reinterpret_cast<AppGLProc>(&::glGetVertexAttribiv)},
+    {"glGetVertexAttribivARB", reinterpret_cast<AppGLProc>(&::glGetVertexAttribivARB)},
+    {"glGetVertexAttribivNV", reinterpret_cast<AppGLProc>(&::glGetVertexAttribivNV)},
+    {"glGetnColorTable", reinterpret_cast<AppGLProc>(&::glGetnColorTable)},
     {"glGetnCompressedTexImage", reinterpret_cast<AppGLProc>(&::glGetnCompressedTexImage)},
+    {"glGetnConvolutionFilter", reinterpret_cast<AppGLProc>(&::glGetnConvolutionFilter)},
+    {"glGetnHistogram", reinterpret_cast<AppGLProc>(&::glGetnHistogram)},
+    {"glGetnMapdv", reinterpret_cast<AppGLProc>(&::glGetnMapdv)},
+    {"glGetnMapfv", reinterpret_cast<AppGLProc>(&::glGetnMapfv)},
+    {"glGetnMapiv", reinterpret_cast<AppGLProc>(&::glGetnMapiv)},
+    {"glGetnMinmax", reinterpret_cast<AppGLProc>(&::glGetnMinmax)},
+    {"glGetnPixelMapfv", reinterpret_cast<AppGLProc>(&::glGetnPixelMapfv)},
+    {"glGetnPixelMapuiv", reinterpret_cast<AppGLProc>(&::glGetnPixelMapuiv)},
+    {"glGetnPixelMapusv", reinterpret_cast<AppGLProc>(&::glGetnPixelMapusv)},
+    {"glGetnPolygonStipple", reinterpret_cast<AppGLProc>(&::glGetnPolygonStipple)},
+    {"glGetnSeparableFilter", reinterpret_cast<AppGLProc>(&::glGetnSeparableFilter)},
     {"glGetnTexImage", reinterpret_cast<AppGLProc>(&::glGetnTexImage)},
     {"glGetnUniformdv", reinterpret_cast<AppGLProc>(&::glGetnUniformdv)},
     {"glGetnUniformfv", reinterpret_cast<AppGLProc>(&::glGetnUniformfv)},
+    {"glGetnUniformfvEXT", reinterpret_cast<AppGLProc>(&::glGetnUniformfvEXT)},
+    {"glGetnUniformfvKHR", reinterpret_cast<AppGLProc>(&::glGetnUniformfvKHR)},
     {"glGetnUniformiv", reinterpret_cast<AppGLProc>(&::glGetnUniformiv)},
+    {"glGetnUniformivEXT", reinterpret_cast<AppGLProc>(&::glGetnUniformivEXT)},
+    {"glGetnUniformivKHR", reinterpret_cast<AppGLProc>(&::glGetnUniformivKHR)},
     {"glGetnUniformuiv", reinterpret_cast<AppGLProc>(&::glGetnUniformuiv)},
+    {"glGetnUniformuivKHR", reinterpret_cast<AppGLProc>(&::glGetnUniformuivKHR)},
     {"glHint", reinterpret_cast<AppGLProc>(&::glHint)},
+    {"glIndexMask", reinterpret_cast<AppGLProc>(&::glIndexMask)},
+    {"glIndexPointer", reinterpret_cast<AppGLProc>(&::glIndexPointer)},
+    {"glIndexd", reinterpret_cast<AppGLProc>(&::glIndexd)},
+    {"glIndexdv", reinterpret_cast<AppGLProc>(&::glIndexdv)},
+    {"glIndexf", reinterpret_cast<AppGLProc>(&::glIndexf)},
+    {"glIndexfv", reinterpret_cast<AppGLProc>(&::glIndexfv)},
+    {"glIndexi", reinterpret_cast<AppGLProc>(&::glIndexi)},
+    {"glIndexiv", reinterpret_cast<AppGLProc>(&::glIndexiv)},
+    {"glIndexs", reinterpret_cast<AppGLProc>(&::glIndexs)},
+    {"glIndexsv", reinterpret_cast<AppGLProc>(&::glIndexsv)},
+    {"glIndexub", reinterpret_cast<AppGLProc>(&::glIndexub)},
+    {"glIndexubv", reinterpret_cast<AppGLProc>(&::glIndexubv)},
+    {"glInitNames", reinterpret_cast<AppGLProc>(&::glInitNames)},
+    {"glInterleavedArrays", reinterpret_cast<AppGLProc>(&::glInterleavedArrays)},
     {"glInvalidateBufferData", reinterpret_cast<AppGLProc>(&::glInvalidateBufferData)},
     {"glInvalidateBufferSubData", reinterpret_cast<AppGLProc>(&::glInvalidateBufferSubData)},
     {"glInvalidateFramebuffer", reinterpret_cast<AppGLProc>(&::glInvalidateFramebuffer)},
@@ -338,39 +1559,143 @@ const ProcEntry kProcTable[] = {
     {"glInvalidateTexImage", reinterpret_cast<AppGLProc>(&::glInvalidateTexImage)},
     {"glInvalidateTexSubImage", reinterpret_cast<AppGLProc>(&::glInvalidateTexSubImage)},
     {"glIsBuffer", reinterpret_cast<AppGLProc>(&::glIsBuffer)},
+    {"glIsBufferARB", reinterpret_cast<AppGLProc>(&::glIsBufferARB)},
     {"glIsEnabled", reinterpret_cast<AppGLProc>(&::glIsEnabled)},
+    {"glIsEnabledIndexedEXT", reinterpret_cast<AppGLProc>(&::glIsEnabledIndexedEXT)},
     {"glIsEnabledi", reinterpret_cast<AppGLProc>(&::glIsEnabledi)},
+    {"glIsEnablediEXT", reinterpret_cast<AppGLProc>(&::glIsEnablediEXT)},
+    {"glIsEnablediNV", reinterpret_cast<AppGLProc>(&::glIsEnablediNV)},
+    {"glIsEnablediOES", reinterpret_cast<AppGLProc>(&::glIsEnablediOES)},
     {"glIsFramebuffer", reinterpret_cast<AppGLProc>(&::glIsFramebuffer)},
+    {"glIsFramebufferEXT", reinterpret_cast<AppGLProc>(&::glIsFramebufferEXT)},
+    {"glIsList", reinterpret_cast<AppGLProc>(&::glIsList)},
     {"glIsProgram", reinterpret_cast<AppGLProc>(&::glIsProgram)},
     {"glIsProgramPipeline", reinterpret_cast<AppGLProc>(&::glIsProgramPipeline)},
     {"glIsQuery", reinterpret_cast<AppGLProc>(&::glIsQuery)},
+    {"glIsQueryARB", reinterpret_cast<AppGLProc>(&::glIsQueryARB)},
     {"glIsRenderbuffer", reinterpret_cast<AppGLProc>(&::glIsRenderbuffer)},
+    {"glIsRenderbufferEXT", reinterpret_cast<AppGLProc>(&::glIsRenderbufferEXT)},
     {"glIsSampler", reinterpret_cast<AppGLProc>(&::glIsSampler)},
     {"glIsShader", reinterpret_cast<AppGLProc>(&::glIsShader)},
     {"glIsSync", reinterpret_cast<AppGLProc>(&::glIsSync)},
+    {"glIsSyncAPPLE", reinterpret_cast<AppGLProc>(&::glIsSyncAPPLE)},
     {"glIsTexture", reinterpret_cast<AppGLProc>(&::glIsTexture)},
     {"glIsTransformFeedback", reinterpret_cast<AppGLProc>(&::glIsTransformFeedback)},
+    {"glIsTransformFeedbackNV", reinterpret_cast<AppGLProc>(&::glIsTransformFeedbackNV)},
     {"glIsVertexArray", reinterpret_cast<AppGLProc>(&::glIsVertexArray)},
+    {"glIsVertexArrayAPPLE", reinterpret_cast<AppGLProc>(&::glIsVertexArrayAPPLE)},
+    {"glIsVertexArrayOES", reinterpret_cast<AppGLProc>(&::glIsVertexArrayOES)},
+    {"glLightModelf", reinterpret_cast<AppGLProc>(&::glLightModelf)},
+    {"glLightModelfv", reinterpret_cast<AppGLProc>(&::glLightModelfv)},
+    {"glLightModeli", reinterpret_cast<AppGLProc>(&::glLightModeli)},
+    {"glLightModeliv", reinterpret_cast<AppGLProc>(&::glLightModeliv)},
+    {"glLightf", reinterpret_cast<AppGLProc>(&::glLightf)},
+    {"glLightfv", reinterpret_cast<AppGLProc>(&::glLightfv)},
+    {"glLighti", reinterpret_cast<AppGLProc>(&::glLighti)},
+    {"glLightiv", reinterpret_cast<AppGLProc>(&::glLightiv)},
+    {"glLineStipple", reinterpret_cast<AppGLProc>(&::glLineStipple)},
     {"glLineWidth", reinterpret_cast<AppGLProc>(&::glLineWidth)},
     {"glLinkProgram", reinterpret_cast<AppGLProc>(&::glLinkProgram)},
+    {"glLinkProgramARB", reinterpret_cast<AppGLProc>(&::glLinkProgramARB)},
+    {"glListBase", reinterpret_cast<AppGLProc>(&::glListBase)},
+    {"glLoadIdentity", reinterpret_cast<AppGLProc>(&::glLoadIdentity)},
+    {"glLoadMatrixd", reinterpret_cast<AppGLProc>(&::glLoadMatrixd)},
+    {"glLoadMatrixf", reinterpret_cast<AppGLProc>(&::glLoadMatrixf)},
+    {"glLoadName", reinterpret_cast<AppGLProc>(&::glLoadName)},
+    {"glLoadTransposeMatrixd", reinterpret_cast<AppGLProc>(&::glLoadTransposeMatrixd)},
+    {"glLoadTransposeMatrixf", reinterpret_cast<AppGLProc>(&::glLoadTransposeMatrixf)},
     {"glLogicOp", reinterpret_cast<AppGLProc>(&::glLogicOp)},
+    {"glMap1d", reinterpret_cast<AppGLProc>(&::glMap1d)},
+    {"glMap1f", reinterpret_cast<AppGLProc>(&::glMap1f)},
+    {"glMap2d", reinterpret_cast<AppGLProc>(&::glMap2d)},
+    {"glMap2f", reinterpret_cast<AppGLProc>(&::glMap2f)},
     {"glMapBuffer", reinterpret_cast<AppGLProc>(&::glMapBuffer)},
+    {"glMapBufferARB", reinterpret_cast<AppGLProc>(&::glMapBufferARB)},
+    {"glMapBufferOES", reinterpret_cast<AppGLProc>(&::glMapBufferOES)},
     {"glMapBufferRange", reinterpret_cast<AppGLProc>(&::glMapBufferRange)},
+    {"glMapBufferRangeEXT", reinterpret_cast<AppGLProc>(&::glMapBufferRangeEXT)},
+    {"glMapGrid1d", reinterpret_cast<AppGLProc>(&::glMapGrid1d)},
+    {"glMapGrid1f", reinterpret_cast<AppGLProc>(&::glMapGrid1f)},
+    {"glMapGrid2d", reinterpret_cast<AppGLProc>(&::glMapGrid2d)},
+    {"glMapGrid2f", reinterpret_cast<AppGLProc>(&::glMapGrid2f)},
     {"glMapNamedBuffer", reinterpret_cast<AppGLProc>(&::glMapNamedBuffer)},
     {"glMapNamedBufferRange", reinterpret_cast<AppGLProc>(&::glMapNamedBufferRange)},
+    {"glMaterialf", reinterpret_cast<AppGLProc>(&::glMaterialf)},
+    {"glMaterialfv", reinterpret_cast<AppGLProc>(&::glMaterialfv)},
+    {"glMateriali", reinterpret_cast<AppGLProc>(&::glMateriali)},
+    {"glMaterialiv", reinterpret_cast<AppGLProc>(&::glMaterialiv)},
+    {"glMatrixMode", reinterpret_cast<AppGLProc>(&::glMatrixMode)},
     {"glMemoryBarrier", reinterpret_cast<AppGLProc>(&::glMemoryBarrier)},
     {"glMemoryBarrierByRegion", reinterpret_cast<AppGLProc>(&::glMemoryBarrierByRegion)},
+    {"glMemoryBarrierEXT", reinterpret_cast<AppGLProc>(&::glMemoryBarrierEXT)},
     {"glMinSampleShading", reinterpret_cast<AppGLProc>(&::glMinSampleShading)},
+    {"glMinSampleShadingARB", reinterpret_cast<AppGLProc>(&::glMinSampleShadingARB)},
+    {"glMinSampleShadingOES", reinterpret_cast<AppGLProc>(&::glMinSampleShadingOES)},
+    {"glMultMatrixd", reinterpret_cast<AppGLProc>(&::glMultMatrixd)},
+    {"glMultMatrixf", reinterpret_cast<AppGLProc>(&::glMultMatrixf)},
+    {"glMultTransposeMatrixd", reinterpret_cast<AppGLProc>(&::glMultTransposeMatrixd)},
+    {"glMultTransposeMatrixf", reinterpret_cast<AppGLProc>(&::glMultTransposeMatrixf)},
     {"glMultiDrawArrays", reinterpret_cast<AppGLProc>(&::glMultiDrawArrays)},
+    {"glMultiDrawArraysEXT", reinterpret_cast<AppGLProc>(&::glMultiDrawArraysEXT)},
     {"glMultiDrawArraysIndirect", reinterpret_cast<AppGLProc>(&::glMultiDrawArraysIndirect)},
+    {"glMultiDrawArraysIndirectAMD", reinterpret_cast<AppGLProc>(&::glMultiDrawArraysIndirectAMD)},
     {"glMultiDrawArraysIndirectCount", reinterpret_cast<AppGLProc>(&::glMultiDrawArraysIndirectCount)},
+    {"glMultiDrawArraysIndirectCountARB", reinterpret_cast<AppGLProc>(&::glMultiDrawArraysIndirectCountARB)},
+    {"glMultiDrawArraysIndirectEXT", reinterpret_cast<AppGLProc>(&::glMultiDrawArraysIndirectEXT)},
     {"glMultiDrawElements", reinterpret_cast<AppGLProc>(&::glMultiDrawElements)},
     {"glMultiDrawElementsBaseVertex", reinterpret_cast<AppGLProc>(&::glMultiDrawElementsBaseVertex)},
+    {"glMultiDrawElementsBaseVertexEXT", reinterpret_cast<AppGLProc>(&::glMultiDrawElementsBaseVertexEXT)},
+    {"glMultiDrawElementsEXT", reinterpret_cast<AppGLProc>(&::glMultiDrawElementsEXT)},
     {"glMultiDrawElementsIndirect", reinterpret_cast<AppGLProc>(&::glMultiDrawElementsIndirect)},
+    {"glMultiDrawElementsIndirectAMD", reinterpret_cast<AppGLProc>(&::glMultiDrawElementsIndirectAMD)},
     {"glMultiDrawElementsIndirectCount", reinterpret_cast<AppGLProc>(&::glMultiDrawElementsIndirectCount)},
+    {"glMultiDrawElementsIndirectCountARB", reinterpret_cast<AppGLProc>(&::glMultiDrawElementsIndirectCountARB)},
+    {"glMultiDrawElementsIndirectEXT", reinterpret_cast<AppGLProc>(&::glMultiDrawElementsIndirectEXT)},
+    {"glMultiTexCoord1d", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1d)},
+    {"glMultiTexCoord1dv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1dv)},
+    {"glMultiTexCoord1f", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1f)},
+    {"glMultiTexCoord1fv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1fv)},
+    {"glMultiTexCoord1i", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1i)},
+    {"glMultiTexCoord1iv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1iv)},
+    {"glMultiTexCoord1s", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1s)},
+    {"glMultiTexCoord1sv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord1sv)},
+    {"glMultiTexCoord2d", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2d)},
+    {"glMultiTexCoord2dv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2dv)},
+    {"glMultiTexCoord2f", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2f)},
+    {"glMultiTexCoord2fv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2fv)},
+    {"glMultiTexCoord2i", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2i)},
+    {"glMultiTexCoord2iv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2iv)},
+    {"glMultiTexCoord2s", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2s)},
+    {"glMultiTexCoord2sv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord2sv)},
+    {"glMultiTexCoord3d", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3d)},
+    {"glMultiTexCoord3dv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3dv)},
+    {"glMultiTexCoord3f", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3f)},
+    {"glMultiTexCoord3fv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3fv)},
+    {"glMultiTexCoord3i", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3i)},
+    {"glMultiTexCoord3iv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3iv)},
+    {"glMultiTexCoord3s", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3s)},
+    {"glMultiTexCoord3sv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord3sv)},
+    {"glMultiTexCoord4d", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4d)},
+    {"glMultiTexCoord4dv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4dv)},
+    {"glMultiTexCoord4f", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4f)},
+    {"glMultiTexCoord4fv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4fv)},
+    {"glMultiTexCoord4i", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4i)},
+    {"glMultiTexCoord4iv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4iv)},
+    {"glMultiTexCoord4s", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4s)},
+    {"glMultiTexCoord4sv", reinterpret_cast<AppGLProc>(&::glMultiTexCoord4sv)},
+    {"glMultiTexCoordP1ui", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP1ui)},
+    {"glMultiTexCoordP1uiv", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP1uiv)},
+    {"glMultiTexCoordP2ui", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP2ui)},
+    {"glMultiTexCoordP2uiv", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP2uiv)},
+    {"glMultiTexCoordP3ui", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP3ui)},
+    {"glMultiTexCoordP3uiv", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP3uiv)},
+    {"glMultiTexCoordP4ui", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP4ui)},
+    {"glMultiTexCoordP4uiv", reinterpret_cast<AppGLProc>(&::glMultiTexCoordP4uiv)},
     {"glNamedBufferData", reinterpret_cast<AppGLProc>(&::glNamedBufferData)},
     {"glNamedBufferStorage", reinterpret_cast<AppGLProc>(&::glNamedBufferStorage)},
+    {"glNamedBufferStorageEXT", reinterpret_cast<AppGLProc>(&::glNamedBufferStorageEXT)},
     {"glNamedBufferSubData", reinterpret_cast<AppGLProc>(&::glNamedBufferSubData)},
+    {"glNamedBufferSubDataEXT", reinterpret_cast<AppGLProc>(&::glNamedBufferSubDataEXT)},
     {"glNamedFramebufferDrawBuffer", reinterpret_cast<AppGLProc>(&::glNamedFramebufferDrawBuffer)},
     {"glNamedFramebufferDrawBuffers", reinterpret_cast<AppGLProc>(&::glNamedFramebufferDrawBuffers)},
     {"glNamedFramebufferParameteri", reinterpret_cast<AppGLProc>(&::glNamedFramebufferParameteri)},
@@ -380,128 +1705,362 @@ const ProcEntry kProcTable[] = {
     {"glNamedFramebufferTextureLayer", reinterpret_cast<AppGLProc>(&::glNamedFramebufferTextureLayer)},
     {"glNamedRenderbufferStorage", reinterpret_cast<AppGLProc>(&::glNamedRenderbufferStorage)},
     {"glNamedRenderbufferStorageMultisample", reinterpret_cast<AppGLProc>(&::glNamedRenderbufferStorageMultisample)},
+    {"glNewList", reinterpret_cast<AppGLProc>(&::glNewList)},
+    {"glNormal3b", reinterpret_cast<AppGLProc>(&::glNormal3b)},
+    {"glNormal3bv", reinterpret_cast<AppGLProc>(&::glNormal3bv)},
+    {"glNormal3d", reinterpret_cast<AppGLProc>(&::glNormal3d)},
+    {"glNormal3dv", reinterpret_cast<AppGLProc>(&::glNormal3dv)},
+    {"glNormal3f", reinterpret_cast<AppGLProc>(&::glNormal3f)},
+    {"glNormal3fv", reinterpret_cast<AppGLProc>(&::glNormal3fv)},
+    {"glNormal3i", reinterpret_cast<AppGLProc>(&::glNormal3i)},
+    {"glNormal3iv", reinterpret_cast<AppGLProc>(&::glNormal3iv)},
+    {"glNormal3s", reinterpret_cast<AppGLProc>(&::glNormal3s)},
+    {"glNormal3sv", reinterpret_cast<AppGLProc>(&::glNormal3sv)},
+    {"glNormalP3ui", reinterpret_cast<AppGLProc>(&::glNormalP3ui)},
+    {"glNormalP3uiv", reinterpret_cast<AppGLProc>(&::glNormalP3uiv)},
+    {"glNormalPointer", reinterpret_cast<AppGLProc>(&::glNormalPointer)},
     {"glObjectLabel", reinterpret_cast<AppGLProc>(&::glObjectLabel)},
+    {"glObjectLabelKHR", reinterpret_cast<AppGLProc>(&::glObjectLabelKHR)},
     {"glObjectPtrLabel", reinterpret_cast<AppGLProc>(&::glObjectPtrLabel)},
+    {"glObjectPtrLabelKHR", reinterpret_cast<AppGLProc>(&::glObjectPtrLabelKHR)},
+    {"glOrtho", reinterpret_cast<AppGLProc>(&::glOrtho)},
+    {"glPassThrough", reinterpret_cast<AppGLProc>(&::glPassThrough)},
     {"glPatchParameterfv", reinterpret_cast<AppGLProc>(&::glPatchParameterfv)},
     {"glPatchParameteri", reinterpret_cast<AppGLProc>(&::glPatchParameteri)},
+    {"glPatchParameteriEXT", reinterpret_cast<AppGLProc>(&::glPatchParameteriEXT)},
+    {"glPatchParameteriOES", reinterpret_cast<AppGLProc>(&::glPatchParameteriOES)},
     {"glPauseTransformFeedback", reinterpret_cast<AppGLProc>(&::glPauseTransformFeedback)},
+    {"glPauseTransformFeedbackNV", reinterpret_cast<AppGLProc>(&::glPauseTransformFeedbackNV)},
+    {"glPixelMapfv", reinterpret_cast<AppGLProc>(&::glPixelMapfv)},
+    {"glPixelMapuiv", reinterpret_cast<AppGLProc>(&::glPixelMapuiv)},
+    {"glPixelMapusv", reinterpret_cast<AppGLProc>(&::glPixelMapusv)},
     {"glPixelStoref", reinterpret_cast<AppGLProc>(&::glPixelStoref)},
     {"glPixelStorei", reinterpret_cast<AppGLProc>(&::glPixelStorei)},
+    {"glPixelTransferf", reinterpret_cast<AppGLProc>(&::glPixelTransferf)},
+    {"glPixelTransferi", reinterpret_cast<AppGLProc>(&::glPixelTransferi)},
+    {"glPixelZoom", reinterpret_cast<AppGLProc>(&::glPixelZoom)},
     {"glPointParameterf", reinterpret_cast<AppGLProc>(&::glPointParameterf)},
+    {"glPointParameterfARB", reinterpret_cast<AppGLProc>(&::glPointParameterfARB)},
+    {"glPointParameterfEXT", reinterpret_cast<AppGLProc>(&::glPointParameterfEXT)},
+    {"glPointParameterfSGIS", reinterpret_cast<AppGLProc>(&::glPointParameterfSGIS)},
     {"glPointParameterfv", reinterpret_cast<AppGLProc>(&::glPointParameterfv)},
+    {"glPointParameterfvARB", reinterpret_cast<AppGLProc>(&::glPointParameterfvARB)},
+    {"glPointParameterfvEXT", reinterpret_cast<AppGLProc>(&::glPointParameterfvEXT)},
+    {"glPointParameterfvSGIS", reinterpret_cast<AppGLProc>(&::glPointParameterfvSGIS)},
     {"glPointParameteri", reinterpret_cast<AppGLProc>(&::glPointParameteri)},
+    {"glPointParameteriNV", reinterpret_cast<AppGLProc>(&::glPointParameteriNV)},
     {"glPointParameteriv", reinterpret_cast<AppGLProc>(&::glPointParameteriv)},
+    {"glPointParameterivNV", reinterpret_cast<AppGLProc>(&::glPointParameterivNV)},
     {"glPointSize", reinterpret_cast<AppGLProc>(&::glPointSize)},
     {"glPolygonMode", reinterpret_cast<AppGLProc>(&::glPolygonMode)},
+    {"glPolygonModeNV", reinterpret_cast<AppGLProc>(&::glPolygonModeNV)},
     {"glPolygonOffset", reinterpret_cast<AppGLProc>(&::glPolygonOffset)},
     {"glPolygonOffsetClamp", reinterpret_cast<AppGLProc>(&::glPolygonOffsetClamp)},
+    {"glPolygonOffsetClampEXT", reinterpret_cast<AppGLProc>(&::glPolygonOffsetClampEXT)},
+    {"glPolygonStipple", reinterpret_cast<AppGLProc>(&::glPolygonStipple)},
+    {"glPopAttrib", reinterpret_cast<AppGLProc>(&::glPopAttrib)},
+    {"glPopClientAttrib", reinterpret_cast<AppGLProc>(&::glPopClientAttrib)},
     {"glPopDebugGroup", reinterpret_cast<AppGLProc>(&::glPopDebugGroup)},
+    {"glPopDebugGroupKHR", reinterpret_cast<AppGLProc>(&::glPopDebugGroupKHR)},
+    {"glPopMatrix", reinterpret_cast<AppGLProc>(&::glPopMatrix)},
+    {"glPopName", reinterpret_cast<AppGLProc>(&::glPopName)},
     {"glPrimitiveRestartIndex", reinterpret_cast<AppGLProc>(&::glPrimitiveRestartIndex)},
+    {"glPrioritizeTextures", reinterpret_cast<AppGLProc>(&::glPrioritizeTextures)},
     {"glProgramBinary", reinterpret_cast<AppGLProc>(&::glProgramBinary)},
+    {"glProgramBinaryOES", reinterpret_cast<AppGLProc>(&::glProgramBinaryOES)},
     {"glProgramParameteri", reinterpret_cast<AppGLProc>(&::glProgramParameteri)},
+    {"glProgramParameteriARB", reinterpret_cast<AppGLProc>(&::glProgramParameteriARB)},
+    {"glProgramParameteriEXT", reinterpret_cast<AppGLProc>(&::glProgramParameteriEXT)},
     {"glProgramUniform1d", reinterpret_cast<AppGLProc>(&::glProgramUniform1d)},
     {"glProgramUniform1dv", reinterpret_cast<AppGLProc>(&::glProgramUniform1dv)},
     {"glProgramUniform1f", reinterpret_cast<AppGLProc>(&::glProgramUniform1f)},
+    {"glProgramUniform1fEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform1fEXT)},
     {"glProgramUniform1fv", reinterpret_cast<AppGLProc>(&::glProgramUniform1fv)},
+    {"glProgramUniform1fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform1fvEXT)},
     {"glProgramUniform1i", reinterpret_cast<AppGLProc>(&::glProgramUniform1i)},
+    {"glProgramUniform1iEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform1iEXT)},
     {"glProgramUniform1iv", reinterpret_cast<AppGLProc>(&::glProgramUniform1iv)},
+    {"glProgramUniform1ivEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform1ivEXT)},
     {"glProgramUniform1ui", reinterpret_cast<AppGLProc>(&::glProgramUniform1ui)},
+    {"glProgramUniform1uiEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform1uiEXT)},
     {"glProgramUniform1uiv", reinterpret_cast<AppGLProc>(&::glProgramUniform1uiv)},
+    {"glProgramUniform1uivEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform1uivEXT)},
     {"glProgramUniform2d", reinterpret_cast<AppGLProc>(&::glProgramUniform2d)},
     {"glProgramUniform2dv", reinterpret_cast<AppGLProc>(&::glProgramUniform2dv)},
     {"glProgramUniform2f", reinterpret_cast<AppGLProc>(&::glProgramUniform2f)},
+    {"glProgramUniform2fEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform2fEXT)},
     {"glProgramUniform2fv", reinterpret_cast<AppGLProc>(&::glProgramUniform2fv)},
+    {"glProgramUniform2fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform2fvEXT)},
     {"glProgramUniform2i", reinterpret_cast<AppGLProc>(&::glProgramUniform2i)},
+    {"glProgramUniform2iEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform2iEXT)},
     {"glProgramUniform2iv", reinterpret_cast<AppGLProc>(&::glProgramUniform2iv)},
+    {"glProgramUniform2ivEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform2ivEXT)},
     {"glProgramUniform2ui", reinterpret_cast<AppGLProc>(&::glProgramUniform2ui)},
+    {"glProgramUniform2uiEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform2uiEXT)},
     {"glProgramUniform2uiv", reinterpret_cast<AppGLProc>(&::glProgramUniform2uiv)},
+    {"glProgramUniform2uivEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform2uivEXT)},
     {"glProgramUniform3d", reinterpret_cast<AppGLProc>(&::glProgramUniform3d)},
     {"glProgramUniform3dv", reinterpret_cast<AppGLProc>(&::glProgramUniform3dv)},
     {"glProgramUniform3f", reinterpret_cast<AppGLProc>(&::glProgramUniform3f)},
+    {"glProgramUniform3fEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform3fEXT)},
     {"glProgramUniform3fv", reinterpret_cast<AppGLProc>(&::glProgramUniform3fv)},
+    {"glProgramUniform3fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform3fvEXT)},
     {"glProgramUniform3i", reinterpret_cast<AppGLProc>(&::glProgramUniform3i)},
+    {"glProgramUniform3iEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform3iEXT)},
     {"glProgramUniform3iv", reinterpret_cast<AppGLProc>(&::glProgramUniform3iv)},
+    {"glProgramUniform3ivEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform3ivEXT)},
     {"glProgramUniform3ui", reinterpret_cast<AppGLProc>(&::glProgramUniform3ui)},
+    {"glProgramUniform3uiEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform3uiEXT)},
     {"glProgramUniform3uiv", reinterpret_cast<AppGLProc>(&::glProgramUniform3uiv)},
+    {"glProgramUniform3uivEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform3uivEXT)},
     {"glProgramUniform4d", reinterpret_cast<AppGLProc>(&::glProgramUniform4d)},
     {"glProgramUniform4dv", reinterpret_cast<AppGLProc>(&::glProgramUniform4dv)},
     {"glProgramUniform4f", reinterpret_cast<AppGLProc>(&::glProgramUniform4f)},
+    {"glProgramUniform4fEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform4fEXT)},
     {"glProgramUniform4fv", reinterpret_cast<AppGLProc>(&::glProgramUniform4fv)},
+    {"glProgramUniform4fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform4fvEXT)},
     {"glProgramUniform4i", reinterpret_cast<AppGLProc>(&::glProgramUniform4i)},
+    {"glProgramUniform4iEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform4iEXT)},
     {"glProgramUniform4iv", reinterpret_cast<AppGLProc>(&::glProgramUniform4iv)},
+    {"glProgramUniform4ivEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform4ivEXT)},
     {"glProgramUniform4ui", reinterpret_cast<AppGLProc>(&::glProgramUniform4ui)},
+    {"glProgramUniform4uiEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform4uiEXT)},
     {"glProgramUniform4uiv", reinterpret_cast<AppGLProc>(&::glProgramUniform4uiv)},
+    {"glProgramUniform4uivEXT", reinterpret_cast<AppGLProc>(&::glProgramUniform4uivEXT)},
     {"glProgramUniformMatrix2dv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix2dv)},
     {"glProgramUniformMatrix2fv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix2fv)},
+    {"glProgramUniformMatrix2fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix2fvEXT)},
     {"glProgramUniformMatrix2x3dv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix2x3dv)},
     {"glProgramUniformMatrix2x3fv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix2x3fv)},
+    {"glProgramUniformMatrix2x3fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix2x3fvEXT)},
     {"glProgramUniformMatrix2x4dv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix2x4dv)},
     {"glProgramUniformMatrix2x4fv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix2x4fv)},
+    {"glProgramUniformMatrix2x4fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix2x4fvEXT)},
     {"glProgramUniformMatrix3dv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix3dv)},
     {"glProgramUniformMatrix3fv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix3fv)},
+    {"glProgramUniformMatrix3fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix3fvEXT)},
     {"glProgramUniformMatrix3x2dv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix3x2dv)},
     {"glProgramUniformMatrix3x2fv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix3x2fv)},
+    {"glProgramUniformMatrix3x2fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix3x2fvEXT)},
     {"glProgramUniformMatrix3x4dv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix3x4dv)},
     {"glProgramUniformMatrix3x4fv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix3x4fv)},
+    {"glProgramUniformMatrix3x4fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix3x4fvEXT)},
     {"glProgramUniformMatrix4dv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix4dv)},
     {"glProgramUniformMatrix4fv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix4fv)},
+    {"glProgramUniformMatrix4fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix4fvEXT)},
     {"glProgramUniformMatrix4x2dv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix4x2dv)},
     {"glProgramUniformMatrix4x2fv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix4x2fv)},
+    {"glProgramUniformMatrix4x2fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix4x2fvEXT)},
     {"glProgramUniformMatrix4x3dv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix4x3dv)},
     {"glProgramUniformMatrix4x3fv", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix4x3fv)},
+    {"glProgramUniformMatrix4x3fvEXT", reinterpret_cast<AppGLProc>(&::glProgramUniformMatrix4x3fvEXT)},
     {"glProvokingVertex", reinterpret_cast<AppGLProc>(&::glProvokingVertex)},
+    {"glProvokingVertexEXT", reinterpret_cast<AppGLProc>(&::glProvokingVertexEXT)},
+    {"glPushAttrib", reinterpret_cast<AppGLProc>(&::glPushAttrib)},
+    {"glPushClientAttrib", reinterpret_cast<AppGLProc>(&::glPushClientAttrib)},
     {"glPushDebugGroup", reinterpret_cast<AppGLProc>(&::glPushDebugGroup)},
+    {"glPushDebugGroupKHR", reinterpret_cast<AppGLProc>(&::glPushDebugGroupKHR)},
+    {"glPushMatrix", reinterpret_cast<AppGLProc>(&::glPushMatrix)},
+    {"glPushName", reinterpret_cast<AppGLProc>(&::glPushName)},
     {"glQueryCounter", reinterpret_cast<AppGLProc>(&::glQueryCounter)},
+    {"glQueryCounterEXT", reinterpret_cast<AppGLProc>(&::glQueryCounterEXT)},
+    {"glRasterPos2d", reinterpret_cast<AppGLProc>(&::glRasterPos2d)},
+    {"glRasterPos2dv", reinterpret_cast<AppGLProc>(&::glRasterPos2dv)},
+    {"glRasterPos2f", reinterpret_cast<AppGLProc>(&::glRasterPos2f)},
+    {"glRasterPos2fv", reinterpret_cast<AppGLProc>(&::glRasterPos2fv)},
+    {"glRasterPos2i", reinterpret_cast<AppGLProc>(&::glRasterPos2i)},
+    {"glRasterPos2iv", reinterpret_cast<AppGLProc>(&::glRasterPos2iv)},
+    {"glRasterPos2s", reinterpret_cast<AppGLProc>(&::glRasterPos2s)},
+    {"glRasterPos2sv", reinterpret_cast<AppGLProc>(&::glRasterPos2sv)},
+    {"glRasterPos3d", reinterpret_cast<AppGLProc>(&::glRasterPos3d)},
+    {"glRasterPos3dv", reinterpret_cast<AppGLProc>(&::glRasterPos3dv)},
+    {"glRasterPos3f", reinterpret_cast<AppGLProc>(&::glRasterPos3f)},
+    {"glRasterPos3fv", reinterpret_cast<AppGLProc>(&::glRasterPos3fv)},
+    {"glRasterPos3i", reinterpret_cast<AppGLProc>(&::glRasterPos3i)},
+    {"glRasterPos3iv", reinterpret_cast<AppGLProc>(&::glRasterPos3iv)},
+    {"glRasterPos3s", reinterpret_cast<AppGLProc>(&::glRasterPos3s)},
+    {"glRasterPos3sv", reinterpret_cast<AppGLProc>(&::glRasterPos3sv)},
+    {"glRasterPos4d", reinterpret_cast<AppGLProc>(&::glRasterPos4d)},
+    {"glRasterPos4dv", reinterpret_cast<AppGLProc>(&::glRasterPos4dv)},
+    {"glRasterPos4f", reinterpret_cast<AppGLProc>(&::glRasterPos4f)},
+    {"glRasterPos4fv", reinterpret_cast<AppGLProc>(&::glRasterPos4fv)},
+    {"glRasterPos4i", reinterpret_cast<AppGLProc>(&::glRasterPos4i)},
+    {"glRasterPos4iv", reinterpret_cast<AppGLProc>(&::glRasterPos4iv)},
+    {"glRasterPos4s", reinterpret_cast<AppGLProc>(&::glRasterPos4s)},
+    {"glRasterPos4sv", reinterpret_cast<AppGLProc>(&::glRasterPos4sv)},
     {"glReadBuffer", reinterpret_cast<AppGLProc>(&::glReadBuffer)},
     {"glReadPixels", reinterpret_cast<AppGLProc>(&::glReadPixels)},
     {"glReadnPixels", reinterpret_cast<AppGLProc>(&::glReadnPixels)},
+    {"glReadnPixelsARB", reinterpret_cast<AppGLProc>(&::glReadnPixelsARB)},
+    {"glReadnPixelsEXT", reinterpret_cast<AppGLProc>(&::glReadnPixelsEXT)},
+    {"glReadnPixelsKHR", reinterpret_cast<AppGLProc>(&::glReadnPixelsKHR)},
+    {"glRectd", reinterpret_cast<AppGLProc>(&::glRectd)},
+    {"glRectdv", reinterpret_cast<AppGLProc>(&::glRectdv)},
+    {"glRectf", reinterpret_cast<AppGLProc>(&::glRectf)},
+    {"glRectfv", reinterpret_cast<AppGLProc>(&::glRectfv)},
+    {"glRecti", reinterpret_cast<AppGLProc>(&::glRecti)},
+    {"glRectiv", reinterpret_cast<AppGLProc>(&::glRectiv)},
+    {"glRects", reinterpret_cast<AppGLProc>(&::glRects)},
+    {"glRectsv", reinterpret_cast<AppGLProc>(&::glRectsv)},
     {"glReleaseShaderCompiler", reinterpret_cast<AppGLProc>(&::glReleaseShaderCompiler)},
+    {"glRenderMode", reinterpret_cast<AppGLProc>(&::glRenderMode)},
     {"glRenderbufferStorage", reinterpret_cast<AppGLProc>(&::glRenderbufferStorage)},
+    {"glRenderbufferStorageEXT", reinterpret_cast<AppGLProc>(&::glRenderbufferStorageEXT)},
     {"glRenderbufferStorageMultisample", reinterpret_cast<AppGLProc>(&::glRenderbufferStorageMultisample)},
+    {"glRenderbufferStorageMultisampleEXT", reinterpret_cast<AppGLProc>(&::glRenderbufferStorageMultisampleEXT)},
+    {"glRenderbufferStorageMultisampleNV", reinterpret_cast<AppGLProc>(&::glRenderbufferStorageMultisampleNV)},
     {"glResumeTransformFeedback", reinterpret_cast<AppGLProc>(&::glResumeTransformFeedback)},
+    {"glResumeTransformFeedbackNV", reinterpret_cast<AppGLProc>(&::glResumeTransformFeedbackNV)},
+    {"glRotated", reinterpret_cast<AppGLProc>(&::glRotated)},
+    {"glRotatef", reinterpret_cast<AppGLProc>(&::glRotatef)},
     {"glSampleCoverage", reinterpret_cast<AppGLProc>(&::glSampleCoverage)},
+    {"glSampleCoverageARB", reinterpret_cast<AppGLProc>(&::glSampleCoverageARB)},
     {"glSampleMaski", reinterpret_cast<AppGLProc>(&::glSampleMaski)},
     {"glSamplerParameterIiv", reinterpret_cast<AppGLProc>(&::glSamplerParameterIiv)},
+    {"glSamplerParameterIivEXT", reinterpret_cast<AppGLProc>(&::glSamplerParameterIivEXT)},
+    {"glSamplerParameterIivOES", reinterpret_cast<AppGLProc>(&::glSamplerParameterIivOES)},
     {"glSamplerParameterIuiv", reinterpret_cast<AppGLProc>(&::glSamplerParameterIuiv)},
+    {"glSamplerParameterIuivEXT", reinterpret_cast<AppGLProc>(&::glSamplerParameterIuivEXT)},
+    {"glSamplerParameterIuivOES", reinterpret_cast<AppGLProc>(&::glSamplerParameterIuivOES)},
     {"glSamplerParameterf", reinterpret_cast<AppGLProc>(&::glSamplerParameterf)},
     {"glSamplerParameterfv", reinterpret_cast<AppGLProc>(&::glSamplerParameterfv)},
     {"glSamplerParameteri", reinterpret_cast<AppGLProc>(&::glSamplerParameteri)},
     {"glSamplerParameteriv", reinterpret_cast<AppGLProc>(&::glSamplerParameteriv)},
+    {"glScaled", reinterpret_cast<AppGLProc>(&::glScaled)},
+    {"glScalef", reinterpret_cast<AppGLProc>(&::glScalef)},
     {"glScissor", reinterpret_cast<AppGLProc>(&::glScissor)},
     {"glScissorArrayv", reinterpret_cast<AppGLProc>(&::glScissorArrayv)},
+    {"glScissorArrayvNV", reinterpret_cast<AppGLProc>(&::glScissorArrayvNV)},
+    {"glScissorArrayvOES", reinterpret_cast<AppGLProc>(&::glScissorArrayvOES)},
     {"glScissorIndexed", reinterpret_cast<AppGLProc>(&::glScissorIndexed)},
+    {"glScissorIndexedNV", reinterpret_cast<AppGLProc>(&::glScissorIndexedNV)},
+    {"glScissorIndexedOES", reinterpret_cast<AppGLProc>(&::glScissorIndexedOES)},
     {"glScissorIndexedv", reinterpret_cast<AppGLProc>(&::glScissorIndexedv)},
+    {"glScissorIndexedvNV", reinterpret_cast<AppGLProc>(&::glScissorIndexedvNV)},
+    {"glScissorIndexedvOES", reinterpret_cast<AppGLProc>(&::glScissorIndexedvOES)},
+    {"glSecondaryColor3b", reinterpret_cast<AppGLProc>(&::glSecondaryColor3b)},
+    {"glSecondaryColor3bv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3bv)},
+    {"glSecondaryColor3d", reinterpret_cast<AppGLProc>(&::glSecondaryColor3d)},
+    {"glSecondaryColor3dv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3dv)},
+    {"glSecondaryColor3f", reinterpret_cast<AppGLProc>(&::glSecondaryColor3f)},
+    {"glSecondaryColor3fv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3fv)},
+    {"glSecondaryColor3i", reinterpret_cast<AppGLProc>(&::glSecondaryColor3i)},
+    {"glSecondaryColor3iv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3iv)},
+    {"glSecondaryColor3s", reinterpret_cast<AppGLProc>(&::glSecondaryColor3s)},
+    {"glSecondaryColor3sv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3sv)},
+    {"glSecondaryColor3ub", reinterpret_cast<AppGLProc>(&::glSecondaryColor3ub)},
+    {"glSecondaryColor3ubv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3ubv)},
+    {"glSecondaryColor3ui", reinterpret_cast<AppGLProc>(&::glSecondaryColor3ui)},
+    {"glSecondaryColor3uiv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3uiv)},
+    {"glSecondaryColor3us", reinterpret_cast<AppGLProc>(&::glSecondaryColor3us)},
+    {"glSecondaryColor3usv", reinterpret_cast<AppGLProc>(&::glSecondaryColor3usv)},
+    {"glSecondaryColorP3ui", reinterpret_cast<AppGLProc>(&::glSecondaryColorP3ui)},
+    {"glSecondaryColorP3uiv", reinterpret_cast<AppGLProc>(&::glSecondaryColorP3uiv)},
+    {"glSecondaryColorPointer", reinterpret_cast<AppGLProc>(&::glSecondaryColorPointer)},
+    {"glSelectBuffer", reinterpret_cast<AppGLProc>(&::glSelectBuffer)},
+    {"glShadeModel", reinterpret_cast<AppGLProc>(&::glShadeModel)},
     {"glShaderBinary", reinterpret_cast<AppGLProc>(&::glShaderBinary)},
     {"glShaderSource", reinterpret_cast<AppGLProc>(&::glShaderSource)},
+    {"glShaderSourceARB", reinterpret_cast<AppGLProc>(&::glShaderSourceARB)},
     {"glShaderStorageBlockBinding", reinterpret_cast<AppGLProc>(&::glShaderStorageBlockBinding)},
     {"glSpecializeShader", reinterpret_cast<AppGLProc>(&::glSpecializeShader)},
+    {"glSpecializeShaderARB", reinterpret_cast<AppGLProc>(&::glSpecializeShaderARB)},
     {"glStencilFunc", reinterpret_cast<AppGLProc>(&::glStencilFunc)},
     {"glStencilFuncSeparate", reinterpret_cast<AppGLProc>(&::glStencilFuncSeparate)},
     {"glStencilMask", reinterpret_cast<AppGLProc>(&::glStencilMask)},
     {"glStencilMaskSeparate", reinterpret_cast<AppGLProc>(&::glStencilMaskSeparate)},
     {"glStencilOp", reinterpret_cast<AppGLProc>(&::glStencilOp)},
     {"glStencilOpSeparate", reinterpret_cast<AppGLProc>(&::glStencilOpSeparate)},
+    {"glStencilOpSeparateATI", reinterpret_cast<AppGLProc>(&::glStencilOpSeparateATI)},
     {"glTexBuffer", reinterpret_cast<AppGLProc>(&::glTexBuffer)},
+    {"glTexBufferARB", reinterpret_cast<AppGLProc>(&::glTexBufferARB)},
+    {"glTexBufferEXT", reinterpret_cast<AppGLProc>(&::glTexBufferEXT)},
+    {"glTexBufferOES", reinterpret_cast<AppGLProc>(&::glTexBufferOES)},
     {"glTexBufferRange", reinterpret_cast<AppGLProc>(&::glTexBufferRange)},
+    {"glTexBufferRangeEXT", reinterpret_cast<AppGLProc>(&::glTexBufferRangeEXT)},
+    {"glTexBufferRangeOES", reinterpret_cast<AppGLProc>(&::glTexBufferRangeOES)},
+    {"glTexCoord1d", reinterpret_cast<AppGLProc>(&::glTexCoord1d)},
+    {"glTexCoord1dv", reinterpret_cast<AppGLProc>(&::glTexCoord1dv)},
+    {"glTexCoord1f", reinterpret_cast<AppGLProc>(&::glTexCoord1f)},
+    {"glTexCoord1fv", reinterpret_cast<AppGLProc>(&::glTexCoord1fv)},
+    {"glTexCoord1i", reinterpret_cast<AppGLProc>(&::glTexCoord1i)},
+    {"glTexCoord1iv", reinterpret_cast<AppGLProc>(&::glTexCoord1iv)},
+    {"glTexCoord1s", reinterpret_cast<AppGLProc>(&::glTexCoord1s)},
+    {"glTexCoord1sv", reinterpret_cast<AppGLProc>(&::glTexCoord1sv)},
+    {"glTexCoord2d", reinterpret_cast<AppGLProc>(&::glTexCoord2d)},
+    {"glTexCoord2dv", reinterpret_cast<AppGLProc>(&::glTexCoord2dv)},
+    {"glTexCoord2f", reinterpret_cast<AppGLProc>(&::glTexCoord2f)},
+    {"glTexCoord2fv", reinterpret_cast<AppGLProc>(&::glTexCoord2fv)},
+    {"glTexCoord2i", reinterpret_cast<AppGLProc>(&::glTexCoord2i)},
+    {"glTexCoord2iv", reinterpret_cast<AppGLProc>(&::glTexCoord2iv)},
+    {"glTexCoord2s", reinterpret_cast<AppGLProc>(&::glTexCoord2s)},
+    {"glTexCoord2sv", reinterpret_cast<AppGLProc>(&::glTexCoord2sv)},
+    {"glTexCoord3d", reinterpret_cast<AppGLProc>(&::glTexCoord3d)},
+    {"glTexCoord3dv", reinterpret_cast<AppGLProc>(&::glTexCoord3dv)},
+    {"glTexCoord3f", reinterpret_cast<AppGLProc>(&::glTexCoord3f)},
+    {"glTexCoord3fv", reinterpret_cast<AppGLProc>(&::glTexCoord3fv)},
+    {"glTexCoord3i", reinterpret_cast<AppGLProc>(&::glTexCoord3i)},
+    {"glTexCoord3iv", reinterpret_cast<AppGLProc>(&::glTexCoord3iv)},
+    {"glTexCoord3s", reinterpret_cast<AppGLProc>(&::glTexCoord3s)},
+    {"glTexCoord3sv", reinterpret_cast<AppGLProc>(&::glTexCoord3sv)},
+    {"glTexCoord4d", reinterpret_cast<AppGLProc>(&::glTexCoord4d)},
+    {"glTexCoord4dv", reinterpret_cast<AppGLProc>(&::glTexCoord4dv)},
+    {"glTexCoord4f", reinterpret_cast<AppGLProc>(&::glTexCoord4f)},
+    {"glTexCoord4fv", reinterpret_cast<AppGLProc>(&::glTexCoord4fv)},
+    {"glTexCoord4i", reinterpret_cast<AppGLProc>(&::glTexCoord4i)},
+    {"glTexCoord4iv", reinterpret_cast<AppGLProc>(&::glTexCoord4iv)},
+    {"glTexCoord4s", reinterpret_cast<AppGLProc>(&::glTexCoord4s)},
+    {"glTexCoord4sv", reinterpret_cast<AppGLProc>(&::glTexCoord4sv)},
+    {"glTexCoordP1ui", reinterpret_cast<AppGLProc>(&::glTexCoordP1ui)},
+    {"glTexCoordP1uiv", reinterpret_cast<AppGLProc>(&::glTexCoordP1uiv)},
+    {"glTexCoordP2ui", reinterpret_cast<AppGLProc>(&::glTexCoordP2ui)},
+    {"glTexCoordP2uiv", reinterpret_cast<AppGLProc>(&::glTexCoordP2uiv)},
+    {"glTexCoordP3ui", reinterpret_cast<AppGLProc>(&::glTexCoordP3ui)},
+    {"glTexCoordP3uiv", reinterpret_cast<AppGLProc>(&::glTexCoordP3uiv)},
+    {"glTexCoordP4ui", reinterpret_cast<AppGLProc>(&::glTexCoordP4ui)},
+    {"glTexCoordP4uiv", reinterpret_cast<AppGLProc>(&::glTexCoordP4uiv)},
+    {"glTexCoordPointer", reinterpret_cast<AppGLProc>(&::glTexCoordPointer)},
+    {"glTexEnvf", reinterpret_cast<AppGLProc>(&::glTexEnvf)},
+    {"glTexEnvfv", reinterpret_cast<AppGLProc>(&::glTexEnvfv)},
+    {"glTexEnvi", reinterpret_cast<AppGLProc>(&::glTexEnvi)},
+    {"glTexEnviv", reinterpret_cast<AppGLProc>(&::glTexEnviv)},
+    {"glTexGend", reinterpret_cast<AppGLProc>(&::glTexGend)},
+    {"glTexGendv", reinterpret_cast<AppGLProc>(&::glTexGendv)},
+    {"glTexGenf", reinterpret_cast<AppGLProc>(&::glTexGenf)},
+    {"glTexGenfv", reinterpret_cast<AppGLProc>(&::glTexGenfv)},
+    {"glTexGeni", reinterpret_cast<AppGLProc>(&::glTexGeni)},
+    {"glTexGeniv", reinterpret_cast<AppGLProc>(&::glTexGeniv)},
     {"glTexImage1D", reinterpret_cast<AppGLProc>(&::glTexImage1D)},
     {"glTexImage2D", reinterpret_cast<AppGLProc>(&::glTexImage2D)},
     {"glTexImage2DMultisample", reinterpret_cast<AppGLProc>(&::glTexImage2DMultisample)},
     {"glTexImage3D", reinterpret_cast<AppGLProc>(&::glTexImage3D)},
+    {"glTexImage3DEXT", reinterpret_cast<AppGLProc>(&::glTexImage3DEXT)},
     {"glTexImage3DMultisample", reinterpret_cast<AppGLProc>(&::glTexImage3DMultisample)},
     {"glTexParameterIiv", reinterpret_cast<AppGLProc>(&::glTexParameterIiv)},
+    {"glTexParameterIivEXT", reinterpret_cast<AppGLProc>(&::glTexParameterIivEXT)},
+    {"glTexParameterIivOES", reinterpret_cast<AppGLProc>(&::glTexParameterIivOES)},
     {"glTexParameterIuiv", reinterpret_cast<AppGLProc>(&::glTexParameterIuiv)},
+    {"glTexParameterIuivEXT", reinterpret_cast<AppGLProc>(&::glTexParameterIuivEXT)},
+    {"glTexParameterIuivOES", reinterpret_cast<AppGLProc>(&::glTexParameterIuivOES)},
     {"glTexParameterf", reinterpret_cast<AppGLProc>(&::glTexParameterf)},
     {"glTexParameterfv", reinterpret_cast<AppGLProc>(&::glTexParameterfv)},
     {"glTexParameteri", reinterpret_cast<AppGLProc>(&::glTexParameteri)},
     {"glTexParameteriv", reinterpret_cast<AppGLProc>(&::glTexParameteriv)},
     {"glTexStorage1D", reinterpret_cast<AppGLProc>(&::glTexStorage1D)},
+    {"glTexStorage1DEXT", reinterpret_cast<AppGLProc>(&::glTexStorage1DEXT)},
     {"glTexStorage2D", reinterpret_cast<AppGLProc>(&::glTexStorage2D)},
+    {"glTexStorage2DEXT", reinterpret_cast<AppGLProc>(&::glTexStorage2DEXT)},
     {"glTexStorage2DMultisample", reinterpret_cast<AppGLProc>(&::glTexStorage2DMultisample)},
     {"glTexStorage3D", reinterpret_cast<AppGLProc>(&::glTexStorage3D)},
+    {"glTexStorage3DEXT", reinterpret_cast<AppGLProc>(&::glTexStorage3DEXT)},
     {"glTexStorage3DMultisample", reinterpret_cast<AppGLProc>(&::glTexStorage3DMultisample)},
+    {"glTexStorage3DMultisampleOES", reinterpret_cast<AppGLProc>(&::glTexStorage3DMultisampleOES)},
     {"glTexSubImage1D", reinterpret_cast<AppGLProc>(&::glTexSubImage1D)},
+    {"glTexSubImage1DEXT", reinterpret_cast<AppGLProc>(&::glTexSubImage1DEXT)},
     {"glTexSubImage2D", reinterpret_cast<AppGLProc>(&::glTexSubImage2D)},
+    {"glTexSubImage2DEXT", reinterpret_cast<AppGLProc>(&::glTexSubImage2DEXT)},
     {"glTexSubImage3D", reinterpret_cast<AppGLProc>(&::glTexSubImage3D)},
+    {"glTexSubImage3DEXT", reinterpret_cast<AppGLProc>(&::glTexSubImage3DEXT)},
     {"glTextureBarrier", reinterpret_cast<AppGLProc>(&::glTextureBarrier)},
     {"glTextureBuffer", reinterpret_cast<AppGLProc>(&::glTextureBuffer)},
     {"glTextureBufferRange", reinterpret_cast<AppGLProc>(&::glTextureBufferRange)},
@@ -520,67 +2079,133 @@ const ProcEntry kProcTable[] = {
     {"glTextureSubImage2D", reinterpret_cast<AppGLProc>(&::glTextureSubImage2D)},
     {"glTextureSubImage3D", reinterpret_cast<AppGLProc>(&::glTextureSubImage3D)},
     {"glTextureView", reinterpret_cast<AppGLProc>(&::glTextureView)},
+    {"glTextureViewEXT", reinterpret_cast<AppGLProc>(&::glTextureViewEXT)},
+    {"glTextureViewOES", reinterpret_cast<AppGLProc>(&::glTextureViewOES)},
     {"glTransformFeedbackBufferBase", reinterpret_cast<AppGLProc>(&::glTransformFeedbackBufferBase)},
     {"glTransformFeedbackBufferRange", reinterpret_cast<AppGLProc>(&::glTransformFeedbackBufferRange)},
     {"glTransformFeedbackVaryings", reinterpret_cast<AppGLProc>(&::glTransformFeedbackVaryings)},
+    {"glTransformFeedbackVaryingsEXT", reinterpret_cast<AppGLProc>(&::glTransformFeedbackVaryingsEXT)},
+    {"glTranslated", reinterpret_cast<AppGLProc>(&::glTranslated)},
+    {"glTranslatef", reinterpret_cast<AppGLProc>(&::glTranslatef)},
     {"glUniform1d", reinterpret_cast<AppGLProc>(&::glUniform1d)},
     {"glUniform1dv", reinterpret_cast<AppGLProc>(&::glUniform1dv)},
     {"glUniform1f", reinterpret_cast<AppGLProc>(&::glUniform1f)},
+    {"glUniform1fARB", reinterpret_cast<AppGLProc>(&::glUniform1fARB)},
     {"glUniform1fv", reinterpret_cast<AppGLProc>(&::glUniform1fv)},
+    {"glUniform1fvARB", reinterpret_cast<AppGLProc>(&::glUniform1fvARB)},
     {"glUniform1i", reinterpret_cast<AppGLProc>(&::glUniform1i)},
+    {"glUniform1iARB", reinterpret_cast<AppGLProc>(&::glUniform1iARB)},
     {"glUniform1iv", reinterpret_cast<AppGLProc>(&::glUniform1iv)},
+    {"glUniform1ivARB", reinterpret_cast<AppGLProc>(&::glUniform1ivARB)},
     {"glUniform1ui", reinterpret_cast<AppGLProc>(&::glUniform1ui)},
+    {"glUniform1uiEXT", reinterpret_cast<AppGLProc>(&::glUniform1uiEXT)},
     {"glUniform1uiv", reinterpret_cast<AppGLProc>(&::glUniform1uiv)},
+    {"glUniform1uivEXT", reinterpret_cast<AppGLProc>(&::glUniform1uivEXT)},
     {"glUniform2d", reinterpret_cast<AppGLProc>(&::glUniform2d)},
     {"glUniform2dv", reinterpret_cast<AppGLProc>(&::glUniform2dv)},
     {"glUniform2f", reinterpret_cast<AppGLProc>(&::glUniform2f)},
+    {"glUniform2fARB", reinterpret_cast<AppGLProc>(&::glUniform2fARB)},
     {"glUniform2fv", reinterpret_cast<AppGLProc>(&::glUniform2fv)},
+    {"glUniform2fvARB", reinterpret_cast<AppGLProc>(&::glUniform2fvARB)},
     {"glUniform2i", reinterpret_cast<AppGLProc>(&::glUniform2i)},
+    {"glUniform2iARB", reinterpret_cast<AppGLProc>(&::glUniform2iARB)},
     {"glUniform2iv", reinterpret_cast<AppGLProc>(&::glUniform2iv)},
+    {"glUniform2ivARB", reinterpret_cast<AppGLProc>(&::glUniform2ivARB)},
     {"glUniform2ui", reinterpret_cast<AppGLProc>(&::glUniform2ui)},
+    {"glUniform2uiEXT", reinterpret_cast<AppGLProc>(&::glUniform2uiEXT)},
     {"glUniform2uiv", reinterpret_cast<AppGLProc>(&::glUniform2uiv)},
+    {"glUniform2uivEXT", reinterpret_cast<AppGLProc>(&::glUniform2uivEXT)},
     {"glUniform3d", reinterpret_cast<AppGLProc>(&::glUniform3d)},
     {"glUniform3dv", reinterpret_cast<AppGLProc>(&::glUniform3dv)},
     {"glUniform3f", reinterpret_cast<AppGLProc>(&::glUniform3f)},
+    {"glUniform3fARB", reinterpret_cast<AppGLProc>(&::glUniform3fARB)},
     {"glUniform3fv", reinterpret_cast<AppGLProc>(&::glUniform3fv)},
+    {"glUniform3fvARB", reinterpret_cast<AppGLProc>(&::glUniform3fvARB)},
     {"glUniform3i", reinterpret_cast<AppGLProc>(&::glUniform3i)},
+    {"glUniform3iARB", reinterpret_cast<AppGLProc>(&::glUniform3iARB)},
     {"glUniform3iv", reinterpret_cast<AppGLProc>(&::glUniform3iv)},
+    {"glUniform3ivARB", reinterpret_cast<AppGLProc>(&::glUniform3ivARB)},
     {"glUniform3ui", reinterpret_cast<AppGLProc>(&::glUniform3ui)},
+    {"glUniform3uiEXT", reinterpret_cast<AppGLProc>(&::glUniform3uiEXT)},
     {"glUniform3uiv", reinterpret_cast<AppGLProc>(&::glUniform3uiv)},
+    {"glUniform3uivEXT", reinterpret_cast<AppGLProc>(&::glUniform3uivEXT)},
     {"glUniform4d", reinterpret_cast<AppGLProc>(&::glUniform4d)},
     {"glUniform4dv", reinterpret_cast<AppGLProc>(&::glUniform4dv)},
     {"glUniform4f", reinterpret_cast<AppGLProc>(&::glUniform4f)},
+    {"glUniform4fARB", reinterpret_cast<AppGLProc>(&::glUniform4fARB)},
     {"glUniform4fv", reinterpret_cast<AppGLProc>(&::glUniform4fv)},
+    {"glUniform4fvARB", reinterpret_cast<AppGLProc>(&::glUniform4fvARB)},
     {"glUniform4i", reinterpret_cast<AppGLProc>(&::glUniform4i)},
+    {"glUniform4iARB", reinterpret_cast<AppGLProc>(&::glUniform4iARB)},
     {"glUniform4iv", reinterpret_cast<AppGLProc>(&::glUniform4iv)},
+    {"glUniform4ivARB", reinterpret_cast<AppGLProc>(&::glUniform4ivARB)},
     {"glUniform4ui", reinterpret_cast<AppGLProc>(&::glUniform4ui)},
+    {"glUniform4uiEXT", reinterpret_cast<AppGLProc>(&::glUniform4uiEXT)},
     {"glUniform4uiv", reinterpret_cast<AppGLProc>(&::glUniform4uiv)},
+    {"glUniform4uivEXT", reinterpret_cast<AppGLProc>(&::glUniform4uivEXT)},
     {"glUniformBlockBinding", reinterpret_cast<AppGLProc>(&::glUniformBlockBinding)},
     {"glUniformMatrix2dv", reinterpret_cast<AppGLProc>(&::glUniformMatrix2dv)},
     {"glUniformMatrix2fv", reinterpret_cast<AppGLProc>(&::glUniformMatrix2fv)},
+    {"glUniformMatrix2fvARB", reinterpret_cast<AppGLProc>(&::glUniformMatrix2fvARB)},
     {"glUniformMatrix2x3dv", reinterpret_cast<AppGLProc>(&::glUniformMatrix2x3dv)},
     {"glUniformMatrix2x3fv", reinterpret_cast<AppGLProc>(&::glUniformMatrix2x3fv)},
+    {"glUniformMatrix2x3fvNV", reinterpret_cast<AppGLProc>(&::glUniformMatrix2x3fvNV)},
     {"glUniformMatrix2x4dv", reinterpret_cast<AppGLProc>(&::glUniformMatrix2x4dv)},
     {"glUniformMatrix2x4fv", reinterpret_cast<AppGLProc>(&::glUniformMatrix2x4fv)},
+    {"glUniformMatrix2x4fvNV", reinterpret_cast<AppGLProc>(&::glUniformMatrix2x4fvNV)},
     {"glUniformMatrix3dv", reinterpret_cast<AppGLProc>(&::glUniformMatrix3dv)},
     {"glUniformMatrix3fv", reinterpret_cast<AppGLProc>(&::glUniformMatrix3fv)},
+    {"glUniformMatrix3fvARB", reinterpret_cast<AppGLProc>(&::glUniformMatrix3fvARB)},
     {"glUniformMatrix3x2dv", reinterpret_cast<AppGLProc>(&::glUniformMatrix3x2dv)},
     {"glUniformMatrix3x2fv", reinterpret_cast<AppGLProc>(&::glUniformMatrix3x2fv)},
+    {"glUniformMatrix3x2fvNV", reinterpret_cast<AppGLProc>(&::glUniformMatrix3x2fvNV)},
     {"glUniformMatrix3x4dv", reinterpret_cast<AppGLProc>(&::glUniformMatrix3x4dv)},
     {"glUniformMatrix3x4fv", reinterpret_cast<AppGLProc>(&::glUniformMatrix3x4fv)},
+    {"glUniformMatrix3x4fvNV", reinterpret_cast<AppGLProc>(&::glUniformMatrix3x4fvNV)},
     {"glUniformMatrix4dv", reinterpret_cast<AppGLProc>(&::glUniformMatrix4dv)},
     {"glUniformMatrix4fv", reinterpret_cast<AppGLProc>(&::glUniformMatrix4fv)},
+    {"glUniformMatrix4fvARB", reinterpret_cast<AppGLProc>(&::glUniformMatrix4fvARB)},
     {"glUniformMatrix4x2dv", reinterpret_cast<AppGLProc>(&::glUniformMatrix4x2dv)},
     {"glUniformMatrix4x2fv", reinterpret_cast<AppGLProc>(&::glUniformMatrix4x2fv)},
+    {"glUniformMatrix4x2fvNV", reinterpret_cast<AppGLProc>(&::glUniformMatrix4x2fvNV)},
     {"glUniformMatrix4x3dv", reinterpret_cast<AppGLProc>(&::glUniformMatrix4x3dv)},
     {"glUniformMatrix4x3fv", reinterpret_cast<AppGLProc>(&::glUniformMatrix4x3fv)},
+    {"glUniformMatrix4x3fvNV", reinterpret_cast<AppGLProc>(&::glUniformMatrix4x3fvNV)},
     {"glUniformSubroutinesuiv", reinterpret_cast<AppGLProc>(&::glUniformSubroutinesuiv)},
     {"glUnmapBuffer", reinterpret_cast<AppGLProc>(&::glUnmapBuffer)},
+    {"glUnmapBufferARB", reinterpret_cast<AppGLProc>(&::glUnmapBufferARB)},
+    {"glUnmapBufferOES", reinterpret_cast<AppGLProc>(&::glUnmapBufferOES)},
     {"glUnmapNamedBuffer", reinterpret_cast<AppGLProc>(&::glUnmapNamedBuffer)},
     {"glUseProgram", reinterpret_cast<AppGLProc>(&::glUseProgram)},
+    {"glUseProgramObjectARB", reinterpret_cast<AppGLProc>(&::glUseProgramObjectARB)},
     {"glUseProgramStages", reinterpret_cast<AppGLProc>(&::glUseProgramStages)},
     {"glValidateProgram", reinterpret_cast<AppGLProc>(&::glValidateProgram)},
+    {"glValidateProgramARB", reinterpret_cast<AppGLProc>(&::glValidateProgramARB)},
     {"glValidateProgramPipeline", reinterpret_cast<AppGLProc>(&::glValidateProgramPipeline)},
+    {"glVertex2d", reinterpret_cast<AppGLProc>(&::glVertex2d)},
+    {"glVertex2dv", reinterpret_cast<AppGLProc>(&::glVertex2dv)},
+    {"glVertex2f", reinterpret_cast<AppGLProc>(&::glVertex2f)},
+    {"glVertex2fv", reinterpret_cast<AppGLProc>(&::glVertex2fv)},
+    {"glVertex2i", reinterpret_cast<AppGLProc>(&::glVertex2i)},
+    {"glVertex2iv", reinterpret_cast<AppGLProc>(&::glVertex2iv)},
+    {"glVertex2s", reinterpret_cast<AppGLProc>(&::glVertex2s)},
+    {"glVertex2sv", reinterpret_cast<AppGLProc>(&::glVertex2sv)},
+    {"glVertex3d", reinterpret_cast<AppGLProc>(&::glVertex3d)},
+    {"glVertex3dv", reinterpret_cast<AppGLProc>(&::glVertex3dv)},
+    {"glVertex3f", reinterpret_cast<AppGLProc>(&::glVertex3f)},
+    {"glVertex3fv", reinterpret_cast<AppGLProc>(&::glVertex3fv)},
+    {"glVertex3i", reinterpret_cast<AppGLProc>(&::glVertex3i)},
+    {"glVertex3iv", reinterpret_cast<AppGLProc>(&::glVertex3iv)},
+    {"glVertex3s", reinterpret_cast<AppGLProc>(&::glVertex3s)},
+    {"glVertex3sv", reinterpret_cast<AppGLProc>(&::glVertex3sv)},
+    {"glVertex4d", reinterpret_cast<AppGLProc>(&::glVertex4d)},
+    {"glVertex4dv", reinterpret_cast<AppGLProc>(&::glVertex4dv)},
+    {"glVertex4f", reinterpret_cast<AppGLProc>(&::glVertex4f)},
+    {"glVertex4fv", reinterpret_cast<AppGLProc>(&::glVertex4fv)},
+    {"glVertex4i", reinterpret_cast<AppGLProc>(&::glVertex4i)},
+    {"glVertex4iv", reinterpret_cast<AppGLProc>(&::glVertex4iv)},
+    {"glVertex4s", reinterpret_cast<AppGLProc>(&::glVertex4s)},
+    {"glVertex4sv", reinterpret_cast<AppGLProc>(&::glVertex4sv)},
     {"glVertexArrayAttribBinding", reinterpret_cast<AppGLProc>(&::glVertexArrayAttribBinding)},
     {"glVertexArrayAttribFormat", reinterpret_cast<AppGLProc>(&::glVertexArrayAttribFormat)},
     {"glVertexArrayAttribIFormat", reinterpret_cast<AppGLProc>(&::glVertexArrayAttribIFormat)},
@@ -590,76 +2215,172 @@ const ProcEntry kProcTable[] = {
     {"glVertexArrayVertexBuffer", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexBuffer)},
     {"glVertexArrayVertexBuffers", reinterpret_cast<AppGLProc>(&::glVertexArrayVertexBuffers)},
     {"glVertexAttrib1d", reinterpret_cast<AppGLProc>(&::glVertexAttrib1d)},
+    {"glVertexAttrib1dARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib1dARB)},
+    {"glVertexAttrib1dNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib1dNV)},
     {"glVertexAttrib1dv", reinterpret_cast<AppGLProc>(&::glVertexAttrib1dv)},
+    {"glVertexAttrib1dvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib1dvARB)},
+    {"glVertexAttrib1dvNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib1dvNV)},
     {"glVertexAttrib1f", reinterpret_cast<AppGLProc>(&::glVertexAttrib1f)},
+    {"glVertexAttrib1fARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib1fARB)},
+    {"glVertexAttrib1fNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib1fNV)},
     {"glVertexAttrib1fv", reinterpret_cast<AppGLProc>(&::glVertexAttrib1fv)},
+    {"glVertexAttrib1fvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib1fvARB)},
+    {"glVertexAttrib1fvNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib1fvNV)},
     {"glVertexAttrib1s", reinterpret_cast<AppGLProc>(&::glVertexAttrib1s)},
+    {"glVertexAttrib1sARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib1sARB)},
+    {"glVertexAttrib1sNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib1sNV)},
     {"glVertexAttrib1sv", reinterpret_cast<AppGLProc>(&::glVertexAttrib1sv)},
+    {"glVertexAttrib1svARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib1svARB)},
+    {"glVertexAttrib1svNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib1svNV)},
     {"glVertexAttrib2d", reinterpret_cast<AppGLProc>(&::glVertexAttrib2d)},
+    {"glVertexAttrib2dARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib2dARB)},
+    {"glVertexAttrib2dNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib2dNV)},
     {"glVertexAttrib2dv", reinterpret_cast<AppGLProc>(&::glVertexAttrib2dv)},
+    {"glVertexAttrib2dvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib2dvARB)},
+    {"glVertexAttrib2dvNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib2dvNV)},
     {"glVertexAttrib2f", reinterpret_cast<AppGLProc>(&::glVertexAttrib2f)},
+    {"glVertexAttrib2fARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib2fARB)},
+    {"glVertexAttrib2fNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib2fNV)},
     {"glVertexAttrib2fv", reinterpret_cast<AppGLProc>(&::glVertexAttrib2fv)},
+    {"glVertexAttrib2fvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib2fvARB)},
+    {"glVertexAttrib2fvNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib2fvNV)},
     {"glVertexAttrib2s", reinterpret_cast<AppGLProc>(&::glVertexAttrib2s)},
+    {"glVertexAttrib2sARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib2sARB)},
+    {"glVertexAttrib2sNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib2sNV)},
     {"glVertexAttrib2sv", reinterpret_cast<AppGLProc>(&::glVertexAttrib2sv)},
+    {"glVertexAttrib2svARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib2svARB)},
+    {"glVertexAttrib2svNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib2svNV)},
     {"glVertexAttrib3d", reinterpret_cast<AppGLProc>(&::glVertexAttrib3d)},
+    {"glVertexAttrib3dARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib3dARB)},
+    {"glVertexAttrib3dNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib3dNV)},
     {"glVertexAttrib3dv", reinterpret_cast<AppGLProc>(&::glVertexAttrib3dv)},
+    {"glVertexAttrib3dvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib3dvARB)},
+    {"glVertexAttrib3dvNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib3dvNV)},
     {"glVertexAttrib3f", reinterpret_cast<AppGLProc>(&::glVertexAttrib3f)},
+    {"glVertexAttrib3fARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib3fARB)},
+    {"glVertexAttrib3fNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib3fNV)},
     {"glVertexAttrib3fv", reinterpret_cast<AppGLProc>(&::glVertexAttrib3fv)},
+    {"glVertexAttrib3fvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib3fvARB)},
+    {"glVertexAttrib3fvNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib3fvNV)},
     {"glVertexAttrib3s", reinterpret_cast<AppGLProc>(&::glVertexAttrib3s)},
+    {"glVertexAttrib3sARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib3sARB)},
+    {"glVertexAttrib3sNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib3sNV)},
     {"glVertexAttrib3sv", reinterpret_cast<AppGLProc>(&::glVertexAttrib3sv)},
+    {"glVertexAttrib3svARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib3svARB)},
+    {"glVertexAttrib3svNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib3svNV)},
     {"glVertexAttrib4Nbv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4Nbv)},
+    {"glVertexAttrib4NbvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4NbvARB)},
     {"glVertexAttrib4Niv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4Niv)},
+    {"glVertexAttrib4NivARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4NivARB)},
     {"glVertexAttrib4Nsv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4Nsv)},
+    {"glVertexAttrib4NsvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4NsvARB)},
     {"glVertexAttrib4Nub", reinterpret_cast<AppGLProc>(&::glVertexAttrib4Nub)},
+    {"glVertexAttrib4NubARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4NubARB)},
     {"glVertexAttrib4Nubv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4Nubv)},
+    {"glVertexAttrib4NubvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4NubvARB)},
     {"glVertexAttrib4Nuiv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4Nuiv)},
+    {"glVertexAttrib4NuivARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4NuivARB)},
     {"glVertexAttrib4Nusv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4Nusv)},
+    {"glVertexAttrib4NusvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4NusvARB)},
     {"glVertexAttrib4bv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4bv)},
+    {"glVertexAttrib4bvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4bvARB)},
     {"glVertexAttrib4d", reinterpret_cast<AppGLProc>(&::glVertexAttrib4d)},
+    {"glVertexAttrib4dARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4dARB)},
+    {"glVertexAttrib4dNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib4dNV)},
     {"glVertexAttrib4dv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4dv)},
+    {"glVertexAttrib4dvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4dvARB)},
+    {"glVertexAttrib4dvNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib4dvNV)},
     {"glVertexAttrib4f", reinterpret_cast<AppGLProc>(&::glVertexAttrib4f)},
+    {"glVertexAttrib4fARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4fARB)},
+    {"glVertexAttrib4fNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib4fNV)},
     {"glVertexAttrib4fv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4fv)},
+    {"glVertexAttrib4fvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4fvARB)},
+    {"glVertexAttrib4fvNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib4fvNV)},
     {"glVertexAttrib4iv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4iv)},
+    {"glVertexAttrib4ivARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4ivARB)},
     {"glVertexAttrib4s", reinterpret_cast<AppGLProc>(&::glVertexAttrib4s)},
+    {"glVertexAttrib4sARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4sARB)},
+    {"glVertexAttrib4sNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib4sNV)},
     {"glVertexAttrib4sv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4sv)},
+    {"glVertexAttrib4svARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4svARB)},
+    {"glVertexAttrib4svNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib4svNV)},
+    {"glVertexAttrib4ubNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib4ubNV)},
     {"glVertexAttrib4ubv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4ubv)},
+    {"glVertexAttrib4ubvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4ubvARB)},
+    {"glVertexAttrib4ubvNV", reinterpret_cast<AppGLProc>(&::glVertexAttrib4ubvNV)},
     {"glVertexAttrib4uiv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4uiv)},
+    {"glVertexAttrib4uivARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4uivARB)},
     {"glVertexAttrib4usv", reinterpret_cast<AppGLProc>(&::glVertexAttrib4usv)},
+    {"glVertexAttrib4usvARB", reinterpret_cast<AppGLProc>(&::glVertexAttrib4usvARB)},
     {"glVertexAttribBinding", reinterpret_cast<AppGLProc>(&::glVertexAttribBinding)},
     {"glVertexAttribDivisor", reinterpret_cast<AppGLProc>(&::glVertexAttribDivisor)},
+    {"glVertexAttribDivisorANGLE", reinterpret_cast<AppGLProc>(&::glVertexAttribDivisorANGLE)},
+    {"glVertexAttribDivisorARB", reinterpret_cast<AppGLProc>(&::glVertexAttribDivisorARB)},
+    {"glVertexAttribDivisorEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribDivisorEXT)},
+    {"glVertexAttribDivisorNV", reinterpret_cast<AppGLProc>(&::glVertexAttribDivisorNV)},
     {"glVertexAttribFormat", reinterpret_cast<AppGLProc>(&::glVertexAttribFormat)},
     {"glVertexAttribI1i", reinterpret_cast<AppGLProc>(&::glVertexAttribI1i)},
+    {"glVertexAttribI1iEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI1iEXT)},
     {"glVertexAttribI1iv", reinterpret_cast<AppGLProc>(&::glVertexAttribI1iv)},
+    {"glVertexAttribI1ivEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI1ivEXT)},
     {"glVertexAttribI1ui", reinterpret_cast<AppGLProc>(&::glVertexAttribI1ui)},
+    {"glVertexAttribI1uiEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI1uiEXT)},
     {"glVertexAttribI1uiv", reinterpret_cast<AppGLProc>(&::glVertexAttribI1uiv)},
+    {"glVertexAttribI1uivEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI1uivEXT)},
     {"glVertexAttribI2i", reinterpret_cast<AppGLProc>(&::glVertexAttribI2i)},
+    {"glVertexAttribI2iEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI2iEXT)},
     {"glVertexAttribI2iv", reinterpret_cast<AppGLProc>(&::glVertexAttribI2iv)},
+    {"glVertexAttribI2ivEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI2ivEXT)},
     {"glVertexAttribI2ui", reinterpret_cast<AppGLProc>(&::glVertexAttribI2ui)},
+    {"glVertexAttribI2uiEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI2uiEXT)},
     {"glVertexAttribI2uiv", reinterpret_cast<AppGLProc>(&::glVertexAttribI2uiv)},
+    {"glVertexAttribI2uivEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI2uivEXT)},
     {"glVertexAttribI3i", reinterpret_cast<AppGLProc>(&::glVertexAttribI3i)},
+    {"glVertexAttribI3iEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI3iEXT)},
     {"glVertexAttribI3iv", reinterpret_cast<AppGLProc>(&::glVertexAttribI3iv)},
+    {"glVertexAttribI3ivEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI3ivEXT)},
     {"glVertexAttribI3ui", reinterpret_cast<AppGLProc>(&::glVertexAttribI3ui)},
+    {"glVertexAttribI3uiEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI3uiEXT)},
     {"glVertexAttribI3uiv", reinterpret_cast<AppGLProc>(&::glVertexAttribI3uiv)},
+    {"glVertexAttribI3uivEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI3uivEXT)},
     {"glVertexAttribI4bv", reinterpret_cast<AppGLProc>(&::glVertexAttribI4bv)},
+    {"glVertexAttribI4bvEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI4bvEXT)},
     {"glVertexAttribI4i", reinterpret_cast<AppGLProc>(&::glVertexAttribI4i)},
+    {"glVertexAttribI4iEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI4iEXT)},
     {"glVertexAttribI4iv", reinterpret_cast<AppGLProc>(&::glVertexAttribI4iv)},
+    {"glVertexAttribI4ivEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI4ivEXT)},
     {"glVertexAttribI4sv", reinterpret_cast<AppGLProc>(&::glVertexAttribI4sv)},
+    {"glVertexAttribI4svEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI4svEXT)},
     {"glVertexAttribI4ubv", reinterpret_cast<AppGLProc>(&::glVertexAttribI4ubv)},
+    {"glVertexAttribI4ubvEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI4ubvEXT)},
     {"glVertexAttribI4ui", reinterpret_cast<AppGLProc>(&::glVertexAttribI4ui)},
+    {"glVertexAttribI4uiEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI4uiEXT)},
     {"glVertexAttribI4uiv", reinterpret_cast<AppGLProc>(&::glVertexAttribI4uiv)},
+    {"glVertexAttribI4uivEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI4uivEXT)},
     {"glVertexAttribI4usv", reinterpret_cast<AppGLProc>(&::glVertexAttribI4usv)},
+    {"glVertexAttribI4usvEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribI4usvEXT)},
     {"glVertexAttribIFormat", reinterpret_cast<AppGLProc>(&::glVertexAttribIFormat)},
     {"glVertexAttribIPointer", reinterpret_cast<AppGLProc>(&::glVertexAttribIPointer)},
+    {"glVertexAttribIPointerEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribIPointerEXT)},
     {"glVertexAttribL1d", reinterpret_cast<AppGLProc>(&::glVertexAttribL1d)},
+    {"glVertexAttribL1dEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribL1dEXT)},
     {"glVertexAttribL1dv", reinterpret_cast<AppGLProc>(&::glVertexAttribL1dv)},
+    {"glVertexAttribL1dvEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribL1dvEXT)},
     {"glVertexAttribL2d", reinterpret_cast<AppGLProc>(&::glVertexAttribL2d)},
+    {"glVertexAttribL2dEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribL2dEXT)},
     {"glVertexAttribL2dv", reinterpret_cast<AppGLProc>(&::glVertexAttribL2dv)},
+    {"glVertexAttribL2dvEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribL2dvEXT)},
     {"glVertexAttribL3d", reinterpret_cast<AppGLProc>(&::glVertexAttribL3d)},
+    {"glVertexAttribL3dEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribL3dEXT)},
     {"glVertexAttribL3dv", reinterpret_cast<AppGLProc>(&::glVertexAttribL3dv)},
+    {"glVertexAttribL3dvEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribL3dvEXT)},
     {"glVertexAttribL4d", reinterpret_cast<AppGLProc>(&::glVertexAttribL4d)},
+    {"glVertexAttribL4dEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribL4dEXT)},
     {"glVertexAttribL4dv", reinterpret_cast<AppGLProc>(&::glVertexAttribL4dv)},
+    {"glVertexAttribL4dvEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribL4dvEXT)},
     {"glVertexAttribLFormat", reinterpret_cast<AppGLProc>(&::glVertexAttribLFormat)},
     {"glVertexAttribLPointer", reinterpret_cast<AppGLProc>(&::glVertexAttribLPointer)},
+    {"glVertexAttribLPointerEXT", reinterpret_cast<AppGLProc>(&::glVertexAttribLPointerEXT)},
     {"glVertexAttribP1ui", reinterpret_cast<AppGLProc>(&::glVertexAttribP1ui)},
     {"glVertexAttribP1uiv", reinterpret_cast<AppGLProc>(&::glVertexAttribP1uiv)},
     {"glVertexAttribP2ui", reinterpret_cast<AppGLProc>(&::glVertexAttribP2ui)},
@@ -669,12 +2390,43 @@ const ProcEntry kProcTable[] = {
     {"glVertexAttribP4ui", reinterpret_cast<AppGLProc>(&::glVertexAttribP4ui)},
     {"glVertexAttribP4uiv", reinterpret_cast<AppGLProc>(&::glVertexAttribP4uiv)},
     {"glVertexAttribPointer", reinterpret_cast<AppGLProc>(&::glVertexAttribPointer)},
+    {"glVertexAttribPointerARB", reinterpret_cast<AppGLProc>(&::glVertexAttribPointerARB)},
     {"glVertexBindingDivisor", reinterpret_cast<AppGLProc>(&::glVertexBindingDivisor)},
+    {"glVertexP2ui", reinterpret_cast<AppGLProc>(&::glVertexP2ui)},
+    {"glVertexP2uiv", reinterpret_cast<AppGLProc>(&::glVertexP2uiv)},
+    {"glVertexP3ui", reinterpret_cast<AppGLProc>(&::glVertexP3ui)},
+    {"glVertexP3uiv", reinterpret_cast<AppGLProc>(&::glVertexP3uiv)},
+    {"glVertexP4ui", reinterpret_cast<AppGLProc>(&::glVertexP4ui)},
+    {"glVertexP4uiv", reinterpret_cast<AppGLProc>(&::glVertexP4uiv)},
+    {"glVertexPointer", reinterpret_cast<AppGLProc>(&::glVertexPointer)},
     {"glViewport", reinterpret_cast<AppGLProc>(&::glViewport)},
     {"glViewportArrayv", reinterpret_cast<AppGLProc>(&::glViewportArrayv)},
+    {"glViewportArrayvNV", reinterpret_cast<AppGLProc>(&::glViewportArrayvNV)},
+    {"glViewportArrayvOES", reinterpret_cast<AppGLProc>(&::glViewportArrayvOES)},
     {"glViewportIndexedf", reinterpret_cast<AppGLProc>(&::glViewportIndexedf)},
+    {"glViewportIndexedfNV", reinterpret_cast<AppGLProc>(&::glViewportIndexedfNV)},
+    {"glViewportIndexedfOES", reinterpret_cast<AppGLProc>(&::glViewportIndexedfOES)},
     {"glViewportIndexedfv", reinterpret_cast<AppGLProc>(&::glViewportIndexedfv)},
+    {"glViewportIndexedfvNV", reinterpret_cast<AppGLProc>(&::glViewportIndexedfvNV)},
+    {"glViewportIndexedfvOES", reinterpret_cast<AppGLProc>(&::glViewportIndexedfvOES)},
     {"glWaitSync", reinterpret_cast<AppGLProc>(&::glWaitSync)},
+    {"glWaitSyncAPPLE", reinterpret_cast<AppGLProc>(&::glWaitSyncAPPLE)},
+    {"glWindowPos2d", reinterpret_cast<AppGLProc>(&::glWindowPos2d)},
+    {"glWindowPos2dv", reinterpret_cast<AppGLProc>(&::glWindowPos2dv)},
+    {"glWindowPos2f", reinterpret_cast<AppGLProc>(&::glWindowPos2f)},
+    {"glWindowPos2fv", reinterpret_cast<AppGLProc>(&::glWindowPos2fv)},
+    {"glWindowPos2i", reinterpret_cast<AppGLProc>(&::glWindowPos2i)},
+    {"glWindowPos2iv", reinterpret_cast<AppGLProc>(&::glWindowPos2iv)},
+    {"glWindowPos2s", reinterpret_cast<AppGLProc>(&::glWindowPos2s)},
+    {"glWindowPos2sv", reinterpret_cast<AppGLProc>(&::glWindowPos2sv)},
+    {"glWindowPos3d", reinterpret_cast<AppGLProc>(&::glWindowPos3d)},
+    {"glWindowPos3dv", reinterpret_cast<AppGLProc>(&::glWindowPos3dv)},
+    {"glWindowPos3f", reinterpret_cast<AppGLProc>(&::glWindowPos3f)},
+    {"glWindowPos3fv", reinterpret_cast<AppGLProc>(&::glWindowPos3fv)},
+    {"glWindowPos3i", reinterpret_cast<AppGLProc>(&::glWindowPos3i)},
+    {"glWindowPos3iv", reinterpret_cast<AppGLProc>(&::glWindowPos3iv)},
+    {"glWindowPos3s", reinterpret_cast<AppGLProc>(&::glWindowPos3s)},
+    {"glWindowPos3sv", reinterpret_cast<AppGLProc>(&::glWindowPos3sv)},
 };
 
 constexpr std::size_t kProcTableSize = sizeof(kProcTable) / sizeof(kProcTable[0]);  // sizeof-based size is still a constant expression.

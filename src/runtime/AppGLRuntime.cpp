@@ -897,6 +897,23 @@ void Runtime::recordUnimplemented(FunctionId id, std::string_view functionName) 
     }
 }
 
+void Runtime::recordFixedFunctionStub(std::string_view functionName) {
+    // Fixed-function compat-profile entry points intentionally no-op.
+    // We publish a diagnostic ring entry (errorEnum = 0 so it doesn't
+    // masquerade as a real GL error and doesn't reach the engine-facing
+    // glGetError queue) that tooling can surface to show which legacy
+    // symbols a client is touching. The ErrorRecord dedupe collapses
+    // per-frame spam so a 120 Hz caller hitting glMatrixMode still
+    // only produces a single ring entry with a bumped count.
+    ErrorRecord record;
+    record.function = std::string(functionName);
+    record.errorEnum = 0;
+    record.message = std::string(functionName) +
+                     " is a fixed-function compat-profile entry point and is stubbed in AppGL.";
+    recordError(std::move(record));
+    traceLog_.append(std::string(functionName) + " -> fixed-function stub");
+}
+
 void Runtime::makeCurrent(GLContext* context) {
     gCurrentContext = context;
     if (context != nullptr) {

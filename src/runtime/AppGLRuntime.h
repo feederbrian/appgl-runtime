@@ -581,6 +581,16 @@ public:
     void recordBootstrapTrace(std::string message);
     void recordUnimplemented(FunctionId id, std::string_view functionName);
 
+    // Landing C 3e: fixed-function compat-profile entry points (matrix
+    // stack, immediate mode, display lists, glBegin/glEnd, ...) resolve
+    // to no-op stubs that call this. The stubs don't have a FunctionId
+    // (they're not part of AppGL's core 4.6 manifest) so we can't route
+    // through recordUnimplemented. Instead we push a diagnostic-only
+    // error record with errorEnum = 0, letting the ring-buffer dedupe
+    // suppress per-frame spam while still surfacing the stub name so
+    // tooling can flag which legacy calls a client is touching.
+    void recordFixedFunctionStub(std::string_view functionName);
+
     void makeCurrent(GLContext* context);
     GLContext* currentContext();
 

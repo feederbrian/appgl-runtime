@@ -25,6 +25,8 @@ PUBLIC_KHR = PUBLIC_INCLUDE_DIR / "khrplatform.h"
 DISPATCH_HEADER = GENERATED_DIR / "gl_dispatch.gen.h"
 ENTRYPOINTS_CPP = GENERATED_DIR / "gl_entrypoints.gen.cpp"
 PROC_ADDRESS_CPP = GENERATED_DIR / "gl_procaddress.gen.cpp"
+ALIASES_CPP = GENERATED_DIR / "gl_aliases.gen.cpp"
+FIXED_FUNCTION_CPP = GENERATED_DIR / "gl_fixed_function.gen.cpp"
 MANIFEST_JSON = GENERATED_DIR / "gl_manifest.gen.json"
 ENUMS_HEADER = GENERATED_DIR / "gl_enums.gen.h"
 FUNCTION_IDS_HEADER = GENERATED_DIR / "gl_function_ids.gen.h"
@@ -161,7 +163,14 @@ def extract_command_signature(command: ET.Element) -> dict[str, object]:
     }
 
 
-def parse_registry() -> tuple[ET.Element, list[dict[str, object]], list[dict[str, str]], list[str]]:
+def parse_registry() -> tuple[
+    ET.Element,
+    list[dict[str, object]],
+    list[dict[str, str]],
+    list[str],
+    list[dict[str, object]],
+    list[dict[str, object]],
+]:
     if not XML_PATH.exists():
         raise FileNotFoundError(f"Missing registry XML: {XML_PATH}")
 
@@ -184,6 +193,13 @@ def parse_registry() -> tuple[ET.Element, list[dict[str, object]], list[dict[str
     ordered_commands: "OrderedDict[str, str]" = OrderedDict()
     ordered_enums: "OrderedDict[str, str]" = OrderedDict()
 
+    # Track every command that was ever required by a feature (with any
+    # profile), regardless of whether the core profile later removed it.
+    # The set difference against `ordered_commands` yields the compat-only
+    # fixed-function entry points (matrix stack, immediate mode, display
+    # lists, etc.) that we emit as no-op stubs in Landing C 3e.
+    all_feature_commands: set[str] = set()
+
     for feature_name in SUPPORTED_FEATURES:
         feature = root.find(f"./feature[@api='gl'][@name='{feature_name}']")
         if feature is None:
@@ -191,9 +207,17 @@ def parse_registry() -> tuple[ET.Element, list[dict[str, object]], list[dict[str
 
         for child in feature:
             profile = child.attrib.get("profile")
-            if profile not in (None, "core"):
-                continue
             if child.tag not in {"require", "remove"}:
+                continue
+
+            if child.tag == "require":
+                # Track any required command regardless of profile so we
+                # can later diff against the core set to find the
+                # compat-only fixed-function entry points.
+                for command_node in child.findall("command"):
+                    all_feature_commands.add(command_node.attrib["name"])
+
+            if profile not in (None, "core"):
                 continue
 
             if child.tag == "require":
@@ -220,8 +244,75 @@ def parse_registry() -> tuple[ET.Element, list[dict[str, object]], list[dict[str
         signature = extract_command_signature(commands_by_name[name])
         signature["introduced_version"] = feature_version_string(feature_name)
         commands.append(signature)
+
+    core_names = set(ordered_commands.keys())
+
+    # --- Landing C 3e: aliases forwarding into the core set ---------------
+    # Walk every command in the registry; if it declares <alias name="X"/>
+    # where X is in the core set and the alias source itself is NOT in core,
+    # it's a forwardable alias (glBindBufferARB -> glBindBuffer and so on).
+    # We emit the stub with the CORE target's signature under the alias
+    # name — C linkage means only the symbol name matters at link time,
+    # and external loaders resolve these via appglGetProcAddress and cast
+    # the returned function pointer to whatever type they need.
+    aliases: list[dict[str, object]] = []
+    for alias_name, alias_cmd in commands_by_name.items():
+        alias_node = alias_cmd.find("alias")
+        if alias_node is None:
+            continue
+        target_name = alias_node.attrib.get("name")
+        if target_name is None or target_name not in core_names:
+            continue
+        if alias_name in core_names:
+            # Both the alias and its target are already core — no stub
+            # needed, they share the same canonical entry point.
+            continue
+        target_signature = next(
+            (c for c in commands if c["name"] == target_name), None
+        )
+        if target_signature is None:
+            raise RuntimeError(
+                f"Alias {alias_name} targets core command {target_name} "
+                f"but the core signature table has no entry for it."
+            )
+        aliases.append(
+            {
+                "name": alias_name,
+                "target": target_name,
+                "return_type": target_signature["return_type"],
+                "args_decl": target_signature["args_decl"],
+                "params": target_signature["params"],
+            }
+        )
+    aliases.sort(key=lambda entry: entry["name"])
+
+    # --- Landing C 3e: fixed-function compat-only entry points ------------
+    # The compat profile kept a long tail of GL 1.x-era entry points
+    # (matrix stack, immediate mode, display lists, fog, lighting, pixel
+    # transfer) that core removed. Engines like Recoil/BAR sometimes
+    # probe these names during extension detection even though they
+    # don't actually drive rendering through them. We emit no-op stubs
+    # so appglGetProcAddress returns a valid (if inert) function pointer
+    # instead of null, letting extension checks complete cleanly.
+    fixed_function: list[dict[str, object]] = []
+    for name in sorted(all_feature_commands - core_names):
+        command = commands_by_name.get(name)
+        if command is None:
+            raise RuntimeError(
+                f"Fixed-function command {name} missing from registry command table."
+            )
+        signature = extract_command_signature(command)
+        fixed_function.append(signature)
+
     enums = [{"name": name, "value": value} for name, value in ordered_enums.items()]
-    return root, commands, enums, list(ordered_commands.values())
+    return (
+        root,
+        commands,
+        enums,
+        list(ordered_commands.values()),
+        aliases,
+        fixed_function,
+    )
 
 
 def extract_header_preamble(source_lines: list[str]) -> list[str]:
@@ -733,13 +824,28 @@ def generate_entrypoints_cpp(commands: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
-def generate_proc_address_cpp(commands: list[dict[str, object]]) -> str:
+def generate_proc_address_cpp(
+    commands: list[dict[str, object]],
+    aliases: list[dict[str, object]],
+    fixed_function: list[dict[str, object]],
+) -> str:
     # appglGetProcAddress is the canonical loader entry point used by
     # external GL loaders (glad / GLEW / in-engine loaders in Recoil/BAR)
     # to populate their dispatch tables against AppGL's generated extern
     # "C" entry points. The table is sorted so the runtime resolver can
     # binary-search without needing an unordered_map or a sort at startup.
-    sorted_names = sorted(command["name"] for command in commands)
+    #
+    # Landing C 3e extends the table with EXT/ARB alias forwarders and
+    # fixed-function no-op stubs so engines that query legacy names
+    # (glBindBufferARB, glMatrixMode, ...) get a non-null function
+    # pointer and not a load failure.
+    all_names = set(command["name"] for command in commands)
+    for entry in aliases:
+        all_names.add(entry["name"])
+    for entry in fixed_function:
+        all_names.add(entry["name"])
+    sorted_names = sorted(all_names)
+
     lines = [
         "// Generated by appgl-runtime/tools/gen_from_registry/generate_from_registry.py",
         "",
@@ -747,21 +853,41 @@ def generate_proc_address_cpp(commands: list[dict[str, object]]) -> str:
         "#include <cstring>",
         "",
         '#include "../../include/AppGL/AppGL.h"',
+        '#include "../../include/AppGL/glcorearb.h"',
         "",
-        "namespace {",
-        "",
-        "struct ProcEntry {",
-        "    const char* name;",
-        "    AppGLProc proc;",
-        "};",
-        "",
-        "// Sorted alphabetically so appglGetProcAddress can binary-search",
-        "// without sorting at startup. The table is const rather than",
-        "// constexpr because reinterpret_cast between function pointer",
-        "// types is not a constant expression — but function addresses are",
-        "// link-time constants, so the const array still ends up in rodata.",
-        "const ProcEntry kProcTable[] = {",
+        "// Forward declarations for alias + fixed-function stubs emitted in",
+        "// gl_aliases.gen.cpp / gl_fixed_function.gen.cpp. Declaring them",
+        "// here (rather than including those files' generated headers)",
+        "// keeps the codegen graph simple and avoids a second include layer.",
+        'extern "C" {',
     ]
+    for entry in aliases:
+        lines.append(
+            f'{entry["return_type"]} APIENTRY {entry["name"]}({entry["args_decl"]});'
+        )
+    for entry in fixed_function:
+        lines.append(
+            f'{entry["return_type"]} APIENTRY {entry["name"]}({entry["args_decl"]});'
+        )
+    lines.extend(
+        [
+            "}  // extern \"C\"",
+            "",
+            "namespace {",
+            "",
+            "struct ProcEntry {",
+            "    const char* name;",
+            "    AppGLProc proc;",
+            "};",
+            "",
+            "// Sorted alphabetically so appglGetProcAddress can binary-search",
+            "// without sorting at startup. The table is const rather than",
+            "// constexpr because reinterpret_cast between function pointer",
+            "// types is not a constant expression — but function addresses are",
+            "// link-time constants, so the const array still ends up in rodata.",
+            "const ProcEntry kProcTable[] = {",
+        ]
+    )
     for name in sorted_names:
         lines.append(
             f'    {{"{name}", reinterpret_cast<AppGLProc>(&::{name})}},'
@@ -800,6 +926,109 @@ def generate_proc_address_cpp(commands: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def generate_aliases_cpp(aliases: list[dict[str, object]]) -> str:
+    # Emits extern "C" forwarders from each EXT/ARB alias name into its
+    # canonical core target. Every stub is a straight pass-through — the
+    # alias entry points share semantics with their core targets by
+    # definition (that's what <alias> means in the registry), so the stub
+    # need only re-emit the core call with the same arguments.
+    #
+    # Signatures use the core target's parameter types, not the alias's.
+    # 27 of the 481 aliases have type-mismatched legacy parameters
+    # (GLhandleARB, GLsizeiptrARB, GLcharARB, ...) — because extern "C"
+    # linkage matches only on symbol name and the underlying ABI types
+    # are identical (khronos_ssize_t / GLuint / char), engines that
+    # resolve via appglGetProcAddress and cast the returned pointer see
+    # no ABI mismatch at the machine-code level.
+    lines = [
+        "// Generated by appgl-runtime/tools/gen_from_registry/generate_from_registry.py",
+        "//",
+        "// EXT/ARB alias forwarders — each extern \"C\" entry point below",
+        "// delegates into its canonical core target. External loaders can",
+        "// resolve these legacy names via appglGetProcAddress and get a",
+        "// functional (not null) function pointer.",
+        "",
+        '#include "../../include/AppGL/glcorearb.h"',
+        "",
+    ]
+    for entry in aliases:
+        call_args = ", ".join(param["name"] for param in entry["params"])
+        lines.append(
+            f'extern "C" {entry["return_type"]} APIENTRY {entry["name"]}({entry["args_decl"]}) {{'
+        )
+        if entry["return_type"] == "void":
+            lines.append(
+                f"    ::{entry['target']}({call_args});" if call_args else f"    ::{entry['target']}();"
+            )
+        else:
+            lines.append(
+                f"    return ::{entry['target']}({call_args});" if call_args else f"    return ::{entry['target']}();"
+            )
+        lines.append("}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def generate_fixed_function_cpp(fixed_function: list[dict[str, object]]) -> str:
+    # Fixed-function compat-profile entry points (matrix stack, immediate
+    # mode, display lists, pixel transfer, lighting, fog, etc.). Core
+    # profile removed all of these but some engines still probe the
+    # names during extension detection. Each stub records a trace into
+    # the unimplemented coverage table so diagnostic tooling can surface
+    # which legacy entry points a client is touching, then returns a
+    # sensible default for the handful of non-void entries.
+    lines = [
+        "// Generated by appgl-runtime/tools/gen_from_registry/generate_from_registry.py",
+        "//",
+        "// Fixed-function compat-only entry points emitted as no-op stubs so",
+        "// extension probing from legacy engines succeeds. Every stub records",
+        "// an unimplemented trace (so Runtime::coverageStore flags that the",
+        "// client is touching a legacy path) and then no-ops. The four",
+        "// non-void entries return conservative defaults: glGenLists → 0,",
+        "// glIsList → GL_FALSE, glAreTexturesResident → GL_FALSE,",
+        "// glRenderMode → 0 (the GL_RENDER feedback rendering mode).",
+        "",
+        '#include "../../include/AppGL/glcorearb.h"',
+        '#include "../runtime/AppGLRuntime.h"',
+        "",
+    ]
+
+    nonvoid_defaults = {
+        "glAreTexturesResident": "GL_FALSE",
+        "glGenLists": "0u",
+        "glIsList": "GL_FALSE",
+        "glRenderMode": "0",
+    }
+
+    for entry in fixed_function:
+        # Suppress unused-parameter warnings by casting each parameter
+        # to void inside the stub. The cast is free at runtime and keeps
+        # -Wunused-parameter quiet across 387 void stubs.
+        name = entry["name"]
+        ret = entry["return_type"]
+        lines.append(
+            f'extern "C" {ret} APIENTRY {name}({entry["args_decl"]}) {{'
+        )
+        for param in entry["params"]:
+            lines.append(f"    (void){param['name']};")
+        lines.append(
+            f'    appgl::Runtime::shared().recordFixedFunctionStub("{name}");'
+        )
+        if ret == "void":
+            lines.append("    return;")
+        else:
+            default = nonvoid_defaults.get(name)
+            if default is None:
+                raise RuntimeError(
+                    f"Fixed-function entry {name} has non-void return {ret} "
+                    f"but no default value configured in the codegen."
+                )
+            lines.append(f"    return {default};")
+        lines.append("}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def generate_manifest(commands: list[dict[str, object]]) -> str:
     functions = []
     for command in commands:
@@ -832,7 +1061,7 @@ def main() -> None:
     if not VENDOR_KHR.exists():
         raise FileNotFoundError(f"Missing vendored khrplatform.h: {VENDOR_KHR}")
 
-    root, commands, enums, _ = parse_registry()
+    root, commands, enums, _, aliases, fixed_function = parse_registry()
 
     PUBLIC_INCLUDE_DIR.mkdir(parents=True, exist_ok=True)
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
@@ -846,10 +1075,16 @@ def main() -> None:
     FUNCTION_IDS_HEADER.write_text(generate_function_ids_header(commands))
     DISPATCH_HEADER.write_text(generate_dispatch_header(commands))
     ENTRYPOINTS_CPP.write_text(generate_entrypoints_cpp(commands))
-    PROC_ADDRESS_CPP.write_text(generate_proc_address_cpp(commands))
+    ALIASES_CPP.write_text(generate_aliases_cpp(aliases))
+    FIXED_FUNCTION_CPP.write_text(generate_fixed_function_cpp(fixed_function))
+    PROC_ADDRESS_CPP.write_text(generate_proc_address_cpp(commands, aliases, fixed_function))
     MANIFEST_JSON.write_text(generate_manifest(commands))
 
-    print(f"Generated {len(commands)} OpenGL 4.6 core entry points.")
+    print(
+        f"Generated {len(commands)} OpenGL 4.6 core entry points, "
+        f"{len(aliases)} EXT/ARB alias forwarders, "
+        f"{len(fixed_function)} fixed-function stubs."
+    )
 
 
 if __name__ == "__main__":

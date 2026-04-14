@@ -1050,6 +1050,95 @@ public:
         expectCondition(foundInternalRecord,
                         "runtime error ring records context-level pushError(GL_INVALID_ENUM)");
 
+        // Landing C 3e: EXT/ARB alias forwarders + fixed-function no-op
+        // stubs are now wired into appglGetProcAddress. Engines resolving
+        // legacy names (glBindBufferARB from ARB_vertex_buffer_object
+        // probing, glMatrixMode from extension-detection paths in Recoil)
+        // should get non-null function pointers — the aliases forward
+        // into the canonical core entry points and the fixed-function
+        // stubs record a diagnostic ring entry and no-op.
+
+        // Alias resolution: well-known ARB aliases for BAR/Recoil's
+        // buffer pipeline.
+        expectCondition(appglGetProcAddress("glBindBufferARB") != nullptr,
+                        "appglGetProcAddress resolves glBindBufferARB (alias)");
+        expectCondition(appglGetProcAddress("glGenBuffersARB") != nullptr,
+                        "appglGetProcAddress resolves glGenBuffersARB (alias)");
+        expectCondition(appglGetProcAddress("glBufferDataARB") != nullptr,
+                        "appglGetProcAddress resolves glBufferDataARB (alias)");
+        expectCondition(appglGetProcAddress("glActiveTextureARB") != nullptr,
+                        "appglGetProcAddress resolves glActiveTextureARB (alias)");
+
+        // Alias forwarding path: drive glGenBuffersARB through the
+        // resolved alias pointer and confirm the buffer actually got
+        // created (so the alias stub is actually calling the core
+        // glGenBuffers, not returning uninitialized garbage).
+        using GenBuffersARBFn = void(APIENTRY *)(GLsizei, GLuint*);
+        AppGLProc rawGenBuffersARB = appglGetProcAddress("glGenBuffersARB");
+        GenBuffersARBFn genBuffersARB = reinterpret_cast<GenBuffersARBFn>(rawGenBuffersARB);
+        expectCondition(genBuffersARB != nullptr,
+                        "glGenBuffersARB alias pointer non-null before cast");
+        GLuint aliasProbeBuffer = 0;
+        genBuffersARB(1, &aliasProbeBuffer);
+        expectCondition(aliasProbeBuffer != 0,
+                        "glGenBuffersARB alias forwards into core glGenBuffers (non-zero id)");
+        expectCondition(gl.glIsBuffer(aliasProbeBuffer) == GL_FALSE,
+                        "alias-generated buffer id is reserved but not yet bound (parity with core glGenBuffers)");
+        gl.glDeleteBuffers(1, &aliasProbeBuffer);
+
+        // Fixed-function stub resolution: classic GL 1.x entry points
+        // that core removed but extension-probing engines still touch.
+        expectCondition(appglGetProcAddress("glMatrixMode") != nullptr,
+                        "appglGetProcAddress resolves glMatrixMode (fixed-function stub)");
+        expectCondition(appglGetProcAddress("glBegin") != nullptr,
+                        "appglGetProcAddress resolves glBegin (fixed-function stub)");
+        expectCondition(appglGetProcAddress("glLoadIdentity") != nullptr,
+                        "appglGetProcAddress resolves glLoadIdentity (fixed-function stub)");
+        expectCondition(appglGetProcAddress("glGenLists") != nullptr,
+                        "appglGetProcAddress resolves glGenLists (fixed-function stub, non-void return)");
+
+        // Drive a fixed-function stub and verify (a) it does not crash,
+        // (b) it records a diagnostic ring entry with the right function
+        // tag, and (c) it does NOT inject a GL error into the glGetError
+        // queue — the stub is deliberately silent so extension probing
+        // doesn't fail downstream error checks.
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+        const std::size_t ringBeforeFixedFunction = Runtime::shared().errorLogCount();
+        using MatrixModeFn = void(APIENTRY *)(GLenum);
+        AppGLProc rawMatrixMode = appglGetProcAddress("glMatrixMode");
+        MatrixModeFn matrixMode = reinterpret_cast<MatrixModeFn>(rawMatrixMode);
+        // GL_MODELVIEW (0x1700) is a compat-profile enum that core's
+        // glcorearb.h doesn't export, so we pass the raw literal here.
+        // The stub is a no-op and ignores the argument anyway.
+        constexpr GLenum kModelviewMatrixMode = 0x1700;
+        matrixMode(kModelviewMatrixMode);
+        expectCondition(gl.glGetError() == GL_NO_ERROR,
+                        "glMatrixMode fixed-function stub does not pollute glGetError queue");
+        auto postFixedFunction = Runtime::shared().errorLogSnapshot();
+        expectCondition(postFixedFunction.size() > ringBeforeFixedFunction,
+                        "glMatrixMode fixed-function stub grew the runtime diagnostic ring");
+        bool foundFixedFunctionRecord = false;
+        for (auto it = postFixedFunction.rbegin(); it != postFixedFunction.rend(); ++it) {
+            if (it->function == "glMatrixMode" && it->errorEnum == 0) {
+                foundFixedFunctionRecord = true;
+                break;
+            }
+        }
+        expectCondition(foundFixedFunctionRecord,
+                        "runtime diagnostic ring records glMatrixMode fixed-function stub");
+
+        // Non-void fixed-function return: glGenLists should return 0
+        // (the conservative default). Engines checking the returned id
+        // for non-zero before using it will correctly skip the legacy
+        // display-list path instead of dereferencing garbage.
+        using GenListsFn = GLuint(APIENTRY *)(GLsizei);
+        AppGLProc rawGenLists = appglGetProcAddress("glGenLists");
+        GenListsFn genLists = reinterpret_cast<GenListsFn>(rawGenLists);
+        const GLuint genListsResult = genLists(4);
+        expectCondition(genListsResult == 0u,
+                        "glGenLists fixed-function stub returns 0 (conservative default)");
+
         // Drain before returning so the render pass starts clean.
         while (gl.glGetError() != GL_NO_ERROR) {
         }

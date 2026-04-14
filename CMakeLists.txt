@@ -45,6 +45,8 @@ set(APPGL_SOURCES
   src/state/MetalVertexDescriptorBuilder.mm
   src/generated/gl_entrypoints.gen.cpp
   src/generated/gl_procaddress.gen.cpp
+  src/generated/gl_aliases.gen.cpp
+  src/generated/gl_fixed_function.gen.cpp
 )
 
 set(APPGL_TEST_SUPPORT_SOURCES
