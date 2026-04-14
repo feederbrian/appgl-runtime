@@ -1,5 +1,18 @@
 cmake_minimum_required(VERSION 3.28)
 
+# Pin the macOS deployment target so both AppGL and its vendored shader
+# translator dependencies (glslang, SPIRV-Cross) produce object files
+# targeting the same platform version that the consuming Xcode projects
+# (ogl-46-mac framework and ogl-test-application) link against. Without
+# this pin, CMake defaults to the host OS's current SDK version, which
+# causes "built for newer macOS version than being linked" warnings for
+# every translation unit in the static libs when those `.a` files are
+# pulled into the 14.0-targeted Xcode framework build.
+#
+# Set BEFORE `project()` so it propagates to every sub-project registered
+# via add_subdirectory (including third_party/glslang and SPIRV-Cross).
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS deployment target")
+
 project(AppGL LANGUAGES C CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 20)
