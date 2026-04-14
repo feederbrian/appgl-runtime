@@ -1085,6 +1085,27 @@ GLuint GLStateTracker::boundTexture(GLenum target) const {
     return found == unit.bindings.end() ? 0 : found->second;
 }
 
+// Phase 8X Group 4d follow-up⁷ — per-draw sampler resolution needs to
+// look up the texture bound to an arbitrary texture unit, not just the
+// active one (the active unit is the `glBindTexture` write pointer, but
+// a fragment shader with N sampler uniforms reads from N different
+// units). The draw path walks each sampler uniform, reads the
+// user-set integer (via `glUniform1i(loc, unit)`) as the unit index,
+// and resolves the texture binding through this accessor. Returns 0
+// when no texture is bound to that (unit, target) pair; the caller
+// then emits no binding for that slot and the shader sees an unbound
+// texture (undefined on the Metal side — same semantics as an
+// uninitialized sampler, which is consistent with GL's "undefined
+// sampling result" behavior for the same state).
+GLuint GLStateTracker::boundTextureOnUnit(GLuint unit, GLenum target) const {
+    if (unit >= textureUnits_.size()) {
+        return 0;
+    }
+    const auto& unitState = textureUnits_[unit];
+    const auto found = unitState.bindings.find(target);
+    return found == unitState.bindings.end() ? 0 : found->second;
+}
+
 void GLStateTracker::deleteTextureBindings(GLuint object) {
     if (object == 0) {
         return;

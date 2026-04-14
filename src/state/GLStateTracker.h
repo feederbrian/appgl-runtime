@@ -214,6 +214,10 @@ public:
     void deleteBufferBindings(GLuint object);
     void bindTexture(GLenum target, GLuint object);
     GLuint boundTexture(GLenum target) const;
+    // Phase 8X Group 4d follow-up⁷ — explicit-unit accessor used by the
+    // draw-time sampler resolution path to read texture bindings from
+    // units other than the active `glActiveTexture` pointer.
+    GLuint boundTextureOnUnit(GLuint unit, GLenum target) const;
     void deleteTextureBindings(GLuint object);
     void bindRenderbuffer(GLuint object);
     GLuint boundRenderbuffer() const;

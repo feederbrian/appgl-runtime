@@ -118,6 +118,43 @@ struct TranslatedDrawInfo {
     const std::uint8_t* fragmentUniformData = nullptr;
     std::size_t fragmentUniformSize = 0;
 
+    // Phase 8X Group 4d follow-up⁷ — per-draw texture/sampler binding
+    // plumbing. Prior to this round, `encodeTranslatedDraw` bound zero
+    // MTLTexture / MTLSamplerState objects to the render encoder: the
+    // shader translator correctly emitted `[[texture(N)]]` /
+    // `[[sampler(N)]]` arguments on the fragment stage and the reflection
+    // carried the binding indices, but nothing ever wired the GL
+    // texture-unit state through to the Metal encoder calls. The
+    // fragment shader's `texture.sample(sampler, uv)` therefore read
+    // from an unbound slot (undefined on Apple Silicon, typically zero
+    // on Mac2-family) — this is the structural root cause of the
+    // "smeared / double-exposed" glyph artifact BAR captured in
+    // followup⁶ verification §Visual.
+    //
+    // Both vectors are non-owning; `metalTexture` / `metalSamplerState`
+    // must outlive the encode call. GLContext::drawArrays (and its
+    // instanced / indexed siblings) populate these vectors right after
+    // the uniform buffer push by walking the program's fragment (and
+    // vertex) sampler uniforms, resolving each one to its bound texture
+    // object via the GL texture-unit state, and snapping pointers to
+    // the cached MTLTexture / MTLSamplerState on the texture object
+    // (lazily rebuilt via `rebuildTextureSamplerState`).
+    //
+    // `metalSlot` is the SPIRV-Cross `[[texture(N)]]` / `[[sampler(N)]]`
+    // slot from `ShaderReflection::sampledTextures[i].metalBinding`,
+    // which is `BindingMap::textureBase + glBinding = glBinding` under
+    // the default BindingMap. The encoder uses the same slot for both
+    // the texture and the sampler state, matching SPIRV-Cross's MSL
+    // output pattern where sampled images are decomposed into parallel
+    // `[[texture(N)]]` / `[[sampler(N)]]` arguments.
+    struct TextureBinding {
+        std::uint32_t metalSlot = 0;
+        void* metalTexture = nullptr;       // id<MTLTexture>
+        void* metalSamplerState = nullptr;  // id<MTLSamplerState>
+    };
+    std::vector<TextureBinding> fragmentTextures;
+    std::vector<TextureBinding> vertexTextures;
+
     // Pipeline state toggles.
     bool depthTestEnabled = false;
     GLenum depthFunc = GL_LESS;

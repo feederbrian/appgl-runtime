@@ -851,6 +851,15 @@ struct GLContext::Impl {
     void releaseTextureStorage(GLTextureObject& object) {
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
+        // Phase 8X Group 4d follow-up⁷ — the per-texture MTLSamplerState
+        // (see GLTextureObject.metalSampler in GLObjectStore.h) lives
+        // alongside the Metal storage and is rebuilt lazily from params
+        // at draw time. Release it here so deleting or respecifying a
+        // texture tears down both halves, and mark the sampler dirty so
+        // the next draw rebuilds against the refreshed parameters.
+        releaseRetainedMetalObject(object.metalSampler);
+        object.metalSampler = nullptr;
+        object.samplerDirty = true;
         object.desc = {};
         object.levels.clear();
     }
@@ -1180,6 +1189,187 @@ struct GLContext::Impl {
         object.metalSampler = transferRetainedMetalObject(sampler);
         object.dirty = false;
         return true;
+    }
+
+    // Phase 8X Group 4d follow-up⁷ — build an MTLSamplerState from the
+    // texture-owned `GLTextureParameters` and cache it on the texture
+    // object. Mirrors `rebuildSamplerState(GLSamplerObject&)` above but
+    // reads from the `GLTextureObject.params` field instead of a
+    // stand-alone sampler object, and writes back into the texture's
+    // own `metalSampler` / `samplerDirty` fields.
+    //
+    // This path is the one that runs for the GL legacy / GL 3.0 texture
+    // unit model — the app sets filter/wrap via `glTexParameter*` and
+    // the texture itself carries the sampler state. The stand-alone
+    // `GLSamplerObject` path (glGenSamplers / glBindSampler) takes
+    // precedence when a sampler object is attached to the unit; see
+    // `resolveSamplerBindings` below for the precedence logic.
+    //
+    // The function is idempotent when `samplerDirty` is false: the
+    // call returns true immediately with the cached handle intact.
+    // Every parameter mutation in `texParameterInteger` /
+    // `texParameterFloat` flips `samplerDirty = true` so the next draw
+    // rebuilds on demand.
+    bool rebuildTextureSamplerState(GLTextureObject& object) {
+        if (!object.samplerDirty && object.metalSampler != nullptr) {
+            return true;
+        }
+        releaseRetainedMetalObject(object.metalSampler);
+        object.metalSampler = nullptr;
+        if (device == nil) {
+            object.samplerDirty = false;
+            return true;
+        }
+
+        MTLSamplerDescriptor* descriptor = [[MTLSamplerDescriptor alloc] init];
+        descriptor.minFilter = metalMinMagFilter(object.params.minFilter);
+        descriptor.magFilter = metalMinMagFilter(object.params.magFilter);
+        descriptor.mipFilter = metalMipFilter(object.params.minFilter);
+        descriptor.sAddressMode = metalAddressMode(object.params.wrapS);
+        descriptor.tAddressMode = metalAddressMode(object.params.wrapT);
+        descriptor.rAddressMode = metalAddressMode(object.params.wrapR);
+        descriptor.lodMinClamp = object.params.minLod;
+        descriptor.lodMaxClamp = object.params.maxLod;
+        descriptor.compareFunction = object.params.compareMode == GL_COMPARE_REF_TO_TEXTURE
+            ? metalCompareFunction(object.params.compareFunc)
+            : MTLCompareFunctionNever;
+
+        id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:descriptor];
+        if (sampler == nil) {
+            return false;
+        }
+        object.metalSampler = transferRetainedMetalObject(sampler);
+        object.samplerDirty = false;
+        return true;
+    }
+
+    // Phase 8X Group 4d follow-up⁷ — walk a program's fragment/vertex
+    // reflection, match each sampled-texture entry to the GL sampler
+    // uniform that selects its texture unit, resolve the unit binding
+    // to a live MTLTexture + MTLSamplerState, and populate the two
+    // binding vectors on the TranslatedDrawInfo. Called from
+    // drawArrays / drawArraysInstanced / drawElements right after the
+    // uniform buffer push and immediately before encodeTranslatedDraw.
+    //
+    // Resolution rules — matches the GL spec plus our Phase A 2D-only
+    // scope for this round:
+    //
+    //  1. For each `ShaderReflection::sampledTextures[i]` entry on the
+    //     fragment stage, match it to a GL sampler uniform by name.
+    //     The `reflection.name` string is the GLSL sampler variable
+    //     name; we search `program.uniforms` for a matching entry
+    //     whose `type` is a sampler (GL_SAMPLER_2D etc).
+    //  2. Read the user-set texture unit from
+    //     `program.uniformValues[location].ints[0]`. This is the value
+    //     last written by `glUniform1i(loc, unit)`. Defaults to 0
+    //     when the application never set the uniform (GL spec:
+    //     sampler uniforms default to 0).
+    //  3. Look up the texture bound to `(unit, GL_TEXTURE_2D)` via
+    //     `state.boundTextureOnUnit`. Only GL_TEXTURE_2D is handled in
+    //     this round — cube maps / 3D / 2D-array / buffer textures
+    //     deferred to a future followup. Unbound units are skipped
+    //     silently (emit no TextureBinding; the Metal shader reads
+    //     from an unbound slot which matches GL's "undefined
+    //     sampling" behavior).
+    //  4. If a stand-alone `GLSamplerObject` is attached to the unit
+    //     via `glBindSampler(unit, samplerObj)` (GL 3.3+), that
+    //     takes precedence and provides the filter/wrap/lod state
+    //     via `rebuildSamplerState(samplerObj)`. Otherwise the
+    //     texture-owned `GLTextureObject.params` state is used via
+    //     `rebuildTextureSamplerState(texObj)`.
+    //  5. The resolved `metalTexture` / `metalSamplerState` pair is
+    //     appended to `info.fragmentTextures` at the Metal slot
+    //     `reflection.metalBinding` (= `reflection.glBinding` under
+    //     the default `BindingMap` where `textureBase = 0`).
+    //
+    // The same logic runs for the vertex stage and writes into
+    // `info.vertexTextures`. Most programs have zero vertex
+    // samplers — the path is O(sampledTextures) and short-circuits
+    // cleanly when the vector is empty.
+    void resolveSamplerBindings(
+        GLProgramObject& program,
+        TranslatedDrawInfo& info)
+    {
+        auto resolveStage = [&](const ShaderReflection* reflection,
+                                std::vector<TranslatedDrawInfo::TextureBinding>& outBindings) {
+            if (reflection == nullptr || reflection->sampledTextures.empty()) {
+                return;
+            }
+            for (const auto& sampledTex : reflection->sampledTextures) {
+                // Step 1: find the GL sampler uniform by name.
+                GLint uniformLocation = -1;
+                for (const auto& uinfo : program.uniforms) {
+                    if (uinfo.name == sampledTex.name) {
+                        uniformLocation = uinfo.location;
+                        break;
+                    }
+                }
+
+                // Step 2: resolve the texture unit index. Sampler
+                // uniforms default to 0 per GL spec when the app
+                // never called glUniform1i, so a missing entry in
+                // uniformValues also reads as unit 0.
+                GLint glUnit = 0;
+                if (uniformLocation >= 0) {
+                    auto it = program.uniformValues.find(uniformLocation);
+                    if (it != program.uniformValues.end() && !it->second.ints.empty()) {
+                        glUnit = it->second.ints[0];
+                    }
+                }
+                if (glUnit < 0) {
+                    continue;  // malformed app state; skip silently
+                }
+
+                // Step 3: look up the texture object bound to that
+                // unit for GL_TEXTURE_2D. Future rounds extend to
+                // cube maps etc by widening this target probe.
+                const GLuint texName = state->boundTextureOnUnit(
+                    static_cast<GLuint>(glUnit), GL_TEXTURE_2D);
+                if (texName == 0) {
+                    continue;  // no texture bound to the unit
+                }
+                GLTextureObject* texObject = objects->textures().get(texName);
+                if (texObject == nullptr || !texObject->instantiated ||
+                    texObject->metalTexture == nullptr) {
+                    continue;  // texture not yet populated with storage
+                }
+
+                // Step 4: determine sampler state — stand-alone
+                // sampler object if one is attached, otherwise fall
+                // back to the texture's own params. Both paths
+                // lazily rebuild the MTLSamplerState on demand.
+                void* metalSamplerState = nullptr;
+                const GLuint samplerName = state->boundSampler(static_cast<GLuint>(glUnit));
+                if (samplerName != 0) {
+                    GLSamplerObject* samplerObj = objects->samplers().get(samplerName);
+                    if (samplerObj != nullptr) {
+                        if (samplerObj->dirty || samplerObj->metalSampler == nullptr) {
+                            (void)rebuildSamplerState(*samplerObj);
+                        }
+                        metalSamplerState = samplerObj->metalSampler;
+                    }
+                }
+                if (metalSamplerState == nullptr) {
+                    if (texObject->samplerDirty || texObject->metalSampler == nullptr) {
+                        (void)rebuildTextureSamplerState(*texObject);
+                    }
+                    metalSamplerState = texObject->metalSampler;
+                }
+                if (metalSamplerState == nullptr) {
+                    continue;  // sampler build failure; nothing to bind
+                }
+
+                // Step 5: push the binding at the reflected Metal slot.
+                TranslatedDrawInfo::TextureBinding binding;
+                binding.metalSlot = sampledTex.metalBinding;
+                binding.metalTexture = texObject->metalTexture;
+                binding.metalSamplerState = metalSamplerState;
+                outBindings.push_back(binding);
+            }
+        };
+
+        resolveStage(info.fragmentReflection, info.fragmentTextures);
+        resolveStage(info.vertexReflection, info.vertexTextures);
     }
 
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
@@ -3915,6 +4105,15 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
         return false;
     }
+    // Phase 8X Group 4d follow-up⁷ — the filter/wrap/lod/compare state
+    // on the texture now feeds an MTLSamplerState cached on the object
+    // (see GLTextureObject.metalSampler). Flip the dirty flag so the
+    // next draw rebuilds it from the mutated params. Unconditional
+    // because the GL parameter names that affect sampling are a
+    // superset of the fields in GLTextureParameters (setTextureParameter
+    // already filters out unknown names by returning false above), and
+    // swizzle/border changes also require a rebuild via the descriptor.
+    object->samplerDirty = true;
     return true;
 }
 
@@ -3947,6 +4146,11 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
         return false;
     }
+    // Phase 8X Group 4d follow-up⁷ — see texParameterInteger for the
+    // rationale; float params update the same GLTextureParameters
+    // fields (lod clamps, border color) so the cached sampler must
+    // rebuild on the next draw.
+    object->samplerDirty = true;
     return true;
 }
 
@@ -7184,6 +7388,19 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     tdi.fragmentUniformData = fragUniformScratch.data();
                     tdi.fragmentUniformSize = fragUniformScratch.size();
 
+                    // Phase 8X Group 4d follow-up⁷ — resolve each sampler
+                    // uniform in the program to the Metal texture + sampler
+                    // state currently bound to its GL texture unit, then
+                    // append the pairs to the TranslatedDrawInfo binding
+                    // vectors. See `Impl::resolveSamplerBindings` for the
+                    // resolution rules. This is the structural hole behind
+                    // the smeared-glyph observation from followup⁶
+                    // verification §Visual — prior to this round,
+                    // encodeTranslatedDraw bound zero textures/samplers
+                    // and the fragment shader sampled from an unbound
+                    // slot.
+                    impl_->resolveSamplerBindings(*program, tdi);
+
                     // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
                     // pipeline-build error text plumbed out of the encode-failed
                     // path. Thread-local so we don't reallocate per draw; clear
@@ -7408,6 +7625,11 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     tdi.fragmentUniformData = fragUniformScratch.data();
                     tdi.fragmentUniformSize = fragUniformScratch.size();
 
+                    // Phase 8X Group 4d follow-up⁷ — see matching comment in
+                    // drawArrays for rationale; the instanced draw path
+                    // needs identical sampler resolution.
+                    impl_->resolveSamplerBindings(*program, tdi);
+
                     // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
                     // pipeline-build error text plumbed out of the encode-failed
                     // path. See the matching comment in drawArrays for rationale.
@@ -7609,6 +7831,12 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.vertexUniformSize = vtxUniformScratch.size();
                     tdi.fragmentUniformData = fragUniformScratch.data();
                     tdi.fragmentUniformSize = fragUniformScratch.size();
+
+                    // Phase 8X Group 4d follow-up⁷ — see matching comment in
+                    // drawArrays for rationale; drawElements needs identical
+                    // sampler resolution. BAR's select-menu glyph draws
+                    // arrive on this path (indexed quads).
+                    impl_->resolveSamplerBindings(*program, tdi);
 
                     // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
                     // pipeline-build error text plumbed out of the encode-failed

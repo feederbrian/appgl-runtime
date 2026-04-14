@@ -804,6 +804,46 @@ struct MetalFrameGraph::Impl {
                                            atIndex:16];
         }
 
+        // Phase 8X Group 4d follow-up⁷ — bind textures and samplers for
+        // this draw. GLContext::drawArrays / drawArraysInstanced /
+        // drawElements populates `info.fragmentTextures` and
+        // `info.vertexTextures` by walking the program's sampler uniforms,
+        // resolving each one through the GL texture-unit state, and
+        // snapping pointers to the cached MTLTexture / MTLSamplerState on
+        // the texture object. A slot with a nullptr texture or sampler is
+        // skipped silently — that means the GL app bound a sampler
+        // uniform that points at an empty texture unit, which on the GL
+        // side would sample a 1×1×1 default texture. Metal has no such
+        // default so the slot stays unbound and the shader gets whatever
+        // the driver leaves there. Most engines bind a real texture
+        // before drawing anything that samples it, so the "null slot"
+        // case is only expected for debug paths that we don't care about
+        // in the smoke run. BAR's select-menu fragment shaders sample
+        // one texture per draw (the glyph atlas page), so every call
+        // here populates one binding in `fragmentTextures`.
+        for (const auto& binding : info.fragmentTextures) {
+            if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+                continue;
+            }
+            id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
+            id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+            [currentRenderEncoder setFragmentTexture:tex
+                                             atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            [currentRenderEncoder setFragmentSamplerState:smp
+                                                  atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+        }
+        for (const auto& binding : info.vertexTextures) {
+            if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+                continue;
+            }
+            id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
+            id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+            [currentRenderEncoder setVertexTexture:tex
+                                           atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            [currentRenderEncoder setVertexSamplerState:smp
+                                                atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+        }
+
         const MTLPrimitiveType primitive = (info.mode == GL_TRIANGLE_STRIP)
             ? MTLPrimitiveTypeTriangleStrip
             : (info.mode == GL_LINES ? MTLPrimitiveTypeLine

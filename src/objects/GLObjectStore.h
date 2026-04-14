@@ -94,6 +94,40 @@ struct GLTextureObject {
     GLTextureParameters params;
     std::unordered_map<GLint, GLTextureImageLevel> levels;
     bool instantiated = false;
+
+    // Phase 8X Group 4d follow-up⁷ — lazy MTLSamplerState cached on the
+    // texture object itself, rebuilt from `params` on demand. GL's
+    // glTexParameter path sets filter/wrap/lod/compare state *on the
+    // texture object* (this is the legacy "texture has sampler state"
+    // API); GL 3.3+ glSamplerParameter lets applications instead attach
+    // a separate GLSamplerObject that overrides the texture-owned state
+    // at draw time, and GLSamplerObject already carries its own
+    // `metalSampler` + dirty flag. Prior to this round we only built
+    // MTLSamplerState for the stand-alone GLSamplerObject path, which
+    // meant textures without an attached sampler object — the common
+    // case for BAR's glyph atlases, the splash texture, and everything
+    // uploaded through the legacy glTexImage / glTexParameter path —
+    // had no Metal-side sampler to bind, and the fragment shader's
+    // `texture.sample(sampler, uv)` call would read from an unbound
+    // sampler slot (Apple Silicon returns undefined filtering). This
+    // is the structural gap behind the "smeared / double-exposed"
+    // glyphs BAR captured in followup⁶ verification §Visual.
+    //
+    // Lifecycle:
+    //  - `samplerDirty` is flipped to true whenever any of the filter /
+    //    wrap / lod / compare / border / swizzle fields on `params`
+    //    change (texParameterInteger / texParameterFloat).
+    //  - `rebuildTextureSamplerState` in GLContext.mm consumes
+    //    the dirty flag and builds an MTLSamplerState from the
+    //    current params, matching the shape of `rebuildSamplerState`
+    //    for GLSamplerObject. Lazy: rebuilt on-demand from the draw
+    //    path the first time the texture is sampled after a
+    //    parameter change.
+    //  - `releaseTextureStorage` releases the retained Metal handle
+    //    alongside `metalTexture`. Deleting the GL texture object
+    //    therefore releases both the storage and the cached sampler.
+    void* metalSampler = nullptr;
+    bool samplerDirty = true;
 };
 
 struct GLSamplerObject {
