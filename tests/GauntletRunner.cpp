@@ -1001,9 +1001,16 @@ public:
         // recordValidationError helper.
 
         // Drain both surfaces to a known-clean baseline.
+        //
+        // `errorLogCount()` is a lifetime event counter (see AppGLRuntime.h),
+        // not the current ring size — the 64-entry ring both evicts oldest
+        // entries under pressure and collapses consecutive duplicates with
+        // the same function+errorEnum into a single record with a bumped
+        // count field. A plain snapshot.size() delta is broken by either
+        // condition; the event counter is robust to both.
         while (gl.glGetError() != GL_NO_ERROR) {
         }
-        const std::size_t errorLogBaseline = Runtime::shared().errorLogCount();
+        const std::uint64_t errorEventsBaseline = Runtime::shared().errorLogCount();
 
         // Runtime-layer path: glBindBuffer with an invalid target goes
         // through recordValidationError -> context->pushError with the full
@@ -1012,8 +1019,9 @@ public:
         gl.glBindBuffer(kBogusBufferTarget, 0);
         expectCondition(gl.glGetError() == GL_INVALID_ENUM,
                         "glBindBuffer(bogus target) raises GL_INVALID_ENUM on the glGetError queue");
+        const std::uint64_t errorEventsAfterBogusBind = Runtime::shared().errorLogCount();
         auto snapshot = Runtime::shared().errorLogSnapshot();
-        expectCondition(snapshot.size() > errorLogBaseline,
+        expectCondition(errorEventsAfterBogusBind > errorEventsBaseline,
                         "glBindBuffer(bogus target) grew the runtime error ring");
         bool foundBindBufferRecord = false;
         for (auto it = snapshot.rbegin(); it != snapshot.rend(); ++it) {
@@ -1032,13 +1040,14 @@ public:
         // ring buffer. After 3g it shows up as an "<internal>" record.
         while (gl.glGetError() != GL_NO_ERROR) {
         }
-        const std::size_t ringBeforeContextError = Runtime::shared().errorLogCount();
+        const std::uint64_t errorEventsBeforeContextError = Runtime::shared().errorLogCount();
         GLuint probeByte = 0;
         gl.glReadPixels(0, 0, 1, 1, GL_RED, GL_BYTE, &probeByte);
         expectCondition(gl.glGetError() == GL_INVALID_ENUM,
                         "glReadPixels(GL_RED, GL_BYTE) raises GL_INVALID_ENUM on the glGetError queue");
+        const std::uint64_t errorEventsAfterContextError = Runtime::shared().errorLogCount();
         auto postContextSnapshot = Runtime::shared().errorLogSnapshot();
-        expectCondition(postContextSnapshot.size() > ringBeforeContextError,
+        expectCondition(errorEventsAfterContextError > errorEventsBeforeContextError,
                         "glReadPixels context-level pushError grew the runtime error ring");
         bool foundInternalRecord = false;
         for (auto it = postContextSnapshot.rbegin(); it != postContextSnapshot.rend(); ++it) {
@@ -1104,7 +1113,7 @@ public:
         // doesn't fail downstream error checks.
         while (gl.glGetError() != GL_NO_ERROR) {
         }
-        const std::size_t ringBeforeFixedFunction = Runtime::shared().errorLogCount();
+        const std::uint64_t errorEventsBeforeFixedFunction = Runtime::shared().errorLogCount();
         using MatrixModeFn = void(APIENTRY *)(GLenum);
         AppGLProc rawMatrixMode = appglGetProcAddress("glMatrixMode");
         MatrixModeFn matrixMode = reinterpret_cast<MatrixModeFn>(rawMatrixMode);
@@ -1115,8 +1124,9 @@ public:
         matrixMode(kModelviewMatrixMode);
         expectCondition(gl.glGetError() == GL_NO_ERROR,
                         "glMatrixMode fixed-function stub does not pollute glGetError queue");
+        const std::uint64_t errorEventsAfterFixedFunction = Runtime::shared().errorLogCount();
         auto postFixedFunction = Runtime::shared().errorLogSnapshot();
-        expectCondition(postFixedFunction.size() > ringBeforeFixedFunction,
+        expectCondition(errorEventsAfterFixedFunction > errorEventsBeforeFixedFunction,
                         "glMatrixMode fixed-function stub grew the runtime diagnostic ring");
         bool foundFixedFunctionRecord = false;
         for (auto it = postFixedFunction.rbegin(); it != postFixedFunction.rend(); ++it) {

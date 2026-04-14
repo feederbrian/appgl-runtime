@@ -1047,6 +1047,13 @@ std::vector<Runtime::ShaderTranslationRecord> Runtime::shaderTranslationSnapshot
 
 void Runtime::recordError(ErrorRecord record) {
     std::lock_guard<std::mutex> lock(errorLogMutex_);
+    // Every observed error event bumps the lifetime counter, including
+    // the dedupe-collapse path below. Test harnesses use the counter
+    // delta to assert "this call recorded an error" in a way that is
+    // robust to ring eviction AND duplicate collapsing — asserting on
+    // errorLog_.size() fails in both of those cases even though the
+    // error was correctly captured.
+    ++errorLogEventsObserved_;
     // Collapse into the previous entry if it's the same function+error enum.
     // Spammy stub paths (e.g. a thousand copies of "glFoo is not implemented"
     // fired every frame) otherwise fill the 64-entry ring immediately and hide
@@ -1065,9 +1072,9 @@ void Runtime::recordError(ErrorRecord record) {
     errorLog_.push_back(std::move(record));
 }
 
-std::size_t Runtime::errorLogCount() {
+std::uint64_t Runtime::errorLogCount() {
     std::lock_guard<std::mutex> lock(errorLogMutex_);
-    return errorLog_.size();
+    return errorLogEventsObserved_;
 }
 
 std::vector<Runtime::ErrorRecord> Runtime::errorLogSnapshot() {

@@ -665,13 +665,25 @@ public:
     };
     void recordError(ErrorRecord record);
 
-    // Read-only snapshot accessors for the runtime error log. The
-    // gauntlet test harness uses these in the Landing C 3g assertions
-    // that verify raised errors actually reach the ring buffer — not
-    // just the per-context glGetError queue. The snapshot is a copy
-    // taken under errorLogMutex_ so callers don't have to worry about
-    // concurrent mutation.
-    std::size_t errorLogCount();
+    // Monotonic lifetime counter of recordError() calls, and a read-only
+    // snapshot of the 64-entry ring buffer. Used by the gauntlet Landing C
+    // 3g assertions that verify raised errors actually reach the ring
+    // buffer — not just the per-context glGetError queue.
+    //
+    // `errorLogCount()` returns the *event* count, not the ring size. Every
+    // recordError() call bumps the counter, including the dedupe path that
+    // only bumps the back entry's `count` field without appending a new
+    // record. Two distinct failure modes would otherwise break a
+    // "after > before" assertion on `errorLogSnapshot().size()`:
+    //   - Ring saturation: push + erase leaves the size unchanged.
+    //   - Dedupe collapse: same function + errorEnum as the back entry
+    //     merges into it without growing the ring at all.
+    // A lifetime event counter is robust to both. Callers that genuinely
+    // want the current ring size should use errorLogSnapshot().size().
+    //
+    // The snapshot is a copy taken under errorLogMutex_ so callers don't
+    // have to worry about concurrent mutation.
+    std::uint64_t errorLogCount();
     std::vector<ErrorRecord> errorLogSnapshot();
 
     // Last-known object-store inventory for the most recently destroyed context.
@@ -717,6 +729,7 @@ private:
     std::uint64_t shaderTranslationsEverPushed_ = 0;
     std::mutex errorLogMutex_;
     std::vector<ErrorRecord> errorLog_;
+    std::uint64_t errorLogEventsObserved_ = 0;
     InventorySnapshot lastKnownInventory_;
 };
 
