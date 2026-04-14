@@ -710,9 +710,63 @@ static void APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat de
     (void)stencil;
 }
 
+// AppGL extension surface as exposed to host loaders. GL 3.0+ replaced the
+// monolithic glGetString(GL_EXTENSIONS) blob with an indexed query, and
+// loaders like GLAD enumerate this list to populate per-extension bool flags
+// (GLAD_GL_ARB_*, GLAD_GL_EXT_*). The list must therefore include every
+// extension the host engine probes — even ones that are core in 4.6, because
+// loaders don't auto-promote ARB/EXT flags from the parsed version. Keep in
+// sync with GLCapabilities::initializeExtensions() and the GL_NUM_EXTENSIONS
+// integer limit reported there.
+static const char* const kAppGLExtensionList[] = {
+    "GL_KHR_debug",
+    "GL_ARB_debug_output",
+    "GL_ARB_multitexture",
+    "GL_ARB_texture_env_combine",
+    "GL_ARB_texture_compression",
+    "GL_ARB_texture_float",
+    "GL_ARB_texture_non_power_of_two",
+    "GL_ARB_texture_query_lod",
+    "GL_ARB_framebuffer_object",
+    "GL_EXT_framebuffer_object",
+    "GL_EXT_framebuffer_multisample",
+    "GL_EXT_texture_filter_anisotropic",
+    "GL_ARB_vertex_shader",
+    "GL_ARB_fragment_shader",
+    "GL_ARB_geometry_shader4",
+    "GL_ARB_uniform_buffer_object",
+    "GL_ARB_shader_storage_buffer_object",
+    "GL_ARB_explicit_attrib_location",
+    "GL_ARB_explicit_uniform_location",
+    "GL_ARB_buffer_storage",
+    "GL_ARB_multi_draw_indirect",
+    "GL_ARB_clip_control",
+    "GL_ARB_seamless_cube_map",
+    "GL_ARB_conservative_depth",
+    "GL_ARB_timer_query",
+    "GL_ARB_multisample",
+    "GL_ARB_vertex_array_object",
+    "GL_ARB_instanced_arrays",
+    "GL_ARB_draw_instanced",
+    "GL_ARB_base_instance",
+    "GL_ARB_sampler_objects",
+    "GL_ARB_texture_storage",
+    "GL_ARB_texture_swizzle",
+    "GL_ARB_separate_shader_objects",
+    "GL_ARB_program_interface_query",
+    "GL_ARB_shading_language_420pack",
+    "GL_ARB_shading_language_packing",
+};
+static constexpr GLuint kAppGLExtensionCount =
+    static_cast<GLuint>(sizeof(kAppGLExtensionList) / sizeof(kAppGLExtensionList[0]));
+
 static const GLubyte * APIENTRY glGetStringi(GLenum name, GLuint index) {
-    (void)name;
-    (void)index;
+    if (name == 0x1F03 /* GL_EXTENSIONS */) {
+        if (index < kAppGLExtensionCount) {
+            return reinterpret_cast<const GLubyte*>(kAppGLExtensionList[index]);
+        }
+        return nullptr;
+    }
     return nullptr;
 }
 

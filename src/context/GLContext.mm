@@ -1894,7 +1894,13 @@ struct GLContext::Impl {
 
     std::string vendorString = "AppGL";
     std::string rendererString = "AppGL on Metal";
-    std::string versionString;
+    // Default to a parseable GL version string so loaders that call
+    // glGetString(GL_VERSION) before any coverage-tracking entry point runs
+    // (e.g. GLAD's gladLoadGLLoader -> find_coreGL -> sscanf("%d.%d", ...))
+    // get a non-empty string. Runtime::refreshCurrentContextClaimedVersion()
+    // overwrites this with the coverage-derived value as soon as the first
+    // version-bumping entry point is hit.
+    std::string versionString = "4.6 AppGL bootstrap";
     std::string shadingLanguageVersion = "3.30 AppGL bootstrap";
     std::string extensionsString;
 };
@@ -4544,7 +4550,16 @@ const std::string& GLContext::rendererString() const {
 }
 
 void GLContext::setClaimedVersionString(std::string value) {
-    impl_->versionString = value.empty() ? "3.0 AppGL bootstrap" : std::move(value);
+    // Coverage is empty during the GL bootstrap window: the very first call
+    // into a coverage-tracking entry point invokes
+    // Runtime::refreshCurrentContextClaimedVersion() which calls us with an
+    // empty string. Reporting "3.0" here causes loaders/engines that pick GL
+    // capabilities off glGetString(GL_VERSION) to fall back to a GL3 path
+    // even though the AppGL surface advertises 4.6 elsewhere
+    // (glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION) and the static
+    // bootstrap default in Impl). Default the fallback to 4.6 to keep the
+    // string-based and integer-based version reports consistent.
+    impl_->versionString = value.empty() ? "4.6 AppGL bootstrap" : std::move(value);
 }
 
 GLCapabilities& GLContext::capabilities() {

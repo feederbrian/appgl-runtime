@@ -104,7 +104,11 @@ std::string CoverageStore::highestFullyImplementedVersion() const {
             return it->claimedString;
         }
     }
-    return "3.0 AppGL bootstrap";
+    // No coverage rules qualified yet (cold-boot or selective tests). Report
+    // 4.6 so external loaders/engines treat the context as the full AppGL
+    // surface; the live coverage store will overwrite this once entry points
+    // start being marked implemented during normal frame submission.
+    return "4.6 AppGL bootstrap";
 }
 
 std::string CoverageStore::buildSnapshotJson(std::string_view renderer, const std::vector<std::string>& traceTail) const {
