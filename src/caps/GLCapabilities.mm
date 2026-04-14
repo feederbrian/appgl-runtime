@@ -37,6 +37,31 @@
 #define GL_INTENSITY8 0x804B
 #endif
 
+// Phase 8X Group 4d follow-up⁶ — fixed-function pname aliases. These are
+// compat-profile scalar queries (GL 1.x–2.x era) that have been removed
+// from core glcorearb.h but are still probed by legacy engines during
+// steady-state rendering. BAR's followup⁵ verification captured two of
+// them in the select-menu smoke:
+//
+//   GL_LIST_INDEX (0x0B33)       — queried every frame by the Recoil
+//                                  fog-state probe (28,717 hits over 22s).
+//                                  There is no active display list in
+//                                  AppGL, so the spec-correct answer is 0.
+//
+//   GL_MAX_TEXTURE_COORDS (0x8871) — legacy fixed-function multi-texture
+//                                    limit. Engines use it to size their
+//                                    texcoord-unit arrays even on GL 3.x+
+//                                    code paths. GL 3.2 spec floor is 8.
+//
+// Defining them locally keeps initializeLimits self-contained without
+// touching the public glcorearb.h surface.
+#ifndef GL_LIST_INDEX
+#define GL_LIST_INDEX 0x0B33
+#endif
+#ifndef GL_MAX_TEXTURE_COORDS
+#define GL_MAX_TEXTURE_COORDS 0x8871
+#endif
+
 namespace appgl {
 
 GLCapabilities::GLCapabilities(void* metalDevice) {
@@ -60,6 +85,19 @@ bool GLCapabilities::queryInteger(GLenum pname, GLint* out) const {
         }
         out[0] = static_cast<GLint>(value->second);
         out[1] = static_cast<GLint>(value->second);
+        return true;
+    }
+    // Phase 8X Group 4d follow-up⁶ — GL_COMPRESSED_TEXTURE_FORMATS is a
+    // variable-length query: the caller is supposed to glGetIntegerv the
+    // count from GL_NUM_COMPRESSED_TEXTURE_FORMATS first, then size the
+    // output buffer and pass it here. We advertise zero compressed
+    // format enums through this query (compressed formats are reachable
+    // via glCompressedTexImage2D / format table routing, but none are
+    // exposed through the legacy probe), so the correct behaviour is to
+    // write zero entries and return true. The NUM alias is published in
+    // initializeLimits alongside every other scalar cap.
+    if (pname == GL_COMPRESSED_TEXTURE_FORMATS) {
+        (void)out;
         return true;
     }
 
@@ -93,6 +131,14 @@ bool GLCapabilities::queryInteger64(GLenum pname, GLint64* out) const {
         }
         out[0] = value->second;
         out[1] = value->second;
+        return true;
+    }
+    // Phase 8X Group 4d follow-up⁶ — zero-entry variable-length cap. See
+    // the matching comment in queryInteger for the NUM-first probe
+    // contract; the 64-bit path mirrors it so glGetInteger64v and
+    // glGetIntegerv return identical shapes.
+    if (pname == GL_COMPRESSED_TEXTURE_FORMATS) {
+        (void)out;
         return true;
     }
 
@@ -422,6 +468,19 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_TEXTURE_IMAGE_UNITS] = 16;
     integerLimits_[GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS] = 32;
     integerLimits_[GL_MAX_UNIFORM_BLOCK_SIZE] = maxUniformBlockSize;
+    // Phase 8X Group 4d follow-up⁶ — UBO offset alignment. Metal's
+    // MTLBuffer::setBufferOffset requires Mac-family GPUs to align constant
+    // buffer offsets to 256 bytes (Apple-family GPUs are happy at 16, but
+    // we publish the universal Mac floor so BAR's UBO offset padding is
+    // always wide enough to satisfy the actual Metal binding path). GL
+    // 4.2 spec floor is 1; engines that respect this cap will round their
+    // per-instance UBO offsets up to 256 and nothing breaks on either GPU
+    // family. BAR caught this pname in followup⁵ §6d as 0x8A34 — their
+    // table misnamed it GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS (which
+    // is 0x8A31 and already published below). The correct enum is
+    // GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT and every UBO-using app queries
+    // it at startup to size their dynamic-UBO ring buffer.
+    integerLimits_[GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT] = 256;
     integerLimits_[GL_MAX_VERTEX_UNIFORM_COMPONENTS] = 4096;
     integerLimits_[GL_MAX_FRAGMENT_UNIFORM_COMPONENTS] = 4096;
     integerLimits_[GL_MAX_SAMPLES] = maxSamples;
@@ -486,6 +545,31 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_COMPUTE_TEXTURE_IMAGE_UNITS] = 16;
     integerLimits_[GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS] = 16;
     integerLimits_[GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS] = 16;
+
+    // Phase 8X Group 4d follow-up⁶ — fixed-function multi-texture limit.
+    // GL_MAX_TEXTURE_COORDS (0x8871) was a GL 1.3 query that reported the
+    // number of texture coordinate sets the fixed-function pipeline could
+    // interpolate per vertex. Modern engines still probe it during
+    // version-flag synthesis even on GL 3.x+ code paths (the enum outlived
+    // the fixed-function stage in compat headers until 4.6). The GL 3.2
+    // spec floor is 8; we report 8 so probing engines see a sensible
+    // number instead of a named GL_INVALID_ENUM breadcrumb.
+    integerLimits_[GL_MAX_TEXTURE_COORDS] = 8;
+
+    // Phase 8X Group 4d follow-up⁶ — fixed-function display list index.
+    // GL_LIST_INDEX (0x0B33) is queried every frame by Recoil's steady-
+    // state draw loop and was responsible for 28,717 of the 28,769
+    // errorLog entries in BAR's followup⁵ select-menu smoke (~99.8%
+    // noise). AppGL has no display list stack — glNewList/glEndList are
+    // explicit emulation gaps under Phase A — so the spec-correct answer
+    // is 0 ("no list is currently being compiled"). Publishing it as a
+    // cap silences the ring firehose without hiding real errors.
+    //
+    // Note: followup⁵ briefly mistook 0x0B33 for GL_FOG_INDEX (which is
+    // 0x0B61). Both are fixed-function, but the correct identification
+    // matters because GL_FOG_INDEX would need a different default (the
+    // current fog index, not 0).
+    integerLimits_[GL_LIST_INDEX] = 0;
 
     // Texture filter anisotropy. Metal's upper limit is 16. GL 4.6 promoted
     // the ARB/EXT name to core as GL_MAX_TEXTURE_MAX_ANISOTROPY (no suffix);
@@ -572,6 +656,18 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // slots an explicit-location uniform can occupy. Spec floor is 1024;
     // AppGL has no hard internal ceiling so we report the floor.
     integerLimits_[GL_MAX_UNIFORM_LOCATIONS] = 1024;
+
+    // Phase 8X Group 4d follow-up⁶ — compressed-format probe count.
+    // Publishing GL_NUM_COMPRESSED_TEXTURE_FORMATS = 0 advertises "no
+    // compressed formats exposed through the legacy enum list". The
+    // format table already routes BC/ETC2/EAC/ASTC through the full
+    // glCompressedTexImage2D path for engines that know the specific
+    // enum they need, but the queryable list here is empty so compliant
+    // callers skip the variable-length GL_COMPRESSED_TEXTURE_FORMATS
+    // follow-up query. GLCapabilities::queryInteger still accepts the
+    // variable-length path with a zero-write special case so legacy
+    // callers that skip the NUM probe don't trip a GL_INVALID_ENUM.
+    integerLimits_[GL_NUM_COMPRESSED_TEXTURE_FORMATS] = 0;
 
     // Framebuffer object dimensions. Match the viewport limits.
     integerLimits_[GL_MAX_FRAMEBUFFER_WIDTH] = maxViewportDimension;

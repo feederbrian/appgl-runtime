@@ -11,6 +11,36 @@
 #include "../objects/GLObjectStore.h"
 #include "../shared/JsonUtil.h"
 
+// Phase 8X Group 4d follow-up⁶ — compat-profile upload aliases. These
+// enums were removed from the core profile in GL 3.2, so glcorearb.h does
+// not expose them. AppGL still accepts them at the driver edge because
+// font caches (FreeType, stb_truetype, BAR's glyph atlases) allocate
+// GL_ALPHA8 / GL_LUMINANCE8 / GL_LUMINANCE8_ALPHA8 textures through
+// glTexImage2D and upload single-channel glyph coverage bytes. The same
+// #ifndef guards are used by GLCapabilities.mm to keep both sides of the
+// upload path in sync without polluting the public glcorearb.h surface.
+#ifndef GL_ALPHA8
+#define GL_ALPHA8 0x803C
+#endif
+#ifndef GL_LUMINANCE
+#define GL_LUMINANCE 0x1909
+#endif
+#ifndef GL_LUMINANCE_ALPHA
+#define GL_LUMINANCE_ALPHA 0x190A
+#endif
+#ifndef GL_LUMINANCE8
+#define GL_LUMINANCE8 0x8040
+#endif
+#ifndef GL_LUMINANCE8_ALPHA8
+#define GL_LUMINANCE8_ALPHA8 0x8045
+#endif
+#ifndef GL_INTENSITY
+#define GL_INTENSITY 0x8049
+#endif
+#ifndef GL_INTENSITY8
+#define GL_INTENSITY8 0x804B
+#endif
+
 namespace appgl {
 
 namespace {
@@ -498,6 +528,16 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
     // carry pixel data alongside the internal format, and the current
     // driver-edge upload path only handles the RGBA8 shadow — so they must
     // reject anything that would require a higher-precision upload.
+    //
+    // Phase 8X Group 4d follow-up⁶ — the compat-profile alpha / luminance /
+    // intensity aliases are added here because GLCapabilities already maps
+    // them to MTLPixelFormatRGBA8Unorm and buildRGBA8Upload already handles
+    // their channel-fill rules (see GLContext.mm:920+). The validator was
+    // the only thing keeping these out; unblocking them restores legibility
+    // for BAR's glyph atlases, which were producing ~6 uploads/sec of
+    // `glTexImage2D format/type combination is outside the Phase A RGBA8
+    // upload path` errors on the select-menu smoke and leaving the text
+    // shapes correctly positioned but sampling from empty textures.
     switch (internalFormat) {
         case GL_RED:
         case GL_RG:
@@ -507,6 +547,16 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
         case GL_RG8:
         case GL_RGB8:
         case GL_RGBA8:
+        // Compat-profile single-channel aliases — all upcast to RGBA8 at
+        // the buildRGBA8Upload edge with the documented channel-fill rules.
+        case GL_ALPHA:
+        case GL_ALPHA8:
+        case GL_LUMINANCE:
+        case GL_LUMINANCE8:
+        case GL_LUMINANCE_ALPHA:
+        case GL_LUMINANCE8_ALPHA8:
+        case GL_INTENSITY:
+        case GL_INTENSITY8:
             return true;
         default:
             return false;
@@ -535,7 +585,22 @@ bool isValidStorageInternalFormat(GLContext* context, GLenum internalFormat) {
 }
 
 bool isValidTextureUploadFormat(GLenum format) {
-    return format == GL_RED || format == GL_RG || format == GL_RGB || format == GL_RGBA;
+    // Phase 8X Group 4d follow-up⁶ — the compat-profile GL_ALPHA /
+    // GL_LUMINANCE / GL_LUMINANCE_ALPHA / GL_INTENSITY upload formats are
+    // accepted here because buildRGBA8Upload (GLContext.mm:920+) knows how
+    // to fan each one out into the RGBA8 shadow with the correct channel
+    // replication. Restricting the validator to GL_RED..GL_RGBA was what
+    // kept BAR's glyph atlases from landing pixels during the followup⁵
+    // smoke — the select-menu glyphs drew in the right place but sampled
+    // from an empty texture because the upload path rejected them.
+    return format == GL_RED
+        || format == GL_RG
+        || format == GL_RGB
+        || format == GL_RGBA
+        || format == GL_ALPHA
+        || format == GL_LUMINANCE
+        || format == GL_LUMINANCE_ALPHA
+        || format == GL_INTENSITY;
 }
 
 bool isValidTextureUploadType(GLenum type) {
