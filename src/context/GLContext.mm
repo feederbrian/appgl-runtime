@@ -4745,6 +4745,78 @@ std::string defaultErrorMessage(GLenum error, bool internalCallSite) {
     return base;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 8X Group 4d follow-up³ — translated-draw fall-through instrumentation.
+//
+// The translated-draw path in glDrawArrays / glDrawArraysInstanced /
+// glDrawElements has a chain of guards that can silently fall through to the
+// solid-color fallback (or to a no-op for the instanced path). For BAR's
+// select-menu corpus we observe `pipelineCache: {hits:0, misses:0}` despite
+// `hasTranslatedPipeline=1`, which means encodeTranslatedDraw is never being
+// reached — one of these guards is firing for every draw without naming
+// itself in any log surface.
+//
+// `reportTranslatedFallbackOnce` emits a single NSLog line per (program, gate)
+// pair, gated by a per-program bitmask in GLProgramObject. The shape of the
+// line matches BAR's grep-aggregation request:
+//
+//   [GL] drawArrays-fallback: program=5 gate=shadowBytes-empty vao=3 vbo=7 attrCount=2
+//
+// `program` and `gate` are the two grep-by fields. `vao`, `vbo`, and
+// `attrCount` are bonus context for cross-referencing against the
+// objectStore dump in the live diagnostic JSON.
+//
+// The bitmask is per-program and per-gate, so a real game scene that pulls
+// in 200 distinct shader programs with 5 fall-through gates between them
+// produces at most 1000 log lines — actually far fewer in practice, because
+// the same gate is usually firing for every draw of the same program.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum class TranslatedFallbackGate : std::uint32_t {
+    EmptyAttributes  = 1u << 0,  // VAO has no enabled attributes
+    NullVBO          = 1u << 1,  // attribute 0's buffer name doesn't resolve
+    ShadowBytesEmpty = 1u << 2,  // VBO has no CPU-side shadow (likely glBufferStorage)
+    OffsetOverflow   = 1u << 3,  // first vertex offset overruns the shadow
+    EncodeFailed     = 1u << 4,  // encodeTranslatedDraw returned false
+};
+
+const char* translatedFallbackGateName(TranslatedFallbackGate gate) {
+    switch (gate) {
+        case TranslatedFallbackGate::EmptyAttributes:  return "empty-attributes";
+        case TranslatedFallbackGate::NullVBO:          return "null-vbo";
+        case TranslatedFallbackGate::ShadowBytesEmpty: return "shadowBytes-empty";
+        case TranslatedFallbackGate::OffsetOverflow:   return "offset-overflow";
+        case TranslatedFallbackGate::EncodeFailed:     return "encode-failed";
+    }
+    return "unknown";
+}
+
+void reportTranslatedFallbackOnce(GLProgramObject* program,
+                                  GLuint programName,
+                                  TranslatedFallbackGate gate,
+                                  const char* siteName,
+                                  GLuint vaoName,
+                                  std::size_t attrCount,
+                                  GLuint vboName,
+                                  std::size_t shadowBytesSize) {
+    if (program == nullptr || siteName == nullptr) {
+        return;
+    }
+    const std::uint32_t bit = static_cast<std::uint32_t>(gate);
+    if ((program->translatedFallbackGatesReported & bit) != 0) {
+        return;
+    }
+    program->translatedFallbackGatesReported |= bit;
+    NSLog(@"[GL] %s-fallback: program=%u gate=%s vao=%u vbo=%u attrCount=%zu shadowBytes=%zu",
+          siteName,
+          static_cast<unsigned>(programName),
+          translatedFallbackGateName(gate),
+          static_cast<unsigned>(vaoName),
+          static_cast<unsigned>(vboName),
+          attrCount,
+          shadowBytesSize);
+}
+
 }  // namespace
 
 void GLContext::pushError(GLenum error,
@@ -6733,16 +6805,38 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     if (program != nullptr && program->hasTranslatedPipeline) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
+        const bool gateEmpty = (vao == nullptr || vao->attributes.empty());
+        if (gateEmpty) {
+            reportTranslatedFallbackOnce(program, programName,
+                TranslatedFallbackGate::EmptyAttributes, "drawArrays",
+                vaoName, vao ? vao->attributes.size() : 0, 0, 0);
+        }
         if (vao != nullptr && !vao->attributes.empty()) {
             const auto& posAttr = vao->attributes[0];
             auto resolved = resolveVertexAttrib(posAttr, *vao);
             GLBufferObject* vbo = (resolved.bufferName != 0)
                 ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
+            if (vbo == nullptr) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::NullVBO, "drawArrays",
+                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+            } else if (vbo->shadowBytes.empty()) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::ShadowBytesEmpty, "drawArrays",
+                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+            }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = resolved.stride;
                 const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
                 const std::size_t startOff = resolved.offset + firstOff;
 
+                if (startOff > vbo->shadowBytes.size()) {
+                    reportTranslatedFallbackOnce(program, programName,
+                        TranslatedFallbackGate::OffsetOverflow, "drawArrays",
+                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vbo->shadowBytes.size());
+                }
                 if (startOff <= vbo->shadowBytes.size()) {
                     TranslatedDrawInfo tdi;
                     tdi.mode = mode;
@@ -6813,6 +6907,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     if (ok) {
                         return true;
                     }
+                    reportTranslatedFallbackOnce(program, programName,
+                        TranslatedFallbackGate::EncodeFailed, "drawArrays",
+                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vbo->shadowBytes.size());
                     // Fall through to solid-color path on failure.
                 }
             }
@@ -6884,16 +6982,37 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
     if (program != nullptr && program->hasTranslatedPipeline) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
+        if (vao == nullptr || vao->attributes.empty()) {
+            reportTranslatedFallbackOnce(program, programName,
+                TranslatedFallbackGate::EmptyAttributes, "drawArraysInstanced",
+                vaoName, vao ? vao->attributes.size() : 0, 0, 0);
+        }
         if (vao != nullptr && !vao->attributes.empty()) {
             const auto& posAttr = vao->attributes[0];
             auto resolved = resolveVertexAttrib(posAttr, *vao);
             GLBufferObject* vbo = (resolved.bufferName != 0)
                 ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
+            if (vbo == nullptr) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::NullVBO, "drawArraysInstanced",
+                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+            } else if (vbo->shadowBytes.empty()) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::ShadowBytesEmpty, "drawArraysInstanced",
+                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+            }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = resolved.stride;
                 const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
                 const std::size_t startOff = resolved.offset + firstOff;
 
+                if (startOff > vbo->shadowBytes.size()) {
+                    reportTranslatedFallbackOnce(program, programName,
+                        TranslatedFallbackGate::OffsetOverflow, "drawArraysInstanced",
+                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vbo->shadowBytes.size());
+                }
                 if (startOff <= vbo->shadowBytes.size()) {
                     TranslatedDrawInfo tdi;
                     tdi.mode = mode;
@@ -7001,6 +7120,10 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     if (ok) {
                         return true;
                     }
+                    reportTranslatedFallbackOnce(program, programName,
+                        TranslatedFallbackGate::EncodeFailed, "drawArraysInstanced",
+                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vbo->shadowBytes.size());
                 }
             }
         }
@@ -7087,15 +7210,36 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     const GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
     if (program != nullptr && program->hasTranslatedPipeline) {
+        // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
+        if (vao->attributes.empty()) {
+            reportTranslatedFallbackOnce(program, programName,
+                TranslatedFallbackGate::EmptyAttributes, "drawElements",
+                vaoName, 0, 0, 0);
+        }
         if (!vao->attributes.empty()) {
             const auto& posAttr = vao->attributes[0];
             auto resolved = resolveVertexAttrib(posAttr, *vao);
             GLBufferObject* vbo = (resolved.bufferName != 0)
                 ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
+            if (vbo == nullptr) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::NullVBO, "drawElements",
+                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+            } else if (vbo->shadowBytes.empty()) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::ShadowBytesEmpty, "drawElements",
+                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+            }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = resolved.stride;
                 const std::size_t startOff = resolved.offset;
 
+                if (startOff > vbo->shadowBytes.size()) {
+                    reportTranslatedFallbackOnce(program, programName,
+                        TranslatedFallbackGate::OffsetOverflow, "drawElements",
+                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vbo->shadowBytes.size());
+                }
                 if (startOff <= vbo->shadowBytes.size()) {
                     TranslatedDrawInfo tdi;
                     tdi.mode = mode;
@@ -7169,6 +7313,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     if (ok) {
                         return true;
                     }
+                    reportTranslatedFallbackOnce(program, programName,
+                        TranslatedFallbackGate::EncodeFailed, "drawElements",
+                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vbo->shadowBytes.size());
                     // Fall through to solid-color path on failure.
                 }
             }

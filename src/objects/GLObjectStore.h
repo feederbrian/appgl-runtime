@@ -317,6 +317,16 @@ struct GLProgramObject {
     // can invalidate if the render target format changes.
     std::uint32_t metalPipelineColorFormat = 0;
 
+    // Phase 8X Group 4d follow-up³ — diagnostic instrumentation for the
+    // translated-draw fall-through path. Each bit corresponds to a
+    // TranslatedFallbackGate enumerator (defined in GLContext.mm). The
+    // reportTranslatedFallbackOnce helper checks the matching bit, sets it
+    // if clear, and emits a single NSLog line per (program, gate) pair so
+    // BAR-side log analysis can name the gate that's silently routing draws
+    // through encodeSolidColorDraw instead of encodeTranslatedDraw without
+    // drowning in per-draw spam.
+    std::uint32_t translatedFallbackGatesReported = 0;
+
     // GL 4.3 program resource introspection tables (populated at link time).
     std::vector<GLProgramResourceEntry> resourceUniforms;
     std::vector<GLProgramResourceEntry> resourceUniformBlocks;
