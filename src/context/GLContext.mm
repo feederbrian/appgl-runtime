@@ -1436,7 +1436,8 @@ struct GLContext::Impl {
         //
         //   min/mag    = Linear   (Recoil's default; text looks right)
         //   mipFilter  = NotMipmapped
-        //   wrap s/t/r = ClampToEdge
+        //   wrap s/t/r = ClampToBorderColor + TransparentBlack
+        //                (followup¹²; see comment below)
         //   lodMin     = 0.0
         //   lodMax     = 0.25     (effectively "level 0 only",
         //                          defensive against Recoil mistakenly
@@ -1460,6 +1461,41 @@ struct GLContext::Impl {
         // atlas as LINEAR/CLAMP/no-mip even if Recoil asked for
         // something weirder, than honor the weird setting and
         // render illegible text" (followup⁸ §Primary).
+        //
+        // Phase 8X Group 4d follow-up¹² — address-mode revision.
+        //
+        // followup¹¹'s widened dedup caught the real 256×225 GL_ALPHA
+        // glyph atlas (texName=1) being uploaded via a
+        // `glTexImage2D(1×1 placeholder) → glTexImage2D(256×225 real)`
+        // reallocation pattern that followup¹⁰'s texName-only dedup
+        // had silenced. With the atlas now visible, BAR's followup¹¹
+        // verification memo (docs/phase-8x-group-4d-followup11-
+        // verification.md §"Theory A") reported that Recoil had
+        // *explicitly* set `wrapS=wrapT=GL_CLAMP_TO_BORDER` on the
+        // glyph atlas — which is the correct address mode for a
+        // tightly-packed glyph atlas. When a linear filter kernel
+        // samples slightly outside a glyph's UV rectangle (at the
+        // right or bottom edge of the glyph quad, due to sub-pixel
+        // positioning), `ClampToBorder + TransparentBlack` returns a
+        // transparent black pixel. `ClampToEdge` returns the
+        // leftmost/topmost pixel of the *next glyph* in the atlas,
+        // which manifests as "smeared / double-exposed glyphs" in
+        // text rendering — exactly the remaining visible artifact.
+        //
+        // followup⁹'s initial sledgehammer picked `ClampToEdge`
+        // because it was the common default and the priority at that
+        // round was fixing the `maxLevel=1000` LOD trap and the
+        // `wrap=REPEAT` bleed, both of which are genuine bugs on a
+        // compat-profile glyph atlas. With the LOD and mip sides
+        // locked down, the address mode can now move to what Recoil
+        // actually wanted.
+        //
+        // Metal's `MTLSamplerAddressModeClampToBorderColor` plus
+        // `MTLSamplerBorderColorTransparentBlack` has been available
+        // since macOS 10.12, well below our deployment target, and
+        // the rest of the runtime already maps GL_CLAMP_TO_BORDER to
+        // this mode in `metalAddressMode()` — so this override aligns
+        // with the non-compat path.
         const GLenum internalFormat = object.desc.internalFormat;
         const bool isCompatGlyphFormat =
             internalFormat == GL_ALPHA ||
@@ -1474,9 +1510,21 @@ struct GLContext::Impl {
             descriptor.minFilter = MTLSamplerMinMagFilterLinear;
             descriptor.magFilter = MTLSamplerMinMagFilterLinear;
             descriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
-            descriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
-            descriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
-            descriptor.rAddressMode = MTLSamplerAddressModeClampToEdge;
+            if (@available(macOS 10.12, *)) {
+                descriptor.sAddressMode = MTLSamplerAddressModeClampToBorderColor;
+                descriptor.tAddressMode = MTLSamplerAddressModeClampToBorderColor;
+                descriptor.rAddressMode = MTLSamplerAddressModeClampToBorderColor;
+                descriptor.borderColor = MTLSamplerBorderColorTransparentBlack;
+            } else {
+                // Fallback on pre-10.12 systems — Metal doesn't
+                // support border color there. Use ClampToEdge as the
+                // next-closest approximation; this path will not be
+                // exercised on any supported macOS deployment target
+                // but keeps the override well-defined.
+                descriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
+                descriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+                descriptor.rAddressMode = MTLSamplerAddressModeClampToEdge;
+            }
             descriptor.lodMinClamp = 0.0f;
             descriptor.lodMaxClamp = 0.25f;
             descriptor.compareFunction = MTLCompareFunctionNever;
@@ -1510,8 +1558,26 @@ struct GLContext::Impl {
             // the compat glyph path the override tag will be
             // `glyph-compat` and the params readout will show the
             // (ignored) Recoil-set values.
+            //
+            // Phase 8X Group 4d follow-up¹² — append an
+            // `overrideAddressMode=` tag so BAR can confirm that the
+            // post-override sampler descriptor now uses
+            // ClampToBorderColor+TransparentBlack (not ClampToEdge)
+            // on the glyph atlas. The `object.params` readout is
+            // unchanged: it still reports what Recoil asked for, so
+            // the delta between params.wrapS and overrideAddressMode
+            // makes the override action visible on one line.
+            const char* overrideAddressModeTag = "pass-through";
+            if (isCompatGlyphFormat) {
+                if (@available(macOS 10.12, *)) {
+                    overrideAddressModeTag = "ClampToBorder+TransparentBlack";
+                } else {
+                    overrideAddressModeTag = "ClampToEdge (pre-10.12)";
+                }
+            }
             NSLog(@"[GL] rebuildTextureSamplerState first-build texName=%u"
                   @" internalFormat=0x%04X override=%s"
+                  @" overrideAddressMode=%s"
                   @" minFilter=0x%04X magFilter=0x%04X"
                   @" wrapS=0x%04X wrapT=0x%04X wrapR=0x%04X"
                   @" minLod=%.2f maxLod=%.2f baseLevel=%d maxLevel=%d"
@@ -1519,6 +1585,7 @@ struct GLContext::Impl {
                   texName,
                   static_cast<unsigned>(internalFormat),
                   isCompatGlyphFormat ? "glyph-compat" : "none",
+                  overrideAddressModeTag,
                   static_cast<unsigned>(object.params.minFilter),
                   static_cast<unsigned>(object.params.magFilter),
                   static_cast<unsigned>(object.params.wrapS),
@@ -1597,6 +1664,184 @@ struct GLContext::Impl {
                   @" fragment.sampledTextures=%zu vertex.sampledTextures=%zu"
                   @" uniforms=%zu",
                   info.program, fragCount, vertCount, program.uniforms.size());
+
+            // Phase 8X Group 4d follow-up¹² — §Secondary: dump the full
+            // translated MSL source and uniform snapshot for this
+            // program, once at first resolve.
+            //
+            // BAR's followup¹¹ verification memo (Theory B) asked for
+            // this so they can determine whether program 5's vertex
+            // shader correctly normalizes the pixel-coord UVs into the
+            // `vUV` varying on its way to the fragment stage, or
+            // whether the SPIRV-Cross translation drops the
+            // normalization step. The pipelineCache `mslPreview` they
+            // see on shutdown is capped at ~200 chars by the ring
+            // budget — that reaches the top-of-file struct decls and
+            // nothing else. Here we dump the whole string, one line
+            // per NSLog, so every line stays grep-able with the `[GL]`
+            // prefix and BAR can locate the start/end of each section
+            // without worrying about NSLog line-splitting. The dump is
+            // one-shot per program (keyed on the same
+            // `loggedSamplerResolvePrograms` set that gates the
+            // first-call summary above), so cost is paid once at
+            // startup per program.
+            //
+            // Format per program:
+            //   msl-dump program=P BEGIN
+            //   vs.summary bytes=... lines=... hasTextureSize=? hasGetWidth=? hasGetHeight=?
+            //   vs.L001: <first line of vertex MSL>
+            //   ...
+            //   vs.END
+            //   fs.summary bytes=... lines=... hasTextureSize=? hasGetWidth=? hasGetHeight=?
+            //   fs.L001: <first line of fragment MSL>
+            //   ...
+            //   fs.END
+            //   uniforms-snapshot program=P count=N
+            //     uniform[i] name=... location=... type=0xHHHH arraySize=... value=...
+            //   msl-dump program=P END
+            //
+            // The `hasTextureSize` / `hasGetWidth` / `hasGetHeight`
+            // scan catches the three ways a translated MSL vertex
+            // shader could normalize pixel-coord UVs at run-time
+            // without a CPU-supplied inverse-atlas-size uniform.
+            // All three missing + no `u_atlasSize`-ish uniform in
+            // the snapshot → Theory B lands: the translation is
+            // dropping the normalization. All three missing + a
+            // likely inverse-atlas uniform present → Theory B lands
+            // on Recoil's side (they're supposed to plumb it but
+            // don't). Any one present → normalization exists and
+            // Theory B is out, focus shifts to the sampler path.
+            auto emitMslDump = [](const char* stageTag, const std::string& msl) {
+                // Quick scans for the three normalization markers.
+                auto containsToken = [](const std::string& hay, const char* needle) -> bool {
+                    return hay.find(needle) != std::string::npos;
+                };
+                const bool hasTextureSize = containsToken(msl, "textureSize(");
+                const bool hasGetWidth = containsToken(msl, ".get_width(");
+                const bool hasGetHeight = containsToken(msl, ".get_height(");
+
+                // Count lines so BAR can cross-check the dump
+                // isn't truncated by NSLog or the OS log ring.
+                std::size_t lineCount = 0;
+                for (char c : msl) {
+                    if (c == '\n') ++lineCount;
+                }
+                if (!msl.empty() && msl.back() != '\n') {
+                    ++lineCount;  // account for the unterminated final line
+                }
+
+                NSLog(@"[GL]   %s.summary bytes=%zu lines=%zu"
+                      @" hasTextureSize=%d hasGetWidth=%d hasGetHeight=%d",
+                      stageTag,
+                      msl.size(),
+                      lineCount,
+                      hasTextureSize ? 1 : 0,
+                      hasGetWidth ? 1 : 0,
+                      hasGetHeight ? 1 : 0);
+
+                // Emit every line individually so grep-for-prefix
+                // on the spring stderr capture can always locate
+                // the full block, and so each line remains under
+                // the OS log per-message truncation budget.
+                std::size_t lineIdx = 0;
+                std::size_t start = 0;
+                for (std::size_t i = 0; i <= msl.size(); ++i) {
+                    if (i == msl.size() || msl[i] == '\n') {
+                        ++lineIdx;
+                        const std::size_t len = i - start;
+                        const std::string line = msl.substr(start, len);
+                        NSLog(@"[GL]   %s.L%03zu: %s",
+                              stageTag, lineIdx, line.c_str());
+                        start = i + 1;
+                        if (i == msl.size()) break;
+                    }
+                }
+                NSLog(@"[GL]   %s.END", stageTag);
+            };
+
+            NSLog(@"[GL] msl-dump program=%u BEGIN", info.program);
+            emitMslDump("vs", program.vertexMSL);
+            emitMslDump("fs", program.fragmentMSL);
+
+            // Uniform snapshot — names, locations, types, and the
+            // current CPU-shadowed values. BAR specifically asked
+            // for this so they can answer "is there an atlas-size
+            // uniform plumbed into program 5 at all?" without
+            // having to cross-reference the link-time reflection
+            // against a separate uniformValues dump.
+            NSLog(@"[GL]   uniforms-snapshot program=%u count=%zu",
+                  info.program, program.uniforms.size());
+            for (std::size_t ui = 0; ui < program.uniforms.size(); ++ui) {
+                const auto& uinfo = program.uniforms[ui];
+                // Best-effort value decode. Sampler uniforms carry
+                // the bound texture unit in `ints[0]`. Scalar and
+                // vector float uniforms carry up to 16 floats for
+                // mat4. We print up to 4 elements of whatever the
+                // shadow vector holds, plus the raw type hex so BAR
+                // can fully disambiguate downstream.
+                const auto valIt = program.uniformValues.find(uinfo.location);
+                const bool hasValue = (valIt != program.uniformValues.end());
+
+                char valueBuf[192];
+                valueBuf[0] = '\0';
+                if (hasValue) {
+                    const auto& uval = valIt->second;
+                    if (!uval.floats.empty()) {
+                        const std::size_t n = std::min<std::size_t>(uval.floats.size(), 4);
+                        int off = std::snprintf(valueBuf, sizeof(valueBuf), "floats[");
+                        for (std::size_t i = 0; i < n; ++i) {
+                            off += std::snprintf(valueBuf + off,
+                                                 sizeof(valueBuf) - off,
+                                                 "%s%.4f",
+                                                 i == 0 ? "" : " ",
+                                                 uval.floats[i]);
+                        }
+                        std::snprintf(valueBuf + off, sizeof(valueBuf) - off,
+                                      "%s total=%zu]",
+                                      uval.floats.size() > n ? "..." : "",
+                                      uval.floats.size());
+                    } else if (!uval.ints.empty()) {
+                        const std::size_t n = std::min<std::size_t>(uval.ints.size(), 4);
+                        int off = std::snprintf(valueBuf, sizeof(valueBuf), "ints[");
+                        for (std::size_t i = 0; i < n; ++i) {
+                            off += std::snprintf(valueBuf + off,
+                                                 sizeof(valueBuf) - off,
+                                                 "%s%d",
+                                                 i == 0 ? "" : " ",
+                                                 uval.ints[i]);
+                        }
+                        std::snprintf(valueBuf + off, sizeof(valueBuf) - off,
+                                      "%s total=%zu]",
+                                      uval.ints.size() > n ? "..." : "",
+                                      uval.ints.size());
+                    } else if (!uval.uints.empty()) {
+                        std::snprintf(valueBuf, sizeof(valueBuf),
+                                      "uints[count=%zu first=%u]",
+                                      uval.uints.size(),
+                                      uval.uints[0]);
+                    } else if (!uval.doubles.empty()) {
+                        std::snprintf(valueBuf, sizeof(valueBuf),
+                                      "doubles[count=%zu first=%.4f]",
+                                      uval.doubles.size(),
+                                      uval.doubles[0]);
+                    } else {
+                        std::snprintf(valueBuf, sizeof(valueBuf),
+                                      "empty-shadow");
+                    }
+                } else {
+                    std::snprintf(valueBuf, sizeof(valueBuf), "unset");
+                }
+
+                NSLog(@"[GL]     uniform[%zu] name='%s' location=%d"
+                      @" type=0x%04X arraySize=%d value=%s",
+                      ui,
+                      uinfo.name.c_str(),
+                      uinfo.location,
+                      static_cast<unsigned>(uinfo.type),
+                      uinfo.arraySize,
+                      valueBuf);
+            }
+            NSLog(@"[GL] msl-dump program=%u END", info.program);
         }
 
         auto resolveStage = [&](const char* stageTag,
