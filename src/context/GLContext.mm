@@ -72,6 +72,27 @@
 namespace appgl {
 namespace {
 
+// Phase 8X Group 4d follow-up¹¹ — §Tertiary chokepoint-bypass warning
+// helper for DSA / copy entry points that currently drop data.
+// Mirrors AppGLGroup8.cpp's `warnDataDroppedOnce`; duplicated here
+// because this translation unit is separate and there's no shared
+// header for the diagnostic. BAR can grep `[GL] WARNING: bypass` to
+// find every hit. Emits once per `(functionName, texName)` pair so
+// if Recoil uses the same bypass on multiple textures we still see
+// each distinct victim.
+void warnBypassOnce(const char* functionName, GLuint texName) {
+    static std::unordered_set<std::uint64_t> warned;
+    const std::uint64_t key = (static_cast<std::uint64_t>(
+        std::hash<std::string>{}(functionName)) << 32) ^ static_cast<std::uint64_t>(texName);
+    if (warned.insert(key).second) {
+        NSLog(@"[GL] WARNING: bypass %s texName=%u — current implementation is"
+              @" a drop-data / stub-return-true path, texture byte payload is"
+              @" not routed through replaceMetalTexture. Phase 8X Group 4d"
+              @" follow-up¹¹ chokepoint instrumentation.",
+              functionName, texName);
+    }
+}
+
 constexpr std::size_t kMaxDebugMessages = 64;
 constexpr std::size_t kMaxDebugMessageLength = 1024;
 constexpr std::size_t kMaxDebugGroupDepth = 64;
@@ -1108,11 +1129,45 @@ struct GLContext::Impl {
         //     would reveal a channel-fill bug that blanks one
         //     channel or a stride bug that leaves gaps)
         //
-        // One-shot per GL texture name per process. Only fires when
-        // the caller passes a non-zero `texName` — the internal
-        // callers (generateMipmaps / attachment clear) pass 0 so we
-        // don't double-log the same texture on every re-upload.
-        if (texName != 0 && loggedUploadTextures.insert(texName).second) {
+        // Follow-up¹¹ — dedup re-fires on `(width, height, bytes)`
+        // mismatch so we catch Recoil's `glTexImage2D(w,h,NULL)` ->
+        // `glTexImage2D(real)` and `1×1 placeholder` -> `N×M real`
+        // allocation patterns. Only fires when the caller passes a
+        // non-zero `texName` — internal callers (generateMipmaps /
+        // attachment clear) leave texName at the default so their
+        // downstream re-uploads don't spam the log.
+        bool shouldFireFingerprint = false;
+        const char* reFireReason = "first";
+        if (texName != 0) {
+            const UploadFingerprintKey currentKey{
+                baseLevel.desc.width,
+                baseLevel.desc.height,
+                baseLevel.rgba8.size(),
+            };
+            auto [it, inserted] = loggedUploadTextures.try_emplace(texName, currentKey);
+            if (inserted) {
+                shouldFireFingerprint = true;
+                reFireReason = "first";
+            } else if (it->second.width != currentKey.width
+                    || it->second.height != currentKey.height
+                    || it->second.rgba8Bytes != currentKey.rgba8Bytes) {
+                // Figure out which component changed so BAR can tell
+                // a dimension realloc from a pure byte-count change
+                // (e.g. channel-fill format swap) at a glance.
+                if (it->second.width != currentKey.width && it->second.height != currentKey.height) {
+                    reFireReason = "dims";
+                } else if (it->second.width != currentKey.width) {
+                    reFireReason = "width";
+                } else if (it->second.height != currentKey.height) {
+                    reFireReason = "height";
+                } else {
+                    reFireReason = "bytes";
+                }
+                it->second = currentKey;
+                shouldFireFingerprint = true;
+            }
+        }
+        if (shouldFireFingerprint) {
             const auto& levelZero = baseLevel;
             const std::size_t byteCount = levelZero.rgba8.size();
             const std::uint8_t* bytes = levelZero.rgba8.data();
@@ -1163,13 +1218,13 @@ struct GLContext::Impl {
                 hexPeek[0] = '\0';
             }
 
-            NSLog(@"[GL] replaceMetalTexture first-upload texName=%u"
+            NSLog(@"[GL] replaceMetalTexture upload texName=%u reFire=%s"
                   @" internalFormat=0x%04X sourceFormat=0x%04X sourceType=0x%04X"
                   @" width=%d height=%d depth=%d rgba8Bytes=%zu"
                   @" fnv1a_head256=0x%08X fnv1a_tail256=0x%08X"
                   @" nonzeroQ0=%u nonzeroQ1=%u nonzeroQ2=%u nonzeroQ3=%u"
                   @" peek16=[%s]",
-                  texName,
+                  texName, reFireReason,
                   static_cast<unsigned>(levelZero.desc.internalFormat),
                   static_cast<unsigned>(levelZero.desc.sourceFormat),
                   static_cast<unsigned>(levelZero.desc.sourceType),
@@ -2521,16 +2576,75 @@ struct GLContext::Impl {
     // `resolveSamplerBindings` and `rebuildTextureSamplerState`.
     std::unordered_set<GLuint> loggedSamplerResolvePrograms;
     std::unordered_set<GLuint> loggedSamplerBuildTextures;
-    // Phase 8X Group 4d follow-up¹⁰ — one-shot-per-texture dedup for
-    // the RGBA8 upload-bytes fingerprint log. Keyed on GL texture
-    // name; only the first successful upload per texture fires the
-    // log. Re-uploads (glTexSubImage over an already-logged texture)
-    // are silent after the first fingerprint lands so BAR's grep
-    // stays clean. If BAR needs per-re-upload fingerprints in a
-    // future round we'd widen this to a map keyed on
-    // (texName, level, subregion) but the current ask is "does the
-    // first upload match native GL" which is answered by this set.
-    std::unordered_set<GLuint> loggedUploadTextures;
+    // Phase 8X Group 4d follow-up¹⁰/¹¹ — dedup state for the RGBA8
+    // upload-bytes fingerprint log emitted from `replaceMetalTexture`.
+    //
+    // Follow-up¹⁰ shape was `std::unordered_set<GLuint>` — one log per
+    // GL texture name per process. BAR's followup¹⁰ verification
+    // revealed that's too narrow: Recoil allocates with
+    // `glTexImage2D(w,h,NULL)` (or a 1×1 placeholder) and then calls
+    // `glTexImage2D(real w, real h, real bytes)` to reupload — the
+    // second call reaches `replaceMetalTexture` but the texName was
+    // already in the set, so the fingerprint never re-fires and we
+    // miss the real glyph payload entirely.
+    //
+    // Follow-up¹¹ widens the key to `(width, height, rgba8Bytes)` so
+    // the fingerprint re-fires whenever any of those change. That
+    // catches both the `NULL → real` allocation pattern and the
+    // `1×1 → N×M` reallocation pattern described in §Primary of
+    // `docs/phase-8x-group-4d-followup10-verification.md`. The log
+    // line includes a `reFire=...` field naming which component
+    // changed so BAR can tell a realloc from a first upload at a
+    // glance.
+    struct UploadFingerprintKey {
+        GLsizei width = 0;
+        GLsizei height = 0;
+        std::size_t rgba8Bytes = 0;
+    };
+    std::unordered_map<GLuint, UploadFingerprintKey> loggedUploadTextures;
+    // Phase 8X Group 4d follow-up¹¹ — §Secondary per-subregion dedup
+    // for the `texSubImage` fingerprint log. Keyed on
+    // `(texName, xoffset, yoffset, width, height)` so each distinct
+    // updated rectangle on a given texture fires at most once.
+    // Recoil's glyph cache streams per-glyph sub-images into a single
+    // atlas texture; this keeps the log from flooding while still
+    // capturing the first update at every distinct offset.
+    struct SubImageRegionKey {
+        GLuint texName = 0;
+        GLint xoffset = 0;
+        GLint yoffset = 0;
+        GLsizei width = 0;
+        GLsizei height = 0;
+        bool operator==(const SubImageRegionKey& other) const {
+            return texName == other.texName
+                && xoffset == other.xoffset
+                && yoffset == other.yoffset
+                && width == other.width
+                && height == other.height;
+        }
+    };
+    struct SubImageRegionKeyHash {
+        std::size_t operator()(const SubImageRegionKey& k) const noexcept {
+            // Simple FNV-1a of the five fields as raw bytes. Not
+            // cryptographic, just needs to spread well for an
+            // unordered_set bucket count in the low thousands (one
+            // entry per distinct sub-image rect per texture).
+            std::uint64_t h = 0xcbf29ce484222325ull;
+            auto mix = [&h](std::uint32_t v) {
+                for (int i = 0; i < 4; ++i) {
+                    h ^= static_cast<std::uint8_t>(v >> (i * 8));
+                    h *= 0x100000001b3ull;
+                }
+            };
+            mix(k.texName);
+            mix(static_cast<std::uint32_t>(k.xoffset));
+            mix(static_cast<std::uint32_t>(k.yoffset));
+            mix(static_cast<std::uint32_t>(k.width));
+            mix(static_cast<std::uint32_t>(k.height));
+            return static_cast<std::size_t>(h);
+        }
+    };
+    std::unordered_set<SubImageRegionKey, SubImageRegionKeyHash> loggedSubImageRegions;
     // Per-context fixed-function matrix mirror. Compat-profile matrix
     // entry points (defined in src/runtime/AppGLMatrixOverrides.cpp)
     // route through this member, and the draw path reads from it to
@@ -4294,6 +4408,68 @@ bool GLContext::texSubImage(
             );
         }
     }
+
+    // Phase 8X Group 4d follow-up¹¹ — §Secondary per-subregion
+    // fingerprint. Fires at most once per distinct
+    // `(texName, xoffset, yoffset, width, height)` so Recoil's
+    // glyph streaming (one sub-image call per glyph rect) gets
+    // fingerprinted at the first update to each distinct
+    // rectangle without flooding the log on repeat updates to
+    // the same rectangle.
+    //
+    // The hash runs on the channel-fill-expanded RGBA8 `upload`
+    // vector — that's the same representation the outer texture's
+    // level-0 byte store uses, so BAR can cross-reference it
+    // against the native-GL-path fingerprint BAR computes on the
+    // post-channel-fill RGBA8.
+    //
+    // Unlike `replaceMetalTexture`'s log, this fires unconditionally
+    // (not gated on texName !=0) because by the time we reach this
+    // point the object pointer is valid and we know the bound
+    // texture name is non-zero (currentTexture returned a concrete
+    // object).
+    const GLuint subTexName = impl_->state->boundTexture(target);
+    if (subTexName != 0 && depth == 1) {
+        Impl::SubImageRegionKey key{subTexName, xoffset, yoffset, width, height};
+        if (impl_->loggedSubImageRegions.insert(key).second) {
+            const std::uint8_t* subBytes = upload.data();
+            const std::size_t subByteCount = upload.size();
+            auto fnv1a = [](const std::uint8_t* p, std::size_t n) {
+                std::uint32_t h = 0x811c9dc5u;
+                for (std::size_t i = 0; i < n; ++i) {
+                    h ^= p[i];
+                    h *= 0x01000193u;
+                }
+                return h;
+            };
+            const std::uint32_t subHash = subByteCount ? fnv1a(subBytes, subByteCount) : 0;
+            std::uint32_t nonzeroCount = 0;
+            for (std::size_t i = 0; i < subByteCount; ++i) {
+                if (subBytes[i] != 0) { ++nonzeroCount; }
+            }
+            char hexPeek[64] = {0};
+            const std::size_t peekLen = std::min<std::size_t>(subByteCount, 16);
+            for (std::size_t i = 0; i < peekLen; ++i) {
+                std::snprintf(hexPeek + i * 3, sizeof(hexPeek) - i * 3,
+                              "%02X ", subBytes[i]);
+            }
+            if (peekLen > 0) { hexPeek[peekLen * 3 - 1] = '\0'; }
+            NSLog(@"[GL] texSubImage first-call texName=%u target=0x%04X level=%d"
+                  @" subregion=[%d,%d,%d,%d] sourceFormat=0x%04X sourceType=0x%04X"
+                  @" rgba8Bytes=%zu fnv1a=0x%08X nonzero=%u peek16=[%s]",
+                  subTexName,
+                  static_cast<unsigned>(target),
+                  level,
+                  xoffset, yoffset, width, height,
+                  static_cast<unsigned>(format),
+                  static_cast<unsigned>(type),
+                  subByteCount,
+                  subHash,
+                  nonzeroCount,
+                  hexPeek);
+        }
+    }
+
     if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
@@ -8988,6 +9164,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     }
     // Stub: actual Metal blit encoder copy will be wired when texture Metal
     // objects are fully instantiated at upload time.
+    warnBypassOnce("copyImageSubData", dstIsTex ? dstName : 0);
     return true;
 }
 
@@ -9634,6 +9811,7 @@ bool GLContext::getNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr
     body \
     impl_->state->bindTexture(_target, _prevTex);
 
+
 bool GLContext::textureStorage1D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width) {
     DSA_TEX_WRAP(texture, {
         bool ok = texStorage(GL_TEXTURE_1D, levels, internalformat, width, 1, 1);
@@ -9711,6 +9889,7 @@ bool GLContext::compressedTextureSubImage1D(GLuint texture, GLint level, GLint x
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
     (void)level; (void)xoffset; (void)width; (void)format; (void)imageSize; (void)data;
+    warnBypassOnce("compressedTextureSubImage1D", texture);
     // Accepted — compressed sub-image upload deferred to Metal texture instantiation.
     return true;
 }
@@ -9719,6 +9898,7 @@ bool GLContext::compressedTextureSubImage2D(GLuint texture, GLint level, GLint x
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
     (void)level; (void)xoffset; (void)yoffset; (void)width; (void)height; (void)format; (void)imageSize; (void)data;
+    warnBypassOnce("compressedTextureSubImage2D", texture);
     return true;
 }
 
@@ -9726,10 +9906,12 @@ bool GLContext::compressedTextureSubImage3D(GLuint texture, GLint level, GLint x
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
     (void)level; (void)xoffset; (void)yoffset; (void)zoffset; (void)width; (void)height; (void)depth; (void)format; (void)imageSize; (void)data;
+    warnBypassOnce("compressedTextureSubImage3D", texture);
     return true;
 }
 
 bool GLContext::copyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
+    warnBypassOnce("copyTextureSubImage1D", texture);
     DSA_TEX_WRAP(texture, {
         (void)level; (void)xoffset; (void)x; (void)y; (void)width;
         // Accepted — deferred to Metal blit path.
@@ -9738,6 +9920,7 @@ bool GLContext::copyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset
 }
 
 bool GLContext::copyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
+    warnBypassOnce("copyTextureSubImage2D", texture);
     DSA_TEX_WRAP(texture, {
         (void)level; (void)xoffset; (void)yoffset; (void)x; (void)y; (void)width; (void)height;
         return true;
@@ -9745,6 +9928,7 @@ bool GLContext::copyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset
 }
 
 bool GLContext::copyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
+    warnBypassOnce("copyTextureSubImage3D", texture);
     DSA_TEX_WRAP(texture, {
         (void)level; (void)xoffset; (void)yoffset; (void)zoffset; (void)x; (void)y; (void)width; (void)height;
         return true;

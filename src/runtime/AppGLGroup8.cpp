@@ -14,6 +14,10 @@
 #include "../objects/GLObjectStore.h"
 #include "../../include/AppGL/glcorearb.h"
 
+#include <cstdio>
+#include <string>
+#include <unordered_set>
+
 namespace appgl {
 
 namespace {
@@ -22,6 +26,32 @@ constexpr const char* kPhaseAQueryTestId = "phase-a.query-objects";
 
 GLContext* currentContextOrNull() {
     return Runtime::shared().currentContext();
+}
+
+// Phase 8X Group 4d follow-up¹¹ — §Tertiary chokepoint-bypass
+// warning helper. Many 3.3 texture-upload entry points in this file
+// are still pass-through no-op stubs (`(void)data;`) from the
+// original Phase A gate landing. If Recoil's glyph cache (or any
+// other consumer) calls one of these, the byte payload is silently
+// dropped, which is one of BAR's followup¹⁰ hypotheses for "where
+// is the real glyph atlas going". Each stub that drops data now
+// fires a one-shot stderr warning the first time it's invoked so
+// BAR's log capture will show exactly which bypass is in use.
+//
+// Writes to stderr via fprintf because AppGLGroup8.cpp is plain C++
+// and NSLog requires an Objective-C++ translation unit. NSLog's
+// default destination on macOS is also stderr, so BAR's existing
+// grep-for-[GL] pattern works uniformly across both paths.
+void warnDataDroppedOnce(const char* functionName) {
+    static std::unordered_set<std::string> warned;
+    if (warned.insert(functionName).second) {
+        std::fprintf(stderr,
+                     "[GL] WARNING: %s called but the implementation is a"
+                     " drop-data stub — texture byte payload is discarded."
+                     " Phase 8X Group 4d follow-up¹¹ bypass instrumentation.\n",
+                     functionName);
+        std::fflush(stderr);
+    }
 }
 
 // --- Phase 8 stubs (non-query) ---------------------------------------------
@@ -70,6 +100,7 @@ static void APIENTRY glCopyTexImage1D(GLenum target, GLint level, GLenum interna
     (void)y;
     (void)width;
     (void)border;
+    warnDataDroppedOnce("glCopyTexImage1D");
 }
 
 static void APIENTRY glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) {
@@ -81,6 +112,7 @@ static void APIENTRY glCopyTexImage2D(GLenum target, GLint level, GLenum interna
     (void)width;
     (void)height;
     (void)border;
+    warnDataDroppedOnce("glCopyTexImage2D");
 }
 
 static void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
@@ -90,6 +122,7 @@ static void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffs
     (void)x;
     (void)y;
     (void)width;
+    warnDataDroppedOnce("glCopyTexSubImage1D");
 }
 
 static void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
@@ -101,6 +134,7 @@ static void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffs
     (void)y;
     (void)width;
     (void)height;
+    warnDataDroppedOnce("glCopyTexSubImage2D");
 }
 
 static void APIENTRY glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices) {
@@ -122,6 +156,7 @@ static void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffs
     (void)y;
     (void)width;
     (void)height;
+    warnDataDroppedOnce("glCopyTexSubImage3D");
 }
 
 static void APIENTRY glSampleCoverage(GLfloat value, GLboolean invert) {
@@ -139,6 +174,7 @@ static void APIENTRY glCompressedTexImage3D(GLenum target, GLint level, GLenum i
     (void)border;
     (void)imageSize;
     (void)data;
+    warnDataDroppedOnce("glCompressedTexImage3D");
 }
 
 static void APIENTRY glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data) {
@@ -150,6 +186,7 @@ static void APIENTRY glCompressedTexImage2D(GLenum target, GLint level, GLenum i
     (void)border;
     (void)imageSize;
     (void)data;
+    warnDataDroppedOnce("glCompressedTexImage2D");
 }
 
 static void APIENTRY glCompressedTexImage1D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLint border, GLsizei imageSize, const void *data) {
@@ -160,6 +197,7 @@ static void APIENTRY glCompressedTexImage1D(GLenum target, GLint level, GLenum i
     (void)border;
     (void)imageSize;
     (void)data;
+    warnDataDroppedOnce("glCompressedTexImage1D");
 }
 
 static void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data) {
@@ -174,6 +212,7 @@ static void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level, GLint
     (void)format;
     (void)imageSize;
     (void)data;
+    warnDataDroppedOnce("glCompressedTexSubImage3D");
 }
 
 static void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data) {
@@ -186,6 +225,7 @@ static void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level, GLint
     (void)format;
     (void)imageSize;
     (void)data;
+    warnDataDroppedOnce("glCompressedTexSubImage2D");
 }
 
 static void APIENTRY glCompressedTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void *data) {
@@ -196,6 +236,7 @@ static void APIENTRY glCompressedTexSubImage1D(GLenum target, GLint level, GLint
     (void)format;
     (void)imageSize;
     (void)data;
+    warnDataDroppedOnce("glCompressedTexSubImage1D");
 }
 
 static void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void *img) {

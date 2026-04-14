@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <sstream>
+#include <unordered_set>
 
 #include "../../include/AppGL/AppGL.h"
 #include "../caps/GLCapabilities.h"
@@ -75,6 +78,46 @@ std::string formatFloat(GLfloat value) {
     stream.precision(3);
     stream << value;
     return stream.str();
+}
+
+// Phase 8X Group 4d follow-up¹¹ — §Tertiary upload-rejection warning
+// helper. `glTexImage2D` / `glTexSubImage2D` silently push
+// GL_INVALID_ENUM when the caller hands them a `format` or `type`
+// outside `isValidTextureUploadFormat` / `isValidTextureUploadType`
+// (see AppGLRuntime.cpp:587+). On the GL error queue this shows up
+// as a validation error but does not appear in the stderr capture
+// BAR is grepping — so if Recoil uses `GL_UNSIGNED_INT_8_8_8_8_REV`
+// or `GL_BGRA` for its glyph atlases the rejection is invisible in
+// the log stream and the glyph bytes vanish without a trace.
+//
+// This emits one `[GL] WARNING:` stderr line the first time each
+// distinct `(functionName, format, type, internalFormat)` tuple
+// is rejected, so BAR can see which uploads are being dropped at
+// the validator edge. Downstream of this function, execution still
+// returns normally after `recordValidationError`.
+void warnUploadRejectionOnce(const char* functionName,
+                             GLenum format,
+                             GLenum type,
+                             GLenum internalFormat) {
+    static std::unordered_set<std::uint64_t> warned;
+    const std::uint64_t key =
+        (static_cast<std::uint64_t>(std::hash<std::string>{}(functionName)) << 48)
+        ^ (static_cast<std::uint64_t>(internalFormat) << 32)
+        ^ (static_cast<std::uint64_t>(format) << 16)
+        ^ static_cast<std::uint64_t>(type);
+    if (warned.insert(key).second) {
+        std::fprintf(stderr,
+                     "[GL] WARNING: upload-rejection %s"
+                     " internalFormat=0x%04X format=0x%04X type=0x%04X — "
+                     "combination is outside the Phase A RGBA8 validator;"
+                     " byte payload dropped at the entry point."
+                     " Phase 8X Group 4d follow-up¹¹.\n",
+                     functionName,
+                     static_cast<unsigned>(internalFormat),
+                     static_cast<unsigned>(format),
+                     static_cast<unsigned>(type));
+        std::fflush(stderr);
+    }
 }
 
 void recordValidationError(GLContext* context, std::string_view functionName, GLenum error, std::string_view message) {
@@ -2426,6 +2469,7 @@ void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat, GLs
     }
     if (!isValidLegacyUploadInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexImage1D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        warnUploadRejectionOnce("glTexImage1D", format, type, static_cast<GLenum>(internalformat));
         return;
     }
     if (context->texImage(target, level, internalformat, width, 1, 1, border, format, type, pixels)) {
@@ -2445,6 +2489,7 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLs
     }
     if (!isValidLegacyUploadInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexImage2D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        warnUploadRejectionOnce("glTexImage2D", format, type, static_cast<GLenum>(internalformat));
         return;
     }
     if (context->texImage(target, level, internalformat, width, height, 1, border, format, type, pixels)) {
@@ -2475,6 +2520,7 @@ void APIENTRY glTexImage3D(
     }
     if (!isValidLegacyUploadInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexImage3D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        warnUploadRejectionOnce("glTexImage3D", format, type, static_cast<GLenum>(internalformat));
         return;
     }
     if (context->texImage(target, level, internalformat, width, height, depth, border, format, type, pixels)) {
@@ -2494,6 +2540,7 @@ void APIENTRY glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei
     }
     if (!isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexSubImage1D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        warnUploadRejectionOnce("glTexSubImage1D", format, type, 0);
         return;
     }
     if (context->texSubImage(target, level, xoffset, 0, 0, width, 1, 1, format, type, pixels)) {
@@ -2513,6 +2560,7 @@ void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint y
     }
     if (!isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexSubImage2D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        warnUploadRejectionOnce("glTexSubImage2D", format, type, 0);
         return;
     }
     if (context->texSubImage(target, level, xoffset, yoffset, 0, width, height, 1, format, type, pixels)) {
@@ -2544,6 +2592,7 @@ void APIENTRY glTexSubImage3D(
     }
     if (!isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexSubImage3D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
+        warnUploadRejectionOnce("glTexSubImage3D", format, type, 0);
         return;
     }
     if (context->texSubImage(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels)) {
