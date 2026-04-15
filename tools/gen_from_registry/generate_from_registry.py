@@ -80,8 +80,17 @@ EXTRA_ALIASES = [
 # `appgl_*` uniforms at draw time, so the matrix stack entry points
 # go here. Everything else stays on the silent-stub path.
 #
-# Hand-written definitions live in src/runtime/AppGLMatrixOverrides.cpp.
+# Hand-written definitions live in src/runtime/AppGLMatrixOverrides.cpp and
+# src/runtime/AppGLImmediateMode.cpp. The matrix-stack entries route into
+# the per-context `MatrixStateMirror`; the immediate-mode geometry entries
+# (glBegin/glVertex*/glColor*/glTexCoord*/glMultiTexCoord*/glEnd) land in
+# a capture state on `GLContext` and drain into `MetalFrameGraph::
+# encodeImmediateModeDraw` from `glEnd`. Both families must stay in
+# `MANUAL_FIXED_FUNCTION_OVERRIDES` so the codegen does NOT emit a
+# no-op `recordFixedFunctionStub` body that would collide at link time
+# with the hand-written real definitions.
 MANUAL_FIXED_FUNCTION_OVERRIDES = {
+    # Matrix stack (routed to MatrixStateMirror).
     "glMatrixMode",
     "glLoadIdentity",
     "glLoadMatrixf",
@@ -102,6 +111,46 @@ MANUAL_FIXED_FUNCTION_OVERRIDES = {
     "glScaled",
     "glOrtho",
     "glFrustum",
+    # Phase 8X Group 4d follow-up¹⁷ — immediate-mode geometry capture
+    # for Chobby / Chili widget chrome. Routes into
+    # GLContext::{beginImmediate, immediateVertex, immediateColor,
+    # immediateTexCoord, endImmediate} and drains into
+    # MetalFrameGraph::encodeImmediateModeDraw on glEnd. glLightModel*
+    # is silently accepted as a no-op — BAR Chobby sets
+    # GL_LIGHT_MODEL_TWO_SIDE during its compat init step but nothing
+    # downstream actually reads it.
+    "glBegin",
+    "glEnd",
+    "glVertex2f",
+    "glVertex2fv",
+    "glVertex3f",
+    "glVertex3fv",
+    "glVertex4f",
+    "glVertex4fv",
+    "glColor3f",
+    "glColor3fv",
+    "glColor4f",
+    "glColor4fv",
+    "glColor3ub",
+    "glColor3ubv",
+    "glColor4ub",
+    "glColor4ubv",
+    "glTexCoord2f",
+    "glTexCoord2fv",
+    "glTexCoord3f",
+    "glTexCoord3fv",
+    "glTexCoord4f",
+    "glTexCoord4fv",
+    "glMultiTexCoord2f",
+    "glMultiTexCoord2fv",
+    "glMultiTexCoord3f",
+    "glMultiTexCoord3fv",
+    "glMultiTexCoord4f",
+    "glMultiTexCoord4fv",
+    "glLightModelf",
+    "glLightModelfv",
+    "glLightModeli",
+    "glLightModeliv",
 }
 
 IMPLEMENTED_FUNCTIONS = {

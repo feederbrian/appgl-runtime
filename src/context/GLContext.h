@@ -494,6 +494,33 @@ public:
     MatrixStateMirror& matrixState();
     const MatrixStateMirror& matrixState() const;
 
+    // Compat-profile immediate-mode geometry capture.
+    //
+    // Phase 8X Group 4d follow-up¹⁷ — Chobby's Chili UI draws every
+    // panel, border and button through OpenGL 1.x immediate mode
+    // (`glBegin` / `glVertex*` / `glColor*` / `glTexCoord*` /
+    // `glMultiTexCoord*` / `glEnd`), which the core profile stubs as
+    // error pushes. The hand-written compat entry points in
+    // `AppGLImmediateMode.cpp` route into these five methods. They
+    // implement a small capture state machine: `beginImmediate` starts
+    // a batch in `GL_TRIANGLES` / `GL_TRIANGLE_STRIP` / `GL_TRIANGLE_FAN`
+    // / `GL_QUADS` / `GL_LINES` / `GL_LINE_STRIP` / `GL_LINE_LOOP`;
+    // `immediateColor` and `immediateTexCoord` update per-vertex
+    // registers without emitting anything; `immediateVertex` pushes one
+    // `{pos,color,texcoord}` tuple onto the capture buffer; `endImmediate`
+    // expands `GL_QUADS` to triangles CPU-side (core Metal has no quads),
+    // uploads the vertex data into the frame-graph's triple-buffered
+    // ring, resolves the active texture (if any) on unit 0 for the
+    // textured-or-untextured pipeline choice, and dispatches
+    // `encodeImmediateModeDraw`. The mode and the captured state are all
+    // read from the matrix mirror (MVP = proj · modelview) so no
+    // synthesized uniforms are needed.
+    void beginImmediate(GLenum mode);
+    void immediateVertex(float x, float y, float z, float w);
+    void immediateColor(float r, float g, float b, float a);
+    void immediateTexCoord(unsigned int unit, float s, float t, float r, float q);
+    void endImmediate();
+
     // Benchmark instrumentation — pipeline cache metrics.
     //
     // Phase 8X Group 4d follow-up⁴ — `buildAttempts` and `buildFailures`

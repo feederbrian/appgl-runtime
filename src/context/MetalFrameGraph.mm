@@ -961,8 +961,12 @@ struct MetalFrameGraph::Impl {
             // here — raw enum values are emitted alongside a short
             // symbolic name for the common cases so the log stays
             // self-describing without a lookup table.
+            // Phase 8X Group 4d follow-up¹⁷ — dedup is keyed on
+            // (program, pipelineCacheKey), not program alone. See the
+            // member declaration of `loggedPipelineBuildPrograms` for
+            // the rationale (was hiding the `entries=5` cache growth).
             if (info.program != 0 &&
-                loggedPipelineBuildPrograms.insert(info.program).second) {
+                loggedPipelineBuildPrograms.insert({info.program, pipelineCacheKey}).second) {
                 auto vertexFormatName = [](MTLVertexFormat f) -> const char* {
                     switch (f) {
                         case MTLVertexFormatInvalid:          return "Invalid";
@@ -1688,6 +1692,294 @@ fragment float4 appgl_solid_fs(constant float4& color [[buffer(0)]]) {
         return true;
     }
 
+    // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
+    // shader library and two pipeline states (vertex-color-only and
+    // vertex-color × texture2D). Built lazily on first glEnd that
+    // actually drains vertices, mirroring the solid-color pattern.
+    //
+    // The MSL vertex shader reads the captured `{pos, color, texcoord}`
+    // interleaved tuple via the attribute slots (0, 1, 2) and multiplies
+    // position by an MVP matrix pushed as a vertex constant buffer at
+    // index 1 (buffer 0 is the vertex data). The fragment shader picks
+    // the path based on which pipeline is bound — untextured just
+    // returns the interpolated color, textured multiplies it by a
+    // sample from a single-unit texture2D bound at fragment slot 0.
+    // Both pipelines share the same vertex descriptor / vertex function
+    // / color format, so the only divergence is the fragment function.
+    bool ensureImmediateModeLibrary() {
+        if (immediateModeLibrary != nil) {
+            return true;
+        }
+        NSString* source = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct AppGLImmediateIn {
+    float4 position [[attribute(0)]];
+    float4 color    [[attribute(1)]];
+    float2 texcoord [[attribute(2)]];
+};
+
+struct AppGLImmediateOut {
+    float4 position [[position]];
+    float4 color;
+    float2 texcoord;
+};
+
+vertex AppGLImmediateOut appgl_immediate_vs(
+    AppGLImmediateIn in [[stage_in]],
+    constant float4x4& mvp [[buffer(1)]]
+) {
+    AppGLImmediateOut out;
+    out.position = mvp * in.position;
+    out.color    = in.color;
+    out.texcoord = in.texcoord;
+    return out;
+}
+
+fragment float4 appgl_immediate_color_fs(AppGLImmediateOut in [[stage_in]]) {
+    return in.color;
+}
+
+fragment float4 appgl_immediate_textured_fs(
+    AppGLImmediateOut in [[stage_in]],
+    texture2d<float> tex [[texture(0)]],
+    sampler samp [[sampler(0)]]
+) {
+    return in.color * tex.sample(samp, in.texcoord);
+}
+)MSL";
+        NSError* error = nil;
+        immediateModeLibrary = [device newLibraryWithSource:source options:nil error:&error];
+        if (immediateModeLibrary == nil) {
+            NSLog(@"[AppGL] immediate-mode library build failed: %@", error);
+            return false;
+        }
+        immediateModeVertexFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_vs"];
+        immediateModeColorFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_color_fs"];
+        immediateModeTexturedFragmentFn = [immediateModeLibrary newFunctionWithName:@"appgl_immediate_textured_fs"];
+        return immediateModeVertexFn != nil
+            && immediateModeColorFragmentFn != nil
+            && immediateModeTexturedFragmentFn != nil;
+    }
+
+    bool ensureImmediateModePipelines(MTLPixelFormat colorFormat) {
+        if (immediateModeColorPipelineState != nil
+            && immediateModeTexturedPipelineState != nil
+            && immediateModePipelineColorFormat == colorFormat) {
+            return true;
+        }
+
+        MTLVertexDescriptor* vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+        // attribute 0: position (float4) at offset 0
+        vertexDescriptor.attributes[0].format = MTLVertexFormatFloat4;
+        vertexDescriptor.attributes[0].offset = 0;
+        vertexDescriptor.attributes[0].bufferIndex = 0;
+        // attribute 1: color (float4) at offset 16
+        vertexDescriptor.attributes[1].format = MTLVertexFormatFloat4;
+        vertexDescriptor.attributes[1].offset = sizeof(float) * 4;
+        vertexDescriptor.attributes[1].bufferIndex = 0;
+        // attribute 2: texcoord (float2) at offset 32
+        vertexDescriptor.attributes[2].format = MTLVertexFormatFloat2;
+        vertexDescriptor.attributes[2].offset = sizeof(float) * 8;
+        vertexDescriptor.attributes[2].bufferIndex = 0;
+        vertexDescriptor.layouts[0].stride = sizeof(float) * 10; // 40 bytes
+        vertexDescriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+        vertexDescriptor.layouts[0].stepRate = 1;
+
+        // Alpha blending is always enabled for immediate-mode — it's
+        // what Chobby's Chili UI renders on top of the scene and every
+        // glColor*/glTexCoord* path assumes straight-alpha blending.
+        auto makePipeline = [&](id<MTLFunction> fragmentFn) -> id<MTLRenderPipelineState> {
+            MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+            desc.vertexFunction = immediateModeVertexFn;
+            desc.fragmentFunction = fragmentFn;
+            desc.vertexDescriptor = vertexDescriptor;
+            desc.colorAttachments[0].pixelFormat = colorFormat;
+            desc.colorAttachments[0].blendingEnabled = YES;
+            desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+            desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorSourceAlpha;
+            desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            desc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+            desc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+            desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            NSError* error = nil;
+            id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+            if (state == nil) {
+                NSLog(@"[AppGL] immediate-mode pipeline build failed: %@", error);
+            }
+            return state;
+        };
+
+        immediateModeColorPipelineState = makePipeline(immediateModeColorFragmentFn);
+        immediateModeTexturedPipelineState = makePipeline(immediateModeTexturedFragmentFn);
+        if (immediateModeColorPipelineState == nil || immediateModeTexturedPipelineState == nil) {
+            return false;
+        }
+        immediateModePipelineColorFormat = colorFormat;
+        return true;
+    }
+
+    // Lazy default linear sampler for immediate-mode textured draws.
+    // Chobby sets up texture parameters on the bound texture before
+    // every batch, but the Chili UI only uses nearest/linear clamp-to-
+    // edge — a single default is fine for the ~90% path; if BAR ever
+    // needs filtering variants the sampler can be cached by GL state.
+    id<MTLSamplerState> immediateModeDefaultSampler() {
+        if (immediateModeSamplerState != nil) {
+            return immediateModeSamplerState;
+        }
+        MTLSamplerDescriptor* sdesc = [[MTLSamplerDescriptor alloc] init];
+        sdesc.minFilter = MTLSamplerMinMagFilterLinear;
+        sdesc.magFilter = MTLSamplerMinMagFilterLinear;
+        sdesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+        sdesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        immediateModeSamplerState = [device newSamplerStateWithDescriptor:sdesc];
+        return immediateModeSamplerState;
+    }
+
+    bool encodeImmediateModeDraw(const ImmediateDrawInfo& info) {
+        FG_TRACE(@"encodeImmediateModeDraw: enter mode=0x%X verts=%zu tex=%p",
+                 info.mode, info.vertexCount, info.metalTexture);
+        if (device == nil || commandQueue == nil) {
+            return false;
+        }
+        if (info.vertices == nullptr || info.vertexCount == 0 || info.vertexStride == 0) {
+            return false;
+        }
+
+        // Map GL mode → Metal primitive. GL_QUADS was already expanded
+        // to GL_TRIANGLES on the GLContext side, so we only see core-
+        // profile primitives here.
+        MTLPrimitiveType primitive;
+        switch (info.mode) {
+            case GL_TRIANGLES:      primitive = MTLPrimitiveTypeTriangle; break;
+            case GL_TRIANGLE_STRIP: primitive = MTLPrimitiveTypeTriangleStrip; break;
+            case GL_LINES:          primitive = MTLPrimitiveTypeLine; break;
+            case GL_LINE_STRIP:     primitive = MTLPrimitiveTypeLineStrip; break;
+            case GL_POINTS:         primitive = MTLPrimitiveTypePoint; break;
+            default:
+                // GL_TRIANGLE_FAN and GL_LINE_LOOP have no Metal
+                // equivalent; expand them here if BAR hits them.
+                FG_TRACE(@"encodeImmediateModeDraw: unsupported mode 0x%X", info.mode);
+                return false;
+        }
+
+        acquireRingSlot();
+        ensureDrawableResources();
+        if (!ensureImmediateModeLibrary()) {
+            return false;
+        }
+
+        endRenderPass();
+
+        if (currentCommandBuffer == nil) {
+            currentCommandBuffer = [commandQueue commandBuffer];
+            attachErrorHandler(currentCommandBuffer, @"immediateModeDraw");
+            if (currentCommandBuffer == nil) {
+                return false;
+            }
+        }
+
+        if (!usesOffscreenTarget && currentDrawable == nil) {
+            currentDrawable = [layer nextDrawable];
+            if (currentDrawable == nil) {
+                return false;
+            }
+        }
+
+        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
+        if (colorTexture == nil) {
+            return false;
+        }
+
+        const MTLPixelFormat colorFormat = colorTexture.pixelFormat;
+        if (!ensureImmediateModePipelines(colorFormat)) {
+            return false;
+        }
+
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = colorTexture;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].clearColor = pendingClearColor;
+        } else {
+            pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        }
+        if (depthStencilTexture != nil) {
+            pass.depthAttachment.texture = depthStencilTexture;
+            pass.depthAttachment.storeAction = MTLStoreActionStore;
+            pass.stencilAttachment.texture = depthStencilTexture;
+            pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            if (hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
+                pass.depthAttachment.loadAction = MTLLoadActionClear;
+                pass.depthAttachment.clearDepth = pendingClearDepth;
+            } else {
+                pass.depthAttachment.loadAction = MTLLoadActionLoad;
+            }
+            if (hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
+                pass.stencilAttachment.loadAction = MTLLoadActionClear;
+                pass.stencilAttachment.clearStencil = pendingClearStencil;
+            } else {
+                pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+            }
+        }
+        hasPendingClear = false;
+
+        id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (encoder == nil) {
+            return false;
+        }
+
+        id<MTLRenderPipelineState> pipelineState = (info.metalTexture != nullptr)
+            ? immediateModeTexturedPipelineState
+            : immediateModeColorPipelineState;
+        [encoder setRenderPipelineState:pipelineState];
+        [encoder setCullMode:MTLCullModeNone];
+        [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
+        [encoder setTriangleFillMode:MTLTriangleFillModeFill];
+
+        const std::size_t vertexBytes = info.vertexCount * info.vertexStride;
+        if (vertexBytes <= 4096) {
+            [encoder setVertexBytes:info.vertices length:vertexBytes atIndex:0];
+        } else {
+            auto alloc = ringSuballocate(info.vertices, vertexBytes);
+            if (alloc.buffer == nil) {
+                [encoder endEncoding];
+                return false;
+            }
+            [encoder setVertexBuffer:alloc.buffer offset:alloc.offset atIndex:0];
+        }
+
+        // MVP matrix is pushed as a vertex-stage constant (buffer index 1).
+        // `Matrix4` stores 16 floats in column-major order, matching MSL's
+        // float4x4 memory layout.
+        const Matrix4 mvp = info.mvp;
+        [encoder setVertexBytes:mvp.m.data() length:sizeof(float) * 16 atIndex:1];
+
+        if (info.metalTexture != nullptr) {
+            id<MTLTexture> tex = (__bridge id<MTLTexture>)(info.metalTexture);
+            [encoder setFragmentTexture:tex atIndex:0];
+            id<MTLSamplerState> samp = immediateModeDefaultSampler();
+            if (samp != nil) {
+                [encoder setFragmentSamplerState:samp atIndex:0];
+            }
+        }
+
+        [encoder drawPrimitives:primitive
+                    vertexStart:0
+                    vertexCount:static_cast<NSUInteger>(info.vertexCount)];
+
+        [encoder endEncoding];
+        readbackSourceTexture = colorTexture;
+        readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+        pendingPresent = true;
+        return true;
+    }
+
     id<MTLDepthStencilState> depthStencilStateForDraw(const MetalDrawInfo& info) {
         // Cache key: pack (depthTestEnabled, depthFunc) into a single uint32.
         // The state space is tiny (~16 combinations), so after the first frame
@@ -2095,6 +2387,21 @@ private:
     id<MTLFunction> solidColorFragmentFn = nil;
     id<MTLRenderPipelineState> solidColorPipelineState = nil;
     MTLPixelFormat solidColorPipelineColorFormat = MTLPixelFormatInvalid;
+
+    // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
+    // shader library, two pipeline states, and a default sampler.
+    // See `ensureImmediateModeLibrary` and `ensureImmediateModePipelines`
+    // for the shader source and descriptor layout. These are only
+    // touched from `encodeImmediateModeDraw` so no cross-encoder
+    // caching is needed.
+    id<MTLLibrary> immediateModeLibrary = nil;
+    id<MTLFunction> immediateModeVertexFn = nil;
+    id<MTLFunction> immediateModeColorFragmentFn = nil;
+    id<MTLFunction> immediateModeTexturedFragmentFn = nil;
+    id<MTLRenderPipelineState> immediateModeColorPipelineState = nil;
+    id<MTLRenderPipelineState> immediateModeTexturedPipelineState = nil;
+    MTLPixelFormat immediateModePipelineColorFormat = MTLPixelFormatInvalid;
+    id<MTLSamplerState> immediateModeSamplerState = nil;
     std::vector<std::uint8_t> headlessReadbackRGBA;
     GLsizei drawableWidth = 1;
     GLsizei drawableHeight = 1;
@@ -2130,21 +2437,47 @@ private:
     std::unordered_set<GLuint> loggedBindingPrograms;
 
     // Phase 8X Group 4d follow-up¹³ — per-context dedup for the
-    // first-build-per-program pipeline diagnostic NSLog. Fires once
-    // per GL program name per MetalFrameGraph instance at the pipeline
-    // build path (just before newRenderPipelineStateWithDescriptor),
+    // first-build-per-program pipeline diagnostic NSLog. Fires at the
+    // pipeline build path (just before newRenderPipelineStateWithDescriptor),
     // where we still have a live MTLRenderPipelineDescriptor +
     // MTLVertexDescriptor in scope. BAR followup¹²-verification
     // §Candidate 1 (blend state) and §Candidate 2 (MTLVertexDescriptor
     // format mismatch) both need the actual Metal-side descriptor
     // values — we can't reconstruct them from `info` at the first-draw
     // logging site because the descriptor is gone once
-    // newRenderPipelineStateWithDescriptor returns. Pipeline builds
-    // are cached on GLProgramObject so this fires exactly once per
-    // program per process (matching the existing `loggedBindingPrograms`
-    // granularity and the `loggedSamplerResolvePrograms` one on
-    // GLContext's Impl). Keyed on info.program.
-    std::unordered_set<GLuint> loggedPipelineBuildPrograms;
+    // newRenderPipelineStateWithDescriptor returns.
+    //
+    // Phase 8X Group 4d follow-up¹⁷ — the dedup key was previously
+    // `info.program` alone, which meant the first pipeline-build log
+    // for a given program suppressed every subsequent build for the
+    // SAME program with a DIFFERENT pipelineCacheKey (e.g. the same
+    // program drawn first with blend off and then with blend on, or
+    // with a different VBO attribute-format tuple). That's exactly
+    // the situation followup¹⁴ left on the watchlist as the
+    // `pipelineCache.entries=5` mystery: the cache was growing but
+    // we only ever saw one log line per program. The rekey to
+    // `(program, pipelineCacheKey)` makes every distinct cache-key
+    // build fire its own log exactly once, so future intermittent
+    // growth in `entries` becomes self-documenting in the terminal
+    // output without any additional tooling.
+    struct PipelineBuildLogKey {
+        GLuint program;
+        std::uint64_t pipelineCacheKey;
+        bool operator==(const PipelineBuildLogKey& other) const {
+            return program == other.program && pipelineCacheKey == other.pipelineCacheKey;
+        }
+    };
+    struct PipelineBuildLogKeyHash {
+        std::size_t operator()(const PipelineBuildLogKey& k) const noexcept {
+            // Mix the 32-bit program name into the 64-bit cache key with
+            // a FNV-ish splice — good enough for the tiny cardinality of
+            // this set (a few entries per context).
+            const std::uint64_t mixed = k.pipelineCacheKey
+                                      ^ (static_cast<std::uint64_t>(k.program) * 0x9E3779B97F4A7C15ull);
+            return static_cast<std::size_t>(mixed ^ (mixed >> 32));
+        }
+    };
+    std::unordered_set<PipelineBuildLogKey, PipelineBuildLogKeyHash> loggedPipelineBuildPrograms;
 
     // ── Encoder state deduplication (OPT-6) ──
     // Track what was last set on the current render encoder. Skip redundant
@@ -2309,6 +2642,10 @@ bool MetalFrameGraph::encodeSolidColorDraw(const MetalDrawInfo& info) {
 
 bool MetalFrameGraph::encodeTranslatedDraw(TranslatedDrawInfo& info) {
     return impl_->encodeTranslatedDraw(info);
+}
+
+bool MetalFrameGraph::encodeImmediateModeDraw(const ImmediateDrawInfo& info) {
+    return impl_->encodeImmediateModeDraw(info);
 }
 
 void MetalFrameGraph::endFrame(GLObjectStore& objects) {

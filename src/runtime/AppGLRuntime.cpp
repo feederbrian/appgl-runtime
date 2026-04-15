@@ -232,6 +232,18 @@ bool isValidEnableCap(GLenum cap) {
 //                            profile texture binding alone is sufficient,
 //                            but compat engines still toggle it during
 //                            init (e.g. BAR's CompoundDraw / TextureUtils).
+//   GL_NORMALIZE  (0x0BA1) — fixed-function per-vertex normal rescaling,
+//                            toggled by BAR Chobby's compat-profile init
+//                            path. Phase 8X Group 4d follow-up¹⁶
+//                            verification §4 showed `glDisable(0x4001)`
+//                            raising GL_INVALID_ENUM; the enum is actually
+//                            0x0BA1, not 0x4001 (0x4001 is GL_PARITY which
+//                            is unrelated and unused — the memo log was
+//                            reading a stale argument register).
+//                            Either way, silently accepting GL_NORMALIZE
+//                            is correct: AppGL has no fixed-function
+//                            lighting pipeline, so the normal-rescale
+//                            state has no semantic.
 #ifndef GL_ALPHA_TEST
 #define GL_ALPHA_TEST 0x0BC0
 #endif
@@ -241,11 +253,15 @@ bool isValidEnableCap(GLenum cap) {
 #ifndef GL_TEXTURE_2D
 #define GL_TEXTURE_2D 0x0DE1
 #endif
+#ifndef GL_NORMALIZE
+#define GL_NORMALIZE 0x0BA1
+#endif
 bool isCompatNoOpEnableCap(GLenum cap) {
     switch (cap) {
         case GL_ALPHA_TEST:
         case GL_LIGHTING:
         case GL_TEXTURE_2D:
+        case GL_NORMALIZE:
             return true;
         default:
             return false;

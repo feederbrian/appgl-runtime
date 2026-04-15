@@ -47,12 +47,6 @@ extern "C" void APIENTRY glArrayElement(GLint i) {
     return;
 }
 
-extern "C" void APIENTRY glBegin(GLenum mode) {
-    (void)mode;
-    appgl::Runtime::shared().recordFixedFunctionStub("glBegin");
-    return;
-}
-
 extern "C" void APIENTRY glBitmap(GLsizei width, GLsizei height, GLfloat xorig, GLfloat yorig, GLfloat xmove, GLfloat ymove, const GLubyte *bitmap) {
     (void)width;
     (void)height;
@@ -135,20 +129,6 @@ extern "C" void APIENTRY glColor3dv(const GLdouble *v) {
     return;
 }
 
-extern "C" void APIENTRY glColor3f(GLfloat red, GLfloat green, GLfloat blue) {
-    (void)red;
-    (void)green;
-    (void)blue;
-    appgl::Runtime::shared().recordFixedFunctionStub("glColor3f");
-    return;
-}
-
-extern "C" void APIENTRY glColor3fv(const GLfloat *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glColor3fv");
-    return;
-}
-
 extern "C" void APIENTRY glColor3i(GLint red, GLint green, GLint blue) {
     (void)red;
     (void)green;
@@ -174,20 +154,6 @@ extern "C" void APIENTRY glColor3s(GLshort red, GLshort green, GLshort blue) {
 extern "C" void APIENTRY glColor3sv(const GLshort *v) {
     (void)v;
     appgl::Runtime::shared().recordFixedFunctionStub("glColor3sv");
-    return;
-}
-
-extern "C" void APIENTRY glColor3ub(GLubyte red, GLubyte green, GLubyte blue) {
-    (void)red;
-    (void)green;
-    (void)blue;
-    appgl::Runtime::shared().recordFixedFunctionStub("glColor3ub");
-    return;
-}
-
-extern "C" void APIENTRY glColor3ubv(const GLubyte *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glColor3ubv");
     return;
 }
 
@@ -249,21 +215,6 @@ extern "C" void APIENTRY glColor4dv(const GLdouble *v) {
     return;
 }
 
-extern "C" void APIENTRY glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
-    (void)red;
-    (void)green;
-    (void)blue;
-    (void)alpha;
-    appgl::Runtime::shared().recordFixedFunctionStub("glColor4f");
-    return;
-}
-
-extern "C" void APIENTRY glColor4fv(const GLfloat *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glColor4fv");
-    return;
-}
-
 extern "C" void APIENTRY glColor4i(GLint red, GLint green, GLint blue, GLint alpha) {
     (void)red;
     (void)green;
@@ -291,21 +242,6 @@ extern "C" void APIENTRY glColor4s(GLshort red, GLshort green, GLshort blue, GLs
 extern "C" void APIENTRY glColor4sv(const GLshort *v) {
     (void)v;
     appgl::Runtime::shared().recordFixedFunctionStub("glColor4sv");
-    return;
-}
-
-extern "C" void APIENTRY glColor4ub(GLubyte red, GLubyte green, GLubyte blue, GLubyte alpha) {
-    (void)red;
-    (void)green;
-    (void)blue;
-    (void)alpha;
-    appgl::Runtime::shared().recordFixedFunctionStub("glColor4ub");
-    return;
-}
-
-extern "C" void APIENTRY glColor4ubv(const GLubyte *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glColor4ubv");
     return;
 }
 
@@ -438,11 +374,6 @@ extern "C" void APIENTRY glEdgeFlagv(const GLboolean *flag) {
 extern "C" void APIENTRY glEnableClientState(GLenum array) {
     (void)array;
     appgl::Runtime::shared().recordFixedFunctionStub("glEnableClientState");
-    return;
-}
-
-extern "C" void APIENTRY glEnd(void) {
-    appgl::Runtime::shared().recordFixedFunctionStub("glEnd");
     return;
 }
 
@@ -942,34 +873,6 @@ extern "C" GLboolean APIENTRY glIsList(GLuint list) {
     return GL_FALSE;
 }
 
-extern "C" void APIENTRY glLightModelf(GLenum pname, GLfloat param) {
-    (void)pname;
-    (void)param;
-    appgl::Runtime::shared().recordFixedFunctionStub("glLightModelf");
-    return;
-}
-
-extern "C" void APIENTRY glLightModelfv(GLenum pname, const GLfloat *params) {
-    (void)pname;
-    (void)params;
-    appgl::Runtime::shared().recordFixedFunctionStub("glLightModelfv");
-    return;
-}
-
-extern "C" void APIENTRY glLightModeli(GLenum pname, GLint param) {
-    (void)pname;
-    (void)param;
-    appgl::Runtime::shared().recordFixedFunctionStub("glLightModeli");
-    return;
-}
-
-extern "C" void APIENTRY glLightModeliv(GLenum pname, const GLint *params) {
-    (void)pname;
-    (void)params;
-    appgl::Runtime::shared().recordFixedFunctionStub("glLightModeliv");
-    return;
-}
-
 extern "C" void APIENTRY glLightf(GLenum light, GLenum pname, GLfloat param) {
     (void)light;
     (void)pname;
@@ -1214,21 +1117,6 @@ extern "C" void APIENTRY glMultiTexCoord2dv(GLenum target, const GLdouble *v) {
     return;
 }
 
-extern "C" void APIENTRY glMultiTexCoord2f(GLenum target, GLfloat s, GLfloat t) {
-    (void)target;
-    (void)s;
-    (void)t;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultiTexCoord2f");
-    return;
-}
-
-extern "C" void APIENTRY glMultiTexCoord2fv(GLenum target, const GLfloat *v) {
-    (void)target;
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultiTexCoord2fv");
-    return;
-}
-
 extern "C" void APIENTRY glMultiTexCoord2i(GLenum target, GLint s, GLint t) {
     (void)target;
     (void)s;
@@ -1272,22 +1160,6 @@ extern "C" void APIENTRY glMultiTexCoord3dv(GLenum target, const GLdouble *v) {
     (void)target;
     (void)v;
     appgl::Runtime::shared().recordFixedFunctionStub("glMultiTexCoord3dv");
-    return;
-}
-
-extern "C" void APIENTRY glMultiTexCoord3f(GLenum target, GLfloat s, GLfloat t, GLfloat r) {
-    (void)target;
-    (void)s;
-    (void)t;
-    (void)r;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultiTexCoord3f");
-    return;
-}
-
-extern "C" void APIENTRY glMultiTexCoord3fv(GLenum target, const GLfloat *v) {
-    (void)target;
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultiTexCoord3fv");
     return;
 }
 
@@ -1337,23 +1209,6 @@ extern "C" void APIENTRY glMultiTexCoord4dv(GLenum target, const GLdouble *v) {
     (void)target;
     (void)v;
     appgl::Runtime::shared().recordFixedFunctionStub("glMultiTexCoord4dv");
-    return;
-}
-
-extern "C" void APIENTRY glMultiTexCoord4f(GLenum target, GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
-    (void)target;
-    (void)s;
-    (void)t;
-    (void)r;
-    (void)q;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultiTexCoord4f");
-    return;
-}
-
-extern "C" void APIENTRY glMultiTexCoord4fv(GLenum target, const GLfloat *v) {
-    (void)target;
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glMultiTexCoord4fv");
     return;
 }
 
@@ -2099,19 +1954,6 @@ extern "C" void APIENTRY glTexCoord2dv(const GLdouble *v) {
     return;
 }
 
-extern "C" void APIENTRY glTexCoord2f(GLfloat s, GLfloat t) {
-    (void)s;
-    (void)t;
-    appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord2f");
-    return;
-}
-
-extern "C" void APIENTRY glTexCoord2fv(const GLfloat *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord2fv");
-    return;
-}
-
 extern "C" void APIENTRY glTexCoord2i(GLint s, GLint t) {
     (void)s;
     (void)t;
@@ -2149,20 +1991,6 @@ extern "C" void APIENTRY glTexCoord3d(GLdouble s, GLdouble t, GLdouble r) {
 extern "C" void APIENTRY glTexCoord3dv(const GLdouble *v) {
     (void)v;
     appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord3dv");
-    return;
-}
-
-extern "C" void APIENTRY glTexCoord3f(GLfloat s, GLfloat t, GLfloat r) {
-    (void)s;
-    (void)t;
-    (void)r;
-    appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord3f");
-    return;
-}
-
-extern "C" void APIENTRY glTexCoord3fv(const GLfloat *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord3fv");
     return;
 }
 
@@ -2206,21 +2034,6 @@ extern "C" void APIENTRY glTexCoord4d(GLdouble s, GLdouble t, GLdouble r, GLdoub
 extern "C" void APIENTRY glTexCoord4dv(const GLdouble *v) {
     (void)v;
     appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord4dv");
-    return;
-}
-
-extern "C" void APIENTRY glTexCoord4f(GLfloat s, GLfloat t, GLfloat r, GLfloat q) {
-    (void)s;
-    (void)t;
-    (void)r;
-    (void)q;
-    appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord4f");
-    return;
-}
-
-extern "C" void APIENTRY glTexCoord4fv(const GLfloat *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glTexCoord4fv");
     return;
 }
 
@@ -2412,19 +2225,6 @@ extern "C" void APIENTRY glVertex2dv(const GLdouble *v) {
     return;
 }
 
-extern "C" void APIENTRY glVertex2f(GLfloat x, GLfloat y) {
-    (void)x;
-    (void)y;
-    appgl::Runtime::shared().recordFixedFunctionStub("glVertex2f");
-    return;
-}
-
-extern "C" void APIENTRY glVertex2fv(const GLfloat *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glVertex2fv");
-    return;
-}
-
 extern "C" void APIENTRY glVertex2i(GLint x, GLint y) {
     (void)x;
     (void)y;
@@ -2462,20 +2262,6 @@ extern "C" void APIENTRY glVertex3d(GLdouble x, GLdouble y, GLdouble z) {
 extern "C" void APIENTRY glVertex3dv(const GLdouble *v) {
     (void)v;
     appgl::Runtime::shared().recordFixedFunctionStub("glVertex3dv");
-    return;
-}
-
-extern "C" void APIENTRY glVertex3f(GLfloat x, GLfloat y, GLfloat z) {
-    (void)x;
-    (void)y;
-    (void)z;
-    appgl::Runtime::shared().recordFixedFunctionStub("glVertex3f");
-    return;
-}
-
-extern "C" void APIENTRY glVertex3fv(const GLfloat *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glVertex3fv");
     return;
 }
 
@@ -2519,21 +2305,6 @@ extern "C" void APIENTRY glVertex4d(GLdouble x, GLdouble y, GLdouble z, GLdouble
 extern "C" void APIENTRY glVertex4dv(const GLdouble *v) {
     (void)v;
     appgl::Runtime::shared().recordFixedFunctionStub("glVertex4dv");
-    return;
-}
-
-extern "C" void APIENTRY glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
-    (void)x;
-    (void)y;
-    (void)z;
-    (void)w;
-    appgl::Runtime::shared().recordFixedFunctionStub("glVertex4f");
-    return;
-}
-
-extern "C" void APIENTRY glVertex4fv(const GLfloat *v) {
-    (void)v;
-    appgl::Runtime::shared().recordFixedFunctionStub("glVertex4fv");
     return;
 }
 

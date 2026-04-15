@@ -1107,14 +1107,23 @@ public:
 
         // Fixed-function stub resolution: classic GL 1.x entry points
         // that core removed but extension-probing engines still touch.
-        // The matrix family (glMatrixMode, glLoadIdentity, glPushMatrix, ...)
-        // is now backed by AppGLMatrixOverrides.cpp + MatrixStateMirror, so
-        // it no longer counts as a "stub" — those are exercised separately
-        // below. The remaining names here are still pure no-op stubs.
+        //
+        // Phase 8X Group 4d follow-up¹⁷ — the matrix family was moved
+        // to AppGLMatrixOverrides.cpp + MatrixStateMirror in an earlier
+        // round, and this round moves the immediate-mode geometry
+        // family (glBegin/glVertex*/glColor*/glTexCoord*/glMultiTexCoord*
+        // /glEnd) to AppGLImmediateMode.cpp + GLContext::beginImmediate
+        // + MetalFrameGraph::encodeImmediateModeDraw. Both families are
+        // now real implementations; only glGenLists (and friends) remain
+        // as pure no-op stubs. The ring-recording test below still
+        // targets a legitimate silent-stub function — glGenLists — to
+        // make sure the generic recordFixedFunctionStub machinery is
+        // still wired up for the functions that HAVE stayed on the
+        // silent-stub path.
         expectCondition(appglGetProcAddress("glBegin") != nullptr,
-                        "appglGetProcAddress resolves glBegin (fixed-function stub)");
+                        "appglGetProcAddress resolves glBegin (immediate-mode capture entry)");
         expectCondition(appglGetProcAddress("glEnd") != nullptr,
-                        "appglGetProcAddress resolves glEnd (fixed-function stub)");
+                        "appglGetProcAddress resolves glEnd (immediate-mode capture entry)");
         expectCondition(appglGetProcAddress("glGenLists") != nullptr,
                         "appglGetProcAddress resolves glGenLists (fixed-function stub, non-void return)");
         // Real (non-stub) fixed-function matrix entry points still resolve
@@ -1128,35 +1137,61 @@ public:
         expectCondition(appglGetProcAddress("glPushMatrix") != nullptr,
                         "appglGetProcAddress resolves glPushMatrix (matrix mirror entry)");
 
-        // Drive a real fixed-function stub (glBegin) and verify (a) it
-        // does not crash, (b) it records a diagnostic ring entry with the
-        // right function tag, and (c) it does NOT inject a GL error into
-        // the glGetError queue — the stub is deliberately silent so
-        // extension probing doesn't fail downstream error checks.
+        // Drive glBegin through the resolved proc pointer and verify
+        // that as a real (no-longer-stub) implementation it (a) does
+        // NOT crash, (b) does NOT push a diagnostic ring entry (real
+        // implementations stay silent on the ring), and (c) does NOT
+        // inject a GL error — a mid-frame glBegin with no glEnd is
+        // valid while we're still inside the begin/end window, so
+        // there's nothing to report. A follow-up glEnd then drains
+        // the (empty) capture and also stays silent because the
+        // vertex buffer is empty.
         while (gl.glGetError() != GL_NO_ERROR) {
         }
-        const std::uint64_t errorEventsBeforeFixedFunction = Runtime::shared().errorLogCount();
+        const std::uint64_t errorEventsBeforeBegin = Runtime::shared().errorLogCount();
         using BeginFn = void(APIENTRY *)(GLenum);
+        using EndFn   = void(APIENTRY *)(void);
         AppGLProc rawBegin = appglGetProcAddress("glBegin");
+        AppGLProc rawEnd   = appglGetProcAddress("glEnd");
         BeginFn beginFn = reinterpret_cast<BeginFn>(rawBegin);
-        // GL_TRIANGLES is in core, but glBegin itself is the compat-only
-        // immediate-mode stub. Its body is a no-op + diagnostic ring trace.
+        EndFn   endFn   = reinterpret_cast<EndFn>(rawEnd);
         beginFn(GL_TRIANGLES);
+        endFn();
         expectCondition(gl.glGetError() == GL_NO_ERROR,
-                        "glBegin fixed-function stub does not pollute glGetError queue");
-        const std::uint64_t errorEventsAfterFixedFunction = Runtime::shared().errorLogCount();
-        auto postFixedFunction = Runtime::shared().errorLogSnapshot();
-        expectCondition(errorEventsAfterFixedFunction > errorEventsBeforeFixedFunction,
-                        "glBegin fixed-function stub grew the runtime diagnostic ring");
+                        "glBegin/glEnd (real implementation) does not pollute glGetError queue");
+        const std::uint64_t errorEventsAfterBegin = Runtime::shared().errorLogCount();
+        expectCondition(errorEventsAfterBegin == errorEventsBeforeBegin,
+                        "glBegin/glEnd (real implementation) does not grow the runtime diagnostic ring");
+
+        // Still verify that the generic silent-stub path stays wired
+        // by driving a function that DID stay on the stub path
+        // (glColorMaterial — a compat-profile lighting entry we have
+        // no use for). It should push a single diagnostic ring entry
+        // with the function tag and no GL error.
+        while (gl.glGetError() != GL_NO_ERROR) {
+        }
+        const std::uint64_t errorEventsBeforeStub = Runtime::shared().errorLogCount();
+        using ColorMaterialFn = void(APIENTRY *)(GLenum, GLenum);
+        AppGLProc rawColorMaterial = appglGetProcAddress("glColorMaterial");
+        ColorMaterialFn colorMaterialFn = reinterpret_cast<ColorMaterialFn>(rawColorMaterial);
+        expectCondition(colorMaterialFn != nullptr,
+                        "appglGetProcAddress resolves glColorMaterial (fixed-function stub)");
+        colorMaterialFn(0x0408 /* GL_FRONT_AND_BACK */, 0x1602 /* GL_AMBIENT_AND_DIFFUSE */);
+        expectCondition(gl.glGetError() == GL_NO_ERROR,
+                        "glColorMaterial fixed-function stub does not pollute glGetError queue");
+        const std::uint64_t errorEventsAfterStub = Runtime::shared().errorLogCount();
+        auto postStub = Runtime::shared().errorLogSnapshot();
+        expectCondition(errorEventsAfterStub > errorEventsBeforeStub,
+                        "glColorMaterial fixed-function stub grew the runtime diagnostic ring");
         bool foundFixedFunctionRecord = false;
-        for (auto it = postFixedFunction.rbegin(); it != postFixedFunction.rend(); ++it) {
-            if (it->function == "glBegin" && it->errorEnum == 0) {
+        for (auto it = postStub.rbegin(); it != postStub.rend(); ++it) {
+            if (it->function == "glColorMaterial" && it->errorEnum == 0) {
                 foundFixedFunctionRecord = true;
                 break;
             }
         }
         expectCondition(foundFixedFunctionRecord,
-                        "runtime diagnostic ring records glBegin fixed-function stub");
+                        "runtime diagnostic ring records glColorMaterial fixed-function stub");
 
         // Real fixed-function matrix path: glMatrixMode now routes through
         // the per-context MatrixStateMirror. A valid mode (GL_MODELVIEW,
@@ -7095,6 +7130,132 @@ private:
     int vertCount_ = 0;
 };
 
+// Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode scene.
+//
+// Exercises the glBegin / glColor* / glVertex* / glEnd capture path
+// that Chobby's Chili UI uses to draw every panel and button, routing
+// into GLContext::{beginImmediate, immediateVertex, immediateColor,
+// immediateTexCoord, endImmediate} and out through
+// MetalFrameGraph::encodeImmediateModeDraw. The scene uses GL_QUADS so
+// the CPU-side expansion-to-triangles path is also covered. A second
+// GL_TRIANGLES batch with a per-vertex color gradient validates the
+// vertex-color interpolation, and glLightModeli is silently accepted
+// to match Chobby's compat init. No shader program is bound — this
+// is the "no current program" path that forces the frame graph into
+// the built-in immediate-mode pipeline rather than the translated
+// path. The identity MVP means vertices are captured in clip space.
+//
+// Compat-profile entry points are not in the core `dispatch` table,
+// so the scene forward-declares the extern "C" symbols it needs and
+// calls them directly. These symbols are defined by
+// src/runtime/AppGLImmediateMode.cpp and link the same way a client
+// application would see them.
+extern "C" {
+void APIENTRY glBegin(GLenum mode);
+void APIENTRY glEnd(void);
+void APIENTRY glVertex2f(GLfloat x, GLfloat y);
+void APIENTRY glColor3f(GLfloat r, GLfloat g, GLfloat b);
+void APIENTRY glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
+void APIENTRY glLightModeli(GLenum pname, GLint param);
+}  // extern "C"
+
+// Compat-profile enums not in glcorearb.h.
+#ifndef GL_QUADS
+#define GL_QUADS 0x0007
+#endif
+#ifndef GL_NORMALIZE
+#define GL_NORMALIZE 0x0BA1
+#endif
+#ifndef GL_LIGHT_MODEL_TWO_SIDE
+#define GL_LIGHT_MODEL_TWO_SIDE 0x0B52
+#endif
+
+class ImmediateModeQuadScene final : public Scene {
+public:
+    std::string id() const override { return "phase-7.immediate-mode-quad"; }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {96, 96}; }
+
+    double tolerance() const override {
+        // The built-in MSL pipeline is deterministic but triangle-edge
+        // anti-aliasing at the GL_QUADS → GL_TRIANGLES seam and the
+        // gradient interpolation can drift by one channel on different
+        // GPUs. Match the tolerance of SolidTriangleDrawScene.
+        return 0.02;
+    }
+
+    void setup(GLContext& /*context*/) override {
+        auto& gl = Runtime::shared().dispatch();
+        // Silent-no-op light model call — Chobby does this at compat
+        // init. Without the fw17 allowlist entry this would trip a
+        // GL_INVALID_ENUM error push.
+        glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 1);
+        // And the GL_NORMALIZE enable cap, also a silent no-op in
+        // compat mode (added to isCompatNoOpEnableCap by fw17).
+        gl.glEnable(GL_NORMALIZE);
+    }
+
+    void render(GLContext& /*context*/) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        gl.glViewport(0, 0, framebufferSize().width, framebufferSize().height);
+        gl.glClearColor(0.05f, 0.07f, 0.12f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+
+        // Ensure no shader program is bound so the draw path does NOT
+        // fall into the translated-draw branch — our glEnd() lives on
+        // a separate codepath that bypasses any currentProgram state
+        // by dispatching directly to `encodeImmediateModeDraw`.
+        gl.glUseProgram(0);
+
+        // Identity MVP — matrix mirror defaults everything to identity
+        // after a fresh context, so captured vertices already live in
+        // clip space. No glMatrixMode / glLoadIdentity is required for
+        // this scene to land on the expected region.
+
+        // Batch 1 — a solid orange quad on the left half of the
+        // viewport. Uses GL_QUADS so the CPU-side expansion to two
+        // triangles fires. glColor4f is called once before the quad
+        // so every vertex reads the same color register.
+        glBegin(GL_QUADS);
+        glColor4f(0.95f, 0.45f, 0.15f, 1.0f);
+        glVertex2f(-0.80f, -0.60f);
+        glVertex2f(-0.05f, -0.60f);
+        glVertex2f(-0.05f,  0.60f);
+        glVertex2f(-0.80f,  0.60f);
+        glEnd();
+
+        // Batch 2 — a gradient-colored triangle on the right half.
+        // glColor3f is updated between each vertex so the color
+        // register walks red → green → blue, and the Metal pipeline
+        // interpolates in fragment space.
+        glBegin(GL_TRIANGLES);
+        glColor3f(1.0f, 0.0f, 0.0f);
+        glVertex2f( 0.10f, -0.60f);
+        glColor3f(0.0f, 1.0f, 0.0f);
+        glVertex2f( 0.80f, -0.60f);
+        glColor3f(0.0f, 0.0f, 1.0f);
+        glVertex2f( 0.45f,  0.60f);
+        glEnd();
+
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        // No FunctionId entries for the compat-profile immediate-mode
+        // entry points (they're on the silent-stub side of the coverage
+        // ring). The scene still exercises them, but coverage tracking
+        // stays on the core-profile surface we advertise.
+        return {
+            FunctionId::glClear,
+            FunctionId::glClearColor,
+            FunctionId::glFlush,
+            FunctionId::glUseProgram,
+            FunctionId::glViewport,
+        };
+    }
+};
+
 // ===========================================================================
 // Benchmark infrastructure — Phase 7 Group 5a
 // ===========================================================================
@@ -7843,6 +8004,13 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         tests.push_back(runScene(vc41));
         VersionCompare46Scene vc46;
         tests.push_back(runScene(vc46));
+
+        // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
+        // capture path (glBegin/glVertex*/glColor*/glEnd) required for
+        // Chobby's Chili UI. Added in the same commit as the routing
+        // into MetalFrameGraph::encodeImmediateModeDraw.
+        ImmediateModeQuadScene immediateModeQuadScene;
+        tests.push_back(runScene(immediateModeQuadScene));
     }
 
     return buildJSON(normalizedPhase, tests);

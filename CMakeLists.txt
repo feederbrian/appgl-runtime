@@ -44,6 +44,7 @@ set(APPGL_SOURCES
   src/runtime/AppGLRuntime.cpp
   src/runtime/AppGLGroup8.cpp
   src/runtime/AppGLMatrixOverrides.cpp
+  src/runtime/AppGLImmediateMode.cpp
   src/caps/GLCapabilities.mm
   src/context/GLContext.mm
   src/context/MetalFrameGraph.mm

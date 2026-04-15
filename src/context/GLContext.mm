@@ -2914,6 +2914,40 @@ struct GLContext::Impl {
     // Indexed by attribute slot; each stores 4 doubles (default {0,0,0,1}).
     static constexpr std::size_t kMaxImmediateDoubleAttribs = 16;
     std::array<std::array<GLdouble, 4>, kMaxImmediateDoubleAttribs> immediateDoubleAttribs{};
+
+    // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
+    // capture state.
+    //
+    // When `glBegin(mode)` fires we flip `active = true`, record the
+    // primitive mode, and start accumulating vertices into `vertices`.
+    // `glColor*` and `glTexCoord*` update the per-vertex registers
+    // without emitting; `glVertex*` pushes one interleaved
+    // `{pos[4], color[4], texcoord[2]}` tuple into the buffer using the
+    // current registers. `glEnd` expands `GL_QUADS` to triangles
+    // CPU-side (Metal core has no quads primitive), resolves the
+    // currently-bound unit-0 GL_TEXTURE_2D for the textured-vs-untextured
+    // pipeline choice, and hands the buffer off to
+    // `MetalFrameGraph::encodeImmediateModeDraw`.
+    //
+    // The capture buffer reuses this struct across calls (we only
+    // `clear()` the vector on `beginImmediate`) so per-batch allocations
+    // stay amortized. The 40-byte vertex matches the vertex descriptor
+    // set up in `MetalFrameGraph::ensureImmediateModePipeline`.
+    struct ImmediateModeVertex {
+        float position[4];
+        float color[4];
+        float texcoord[2];
+    };
+    static_assert(sizeof(ImmediateModeVertex) == 40,
+                  "ImmediateModeVertex must be 40 bytes to match the vertex descriptor in MetalFrameGraph::ensureImmediateModePipeline");
+    struct ImmediateModeCapture {
+        bool active = false;
+        GLenum mode = 0;
+        float currentColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        float currentTexcoord[2] = {0.0f, 0.0f};
+        std::vector<ImmediateModeVertex> vertices;
+    };
+    ImmediateModeCapture immediate;
     // GL 4.2 — image load/store unit bindings.
     struct ImageBinding {
         GLuint texture = 0;
@@ -6019,6 +6053,166 @@ MatrixStateMirror& GLContext::matrixState() {
 
 const MatrixStateMirror& GLContext::matrixState() const {
     return impl_->matrixState;
+}
+
+// Phase 8X Group 4d follow-up¹⁷ — immediate-mode entry points.
+//
+// See the block comment in GLContext.h alongside the declarations for
+// the rationale. These five methods form a small state machine that
+// captures `{position, color, texcoord}` tuples between glBegin/glEnd
+// and drains them to a built-in Metal pipeline on glEnd. State lives
+// in `impl_->immediate`. `currentColor` / `currentTexcoord` are
+// per-vertex registers updated by glColor*/glTexCoord* without
+// emitting a vertex; only glVertex* pushes into the capture vector.
+
+void GLContext::beginImmediate(GLenum mode) {
+    switch (mode) {
+        case GL_TRIANGLES:
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:
+        case GL_QUADS:
+        case GL_LINES:
+        case GL_LINE_STRIP:
+        case GL_LINE_LOOP:
+        case GL_POINTS:
+            break;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return;
+    }
+    if (impl_->immediate.active) {
+        // Nested glBegin is invalid in the GL spec.
+        pushError(GL_INVALID_OPERATION);
+        return;
+    }
+    impl_->immediate.active = true;
+    impl_->immediate.mode = mode;
+    impl_->immediate.vertices.clear();
+}
+
+void GLContext::immediateVertex(float x, float y, float z, float w) {
+    if (!impl_->immediate.active) {
+        // glVertex* outside glBegin/glEnd is silently ignored per GL 1.x.
+        // (The function exists but does nothing when not inside a begin/end pair.)
+        return;
+    }
+    Impl::ImmediateModeVertex v;
+    v.position[0] = x;
+    v.position[1] = y;
+    v.position[2] = z;
+    v.position[3] = w;
+    v.color[0] = impl_->immediate.currentColor[0];
+    v.color[1] = impl_->immediate.currentColor[1];
+    v.color[2] = impl_->immediate.currentColor[2];
+    v.color[3] = impl_->immediate.currentColor[3];
+    v.texcoord[0] = impl_->immediate.currentTexcoord[0];
+    v.texcoord[1] = impl_->immediate.currentTexcoord[1];
+    impl_->immediate.vertices.push_back(v);
+}
+
+void GLContext::immediateColor(float r, float g, float b, float a) {
+    // Per GL 1.x spec, glColor* is valid outside begin/end and simply
+    // updates the current color register; it's read by the next glVertex*
+    // inside a begin/end pair.
+    impl_->immediate.currentColor[0] = r;
+    impl_->immediate.currentColor[1] = g;
+    impl_->immediate.currentColor[2] = b;
+    impl_->immediate.currentColor[3] = a;
+}
+
+void GLContext::immediateTexCoord(unsigned int unit, float s, float t, float /*r*/, float /*q*/) {
+    // Only texture unit 0 is captured for the built-in immediate-mode
+    // pipeline (Chobby/Chili UI only uses unit 0). Multi-texturing on
+    // other units is silently ignored — this matches the single-
+    // sampler pipeline we build in MetalFrameGraph.
+    if (unit != 0) {
+        return;
+    }
+    impl_->immediate.currentTexcoord[0] = s;
+    impl_->immediate.currentTexcoord[1] = t;
+}
+
+void GLContext::endImmediate() {
+    if (!impl_->immediate.active) {
+        pushError(GL_INVALID_OPERATION);
+        return;
+    }
+    impl_->immediate.active = false;
+
+    const GLenum mode = impl_->immediate.mode;
+    auto& captured = impl_->immediate.vertices;
+    if (captured.empty()) {
+        return;
+    }
+    if (impl_->frameGraph == nullptr) {
+        return;
+    }
+
+    // GL_QUADS → GL_TRIANGLES CPU-side expansion. Metal core has no
+    // quads primitive, so every 4 captured vertices become 6 output
+    // vertices using the canonical {0,1,2, 0,2,3} fan pattern.
+    std::vector<Impl::ImmediateModeVertex> expanded;
+    const Impl::ImmediateModeVertex* drawVerts = captured.data();
+    std::size_t drawCount = captured.size();
+    GLenum drawMode = mode;
+    if (mode == GL_QUADS) {
+        const std::size_t quads = captured.size() / 4;
+        expanded.reserve(quads * 6);
+        for (std::size_t q = 0; q < quads; ++q) {
+            const Impl::ImmediateModeVertex& v0 = captured[q * 4 + 0];
+            const Impl::ImmediateModeVertex& v1 = captured[q * 4 + 1];
+            const Impl::ImmediateModeVertex& v2 = captured[q * 4 + 2];
+            const Impl::ImmediateModeVertex& v3 = captured[q * 4 + 3];
+            expanded.push_back(v0);
+            expanded.push_back(v1);
+            expanded.push_back(v2);
+            expanded.push_back(v0);
+            expanded.push_back(v2);
+            expanded.push_back(v3);
+        }
+        drawVerts = expanded.data();
+        drawCount = expanded.size();
+        drawMode = GL_TRIANGLES;
+    }
+
+    // Ensure any pending clear is flushed before the encode.
+    impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
+    impl_->encodePendingWork();
+
+    // Resolve the texture bound to unit 0 GL_TEXTURE_2D, if any.
+    // The textured pipeline samples it; the untextured pipeline ignores
+    // the slot entirely.
+    void* metalTexture = nullptr;
+    const GLuint texName = impl_->state->boundTextureOnUnit(0, GL_TEXTURE_2D);
+    if (texName != 0) {
+        GLTextureObject* tex = impl_->objects->textures().get(texName);
+        if (tex != nullptr && tex->metalTexture != nullptr) {
+            metalTexture = tex->metalTexture;
+        }
+    }
+
+    // Build the MVP from the matrix mirror (proj · modelview); the
+    // immediate-mode vertex shader applies it to each captured position.
+    const Matrix4 mvp = impl_->matrixState.modelViewProjection();
+
+    ImmediateDrawInfo info;
+    info.mode = drawMode;
+    info.vertices = drawVerts;
+    info.vertexCount = drawCount;
+    info.vertexStride = sizeof(Impl::ImmediateModeVertex);
+    info.mvp = mvp;
+    info.metalTexture = metalTexture;
+
+    const bool ok = impl_->frameGraph->encodeImmediateModeDraw(info);
+    if (!ok) {
+        emitDebugMessage(
+            GL_DEBUG_SOURCE_API,
+            GL_DEBUG_TYPE_ERROR,
+            0,
+            GL_DEBUG_SEVERITY_HIGH,
+            "glEnd: MetalFrameGraph failed to encode immediate-mode draw"
+        );
+    }
 }
 
 GLContext::PipelineCacheMetrics GLContext::pipelineCacheMetrics() const {

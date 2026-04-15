@@ -9,6 +9,7 @@
 
 #include "../../include/AppGL/glcorearb.h"
 #include "../shader/ShaderTranslator.h"
+#include "../state/MatrixStateMirror.h"
 
 #ifdef __OBJC__
 @class CAMetalLayer;
@@ -281,6 +282,32 @@ struct TranslatedDrawInfo {
     std::string* pipelineBuildErrorOut = nullptr;
 };
 
+// Phase 8X Group 4d follow-up¹⁷ — describes a single immediate-mode
+// draw captured between `glBegin` and `glEnd`.
+//
+// The vertex layout is fixed: `{float position[4], float color[4],
+// float texcoord[2]}` = 40 bytes. `vertices` points at a contiguous
+// array of that tuple type (owned by the caller — `GLContext::endImmediate`
+// passes its capture vector directly, and the frame graph copies the
+// bytes into the triple-buffered ring before returning). `vertexStride`
+// is always `sizeof(float) * 10` but is carried explicitly so the Metal
+// vertex descriptor can be built from the struct without magic numbers.
+//
+// `mvp` is the projection * modelview matrix snapshot at glEnd time;
+// it's pushed as a vertex-stage constant because no shader program is
+// active on this path. `metalTexture` is the id<MTLTexture> bound to
+// GL_TEXTURE_2D on unit 0 (resolved by the caller), or nullptr if no
+// texture is bound; the frame graph picks the untextured pipeline in
+// that case.
+struct ImmediateDrawInfo {
+    GLenum mode = 0;
+    const void* vertices = nullptr;
+    std::size_t vertexCount = 0;
+    std::size_t vertexStride = 0;
+    Matrix4 mvp = Matrix4::identity();
+    void* metalTexture = nullptr;  // id<MTLTexture> or nullptr
+};
+
 class MetalFrameGraph {
 public:
     MetalFrameGraph(void* layer, void* device, void* commandQueue);
@@ -311,6 +338,13 @@ public:
     // Encodes a draw call using a translated GLSL→MSL pipeline. The pipeline
     // state is lazily created on first use and cached on the program object.
     bool encodeTranslatedDraw(TranslatedDrawInfo& info);
+    // Phase 8X Group 4d follow-up¹⁷ — encodes a single compat-profile
+    // immediate-mode draw (glBegin/glVertex*/glEnd) using one of two
+    // built-in pipelines (textured-and-vertex-color or vertex-color-
+    // only). The vertex data is memcpy'd into the frame-graph's
+    // triple-buffered ring before the encode. Returns true on success
+    // or false if the pipeline state could not be built.
+    bool encodeImmediateModeDraw(const ImmediateDrawInfo& info);
     void endFrame(GLObjectStore& objects);
     void present();
     bool copyRGBA8Pixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels);
