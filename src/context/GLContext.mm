@@ -954,7 +954,7 @@ struct GLContext::Impl {
         // bespoke routing because their byte-stride doesn't match the
         // RGBA8 storage layout:
         //
-        //   GL_ALPHA          (1 byte)  → (0, 0, 0, S0)
+        //   GL_ALPHA          (1 byte)  → (S0, S0, S0, S0) [see note below]
         //   GL_LUMINANCE      (1 byte)  → (S0, S0, S0, 255)
         //   GL_INTENSITY      (1 byte)  → (S0, S0, S0, S0)
         //   GL_LUMINANCE_ALPHA(2 bytes) → (S0, S0, S0, S1)
@@ -963,6 +963,39 @@ struct GLContext::Impl {
         // RGBA8 texture with the spec-correct sampling result, so no
         // per-texture swizzle table is required and the existing
         // shader code path doesn't need to learn about luminance.
+        //
+        // GL_ALPHA broadcast note (Phase 8X Group 4d follow-up¹⁸):
+        // the GL spec defines GL_ALPHA as `(0, 0, 0, S0)` — zero for
+        // the color channels, source byte in alpha. That layout is
+        // correct for a compat-profile consumer that reads the texel
+        // back through `texture2D(..).a` in a fixed-function or
+        // hand-written GLSL 1.x shader, but AppGL only ever serves
+        // CORE-profile shader consumers (because Metal has no compat
+        // profile, the compat-shader-rewriter rewrites everything up
+        // to GLSL 3.30+). Every core-profile font renderer in BAR and
+        // Spring reads the single source channel as `.r` / `.x` —
+        // specifically, Spring's CglShaderFontRenderer in
+        // `rts/Rendering/Fonts/glFont.cpp` samples the alpha-texture
+        // atlas with `float alpha = tex.sample(texSmplr, uv).x`, and
+        // with the spec-literal (0,0,0,A) layout every glyph fragment
+        // reads `.x = 0` and draws fully transparent. fw¹⁷ verified
+        // this is *exactly* what happens in BYAR-Chobby: the Chili
+        // widget chrome renders correctly but all engine-drawn text
+        // is invisible. See
+        // `docs/phase-8x-group-4d-followup17-verification.md` §4 for
+        // the terminal-capture trace that pinned it down.
+        //
+        // We fold GL_ALPHA into the same broadcast branch as
+        // GL_INTENSITY so every RGBA channel carries the same coverage
+        // byte. A core-profile shader can then read the texel via any
+        // channel (`.r`, `.g`, `.b`, or `.a`) and get the same answer,
+        // which is what happens in practice anyway — nothing in the
+        // BAR menu path reads back through `.a` expecting the classic
+        // compat-profile layout. If a future consumer does need the
+        // spec-literal (0,0,0,A) semantics, we can gate it on
+        // `isCompatGlyphFormat` or add a per-texture opt-out — but the
+        // unconditional broadcast is the simpler starting point and
+        // matches the de facto core-profile convention.
         const bool isAlphaOnly = (format == GL_ALPHA);
         const bool isLuminance = (format == GL_LUMINANCE);
         const bool isIntensity = (format == GL_INTENSITY);
@@ -981,23 +1014,22 @@ struct GLContext::Impl {
                             * static_cast<std::size_t>(width)
                             + static_cast<std::size_t>(x))
                         * 4u;
-                    if (isAlphaOnly) {
-                        rgba8[destIndex + 0] = 0;
-                        rgba8[destIndex + 1] = 0;
-                        rgba8[destIndex + 2] = 0;
-                        rgba8[destIndex + 3] = source[sourceIndex + 0];
+                    if (isAlphaOnly || isIntensity) {
+                        // Broadcast the single source byte to all four
+                        // channels — see the block comment above for why
+                        // GL_ALPHA folds into this path in AppGL alongside
+                        // the spec-native GL_INTENSITY broadcast.
+                        const std::uint8_t coverage = source[sourceIndex + 0];
+                        rgba8[destIndex + 0] = coverage;
+                        rgba8[destIndex + 1] = coverage;
+                        rgba8[destIndex + 2] = coverage;
+                        rgba8[destIndex + 3] = coverage;
                     } else if (isLuminance) {
                         const std::uint8_t luminance = source[sourceIndex + 0];
                         rgba8[destIndex + 0] = luminance;
                         rgba8[destIndex + 1] = luminance;
                         rgba8[destIndex + 2] = luminance;
                         rgba8[destIndex + 3] = 255;
-                    } else if (isIntensity) {
-                        const std::uint8_t intensity = source[sourceIndex + 0];
-                        rgba8[destIndex + 0] = intensity;
-                        rgba8[destIndex + 1] = intensity;
-                        rgba8[destIndex + 2] = intensity;
-                        rgba8[destIndex + 3] = intensity;
                     } else if (isLuminanceAlpha) {
                         const std::uint8_t luminance = source[sourceIndex + 0];
                         const std::uint8_t alpha = source[sourceIndex + 1];

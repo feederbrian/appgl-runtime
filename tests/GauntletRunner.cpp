@@ -7256,6 +7256,197 @@ public:
     }
 };
 
+// Phase 8X Group 4d follow-up¹⁸ — AlphaTextureCoverageScene.
+//
+// Regression test for the GL_ALPHA → RGBA8 channel broadcast that the
+// `buildRGBA8Upload` routine started emitting in follow-up¹⁸. Prior to
+// the fix, a GL_ALPHA upload produced the spec-literal (0,0,0,S) layout,
+// which meant a core-profile fragment shader that sampled the texel via
+// `.x` / `.r` — the pattern Spring's `CglShaderFontRenderer` actually
+// uses in `rts/Rendering/Fonts/glFont.cpp` — would read zero everywhere
+// and draw fully transparent. fw¹⁷'s BAR-side verification pinned this
+// as the reason Chobby's engine-drawn text was invisible. The scene
+// reproduces the failure mode end-to-end:
+//
+//   1. Upload a 4×4 GL_ALPHA texture with a known coverage ramp.
+//   2. Compile a fragment shader that samples the texel via `.x` and
+//      writes it into all three color channels (exactly matching the
+//      way Spring's font shader lights the glyph color).
+//   3. Draw a full-screen quad through the translated core-profile
+//      path so the final framebuffer carries one luminance value per
+//      texel — the byte the GL_ALPHA upload delivered.
+//   4. Compare against a golden PNG. If the (0,0,0,A) regression comes
+//      back, every pixel in the golden is black (the `.x` read returns
+//      zero) and the compare fails loudly.
+class AlphaTextureCoverageScene final : public Scene {
+public:
+    std::string id() const override { return "phase-7.alpha-texture-coverage"; }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {64, 64}; }
+
+    double tolerance() const override {
+        // Nearest-neighbour sampling plus deterministic shader math —
+        // zero channel drift is expected in theory, but allow the same
+        // one-channel slack the other phase-7 scenes use so a driver
+        // revision bump doesn't false-fail the whole phase.
+        return 0.02;
+    }
+
+    void setup(GLContext& /*context*/) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        // Compile the shader program. The fragment stage samples the
+        // single-channel texture via `.x` — the same access path
+        // Spring's CglShaderFontRenderer uses — so the broadcast fix
+        // in buildRGBA8Upload is exactly what makes this scene land
+        // non-black.
+        const char* vertexSource =
+            "#version 330 core\n"
+            "layout(location = 0) in vec2 aPosition;\n"
+            "layout(location = 1) in vec2 aTexCoord;\n"
+            "out vec2 vTexCoord;\n"
+            "void main() {\n"
+            "    vTexCoord = aTexCoord;\n"
+            "    gl_Position = vec4(aPosition, 0.0, 1.0);\n"
+            "}\n";
+        const char* fragmentSource =
+            "#version 330 core\n"
+            "in vec2 vTexCoord;\n"
+            "uniform sampler2D uTexture;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    float coverage = texture(uTexture, vTexCoord).x;\n"
+            "    fragColor = vec4(coverage, coverage, coverage, 1.0);\n"
+            "}\n";
+
+        const GLuint vertex = gl.glCreateShader(GL_VERTEX_SHADER);
+        const GLuint fragment = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(vertex, 1, &vertexSource, nullptr);
+        gl.glShaderSource(fragment, 1, &fragmentSource, nullptr);
+        gl.glCompileShader(vertex);
+        gl.glCompileShader(fragment);
+
+        program_ = gl.glCreateProgram();
+        gl.glAttachShader(program_, vertex);
+        gl.glAttachShader(program_, fragment);
+        gl.glLinkProgram(program_);
+        GLint linkStatus = 0;
+        gl.glGetProgramiv(program_, GL_LINK_STATUS, &linkStatus);
+        expectCondition(linkStatus == GL_TRUE, "alpha-coverage program links");
+        gl.glDeleteShader(vertex);
+        gl.glDeleteShader(fragment);
+
+        // 4×4 GL_ALPHA texture. Every texel carries one byte in [0,255]
+        // chosen so the golden PNG shows an obvious diagonal gradient —
+        // if the broadcast regresses, every channel reads zero and the
+        // golden goes black, which the compare picks up immediately.
+        const std::uint8_t alphaPixels[16] = {
+              0,  64, 128, 255,
+             32,  96, 160, 224,
+             64, 128, 192, 255,
+            128, 192, 224, 255,
+        };
+        gl.glGenTextures(1, &texture_);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, texture_);
+        // Tight packing — the gauntlet runner never perturbs PIXEL_STORE
+        // but the explicit set keeps the scene hermetic.
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, 4, 4, 0, GL_ALPHA, GL_UNSIGNED_BYTE, alphaPixels);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        // Full-viewport quad in clip space (two triangles, CCW).
+        // Attribute 0 — position (x,y), attribute 1 — texcoord (u,v).
+        const GLfloat vertices[] = {
+            // x,     y,     u,    v
+            -1.0f, -1.0f,  0.0f, 0.0f,
+             1.0f, -1.0f,  1.0f, 0.0f,
+             1.0f,  1.0f,  1.0f, 1.0f,
+            -1.0f,  1.0f,  0.0f, 1.0f,
+        };
+        const GLushort indices[] = {0, 1, 2, 2, 3, 0};
+
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glBindVertexArray(vao_);
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        gl.glGenBuffers(1, &ibo_);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
+        gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), reinterpret_cast<const void*>(0));
+        gl.glEnableVertexAttribArray(1);
+        gl.glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
+                                 reinterpret_cast<const void*>(2 * sizeof(GLfloat)));
+
+        gl.glUseProgram(program_);
+        const GLint textureLocation = gl.glGetUniformLocation(program_, "uTexture");
+        expectCondition(textureLocation >= 0, "alpha-coverage uTexture is resolvable");
+        gl.glUniform1i(textureLocation, 0);
+    }
+
+    void render(GLContext& /*context*/) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        gl.glViewport(0, 0, framebufferSize().width, framebufferSize().height);
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+
+        gl.glUseProgram(program_);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, texture_);
+        gl.glBindVertexArray(vao_);
+        gl.glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glActiveTexture,
+            FunctionId::glAttachShader,
+            FunctionId::glBindBuffer,
+            FunctionId::glBindTexture,
+            FunctionId::glBindVertexArray,
+            FunctionId::glBufferData,
+            FunctionId::glClear,
+            FunctionId::glClearColor,
+            FunctionId::glCompileShader,
+            FunctionId::glCreateProgram,
+            FunctionId::glCreateShader,
+            FunctionId::glDeleteShader,
+            FunctionId::glDrawElements,
+            FunctionId::glEnableVertexAttribArray,
+            FunctionId::glFlush,
+            FunctionId::glGenBuffers,
+            FunctionId::glGenTextures,
+            FunctionId::glGenVertexArrays,
+            FunctionId::glGetProgramiv,
+            FunctionId::glGetUniformLocation,
+            FunctionId::glLinkProgram,
+            FunctionId::glPixelStorei,
+            FunctionId::glShaderSource,
+            FunctionId::glTexImage2D,
+            FunctionId::glTexParameteri,
+            FunctionId::glUniform1i,
+            FunctionId::glUseProgram,
+            FunctionId::glVertexAttribPointer,
+            FunctionId::glViewport,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLuint vao_ = 0;
+    GLuint vbo_ = 0;
+    GLuint ibo_ = 0;
+    GLuint texture_ = 0;
+};
+
 // ===========================================================================
 // Benchmark infrastructure — Phase 7 Group 5a
 // ===========================================================================
@@ -8011,6 +8202,14 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         // into MetalFrameGraph::encodeImmediateModeDraw.
         ImmediateModeQuadScene immediateModeQuadScene;
         tests.push_back(runScene(immediateModeQuadScene));
+
+        // Phase 8X Group 4d follow-up¹⁸ — GL_ALPHA → RGBA8 broadcast
+        // regression guard. Samples the single-channel texture via `.x`
+        // (matching Spring's CglShaderFontRenderer) so a reversion to
+        // the spec-literal (0,0,0,A) layout lights up as an all-black
+        // golden mismatch.
+        AlphaTextureCoverageScene alphaTextureCoverageScene;
+        tests.push_back(runScene(alphaTextureCoverageScene));
     }
 
     return buildJSON(normalizedPhase, tests);

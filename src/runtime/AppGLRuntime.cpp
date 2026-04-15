@@ -226,24 +226,41 @@ bool isValidEnableCap(GLenum cap) {
 // "unhandled cap" errors for genuinely new probes.
 //
 // Currently:
-//   GL_ALPHA_TEST (0x0BC0) — alpha-test stage from compat fragment pipeline
-//   GL_LIGHTING   (0x0B50) — fixed-function lighting (compat-only since 3.1)
-//   GL_TEXTURE_2D (0x0DE1) — fixed-function texture-target enable; in core
-//                            profile texture binding alone is sufficient,
-//                            but compat engines still toggle it during
-//                            init (e.g. BAR's CompoundDraw / TextureUtils).
-//   GL_NORMALIZE  (0x0BA1) — fixed-function per-vertex normal rescaling,
-//                            toggled by BAR Chobby's compat-profile init
-//                            path. Phase 8X Group 4d follow-up¹⁶
-//                            verification §4 showed `glDisable(0x4001)`
-//                            raising GL_INVALID_ENUM; the enum is actually
-//                            0x0BA1, not 0x4001 (0x4001 is GL_PARITY which
-//                            is unrelated and unused — the memo log was
-//                            reading a stale argument register).
-//                            Either way, silently accepting GL_NORMALIZE
-//                            is correct: AppGL has no fixed-function
-//                            lighting pipeline, so the normal-rescale
-//                            state has no semantic.
+//   GL_ALPHA_TEST     (0x0BC0) — alpha-test stage from compat fragment pipeline.
+//   GL_LIGHTING       (0x0B50) — fixed-function lighting (compat-only since 3.1).
+//   GL_TEXTURE_2D     (0x0DE1) — fixed-function texture-target enable; in core
+//                                profile texture binding alone is sufficient,
+//                                but compat engines still toggle it during
+//                                init (e.g. BAR's CompoundDraw / TextureUtils).
+//   GL_NORMALIZE      (0x0BA1) — fixed-function per-vertex normal rescaling.
+//                                AppGL has no fixed-function lighting pipeline,
+//                                so the normal-rescale state has no semantic.
+//   GL_LIGHT0         (0x4000) — fixed-function light 0 enable. Phase 8X
+//   GL_LIGHT1         (0x4001) — fixed-function light 1 enable. Group 4d
+//                                follow-up¹⁸: BAR's `LuaOpenGL::ResetGLState`
+//                                at `rts/Lua/LuaOpenGL.cpp:975,1046,1047`
+//                                literally calls `glDisable(GL_LIGHT0)` and
+//                                `glDisable(GL_LIGHT1)` on every frame-setup
+//                                pass. These enums are spec-correct per
+//                                `glad.h:1170-1171` — follow-up¹⁶ traced the
+//                                `0x4001` trap to this `GL_LIGHT1` call site
+//                                (not `GL_PARITY`, which was a bad guess in
+//                                an earlier draft). AppGL has no fixed-
+//                                function lighting pipeline, so silently
+//                                accepting both lights is the right answer.
+//   GL_LINE_STIPPLE   (0x0B24) — compat-profile line stippling. BAR's
+//                                `LuaOpenGL::ResetGLState` disables it during
+//                                state reset (`LuaOpenGL.cpp:517`). Metal
+//                                has no line-stipple equivalent and AppGL
+//                                never enables it, so disable is a no-op.
+//   GL_COLOR_LOGIC_OP (0x0BF2) — compat-profile fragment logical-op stage.
+//                                BAR's `LuaOpenGL::ResetGLState` disables it
+//                                at `LuaOpenGL.cpp:533`. Metal supports a
+//                                pipeline-level logic op but AppGL doesn't
+//                                wire the compat toggle through to the
+//                                Metal render-pipeline descriptor; silently
+//                                accepting the disable is the correct
+//                                semantic (the default is "off" anyway).
 #ifndef GL_ALPHA_TEST
 #define GL_ALPHA_TEST 0x0BC0
 #endif
@@ -256,12 +273,28 @@ bool isValidEnableCap(GLenum cap) {
 #ifndef GL_NORMALIZE
 #define GL_NORMALIZE 0x0BA1
 #endif
+#ifndef GL_LIGHT0
+#define GL_LIGHT0 0x4000
+#endif
+#ifndef GL_LIGHT1
+#define GL_LIGHT1 0x4001
+#endif
+#ifndef GL_LINE_STIPPLE
+#define GL_LINE_STIPPLE 0x0B24
+#endif
+#ifndef GL_COLOR_LOGIC_OP
+#define GL_COLOR_LOGIC_OP 0x0BF2
+#endif
 bool isCompatNoOpEnableCap(GLenum cap) {
     switch (cap) {
         case GL_ALPHA_TEST:
         case GL_LIGHTING:
         case GL_TEXTURE_2D:
         case GL_NORMALIZE:
+        case GL_LIGHT0:
+        case GL_LIGHT1:
+        case GL_LINE_STIPPLE:
+        case GL_COLOR_LOGIC_OP:
             return true;
         default:
             return false;
@@ -1113,6 +1146,33 @@ static bool isSilentlyAcceptedFixedFunctionStub(std::string_view functionName) {
     if (functionName == "glColor4f") return true;
     if (functionName == "glShadeModel") return true;
     if (functionName == "glRectf") return true;
+    // Phase 8X Group 4d follow-up¹⁸ — four more compat-profile fixed-function
+    // entry points BAR's verification round pinned as steady-state noise, all
+    // originating from `rts/Lua/LuaOpenGL::ResetGLState` at `LuaOpenGL.cpp`
+    // lines 500-578 which runs on every widget-draw boundary:
+    //
+    //   glMaterialfv — fixed-function material-colour uploads for the legacy
+    //                  lighting pipeline. AppGL has no fixed-function lighting
+    //                  (see `isCompatNoOpEnableCap`'s GL_LIGHTING/GL_LIGHT0/
+    //                  GL_LIGHT1 entries), so the material register is never
+    //                  sampled. BAR's reset path calls it ~4 times per pass
+    //                  with the ambient/diffuse/specular/emission slots.
+    //   glMaterialf  — scalar variant for the shininess exponent. Same
+    //                  rationale — the fixed-function lighting pipeline is
+    //                  absent, so the exponent upload has no semantic.
+    //   glAlphaFunc  — configures the compat-profile alpha-test comparison.
+    //                  The associated GL_ALPHA_TEST cap is already on the
+    //                  silent-accept cap allowlist; this adds the matching
+    //                  configuration setter so the pair is symmetric and
+    //                  the reset path stays noise-free.
+    //   glTexEnvi    — fixed-function texture-environment combiner setup.
+    //                  AppGL's translated path runs everything through
+    //                  GLSL core-profile shaders, so the compat combiner
+    //                  register has no effect on any draw.
+    if (functionName == "glMaterialfv") return true;
+    if (functionName == "glMaterialf") return true;
+    if (functionName == "glAlphaFunc") return true;
+    if (functionName == "glTexEnvi") return true;
     return false;
 }
 
