@@ -225,6 +225,20 @@ struct GLShaderDeclaration {
     GLenum type = 0;
     GLint arraySize = 1;
     GLint explicitLocation = -1;
+    // Phase 8X Group 4d follow-up¹⁵ — GLSL 4.20 / ARB_shading_language_420pack
+    // lets uniform declarations carry a default-value initializer, e.g.
+    //   uniform vec4 ucolor   = vec4(1.0);
+    //   uniform vec4 alphaCtrl = vec4(0.0, 0.0, 0.0, 1.0);
+    // Spring's BAR fragment shader template `RenderBuffers.inl` relies on
+    // these defaults — the engine never calls glUniform for ucolor/alphaCtrl,
+    // so a zero-seeded shadow makes `outColor *= ucolor` evaluate to (0,0,0,0)
+    // and the AlphaDiscard branch discards every pixel (black screen).
+    // The scanner populates whichever of these three vectors matches the base
+    // scalar type of `type`; all three are empty when no initializer is present,
+    // in which case linkProgram falls back to zero-seeding.
+    std::vector<GLfloat> defaultFloats;
+    std::vector<GLint>   defaultInts;
+    std::vector<GLuint>  defaultUints;
 };
 
 struct GLShaderObject {
@@ -261,6 +275,14 @@ struct GLProgramUniformInfo {
     GLenum type = 0;
     GLint arraySize = 1;
     GLint location = -1;
+    // Phase 8X Group 4d follow-up¹⁵ — parallel to GLShaderDeclaration.
+    // linkProgram (appendDeclarationsAsUniforms) forwards these from the
+    // shader-stage declarations into the program-level uniform table so
+    // the uniformValues seeding switch can read them without walking the
+    // per-stage declaration lists a second time.
+    std::vector<GLfloat> defaultFloats;
+    std::vector<GLint>   defaultInts;
+    std::vector<GLuint>  defaultUints;
 };
 
 struct GLProgramAttributeInfo {

@@ -134,8 +134,149 @@ GLint extractLayoutLocation(std::vector<std::string>& tokens) {
     return location;
 }
 
+// Phase 8X Group 4d follow-up¹⁵ — scalar kind routing for default-value
+// initializer parsing. Samplers route through the integer path because a
+// `uniform sampler2D tex = 0;` style initializer (if we ever saw one) would
+// be interpreted as a texture-unit index, matching how glUniform1i sets
+// sampler uniforms in practice.
+enum class UniformScalarKind { Float, Int, UInt };
+
+UniformScalarKind scalarKindForType(GLenum type) {
+    switch (type) {
+        case GL_FLOAT:
+        case GL_FLOAT_VEC2:
+        case GL_FLOAT_VEC3:
+        case GL_FLOAT_VEC4:
+        case GL_FLOAT_MAT2:
+        case GL_FLOAT_MAT3:
+        case GL_FLOAT_MAT4:
+            return UniformScalarKind::Float;
+        case GL_UNSIGNED_INT:
+        case GL_UNSIGNED_INT_VEC2:
+        case GL_UNSIGNED_INT_VEC3:
+        case GL_UNSIGNED_INT_VEC4:
+            return UniformScalarKind::UInt;
+        default:
+            // GL_INT*, GL_BOOL*, all sampler types.
+            return UniformScalarKind::Int;
+    }
+}
+
+// Phase 8X Group 4d follow-up¹⁵ — parse a GLSL 4.20 uniform default-value
+// initializer of the form
+//   = <numeric-literal>
+//   = <typeword> ( <num-list> )
+// where <num-list> is one comma-separated numeric literal (scalar broadcast)
+// or exactly `components` comma-separated numeric literals. On recognition,
+// populates whichever of `out.defaultFloats` / `defaultInts` / `defaultUints`
+// matches the declared variable's scalar kind. On any unrecognized token the
+// function bails out silently, leaving the default vectors empty so
+// linkProgram falls back to zero-seeding.
+//
+// Matrix types (mat2/mat3/mat4) are intentionally skipped: in GLSL
+// `mat4(1.0)` constructs an identity matrix, not a component-broadcast
+// vector, and AppGL's compat-profile path already seeds synthesized matrix
+// uniforms through its own channel. Spring/BAR does not use matrix default
+// initializers in any shader we've seen.
+void parseDefaultInitializer(
+    const std::vector<std::string>& tokens,
+    std::size_t exprStart,
+    const TypeEntry& varEntry,
+    GLShaderDeclaration& out
+) {
+    // Matrices: bail. See comment block above.
+    if (varEntry.type == GL_FLOAT_MAT2 ||
+        varEntry.type == GL_FLOAT_MAT3 ||
+        varEntry.type == GL_FLOAT_MAT4) {
+        return;
+    }
+    const GLint components = varEntry.components;
+    if (components <= 0) {
+        return;
+    }
+
+    // Find the argument list range [argBegin, argEnd).
+    std::size_t argBegin = exprStart;
+    std::size_t argEnd = tokens.size();
+
+    // Constructor form: `<typeword> ( ... )`. Skip the typeword and the
+    // opening paren, then scan forward to the matching close paren.
+    if (exprStart + 1 < tokens.size() && tokens[exprStart + 1] == "(") {
+        argBegin = exprStart + 2;
+        std::size_t depth = 1;
+        argEnd = argBegin;
+        while (argEnd < tokens.size() && depth > 0) {
+            if (tokens[argEnd] == "(") {
+                ++depth;
+            } else if (tokens[argEnd] == ")") {
+                --depth;
+                if (depth == 0) {
+                    break;
+                }
+            }
+            ++argEnd;
+        }
+    }
+
+    // Collect numeric literals from the argument range, skipping punctuation.
+    std::vector<double> values;
+    values.reserve(static_cast<std::size_t>(components));
+    for (std::size_t i = argBegin; i < argEnd; ++i) {
+        const std::string& tok = tokens[i];
+        if (tok.empty() || tok == "," || tok == "(" || tok == ")") {
+            continue;
+        }
+        const char first = tok[0];
+        if (first != '-' && first != '+' && first != '.' &&
+            !std::isdigit(static_cast<unsigned char>(first))) {
+            // Unrecognized token (nested ctor, identifier, operator, etc.).
+            // Bail out — linkProgram will zero-seed.
+            return;
+        }
+        char* endp = nullptr;
+        const double v = std::strtod(tok.c_str(), &endp);
+        if (endp == tok.c_str()) {
+            return;
+        }
+        values.push_back(v);
+    }
+    if (values.empty()) {
+        return;
+    }
+
+    // Scalar broadcast: `vec4(1.0)` → {1,1,1,1}. A single value always
+    // broadcasts; any other mismatch is treated as unrecognized.
+    if (values.size() == 1 && components > 1) {
+        values.resize(static_cast<std::size_t>(components), values[0]);
+    }
+    if (values.size() != static_cast<std::size_t>(components)) {
+        return;
+    }
+
+    switch (scalarKindForType(varEntry.type)) {
+        case UniformScalarKind::Float:
+            out.defaultFloats.reserve(static_cast<std::size_t>(components));
+            for (double v : values) {
+                out.defaultFloats.push_back(static_cast<GLfloat>(v));
+            }
+            break;
+        case UniformScalarKind::Int:
+            out.defaultInts.reserve(static_cast<std::size_t>(components));
+            for (double v : values) {
+                out.defaultInts.push_back(static_cast<GLint>(v));
+            }
+            break;
+        case UniformScalarKind::UInt:
+            out.defaultUints.reserve(static_cast<std::size_t>(components));
+            for (double v : values) {
+                out.defaultUints.push_back(static_cast<GLuint>(v));
+            }
+            break;
+    }
+}
+
 // After layout/qualifiers stripped, the remaining tokens are
-// [qualifier] [precision] <type> <name> [[ <size> ]]
+// [qualifier] [precision] <type> <name> [[ <size> ]] [ = <initializer> ]
 bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
     // Drop common precision qualifiers if present.
     while (!tokens.empty() && (tokens.front() == "highp" || tokens.front() == "mediump" || tokens.front() == "lowp")) {
@@ -152,6 +293,9 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
     out.name = tokens[1];
     out.arraySize = 1;
     // Strip trailing `[N]` baked into the name token (rare) or the next tokens.
+    // `postNameIdx` is the first token after the name (and its optional [N]
+    // suffix) — the default-initializer scan below picks up from here.
+    std::size_t postNameIdx = 2;
     auto bracket = out.name.find('[');
     if (bracket != std::string::npos) {
         const auto end = out.name.find(']', bracket);
@@ -164,8 +308,19 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
         out.name.erase(bracket);
     } else if (tokens.size() >= 5 && tokens[2] == "[") {
         out.arraySize = static_cast<GLint>(std::strtol(tokens[3].c_str(), nullptr, 10));
+        // Advance past `[ N ]` (three tokens).
+        postNameIdx = 5;
     }
-    return !out.name.empty();
+    if (out.name.empty()) {
+        return false;
+    }
+    // Phase 8X Group 4d follow-up¹⁵ — scan for `= <initializer>` after the
+    // name/array-suffix. Array defaults are not supported (would require
+    // per-element parsing); only scalar/vector uniforms receive defaults.
+    if (out.arraySize == 1 && postNameIdx < tokens.size() && tokens[postNameIdx] == "=") {
+        parseDefaultInitializer(tokens, postNameIdx + 1, *entry, out);
+    }
+    return true;
 }
 
 }  // namespace

@@ -6091,6 +6091,22 @@ void appendDeclarationsAsUniforms(
         const auto existing = std::find_if(out.begin(), out.end(),
             [&](const GLProgramUniformInfo& u) { return u.name == decl.name; });
         if (existing != out.end()) {
+            // Phase 8X Group 4d follow-up¹⁵ — when the same uniform is
+            // declared in two stages (e.g. vertex + fragment both declare
+            // `uniform vec4 ucolor = vec4(1.0);`) honour whichever stage
+            // carries a populated default. If the first stage to declare
+            // the uniform had no initializer (or the stage order happens
+            // to land the defaulted copy second) we still want that default
+            // to win over an empty shadow.
+            if (existing->defaultFloats.empty() && !decl.defaultFloats.empty()) {
+                existing->defaultFloats = decl.defaultFloats;
+            }
+            if (existing->defaultInts.empty() && !decl.defaultInts.empty()) {
+                existing->defaultInts = decl.defaultInts;
+            }
+            if (existing->defaultUints.empty() && !decl.defaultUints.empty()) {
+                existing->defaultUints = decl.defaultUints;
+            }
             continue;
         }
         GLProgramUniformInfo info;
@@ -6098,6 +6114,9 @@ void appendDeclarationsAsUniforms(
         info.type = decl.type;
         info.arraySize = decl.arraySize > 0 ? decl.arraySize : 1;
         info.location = -1;  // assigned below
+        info.defaultFloats = decl.defaultFloats;
+        info.defaultInts = decl.defaultInts;
+        info.defaultUints = decl.defaultUints;
         out.push_back(std::move(info));
     }
 }
@@ -6617,10 +6636,22 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->fragmentSourceHash = linkFragmentHash;
 
     // Assign sequential dense uniform locations and seed default values.
+    //
+    // Phase 8X Group 4d follow-up¹⁵ — if the GLSL source carried a default
+    // initializer (`uniform vec4 ucolor = vec4(1.0);`), the scanner has
+    // populated `uniform.defaultFloats` / `defaultInts` / `defaultUints` with
+    // the parsed constant. Seed from that when present; otherwise fall back
+    // to the historical zero-seed. Spring's BAR font/UI fragment shader
+    // template declares both `ucolor` and `alphaCtrl` with defaults the engine
+    // never overrides at runtime — the black-screen regression from
+    // follow-up¹⁴ came from zero-seeding those shadows, which made
+    // `outColor *= ucolor` evaluate to (0,0,0,0) and the AlphaDiscard path
+    // discard every fragment.
     GLint nextLocation = 0;
     for (auto& uniform : programObject->uniforms) {
         uniform.location = nextLocation;
         const GLint components = glslComponentCount(uniform.type) * std::max<GLint>(uniform.arraySize, 1);
+        const std::size_t componentCount = static_cast<std::size_t>(components);
         GLProgramUniformValue value;
         value.type = uniform.type;
         value.arraySize = uniform.arraySize;
@@ -6639,16 +6670,28 @@ bool GLContext::linkProgram(GLuint program) {
             case GL_SAMPLER_CUBE:
             case GL_SAMPLER_2D_ARRAY:
             case GL_SAMPLER_2D_SHADOW:
-                value.ints.assign(static_cast<std::size_t>(components), 0);
+                if (uniform.defaultInts.size() == componentCount) {
+                    value.ints = uniform.defaultInts;
+                } else {
+                    value.ints.assign(componentCount, 0);
+                }
                 break;
             case GL_UNSIGNED_INT:
             case GL_UNSIGNED_INT_VEC2:
             case GL_UNSIGNED_INT_VEC3:
             case GL_UNSIGNED_INT_VEC4:
-                value.uints.assign(static_cast<std::size_t>(components), 0u);
+                if (uniform.defaultUints.size() == componentCount) {
+                    value.uints = uniform.defaultUints;
+                } else {
+                    value.uints.assign(componentCount, 0u);
+                }
                 break;
             default:
-                value.floats.assign(static_cast<std::size_t>(components), 0.0f);
+                if (uniform.defaultFloats.size() == componentCount) {
+                    value.floats = uniform.defaultFloats;
+                } else {
+                    value.floats.assign(componentCount, 0.0f);
+                }
                 break;
         }
         programObject->uniformValues[nextLocation] = std::move(value);
