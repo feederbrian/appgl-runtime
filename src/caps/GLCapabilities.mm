@@ -512,7 +512,9 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // probe the indexed-extension list. Loaders such as GLAD rely on this
     // returning a non-zero count before they will populate the extension
     // table; without it they treat the context as "no GL symbols visible".
-    integerLimits_[GL_NUM_EXTENSIONS] = 37;
+    // Bumped from 37 → 38 in Phase 8X Group 4d follow-up¹⁶ when
+    // GL_ARB_map_buffer_range was added to both extension tables.
+    integerLimits_[GL_NUM_EXTENSIONS] = 38;
     // GL 3.0+ core: applications query the context version via
     // glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION) rather than parsing
     // the GL_VERSION string. The Recoil engine in particular aborts with
@@ -714,6 +716,11 @@ void GLCapabilities::initializeExtensions() {
         "GL_ARB_fragment_shader "
         "GL_ARB_geometry_shader4 "
         "GL_ARB_uniform_buffer_object "
+        // Phase 8X Group 4d follow-up¹⁶ — see the matching entry and
+        // the longer comment in `kAppGLExtensionList` (AppGLGroup8.cpp).
+        // The `glMapBufferRange` family is implemented; this advertises
+        // the extension so loaders set GLAD_GL_ARB_map_buffer_range = 1.
+        "GL_ARB_map_buffer_range "
         "GL_ARB_shader_storage_buffer_object "
         "GL_ARB_explicit_attrib_location "
         "GL_ARB_explicit_uniform_location "

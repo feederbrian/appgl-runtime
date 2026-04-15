@@ -776,6 +776,18 @@ static const char* const kAppGLExtensionList[] = {
     "GL_ARB_fragment_shader",
     "GL_ARB_geometry_shader4",
     "GL_ARB_uniform_buffer_object",
+    // Phase 8X Group 4d follow-up¹⁶ — `glMapBufferRange` /
+    // `glUnmapBuffer` / `glFlushMappedBufferRange` are fully implemented
+    // in `GLContext::mapBufferRange` (validation, access-flag checks,
+    // CPU-visible Metal buffer pointer return, shadow→Metal sync on
+    // unmap), but the extension string was never advertised. BAR's
+    // `VBO::IsSupported(GL_UNIFORM_BUFFER)` early-returns when
+    // `GLAD_GL_ARB_map_buffer_range == 0`, which made spring's
+    // `UniformConstants::Init` bail at startup with the misleading
+    // "Important OpenGL extensions are not supported" log even though
+    // every named extension on that line was actually live. Advertising
+    // here flips the GLAD bool so spring's UBO path stops bailing.
+    "GL_ARB_map_buffer_range",
     "GL_ARB_shader_storage_buffer_object",
     "GL_ARB_explicit_attrib_location",
     "GL_ARB_explicit_uniform_location",
