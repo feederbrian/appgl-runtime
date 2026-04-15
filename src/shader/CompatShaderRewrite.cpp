@@ -609,10 +609,27 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     // Order matters: each identifier replacement must not create text
     // that later passes would recognize as a rewrite target.
     //
-    //   - `texture2D(` → `texture(`, `textureCube(` → `texture(`, and
-    //     `shadow2DProj(` → `textureProj(` all replace function names.
-    //     None of these collide with each other or with the identifier
+    //   - `texture2D(` → `texture(` and `textureCube(` → `texture(`
+    //     replace function names. Neither collides with the identifier
     //     rewrites that follow.
+    //
+    //   - `shadow2DProj(` → `appgl_shadow2DProj(` (Phase 8X Group 4d
+    //     follow-up²¹). fw¹⁹ flat-renamed `shadow2DProj` to the core
+    //     `textureProj`, which silently broke the return-type contract:
+    //     legacy `shadow2DProj(sampler2DShadow, vec4)` returns `vec4`
+    //     (the hardware compare result replicated across channels),
+    //     but core-3.30 `textureProj(sampler2DShadow, vec4)` returns a
+    //     plain `float`. Any chained `.r`/`.x`/`.a` access after the
+    //     rename then gets rejected by glslang as "scalar swizzle :
+    //     not supported" (fw²⁰-verification §4 pinned it in Spring's
+    //     `ModelFragProg.glsl` `USE_SHADOWS == 1` branch). Instead,
+    //     fw²¹ routes call sites to a synthesized preamble helper
+    //     `appgl_shadow2DProj(sampler2DShadow, vec4) -> vec4` that
+    //     wraps `textureProj` and broadcasts the scalar result into a
+    //     vec4, preserving the legacy return-type contract end-to-end.
+    //     The substitution is routed ahead of `texture2D → texture`
+    //     so the prefix-match order stays consistent for anyone
+    //     reading the rewrites top-to-bottom.
     //
     //   - `varying` is an unqualified storage class; we rewrite it to
     //     `in` (FS) or `out` (VS) via a word-boundary replace. Non-raster
@@ -643,14 +660,21 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     //
     //   - `gl_ClipVertex` is rewritten to `appgl_ClipVertex` (a
     //     stage-bridged `out` in VS / `in` in FS).
+    // fw²¹ — `shadow2DProj` is renamed to the synthesized helper
+    // `appgl_shadow2DProj` (emitted in preamble section 5h), NOT the
+    // core `textureProj`. See the docblock above for why the flat
+    // rename is semantically wrong (return-type contract break on
+    // `sampler2DShadow`). Routed first so the substitution is obvious
+    // when reading the rewrites top-to-bottom.
+    if (legacy.rewroteShadow2DProj) {
+        replaceIdentifier(result.source, "shadow2DProj",
+                          "appgl_shadow2DProj");
+    }
     if (legacy.rewroteTexture2D) {
         replaceIdentifier(result.source, "texture2D", "texture");
     }
     if (legacy.rewroteTextureCube) {
         replaceIdentifier(result.source, "textureCube", "texture");
-    }
-    if (legacy.rewroteShadow2DProj) {
-        replaceIdentifier(result.source, "shadow2DProj", "textureProj");
     }
     if (legacy.hadVarying) {
         if (isVertex) {
@@ -964,6 +988,45 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         } else if (isFragment) {
             preamble.append("in vec4 appgl_ClipVertex;\n");
         }
+    }
+
+    // 5h. fw²¹ — `shadow2DProj` helper-function synthesis.
+    //
+    // Spring's `ModelFragProg.glsl` (ShadowedStandard / ShadowedDeferred
+    // variants) calls `shadow2DProj(shadowTex, shadowVertexPos).r` on
+    // a `sampler2DShadow`. Legacy `shadow2DProj` returns a `vec4` —
+    // the hardware depth-compare result replicated across all four
+    // channels — so the `.r` swizzle is legal under `#version 120`.
+    // Core-3.30 `textureProj` on `sampler2DShadow` returns a scalar
+    // `float` instead, so after fw¹⁹'s flat `shadow2DProj → textureProj`
+    // rename, glslang hit `ERROR: 0:34: 'scalar swizzle' : not supported
+    // for this version or the enabled extensions` on the two Shadowed*
+    // variants (fw²⁰-verification §4).
+    //
+    // The fix is a thin preamble wrapper with the legacy return type:
+    //
+    //     vec4 appgl_shadow2DProj(sampler2DShadow s, vec4 p) {
+    //         float v = textureProj(s, p);
+    //         return vec4(v, v, v, v);
+    //     }
+    //
+    // Call sites rewritten by section 4 now resolve to a genuine vec4,
+    // so chained `.r`/`.x`/`.a` accesses continue to type-check. The
+    // hardware depth compare still runs once per call — broadcasting a
+    // scalar through a vec4 constructor is a no-op on Metal.
+    //
+    // Only `shadow2DProj` is observed in BAR's shader corpus this
+    // round, so only that overload is synthesized. The sibling
+    // legacy shadow overloads (`shadow2D` / `shadow2DLod` /
+    // `shadow2DProjLod` / `shadowCube`) have the identical
+    // return-type contract gap and would each be a ~5-line addition
+    // to this block if they surface in a future round.
+    if (legacy.rewroteShadow2DProj) {
+        preamble.append(
+            "vec4 appgl_shadow2DProj(sampler2DShadow s, vec4 p) {\n"
+            "    float v = textureProj(s, p);\n"
+            "    return vec4(v, v, v, v);\n"
+            "}\n");
     }
 
     // ---- 6. Inject preamble ----------------------------------------------

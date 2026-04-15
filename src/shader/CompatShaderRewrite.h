@@ -34,7 +34,10 @@ namespace appgl {
 //      `layout(location=N)` attribute / frag-output declarations the
 //      rewriter emits for the pre-core attribute names, and unlocks the
 //      modern `texture()` / `textureProj()` overloads that we rewrite
-//      `texture2D` / `textureCube` / `shadow2DProj` to.
+//      `texture2D` / `textureCube` to. `shadow2DProj` is routed through
+//      a synthesized `appgl_shadow2DProj` wrapper instead (fw²¹) —
+//      see the `rewroteShadow2DProj` flag comment for why a flat
+//      rename is semantically wrong.
 //
 //   3. For every recognized fixed-function matrix identifier referenced
 //      by the original source, a synthesized `appgl_*` uniform is
@@ -164,7 +167,15 @@ struct LegacyCompatUsage {
     bool rewroteTexture2D = false;
     // `textureCube(...)` call was rewritten to `texture(...)`.
     bool rewroteTextureCube = false;
-    // `shadow2DProj(...)` call was rewritten to `textureProj(...)`.
+    // `shadow2DProj(...)` call was rewritten. fw¹⁹ flat-renamed to
+    // core `textureProj(...)`, but that silently broke the return-
+    // type contract on `sampler2DShadow` — legacy `shadow2DProj`
+    // returns `vec4`, core `textureProj` returns `float`, and BAR's
+    // `ModelFragProg.glsl` chains `.r` on the result which then
+    // fails glslang's "scalar swizzle" check. fw²¹ retargets the
+    // rename to `appgl_shadow2DProj(...)`, a preamble-synthesized
+    // wrapper that keeps the legacy `vec4` return type. See
+    // `rewriteCompatShader` section 5h.
     bool rewroteShadow2DProj = false;
 
     bool anyAttribute() const {

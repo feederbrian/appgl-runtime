@@ -7886,6 +7886,241 @@ private:
     GLuint texture_ = 0;
 };
 
+// Phase 8X Group 4d follow-up²¹ — CompatProfileGLSLShadowScene.
+//
+// Regression test for the `shadow2DProj` helper-function synthesis in
+// `rewriteCompatShader`. fw²⁰-verification §4 pinned a new blocker in
+// Spring's `ModelFragProg.glsl` `USE_SHADOWS == 1` branch: fw¹⁹'s flat
+// rewrite `shadow2DProj → textureProj` silently broke the return-type
+// contract on `sampler2DShadow` (legacy returns `vec4`, core returns
+// `float`), so the chained `.r` swizzle Spring's shader does on the
+// result became "scalar swizzle : not supported" under glslang 330
+// core. Fw²¹ retargets the rewrite: call sites are renamed to
+// `appgl_shadow2DProj`, and the rewriter synthesizes a thin preamble
+// wrapper that calls `textureProj` and replicates the scalar result
+// into a vec4 — preserving the legacy return type end-to-end.
+//
+// This scene compiles a `#version 120` FS that calls
+// `shadow2DProj(uShadow, ...).r` inside a branch guarded by an
+// always-false runtime condition (`vUV.x > 10.0`, where `vUV` is in
+// `[0,1]`). The branch guard is intentionally **not** compile-time
+// constant so glslang has to type-check the `shadow2DProj(...).r`
+// expression — which is where a broken wrapper would surface as a
+// compile error. At runtime the branch is never taken, so the final
+// output is just the texture sample and the golden matches the
+// existing `phase-7.compat-profile-glsl` golden byte-for-byte.
+// Byte-identity is the same positive-evidence pattern fw²⁰ used for
+// the dual-output scene: it proves the helper synthesis is
+// semantically transparent to downstream consumers on the same
+// texture / geometry / matrix inputs.
+class CompatProfileGLSLShadowScene final : public Scene {
+public:
+    std::string id() const override {
+        return "phase-7.compat-profile-glsl-shadow";
+    }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {64, 64}; }
+
+    double tolerance() const override { return 0.02; }
+
+    void setup(GLContext& /*context*/) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        // VS identical to the single-output scene — fw²¹ targets the
+        // fragment-stage rewrite path.
+        const char* vertexSource =
+            "#version 120\n"
+            "varying vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = gl_MultiTexCoord0.xy;\n"
+            "    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+            "}\n";
+
+        // Fragment stage: calls `shadow2DProj(uShadow, ...).r` — the
+        // exact shape that broke Spring's `ModelFragProg.glsl`
+        // `USE_SHADOWS == 1` branch under fw²⁰. The expression is
+        // placed inside an `if (vUV.x > 10.0)` branch so glslang type-
+        // checks it but the branch is never taken at runtime (vUV is
+        // in [0,1] from the UV-gradient texture coordinate). The
+        // rewriter must synthesize `appgl_shadow2DProj(sampler2DShadow,
+        // vec4) -> vec4` into the preamble and rename the call site,
+        // otherwise the `.r` becomes an illegal "scalar swizzle" and
+        // the fragment compile fails at setup time.
+        const char* fragmentSource =
+            "#version 120\n"
+            "uniform sampler2D uTexture;\n"
+            "uniform sampler2DShadow uShadow;\n"
+            "varying vec2 vUV;\n"
+            "void main() {\n"
+            "    vec4 color = texture2D(uTexture, vUV);\n"
+            "    if (vUV.x > 10.0) {\n"
+            "        float s = shadow2DProj(uShadow, vec4(vUV, 0.0, 1.0)).r;\n"
+            "        color = vec4(s);\n"
+            "    }\n"
+            "    gl_FragColor = color;\n"
+            "}\n";
+
+        const GLuint vertex = gl.glCreateShader(GL_VERTEX_SHADER);
+        const GLuint fragment = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(vertex, 1, &vertexSource, nullptr);
+        gl.glShaderSource(fragment, 1, &fragmentSource, nullptr);
+        gl.glCompileShader(vertex);
+        gl.glCompileShader(fragment);
+        GLint vsCompile = 0, fsCompile = 0;
+        gl.glGetShaderiv(vertex, GL_COMPILE_STATUS, &vsCompile);
+        gl.glGetShaderiv(fragment, GL_COMPILE_STATUS, &fsCompile);
+        expectCondition(vsCompile == GL_TRUE,
+                        "shadow vertex shader compiles after rewrite");
+        expectCondition(fsCompile == GL_TRUE,
+                        "shadow fragment shader compiles after rewrite");
+
+        program_ = gl.glCreateProgram();
+        gl.glAttachShader(program_, vertex);
+        gl.glAttachShader(program_, fragment);
+        gl.glLinkProgram(program_);
+        GLint linkStatus = 0;
+        gl.glGetProgramiv(program_, GL_LINK_STATUS, &linkStatus);
+        expectCondition(linkStatus == GL_TRUE,
+                        "shadow program links after rewrite");
+        gl.glDeleteShader(vertex);
+        gl.glDeleteShader(fragment);
+
+        // Same 4×4 UV-gradient texture as the baseline scene so the
+        // rendered output is byte-identical when the shadow branch is
+        // correctly skipped by the runtime guard.
+        std::uint8_t rgbaPixels[16 * 4] = {};
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                const int i = (y * 4 + x) * 4;
+                rgbaPixels[i + 0] = static_cast<std::uint8_t>((x * 255) / 3);
+                rgbaPixels[i + 1] = static_cast<std::uint8_t>((y * 255) / 3);
+                rgbaPixels[i + 2] = 128;
+                rgbaPixels[i + 3] = 255;
+            }
+        }
+        gl.glGenTextures(1, &texture_);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, texture_);
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgbaPixels);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        // Bind the same RGBA gradient to texture unit 1 as a stand-in
+        // for the `sampler2DShadow` binding. The shader's shadow sample
+        // is gated behind an always-false branch at runtime, so Metal
+        // never actually reads from unit 1 — the binding only exists
+        // to keep the draw-time sampler table non-empty. Using RGBA
+        // instead of GL_DEPTH_COMPONENT keeps the scene on the Phase A
+        // texture upload path (fw²⁰-verification §5.1 flagged non-
+        // RGBA8 uploads as a known corpus gap).
+        gl.glGenTextures(1, &shadowTex_);
+        gl.glActiveTexture(GL_TEXTURE1);
+        gl.glBindTexture(GL_TEXTURE_2D, shadowTex_);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgbaPixels);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        const GLfloat vertices[] = {
+            -1.0f,-1.0f, 0.0f, 1.0f,  0.0f, 0.0f,
+             1.0f,-1.0f, 0.0f, 1.0f,  1.0f, 0.0f,
+             1.0f, 1.0f, 0.0f, 1.0f,  1.0f, 1.0f,
+            -1.0f, 1.0f, 0.0f, 1.0f,  0.0f, 1.0f,
+        };
+        const GLushort indices[] = {0, 1, 2, 2, 3, 0};
+
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glBindVertexArray(vao_);
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        gl.glGenBuffers(1, &ibo_);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
+        gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 6 * sizeof(GLfloat),
+                                 reinterpret_cast<const void*>(0));
+        gl.glEnableVertexAttribArray(8);
+        gl.glVertexAttribPointer(8, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(GLfloat),
+                                 reinterpret_cast<const void*>(4 * sizeof(GLfloat)));
+
+        gl.glUseProgram(program_);
+        const GLint textureLocation = gl.glGetUniformLocation(program_, "uTexture");
+        expectCondition(textureLocation >= 0,
+                        "shadow uTexture is resolvable");
+        gl.glUniform1i(textureLocation, 0);
+        const GLint shadowLocation = gl.glGetUniformLocation(program_, "uShadow");
+        expectCondition(shadowLocation >= 0,
+                        "shadow uShadow is resolvable");
+        gl.glUniform1i(shadowLocation, 1);
+    }
+
+    void render(GLContext& /*context*/) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        gl.glViewport(0, 0, framebufferSize().width, framebufferSize().height);
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+
+        gl.glUseProgram(program_);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, texture_);
+        gl.glActiveTexture(GL_TEXTURE1);
+        gl.glBindTexture(GL_TEXTURE_2D, shadowTex_);
+        gl.glBindVertexArray(vao_);
+        gl.glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glActiveTexture,
+            FunctionId::glAttachShader,
+            FunctionId::glBindBuffer,
+            FunctionId::glBindTexture,
+            FunctionId::glBindVertexArray,
+            FunctionId::glBufferData,
+            FunctionId::glClear,
+            FunctionId::glClearColor,
+            FunctionId::glCompileShader,
+            FunctionId::glCreateProgram,
+            FunctionId::glCreateShader,
+            FunctionId::glDeleteShader,
+            FunctionId::glDrawElements,
+            FunctionId::glEnableVertexAttribArray,
+            FunctionId::glFlush,
+            FunctionId::glGenBuffers,
+            FunctionId::glGenTextures,
+            FunctionId::glGenVertexArrays,
+            FunctionId::glGetProgramiv,
+            FunctionId::glGetShaderiv,
+            FunctionId::glGetUniformLocation,
+            FunctionId::glLinkProgram,
+            FunctionId::glPixelStorei,
+            FunctionId::glShaderSource,
+            FunctionId::glTexImage2D,
+            FunctionId::glTexParameteri,
+            FunctionId::glUniform1i,
+            FunctionId::glUseProgram,
+            FunctionId::glVertexAttribPointer,
+            FunctionId::glViewport,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLuint vao_ = 0;
+    GLuint vbo_ = 0;
+    GLuint ibo_ = 0;
+    GLuint texture_ = 0;
+    GLuint shadowTex_ = 0;
+};
+
 // ===========================================================================
 // Benchmark infrastructure — Phase 7 Group 5a
 // ===========================================================================
@@ -8671,6 +8906,20 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         // use of location 0`. See §fw²⁰ memo.
         CompatProfileGLSLDualOutputScene compatProfileDualOutputScene;
         tests.push_back(runScene(compatProfileDualOutputScene));
+
+        // Phase 8X Group 4d follow-up²¹ — shadow2DProj helper wrapper.
+        // Compiles a `#version 120` FS that calls
+        // `shadow2DProj(uShadow, ...).r` — the exact shape that broke
+        // Spring's `ModelFragProg.glsl` `USE_SHADOWS == 1` branch
+        // under fw²⁰ (legacy `shadow2DProj` returns vec4, core
+        // `textureProj` on sampler2DShadow returns float, so .r
+        // becomes illegal scalar swizzle after a flat rename). The
+        // rewriter's fw²¹ helper-synthesis rule must rename call
+        // sites to `appgl_shadow2DProj` AND emit a preamble wrapper
+        // that preserves the legacy vec4 return type — otherwise
+        // the FS compile fails at setup time. See §fw²¹ memo.
+        CompatProfileGLSLShadowScene compatProfileShadowScene;
+        tests.push_back(runScene(compatProfileShadowScene));
     }
 
     return buildJSON(normalizedPhase, tests);
