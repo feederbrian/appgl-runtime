@@ -7447,6 +7447,237 @@ private:
     GLuint texture_ = 0;
 };
 
+// Phase 8X Group 4d follow-up¹⁹ — CompatProfileGLSLScene.
+//
+// Regression test for the legacy-GLSL compat-profile shader rewriter
+// (`rewriteCompatShader` in `src/shader/CompatShaderRewrite.cpp`).
+// Fw¹⁸'s BAR-side verification reported that glslang in Vulkan client
+// mode hard-rejects `#version 100/110/120/130` desktop shaders with
+// "Desktop shaders for Vulkan SPIR-V require version 140 or higher",
+// which crashed Spring at match load on `ModernSkyVS/FS.glsl` and
+// `ModelVertProg/FragProg.glsl`. Fw¹⁹ extends the rewriter to upgrade
+// pre-140 version lines to `330 core` and translate the full set of
+// legacy fixed-function identifiers (`gl_Vertex`, `gl_MultiTexCoord0`,
+// `gl_ModelViewMatrix`, `varying`, `gl_FragColor`, `texture2D`, ...)
+// into the modern GLSL shapes that glslang and SPIRV-Cross accept.
+//
+// The scene compiles a deliberately legacy `#version 120` shader pair
+// that exercises the busiest five rewrite rules in a single pipeline:
+//
+//   1. Version upgrade (120 → 330 core).
+//   2. `varying` → stage-aware `in`/`out`.
+//   3. `gl_Vertex` / `gl_MultiTexCoord0` → synthesized `layout(location=N)`
+//      attribute declarations with the NVIDIA location convention.
+//   4. `gl_ModelViewProjectionMatrix` → the existing `appgl_*` matrix
+//      synthesis path (identity in this scene, so clip-space input
+//      passes through unchanged).
+//   5. `gl_FragColor` → `layout(location=0) out vec4 appgl_FragColor` and
+//      `texture2D(...)` → `texture(...)`.
+//
+// The scene samples a 4×4 RGBA texture whose color channels encode the
+// input texcoord (R = u, G = v, B = 0.5, A = 1.0), so a broken rewrite
+// would produce either a compile/link failure, a link-time attribute
+// mismatch, or a shader that reads position from the wrong binding and
+// smears the output. On a correct rewrite the golden shows a clean UV
+// gradient — red increases with x, green increases with y — and any
+// regression in the rewriter lands as a visibly wrong image.
+class CompatProfileGLSLScene final : public Scene {
+public:
+    std::string id() const override { return "phase-7.compat-profile-glsl"; }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {64, 64}; }
+
+    double tolerance() const override {
+        // Same small allowance as the other phase-7 UV-gradient scenes;
+        // nearest-neighbour sampling and trivial shader math keep drift
+        // well under the threshold on a working build.
+        return 0.02;
+    }
+
+    void setup(GLContext& /*context*/) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        // Deliberately legacy shader sources. The rewriter is what makes
+        // this land — on an un-rewritten glslang these fail compile.
+        //
+        // Vertex stage: `#version 120`, `gl_Vertex` and
+        // `gl_MultiTexCoord0` (→ synthesized attribute locations),
+        // `gl_ModelViewProjectionMatrix` (→ synthesized matrix uniform,
+        // mirror pushes identity so clip-space coordinates pass
+        // through), `varying` (→ `out` on VS side, matched to `in` on
+        // FS side through the rewriter's word-boundary rule).
+        const char* vertexSource =
+            "#version 120\n"
+            "varying vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = gl_MultiTexCoord0.xy;\n"
+            "    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+            "}\n";
+        // Fragment stage: `#version 120`, `varying` (→ `in` on FS
+        // side), `gl_FragColor` (→ synthesized `layout(location=0) out
+        // vec4 appgl_FragColor`), `texture2D` (→ `texture`).
+        const char* fragmentSource =
+            "#version 120\n"
+            "uniform sampler2D uTexture;\n"
+            "varying vec2 vUV;\n"
+            "void main() {\n"
+            "    gl_FragColor = texture2D(uTexture, vUV);\n"
+            "}\n";
+
+        const GLuint vertex = gl.glCreateShader(GL_VERTEX_SHADER);
+        const GLuint fragment = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(vertex, 1, &vertexSource, nullptr);
+        gl.glShaderSource(fragment, 1, &fragmentSource, nullptr);
+        gl.glCompileShader(vertex);
+        gl.glCompileShader(fragment);
+        GLint vsCompile = 0, fsCompile = 0;
+        gl.glGetShaderiv(vertex, GL_COMPILE_STATUS, &vsCompile);
+        gl.glGetShaderiv(fragment, GL_COMPILE_STATUS, &fsCompile);
+        expectCondition(vsCompile == GL_TRUE,
+                        "compat-profile-glsl vertex shader compiles after rewrite");
+        expectCondition(fsCompile == GL_TRUE,
+                        "compat-profile-glsl fragment shader compiles after rewrite");
+
+        program_ = gl.glCreateProgram();
+        gl.glAttachShader(program_, vertex);
+        gl.glAttachShader(program_, fragment);
+        gl.glLinkProgram(program_);
+        GLint linkStatus = 0;
+        gl.glGetProgramiv(program_, GL_LINK_STATUS, &linkStatus);
+        expectCondition(linkStatus == GL_TRUE,
+                        "compat-profile-glsl program links after rewrite");
+        gl.glDeleteShader(vertex);
+        gl.glDeleteShader(fragment);
+
+        // 4×4 RGBA texture encoding the UV coordinate directly so a
+        // wrong attribute binding (e.g. location mismatch between the
+        // rewriter's synthesized `layout(location=8) in vec4
+        // appgl_MultiTexCoord0` and the client-side pointer) produces a
+        // visibly wrong gradient instead of a silent pass.
+        std::uint8_t rgbaPixels[16 * 4] = {};
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                const int i = (y * 4 + x) * 4;
+                rgbaPixels[i + 0] = static_cast<std::uint8_t>((x * 255) / 3);
+                rgbaPixels[i + 1] = static_cast<std::uint8_t>((y * 255) / 3);
+                rgbaPixels[i + 2] = 128;
+                rgbaPixels[i + 3] = 255;
+            }
+        }
+        gl.glGenTextures(1, &texture_);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, texture_);
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgbaPixels);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        // Full-viewport quad. The rewriter parks `gl_Vertex` at
+        // `layout(location = 0)` and `gl_MultiTexCoord0` at
+        // `layout(location = 8)` per the NVIDIA convention, so the
+        // client-side `glVertexAttribPointer` calls must match those
+        // locations exactly for the scene to run — i.e. the scene also
+        // smoke-tests that the commitment to NVIDIA locations at the
+        // rewriter edge holds end-to-end through the pipeline builder.
+        //
+        // Interleaved layout: vec4 position + vec2 texcoord = 24 bytes.
+        const GLfloat vertices[] = {
+            // x,    y,    z,   w,     u,   v
+            -1.0f,-1.0f, 0.0f, 1.0f,  0.0f, 0.0f,
+             1.0f,-1.0f, 0.0f, 1.0f,  1.0f, 0.0f,
+             1.0f, 1.0f, 0.0f, 1.0f,  1.0f, 1.0f,
+            -1.0f, 1.0f, 0.0f, 1.0f,  0.0f, 1.0f,
+        };
+        const GLushort indices[] = {0, 1, 2, 2, 3, 0};
+
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glBindVertexArray(vao_);
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        gl.glGenBuffers(1, &ibo_);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
+        gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+        // `gl_Vertex`  → `layout(location = 0)` (NVIDIA convention).
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 6 * sizeof(GLfloat),
+                                 reinterpret_cast<const void*>(0));
+        // `gl_MultiTexCoord0` → `layout(location = 8)` (NVIDIA
+        // convention). The scene commits to this binding — if the
+        // rewriter ever re-emits to a different slot the driver-side
+        // binding will mismatch and the test surface will show it.
+        gl.glEnableVertexAttribArray(8);
+        gl.glVertexAttribPointer(8, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(GLfloat),
+                                 reinterpret_cast<const void*>(4 * sizeof(GLfloat)));
+
+        gl.glUseProgram(program_);
+        const GLint textureLocation = gl.glGetUniformLocation(program_, "uTexture");
+        expectCondition(textureLocation >= 0,
+                        "compat-profile-glsl uTexture is resolvable");
+        gl.glUniform1i(textureLocation, 0);
+    }
+
+    void render(GLContext& /*context*/) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        gl.glViewport(0, 0, framebufferSize().width, framebufferSize().height);
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+
+        gl.glUseProgram(program_);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, texture_);
+        gl.glBindVertexArray(vao_);
+        gl.glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glActiveTexture,
+            FunctionId::glAttachShader,
+            FunctionId::glBindBuffer,
+            FunctionId::glBindTexture,
+            FunctionId::glBindVertexArray,
+            FunctionId::glBufferData,
+            FunctionId::glClear,
+            FunctionId::glClearColor,
+            FunctionId::glCompileShader,
+            FunctionId::glCreateProgram,
+            FunctionId::glCreateShader,
+            FunctionId::glDeleteShader,
+            FunctionId::glDrawElements,
+            FunctionId::glEnableVertexAttribArray,
+            FunctionId::glFlush,
+            FunctionId::glGenBuffers,
+            FunctionId::glGenTextures,
+            FunctionId::glGenVertexArrays,
+            FunctionId::glGetProgramiv,
+            FunctionId::glGetShaderiv,
+            FunctionId::glGetUniformLocation,
+            FunctionId::glLinkProgram,
+            FunctionId::glPixelStorei,
+            FunctionId::glShaderSource,
+            FunctionId::glTexImage2D,
+            FunctionId::glTexParameteri,
+            FunctionId::glUniform1i,
+            FunctionId::glUseProgram,
+            FunctionId::glVertexAttribPointer,
+            FunctionId::glViewport,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLuint vao_ = 0;
+    GLuint vbo_ = 0;
+    GLuint ibo_ = 0;
+    GLuint texture_ = 0;
+};
+
 // ===========================================================================
 // Benchmark infrastructure — Phase 7 Group 5a
 // ===========================================================================
@@ -8210,6 +8441,16 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         // golden mismatch.
         AlphaTextureCoverageScene alphaTextureCoverageScene;
         tests.push_back(runScene(alphaTextureCoverageScene));
+
+        // Phase 8X Group 4d follow-up¹⁹ — legacy-GLSL rewriter end-to-end.
+        // Compiles a `#version 120` shader pair that exercises version
+        // upgrade, `varying` translation, `gl_Vertex`/`gl_MultiTexCoord0`
+        // synthesis, `gl_ModelViewProjectionMatrix` push, `gl_FragColor`
+        // rewrite, and `texture2D` → `texture` in one program. If any
+        // piece of `rewriteCompatShader` regresses the compile will fail
+        // or the golden image will flip. See §fw¹⁹ memo.
+        CompatProfileGLSLScene compatProfileGlslScene;
+        tests.push_back(runScene(compatProfileGlslScene));
     }
 
     return buildJSON(normalizedPhase, tests);

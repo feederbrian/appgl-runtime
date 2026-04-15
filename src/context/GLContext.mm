@@ -6481,7 +6481,8 @@ bool GLContext::compileShader(GLuint shader) {
     //    uniforms get picked up by the scanner and end up in
     //    declaredUniforms — which linkProgram lifts into
     //    programObject->uniforms with normal sequential locations.
-    CompatShaderRewriteResult rewrite = rewriteCompatShader(object->source);
+    CompatShaderRewriteResult rewrite =
+        rewriteCompatShader(object->source, object->stage);
     const std::string& compileSource =
         rewrite.didRewrite ? rewrite.source : object->source;
 
@@ -7128,8 +7129,10 @@ bool GLContext::linkProgram(GLuint program) {
         if (vsStage == nullptr || fsStage == nullptr) {
             return {};
         }
-        CompatShaderRewriteResult vsRewrite = rewriteCompatShader(vsStage->source);
-        CompatShaderRewriteResult fsRewrite = rewriteCompatShader(fsStage->source);
+        CompatShaderRewriteResult vsRewrite =
+            rewriteCompatShader(vsStage->source, GL_VERTEX_SHADER);
+        CompatShaderRewriteResult fsRewrite =
+            rewriteCompatShader(fsStage->source, GL_FRAGMENT_SHADER);
         const std::string& vsLinkSource =
             vsRewrite.didRewrite ? vsRewrite.source : vsStage->source;
         const std::string& fsLinkSource =

@@ -1,8 +1,13 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
+
+// GLenum is a plain uint32_t. Forward-declare rather than pulling in
+// <AppGL/AppGL.h> so callers that don't already include it still compile.
+typedef unsigned int GLenum;
 
 namespace appgl {
 
@@ -11,15 +16,27 @@ namespace appgl {
 // compatibility`; it also rejects every `gl_*` fixed-function identifier
 // (`gl_ModelViewMatrix`, `gl_NormalMatrix`, ...). BAR's shader corpus
 // includes 100+ shaders that begin with `#version 150 compatibility` and
-// reference the matrix family in the vertex stage.
+// reference the matrix family in the vertex stage. It ALSO includes
+// `#version 120` / `#version 130` legacy desktop shaders (Spring's sky
+// and deferred-model drawers) that reject at the glslang Vulkan client
+// front-end with `Desktop shaders for Vulkan SPIR-V require version 140
+// or higher`, and once that floor is lifted, need a much deeper set of
+// identifier rewrites to satisfy the core-profile surface.
 //
-// This pass does the minimum mechanical translation needed to get those
-// shaders past glslang:
+// This pass does the mechanical translation needed to get those shaders
+// past glslang:
 //
 //   1. `#version NNN compatibility` is rewritten to `#version NNN core`
 //      in-place (no line-number shift; same physical line).
 //
-//   2. For every recognized fixed-function matrix identifier referenced
+//   2. `#version 100/110/120/130` is rewritten to `#version 330 core`
+//      (Phase 8X Group 4d follow-up¹⁹). 330 core mates cleanly with the
+//      `layout(location=N)` attribute / frag-output declarations the
+//      rewriter emits for the pre-core attribute names, and unlocks the
+//      modern `texture()` / `textureProj()` overloads that we rewrite
+//      `texture2D` / `textureCube` / `shadow2DProj` to.
+//
+//   3. For every recognized fixed-function matrix identifier referenced
 //      by the original source, a synthesized `appgl_*` uniform is
 //      prepended to the source after the `#version` line, paired with
 //      a `#define gl_X appgl_X` so the user's references resolve
@@ -34,20 +51,27 @@ namespace appgl {
 //      draw-time uniform push reads `appgl_*` values from the per-context
 //      MatrixStateMirror.
 //
-//   3. After the preamble, a `#line 2` directive is injected so glslang
+//   4. Phase 8X Group 4d follow-up¹⁹ — the legacy-attribute/varying/
+//      frag-output/fog/light/sampler/clip-vertex family is handled via a
+//      mix of preamble injection and in-place source-text token
+//      rewriting. The signature was extended with a `GLenum stage`
+//      argument because `varying` and `gl_TexCoord[]` have stage-
+//      dependent behaviour (VS-side `varying` → `out`, FS-side `varying`
+//      → `in`; VS-side `gl_TexCoord[8]` becomes an `out` array, FS-side
+//      an `in` array). The stage argument is the GL_*_SHADER enum
+//      (GL_VERTEX_SHADER / GL_FRAGMENT_SHADER / ...). Non-raster stages
+//      are accepted and routed through the stage-independent rewrites
+//      only.
+//
+//   5. After the preamble, a `#line 2` directive is injected so glslang
 //      reports compile errors against the original source line numbers
 //      rather than the post-rewrite line numbers. (`#version` stays on
 //      its original line, so error messages on line 1 still point to
 //      the right place.)
-//
-// Identifiers NOT covered by this initial landing (gl_Vertex, gl_Color,
-// gl_Normal, gl_FragColor, gl_FrontColor, gl_TexCoord, gl_LightSource,
-// gl_Fog, gl_ClipVertex, ...) are deferred to a follow-up landing once
-// BAR's in-game render path needs them. The Phase 8X target shader
-// (BAR's `Icons2DVS.glsl` / `IconsFS.glsl` combo for the select menu)
-// only references `gl_ModelViewProjectionMatrix`, so the matrix family
-// alone is enough to unblock the smoke test.
 
+// Tracks which synthesized matrix uniforms got generated. Caller uses
+// this to cache uniform locations on the program object so draw-time
+// matrix push doesn't have to rescan the uniform table.
 struct SynthesizedMatrixUsage {
     bool modelView = false;
     bool projection = false;
@@ -65,11 +89,113 @@ struct SynthesizedMatrixUsage {
     }
 };
 
+// Phase 8X Group 4d follow-up¹⁹ — legacy compat-profile feature usage,
+// separate from the matrix family so downstream callers that only care
+// about the matrix bind-path don't need to pattern-match 30 extra flags.
+// All flags default to `false`; the rewriter sets them when the
+// corresponding identifier is discovered in the original source.
+struct LegacyCompatUsage {
+    // Version-line rewrite kicked in for a pre-140 desktop version
+    // (`#version 100/110/120/130`). Not set for `150 compatibility` —
+    // that's the older, narrower rewrite covered by `wasCompatProfile`.
+    bool upgradedVersion = false;
+    // `varying` keyword appeared and was rewritten to `in`/`out`. The
+    // exact in/out direction depends on the stage passed to the rewriter.
+    bool hadVarying = false;
+    // Stage-affecting attribute rewrites (vertex stage only).
+    bool attrVertex = false;           // gl_Vertex -> layout(loc=0) in vec4 appgl_Vertex
+    bool attrNormal = false;           // gl_Normal -> layout(loc=2) in vec3 appgl_Normal
+    bool attrColor = false;            // gl_Color -> layout(loc=3) in vec4 appgl_Color
+    std::array<bool, 8> attrMultiTexCoord = {};  // gl_MultiTexCoord[0..7] -> layout(loc=8+N)
+    // Frag-output rewrites (fragment stage only).
+    bool fragColor = false;            // gl_FragColor -> layout(loc=0) out vec4 appgl_FragColor
+    // Highest `gl_FragData[N]` index seen. -1 means `gl_FragData` was
+    // not used. Ns of 0..7 emit an 8-slot array at location 0.
+    int fragDataMax = -1;
+    // gl_TexCoord[N] stage-bridged varying. The rewriter records the
+    // highest N seen across stages; the preamble emits a matched
+    // `appgl_TexCoord[max+1]` array on the VS `out` side and the FS
+    // `in` side.
+    int texCoordMax = -1;
+    // gl_Fog.* field accesses. Each sub-field records whether the
+    // corresponding flat uniform (`appgl_FogColor`, ...) should be
+    // synthesized. The GL 1.x defaults are baked into the declaration
+    // initializer so no runtime-side plumbing is needed.
+    bool usesFogColor = false;
+    bool usesFogDensity = false;
+    bool usesFogStart = false;
+    bool usesFogEnd = false;
+    bool usesFogScale = false;
+    // gl_LightSource[*].* field accesses (unioned across all observed
+    // subscripts). The preamble emits array uniforms for every used
+    // field, sized to `kSynthesizedLightSourceCount`. Defaults are
+    // NOT seeded via the initializer path (GLSL scalar/vector default-
+    // initializer syntax doesn't cover arrays in the fw¹⁵ scanner), so
+    // the uniforms come up as zero and produce unlit-black geometry.
+    // This is a known deviation from GL 1.x default state (light 0 has
+    // a white directional source) and is the first candidate to extend
+    // in a follow-up round if BAR's model rendering comes up dark after
+    // fw¹⁹ lands.
+    bool usesLightAmbient = false;
+    bool usesLightDiffuse = false;
+    bool usesLightSpecular = false;
+    bool usesLightPosition = false;
+    bool usesLightHalfVector = false;
+    bool usesLightSpotDirection = false;
+    bool usesLightSpotExponent = false;
+    bool usesLightSpotCutoff = false;
+    bool usesLightSpotCosCutoff = false;
+    bool usesLightConstantAttenuation = false;
+    bool usesLightLinearAttenuation = false;
+    bool usesLightQuadraticAttenuation = false;
+    bool anyLight() const {
+        return usesLightAmbient || usesLightDiffuse || usesLightSpecular ||
+               usesLightPosition || usesLightHalfVector ||
+               usesLightSpotDirection || usesLightSpotExponent ||
+               usesLightSpotCutoff || usesLightSpotCosCutoff ||
+               usesLightConstantAttenuation || usesLightLinearAttenuation ||
+               usesLightQuadraticAttenuation;
+    }
+    // `gl_ClipVertex` appeared in VS. Rewritten to an `out`/`in` bridge
+    // so the cross-stage interface stays balanced and glslang stops
+    // rejecting the reference.
+    bool usesClipVertex = false;
+    // `texture2D(...)` call was rewritten to `texture(...)`.
+    bool rewroteTexture2D = false;
+    // `textureCube(...)` call was rewritten to `texture(...)`.
+    bool rewroteTextureCube = false;
+    // `shadow2DProj(...)` call was rewritten to `textureProj(...)`.
+    bool rewroteShadow2DProj = false;
+
+    bool anyAttribute() const {
+        if (attrVertex || attrNormal || attrColor) return true;
+        for (bool used : attrMultiTexCoord) {
+            if (used) return true;
+        }
+        return false;
+    }
+    bool any() const {
+        return upgradedVersion || hadVarying || anyAttribute() ||
+               fragColor || fragDataMax >= 0 || texCoordMax >= 0 ||
+               usesFogColor || usesFogDensity || usesFogStart ||
+               usesFogEnd || usesFogScale || anyLight() ||
+               usesClipVertex || rewroteTexture2D ||
+               rewroteTextureCube || rewroteShadow2DProj;
+    }
+};
+
 struct CompatShaderRewriteResult {
     // Rewritten source. If no rewrite was applied, equals the original.
     std::string source;
-    // Which `appgl_*` uniforms got synthesized into the rewritten source.
+    // Which `appgl_*` matrix uniforms got synthesized into the rewritten
+    // source. See the matrix-bind path in GLContext::linkProgram.
     SynthesizedMatrixUsage usage;
+    // Phase 8X Group 4d follow-up¹⁹ — which of the non-matrix compat
+    // features were exercised on this source. Callers may consult this
+    // for diagnostics, but the preamble emission itself is
+    // self-contained — no caller needs to act on these flags to get
+    // correct behaviour.
+    LegacyCompatUsage legacy;
     // True iff the original source carried `#version NNN compatibility`.
     bool wasCompatProfile = false;
     // True iff any rewrite was applied (version downgrade, preamble
@@ -78,10 +204,10 @@ struct CompatShaderRewriteResult {
     bool didRewrite = false;
 };
 
-// Names of the synthesized uniforms. Hand-coded constexpr strings so the
-// link-time path can match by name without having to know the rewriter's
-// internal table. Kept in a namespace so callers don't accidentally pull
-// the names into the global ns via a `using` directive.
+// Names of the synthesized matrix uniforms. Hand-coded constexpr strings
+// so the link-time path can match by name without having to know the
+// rewriter's internal table. Kept in a namespace so callers don't
+// accidentally pull the names into the global ns via a `using` directive.
 namespace SynthesizedUniformNames {
 inline constexpr const char* kModelViewMatrix =
     "appgl_ModelViewMatrix";
@@ -105,11 +231,22 @@ inline constexpr const char* kTextureMatrix =
 // MatrixStateMirror::kMaxTextureUnits.
 inline constexpr unsigned int kSynthesizedTextureMatrixCount = 8;
 
+// Phase 8X Group 4d follow-up¹⁹ — length of the synthesized light-source
+// array uniform. Matches the GL 1.x `GL_MAX_LIGHTS` minimum (8) and the
+// spring model-drawer slot count the fw¹⁸ verification memo reported.
+inline constexpr unsigned int kSynthesizedLightSourceCount = 8;
+
 // Apply the compat-shader rewrite. Returns the rewritten source plus a
 // usage descriptor that the link-time path uses to cache uniform
 // locations on the program object. Safe to call on any GLSL source —
-// non-compat shaders that don't reference any fixed-function matrix
-// identifier come back unchanged with `didRewrite == false`.
-CompatShaderRewriteResult rewriteCompatShader(std::string_view source);
+// non-compat shaders that don't reference any fixed-function identifier
+// come back unchanged with `didRewrite == false`.
+//
+// `stage` is the GL shader stage enum (GL_VERTEX_SHADER /
+// GL_FRAGMENT_SHADER / GL_GEOMETRY_SHADER / GL_TESS_*_SHADER /
+// GL_COMPUTE_SHADER). Affects the direction of `varying` rewrites and
+// the `out`/`in` side of stage-bridged arrays.
+CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
+                                              GLenum stage);
 
 }  // namespace appgl

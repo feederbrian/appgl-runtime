@@ -261,6 +261,18 @@ bool isValidEnableCap(GLenum cap) {
 //                                Metal render-pipeline descriptor; silently
 //                                accepting the disable is the correct
 //                                semantic (the default is "off" anyway).
+//   GL_TEXTURE_GEN_S  (0x0C60) — fixed-function per-coordinate automatic
+//   GL_TEXTURE_GEN_T  (0x0C61)   texture-coordinate generation. Phase 8X
+//   GL_TEXTURE_GEN_R  (0x0C62)   Group 4d follow-up¹⁹ — the legacy GLSL
+//   GL_TEXTURE_GEN_Q  (0x0C63)   shader rewriter unlocks `#version 120/130`
+//                                desktop shaders that Spring pairs with
+//                                `glDisable(GL_TEXTURE_GEN_*)` in
+//                                `LuaOpenGL::ResetGLState`. The fixed-
+//                                function texgen stage was dropped in
+//                                core 3.2 — translated shaders compute
+//                                their own texture coordinates in the
+//                                vertex stage — so silent accept is the
+//                                correct no-op semantic.
 #ifndef GL_ALPHA_TEST
 #define GL_ALPHA_TEST 0x0BC0
 #endif
@@ -285,6 +297,18 @@ bool isValidEnableCap(GLenum cap) {
 #ifndef GL_COLOR_LOGIC_OP
 #define GL_COLOR_LOGIC_OP 0x0BF2
 #endif
+#ifndef GL_TEXTURE_GEN_S
+#define GL_TEXTURE_GEN_S 0x0C60
+#endif
+#ifndef GL_TEXTURE_GEN_T
+#define GL_TEXTURE_GEN_T 0x0C61
+#endif
+#ifndef GL_TEXTURE_GEN_R
+#define GL_TEXTURE_GEN_R 0x0C62
+#endif
+#ifndef GL_TEXTURE_GEN_Q
+#define GL_TEXTURE_GEN_Q 0x0C63
+#endif
 bool isCompatNoOpEnableCap(GLenum cap) {
     switch (cap) {
         case GL_ALPHA_TEST:
@@ -295,6 +319,10 @@ bool isCompatNoOpEnableCap(GLenum cap) {
         case GL_LIGHT1:
         case GL_LINE_STIPPLE:
         case GL_COLOR_LOGIC_OP:
+        case GL_TEXTURE_GEN_S:
+        case GL_TEXTURE_GEN_T:
+        case GL_TEXTURE_GEN_R:
+        case GL_TEXTURE_GEN_Q:
             return true;
         default:
             return false;
