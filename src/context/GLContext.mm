@@ -6693,6 +6693,22 @@ bool GLContext::linkProgram(GLuint program) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+
+    // Phase 8X Group 4d follow-up²³ — link-path crash-site instrumentation.
+    // The fw²² smoke identified Spring's Sky shader (program 28) SIGABRT'ing
+    // between the `compileGLSLProgram` NSLog and the final `linkProgram`
+    // NSLog. All Metal pipeline work (`newLibraryWithSource`,
+    // `newRenderPipelineStateWithDescriptor`) lives in `MetalFrameGraph.mm`
+    // and is only reached at draw time — so the only work between those two
+    // log lines is glslang cross-stage link + SPIRV-Cross spirvToMSL/reflect.
+    // These markers bracket each sub-step so BAR's crash handler can tell
+    // which one is the last to run before abort. Each marker is followed by
+    // an explicit `fflush(stderr)` to survive the libunwind double-abort that
+    // fw²² verification §5.3 documented (`fsync(STDERR_FILENO)` Spring-side
+    // fix is separate and still deferred).
+    NSLog(@"[GL] linkProgram-begin program=%u", program);
+    fflush(stderr);
+
     programObject->uniforms.clear();
     programObject->attributes.clear();
     programObject->uniformValues.clear();
@@ -7065,11 +7081,43 @@ bool GLContext::linkProgram(GLuint program) {
         if (spirvData == nullptr || spirvWords == 0) {
             return false;
         }
-        std::string mslLog;
-        std::string msl = translator.spirvToMSL(
-            spirvData, spirvWords, bindings, &mslLog);
         const std::string stageTag = programTag + "-" + stageName;
         const std::string hash = quickHash(sourceText);
+
+        // Phase 8X Group 4d follow-up²³ — sub-step marker + C++ exception
+        // guard around spirvToMSL. SPIRV-Cross can throw `spirv_cross_error`
+        // on ill-formed SPIR-V or unsupported decoration patterns; if that
+        // escapes into this Objective-C++ frame unhandled, std::terminate
+        // fires and the process SIGABRTs. Catch here so a throw becomes a
+        // clean translation failure (MSL empty + diagnostic record) instead
+        // of the fw²² Sky-program-28 crash signature.
+        NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s", program, stageName);
+        fflush(stderr);
+        std::string mslLog;
+        std::string msl;
+        try {
+            msl = translator.spirvToMSL(
+                spirvData, spirvWords, bindings, &mslLog);
+        } catch (const std::exception& e) {
+            NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW: %s",
+                  program, stageName, e.what());
+            fflush(stderr);
+            Runtime::shared().recordShaderTranslation({
+                stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+                std::string("spirvToMSL threw std::exception: ") + e.what(),
+                "", false
+            });
+            return false;
+        } catch (...) {
+            NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW unknown exception",
+                  program, stageName);
+            fflush(stderr);
+            Runtime::shared().recordShaderTranslation({
+                stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+                "spirvToMSL threw unknown exception", "", false
+            });
+            return false;
+        }
         if (msl.empty()) {
             Runtime::shared().recordShaderTranslation({
                 stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
@@ -7078,8 +7126,35 @@ bool GLContext::linkProgram(GLuint program) {
             });
             return false;
         }
-        reflectionOut = translator.reflect(
-            spirvData, spirvWords, bindings, nullptr);
+
+        // Phase 8X Group 4d follow-up²³ — sub-step marker + exception guard
+        // around reflect. SPIRV-Cross reflection re-walks the SPIR-V and is
+        // the other plausible throw site in the translator's critical path.
+        NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s", program, stageName);
+        fflush(stderr);
+        try {
+            reflectionOut = translator.reflect(
+                spirvData, spirvWords, bindings, nullptr);
+        } catch (const std::exception& e) {
+            NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s THREW: %s",
+                  program, stageName, e.what());
+            fflush(stderr);
+            Runtime::shared().recordShaderTranslation({
+                stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+                std::string("reflect threw std::exception: ") + e.what(),
+                "", false
+            });
+            return false;
+        } catch (...) {
+            NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s THREW unknown exception",
+                  program, stageName);
+            fflush(stderr);
+            Runtime::shared().recordShaderTranslation({
+                stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
+                "reflect threw unknown exception", "", false
+            });
+            return false;
+        }
         mslOut = std::move(msl);
         // Phase 8X Group 4d follow-up⁵ — §6b: when the stage *succeeds*
         // we keep the 200-byte preview because the full MSL is large and
@@ -7137,12 +7212,19 @@ bool GLContext::linkProgram(GLuint program) {
             vsRewrite.didRewrite ? vsRewrite.source : vsStage->source;
         const std::string& fsLinkSource =
             fsRewrite.didRewrite ? fsRewrite.source : fsStage->source;
+        // Phase 8X Group 4d follow-up²³ — sub-step marker before the
+        // glslang cross-stage link. First candidate on the abort-site ladder
+        // is glslang's TProgram::link re-entry, since that's the first heavy
+        // operation inside this lambda.
+        NSLog(@"[GL] linkProgram-step=compile-glsl-program program=%u", program);
+        fflush(stderr);
         std::string linkErrorLog;
         LinkedProgramSpirv linked = translator.compileGLSLProgram(
             vsLinkSource, fsLinkSource, 330, &linkErrorLog);
         NSLog(@"[GL] compileGLSLProgram: program=%u success=%d log=%s",
               program, linked.linkSucceeded ? 1 : 0,
               linkErrorLog.c_str());
+        fflush(stderr);
         if (!linked.linkSucceeded) {
             // Record the cross-stage link failure so BAR can see why the
             // VS+FS path is degrading back to per-stage SPIR-V. The fall
@@ -7360,6 +7442,7 @@ bool GLContext::linkProgram(GLuint program) {
           programObject->vertexReflection.vertexInputs.size(),
           programObject->vertexReflection.uniformBlocks.size(),
           programObject->fragmentReflection.uniformBlocks.size());
+    fflush(stderr);  // Phase 8X Group 4d follow-up²³ — synchronous flush
 
     // ── Merge SPIRV-Cross uniform block reflection into the program's
     //    resource introspection tables ──

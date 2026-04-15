@@ -2509,7 +2509,24 @@ public:
             // push one record tagged stage="link" with success=false.
             const GLuint failProgram = gl.glCreateProgram();
             gl.glAttachShader(failProgram, badShader);
+
+            // Phase 8X Group 4d follow-up²³ — snapshot right before the
+            // glLinkProgram call so the delta measures only linkProgram's
+            // push, not the preceding glCompileShader's compile-failure
+            // record. fw²³ adds C++ exception guards around
+            // `translator.spirvToMSL` / `translator.reflect` inside
+            // `linkProgram`'s translateStage lambda; if a future regression
+            // made the uncompiled-attached-shader branch reach SPIRV-Cross
+            // and push additional records (or if the exception guard ever
+            // pushed duplicate records on a single throw), this assertion
+            // catches it. The uncompiled-shader bailout path pushes exactly
+            // one record at the top of `linkProgram` (see the
+            // `!shaderObject->compiled` branch) — no more, no less.
+            const std::uint64_t translationsBeforeLinkOnly =
+                Runtime::shared().shaderTranslationCount();
             gl.glLinkProgram(failProgram);
+            const std::uint64_t translationsAfterLinkOnly =
+                Runtime::shared().shaderTranslationCount();
 
             GLint failLinkStatus = GL_TRUE;
             gl.glGetProgramiv(failProgram, GL_LINK_STATUS, &failLinkStatus);
@@ -2522,6 +2539,13 @@ public:
                 Runtime::shared().shaderTranslationSnapshot();
             expectCondition(translationsAfterFailure > translationsBeforeFailure,
                             "link-of-bad-shader pushed at least one shader translation record");
+            // Phase 8X Group 4d follow-up²³ regression guard — linkProgram
+            // must push exactly one record on the uncompiled-attached-shader
+            // bailout path. This is the fw²³ contract: the translateStage
+            // try/catch blocks must not duplicate-push on any code path that
+            // doesn't reach them at all.
+            expectCondition(translationsAfterLinkOnly - translationsBeforeLinkOnly == 1,
+                            "linkProgram pushed exactly one record on uncompiled-shader bailout");
             if (!failureSnapshot.empty() &&
                 translationsAfterFailure > translationsBeforeFailure) {
                 const auto& failureRecord = failureSnapshot.back();
