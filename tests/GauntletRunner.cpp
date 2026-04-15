@@ -777,6 +777,83 @@ public:
                             "GL_SHADING_LANGUAGE_VERSION reports \"4.60\"");
         }
 
+        // Phase 8X Group 4d follow-up²² — buffer-family extension-string
+        // audit. Before fw²² the extension tables omitted
+        // `GL_ARB_vertex_buffer_object` (and siblings), which made
+        // GLAD's `GLAD_GL_ARB_vertex_buffer_object` bool stay at its
+        // default zero inside BAR/Recoil. That caused
+        // `VBO::IsSupported(GL_ARRAY_BUFFER)` to return false at
+        // startup, short-circuiting `LuaVBOs::CheckAndReportSupported`
+        // into a 74× error log on the fw²¹ smoke run and gating the
+        // entire HUD widget stack behind the Lua VBO layer. The four
+        // strings asserted below are the exact names GLAD's
+        // `has_ext()` probes drive the buffer-path gates through:
+        // see `kAppGLExtensionList` in `AppGLGroup8.cpp` for the full
+        // gate analysis and sibling references to VBO.cpp:38 /
+        // LuaVAO.cpp:89 in the Recoil tree. Asserting them here pins
+        // the table so a future extension-table regression lights up
+        // at gauntlet time rather than silently re-breaking BAR's
+        // buffer path.
+        //
+        // The assertions cover both the glGetString(GL_EXTENSIONS)
+        // monolithic blob (GL <= 2.1 loaders) and the
+        // glGetStringi(GL_EXTENSIONS, i) indexed path (GL 3.0+ loaders
+        // — the one GLAD actually uses). Both tables must be kept in
+        // sync; this single test covers both sides.
+        const GLubyte* extensionsBlob = gl.glGetString(GL_EXTENSIONS);
+        expectCondition(extensionsBlob != nullptr,
+                        "glGetString(GL_EXTENSIONS) returns non-null blob");
+        const std::string extensionsText = (extensionsBlob != nullptr)
+            ? std::string(reinterpret_cast<const char*>(extensionsBlob))
+            : std::string();
+
+        auto assertBlobContains = [&](const char* name) {
+            // Single-space sentinel both sides so we match whole-token,
+            // never a prefix / suffix slip-through (e.g. "GL_ARB_copy"
+            // inside "GL_ARB_copy_buffer" or "GL_ARB_copy_image").
+            const std::string padded = std::string(" ") + name + " ";
+            const std::string haystack = std::string(" ") + extensionsText + " ";
+            expectCondition(haystack.find(padded) != std::string::npos,
+                            std::string("glGetString(GL_EXTENSIONS) advertises ") + name);
+        };
+        assertBlobContains("GL_ARB_vertex_buffer_object");
+        assertBlobContains("GL_ARB_copy_buffer");
+        assertBlobContains("GL_ARB_draw_elements_base_vertex");
+        assertBlobContains("GL_EXT_pixel_buffer_object");
+        // Regression guard on the fw¹⁶ entry — if it ever drops out of
+        // the table again, this fires before we reach the spring smoke.
+        assertBlobContains("GL_ARB_map_buffer_range");
+
+        // Indexed-query side. GL_NUM_EXTENSIONS is the upper bound of
+        // the indexed loop; GLAD uses this exact pattern in has_ext()
+        // so mirroring it here is the highest-fidelity check we can
+        // make short of re-linking against glad.c.
+        GLint numExtensions = 0;
+        gl.glGetIntegerv(GL_NUM_EXTENSIONS, &numExtensions);
+        expectCondition(numExtensions == 42,
+                        "GL_NUM_EXTENSIONS reports 42 (post-fw²² buffer-family additions)");
+
+        auto assertIndexedContains = [&](const char* name) {
+            bool found = false;
+            for (GLint i = 0; i < numExtensions; ++i) {
+                const GLubyte* entry = gl.glGetStringi(
+                    GL_EXTENSIONS, static_cast<GLuint>(i));
+                if (entry != nullptr
+                    && std::string(reinterpret_cast<const char*>(entry)) == name) {
+                    found = true;
+                    break;
+                }
+            }
+            expectCondition(found,
+                            std::string("glGetStringi(GL_EXTENSIONS, i) advertises ")
+                                + name);
+        };
+        assertIndexedContains("GL_ARB_vertex_buffer_object");
+        assertIndexedContains("GL_ARB_copy_buffer");
+        assertIndexedContains("GL_ARB_draw_elements_base_vertex");
+        assertIndexedContains("GL_EXT_pixel_buffer_object");
+        assertIndexedContains("GL_ARB_map_buffer_range");
+
         // Landing C 3a assertions. These caps were all returning false from
         // GLCapabilities::queryInteger before the 3a pass, which made BAR's
         // version log show "max texture slots: 2" (it walks several cap

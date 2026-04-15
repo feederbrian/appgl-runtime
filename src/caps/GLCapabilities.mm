@@ -514,7 +514,12 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // table; without it they treat the context as "no GL symbols visible".
     // Bumped from 37 → 38 in Phase 8X Group 4d follow-up¹⁶ when
     // GL_ARB_map_buffer_range was added to both extension tables.
-    integerLimits_[GL_NUM_EXTENSIONS] = 38;
+    // Bumped from 38 → 42 in Phase 8X Group 4d follow-up²² when the
+    // buffer-family ARB/EXT aliases (vertex_buffer_object, copy_buffer,
+    // draw_elements_base_vertex, EXT_pixel_buffer_object) were added so
+    // GLAD's string-matched has_ext() flips Recoil's VBO::IsSupported
+    // gates from their default-false state.
+    integerLimits_[GL_NUM_EXTENSIONS] = 42;
     // GL 3.0+ core: applications query the context version via
     // glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION) rather than parsing
     // the GL_VERSION string. The Recoil engine in particular aborts with
@@ -721,6 +726,18 @@ void GLCapabilities::initializeExtensions() {
         // The `glMapBufferRange` family is implemented; this advertises
         // the extension so loaders set GLAD_GL_ARB_map_buffer_range = 1.
         "GL_ARB_map_buffer_range "
+        // Phase 8X Group 4d follow-up²² — buffer-family aliases that
+        // BAR/Recoil's `VBO::IsSupported` gate reads through GLAD's
+        // string-matched `has_ext()`. All four correspond to features
+        // that are either core since GL 2.1/3.1/3.2 or otherwise fully
+        // implemented on the AppGL surface; advertising them here flips
+        // the GLAD bool so Recoil's buffer path stops short-circuiting.
+        // See the matching block in `kAppGLExtensionList` for the full
+        // gate analysis.
+        "GL_ARB_vertex_buffer_object "
+        "GL_ARB_copy_buffer "
+        "GL_ARB_draw_elements_base_vertex "
+        "GL_EXT_pixel_buffer_object "
         "GL_ARB_shader_storage_buffer_object "
         "GL_ARB_explicit_attrib_location "
         "GL_ARB_explicit_uniform_location "

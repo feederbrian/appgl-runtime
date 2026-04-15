@@ -788,6 +788,49 @@ static const char* const kAppGLExtensionList[] = {
     // every named extension on that line was actually live. Advertising
     // here flips the GLAD bool so spring's UBO path stops bailing.
     "GL_ARB_map_buffer_range",
+    // Phase 8X Group 4d follow-up²² — BAR's `VBO::IsSupported(GLenum)`
+    // (`rts/Rendering/GL/VBO.cpp:38`) dispatches buffer-target probes
+    // through per-target `GLAD_GL_*_buffer_object` bools, and
+    // `LuaVAOs::LuaVAOs()` (`rts/Lua/LuaVAO.cpp:89`) logs a compound
+    // "Important OpenGL extensions are not supported" line listing
+    // `ARB_vertex_buffer_object` / `ARB_draw_elements_base_vertex` when
+    // either flag is zero. Before fw²² none of the four strings below
+    // were advertised, so Recoil's `GL_ARRAY_BUFFER`/
+    // `GL_ELEMENT_ARRAY_BUFFER` path short-circuited inside
+    // `VBO::IsSupported` and `LuaVBOs::CheckAndReportSupported` raised
+    // 74 errors at startup on the fw²¹ smoke run — gating BAR's entire
+    // HUD widget stack behind Lua VBOs. Advertising all four here
+    // flips every GLAD bool that BAR's buffer-support matrix reads:
+    //
+    //   `GL_ARB_vertex_buffer_object`        — GL_ARRAY_BUFFER,
+    //                                          GL_ELEMENT_ARRAY_BUFFER
+    //   `GL_EXT_pixel_buffer_object`         — GL_PIXEL_PACK_BUFFER,
+    //                                          GL_PIXEL_UNPACK_BUFFER
+    //                                          (EXT, not ARB — GLAD's
+    //                                          `GLAD_GL_EXT_pixel_buffer_object`
+    //                                          is the specific flag
+    //                                          VBO.cpp:43 reads; the
+    //                                          ARB spelling would not
+    //                                          flip it)
+    //   `GL_ARB_copy_buffer`                 — GL_COPY_READ_BUFFER,
+    //                                          GL_COPY_WRITE_BUFFER
+    //   `GL_ARB_draw_elements_base_vertex`   — silences the LuaVAO
+    //                                          compound error log line
+    //                                          and leaves base-vertex
+    //                                          paths free to dispatch
+    //                                          (AppGL already accepts
+    //                                          `glDrawElementsBaseVertex`
+    //                                          at the dispatch layer).
+    //
+    // The underlying entry points are either core in GL 3.3+ (VBO,
+    // copy_buffer, draw_elements_base_vertex) or implemented via the
+    // same shadow-buffer path that the ARB map_buffer_range family
+    // already uses (PBO). No new code path is added; only the
+    // discoverability string table is widened.
+    "GL_ARB_vertex_buffer_object",
+    "GL_ARB_copy_buffer",
+    "GL_ARB_draw_elements_base_vertex",
+    "GL_EXT_pixel_buffer_object",
     "GL_ARB_shader_storage_buffer_object",
     "GL_ARB_explicit_attrib_location",
     "GL_ARB_explicit_uniform_location",
