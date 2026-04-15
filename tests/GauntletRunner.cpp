@@ -7678,6 +7678,214 @@ private:
     GLuint texture_ = 0;
 };
 
+// Phase 8X Group 4d follow-up²⁰ — CompatProfileGLSLDualOutputScene.
+//
+// Regression test for the fragment-output consolidation rule in
+// `rewriteCompatShader`. Fw¹⁹-verification pinned Spring's
+// `ModelFragProg.glsl` crash at match load as a `location 0` collision:
+// the shader has both `gl_FragData[...]` and `gl_FragColor` lexically
+// present inside a `#if DEFERRED_MODE == 1 / #else` split, and fw¹⁹'s
+// rewriter emitted two `layout(location = 0) out` declarations
+// (`appgl_FragColor` and `appgl_FragData[N+1]`) which glslang rejects.
+// Fw²⁰ consolidates to a single `appgl_FragData[]` array and rewrites
+// `gl_FragColor` → `appgl_FragData[0]` using the spec-level aliasing
+// of those two identifiers.
+//
+// This scene compiles exactly that dual-form shape: a `#version 120`
+// FS that mentions both `gl_FragColor` (in the live `#else` branch)
+// and `gl_FragData[1]` (in the dead `#if DEFERRED_MODE == 1` branch).
+// The rewriter scans pre-preprocessor source, so both forms register
+// regardless of which branch the C preprocessor selects. If the
+// consolidation rule regresses, the shader fails to compile at load
+// time (the `expectCondition(compileStatus == GL_TRUE)` fires) — so
+// a broken rewriter shows up as a scene abort, not a silent image
+// mismatch. On a correct rewrite the scene renders the same UV
+// gradient as `phase-7.compat-profile-glsl`.
+class CompatProfileGLSLDualOutputScene final : public Scene {
+public:
+    std::string id() const override {
+        return "phase-7.compat-profile-glsl-dual-output";
+    }
+    std::string phase() const override { return "phase-7"; }
+    SceneSize framebufferSize() const override { return {64, 64}; }
+
+    double tolerance() const override { return 0.02; }
+
+    void setup(GLContext& /*context*/) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        // VS is the same as the single-output scene — this scene
+        // targets the FS rewrite path.
+        const char* vertexSource =
+            "#version 120\n"
+            "varying vec2 vUV;\n"
+            "void main() {\n"
+            "    vUV = gl_MultiTexCoord0.xy;\n"
+            "    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;\n"
+            "}\n";
+
+        // Fragment stage: the `#if DEFERRED_MODE == 1` branch is dead
+        // (DEFERRED_MODE is never defined, so the preprocessor selects
+        // the `#else` branch), but the rewriter scans the raw text so
+        // both `gl_FragData[1]` and `gl_FragColor` register in the
+        // `LegacyCompatUsage` flag struct — exactly the shape that
+        // crashed Spring's `ModelFragProg.glsl` under fw¹⁹. fw²⁰'s
+        // consolidation rule emits a single `appgl_FragData[2]`
+        // array and rewrites `gl_FragColor` → `appgl_FragData[0]`,
+        // producing a shader that glslang accepts and SPIRV-Cross
+        // translates into MSL that writes the UV gradient into
+        // color attachment 0.
+        const char* fragmentSource =
+            "#version 120\n"
+            "uniform sampler2D uTexture;\n"
+            "varying vec2 vUV;\n"
+            "void main() {\n"
+            "#if DEFERRED_MODE == 1\n"
+            "    gl_FragData[0] = texture2D(uTexture, vUV);\n"
+            "    gl_FragData[1] = vec4(1.0);\n"
+            "#else\n"
+            "    gl_FragColor = texture2D(uTexture, vUV);\n"
+            "#endif\n"
+            "}\n";
+
+        const GLuint vertex = gl.glCreateShader(GL_VERTEX_SHADER);
+        const GLuint fragment = gl.glCreateShader(GL_FRAGMENT_SHADER);
+        gl.glShaderSource(vertex, 1, &vertexSource, nullptr);
+        gl.glShaderSource(fragment, 1, &fragmentSource, nullptr);
+        gl.glCompileShader(vertex);
+        gl.glCompileShader(fragment);
+        GLint vsCompile = 0, fsCompile = 0;
+        gl.glGetShaderiv(vertex, GL_COMPILE_STATUS, &vsCompile);
+        gl.glGetShaderiv(fragment, GL_COMPILE_STATUS, &fsCompile);
+        expectCondition(vsCompile == GL_TRUE,
+                        "dual-output vertex shader compiles after rewrite");
+        expectCondition(fsCompile == GL_TRUE,
+                        "dual-output fragment shader compiles after rewrite");
+
+        program_ = gl.glCreateProgram();
+        gl.glAttachShader(program_, vertex);
+        gl.glAttachShader(program_, fragment);
+        gl.glLinkProgram(program_);
+        GLint linkStatus = 0;
+        gl.glGetProgramiv(program_, GL_LINK_STATUS, &linkStatus);
+        expectCondition(linkStatus == GL_TRUE,
+                        "dual-output program links after rewrite");
+        gl.glDeleteShader(vertex);
+        gl.glDeleteShader(fragment);
+
+        // Same 4×4 UV-gradient texture as the single-output scene so
+        // a direct byte comparison between the two goldens would show
+        // identical shaded content — the only change is which path
+        // through the rewriter produced the shader.
+        std::uint8_t rgbaPixels[16 * 4] = {};
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                const int i = (y * 4 + x) * 4;
+                rgbaPixels[i + 0] = static_cast<std::uint8_t>((x * 255) / 3);
+                rgbaPixels[i + 1] = static_cast<std::uint8_t>((y * 255) / 3);
+                rgbaPixels[i + 2] = 128;
+                rgbaPixels[i + 3] = 255;
+            }
+        }
+        gl.glGenTextures(1, &texture_);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, texture_);
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgbaPixels);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        const GLfloat vertices[] = {
+            -1.0f,-1.0f, 0.0f, 1.0f,  0.0f, 0.0f,
+             1.0f,-1.0f, 0.0f, 1.0f,  1.0f, 0.0f,
+             1.0f, 1.0f, 0.0f, 1.0f,  1.0f, 1.0f,
+            -1.0f, 1.0f, 0.0f, 1.0f,  0.0f, 1.0f,
+        };
+        const GLushort indices[] = {0, 1, 2, 2, 3, 0};
+
+        gl.glGenVertexArrays(1, &vao_);
+        gl.glBindVertexArray(vao_);
+        gl.glGenBuffers(1, &vbo_);
+        gl.glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        gl.glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        gl.glGenBuffers(1, &ibo_);
+        gl.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
+        gl.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+        gl.glEnableVertexAttribArray(0);
+        gl.glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 6 * sizeof(GLfloat),
+                                 reinterpret_cast<const void*>(0));
+        gl.glEnableVertexAttribArray(8);
+        gl.glVertexAttribPointer(8, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(GLfloat),
+                                 reinterpret_cast<const void*>(4 * sizeof(GLfloat)));
+
+        gl.glUseProgram(program_);
+        const GLint textureLocation = gl.glGetUniformLocation(program_, "uTexture");
+        expectCondition(textureLocation >= 0,
+                        "dual-output uTexture is resolvable");
+        gl.glUniform1i(textureLocation, 0);
+    }
+
+    void render(GLContext& /*context*/) override {
+        auto& gl = Runtime::shared().dispatch();
+
+        gl.glViewport(0, 0, framebufferSize().width, framebufferSize().height);
+        gl.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.glClear(GL_COLOR_BUFFER_BIT);
+
+        gl.glUseProgram(program_);
+        gl.glActiveTexture(GL_TEXTURE0);
+        gl.glBindTexture(GL_TEXTURE_2D, texture_);
+        gl.glBindVertexArray(vao_);
+        gl.glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+
+        gl.glFlush();
+    }
+
+    std::vector<FunctionId> scenarioCoverage() const override {
+        return {
+            FunctionId::glActiveTexture,
+            FunctionId::glAttachShader,
+            FunctionId::glBindBuffer,
+            FunctionId::glBindTexture,
+            FunctionId::glBindVertexArray,
+            FunctionId::glBufferData,
+            FunctionId::glClear,
+            FunctionId::glClearColor,
+            FunctionId::glCompileShader,
+            FunctionId::glCreateProgram,
+            FunctionId::glCreateShader,
+            FunctionId::glDeleteShader,
+            FunctionId::glDrawElements,
+            FunctionId::glEnableVertexAttribArray,
+            FunctionId::glFlush,
+            FunctionId::glGenBuffers,
+            FunctionId::glGenTextures,
+            FunctionId::glGenVertexArrays,
+            FunctionId::glGetProgramiv,
+            FunctionId::glGetShaderiv,
+            FunctionId::glGetUniformLocation,
+            FunctionId::glLinkProgram,
+            FunctionId::glPixelStorei,
+            FunctionId::glShaderSource,
+            FunctionId::glTexImage2D,
+            FunctionId::glTexParameteri,
+            FunctionId::glUniform1i,
+            FunctionId::glUseProgram,
+            FunctionId::glVertexAttribPointer,
+            FunctionId::glViewport,
+        };
+    }
+
+private:
+    GLuint program_ = 0;
+    GLuint vao_ = 0;
+    GLuint vbo_ = 0;
+    GLuint ibo_ = 0;
+    GLuint texture_ = 0;
+};
+
 // ===========================================================================
 // Benchmark infrastructure — Phase 7 Group 5a
 // ===========================================================================
@@ -8451,6 +8659,18 @@ std::string runGauntletJSON(std::string_view phaseFilter) {
         // or the golden image will flip. See §fw¹⁹ memo.
         CompatProfileGLSLScene compatProfileGlslScene;
         tests.push_back(runScene(compatProfileGlslScene));
+
+        // Phase 8X Group 4d follow-up²⁰ — dual-form fragment output.
+        // Compiles a `#version 120` FS that has both `gl_FragData[]`
+        // and `gl_FragColor` lexically present inside a dead
+        // `#if DEFERRED_MODE == 1` branch (same shape as Spring's
+        // `ModelFragProg.glsl`). The rewriter's fw²⁰ consolidation
+        // rule must fold `gl_FragColor` → `appgl_FragData[0]` and
+        // emit a single `appgl_FragData[]` array declaration —
+        // otherwise glslang rejects with `'location' : overlapping
+        // use of location 0`. See §fw²⁰ memo.
+        CompatProfileGLSLDualOutputScene compatProfileDualOutputScene;
+        tests.push_back(runScene(compatProfileDualOutputScene));
     }
 
     return buildJSON(normalizedPhase, tests);

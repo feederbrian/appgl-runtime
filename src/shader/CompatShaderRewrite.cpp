@@ -677,10 +677,40 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
             replaceIdentifier(result.source, from, to);
         }
     }
-    if (legacy.fragColor) {
+    // Phase 8X Group 4d follow-up²⁰ — fragment-output consolidation.
+    //
+    // Some shader corpora (Spring's `ModelFragProg.glsl`) have both
+    // `gl_FragData[]` and `gl_FragColor` lexically present in a
+    // `#if DEFERRED_MODE == 1 / #else` split. The rewriter scans
+    // pre-preprocessor source text, so both usage flags fire even
+    // though only one branch is live in any given program variant.
+    // fw¹⁹ emitted two separate `layout(location = 0) out` decls
+    // (one for `appgl_FragColor`, one for `appgl_FragData[N+1]`),
+    // which glslang rejects with `'location' : overlapping use of
+    // location 0`. fw²⁰ consolidates: when both forms are observed,
+    // rewrite `gl_FragColor` to `appgl_FragData[0]` and emit only
+    // the single array declaration. GL aliases `gl_FragColor ≡
+    // gl_FragData[0]` at the spec level (ARB_draw_buffers / core
+    // compat profile), so the consolidation is semantically
+    // lossless — whichever preprocessor branch is live writes to
+    // color attachment 0 exactly the same way in both shapes.
+    const bool dualFragOutput =
+        isFragment && legacy.fragColor && legacy.fragDataMax >= 0;
+    if (dualFragOutput) {
+        // Order: rewrite `gl_FragColor` first so the resulting
+        // `appgl_FragData[0]` substring is written into the source
+        // before the `gl_FragData` → `appgl_FragData` pass. The
+        // word-boundary replace below is safe either way (the left
+        // boundary of the `gl_FragData` substring inside
+        // `appgl_FragData` is the identifier char `_`, so the
+        // replace is rejected), but the explicit ordering keeps the
+        // intent obvious to the next reader.
+        replaceIdentifier(result.source, "gl_FragColor",
+                          "appgl_FragData[0]");
+        replaceIdentifier(result.source, "gl_FragData", "appgl_FragData");
+    } else if (legacy.fragColor) {
         replaceIdentifier(result.source, "gl_FragColor", "appgl_FragColor");
-    }
-    if (legacy.fragDataMax >= 0) {
+    } else if (legacy.fragDataMax >= 0) {
         replaceIdentifier(result.source, "gl_FragData", "appgl_FragData");
     }
     if (legacy.usesClipVertex) {
@@ -820,13 +850,34 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
     }
 
-    // 5c. fw¹⁹ — fragment output declarations.
+    // 5c. fw¹⁹ / fw²⁰ — fragment output declarations.
+    //
+    // Three shapes, selected by the (fragColor, fragDataMax) pair:
+    //   - fragColor only: single `appgl_FragColor` decl.
+    //   - fragData only:  single `appgl_FragData[N+1]` array decl.
+    //   - both (fw²⁰):    consolidate to a single `appgl_FragData[M]`
+    //                     array decl, where M = max(fragDataMax + 1, 1)
+    //                     so index 0 is always valid for the
+    //                     rewritten `gl_FragColor` → `appgl_FragData[0]`.
     if (isFragment) {
-        if (legacy.fragColor) {
+        const bool dualFrag =
+            legacy.fragColor && legacy.fragDataMax >= 0;
+        if (dualFrag) {
+            // Consolidated array. `gl_FragColor` was rewritten to
+            // `appgl_FragData[0]` in the source-text pass above, so
+            // the array must include index 0 whether or not the
+            // original `gl_FragData[<lit>]` subscripts covered it.
+            int count = legacy.fragDataMax + 1;
+            if (count < 1) count = 1;
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "layout(location = 0) out vec4 appgl_FragData[%d];\n",
+                          count);
+            preamble.append(buf);
+        } else if (legacy.fragColor) {
             preamble.append(
                 "layout(location = 0) out vec4 appgl_FragColor;\n");
-        }
-        if (legacy.fragDataMax >= 0) {
+        } else if (legacy.fragDataMax >= 0) {
             // Emit an array at location 0. Consecutive indices cover
             // the range [0, fragDataMax] inclusive — the spec says
             // arrayed frag outputs consume sequential locations.

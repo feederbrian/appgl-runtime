@@ -273,6 +273,18 @@ bool isValidEnableCap(GLenum cap) {
 //                                their own texture coordinates in the
 //                                vertex stage — so silent accept is the
 //                                correct no-op semantic.
+//   GL_POINT_SPRITE   (0x8861) — compat-profile point-sprite mode. Phase
+//                                8X Group 4d follow-up²⁰ — the fw¹⁹
+//                                verification memo §5.1 pinned this as
+//                                the loudest remaining uncovered cap
+//                                enum, with ~5,030+ errorLog hits at
+//                                the pre-crash sample. Spring's particle
+//                                and billboard code enabled point-sprite
+//                                mode in the GL 2.x / compat era; in
+//                                core 3.2+ point sprites are the default
+//                                (there's no toggle — `gl_PointCoord` is
+//                                always available in the fragment stage),
+//                                so silent accept is correct.
 #ifndef GL_ALPHA_TEST
 #define GL_ALPHA_TEST 0x0BC0
 #endif
@@ -309,6 +321,9 @@ bool isValidEnableCap(GLenum cap) {
 #ifndef GL_TEXTURE_GEN_Q
 #define GL_TEXTURE_GEN_Q 0x0C63
 #endif
+#ifndef GL_POINT_SPRITE
+#define GL_POINT_SPRITE 0x8861
+#endif
 bool isCompatNoOpEnableCap(GLenum cap) {
     switch (cap) {
         case GL_ALPHA_TEST:
@@ -323,6 +338,7 @@ bool isCompatNoOpEnableCap(GLenum cap) {
         case GL_TEXTURE_GEN_T:
         case GL_TEXTURE_GEN_R:
         case GL_TEXTURE_GEN_Q:
+        case GL_POINT_SPRITE:
             return true;
         default:
             return false;
