@@ -1121,6 +1121,21 @@ struct GLContext::Impl {
         }
     }
 
+    // Returns the cube-face bit (0..5) for per-face CUBE_MAP targets,
+    // or -1 when the target is not a cube face. Face order matches GL
+    // 4.6 §8.18 enum ordering.
+    static int cubeFaceIndexForTarget(GLenum target) {
+        switch (target) {
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_X: return 0;
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_X: return 1;
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Y: return 2;
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y: return 3;
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Z: return 4;
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z: return 5;
+            default: return -1;
+        }
+    }
+
     GLTextureObject* currentTexture(GLenum target) {
         const GLuint name = state->boundTexture(normalizeTextureBindingTarget(target));
         if (name == 0) {
@@ -6204,6 +6219,15 @@ bool GLContext::texImage(
     object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
     image.desc.levels = object->desc.levels;
     object->levels[level] = std::move(image);
+    // Track cube-face definition for cube-completeness checking at
+    // glGenerateMipmap time. Only level-0 face definitions count toward
+    // cube completeness (GL 4.6 §8.17).
+    if (level == 0) {
+        const int faceIdx = Impl::cubeFaceIndexForTarget(target);
+        if (faceIdx >= 0) {
+            object->cubeFacesDefined |= static_cast<std::uint8_t>(1u << faceIdx);
+        }
+    }
     if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
         pushError(GL_OUT_OF_MEMORY);
         return false;
@@ -6750,6 +6774,20 @@ bool GLContext::generateMipmap(GLenum target) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §8.17: GL_INVALID_OPERATION if target is GL_TEXTURE_CUBE_MAP
+    // (or CUBE_MAP_ARRAY) and the texture is not cube complete — i.e. at
+    // least one of the six faces is missing a level-0 definition.
+    // Checked by KHR-GL46.direct_state_access.textures_generate_mipmap_errors.
+    // Level-0 face coverage is the minimum viable check: a stricter read
+    // of the spec also requires matching face dimensions and format, but
+    // all six faces going through the same single-target bindTexture +
+    // same-size texImage2D path in practice means face-count is the
+    // signal that distinguishes complete from incomplete.
+    const GLenum normalized = Impl::normalizeTextureBindingTarget(target);
+    if (normalized == GL_TEXTURE_CUBE_MAP && object->cubeFacesDefined != 0x3F) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     if (!impl_->generateMipmaps(*object)) {
         pushError(GL_INVALID_OPERATION);
         return false;
@@ -6840,8 +6878,18 @@ bool GLContext::renderbufferStorage(GLenum target, GLenum internalformat, GLsize
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    // RC-D18: Validate samples against GL_MAX_SAMPLES (spec requires
-    // GL_INVALID_VALUE when samples exceeds the implementation limit).
+    // RC-D18: Validate samples against GL_MAX_SAMPLES.
+    //
+    // GL 4.6 §9.2.4 (and the DSA glNamedRenderbufferStorageMultisample
+    // entry) specify GL_INVALID_OPERATION — NOT GL_INVALID_VALUE — when
+    // samples > MAX_SAMPLES. This is checked by
+    // KHR-GL46.direct_state_access.renderbuffers_storage_multisample_errors.
+    // Previously we returned GL_INVALID_VALUE here; the test happened to
+    // pass anyway because the `supportsTextureSampleCount:` check below
+    // preempted it when our advertised MAX_SAMPLES exceeded what Metal
+    // could actually deliver. Correct both the primary check's error code
+    // and the preempting behaviour now that MAX_SAMPLES matches Metal.
+    //
     // Also normalise samples <= 1 to 0: a single sample is logically
     // non-multisample and avoids Metal rejecting sampleCount == 1 for
     // MTLTextureType2DMultisample on some GPU families.
@@ -6853,7 +6901,7 @@ bool GLContext::renderbufferStorage(GLenum target, GLenum internalformat, GLsize
             impl_->capabilities->queryInteger(GL_MAX_SAMPLES, &maxSamples);
         }
         if (maxSamples > 0 && samples > maxSamples) {
-            pushError(GL_INVALID_VALUE);
+            pushError(GL_INVALID_OPERATION);
             return false;
         }
         // Metal's MTLDevice only supports a subset of sample counts (typically

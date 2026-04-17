@@ -154,6 +154,18 @@ struct GLTextureObject {
     // changes, so the view is rebuilt on the next draw.
     void* metalSwizzledView = nullptr;
     bool swizzleDirty = true;
+
+    // Cube-map completeness tracking. For GL_TEXTURE_CUBE_MAP targets,
+    // each bit 0..5 corresponds to a face in the enum order
+    //   POSITIVE_X, NEGATIVE_X, POSITIVE_Y, NEGATIVE_Y, POSITIVE_Z, NEGATIVE_Z
+    // (GL 4.6 §8.18). A cube map is "cube complete" only when all six
+    // faces have been defined at level 0 with matching size and format.
+    // Used by glGenerateMipmap / glGenerateTextureMipmap to emit
+    // GL_INVALID_OPERATION on incomplete cube maps, as required by the
+    // spec and verified by the
+    // KHR-GL46.direct_state_access.textures_generate_mipmap_errors test.
+    // Non-cube targets ignore this field.
+    std::uint8_t cubeFacesDefined = 0;
 };
 
 struct GLSamplerObject {
