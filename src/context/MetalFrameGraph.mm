@@ -912,7 +912,24 @@ struct MetalFrameGraph::Impl {
             // Buffer 0 layout: primary per-vertex data.
             // Attributeless draws (gl_VertexID-based) skip vertex buffer
             // layout entirely — the shader generates its own vertices.
-            if (!attributelessDraw) {
+            //
+            // Only set layout[0] if at least one attribute actually uses
+            // bufferIndex=0. Some tests (e.g. KHR-GL46 draw_elements_base_vertex
+            // with divisor-instanced VBOs) have all attributes in buffer 1+;
+            // setting an unused layout[0].stride triggers Metal's
+            // "None of the attributes set bufferIndex to 0, but layout[0]
+            // stride was set" assertion.
+            bool anyAttrOnBuffer0 = false;
+            if (info.vertexReflection != nullptr) {
+                for (const auto& in : info.vertexReflection->vertexInputs) {
+                    if (vertexDescriptor.attributes[in.location].format != MTLVertexFormatInvalid &&
+                        vertexDescriptor.attributes[in.location].bufferIndex == 0) {
+                        anyAttrOnBuffer0 = true;
+                        break;
+                    }
+                }
+            }
+            if (!attributelessDraw && anyAttrOnBuffer0) {
                 const NSUInteger stride = info.vertexStride > 0
                     ? info.vertexStride
                     : sizeof(float) * 3u;

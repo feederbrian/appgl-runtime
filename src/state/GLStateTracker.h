@@ -220,6 +220,12 @@ public:
     // draw-time sampler resolution path to read texture bindings from
     // units other than the active `glActiveTexture` pointer.
     GLuint boundTextureOnUnit(GLuint unit, GLenum target) const;
+    // Any-target variant: returns the first non-zero texture bound to
+    // `unit` across any target, along with its target via *outTarget.
+    // Used by the draw-time sampler binding path when the shader's
+    // sampler type can't be recovered from reflection (e.g. sampler2DArray,
+    // samplerCube, usampler2D — any non-plain-2D binding).
+    GLuint boundTextureOnUnitAny(GLuint unit, GLenum* outTarget) const;
     void deleteTextureBindings(GLuint object);
     void bindRenderbuffer(GLuint object);
     GLuint boundRenderbuffer() const;

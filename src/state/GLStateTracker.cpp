@@ -1231,6 +1231,34 @@ GLuint GLStateTracker::boundTextureOnUnit(GLuint unit, GLenum target) const {
     return found == unitState.bindings.end() ? 0 : found->second;
 }
 
+GLuint GLStateTracker::boundTextureOnUnitAny(GLuint unit, GLenum* outTarget) const {
+    if (unit >= textureUnits_.size()) {
+        if (outTarget) *outTarget = 0;
+        return 0;
+    }
+    const auto& unitState = textureUnits_[unit];
+    // Probe the common targets in order most-specific-first, so a unit with
+    // both a 2D and a 2D_ARRAY bound returns the explicit target the shader
+    // most likely wants. In practice only one is bound at a time because
+    // glBindTexture(target, 0) doesn't clear other targets and apps bind one
+    // target per unit.
+    static const GLenum kProbe[] = {
+        GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_CUBE_MAP,
+        GL_TEXTURE_CUBE_MAP_ARRAY, GL_TEXTURE_3D, GL_TEXTURE_1D,
+        GL_TEXTURE_1D_ARRAY, GL_TEXTURE_RECTANGLE, GL_TEXTURE_BUFFER,
+        GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_2D_MULTISAMPLE_ARRAY,
+    };
+    for (GLenum t : kProbe) {
+        auto it = unitState.bindings.find(t);
+        if (it != unitState.bindings.end() && it->second != 0) {
+            if (outTarget) *outTarget = t;
+            return it->second;
+        }
+    }
+    if (outTarget) *outTarget = 0;
+    return 0;
+}
+
 void GLStateTracker::deleteTextureBindings(GLuint object) {
     if (object == 0) {
         return;

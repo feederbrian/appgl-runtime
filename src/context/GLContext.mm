@@ -2722,11 +2722,23 @@ struct GLContext::Impl {
                     continue;  // malformed app state; skip silently
                 }
 
-                // Step 3: look up the texture object bound to that
-                // unit for GL_TEXTURE_2D. Future rounds extend to
-                // cube maps etc by widening this target probe.
-                const GLuint texName = state->boundTextureOnUnit(
+                // Step 3: look up the texture object bound to that unit.
+                // Try GL_TEXTURE_2D first (overwhelming common case in
+                // compat/Spring-style apps), then fall back to any-target
+                // probe so samplerCube / sampler2DArray / usampler2D /
+                // sampler3D uniforms also bind correctly. Previously this
+                // hard-coded GL_TEXTURE_2D, which meant every non-2D
+                // sampler silently dropped its binding — observed as ~497
+                // test failures in KHR-GL46.texture_swizzle.* because the
+                // suite tests on GL_TEXTURE_2D_ARRAY.
+                GLuint texName = state->boundTextureOnUnit(
                     static_cast<GLuint>(glUnit), GL_TEXTURE_2D);
+                if (texName == 0) {
+                    GLenum discoveredTarget = 0;
+                    texName = state->boundTextureOnUnitAny(
+                        static_cast<GLuint>(glUnit), &discoveredTarget);
+                    (void)discoveredTarget;
+                }
                 if (texName == 0) {
                     if (logThisCall) {
                         NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
