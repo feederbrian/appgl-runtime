@@ -579,6 +579,185 @@ GLint mipTailOffset(GLsizei width, GLsizei height, GLsizei depth) {
     return offset;
 }
 
+// Box-filter downsample for typed native-format texel data.
+//
+// Used by generateMipmaps when the texture is stored in a non-RGBA8
+// Metal pixel format. The existing downsampleRGBA8 handles the shadow
+// rgba8 mirror, but replaceMetalTexture uploads `nativeData` (width *
+// bytesPerPixel) for non-RGBA8 formats. Without a matching native-
+// format downsampler, generated mip levels carry empty `nativeData`
+// and the upload loop's old rgba8 fallback wrote 4-byte pixels into
+// the Metal texture whose format expected `bytesPerPixel` bytes per
+// pixel — tripping AGX's `bytes_per_row >= used_bytes_per_row`
+// assertion in texture_gather / texture_border_clamp.
+//
+// Strategy: a 2×2×2 box filter on each channel, interpreted per the
+// NativeFormatInfo.compType:
+//   UNorm : uintN average, written back as uintN
+//   SNorm : intN  average (saturating), written as intN
+//   UInt  : uintN average, written back as uintN
+//   SInt  : intN  average, written back as intN
+//   Float : float32 average (float16 branches converted via half helper)
+//
+// `channelBytes` ∈ {1,2,4} — covers every non-packed MTLPixelFormat we
+// advertise on the GL side.
+template <typename T>
+static inline T readTyped(const std::uint8_t* src) {
+    T v;
+    std::memcpy(&v, src, sizeof(T));
+    return v;
+}
+template <typename T>
+static inline void writeTyped(std::uint8_t* dst, T v) {
+    std::memcpy(dst, &v, sizeof(T));
+}
+// IEEE 754 half<->float used by the Float+channelBytes==2 branch.
+static inline float halfToFloat(std::uint16_t h) {
+    std::uint32_t sign = (h & 0x8000u) << 16;
+    std::uint32_t exponent = (h >> 10) & 0x1Fu;
+    std::uint32_t mantissa = h & 0x3FFu;
+    std::uint32_t bits;
+    if (exponent == 0) {
+        if (mantissa == 0) { bits = sign; }
+        else {
+            while ((mantissa & 0x400u) == 0) { mantissa <<= 1; exponent -= 1; }
+            exponent += 1;
+            mantissa &= ~0x400u;
+            bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+        }
+    } else if (exponent == 31u) {
+        bits = sign | 0x7F800000u | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+    }
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+static inline std::uint16_t floatToHalf(float f) {
+    std::uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    std::uint32_t sign = (bits >> 16) & 0x8000u;
+    std::int32_t exponent = static_cast<std::int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
+    std::uint32_t mantissa = bits & 0x7FFFFFu;
+    if (exponent <= 0) {
+        if (exponent < -10) { return static_cast<std::uint16_t>(sign); }
+        mantissa = (mantissa | 0x800000u) >> static_cast<std::uint32_t>(1 - exponent);
+        if (mantissa & 0x1000u) { mantissa += 0x2000u; }
+        return static_cast<std::uint16_t>(sign | (mantissa >> 13));
+    }
+    if (exponent >= 31) {
+        return static_cast<std::uint16_t>(sign | (31u << 10));
+    }
+    if (mantissa & 0x1000u) {
+        mantissa += 0x2000u;
+        if (mantissa & 0x800000u) { mantissa = 0; exponent += 1; if (exponent >= 31) { return static_cast<std::uint16_t>(sign | (31u << 10)); } }
+    }
+    return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exponent) << 10) | (mantissa >> 13));
+}
+
+struct NativeDownsampleFormat {
+    int channels;       // 1, 2, 4
+    int channelBytes;   // 1, 2, 4
+    enum Kind { UNorm, SNorm, UInt, SInt, Float } kind;
+};
+
+std::vector<std::uint8_t> downsampleNative(
+    const std::vector<std::uint8_t>& source,
+    GLsizei sourceWidth,
+    GLsizei sourceHeight,
+    GLsizei sourceDepth,
+    GLsizei destWidth,
+    GLsizei destHeight,
+    GLsizei destDepth,
+    NativeDownsampleFormat fmt
+) {
+    const std::size_t bpp = static_cast<std::size_t>(fmt.channels * fmt.channelBytes);
+    std::vector<std::uint8_t> dest(
+        static_cast<std::size_t>(destWidth) * static_cast<std::size_t>(destHeight)
+            * static_cast<std::size_t>(destDepth) * bpp, 0);
+    if (source.empty() || bpp == 0) {
+        return dest;
+    }
+
+    for (GLsizei z = 0; z < destDepth; ++z) {
+        for (GLsizei y = 0; y < destHeight; ++y) {
+            for (GLsizei x = 0; x < destWidth; ++x) {
+                // Accumulate per-channel sums across the 2×2×2 footprint.
+                double sums[4] = {0.0, 0.0, 0.0, 0.0};
+                int samples = 0;
+                for (GLsizei dz = 0; dz < 2; ++dz) {
+                    const GLsizei sz = std::min<GLsizei>(z * 2 + dz, sourceDepth - 1);
+                    for (GLsizei dy = 0; dy < 2; ++dy) {
+                        const GLsizei sy = std::min<GLsizei>(y * 2 + dy, sourceHeight - 1);
+                        for (GLsizei dx = 0; dx < 2; ++dx) {
+                            const GLsizei sx = std::min<GLsizei>(x * 2 + dx, sourceWidth - 1);
+                            const std::size_t pixelIdx =
+                                ((static_cast<std::size_t>(sz) * static_cast<std::size_t>(sourceHeight)
+                                    + static_cast<std::size_t>(sy))
+                                    * static_cast<std::size_t>(sourceWidth)
+                                    + static_cast<std::size_t>(sx));
+                            const std::uint8_t* px = source.data() + pixelIdx * bpp;
+                            for (int c = 0; c < fmt.channels; ++c) {
+                                const std::uint8_t* comp = px + static_cast<std::size_t>(c * fmt.channelBytes);
+                                double v = 0.0;
+                                if (fmt.kind == NativeDownsampleFormat::Float) {
+                                    if (fmt.channelBytes == 4) {
+                                        v = static_cast<double>(readTyped<float>(comp));
+                                    } else if (fmt.channelBytes == 2) {
+                                        v = static_cast<double>(halfToFloat(readTyped<std::uint16_t>(comp)));
+                                    }
+                                } else if (fmt.kind == NativeDownsampleFormat::SInt
+                                        || fmt.kind == NativeDownsampleFormat::SNorm) {
+                                    if (fmt.channelBytes == 1) v = readTyped<std::int8_t>(comp);
+                                    else if (fmt.channelBytes == 2) v = readTyped<std::int16_t>(comp);
+                                    else if (fmt.channelBytes == 4) v = readTyped<std::int32_t>(comp);
+                                } else {
+                                    if (fmt.channelBytes == 1) v = readTyped<std::uint8_t>(comp);
+                                    else if (fmt.channelBytes == 2) v = readTyped<std::uint16_t>(comp);
+                                    else if (fmt.channelBytes == 4) v = static_cast<double>(readTyped<std::uint32_t>(comp));
+                                }
+                                sums[c] += v;
+                            }
+                            ++samples;
+                        }
+                    }
+                }
+
+                const std::size_t pixelIdx =
+                    (static_cast<std::size_t>(z) * static_cast<std::size_t>(destHeight)
+                        + static_cast<std::size_t>(y))
+                    * static_cast<std::size_t>(destWidth)
+                    + static_cast<std::size_t>(x);
+                std::uint8_t* dstPx = dest.data() + pixelIdx * bpp;
+                for (int c = 0; c < fmt.channels; ++c) {
+                    std::uint8_t* comp = dstPx + static_cast<std::size_t>(c * fmt.channelBytes);
+                    const double avg = sums[c] / static_cast<double>(samples);
+                    if (fmt.kind == NativeDownsampleFormat::Float) {
+                        if (fmt.channelBytes == 4) {
+                            writeTyped<float>(comp, static_cast<float>(avg));
+                        } else if (fmt.channelBytes == 2) {
+                            writeTyped<std::uint16_t>(comp, floatToHalf(static_cast<float>(avg)));
+                        }
+                    } else if (fmt.kind == NativeDownsampleFormat::SInt
+                            || fmt.kind == NativeDownsampleFormat::SNorm) {
+                        const double rounded = avg >= 0 ? std::floor(avg + 0.5) : std::ceil(avg - 0.5);
+                        if (fmt.channelBytes == 1) writeTyped<std::int8_t>(comp, static_cast<std::int8_t>(rounded));
+                        else if (fmt.channelBytes == 2) writeTyped<std::int16_t>(comp, static_cast<std::int16_t>(rounded));
+                        else if (fmt.channelBytes == 4) writeTyped<std::int32_t>(comp, static_cast<std::int32_t>(rounded));
+                    } else {
+                        const double rounded = std::floor(avg + 0.5);
+                        if (fmt.channelBytes == 1) writeTyped<std::uint8_t>(comp, static_cast<std::uint8_t>(rounded));
+                        else if (fmt.channelBytes == 2) writeTyped<std::uint16_t>(comp, static_cast<std::uint16_t>(rounded));
+                        else if (fmt.channelBytes == 4) writeTyped<std::uint32_t>(comp, static_cast<std::uint32_t>(rounded));
+                    }
+                }
+            }
+        }
+    }
+    return dest;
+}
+
 std::vector<std::uint8_t> downsampleRGBA8(
     const std::vector<std::uint8_t>& source,
     GLsizei sourceWidth,
@@ -1812,6 +1991,22 @@ struct GLContext::Impl {
             if (useNativePath && image.nativeBpp > 0 && !image.nativeData.empty()) {
                 uploadBytes = image.nativeData.data();
                 bpp = image.nativeBpp;
+            } else if (useNativePath) {
+                // Native-path texture but this level is missing nativeData
+                // (e.g. generated by generateMipmaps on older builds, or a
+                // sparse-level descriptor). Skip the upload rather than
+                // fall back to rgba8 — the rgba8 buffer is 4 bytes/pixel
+                // but Metal's pixelFormat expects `nativeBpp` bytes/pixel,
+                // so pushing rgba8 through replaceRegion trips AGX's
+                // `bytes_per_row >= used_bytes_per_row` assertion (see the
+                // flake cluster in KHR-GL46.texture_gather and
+                // KHR-GL46.texture_border_clamp). Metal leaves the level's
+                // storage zero-initialised, which produces wrong sample
+                // values but is deterministic — the test fails cleanly
+                // instead of flapping between pass and fail. Correct fill
+                // for generated mips lands via the downsampleNative path
+                // in generateMipmaps (same commit).
+                continue;
             } else if (!image.rgba8.empty()) {
                 uploadBytes = image.rgba8.data();
                 bpp = 4;
@@ -2090,6 +2285,28 @@ struct GLContext::Impl {
             object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1
         );
         const GLint finalLevel = std::min(baseLevelIndex + tailOffset, object.params.maxLevel);
+
+        // Resolve the native downsample format once: it's shared across
+        // every generated mip level (we only downsample within one
+        // texture's pixel format). Returns kind=UNorm/channels=0 when
+        // the base isn't a native-format texture (rgba8 path still does
+        // the real work), which the caller skips below.
+        const bool hasNativeBase = baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty();
+        NativeDownsampleFormat nativeFmt{};
+        if (hasNativeBase) {
+            const MTLPixelFormat mtlFmt = metalRenderbufferFormat(baseLevel.desc.internalFormat);
+            const auto info = nativeFormatInfo(mtlFmt);
+            nativeFmt.channels = info.channels;
+            nativeFmt.channelBytes = info.bytesPerChannel;
+            switch (info.compType) {
+                case NativeFormatInfo::UNorm: nativeFmt.kind = NativeDownsampleFormat::UNorm; break;
+                case NativeFormatInfo::SNorm: nativeFmt.kind = NativeDownsampleFormat::SNorm; break;
+                case NativeFormatInfo::UInt:  nativeFmt.kind = NativeDownsampleFormat::UInt; break;
+                case NativeFormatInfo::SInt:  nativeFmt.kind = NativeDownsampleFormat::SInt; break;
+                case NativeFormatInfo::Float: nativeFmt.kind = NativeDownsampleFormat::Float; break;
+            }
+        }
+
         GLTextureImageLevel previousLevel = baseLevel;
         for (GLint levelIndex = baseLevelIndex + 1; levelIndex <= finalLevel; ++levelIndex) {
             const GLint offsetFromBase = levelIndex - baseLevelIndex;
@@ -2109,6 +2326,25 @@ struct GLContext::Impl {
                 generated.desc.height,
                 generated.desc.depth
             );
+            // Also downsample nativeData when the texture has a non-
+            // RGBA8 Metal pixel format. This matches what replaceMetal-
+            // Texture's upload loop expects and avoids the AGX
+            // `bytes_per_row >= used_bytes_per_row` assertion that
+            // previously destabilised texture_gather / texture_border_clamp
+            // tests (flake cluster surfaced via Golden Diff).
+            if (hasNativeBase && nativeFmt.channels > 0) {
+                generated.nativeData = downsampleNative(
+                    previousLevel.nativeData,
+                    previousLevel.desc.width,
+                    previousLevel.desc.height,
+                    previousLevel.desc.depth,
+                    generated.desc.width,
+                    generated.desc.height,
+                    generated.desc.depth,
+                    nativeFmt
+                );
+                generated.nativeBpp = baseLevel.nativeBpp;
+            }
             object.levels[levelIndex] = std::move(generated);
             previousLevel = object.levels.at(levelIndex);
         }
