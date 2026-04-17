@@ -8833,6 +8833,7 @@ bool GLContext::linkProgram(GLuint program) {
         VertexTessellationFragment,
         VertexOnly,
         FragmentOnly,
+        GeometryOnly,
         TessControlOnly,
         TessEvalOnly,
     };
@@ -8857,6 +8858,14 @@ bool GLContext::linkProgram(GLuint program) {
                computeShader == nullptr && geometryShader == nullptr &&
                tessControlShader == nullptr && tessEvalShader == nullptr) {
         kind = ProgramKind::FragmentOnly;
+    } else if (geometryShader != nullptr && shaderCount == 1) {
+        // Separable geometry-only program — used with glProgramPipeline +
+        // glUseProgramStages(GL_GEOMETRY_SHADER_BIT). CTS
+        // `separable_programs_tf.geometry_active` constructs one per stage
+        // and links them independently. Translate to MSL for reflection so
+        // the link succeeds; draw-time GS emulation is handled by the
+        // VertexGeometryFragment path when the combined pipeline runs.
+        kind = ProgramKind::GeometryOnly;
     } else if (tessControlShader != nullptr && shaderCount == 1) {
         kind = ProgramKind::TessControlOnly;
     } else if (tessEvalShader != nullptr && shaderCount == 1) {
@@ -9704,6 +9713,17 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->hasTranslatedPipeline = true;
                 rasterTranslationOk = true;
             }
+            break;
+        }
+        case ProgramKind::GeometryOnly: {
+            // Separable GS-only program (for use with program pipelines).
+            // Translate to MSL so reflection populates; actual draw falls
+            // back through the raster-without-GS path, same as VGF.
+            std::string unusedGsMSL;
+            ShaderReflection gsRefl;
+            (void)translateCachedStage("geometry", geometryShader,
+                                       unusedGsMSL, gsRefl);
+            rasterTranslationOk = true;
             break;
         }
         case ProgramKind::TessControlOnly: {
