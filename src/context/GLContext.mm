@@ -13158,9 +13158,121 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         return false;
     }
 
-    // Stub: compute pipeline creation at link time is not yet wired.
-    // When GLSL compute shaders are compiled and linked, this will encode
-    // a Metal compute command via the frame graph.
+    // Resolve the currently-bound program. No program → no-op (spec is
+    // quiet about undefined behaviour here; matching GL drivers, we
+    // swallow the dispatch).
+    const GLuint progName = impl_->state->currentProgram();
+    if (progName == 0) {
+        return true;
+    }
+    GLProgramObject* programObject = impl_->objects->programs().get(progName);
+    if (programObject == nullptr || !programObject->linked) {
+        return true;
+    }
+
+    // If the pipeline wasn't built (compute MSL translation failed,
+    // device absent, etc.) fall through silently — matches the
+    // pre-this-phase stub behaviour. No GPU work happens and the SSBO
+    // stays at whatever bytes the CPU already wrote.
+    if (programObject->metalComputePipelineState == nullptr) {
+        return true;
+    }
+    if (impl_->frameGraph == nullptr) {
+        return true;
+    }
+
+    ComputeDispatchInfo info;
+    info.metalComputePipelineState = programObject->metalComputePipelineState;
+    info.groupsX = num_groups_x;
+    info.groupsY = num_groups_y;
+    info.groupsZ = num_groups_z;
+    info.localX = programObject->computeLocalSizeX;
+    info.localY = programObject->computeLocalSizeY;
+    info.localZ = programObject->computeLocalSizeZ;
+
+    // Resolve shader-storage buffer bindings. For each SSBO the shader
+    // declares, look up whatever buffer the app has bound to
+    // GL_SHADER_STORAGE_BUFFER at its layout(binding=N) slot via
+    // glBindBufferBase / glBindBufferRange, and forward the Metal
+    // buffer + offset into the dispatch info. SSBOs with no binding
+    // are simply omitted — Metal's unbound-slot behaviour is undefined
+    // but won't crash, and the test will fail verification cleanly.
+    for (const auto& ssbo : programObject->computeReflection.storageBuffers) {
+        const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
+            GL_SHADER_STORAGE_BUFFER, ssbo.glBinding);
+        if (binding.buffer == 0) continue;
+        const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+
+        ComputeDispatchInfo::BufferBinding bb;
+        bb.metalBuffer = bufObj->metalBuffer;
+        bb.offset = static_cast<std::size_t>(binding.offset);
+        bb.metalSlot = ssbo.metalBinding;
+        info.buffers.push_back(bb);
+    }
+
+    // Resolve uniform-block bindings for the compute stage. Compute
+    // shaders rarely use UBOs (the CTS compute tests almost always go
+    // through SSBOs exclusively) but the path is symmetric with the
+    // graphics uboBindings resolver — walk each reflected block,
+    // look up the bound buffer via glBindBufferBase, forward it.
+    for (const auto& ubo : programObject->computeReflection.uniformBlocks) {
+        const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
+            GL_UNIFORM_BUFFER, ubo.glBinding);
+        if (binding.buffer == 0) continue;
+        const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+
+        ComputeDispatchInfo::BufferBinding bb;
+        bb.metalBuffer = bufObj->metalBuffer;
+        bb.offset = static_cast<std::size_t>(binding.offset);
+        bb.metalSlot = ubo.metalBinding;
+        info.buffers.push_back(bb);
+    }
+
+    // Texture/sampler bindings for compute stage. Less common than
+    // SSBOs but real — image-processing compute shaders sample from
+    // textures. Walk each reflected sampler uniform, resolve the
+    // texture unit via the shader's sampler uniform value, and bind
+    // the resulting (texture, sampler) pair at the reflected slot.
+    // The logic mirrors resolveSamplerBindings but targets the
+    // compute slot space.
+    for (const auto& samp : programObject->computeReflection.sampledTextures) {
+        // Find the matching uniform to read its texture-unit value.
+        GLint uniformLoc = -1;
+        for (const auto& u : programObject->uniforms) {
+            if (u.name == samp.name) {
+                uniformLoc = u.location;
+                break;
+            }
+        }
+        if (uniformLoc < 0) continue;
+        auto uvIt = programObject->uniformValues.find(uniformLoc);
+        const GLuint unit = (uvIt != programObject->uniformValues.end() && !uvIt->second.ints.empty())
+            ? static_cast<GLuint>(uvIt->second.ints[0]) : 0;
+
+        GLenum discoveredTarget = GL_TEXTURE_2D;
+        GLuint texName = impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_2D);
+        if (texName == 0) {
+            texName = impl_->state->boundTextureOnUnitAny(unit, &discoveredTarget);
+        }
+        if (texName == 0) continue;
+
+        GLTextureObject* texObj = impl_->objects->textures().get(texName);
+        if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+        // Build the sampler state if dirty.
+        if (texObj->samplerDirty) {
+            impl_->rebuildTextureSamplerState(texName, *texObj);
+        }
+
+        ComputeDispatchInfo::TextureBinding tb;
+        tb.metalTexture = texObj->metalTexture;
+        tb.metalSamplerState = texObj->metalSampler;
+        tb.metalSlot = samp.metalBinding;
+        info.textures.push_back(tb);
+    }
+
+    (void)impl_->frameGraph->encodeComputeDispatch(info);
     return true;
 }
 
