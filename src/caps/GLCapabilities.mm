@@ -504,8 +504,24 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
             maxTextureSize = 16384;
             max3DTextureSize = 2048;
             maxArrayLayers = 2048;
-            maxSamples = 8;
             maxViewportDimension = 16384;
+        }
+        // Probe the actual max supported sample count instead of trusting
+        // the GPU family alone. Apple-family GPUs typically cap at 4
+        // samples even when the family supports everything else at the
+        // Apple7+ tier. Advertising GL_MAX_SAMPLES above the Metal-
+        // supported ceiling causes CTS tests (e.g. texture_swizzle
+        // target_idx=7/8) to request that ceiling and fail because our
+        // texStorageMultisample path correctly rejects unsupported counts
+        // via `supportsTextureSampleCount:`. Sync what we advertise to
+        // what Metal will actually accept.
+        maxSamples = 1;
+        for (NSUInteger n : {2u, 4u, 8u, 16u, 32u}) {
+            if ([device supportsTextureSampleCount:n]) {
+                maxSamples = static_cast<GLint64>(n);
+            } else {
+                break;
+            }
         }
     }
 

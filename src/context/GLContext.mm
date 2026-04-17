@@ -1097,8 +1097,32 @@ struct GLContext::Impl {
         object.dirty = true;
     }
 
+    // Normalize a GL texture target for binding lookups.
+    //
+    // GL 4.6 §8.6 says `glTexImage2D` / `glTexSubImage2D` / copyTexImage
+    // etc. accept the six per-face cube targets
+    // (GL_TEXTURE_CUBE_MAP_{POSITIVE,NEGATIVE}_{X,Y,Z}) even though the
+    // *binding* lives at GL_TEXTURE_CUBE_MAP. Tests rely on the
+    // "bindTexture(GL_TEXTURE_CUBE_MAP, n); texSubImage2D(CUBE_POSITIVE_X, …)"
+    // pattern (e.g. KHR-GL46.texture_swizzle.functional_*_target_idx_6).
+    // Normalize here so a cube-face target resolves to the cube-map
+    // binding. Non-cube-face targets pass through unchanged.
+    static GLenum normalizeTextureBindingTarget(GLenum target) {
+        switch (target) {
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+            case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+            case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+                return GL_TEXTURE_CUBE_MAP;
+            default:
+                return target;
+        }
+    }
+
     GLTextureObject* currentTexture(GLenum target) {
-        const GLuint name = state->boundTexture(target);
+        const GLuint name = state->boundTexture(normalizeTextureBindingTarget(target));
         if (name == 0) {
             return nullptr;
         }
