@@ -2402,6 +2402,120 @@ fragment float4 appgl_immediate_textured_fs(
         return device != nil && commandQueue != nil && depthStencilTexture != nil && (layer != nil || offscreenColorTexture != nil);
     }
 
+    // Compile MSL into a retained MTLComputePipelineState. Returns
+    // transfer-retained void* so the caller can store it on the
+    // GLProgramObject and free it via releaseRetainedMetalObject at
+    // relink / program delete. On failure returns nullptr with the
+    // NSError surfaced through `outError`.
+    void* buildComputePipelineState(const std::string& msl, std::string* outError) {
+        if (device == nil || msl.empty()) {
+            if (outError) *outError = "no device or empty MSL";
+            return nullptr;
+        }
+        NSError* libError = nil;
+        id<MTLLibrary> lib = [device newLibraryWithSource:
+            [NSString stringWithUTF8String:msl.c_str()]
+            options:nil error:&libError];
+        if (lib == nil) {
+            if (outError) {
+                *outError = libError.localizedDescription.UTF8String
+                    ? libError.localizedDescription.UTF8String : "newLibraryWithSource failed";
+            }
+            return nullptr;
+        }
+        // SPIRV-Cross emits the entry point as "main0" by default (same
+        // convention as the vertex/fragment paths).
+        MTLFunctionConstantValues* emptyConstants = [[MTLFunctionConstantValues alloc] init];
+        NSError* fnError = nil;
+        id<MTLFunction> fn = [lib newFunctionWithName:@"main0"
+                                        constantValues:emptyConstants
+                                                 error:&fnError];
+        if (fn == nil) {
+            if (outError) {
+                *outError = fnError.localizedDescription.UTF8String
+                    ? fnError.localizedDescription.UTF8String : "newFunctionWithName(main0) failed";
+            }
+            return nullptr;
+        }
+        NSError* psoError = nil;
+        id<MTLComputePipelineState> pso = [device newComputePipelineStateWithFunction:fn
+                                                                                error:&psoError];
+        if (pso == nil) {
+            if (outError) {
+                *outError = psoError.localizedDescription.UTF8String
+                    ? psoError.localizedDescription.UTF8String : "newComputePipelineState failed";
+            }
+            return nullptr;
+        }
+        return (void*)CFBridgingRetain(pso);
+    }
+
+    // Encode + commit + wait a single compute dispatch. The wait is
+    // synchronous to match CTS's "dispatch, then map SSBO" pattern —
+    // without it, the map'd bytes are stale compute-shader input
+    // rather than post-shader output. Revisit if we ever hit a
+    // workload where pipelined compute+graphics is needed.
+    bool encodeComputeDispatch(const ComputeDispatchInfo& info) {
+        if (device == nil || commandQueue == nil) {
+            return false;
+        }
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)info.metalComputePipelineState;
+        if (pso == nil) {
+            return false;
+        }
+        // End any open render encoder to avoid nesting encoders on one
+        // command buffer. Use our own dedicated command buffer so the
+        // flushForReadback plumbing for render paths stays separate.
+        endRenderPass();
+
+        id<MTLCommandBuffer> cmdBuf = [commandQueue commandBuffer];
+        if (cmdBuf == nil) {
+            return false;
+        }
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+        if (enc == nil) {
+            return false;
+        }
+        [enc setComputePipelineState:pso];
+
+        for (const auto& bb : info.buffers) {
+            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bb.metalBuffer;
+            if (buf == nil) continue;
+            [enc setBuffer:buf
+                    offset:static_cast<NSUInteger>(bb.offset)
+                   atIndex:static_cast<NSUInteger>(bb.metalSlot)];
+        }
+        for (const auto& tb : info.textures) {
+            id<MTLTexture> tex = (__bridge id<MTLTexture>)tb.metalTexture;
+            id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)tb.metalSamplerState;
+            if (tex != nil) {
+                [enc setTexture:tex atIndex:static_cast<NSUInteger>(tb.metalSlot)];
+            }
+            if (smp != nil) {
+                [enc setSamplerState:smp atIndex:static_cast<NSUInteger>(tb.metalSlot)];
+            }
+        }
+
+        // GL's glDispatchCompute(gx, gy, gz) spec: (gx, gy, gz) is the
+        // number of work groups; per-group thread count is the shader's
+        // `layout(local_size_x/y/z = N) in;` declaration. Metal's
+        // dispatchThreadgroups maps 1:1 to this.
+        const MTLSize threadGroups = MTLSizeMake(
+            std::max<NSUInteger>(1, info.groupsX),
+            std::max<NSUInteger>(1, info.groupsY),
+            std::max<NSUInteger>(1, info.groupsZ));
+        const MTLSize threadsPerGroup = MTLSizeMake(
+            std::max<NSUInteger>(1, info.localX),
+            std::max<NSUInteger>(1, info.localY),
+            std::max<NSUInteger>(1, info.localZ));
+        [enc dispatchThreadgroups:threadGroups threadsPerThreadgroup:threadsPerGroup];
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+        return true;
+    }
+
     // Benchmark metric accessors.
     std::uint64_t getPipelineCacheHits() const { return pipelineCacheHits; }
     std::uint64_t getPipelineCacheMisses() const { return pipelineCacheMisses; }
@@ -2978,6 +3092,14 @@ bool MetalFrameGraph::encodeTranslatedDraw(TranslatedDrawInfo& info) {
 
 bool MetalFrameGraph::encodeImmediateModeDraw(const ImmediateDrawInfo& info) {
     return impl_->encodeImmediateModeDraw(info);
+}
+
+void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::string* outError) {
+    return impl_->buildComputePipelineState(msl, outError);
+}
+
+bool MetalFrameGraph::encodeComputeDispatch(const ComputeDispatchInfo& info) {
+    return impl_->encodeComputeDispatch(info);
 }
 
 void MetalFrameGraph::endFrame(GLObjectStore& objects) {

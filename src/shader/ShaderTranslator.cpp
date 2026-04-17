@@ -361,6 +361,33 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             compiler.add_msl_resource_binding(binding);
         }
 
+        // Remap shader-storage buffer objects (GL 4.3+). SSBO slots start
+        // at `storageBufferBase` and increment by GL binding index —
+        // matches the reflection path's assignment so draw/dispatch
+        // bind the same slot the shader reads from. Deterministic
+        // ordering ensures dispatch-time SSBO bindings line up across
+        // reflection and MSL emission.
+        {
+            struct SSBORef { std::uint32_t glBinding; spirv_cross::Resource* res; };
+            std::vector<SSBORef> sortedSSBOs;
+            for (auto& ssbo : resources.storage_buffers) {
+                SSBORef r;
+                r.glBinding = compiler.get_decoration(ssbo.id, spv::DecorationBinding);
+                r.res = &ssbo;
+                sortedSSBOs.push_back(r);
+            }
+            std::sort(sortedSSBOs.begin(), sortedSSBOs.end(),
+                      [](const SSBORef& a, const SSBORef& b) { return a.glBinding < b.glBinding; });
+            for (auto& entry : sortedSSBOs) {
+                spirv_cross::MSLResourceBinding binding;
+                binding.stage = compiler.get_execution_model();
+                binding.desc_set = compiler.get_decoration(entry.res->id, spv::DecorationDescriptorSet);
+                binding.binding = entry.glBinding;
+                binding.msl_buffer = bindings.storageBufferBase + entry.glBinding;
+                compiler.add_msl_resource_binding(binding);
+            }
+        }
+
         // Remap sampled images (combined image samplers).
         for (auto& img : resources.sampled_images) {
             uint32_t glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
@@ -597,6 +624,53 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             result.sampledTextures.push_back(std::move(rb));
         }
 
+        // Shader-storage buffer objects (GL 4.3+). Metal side: SSBOs live
+        // in buffer slots above UBOs. The `storageBufferBase` in the
+        // BindingMap is the first SSBO slot; each SSBO gets the next
+        // consecutive slot keyed on GL binding index so the shader-side
+        // `layout(binding=N)` maps to a specific Metal buffer slot.
+        // Used by glDispatchCompute's encoder-binding path and also by
+        // future vertex/fragment SSBO paths.
+        for (auto& ssbo : resources.storage_buffers) {
+            ShaderReflection::ResourceBinding rb;
+            rb.glBinding = compiler.get_decoration(ssbo.id, spv::DecorationBinding);
+            rb.metalBinding = bindings.storageBufferBase + rb.glBinding;
+            const auto& ssboType = compiler.get_type(ssbo.base_type_id);
+            const std::string typeName = compiler.get_name(ssboType.self);
+            rb.name = typeName.empty() ? ssbo.name : typeName;
+            rb.hasInstanceName = (!typeName.empty() && ssbo.name != typeName);
+            // byteSize may be zero if the block contains a trailing
+            // unbounded array (common for SSBOs) — callers must not
+            // rely on it for draw-time binding size.
+            try {
+                rb.byteSize = compiler.get_declared_struct_size(ssboType);
+            } catch (...) {
+                rb.byteSize = 0;
+            }
+            // Enumerate struct members so the runtime can introspect
+            // SSBO layout (needed by glGetProgramResourceiv /
+            // GL_BUFFER_VARIABLE queries and by the CPU-side verify
+            // path for SSBO-heavy tests).
+            for (std::uint32_t mi = 0; mi < ssboType.member_types.size(); ++mi) {
+                ShaderReflection::UniformMember member;
+                member.name = compiler.get_member_name(ssboType.self, mi);
+                try {
+                    member.offset = compiler.type_struct_member_offset(ssboType, mi);
+                    member.size = compiler.get_declared_struct_member_size(ssboType, mi);
+                } catch (...) {
+                    // Trailing unbounded-array member throws — fall back
+                    // to zero-marked offset/size so the entry still
+                    // appears in the resource table.
+                    member.offset = 0;
+                    member.size = 0;
+                }
+                const auto& memberType = compiler.get_type(ssboType.member_types[mi]);
+                member.type = spirvBaseTypeToGL(memberType);
+                rb.members.push_back(std::move(member));
+            }
+            result.storageBuffers.push_back(std::move(rb));
+        }
+
         // Check for gl_PointSize usage.
         for (auto& builtin : resources.stage_outputs) {
             if (compiler.has_decoration(builtin.id, spv::DecorationBuiltIn)) {
@@ -616,6 +690,29 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         }
     }
     return result;
+}
+
+ComputeExecutionModes extractComputeModes(const std::uint32_t* spirv, std::size_t wordCount) {
+    ComputeExecutionModes modes;
+    if (!spirv || wordCount < 5) return modes;
+    try {
+        spirv_cross::Compiler compiler(spirv, wordCount);
+        // Extract local_size_x/y/z from ExecutionModeLocalSize — the only
+        // reliable source for compute-shader thread group dimensions on
+        // the Metal side. glslang emits this decoration for every compute
+        // shader; if it somehow isn't present, the (1,1,1) defaults
+        // above keep dispatchThreadgroups from receiving a zero size.
+        const auto& bitset = compiler.get_execution_mode_bitset();
+        if (bitset.get(spv::ExecutionModeLocalSize)) {
+            modes.localSizeX = std::max<std::uint32_t>(1,
+                compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 0));
+            modes.localSizeY = std::max<std::uint32_t>(1,
+                compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 1));
+            modes.localSizeZ = std::max<std::uint32_t>(1,
+                compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 2));
+        }
+    } catch (...) {}
+    return modes;
 }
 
 TessellationModes extractTessellationModes(const std::uint32_t* spirv, std::size_t wordCount) {
@@ -708,6 +805,10 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
 }
 
 TessellationModes extractTessellationModes(const std::uint32_t*, std::size_t) {
+    return {};
+}
+
+ComputeExecutionModes extractComputeModes(const std::uint32_t*, std::size_t) {
     return {};
 }
 

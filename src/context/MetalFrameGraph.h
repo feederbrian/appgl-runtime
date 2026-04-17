@@ -345,6 +345,36 @@ struct ImmediateDrawInfo {
     void* metalTexture = nullptr;  // id<MTLTexture> or nullptr
 };
 
+// Compute dispatch descriptor. Populated by GLContext::dispatchCompute
+// from the currently-bound program + SSBO indexed bindings + texture
+// units; consumed by MetalFrameGraph::encodeComputeDispatch which owns
+// the MTLComputeCommandEncoder lifecycle.
+struct ComputeDispatchInfo {
+    void* metalComputePipelineState = nullptr; // id<MTLComputePipelineState>
+    std::uint32_t groupsX = 1;
+    std::uint32_t groupsY = 1;
+    std::uint32_t groupsZ = 1;
+    std::uint32_t localX = 1;
+    std::uint32_t localY = 1;
+    std::uint32_t localZ = 1;
+
+    struct BufferBinding {
+        void* metalBuffer = nullptr; // id<MTLBuffer>
+        std::size_t offset = 0;
+        std::uint32_t metalSlot = 0;
+    };
+    // All non-argument buffers to bind: SSBOs at `storageBufferBase+N`,
+    // UBOs and the default-uniform push-constant buffer below them.
+    std::vector<BufferBinding> buffers;
+
+    struct TextureBinding {
+        void* metalTexture = nullptr;      // id<MTLTexture>
+        void* metalSamplerState = nullptr; // id<MTLSamplerState>
+        std::uint32_t metalSlot = 0;
+    };
+    std::vector<TextureBinding> textures;
+};
+
 class MetalFrameGraph {
 public:
     MetalFrameGraph(void* layer, void* device, void* commandQueue);
@@ -382,6 +412,25 @@ public:
     // triple-buffered ring before the encode. Returns true on success
     // or false if the pipeline state could not be built.
     bool encodeImmediateModeDraw(const ImmediateDrawInfo& info);
+
+    // Compile a compute shader's MSL source into a retained
+    // MTLComputePipelineState and return it as a type-erased void*
+    // (callers CFBridgingRelease via releaseRetainedMetalObject at
+    // program delete / relink). Returns nullptr on build failure and
+    // populates `outError` with the NSError localizedDescription if
+    // provided.
+    void* buildComputePipelineState(const std::string& msl, std::string* outError);
+
+    // Encode + commit + wait a single compute dispatch. This creates a
+    // fresh command buffer + compute encoder, binds the pipeline and
+    // the caller-supplied buffer / texture bindings, issues
+    // dispatchThreadgroups with the given group and local dimensions,
+    // and waits for completion before returning. The wait matches GL's
+    // memory-barrier semantics for single-dispatch tests (CTS's
+    // shader_bitfield_operation / constant_expressions / SSBO tests
+    // all map a subsequent bufferRange on the SSBO and expect the
+    // compute writes to be visible).
+    bool encodeComputeDispatch(const ComputeDispatchInfo& info);
     void endFrame(GLObjectStore& objects);
     void present();
     bool copyRGBA8Pixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels);

@@ -56,7 +56,18 @@ struct ShaderReflection {
     std::vector<VertexInput> vertexInputs;
     std::vector<ResourceBinding> uniformBlocks;
     std::vector<ResourceBinding> sampledTextures;
+    // Shader-storage buffer objects (GL 4.3+). Populated for every stage
+    // but primarily consumed by the compute-dispatch path, which binds
+    // them against GL_SHADER_STORAGE_BUFFER indexed bindings.
+    std::vector<ResourceBinding> storageBuffers;
     bool usesPointSize = false;
+};
+
+// Compute shader execution modes extracted from SPIR-V.
+struct ComputeExecutionModes {
+    std::uint32_t localSizeX = 1;
+    std::uint32_t localSizeY = 1;
+    std::uint32_t localSizeZ = 1;
 };
 
 // Phase 8X Group 4d follow-up⁵ — output of `compileGLSLProgram`. Both
@@ -97,6 +108,13 @@ struct TessellationModes {
 
 // Extract tessellation execution modes from compiled SPIR-V for a TCS or TES stage.
 TessellationModes extractTessellationModes(const std::uint32_t* spirv, std::size_t wordCount);
+
+// Extract compute-shader `layout(local_size_x/y/z = N) in;` values from
+// SPIR-V. Returns (1,1,1) if the shader lacks the decoration (which
+// means the application is using default thread group dimensions —
+// glslang always emits the decoration for compute, but defensive floor
+// keeps dispatchThreadgroups from getting a zero size).
+ComputeExecutionModes extractComputeModes(const std::uint32_t* spirv, std::size_t wordCount);
 
 class ShaderTranslator {
 public:

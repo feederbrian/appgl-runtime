@@ -9616,7 +9616,15 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->hasTranslatedPipeline = false;
     programObject->vertexMSL.clear();
     programObject->fragmentMSL.clear();
+    programObject->computeMSL.clear();
+    programObject->computeReflection = ShaderReflection{};
+    programObject->computeLocalSizeX = 1;
+    programObject->computeLocalSizeY = 1;
+    programObject->computeLocalSizeZ = 1;
     programObject->metalPipelineState = nullptr;
+    // Release the retained MTLComputePipelineState on relink.
+    releaseRetainedMetalObject(programObject->metalComputePipelineState);
+    programObject->metalComputePipelineState = nullptr;
     // Phase 8X Group 4d follow-up¹⁴ — release every cached pipeline
     // on relink so the map doesn't hold stale id<MTLRenderPipelineState>
     // pointers derived from the old MSL. The scalar `metalPipelineState`
@@ -9890,15 +9898,50 @@ bool GLContext::linkProgram(GLuint program) {
             break;
         }
         case ProgramKind::Compute: {
-            // Translate compute to MSL + record the diagnostic so BAR sees
-            // the compute path is live on the translator side. Creating an
-            // MTLComputePipelineState from the MSL is a follow-up (the
-            // sibling path in MetalFrameGraph.mm doesn't exist yet);
-            // without it `glDispatchCompute` will still go through the
-            // existing stub path. The link itself succeeds either way.
-            std::string unusedMSL;
+            // Translate compute to MSL + stash on the program object so
+            // glDispatchCompute can encode against the cached pipeline.
             ShaderReflection csRefl;
-            (void)translateCachedStage("compute", computeShader, unusedMSL, csRefl);
+            const bool csOk = translateCachedStage(
+                "compute", computeShader, programObject->computeMSL, csRefl);
+            if (csOk) {
+                programObject->computeReflection = std::move(csRefl);
+                // Extract local_size_{x,y,z} so dispatch knows the
+                // threads-per-threadgroup dimensions.
+                if (computeShader && !computeShader->spirv.empty()) {
+                    auto modes = extractComputeModes(
+                        computeShader->spirv.data(),
+                        computeShader->spirv.size());
+                    programObject->computeLocalSizeX = modes.localSizeX;
+                    programObject->computeLocalSizeY = modes.localSizeY;
+                    programObject->computeLocalSizeZ = modes.localSizeZ;
+                }
+                // Build + retain the MTLComputePipelineState. Failures
+                // are logged but don't fail linkProgram — the dispatch
+                // path will then fall back to the stub (returning true
+                // with no GPU work).
+                if (impl_->frameGraph != nullptr) {
+                    std::string psoError;
+                    void* pso = impl_->frameGraph->buildComputePipelineState(
+                        programObject->computeMSL, &psoError);
+                    if (pso != nullptr) {
+                        programObject->metalComputePipelineState = pso;
+                        NSLog(@"[GL] linkProgram: compute pipeline built for program=%u "
+                              @"localSize=[%u,%u,%u]",
+                              program,
+                              programObject->computeLocalSizeX,
+                              programObject->computeLocalSizeY,
+                              programObject->computeLocalSizeZ);
+                    } else {
+                        Runtime::shared().recordShaderTranslation({
+                            programTag + "-compute-pipeline", "compute",
+                            quickHash(computeShader ? computeShader->source : std::string()),
+                            linkVertexHash, linkFragmentHash,
+                            std::string("MTLComputePipelineState build failed: ") + psoError,
+                            "", false
+                        });
+                    }
+                }
+            }
             break;
         }
         case ProgramKind::VertexGeometryFragment: {

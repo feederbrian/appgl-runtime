@@ -429,6 +429,20 @@ struct GLProgramObject {
     ShaderReflection fragmentReflection;
     bool hasTranslatedPipeline = false;
 
+    // Compute shader pipeline state. The MSL and reflection are populated
+    // at link time for ProgramKind::Compute; the MTLComputePipelineState
+    // is built immediately and cached here because compute pipelines
+    // have no per-dispatch state variation (unlike render pipelines,
+    // which depend on color format / blend mode).
+    std::string computeMSL;
+    ShaderReflection computeReflection;
+    std::uint32_t computeLocalSizeX = 1;
+    std::uint32_t computeLocalSizeY = 1;
+    std::uint32_t computeLocalSizeZ = 1;
+    // Retained id<MTLComputePipelineState> (CFBridgingRetain'd; released
+    // at linkProgram reset and at program delete via releaseProgram).
+    void* metalComputePipelineState = nullptr;
+
     // Phase 8X Group 4d follow-up⁴ — per-stage source hashes captured at
     // link time. Used by the pipeline-build failure path in the translated
     // draw entry points to stamp the failing program's source hashes onto
