@@ -9150,13 +9150,14 @@ bool GLContext::linkProgram(GLuint program) {
         kind = ProgramKind::Compute;
     } else if (vertexShader != nullptr && fragmentShader != nullptr &&
                tessControlShader == nullptr && tessEvalShader == nullptr &&
-               geometryShader == nullptr) {
+               geometryShader == nullptr && computeShader == nullptr) {
         kind = ProgramKind::VertexFragment;
     } else if (vertexShader != nullptr && fragmentShader != nullptr &&
-               geometryShader != nullptr) {
+               geometryShader != nullptr && computeShader == nullptr) {
         kind = ProgramKind::VertexGeometryFragment;
     } else if (vertexShader != nullptr && fragmentShader != nullptr &&
-               tessControlShader != nullptr && tessEvalShader != nullptr) {
+               tessControlShader != nullptr && tessEvalShader != nullptr &&
+               computeShader == nullptr) {
         kind = ProgramKind::VertexTessellationFragment;
     } else if (vertexShader != nullptr && fragmentShader == nullptr &&
                computeShader == nullptr && geometryShader == nullptr &&
@@ -9618,9 +9619,13 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->fragmentMSL.clear();
     programObject->computeMSL.clear();
     programObject->computeReflection = ShaderReflection{};
-    programObject->computeLocalSizeX = 1;
-    programObject->computeLocalSizeY = 1;
-    programObject->computeLocalSizeZ = 1;
+    // Zero default so glGetProgramiv(GL_COMPUTE_WORK_GROUP_SIZE) returns
+    // (0,0,0) for non-compute programs (matches native drivers).
+    // Overwritten by the Compute kind branch below with the shader's
+    // local_size_{x,y,z} execution mode.
+    programObject->computeLocalSizeX = 0;
+    programObject->computeLocalSizeY = 0;
+    programObject->computeLocalSizeZ = 0;
     programObject->metalPipelineState = nullptr;
     // Release the retained MTLComputePipelineState on relink.
     releaseRetainedMetalObject(programObject->metalComputePipelineState);
@@ -10490,12 +10495,31 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             return true;
         }
         // Compute shader queries (GL 4.3+)
-        case GL_COMPUTE_WORK_GROUP_SIZE:
-            // Returns 3 values; default to (0,0,0) when no compute shader is attached
-            params[0] = 0;
-            params[1] = 0;
-            params[2] = 0;
+        case GL_COMPUTE_WORK_GROUP_SIZE: {
+            // GL 4.6 §7.13: INVALID_OPERATION if the program has not
+            // been linked successfully, or has been linked but
+            // contains no compute shader. Checked by
+            // KHR-GL46.compute_shader.api-program. Otherwise returns
+            // the shader's local_size_{x,y,z} as declared by the
+            // `layout(local_size_x = N) in;` execution mode, populated
+            // at link time via extractComputeModes.
+            bool hasComputeStage = false;
+            for (GLuint shaderId : object->attachedShaders) {
+                const GLShaderObject* sh = impl_->objects->shaders().get(shaderId);
+                if (sh != nullptr && sh->stage == GL_COMPUTE_SHADER) {
+                    hasComputeStage = true;
+                    break;
+                }
+            }
+            if (!object->linked || !hasComputeStage) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            params[0] = static_cast<GLint>(object->computeLocalSizeX);
+            params[1] = static_cast<GLint>(object->computeLocalSizeY);
+            params[2] = static_cast<GLint>(object->computeLocalSizeZ);
             return true;
+        }
         // Transform feedback queries (GL 3.0+)
         case GL_TRANSFORM_FEEDBACK_BUFFER_MODE:
             *params = static_cast<GLint>(object->transformFeedbackBufferMode);
@@ -13158,26 +13182,25 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         return false;
     }
 
-    // Resolve the currently-bound program. No program → no-op (spec is
-    // quiet about undefined behaviour here; matching GL drivers, we
-    // swallow the dispatch).
+    // Resolve the currently-bound program. GL 4.6 §17.1 requires
+    // GL_INVALID_OPERATION when there's no active program OR when
+    // the active program doesn't contain a compute shader. We detect
+    // both by checking whether `metalComputePipelineState` is non-null
+    // — linkProgram only populates it for programs with ProgramKind
+    // ::Compute. This surfaces the compute-shader.api-no-active-program
+    // / api-program negative tests as spec-correct failures.
     const GLuint progName = impl_->state->currentProgram();
-    if (progName == 0) {
-        return true;
-    }
-    GLProgramObject* programObject = impl_->objects->programs().get(progName);
-    if (programObject == nullptr || !programObject->linked) {
-        return true;
-    }
-
-    // If the pipeline wasn't built (compute MSL translation failed,
-    // device absent, etc.) fall through silently — matches the
-    // pre-this-phase stub behaviour. No GPU work happens and the SSBO
-    // stays at whatever bytes the CPU already wrote.
-    if (programObject->metalComputePipelineState == nullptr) {
-        return true;
+    GLProgramObject* programObject = progName == 0 ? nullptr
+        : impl_->objects->programs().get(progName);
+    if (programObject == nullptr || !programObject->linked
+        || programObject->metalComputePipelineState == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
     }
     if (impl_->frameGraph == nullptr) {
+        // Pipeline was built but the frame graph is torn down — no
+        // dispatch is possible. Treat as a silent no-op to avoid
+        // spurious errors during teardown paths.
         return true;
     }
 
@@ -13286,9 +13309,46 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         return false;
     }
 
+    // GL 4.6 §17.2: GL_INVALID_OPERATION when no active compute program
+    // (matches dispatchCompute's spec-correct check below). Without
+    // this, the compute_shader.api-indirect / api-no-active-program
+    // negative tests see GL_NO_ERROR and fail.
+    const GLuint progName = impl_->state->currentProgram();
+    GLProgramObject* programObject = progName == 0 ? nullptr
+        : impl_->objects->programs().get(progName);
+    if (programObject == nullptr || !programObject->linked
+        || programObject->metalComputePipelineState == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    // GL 4.6 §17.2: also INVALID_OPERATION when no buffer is bound
+    // to the GL_DISPATCH_INDIRECT_BUFFER target, or when the command
+    // would read past the end of the bound buffer.
+    const GLuint dispatchBufName = impl_->state->boundBuffer(GL_DISPATCH_INDIRECT_BUFFER);
+    if (dispatchBufName == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const GLBufferObject* dispatchBuf = impl_->objects->buffers().get(dispatchBufName);
+    if (dispatchBuf == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // Three GLuints (x, y, z work-group counts) at `indirect`.
+    constexpr GLsizeiptr kIndirectDispatchSize = 3 * sizeof(GLuint);
+    if (indirect > dispatchBuf->size
+        || kIndirectDispatchSize > dispatchBuf->size - indirect) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
     // Stub: indirect compute dispatch. The offset points into the currently
-    // bound GL_DISPATCH_INDIRECT_BUFFER. Actual Metal encoding will be wired
-    // when compute shader programs are created at link time.
+    // bound GL_DISPATCH_INDIRECT_BUFFER. The dispatch parameters (group
+    // counts) need to be read from the Metal buffer at offset `indirect`
+    // and forwarded to dispatchThreadgroups. Left stubbed for now —
+    // landing the indirect-dispatch encoder is a discrete follow-up
+    // (one CTS test depends on it: compute_shader.dispatch-indirect).
     return true;
 }
 
