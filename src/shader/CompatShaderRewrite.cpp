@@ -604,6 +604,7 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         static const char* const kUnknownExtensions[] = {
             "GL_ARB_cull_distance",
         };
+        bool strippedCullDistance = false;
         for (const char* ext : kUnknownExtensions) {
             std::string needle = std::string("#extension ") + ext;
             std::size_t pos = 0;
@@ -613,6 +614,36 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                 result.source.replace(pos, 10, "// xtensio");
                 result.didRewrite = true;
                 pos += 10;
+                if (std::string(ext) == "GL_ARB_cull_distance") {
+                    strippedCullDistance = true;
+                }
+            }
+        }
+        // When we strip #extension GL_ARB_cull_distance, the built-in
+        // constants `gl_MaxCullDistances` and `gl_MaxCombinedClipAndCullDistances`
+        // that come with the extension also disappear from glslang's known
+        // identifiers. CTS's cull_distance.coverage test uses those built-ins
+        // directly in its shader body, causing "undeclared identifier" errors.
+        // Inject compat const substitutes at the top of the source (after
+        // the #version line) so the shader compiles and samples the minimum
+        // values the GL 4.5 spec guarantees (both are 8 per §23.4).
+        if (strippedCullDistance) {
+            // Use #define rather than `const int` declarations — the shader
+            // still has subsequent `#extension` directives (GL_ARB_compute_shader
+            // etc.), and GLSL requires all #extensions to precede any regular
+            // declarations. Preprocessor defines are safe to emit before them.
+            // GL 4.5 spec §23.4 guarantees both values are at least 8.
+            const std::string compatDefines =
+                "\n#define gl_MaxCullDistances 8\n"
+                "#define gl_MaxCombinedClipAndCullDistances 8\n";
+            std::size_t versionPos = result.source.find("#version");
+            if (versionPos != std::string::npos) {
+                std::size_t eol = result.source.find('\n', versionPos);
+                if (eol != std::string::npos) {
+                    result.source.insert(eol + 1, compatDefines);
+                }
+            } else {
+                result.source.insert(0, compatDefines);
             }
         }
     }

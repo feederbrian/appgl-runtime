@@ -787,10 +787,25 @@ struct MetalFrameGraph::Impl {
                 return false;
             }
             // SPIRV-Cross names the entry points "main0" by default.
-            id<MTLFunction> vertFn = [vertLib newFunctionWithName:@"main0"];
+            // Use the constantValues variant so MSL shaders that declare
+            // `[[function_constant(N)]]` values (e.g. SPIRV-Cross emits
+            // `spvLinearTextureAlignmentOverride` for 2D image atomics,
+            // function_constant(65535)) can be loaded. We provide an empty
+            // MTLFunctionConstantValues — the shader checks
+            // `is_function_constant_defined(...)` and falls back to the
+            // compile-time default when unset, so no values need to be
+            // bound. Without this call, Metal errors with:
+            //   "fragmentFunction main0 cannot be used to build a pipeline
+            //    state. Use newFunctionWithName:constantValues:... ..."
+            // at pipeline-descriptor validation time.
+            MTLFunctionConstantValues* emptyConstants = [[MTLFunctionConstantValues alloc] init];
+            NSError* vertFnError = nil;
+            id<MTLFunction> vertFn = [vertLib newFunctionWithName:@"main0"
+                                                   constantValues:emptyConstants
+                                                            error:&vertFnError];
             if (vertFn == nil) {
-                FG_TRACE(@"encodeTranslatedDraw: newFunctionWithName(vertex,main0) failed");
-                recordBuildFailure("vertex-function", nil);
+                FG_TRACE(@"encodeTranslatedDraw: newFunctionWithName(vertex,main0) failed: %@", vertFnError);
+                recordBuildFailure("vertex-function", vertFnError);
                 return false;
             }
 
@@ -801,10 +816,13 @@ struct MetalFrameGraph::Impl {
                 recordBuildFailure("fragment-library", nil);
                 return false;
             }
-            id<MTLFunction> fragFn = [fragLib newFunctionWithName:@"main0"];
+            NSError* fragFnError = nil;
+            id<MTLFunction> fragFn = [fragLib newFunctionWithName:@"main0"
+                                                   constantValues:emptyConstants
+                                                            error:&fragFnError];
             if (fragFn == nil) {
-                FG_TRACE(@"encodeTranslatedDraw: newFunctionWithName(fragment,main0) failed");
-                recordBuildFailure("fragment-function", nil);
+                FG_TRACE(@"encodeTranslatedDraw: newFunctionWithName(fragment,main0) failed: %@", fragFnError);
+                recordBuildFailure("fragment-function", fragFnError);
                 return false;
             }
 
@@ -1342,6 +1360,7 @@ struct MetalFrameGraph::Impl {
             MetalDrawInfo fakeInfo;
             fakeInfo.depthTestEnabled = info.depthTestEnabled;
             fakeInfo.depthFunc = info.depthFunc;
+            fakeInfo.depthWriteMask = info.depthWriteMask;
             id<MTLDepthStencilState> dsState = depthStencilStateForDraw(fakeInfo);
             if (dsState != nil && dsState != cachedDepthStencilState) {
                 [currentRenderEncoder setDepthStencilState:dsState];
@@ -2135,6 +2154,7 @@ fragment float4 appgl_immediate_textured_fs(
         // The state space is tiny (~16 combinations), so after the first frame
         // this is a pure hash-table lookup with zero Metal allocations.
         const std::uint32_t key = (info.depthTestEnabled ? 0x10000u : 0u)
+                                | (info.depthWriteMask ? 0x20000u : 0u)
                                 | (static_cast<std::uint32_t>(info.depthFunc) & 0xFFFFu);
 
         auto it = depthStencilCache.find(key);
@@ -2143,7 +2163,7 @@ fragment float4 appgl_immediate_textured_fs(
         }
 
         MTLDepthStencilDescriptor* desc = [[MTLDepthStencilDescriptor alloc] init];
-        desc.depthWriteEnabled = info.depthTestEnabled;
+        desc.depthWriteEnabled = info.depthTestEnabled && info.depthWriteMask;
         if (info.depthTestEnabled) {
             switch (info.depthFunc) {
                 case GL_NEVER: desc.depthCompareFunction = MTLCompareFunctionNever; break;

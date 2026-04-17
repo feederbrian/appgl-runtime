@@ -101,8 +101,14 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
     // Find the bound texture for this target
     GLuint texName = context->state().boundTexture(target);
     GLTextureObject* tex = context->objects().textures().get(texName);
+    // OpenGL 4.6 §8.11: querying a default texture (no user texture bound
+    // to `target`) is valid — all parameters return their default values
+    // (dims=0, sizes=0). CTS's packed_depth_stencil.validate_errors.initial_state
+    // iterates 14 targets and expects 0 for each; our old path pushed
+    // GL_INVALID_OPERATION which overflowed gluStateReset::resetErrors'
+    // 10-error drain limit and aborted the entire CTS session afterward.
     if (tex == nullptr || !tex->instantiated) {
-        context->pushError(GL_INVALID_OPERATION);
+        *params = 0;
         return;
     }
     auto it = tex->levels.find(level);

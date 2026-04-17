@@ -392,6 +392,7 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
     add(GL_R3_G3_B2,  MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
     add(GL_RGB4,       MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
     add(GL_RGB5,       MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_RGB565,     MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
     add(GL_RGBA2,      MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
     add(GL_RGBA4,      MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
     add(GL_RGB5_A1,    MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
@@ -514,7 +515,13 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_ARRAY_TEXTURE_LAYERS] = maxArrayLayers;
     integerLimits_[GL_MAX_COLOR_ATTACHMENTS] = 8;
     integerLimits_[GL_MAX_DRAW_BUFFERS] = 8;
-    integerLimits_[GL_MAX_VERTEX_ATTRIBS] = 16;
+    // GL 4.6 spec §23.4 floor is 16, but most desktop drivers expose 32
+    // and CTS tests like cull_distance use 17+ attributes (8 clip + 8 cull
+    // + 1 position). Metal supports 31 vertex attributes via
+    // MTLVertexDescriptor.attributes; expose 32 so CTS reports match common
+    // desktop drivers (glGetIntegerv(GL_MAX_VERTEX_ATTRIBS)). The VAO's
+    // attribute array size in GLObjectStore is raised to match.
+    integerLimits_[GL_MAX_VERTEX_ATTRIBS] = 32;
     integerLimits_[GL_MAX_TEXTURE_IMAGE_UNITS] = 16;
     integerLimits_[GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS] = 80;
     integerLimits_[GL_MAX_UNIFORM_BLOCK_SIZE] = maxUniformBlockSize;

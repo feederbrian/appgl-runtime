@@ -45,6 +45,7 @@ struct MetalDrawInfo {
     // Pipeline state toggles.
     bool depthTestEnabled = false;
     GLenum depthFunc = GL_LESS;
+    bool depthWriteMask = true;
     bool cullFaceEnabled = false;
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
@@ -193,6 +194,7 @@ struct TranslatedDrawInfo {
     // Pipeline state toggles.
     bool depthTestEnabled = false;
     GLenum depthFunc = GL_LESS;
+    bool depthWriteMask = true;
     bool cullFaceEnabled = false;
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;

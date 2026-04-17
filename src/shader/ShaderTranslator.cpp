@@ -303,6 +303,10 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         mslOpts.pad_fragment_output_components = true;
         compiler.set_msl_options(mslOpts);
 
+        spirv_cross::CompilerGLSL::Options glslOpts = compiler.get_common_options();
+        glslOpts.vertex.fixup_clipspace = true;
+        compiler.set_common_options(glslOpts);
+
         // Remap uniform buffers (UBOs + push constants) to Metal buffer slots.
         // UBO arrays occupy consecutive Metal buffer indices, so we compute
         // a running offset rather than using uniformBufferBase + glBinding
