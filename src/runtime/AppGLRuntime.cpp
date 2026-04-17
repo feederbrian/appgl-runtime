@@ -13,6 +13,7 @@
 #include "../loader/DispatchInstall.h"
 #include "../objects/GLObjectStore.h"
 #include "../shared/JsonUtil.h"
+#include "../state/GLStateTracker.h"
 
 // Phase 8X Group 4d follow-up⁶ — compat-profile upload aliases. These
 // enums were removed from the core profile in GL 3.2, so glcorearb.h does
@@ -59,7 +60,16 @@ constexpr const char* kPhaseAShaderTestId = "phase-a.shaders";
 constexpr const char* kPhaseAProgramTestId = "phase-a.programs";
 constexpr const char* kPhaseADrawTestId = "phase-a.draw";
 constexpr GLuint kPhaseAMaxDrawBuffers = 8;
-constexpr GLuint kPhaseAMaxIndexedBufferBindings = 32;
+// Per-target maximum indexed buffer bindings (GL 4.6 spec minima).
+GLuint maxIndexedBindings(GLenum target) {
+    switch (target) {
+        case GL_TRANSFORM_FEEDBACK_BUFFER: return 4;   // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS
+        case GL_UNIFORM_BUFFER:            return 84;   // GL_MAX_UNIFORM_BUFFER_BINDINGS
+        case GL_ATOMIC_COUNTER_BUFFER:     return 1;    // GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS
+        case GL_SHADER_STORAGE_BUFFER:     return 8;    // GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS
+        default: return 0;
+    }
+}
 constexpr GLuint kPhaseAMaxTextureUnits = 32;
 
 GLContext* requireCurrentContext(std::string_view functionName) {
@@ -202,6 +212,7 @@ bool isValidEnableCap(GLenum cap) {
         // list. AppGL has no MSAA backend yet, so the enable simply
         // updates the state mirror without affecting the Metal pass.
         case GL_SAMPLE_SHADING:
+        case GL_DEPTH_CLAMP:
             return true;
         default:
             return false;
@@ -542,7 +553,9 @@ bool isValidMapBufferRangeAccess(GLbitfield access) {
         | GL_MAP_INVALIDATE_RANGE_BIT
         | GL_MAP_INVALIDATE_BUFFER_BIT
         | GL_MAP_FLUSH_EXPLICIT_BIT
-        | GL_MAP_UNSYNCHRONIZED_BIT;
+        | GL_MAP_UNSYNCHRONIZED_BIT
+        | GL_MAP_PERSISTENT_BIT
+        | GL_MAP_COHERENT_BIT;
     if ((access & ~kSupportedAccessBits) != 0) {
         return false;
     }
@@ -656,35 +669,117 @@ void markVertexInputFunction(FunctionId id, std::string_view note) {
 }
 
 bool isValidTextureTarget(GLenum target) {
-    return target == GL_TEXTURE_1D || target == GL_TEXTURE_2D || target == GL_TEXTURE_3D;
+    switch (target) {
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_BUFFER:
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
 }
 
 bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
-    // Narrower 8-bit-only whitelist used by glTexImage*. These entry points
-    // carry pixel data alongside the internal format, and the current
-    // driver-edge upload path only handles the RGBA8 shadow — so they must
-    // reject anything that would require a higher-precision upload.
-    //
-    // Phase 8X Group 4d follow-up⁶ — the compat-profile alpha / luminance /
-    // intensity aliases are added here because GLCapabilities already maps
-    // them to MTLPixelFormatRGBA8Unorm and buildRGBA8Upload already handles
-    // their channel-fill rules (see GLContext.mm:920+). The validator was
-    // the only thing keeping these out; unblocking them restores legibility
-    // for BAR's glyph atlases, which were producing ~6 uploads/sec of
-    // `glTexImage2D format/type combination is outside the Phase A RGBA8
-    // upload path` errors on the select-menu smoke and leaving the text
-    // shapes correctly positioned but sampling from empty textures.
+    // Accept all sized internal formats that GL 4.6 allows for glTexImage*.
+    // The legacy validator previously restricted this to 8-bit unorm only;
+    // widened now so CTS format/type coverage tests can reach the upload path.
     switch (internalFormat) {
+        // Unsized (base) formats
         case GL_RED:
         case GL_RG:
         case GL_RGB:
         case GL_RGBA:
+        // 8-bit unorm
         case GL_R8:
         case GL_RG8:
         case GL_RGB8:
         case GL_RGBA8:
-        // Compat-profile single-channel aliases — all upcast to RGBA8 at
-        // the buildRGBA8Upload edge with the documented channel-fill rules.
+        // 8-bit snorm
+        case GL_R8_SNORM:
+        case GL_RG8_SNORM:
+        case GL_RGB8_SNORM:
+        case GL_RGBA8_SNORM:
+        // 16-bit unorm / snorm
+        case GL_R16:
+        case GL_RG16:
+        case GL_RGB16:
+        case GL_RGBA16:
+        case GL_R16_SNORM:
+        case GL_RG16_SNORM:
+        case GL_RGB16_SNORM:
+        case GL_RGBA16_SNORM:
+        // Float formats
+        case GL_R16F:
+        case GL_RG16F:
+        case GL_RGB16F:
+        case GL_RGBA16F:
+        case GL_R32F:
+        case GL_RG32F:
+        case GL_RGB32F:
+        case GL_RGBA32F:
+        // Integer formats (signed)
+        case GL_R8I:
+        case GL_RG8I:
+        case GL_RGB8I:
+        case GL_RGBA8I:
+        case GL_R16I:
+        case GL_RG16I:
+        case GL_RGB16I:
+        case GL_RGBA16I:
+        case GL_R32I:
+        case GL_RG32I:
+        case GL_RGB32I:
+        case GL_RGBA32I:
+        // Integer formats (unsigned)
+        case GL_R8UI:
+        case GL_RG8UI:
+        case GL_RGB8UI:
+        case GL_RGBA8UI:
+        case GL_R16UI:
+        case GL_RG16UI:
+        case GL_RGB16UI:
+        case GL_RGBA16UI:
+        case GL_R32UI:
+        case GL_RG32UI:
+        case GL_RGB32UI:
+        case GL_RGBA32UI:
+        // Packed / special formats
+        case GL_R11F_G11F_B10F:
+        case GL_RGB9_E5:
+        case GL_RGB10_A2:
+        case GL_RGB10_A2UI:
+        case GL_RGB565:
+        // sRGB
+        case GL_SRGB8:
+        case GL_SRGB8_ALPHA8:
+        // Depth / stencil
+        case GL_DEPTH_COMPONENT16:
+        case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32F:
+        case GL_DEPTH24_STENCIL8:
+        case GL_DEPTH32F_STENCIL8:
+        case GL_STENCIL_INDEX8:
+        // Legacy low-precision / packed sized formats (upcast to RGBA8 /
+        // nearest Metal format in buildRGBA8Upload). CTS copy_image and a
+        // handful of format/type tests still exercise these.
+        case GL_R3_G3_B2:
+        case GL_RGBA2:
+        case GL_RGB4:
+        case GL_RGB5:
+        case GL_RGBA4:
+        case GL_RGB5_A1:
+        case GL_RGB10:
+        case GL_RGB12:
+        case GL_RGBA12:
+        // Compat-profile aliases (upcast to RGBA8 in buildRGBA8Upload)
         case GL_ALPHA:
         case GL_ALPHA8:
         case GL_LUMINANCE:
@@ -721,26 +816,113 @@ bool isValidStorageInternalFormat(GLContext* context, GLenum internalFormat) {
 }
 
 bool isValidTextureUploadFormat(GLenum format) {
-    // Phase 8X Group 4d follow-up⁶ — the compat-profile GL_ALPHA /
-    // GL_LUMINANCE / GL_LUMINANCE_ALPHA / GL_INTENSITY upload formats are
-    // accepted here because buildRGBA8Upload (GLContext.mm:920+) knows how
-    // to fan each one out into the RGBA8 shadow with the correct channel
-    // replication. Restricting the validator to GL_RED..GL_RGBA was what
-    // kept BAR's glyph atlases from landing pixels during the followup⁵
-    // smoke — the select-menu glyphs drew in the right place but sampled
-    // from an empty texture because the upload path rejected them.
-    return format == GL_RED
-        || format == GL_RG
-        || format == GL_RGB
-        || format == GL_RGBA
-        || format == GL_ALPHA
-        || format == GL_LUMINANCE
-        || format == GL_LUMINANCE_ALPHA
-        || format == GL_INTENSITY;
+    // GL 4.6 base formats accepted by glTexImage* / glTexSubImage* for the
+    // format parameter. Widened from the original RED/RG/RGB/RGBA-only set
+    // to include integer variants, depth/stencil, and BGR ordering.
+    switch (format) {
+        case GL_RED:
+        case GL_RG:
+        case GL_RGB:
+        case GL_RGBA:
+        case GL_BGR:
+        case GL_BGRA:
+        case GL_RED_INTEGER:
+        case GL_RG_INTEGER:
+        case GL_RGB_INTEGER:
+        case GL_RGBA_INTEGER:
+        case GL_BGR_INTEGER:
+        case GL_BGRA_INTEGER:
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_STENCIL:
+        case GL_STENCIL_INDEX:
+        // Compat-profile aliases
+        case GL_ALPHA:
+        case GL_LUMINANCE:
+        case GL_LUMINANCE_ALPHA:
+        case GL_INTENSITY:
+            return true;
+        default:
+            return false;
+    }
 }
 
 bool isValidTextureUploadType(GLenum type) {
-    return type == GL_UNSIGNED_BYTE;
+    // GL 4.6 pixel data types accepted by glTexImage* / glTexSubImage* /
+    // glReadPixels. Widened from GL_UNSIGNED_BYTE-only to include all
+    // standard types and packed integer variants.
+    switch (type) {
+        case GL_UNSIGNED_BYTE:
+        case GL_BYTE:
+        case GL_UNSIGNED_SHORT:
+        case GL_SHORT:
+        case GL_UNSIGNED_INT:
+        case GL_INT:
+        case GL_HALF_FLOAT:
+        case GL_FLOAT:
+        case GL_UNSIGNED_BYTE_3_3_2:
+        case GL_UNSIGNED_BYTE_2_3_3_REV:
+        case GL_UNSIGNED_SHORT_5_6_5:
+        case GL_UNSIGNED_SHORT_5_6_5_REV:
+        case GL_UNSIGNED_SHORT_4_4_4_4:
+        case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+        case GL_UNSIGNED_SHORT_5_5_5_1:
+        case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+        case GL_UNSIGNED_INT_8_8_8_8:
+        case GL_UNSIGNED_INT_8_8_8_8_REV:
+        case GL_UNSIGNED_INT_10_10_10_2:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_24_8:
+        case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+        case GL_UNSIGNED_INT_5_9_9_9_REV:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Check if the upload format (e.g., GL_RED, GL_RED_INTEGER, GL_DEPTH_COMPONENT)
+// is compatible with the internal format (e.g., GL_R8, GL_R8I, GL_DEPTH_COMPONENT16).
+// Returns false for mismatches like uploading depth data to a color texture.
+bool isFormatCompatibleWithInternalFormat(GLenum format, GLenum internalFormat) {
+    // Classify the upload format
+    const bool isDepthFormat = (format == GL_DEPTH_COMPONENT);
+    const bool isDepthStencilFormat = (format == GL_DEPTH_STENCIL);
+    const bool isStencilFormat = (format == GL_STENCIL_INDEX);
+    const bool isIntegerFormat = (format == GL_RED_INTEGER || format == GL_RG_INTEGER
+        || format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER
+        || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
+    const bool isColorFormat = !isDepthFormat && !isDepthStencilFormat
+        && !isStencilFormat && !isIntegerFormat;
+
+    // Classify the internal format
+    switch (internalFormat) {
+        // Depth internal formats
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_COMPONENT16:
+        case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32F:
+            return isDepthFormat;
+        // Depth-stencil internal formats
+        case GL_DEPTH_STENCIL:
+        case GL_DEPTH24_STENCIL8:
+        case GL_DEPTH32F_STENCIL8:
+            return isDepthStencilFormat;
+        // Stencil internal format
+        case GL_STENCIL_INDEX:
+        case GL_STENCIL_INDEX8:
+            return isStencilFormat;
+        // Integer internal formats — require _INTEGER upload format
+        case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI: case GL_R32I: case GL_R32UI:
+        case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI: case GL_RG32I: case GL_RG32UI:
+        case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI: case GL_RGB32I: case GL_RGB32UI:
+        case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI: case GL_RGBA32I: case GL_RGBA32UI:
+        case GL_RGB10_A2UI:
+            return isIntegerFormat;
+        // Everything else is a color (non-integer) internal format
+        default:
+            return isColorFormat;
+    }
 }
 
 bool isValidTextureFilter(GLint filter, bool minFilter) {
@@ -785,6 +967,9 @@ bool isValidTextureParameterPname(GLenum pname) {
         case GL_TEXTURE_SWIZZLE_B:
         case GL_TEXTURE_SWIZZLE_A:
         case GL_TEXTURE_SWIZZLE_RGBA:
+        case GL_TEXTURE_LOD_BIAS:
+        case GL_TEXTURE_MAX_ANISOTROPY:
+        case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return true;
         default:
             return false;
@@ -843,6 +1028,8 @@ bool validateTextureParameterValues(GLenum pname, const GLint* params) {
         case GL_TEXTURE_MAX_LOD:
         case GL_TEXTURE_BORDER_COLOR:
             return true;
+        case GL_DEPTH_STENCIL_TEXTURE_MODE:
+            return params[0] == GL_DEPTH_COMPONENT || params[0] == GL_STENCIL_INDEX;
         default:
             return false;
     }
@@ -920,17 +1107,94 @@ bool isValidRenderbufferTarget(GLenum target) {
 
 bool isValidRenderbufferFormat(GLenum internalFormat) {
     switch (internalFormat) {
+        // Unsized color
         case GL_RGB:
         case GL_RGBA:
+        // Sized color (8-bit)
         case GL_RGB8:
         case GL_RGBA8:
+        case GL_R8:
+        case GL_R8_SNORM:
+        case GL_R8I:
+        case GL_R8UI:
+        case GL_RG8:
+        case GL_RG8_SNORM:
+        case GL_RG8I:
+        case GL_RG8UI:
+        case GL_RGBA8_SNORM:
+        case GL_RGBA8I:
+        case GL_RGBA8UI:
+        case GL_SRGB8_ALPHA8:
+        // Sized color (16-bit)
+        case GL_R16:
+        case GL_R16_SNORM:
+        case GL_R16F:
+        case GL_R16I:
+        case GL_R16UI:
+        case GL_RG16:
+        case GL_RG16_SNORM:
+        case GL_RG16F:
+        case GL_RG16I:
+        case GL_RG16UI:
+        case GL_RGBA16:
+        case GL_RGBA16_SNORM:
+        case GL_RGBA16F:
+        case GL_RGBA16I:
+        case GL_RGBA16UI:
+        // Sized color (32-bit)
+        case GL_R32F:
+        case GL_R32I:
+        case GL_R32UI:
+        case GL_RG32F:
+        case GL_RG32I:
+        case GL_RG32UI:
+        case GL_RGBA32F:
+        case GL_RGBA32I:
+        case GL_RGBA32UI:
+        // Packed color
+        case GL_RGB10_A2:
+        case GL_RGB10_A2UI:
+        case GL_R11F_G11F_B10F:
+        case GL_RGB9_E5:
+        case GL_RGB565:
+        // sRGB
+        case GL_SRGB8:
+        // RGB-only sized (no explicit alpha). Not strictly color-renderable
+        // in GL 4.6 core, but CTS copy_image exercises these against
+        // glRenderbufferStorage and expects no API-level error. Backing
+        // store falls back to the nearest Metal renderable format.
+        case GL_RGB8_SNORM:
+        case GL_RGB16:
+        case GL_RGB16_SNORM:
+        case GL_RGB16F:
+        case GL_RGB16I:
+        case GL_RGB16UI:
+        case GL_RGB32F:
+        case GL_RGB32I:
+        case GL_RGB32UI:
+        case GL_RGB8I:
+        case GL_RGB8UI:
+        // Legacy low-precision / packed sized color formats. Same rationale
+        // as the RGB-only block above.
+        case GL_R3_G3_B2:
+        case GL_RGB4:
+        case GL_RGB5:
+        case GL_RGB10:
+        case GL_RGB12:
+        case GL_RGBA2:
+        case GL_RGBA4:
+        case GL_RGB5_A1:
+        case GL_RGBA12:
+        // Depth
         case GL_DEPTH_COMPONENT:
         case GL_DEPTH_COMPONENT16:
         case GL_DEPTH_COMPONENT24:
         case GL_DEPTH_COMPONENT32:
         case GL_DEPTH_COMPONENT32F:
+        // Stencil
         case GL_STENCIL_INDEX:
         case GL_STENCIL_INDEX8:
+        // Depth-stencil
         case GL_DEPTH_STENCIL:
         case GL_DEPTH24_STENCIL8:
         case GL_DEPTH32F_STENCIL8:
@@ -2028,8 +2292,13 @@ void APIENTRY glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
         recordValidationError(context, "glBindBufferBase", GL_INVALID_ENUM, "target is not an indexed buffer binding point");
         return;
     }
-    if (index >= kPhaseAMaxIndexedBufferBindings) {
-        recordValidationError(context, "glBindBufferBase", GL_INVALID_VALUE, "binding index exceeds Phase A limit");
+    if (index >= maxIndexedBindings(target)) {
+        recordValidationError(context, "glBindBufferBase", GL_INVALID_VALUE, "binding index exceeds maximum for target");
+        return;
+    }
+    // GL 4.6 §6.1.1: binding XFB buffers while transform feedback is active is INVALID_OPERATION.
+    if (target == GL_TRANSFORM_FEEDBACK_BUFFER && context->isTransformFeedbackActive()) {
+        recordValidationError(context, "glBindBufferBase", GL_INVALID_OPERATION, "cannot bind transform feedback buffer while transform feedback is active");
         return;
     }
     if (context->bindBufferBase(target, index, buffer)) {
@@ -2047,9 +2316,30 @@ void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
         recordValidationError(context, "glBindBufferRange", GL_INVALID_ENUM, "target is not an indexed buffer binding point");
         return;
     }
-    if (index >= kPhaseAMaxIndexedBufferBindings) {
-        recordValidationError(context, "glBindBufferRange", GL_INVALID_VALUE, "binding index exceeds Phase A limit");
+    if (index >= maxIndexedBindings(target)) {
+        recordValidationError(context, "glBindBufferRange", GL_INVALID_VALUE, "binding index exceeds maximum for target");
         return;
+    }
+    // GL 4.6 §6.1.1: binding XFB buffers while transform feedback is active is INVALID_OPERATION.
+    if (target == GL_TRANSFORM_FEEDBACK_BUFFER && context->isTransformFeedbackActive()) {
+        recordValidationError(context, "glBindBufferRange", GL_INVALID_OPERATION, "cannot bind transform feedback buffer while transform feedback is active");
+        return;
+    }
+    // GL 4.6 §6.1.1: For TRANSFORM_FEEDBACK_BUFFER, size must be > 0, and
+    // both offset and size must be word-aligned (multiple of 4).
+    if (target == GL_TRANSFORM_FEEDBACK_BUFFER && buffer != 0) {
+        if (size <= 0) {
+            recordValidationError(context, "glBindBufferRange", GL_INVALID_VALUE, "size must be > 0 for transform feedback buffer");
+            return;
+        }
+        if (offset % 4 != 0) {
+            recordValidationError(context, "glBindBufferRange", GL_INVALID_VALUE, "offset must be word-aligned for transform feedback buffer");
+            return;
+        }
+        if (size % 4 != 0) {
+            recordValidationError(context, "glBindBufferRange", GL_INVALID_VALUE, "size must be word-aligned for transform feedback buffer");
+            return;
+        }
     }
     if (context->bindBufferRange(target, index, buffer, offset, size)) {
         markBufferFunction(FunctionId::glBindBufferRange, "Indexed buffer-range bindings are tracked.");
@@ -2592,6 +2882,10 @@ void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat, GLs
         warnUploadRejectionOnce("glTexImage1D", format, type, static_cast<GLenum>(internalformat));
         return;
     }
+    if (!isFormatCompatibleWithInternalFormat(format, static_cast<GLenum>(internalformat))) {
+        recordValidationError(context, "glTexImage1D", GL_INVALID_OPERATION, "format/internalformat mismatch");
+        return;
+    }
     if (context->texImage(target, level, internalformat, width, 1, 1, border, format, type, pixels)) {
         markTextureFunction(FunctionId::glTexImage1D, "1D texture storage and RGBA8 shadow upload are live.");
         Runtime::shared().recordBootstrapTrace("glTexImage1D(" + std::to_string(width) + ")");
@@ -2603,13 +2897,25 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLs
     if (context == nullptr) {
         return;
     }
-    if (target != GL_TEXTURE_2D) {
+    if (target != GL_TEXTURE_2D
+        && target != GL_TEXTURE_1D_ARRAY
+        && target != GL_TEXTURE_RECTANGLE
+        && target != GL_TEXTURE_CUBE_MAP_POSITIVE_X
+        && target != GL_TEXTURE_CUBE_MAP_NEGATIVE_X
+        && target != GL_TEXTURE_CUBE_MAP_POSITIVE_Y
+        && target != GL_TEXTURE_CUBE_MAP_NEGATIVE_Y
+        && target != GL_TEXTURE_CUBE_MAP_POSITIVE_Z
+        && target != GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
         recordValidationError(context, "glTexImage2D", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D");
         return;
     }
     if (!isValidLegacyUploadInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexImage2D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
         warnUploadRejectionOnce("glTexImage2D", format, type, static_cast<GLenum>(internalformat));
+        return;
+    }
+    if (!isFormatCompatibleWithInternalFormat(format, static_cast<GLenum>(internalformat))) {
+        recordValidationError(context, "glTexImage2D", GL_INVALID_OPERATION, "format/internalformat mismatch");
         return;
     }
     if (context->texImage(target, level, internalformat, width, height, 1, border, format, type, pixels)) {
@@ -2634,13 +2940,19 @@ void APIENTRY glTexImage3D(
     if (context == nullptr) {
         return;
     }
-    if (target != GL_TEXTURE_3D) {
+    if (target != GL_TEXTURE_3D
+        && target != GL_TEXTURE_2D_ARRAY
+        && target != GL_TEXTURE_CUBE_MAP_ARRAY) {
         recordValidationError(context, "glTexImage3D", GL_INVALID_ENUM, "target must be GL_TEXTURE_3D");
         return;
     }
     if (!isValidLegacyUploadInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexImage3D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
         warnUploadRejectionOnce("glTexImage3D", format, type, static_cast<GLenum>(internalformat));
+        return;
+    }
+    if (!isFormatCompatibleWithInternalFormat(format, static_cast<GLenum>(internalformat))) {
+        recordValidationError(context, "glTexImage3D", GL_INVALID_OPERATION, "format/internalformat mismatch");
         return;
     }
     if (context->texImage(target, level, internalformat, width, height, depth, border, format, type, pixels)) {
@@ -2674,7 +2986,15 @@ void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint y
     if (context == nullptr) {
         return;
     }
-    if (target != GL_TEXTURE_2D) {
+    if (target != GL_TEXTURE_2D
+        && target != GL_TEXTURE_1D_ARRAY
+        && target != GL_TEXTURE_RECTANGLE
+        && target != GL_TEXTURE_CUBE_MAP_POSITIVE_X
+        && target != GL_TEXTURE_CUBE_MAP_NEGATIVE_X
+        && target != GL_TEXTURE_CUBE_MAP_POSITIVE_Y
+        && target != GL_TEXTURE_CUBE_MAP_NEGATIVE_Y
+        && target != GL_TEXTURE_CUBE_MAP_POSITIVE_Z
+        && target != GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
         recordValidationError(context, "glTexSubImage2D", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D");
         return;
     }
@@ -2706,7 +3026,9 @@ void APIENTRY glTexSubImage3D(
     if (context == nullptr) {
         return;
     }
-    if (target != GL_TEXTURE_3D) {
+    if (target != GL_TEXTURE_3D
+        && target != GL_TEXTURE_2D_ARRAY
+        && target != GL_TEXTURE_CUBE_MAP_ARRAY) {
         recordValidationError(context, "glTexSubImage3D", GL_INVALID_ENUM, "target must be GL_TEXTURE_3D");
         return;
     }
@@ -2902,8 +3224,10 @@ void APIENTRY glTexStorage2D(GLenum target, GLsizei levels, GLenum internalforma
     if (context == nullptr) {
         return;
     }
-    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) {
-        recordValidationError(context, "glTexStorage2D", GL_INVALID_ENUM, "target must be GL_TEXTURE_2D or GL_TEXTURE_CUBE_MAP");
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP &&
+        target != GL_TEXTURE_1D_ARRAY && target != GL_TEXTURE_RECTANGLE) {
+        recordValidationError(context, "glTexStorage2D", GL_INVALID_ENUM,
+                              "target must be GL_TEXTURE_2D, GL_TEXTURE_CUBE_MAP, GL_TEXTURE_1D_ARRAY, or GL_TEXTURE_RECTANGLE");
         return;
     }
     if (!isValidStorageInternalFormat(context, internalformat)) {
@@ -2921,8 +3245,10 @@ void APIENTRY glTexStorage3D(GLenum target, GLsizei levels, GLenum internalforma
     if (context == nullptr) {
         return;
     }
-    if (target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY) {
-        recordValidationError(context, "glTexStorage3D", GL_INVALID_ENUM, "target must be GL_TEXTURE_3D or GL_TEXTURE_2D_ARRAY");
+    if (target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY &&
+        target != GL_TEXTURE_CUBE_MAP_ARRAY) {
+        recordValidationError(context, "glTexStorage3D", GL_INVALID_ENUM,
+                              "target must be GL_TEXTURE_3D, GL_TEXTURE_2D_ARRAY, or GL_TEXTURE_CUBE_MAP_ARRAY");
         return;
     }
     if (!isValidStorageInternalFormat(context, internalformat)) {
@@ -3242,7 +3568,15 @@ void APIENTRY glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum te
     if (context == nullptr) {
         return;
     }
-    if (!isValidFramebufferAttachment(attachment) || textarget != GL_TEXTURE_2D) {
+    if (!isValidFramebufferAttachment(attachment) ||
+        (textarget != GL_TEXTURE_2D &&
+         textarget != GL_TEXTURE_2D_MULTISAMPLE &&
+         textarget != GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
+         textarget != GL_TEXTURE_CUBE_MAP_NEGATIVE_X &&
+         textarget != GL_TEXTURE_CUBE_MAP_POSITIVE_Y &&
+         textarget != GL_TEXTURE_CUBE_MAP_NEGATIVE_Y &&
+         textarget != GL_TEXTURE_CUBE_MAP_POSITIVE_Z &&
+         textarget != GL_TEXTURE_CUBE_MAP_NEGATIVE_Z)) {
         recordValidationError(context, "glFramebufferTexture2D", GL_INVALID_ENUM, "attachment or texture target is invalid");
         return;
     }
@@ -4306,6 +4640,14 @@ void APIENTRY glLinkProgram(GLuint program) {
     if (context == nullptr) {
         return;
     }
+    // GL 4.6 §7.3: INVALID_OPERATION if program is in use by any active XFB
+    // (includes paused — the spec says "not active" meaning not ended).
+    if (context->isTransformFeedbackActive() &&
+        program == context->state().currentProgram()) {
+        recordValidationError(context, "glLinkProgram", GL_INVALID_OPERATION,
+                              "cannot link the active program while transform feedback is active");
+        return;
+    }
     const bool ok = context->linkProgram(program);
     markProgramFunction(FunctionId::glLinkProgram, "Program link merges shader reflections and assigns locations.");
     Runtime::shared().recordBootstrapTrace(
@@ -4316,6 +4658,11 @@ void APIENTRY glLinkProgram(GLuint program) {
 void APIENTRY glUseProgram(GLuint program) {
     auto* context = requireCurrentContext("glUseProgram");
     if (context == nullptr) {
+        return;
+    }
+    // GL 4.6 §7.3: INVALID_OPERATION if transform feedback is active and NOT paused.
+    if (context->isTransformFeedbackActive() && !context->isTransformFeedbackPaused()) {
+        recordValidationError(context, "glUseProgram", GL_INVALID_OPERATION, "cannot change program while transform feedback is active and not paused");
         return;
     }
     if (context->useProgram(program)) {
@@ -4861,6 +5208,27 @@ bool isValidDrawElementsType(GLenum type) {
     return type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT || type == GL_UNSIGNED_INT;
 }
 
+// GL 4.6 §13.3: During transform feedback the draw mode must match the
+// primitive type specified in BeginTransformFeedback.
+// GL_PATCHES is always compatible because tessellation determines the output type.
+bool isDrawModeCompatibleWithXfb(GLenum drawMode, GLenum xfbMode) {
+    if (drawMode == GL_PATCHES) return true;
+    switch (xfbMode) {
+        case GL_POINTS:
+            return drawMode == GL_POINTS;
+        case GL_LINES:
+            return drawMode == GL_LINES || drawMode == GL_LINE_STRIP ||
+                   drawMode == GL_LINE_LOOP || drawMode == GL_LINES_ADJACENCY ||
+                   drawMode == GL_LINE_STRIP_ADJACENCY;
+        case GL_TRIANGLES:
+            return drawMode == GL_TRIANGLES || drawMode == GL_TRIANGLE_STRIP ||
+                   drawMode == GL_TRIANGLE_FAN || drawMode == GL_TRIANGLES_ADJACENCY ||
+                   drawMode == GL_TRIANGLE_STRIP_ADJACENCY;
+        default:
+            return true;
+    }
+}
+
 }  // namespace
 
 void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {
@@ -4874,6 +5242,13 @@ void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     }
     if (first < 0 || count < 0) {
         recordValidationError(context, "glDrawArrays", GL_INVALID_VALUE, "first and count must be non-negative");
+        return;
+    }
+    // GL 4.6 §13.3: draw mode must match XFB primitive mode when active and not paused.
+    if (context->isTransformFeedbackActive() && !context->isTransformFeedbackPaused() &&
+        !isDrawModeCompatibleWithXfb(mode, context->transformFeedbackPrimitiveMode())) {
+        recordValidationError(context, "glDrawArrays", GL_INVALID_OPERATION,
+                              "draw mode incompatible with transform feedback primitive mode");
         return;
     }
     context->drawArrays(mode, first, count);
@@ -4954,9 +5329,15 @@ void APIENTRY glPatchParameterfv(GLenum pname, const GLfloat* values) {
 void APIENTRY glBeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
     auto* context = requireCurrentContext("glBeginQueryIndexed");
     if (context == nullptr) return;
-    (void)target; (void)index; (void)id;
-    // Stub: indexed query targets for geometry shader streams are tracked on the CPU
-    // without GPU effect. Full Metal-backed occlusion queries are Phase 5+.
+    // GL 4.6 §4.2: For TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN and PRIMITIVES_GENERATED,
+    // INVALID_VALUE when index >= GL_MAX_VERTEX_STREAMS.
+    if ((target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN || target == GL_PRIMITIVES_GENERATED) &&
+        index >= 4) {  // GL_MAX_VERTEX_STREAMS = 4
+        recordValidationError(context, "glBeginQueryIndexed", GL_INVALID_VALUE,
+                              "index exceeds GL_MAX_VERTEX_STREAMS");
+        return;
+    }
+    (void)id;
     markStateFunction(FunctionId::glBeginQueryIndexed, "Indexed query begin stub accepts call shape.");
     Runtime::shared().recordBootstrapTrace("glBeginQueryIndexed(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ", id=" + std::to_string(id) + ")");
 }
@@ -4964,15 +5345,29 @@ void APIENTRY glBeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
 void APIENTRY glEndQueryIndexed(GLenum target, GLuint index) {
     auto* context = requireCurrentContext("glEndQueryIndexed");
     if (context == nullptr) return;
-    (void)target; (void)index;
-    markStateFunction(FunctionId::glEndQueryIndexed, "Indexed query end stub accepts call shape.");
-    Runtime::shared().recordBootstrapTrace("glEndQueryIndexed(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ")");
+    // GL 4.6 §4.2: Same index validation as BeginQueryIndexed.
+    if ((target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN || target == GL_PRIMITIVES_GENERATED) &&
+        index >= 4) {
+        recordValidationError(context, "glEndQueryIndexed", GL_INVALID_VALUE,
+                              "index exceeds GL_MAX_VERTEX_STREAMS");
+        return;
+    }
+    // GL 4.6 §4.2: INVALID_OPERATION if no query is active at the specified index.
+    // Our stub never activates queries, so any EndQueryIndexed is an error.
+    recordValidationError(context, "glEndQueryIndexed", GL_INVALID_OPERATION,
+                          "no active query at specified index");
 }
 
 void APIENTRY glGetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint* params) {
     auto* context = requireCurrentContext("glGetQueryIndexediv");
     if (context == nullptr) return;
-    (void)target; (void)index;
+    // GL 4.6 §4.2: Same index validation.
+    if ((target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN || target == GL_PRIMITIVES_GENERATED) &&
+        index >= 4) {
+        recordValidationError(context, "glGetQueryIndexediv", GL_INVALID_VALUE,
+                              "index exceeds GL_MAX_VERTEX_STREAMS");
+        return;
+    }
     // Return sensible defaults: CURRENT_QUERY = 0, QUERY_COUNTER_BITS = 0.
     if (params != nullptr) {
         if (pname == GL_CURRENT_QUERY) {
@@ -5807,6 +6202,16 @@ void APIENTRY glDeleteTransformFeedbacks(GLsizei n, const GLuint* ids) {
         recordValidationError(ctx, "glDeleteTransformFeedbacks", GL_INVALID_VALUE, "n < 0");
         return;
     }
+    // GL 4.6 §6.1: INVALID_OPERATION if any of the named objects is active.
+    if (ctx->isTransformFeedbackActive()) {
+        for (GLsizei i = 0; i < n; ++i) {
+            if (ids[i] != 0) {
+                recordValidationError(ctx, "glDeleteTransformFeedbacks", GL_INVALID_OPERATION,
+                                      "cannot delete transform feedback object while transform feedback is active");
+                return;
+            }
+        }
+    }
     for (GLsizei i = 0; i < n; ++i) {
         if (ids[i] != 0) {
             ctx->objects().transformFeedbacks().erase(ids[i]);
@@ -5831,11 +6236,17 @@ void APIENTRY glBindTransformFeedback(GLenum target, GLuint id) {
         recordValidationError(ctx, "glBindTransformFeedback", GL_INVALID_ENUM, "target must be GL_TRANSFORM_FEEDBACK");
         return;
     }
+    // GL 4.6 §6.1.1: INVALID_OPERATION if XFB is active and not paused.
+    if (ctx->isTransformFeedbackActive() && !ctx->isTransformFeedbackPaused()) {
+        recordValidationError(ctx, "glBindTransformFeedback", GL_INVALID_OPERATION,
+                              "cannot bind transform feedback object while transform feedback is active and not paused");
+        return;
+    }
     if (id != 0 && !ctx->objects().transformFeedbacks().contains(id)) {
         recordValidationError(ctx, "glBindTransformFeedback", GL_INVALID_OPERATION, "transform feedback object does not exist");
         return;
     }
-    // State-tracked binding (no Metal effect).
+    ctx->setBoundTransformFeedback(id);
     markStateFunction(FunctionId::glBindTransformFeedback, "Transform feedback object binding (state-tracked).");
     Runtime::shared().recordBootstrapTrace("glBindTransformFeedback(target=GL_TRANSFORM_FEEDBACK, id=" + std::to_string(id) + ")");
 }
@@ -5843,23 +6254,50 @@ void APIENTRY glBindTransformFeedback(GLenum target, GLuint id) {
 void APIENTRY glPauseTransformFeedback(void) {
     auto* ctx = requireCurrentContext("glPauseTransformFeedback");
     if (!ctx) return;
-    // State-tracked (no Metal capture running).
-    markStateFunction(FunctionId::glPauseTransformFeedback, "PauseTransformFeedback (state-tracked, no Metal capture).");
+    // GL 4.6 §13.3: INVALID_OPERATION if XFB is not active or already paused.
+    if (!ctx->isTransformFeedbackActive() || ctx->isTransformFeedbackPaused()) {
+        recordValidationError(ctx, "glPauseTransformFeedback", GL_INVALID_OPERATION,
+                              "transform feedback is not active or is already paused");
+        return;
+    }
+    ctx->setTransformFeedbackPaused(true);
+    markStateFunction(FunctionId::glPauseTransformFeedback, "PauseTransformFeedback (state-tracked).");
     Runtime::shared().recordBootstrapTrace("glPauseTransformFeedback()");
 }
 
 void APIENTRY glResumeTransformFeedback(void) {
     auto* ctx = requireCurrentContext("glResumeTransformFeedback");
     if (!ctx) return;
-    markStateFunction(FunctionId::glResumeTransformFeedback, "ResumeTransformFeedback (state-tracked, no Metal capture).");
+    // GL 4.6 §13.3: INVALID_OPERATION if XFB is not active or not paused.
+    if (!ctx->isTransformFeedbackActive() || !ctx->isTransformFeedbackPaused()) {
+        recordValidationError(ctx, "glResumeTransformFeedback", GL_INVALID_OPERATION,
+                              "transform feedback is not active or not paused");
+        return;
+    }
+    ctx->setTransformFeedbackPaused(false);
+    markStateFunction(FunctionId::glResumeTransformFeedback, "ResumeTransformFeedback (state-tracked).");
     Runtime::shared().recordBootstrapTrace("glResumeTransformFeedback()");
 }
 
 void APIENTRY glDrawTransformFeedback(GLenum mode, GLuint id) {
     auto* ctx = requireCurrentContext("glDrawTransformFeedback");
     if (!ctx) return;
-    (void)mode; (void)id;
-    // Stub: no vertex capture → 0 primitives drawn. Spec-legal when TF captured 0 vertices.
+    // GL 4.6 §10.5: INVALID_VALUE if id is not the name of a transform feedback object.
+    if (id != 0 && !ctx->objects().transformFeedbacks().contains(id)) {
+        recordValidationError(ctx, "glDrawTransformFeedback", GL_INVALID_VALUE,
+                              "id is not a valid transform feedback object");
+        return;
+    }
+    // GL 4.6 §10.5: INVALID_OPERATION if EndTransformFeedback was never called
+    // for the object.
+    auto* tfObj = (id != 0) ? ctx->objects().transformFeedbacks().get(id) : nullptr;
+    if (tfObj && !tfObj->hasCompleted) {
+        recordValidationError(ctx, "glDrawTransformFeedback", GL_INVALID_OPERATION,
+                              "EndTransformFeedback has never been called for this object");
+        return;
+    }
+    (void)mode;
+    // Stub: no vertex capture → 0 primitives drawn.
     markStateFunction(FunctionId::glDrawTransformFeedback, "DrawTransformFeedback stub (0 primitives, no TF capture).");
     Runtime::shared().recordBootstrapTrace("glDrawTransformFeedback(mode=" + std::to_string(mode) + ", id=" + std::to_string(id) + ")");
 }
@@ -5867,7 +6305,13 @@ void APIENTRY glDrawTransformFeedback(GLenum mode, GLuint id) {
 void APIENTRY glDrawTransformFeedbackStream(GLenum mode, GLuint id, GLuint stream) {
     auto* ctx = requireCurrentContext("glDrawTransformFeedbackStream");
     if (!ctx) return;
-    (void)mode; (void)id; (void)stream;
+    // GL 4.6 §10.5: INVALID_VALUE if stream >= GL_MAX_VERTEX_STREAMS.
+    if (stream >= 4) {
+        recordValidationError(ctx, "glDrawTransformFeedbackStream", GL_INVALID_VALUE,
+                              "stream exceeds GL_MAX_VERTEX_STREAMS");
+        return;
+    }
+    (void)mode; (void)id;
     // Stub: same as DrawTransformFeedback but with stream index. 0 primitives.
     markStateFunction(FunctionId::glDrawTransformFeedbackStream, "DrawTransformFeedbackStream stub (0 primitives).");
     Runtime::shared().recordBootstrapTrace("glDrawTransformFeedbackStream(mode=" + std::to_string(mode) + ", id=" + std::to_string(id) + ", stream=" + std::to_string(stream) + ")");
@@ -5878,19 +6322,107 @@ void APIENTRY glDrawTransformFeedbackStream(GLenum mode, GLuint id, GLuint strea
 void APIENTRY glDrawArraysIndirect(GLenum mode, const void* indirect) {
     auto* ctx = requireCurrentContext("glDrawArraysIndirect");
     if (!ctx) return;
-    (void)mode;
-    // Read the indirect struct from client memory or the bound GL_DRAW_INDIRECT_BUFFER.
-    // Stub: accept the call, log it, but perform no draw (same as glDrawArrays with count=0).
-    markStateFunction(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect stub (accepted, no draw).");
-    Runtime::shared().recordBootstrapTrace("glDrawArraysIndirect(mode=" + std::to_string(mode) + ", indirect=" + std::to_string(reinterpret_cast<uintptr_t>(indirect)) + ")");
+    if (!isValidDrawMode(mode)) {
+        recordValidationError(ctx, "glDrawArraysIndirect", GL_INVALID_ENUM, "mode is not a recognized primitive type");
+        return;
+    }
+    // Core profile: drawing with default VAO (0) is INVALID_OPERATION.
+    if (ctx->getBoundVertexArray() == 0) {
+        recordValidationError(ctx, "glDrawArraysIndirect", GL_INVALID_OPERATION, "no VAO bound (default VAO 0 in core profile)");
+        return;
+    }
+    // Offset into indirect buffer must be 4-byte aligned.
+    if (reinterpret_cast<uintptr_t>(indirect) % 4 != 0) {
+        recordValidationError(ctx, "glDrawArraysIndirect", GL_INVALID_VALUE, "indirect offset not aligned to 4 bytes");
+        return;
+    }
+    // GL spec: if GL_DRAW_INDIRECT_BUFFER is bound, `indirect` is a byte offset
+    // into that buffer; otherwise it is a client pointer to the command struct.
+    // Decompose into a regular drawArraysInstancedBaseInstance call.
+    struct DrawArraysIndirectCommand {
+        GLuint count;
+        GLuint instanceCount;
+        GLuint first;
+        GLuint baseInstance;
+    };
+    DrawArraysIndirectCommand cmd{};
+    if (!ctx->readIndirectBuffer(GL_DRAW_INDIRECT_BUFFER, indirect, sizeof(cmd), &cmd)) {
+        return;  // error already recorded by readIndirectBuffer
+    }
+    if (cmd.count == 0 || cmd.instanceCount == 0) {
+        // Valid no-op per spec.
+        markDrawFunction(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect: zero count/instanceCount, no-op.");
+        return;
+    }
+    ctx->drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
+                                         static_cast<GLsizei>(cmd.count),
+                                         static_cast<GLsizei>(cmd.instanceCount),
+                                         cmd.baseInstance);
+    markDrawFunction(FunctionId::glDrawArraysIndirect, "DrawArraysIndirect decomposed to drawArraysInstancedBaseInstance.");
+    Runtime::shared().recordBootstrapTrace(
+        "glDrawArraysIndirect(mode=" + std::to_string(mode)
+        + ", count=" + std::to_string(cmd.count)
+        + ", instanceCount=" + std::to_string(cmd.instanceCount)
+        + ", first=" + std::to_string(cmd.first)
+        + ", baseInstance=" + std::to_string(cmd.baseInstance) + ")");
 }
 
 void APIENTRY glDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect) {
     auto* ctx = requireCurrentContext("glDrawElementsIndirect");
     if (!ctx) return;
-    (void)mode; (void)type;
-    markStateFunction(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect stub (accepted, no draw).");
-    Runtime::shared().recordBootstrapTrace("glDrawElementsIndirect(mode=" + std::to_string(mode) + ", type=" + std::to_string(type) + ")");
+    if (!isValidDrawMode(mode)) {
+        recordValidationError(ctx, "glDrawElementsIndirect", GL_INVALID_ENUM, "mode is not a recognized primitive type");
+        return;
+    }
+    if (!isValidDrawElementsType(type)) {
+        recordValidationError(ctx, "glDrawElementsIndirect", GL_INVALID_ENUM, "type must be UNSIGNED_BYTE/SHORT/INT");
+        return;
+    }
+    // Core profile: drawing with default VAO (0) is INVALID_OPERATION.
+    if (ctx->getBoundVertexArray() == 0) {
+        recordValidationError(ctx, "glDrawElementsIndirect", GL_INVALID_OPERATION, "no VAO bound (default VAO 0 in core profile)");
+        return;
+    }
+    // Offset into indirect buffer must be 4-byte aligned.
+    if (reinterpret_cast<uintptr_t>(indirect) % 4 != 0) {
+        recordValidationError(ctx, "glDrawElementsIndirect", GL_INVALID_VALUE, "indirect offset not aligned to 4 bytes");
+        return;
+    }
+    // GL spec: if GL_DRAW_INDIRECT_BUFFER is bound, `indirect` is a byte offset
+    // into that buffer; otherwise it is a client pointer to the command struct.
+    struct DrawElementsIndirectCommand {
+        GLuint count;
+        GLuint instanceCount;
+        GLuint firstIndex;
+        GLuint baseVertex;
+        GLuint baseInstance;
+    };
+    DrawElementsIndirectCommand cmd{};
+    if (!ctx->readIndirectBuffer(GL_DRAW_INDIRECT_BUFFER, indirect, sizeof(cmd), &cmd)) {
+        return;
+    }
+    if (cmd.count == 0 || cmd.instanceCount == 0) {
+        markDrawFunction(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect: zero count/instanceCount, no-op.");
+        return;
+    }
+    // Compute the byte offset for firstIndex: firstIndex * sizeof(index_type).
+    GLsizei indexSize = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_SHORT) ? 2 : 1;
+    const void* indexOffset = reinterpret_cast<const void*>(
+        static_cast<uintptr_t>(cmd.firstIndex) * static_cast<uintptr_t>(indexSize));
+    ctx->drawElementsInstancedBaseVertexBaseInstance(mode,
+        static_cast<GLsizei>(cmd.count), type, indexOffset,
+        static_cast<GLsizei>(cmd.instanceCount),
+        static_cast<GLint>(cmd.baseVertex),
+        cmd.baseInstance);
+    markDrawFunction(FunctionId::glDrawElementsIndirect, "DrawElementsIndirect decomposed to drawElementsInstancedBaseVertexBaseInstance.");
+    Runtime::shared().recordBootstrapTrace(
+        "glDrawElementsIndirect(mode=" + std::to_string(mode)
+        + ", type=" + std::to_string(type)
+        + ", count=" + std::to_string(cmd.count)
+        + ", instanceCount=" + std::to_string(cmd.instanceCount)
+        + ", firstIndex=" + std::to_string(cmd.firstIndex)
+        + ", baseVertex=" + std::to_string(cmd.baseVertex)
+        + ", baseInstance=" + std::to_string(cmd.baseInstance) + ")");
 }
 
 // --- GL 4.2: Memory Barriers ---
@@ -6074,7 +6606,7 @@ void APIENTRY glMultiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
     if (!ctx->multiDrawArraysIndirect(mode, indirect, drawcount, stride)) {
         return;
     }
-    markDrawFunction(FunctionId::glMultiDrawArraysIndirect, "MultiDrawArraysIndirect stub (validated, indirect buffer not yet read).");
+    markDrawFunction(FunctionId::glMultiDrawArraysIndirect, "MultiDrawArraysIndirect decomposed to per-command drawArraysInstancedBaseInstance.");
 }
 
 void APIENTRY glMultiDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect, GLsizei drawcount, GLsizei stride) {
@@ -6083,7 +6615,7 @@ void APIENTRY glMultiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
     if (!ctx->multiDrawElementsIndirect(mode, type, indirect, drawcount, stride)) {
         return;
     }
-    markDrawFunction(FunctionId::glMultiDrawElementsIndirect, "MultiDrawElementsIndirect stub (validated, indirect buffer not yet read).");
+    markDrawFunction(FunctionId::glMultiDrawElementsIndirect, "MultiDrawElementsIndirect decomposed to per-command drawElementsInstancedBaseVertexBaseInstance.");
 }
 
 // --- GL 4.3: Buffer Clear ---
@@ -6213,6 +6745,27 @@ void APIENTRY glInvalidateTexSubImage(GLuint texture, GLint level, GLint xoffset
 void APIENTRY glDrawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei instancecount) {
     auto* ctx = requireCurrentContext("glDrawTransformFeedbackInstanced");
     if (!ctx) return;
+    if (!isValidDrawMode(mode)) {
+        recordValidationError(ctx, "glDrawTransformFeedbackInstanced", GL_INVALID_ENUM,
+                              "mode is not a recognized primitive type");
+        return;
+    }
+    // GL 4.6 §10.5: INVALID_VALUE if id is not a valid transform feedback object.
+    if (!ctx->objects().transformFeedbacks().contains(id)) {
+        recordValidationError(ctx, "glDrawTransformFeedbackInstanced", GL_INVALID_VALUE,
+                              "id is not a valid transform feedback object");
+        return;
+    }
+    // GL 4.6 §10.5: INVALID_OPERATION if mode is incompatible with the captured XFB mode.
+    {
+        auto* tfObj = ctx->objects().transformFeedbacks().get(id);
+        if (tfObj && tfObj->hasCompleted &&
+            !isDrawModeCompatibleWithXfb(mode, tfObj->capturedPrimitiveMode)) {
+            recordValidationError(ctx, "glDrawTransformFeedbackInstanced", GL_INVALID_OPERATION,
+                                  "draw mode incompatible with captured transform feedback primitive mode");
+            return;
+        }
+    }
     if (!ctx->drawTransformFeedbackInstanced(mode, id, instancecount)) {
         return;
     }
@@ -6222,6 +6775,37 @@ void APIENTRY glDrawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei i
 void APIENTRY glDrawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLuint stream, GLsizei instancecount) {
     auto* ctx = requireCurrentContext("glDrawTransformFeedbackStreamInstanced");
     if (!ctx) return;
+    if (!isValidDrawMode(mode)) {
+        recordValidationError(ctx, "glDrawTransformFeedbackStreamInstanced", GL_INVALID_ENUM,
+                              "mode is not a recognized primitive type");
+        return;
+    }
+    // GL 4.6 §10.5: INVALID_VALUE if stream >= GL_MAX_VERTEX_STREAMS.
+    if (stream >= 4) {
+        recordValidationError(ctx, "glDrawTransformFeedbackStreamInstanced", GL_INVALID_VALUE,
+                              "stream exceeds GL_MAX_VERTEX_STREAMS");
+        return;
+    }
+    // GL 4.6 §10.5: INVALID_VALUE if id is not a valid transform feedback object.
+    if (!ctx->objects().transformFeedbacks().contains(id)) {
+        recordValidationError(ctx, "glDrawTransformFeedbackStreamInstanced", GL_INVALID_VALUE,
+                              "id is not a valid transform feedback object");
+        return;
+    }
+    // GL 4.6 §10.5: INVALID_OPERATION if EndTransformFeedback was never called.
+    auto* tfObj = ctx->objects().transformFeedbacks().get(id);
+    if (tfObj && !tfObj->hasCompleted) {
+        recordValidationError(ctx, "glDrawTransformFeedbackStreamInstanced", GL_INVALID_OPERATION,
+                              "EndTransformFeedback has never been called for this object");
+        return;
+    }
+    // GL 4.6 §10.5: INVALID_OPERATION if mode is incompatible with captured XFB mode.
+    if (tfObj && tfObj->hasCompleted &&
+        !isDrawModeCompatibleWithXfb(mode, tfObj->capturedPrimitiveMode)) {
+        recordValidationError(ctx, "glDrawTransformFeedbackStreamInstanced", GL_INVALID_OPERATION,
+                              "draw mode incompatible with captured transform feedback primitive mode");
+        return;
+    }
     if (!ctx->drawTransformFeedbackStreamInstanced(mode, id, stream, instancecount)) {
         return;
     }

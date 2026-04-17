@@ -201,6 +201,15 @@ bool GLCapabilities::queryFloat(GLenum pname, GLfloat* out) const {
     if (out == nullptr) {
         return false;
     }
+    // Check the dedicated float map first — fractional values like
+    // GL_MIN_FRAGMENT_INTERPOLATION_OFFSET (-0.5f) can't survive the
+    // int64 round-trip.
+    const auto floatIt = floatLimits_.find(pname);
+    if (floatIt != floatLimits_.end()) {
+        out[0] = floatIt->second;
+        return true;
+    }
+    // Fall through to integer path (cast to float).
     GLint integerValue[2] = {};
     if (!queryInteger(pname, integerValue)) {
         return false;
@@ -373,12 +382,53 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
     add(GL_SRGB8_ALPHA8, MTLPixelFormatRGBA8Unorm_sRGB, true, true, true, true, false);
 
     // ------------------------------------------------------------------
+    // Legacy / low-precision sized formats. Metal has no native equivalents
+    // for these but GL 4.6 requires accepting them. We promote to the
+    // closest Metal format with equal or higher precision. The upload path
+    // (buildRGBA8Upload / buildNativeUpload) handles channel expansion
+    // (RGB→RGBA padding alpha=1) automatically.
+    // ------------------------------------------------------------------
+    // Legacy packed / low-bit RGB — promoted to RGBA8Unorm.
+    add(GL_R3_G3_B2,  MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_RGB4,       MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_RGB5,       MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_RGBA2,      MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_RGBA4,      MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    add(GL_RGB5_A1,    MTLPixelFormatRGBA8Unorm, false, true, false, false, false);
+    // 10/12-bit per channel — promoted to 16-bit.
+    add(GL_RGB10,      MTLPixelFormatRGBA16Unorm, false, true, false, false, false);
+    add(GL_RGB12,      MTLPixelFormatRGBA16Unorm, false, true, false, false, false);
+    add(GL_RGBA12,     MTLPixelFormatRGBA16Unorm, false, true, false, false, false);
+
+    // ------------------------------------------------------------------
+    // RGB-only sized formats (16-bit, float, integer). Metal has no 3-
+    // channel pixel formats; we promote to the 4-channel RGBA variant and
+    // pad alpha at upload time. Marked non-renderable because Metal
+    // render targets must match the pipeline output format and we can't
+    // use RGB-only render targets.
+    // ------------------------------------------------------------------
+    add(GL_RGB16,        MTLPixelFormatRGBA16Unorm,  false, true, false, false, false);
+    add(GL_RGB16_SNORM,  MTLPixelFormatRGBA16Snorm,  false, true, false, false, false);
+    add(GL_RGB16F,       MTLPixelFormatRGBA16Float,  false, true, false, false, false);
+    add(GL_RGB32F,       MTLPixelFormatRGBA32Float,  false, false, false, false, false);
+    add(GL_RGB8I,        MTLPixelFormatRGBA8Sint,    false, false, false, false, false);
+    add(GL_RGB8UI,       MTLPixelFormatRGBA8Uint,    false, false, false, false, false);
+    add(GL_RGB16I,       MTLPixelFormatRGBA16Sint,   false, false, false, false, false);
+    add(GL_RGB16UI,      MTLPixelFormatRGBA16Uint,   false, false, false, false, false);
+    add(GL_RGB32I,       MTLPixelFormatRGBA32Sint,   false, false, false, false, false);
+    add(GL_RGB32UI,      MTLPixelFormatRGBA32Uint,   false, false, false, false, false);
+
+    // Shared-exponent float (Metal supports it natively for sampling).
+    add(GL_RGB9_E5, MTLPixelFormatRGB9E5Float, false, true, false, false, false);
+
+    // ------------------------------------------------------------------
     // Depth / stencil. DEPTH_COMPONENT24 maps to Depth32Float because Metal
     // has no native 24-bit depth — precision goes up, sample semantics are
     // the same. STENCIL_INDEX8 is a dedicated Metal format.
     // ------------------------------------------------------------------
     add(GL_DEPTH_COMPONENT16, MTLPixelFormatDepth16Unorm, true, false, false, false, false);
     add(GL_DEPTH_COMPONENT24, MTLPixelFormatDepth32Float, true, false, false, false, false);
+    add(GL_DEPTH_COMPONENT32, MTLPixelFormatDepth32Float, true, false, false, false, false);
     add(GL_DEPTH_COMPONENT32F, MTLPixelFormatDepth32Float, true, false, false, false, false);
     add(GL_DEPTH24_STENCIL8, MTLPixelFormatDepth32Float_Stencil8, true, false, false, false, false);
     add(GL_DEPTH32F_STENCIL8, MTLPixelFormatDepth32Float_Stencil8, true, false, false, false, false);
@@ -466,7 +516,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_DRAW_BUFFERS] = 8;
     integerLimits_[GL_MAX_VERTEX_ATTRIBS] = 16;
     integerLimits_[GL_MAX_TEXTURE_IMAGE_UNITS] = 16;
-    integerLimits_[GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS] = 32;
+    integerLimits_[GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS] = 80;
     integerLimits_[GL_MAX_UNIFORM_BLOCK_SIZE] = maxUniformBlockSize;
     // Phase 8X Group 4d follow-up⁶ — UBO offset alignment. Metal's
     // MTLBuffer::setBufferOffset requires Mac-family GPUs to align constant
@@ -500,7 +550,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // GL 4.3 spec: GL_MAX_ELEMENT_INDEX must be at least 2^32 - 2 for the largest
     // index type (GL_UNSIGNED_INT). It is a property of the index format, not of
     // any particular buffer's storage size.
-    integerLimits_[GL_MAX_ELEMENT_INDEX] = static_cast<GLint64>(0xFFFFFFFEull);
+    integerLimits_[GL_MAX_ELEMENT_INDEX] = static_cast<GLint64>(0xFFFFFFFFull);
     integerLimits_[GL_MAX_ELEMENTS_INDICES] = std::min<GLint64>(maxBufferLength / 4, 0x7fffffff);
     integerLimits_[GL_MAX_ELEMENTS_VERTICES] = std::min<GLint64>(maxBufferLength / 16, 0x7fffffff);
     integerLimits_[GL_MAX_DEBUG_MESSAGE_LENGTH] = 1024;
@@ -520,6 +570,12 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // GLAD's string-matched has_ext() flips Recoil's VBO::IsSupported
     // gates from their default-false state.
     integerLimits_[GL_NUM_EXTENSIONS] = 42;
+    // GL 4.6 SPIR-V extension queries.  The SPIR-V extensions CTS test
+    // (KHR-GL46.spirv_extensions.spirv_extensions_queries) calls
+    // glGetIntegerv(GL_NUM_SPIR_V_EXTENSIONS) and then iterates with
+    // glGetStringi(GL_SPIR_V_EXTENSIONS, i).  Report 0 — AppGL does not
+    // consume SPIR-V shaders directly, so no SPIR-V extensions are exposed.
+    integerLimits_[GL_NUM_SPIR_V_EXTENSIONS] = 0;
     // GL 3.0+ core: applications query the context version via
     // glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION) rather than parsing
     // the GL_VERSION string. The Recoil engine in particular aborts with
@@ -542,8 +598,8 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
         kBindingMap.storageBufferBase - kBindingMap.uniformBufferBase);
     const GLint64 storageBindings = static_cast<GLint64>(
         kBufferSlotsPerStage - kBindingMap.storageBufferBase);
-    integerLimits_[GL_MAX_UNIFORM_BUFFER_BINDINGS] = uniformBindings;
-    integerLimits_[GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS] = storageBindings;
+    integerLimits_[GL_MAX_UNIFORM_BUFFER_BINDINGS] = std::max<GLint64>(uniformBindings, 84);
+    integerLimits_[GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS] = std::max<GLint64>(storageBindings, 8);
     integerLimits_[GL_MAX_SHADER_STORAGE_BLOCK_SIZE] = std::min<GLint64>(
         maxBufferLength, static_cast<GLint64>(128ull * 1024ull * 1024ull));
     integerLimits_[GL_MAX_VERTEX_ATTRIB_BINDINGS] = 16;
@@ -618,7 +674,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_GEOMETRY_UNIFORM_COMPONENTS] = 1024;
     integerLimits_[GL_MAX_GEOMETRY_INPUT_COMPONENTS] = 64;
     integerLimits_[GL_MAX_GEOMETRY_OUTPUT_COMPONENTS] = 128;
-    integerLimits_[GL_MAX_GEOMETRY_UNIFORM_BLOCKS] = uniformBindings;
+    integerLimits_[GL_MAX_GEOMETRY_UNIFORM_BLOCKS] = std::max<GLint64>(uniformBindings, 14);
     integerLimits_[GL_MAX_GEOMETRY_SHADER_INVOCATIONS] = 32;
 
     // Tessellation caps. Same emulation-gap caveat as geometry: the
@@ -629,11 +685,11 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_TESS_CONTROL_OUTPUT_COMPONENTS] = 128;
     integerLimits_[GL_MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS] = 4096;
     integerLimits_[GL_MAX_TESS_CONTROL_UNIFORM_COMPONENTS] = 1024;
-    integerLimits_[GL_MAX_TESS_CONTROL_UNIFORM_BLOCKS] = uniformBindings;
+    integerLimits_[GL_MAX_TESS_CONTROL_UNIFORM_BLOCKS] = std::max<GLint64>(uniformBindings, 14);
     integerLimits_[GL_MAX_TESS_EVALUATION_INPUT_COMPONENTS] = 128;
     integerLimits_[GL_MAX_TESS_EVALUATION_OUTPUT_COMPONENTS] = 128;
     integerLimits_[GL_MAX_TESS_EVALUATION_UNIFORM_COMPONENTS] = 1024;
-    integerLimits_[GL_MAX_TESS_EVALUATION_UNIFORM_BLOCKS] = uniformBindings;
+    integerLimits_[GL_MAX_TESS_EVALUATION_UNIFORM_BLOCKS] = std::max<GLint64>(uniformBindings, 14);
     integerLimits_[GL_MAX_TESS_GEN_LEVEL] = 64;
     integerLimits_[GL_MAX_TESS_PATCH_COMPONENTS] = 120;
     integerLimits_[GL_MAX_PATCH_VERTICES] = 32;
@@ -644,7 +700,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS] = 1024;
     integerLimits_[GL_MAX_COMPUTE_SHARED_MEMORY_SIZE] = 32768;
     integerLimits_[GL_MAX_COMPUTE_UNIFORM_COMPONENTS] = 1024;
-    integerLimits_[GL_MAX_COMPUTE_UNIFORM_BLOCKS] = uniformBindings;
+    integerLimits_[GL_MAX_COMPUTE_UNIFORM_BLOCKS] = std::max<GLint64>(uniformBindings, 14);
     integerLimits_[GL_MAX_COMPUTE_ATOMIC_COUNTERS] = 8;
     integerLimits_[GL_MAX_COMPUTE_ATOMIC_COUNTER_BUFFERS] = 8;
 
@@ -668,7 +724,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_COMBINED_COMPUTE_UNIFORM_COMPONENTS] = combinedUniforms;
     integerLimits_[GL_MAX_COMBINED_TESS_CONTROL_UNIFORM_COMPONENTS] = combinedUniforms;
     integerLimits_[GL_MAX_COMBINED_TESS_EVALUATION_UNIFORM_COMPONENTS] = combinedUniforms;
-    integerLimits_[GL_MAX_COMBINED_UNIFORM_BLOCKS] = uniformBindings * 6;
+    integerLimits_[GL_MAX_COMBINED_UNIFORM_BLOCKS] = std::max<GLint64>(uniformBindings * 6, 84);
 
     // GL_MAX_UNIFORM_LOCATIONS — the total number of discrete location
     // slots an explicit-location uniform can occupy. Spec floor is 1024;
@@ -692,6 +748,118 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_FRAMEBUFFER_HEIGHT] = maxViewportDimension;
     integerLimits_[GL_MAX_FRAMEBUFFER_LAYERS] = 2048;
     integerLimits_[GL_MAX_FRAMEBUFFER_SAMPLES] = maxSamples;
+
+    // ── CTS-required limits (GL 4.0–4.6) ─────────────────────────────
+    // The block below fills every GL_MAX_*/GL_MIN_* enum that the OpenGL
+    // Conformance Test Suite queries during its initialization phase
+    // (glcLimitTest, gluStateReset, gl4cLimitsTests).
+
+    // Fragment interpolation — float-valued limits. Metal Apple Silicon
+    // supports sample-rate interpolation at ±0.5 with 4-bit sub-pixel
+    // precision. The CTS queries these via glGetFloatv, so they live in
+    // the dedicated floatLimits_ map (fractional values can't survive
+    // the int64 round-trip).
+    floatLimits_[GL_MIN_FRAGMENT_INTERPOLATION_OFFSET] = -0.5f;
+    floatLimits_[GL_MAX_FRAGMENT_INTERPOLATION_OFFSET] =  0.5f;
+    floatLimits_[GL_MAX_TEXTURE_LOD_BIAS] = 16.0f;
+
+    // GL_FRAGMENT_INTERPOLATION_OFFSET_BITS: integer value, but the CTS
+    // also queries it via glGetFloatv (glcLimitTest.inl:66). Put it in
+    // both maps — the int map covers glGetIntegerv, the float map covers
+    // glGetFloatv without a lossy cast.
+    integerLimits_[GL_FRAGMENT_INTERPOLATION_OFFSET_BITS] = 4;
+    floatLimits_[GL_FRAGMENT_INTERPOLATION_OFFSET_BITS] = 4.0f;
+
+    // Point size range — Metal Apple Silicon supports up to 511.
+    floatLimits_[GL_POINT_SIZE_RANGE] = 1.0f;       // min (queried as float pair, index 0 = min)
+    floatLimits_[GL_SMOOTH_POINT_SIZE_RANGE] = 1.0f;
+    floatLimits_[GL_POINT_SIZE_GRANULARITY] = 1.0f;
+    floatLimits_[GL_SMOOTH_POINT_SIZE_GRANULARITY] = 1.0f;
+    // Line width range.
+    floatLimits_[GL_LINE_WIDTH_RANGE] = 1.0f;
+    floatLimits_[GL_ALIASED_LINE_WIDTH_RANGE] = 1.0f;
+    floatLimits_[GL_SMOOTH_LINE_WIDTH_RANGE] = 1.0f;
+    floatLimits_[GL_LINE_WIDTH_GRANULARITY] = 1.0f;
+    floatLimits_[GL_SMOOTH_LINE_WIDTH_GRANULARITY] = 1.0f;
+
+    // Clipping / viewport.
+    integerLimits_[GL_MAX_CLIP_DISTANCES] = 8;
+    integerLimits_[GL_MAX_CULL_DISTANCES] = 8;
+    integerLimits_[GL_MAX_COMBINED_CLIP_AND_CULL_DISTANCES] = 8;
+    integerLimits_[GL_MAX_VIEWPORTS] = 16;
+
+    // Vertex / attribute format constraints.
+    integerLimits_[GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET] = 2047;
+    integerLimits_[GL_MAX_VERTEX_ATTRIB_STRIDE] = 2048;
+
+    // Per-stage uniform block counts (derived from binding layout).
+    integerLimits_[GL_MAX_VERTEX_UNIFORM_BLOCKS] = std::max<GLint64>(uniformBindings, 14);
+    integerLimits_[GL_MAX_FRAGMENT_UNIFORM_BLOCKS] = std::max<GLint64>(uniformBindings, 14);
+
+    // Transform feedback.
+    integerLimits_[GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS] = 64;
+    integerLimits_[GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS] = 4;
+    integerLimits_[GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS] = 4;
+    integerLimits_[GL_MAX_TRANSFORM_FEEDBACK_BUFFERS] = 4;
+    integerLimits_[GL_MAX_VERTEX_STREAMS] = 4;
+
+    // Texture / sampler.
+    integerLimits_[GL_MAX_TEXTURE_BUFFER_SIZE] = std::min<GLint64>(
+        maxBufferLength / 4, 134217728);  // cap at 128M texels
+    integerLimits_[GL_MAX_RECTANGLE_TEXTURE_SIZE] = maxTextureSize;
+    integerLimits_[GL_MIN_PROGRAM_TEXTURE_GATHER_OFFSET] = -8;
+    integerLimits_[GL_MAX_PROGRAM_TEXTURE_GATHER_OFFSET] = 7;
+
+    // Multisampling.
+    integerLimits_[GL_MAX_SAMPLE_MASK_WORDS] = 1;
+    integerLimits_[GL_MAX_COLOR_TEXTURE_SAMPLES] = maxSamples;
+    integerLimits_[GL_MAX_DEPTH_TEXTURE_SAMPLES] = maxSamples;
+    integerLimits_[GL_MAX_INTEGER_SAMPLES] = 1;  // Metal: 1 for integer formats
+    integerLimits_[GL_MAX_DUAL_SOURCE_DRAW_BUFFERS] = 1;
+    integerLimits_[GL_MAX_IMAGE_SAMPLES] = 0;
+
+    // Atomic counters — per-stage and combined.
+    integerLimits_[GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS] = 1;
+    integerLimits_[GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE] = 32;
+    integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTER_BUFFERS] = 1;
+    integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTERS] = 8;
+    integerLimits_[GL_MAX_VERTEX_ATOMIC_COUNTER_BUFFERS] = 0;
+    integerLimits_[GL_MAX_VERTEX_ATOMIC_COUNTERS] = 0;
+    integerLimits_[GL_MAX_FRAGMENT_ATOMIC_COUNTER_BUFFERS] = 1;
+    integerLimits_[GL_MAX_FRAGMENT_ATOMIC_COUNTERS] = 8;
+    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS] = 0;
+    integerLimits_[GL_MAX_GEOMETRY_ATOMIC_COUNTERS] = 0;
+    integerLimits_[GL_MAX_TESS_CONTROL_ATOMIC_COUNTER_BUFFERS] = 0;
+    integerLimits_[GL_MAX_TESS_CONTROL_ATOMIC_COUNTERS] = 0;
+    integerLimits_[GL_MAX_TESS_EVALUATION_ATOMIC_COUNTER_BUFFERS] = 0;
+    integerLimits_[GL_MAX_TESS_EVALUATION_ATOMIC_COUNTERS] = 0;
+
+    // Image uniforms — per-stage and combined.
+    integerLimits_[GL_MAX_IMAGE_UNITS] = 8;
+    integerLimits_[GL_MAX_VERTEX_IMAGE_UNIFORMS] = 8;
+    integerLimits_[GL_MAX_FRAGMENT_IMAGE_UNIFORMS] = 8;
+    integerLimits_[GL_MAX_GEOMETRY_IMAGE_UNIFORMS] = 8;
+    integerLimits_[GL_MAX_TESS_CONTROL_IMAGE_UNIFORMS] = 8;
+    integerLimits_[GL_MAX_TESS_EVALUATION_IMAGE_UNIFORMS] = 8;
+    integerLimits_[GL_MAX_COMPUTE_IMAGE_UNIFORMS] = 8;
+    integerLimits_[GL_MAX_COMBINED_IMAGE_UNIFORMS] = 48;
+    integerLimits_[GL_MAX_COMBINED_SHADER_OUTPUT_RESOURCES] = 48;
+
+    // Shader storage blocks — per-stage.
+    integerLimits_[GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS] = storageBindings;
+    integerLimits_[GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS] = storageBindings;
+    integerLimits_[GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS] = storageBindings;
+    integerLimits_[GL_MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS] = storageBindings;
+    integerLimits_[GL_MAX_TESS_EVALUATION_SHADER_STORAGE_BLOCKS] = storageBindings;
+    integerLimits_[GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS] = storageBindings;
+    integerLimits_[GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS] = storageBindings * 6;
+
+    // Subroutines (no Metal equivalent; report GL 4.6 spec floor).
+    integerLimits_[GL_MAX_SUBROUTINES] = 256;
+    integerLimits_[GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS] = 1024;
+
+    // Sync / server wait timeout (int64).
+    integerLimits_[GL_MAX_SERVER_WAIT_TIMEOUT] = 0;
 }
 
 void GLCapabilities::initializeExtensions() {

@@ -57,6 +57,12 @@ private:
     // creation from the Metal device feature set + AppGL's binding layout.
     std::unordered_map<GLenum, GLint64> integerLimits_;
 
+    // Float-valued limits that cannot be represented losslessly in the
+    // int64 map (e.g. GL_MIN_FRAGMENT_INTERPOLATION_OFFSET = -0.5f).
+    // queryFloat checks this map first before falling through to the
+    // integer path.
+    std::unordered_map<GLenum, GLfloat> floatLimits_;
+
     // Indexed cap tuples (x/y/z) for the compute work-group family. Stored
     // as 3-element arrays so queryIntegerIndexed and queryInteger64Indexed
     // can reach them with O(1) index math.

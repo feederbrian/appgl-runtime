@@ -1,4 +1,5 @@
 #include "GLContext.h"
+#include "../runtime/AppGLLog.h"
 #include "MetalFrameGraph.h"
 #include "../caps/GLCapabilities.h"
 #include "../objects/GLObjectStore.h"
@@ -205,9 +206,16 @@ MTLTextureType metalTextureTypeForTarget(GLenum target) {
         case GL_TEXTURE_1D:
             return MTLTextureType1D;
         case GL_TEXTURE_2D:
+        case GL_TEXTURE_RECTANGLE:
             return MTLTextureType2D;
         case GL_TEXTURE_3D:
             return MTLTextureType3D;
+        case GL_TEXTURE_1D_ARRAY:
+            return MTLTextureType1DArray;
+        case GL_TEXTURE_2D_ARRAY:
+            return MTLTextureType2DArray;
+        case GL_TEXTURE_CUBE_MAP:
+            return MTLTextureTypeCube;
         default:
             return MTLTextureType2D;
     }
@@ -244,6 +252,70 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         case GL_DEPTH24_STENCIL8:
         case GL_DEPTH32F_STENCIL8:
             return MTLPixelFormatDepth32Float_Stencil8;
+        // ── Sized color formats (CTS shader execution harness) ──
+        case GL_R8:                return MTLPixelFormatR8Unorm;
+        case GL_R8_SNORM:          return MTLPixelFormatR8Snorm;
+        case GL_R16:               return MTLPixelFormatR16Unorm;
+        case GL_R16_SNORM:         return MTLPixelFormatR16Snorm;
+        case GL_R16F:              return MTLPixelFormatR16Float;
+        case GL_R32F:              return MTLPixelFormatR32Float;
+        case GL_R8I:               return MTLPixelFormatR8Sint;
+        case GL_R8UI:              return MTLPixelFormatR8Uint;
+        case GL_R16I:              return MTLPixelFormatR16Sint;
+        case GL_R16UI:             return MTLPixelFormatR16Uint;
+        case GL_R32I:              return MTLPixelFormatR32Sint;
+        case GL_R32UI:             return MTLPixelFormatR32Uint;
+        case GL_RG8:               return MTLPixelFormatRG8Unorm;
+        case GL_RG8_SNORM:         return MTLPixelFormatRG8Snorm;
+        case GL_RG16:              return MTLPixelFormatRG16Unorm;
+        case GL_RG16_SNORM:        return MTLPixelFormatRG16Snorm;
+        case GL_RG16F:             return MTLPixelFormatRG16Float;
+        case GL_RG32F:             return MTLPixelFormatRG32Float;
+        case GL_RG8I:              return MTLPixelFormatRG8Sint;
+        case GL_RG8UI:             return MTLPixelFormatRG8Uint;
+        case GL_RG16I:             return MTLPixelFormatRG16Sint;
+        case GL_RG16UI:            return MTLPixelFormatRG16Uint;
+        case GL_RG32I:             return MTLPixelFormatRG32Sint;
+        case GL_RG32UI:            return MTLPixelFormatRG32Uint;
+        case GL_RGBA8_SNORM:       return MTLPixelFormatRGBA8Snorm;
+        case GL_RGB10_A2:          return MTLPixelFormatRGB10A2Unorm;
+        case GL_RGB10_A2UI:        return MTLPixelFormatRGB10A2Uint;
+        case GL_R11F_G11F_B10F:    return MTLPixelFormatRG11B10Float;
+        case GL_RGBA16:            return MTLPixelFormatRGBA16Unorm;
+        case GL_RGBA16_SNORM:      return MTLPixelFormatRGBA16Snorm;
+        case GL_RGBA16F:           return MTLPixelFormatRGBA16Float;
+        case GL_RGBA32F:           return MTLPixelFormatRGBA32Float;
+        case GL_RGBA8I:            return MTLPixelFormatRGBA8Sint;
+        case GL_RGBA8UI:           return MTLPixelFormatRGBA8Uint;
+        case GL_RGBA16I:           return MTLPixelFormatRGBA16Sint;
+        case GL_RGBA16UI:          return MTLPixelFormatRGBA16Uint;
+        case GL_RGBA32I:           return MTLPixelFormatRGBA32Sint;
+        case GL_RGBA32UI:          return MTLPixelFormatRGBA32Uint;
+        case GL_SRGB8_ALPHA8:      return MTLPixelFormatRGBA8Unorm_sRGB;
+        // Legacy / low-bit — promoted to higher-precision Metal formats.
+        case GL_R3_G3_B2:          return MTLPixelFormatRGBA8Unorm;
+        case GL_RGB4:              return MTLPixelFormatRGBA8Unorm;
+        case GL_RGB5:              return MTLPixelFormatRGBA8Unorm;
+        case GL_RGBA2:             return MTLPixelFormatRGBA8Unorm;
+        case GL_RGBA4:             return MTLPixelFormatRGBA8Unorm;
+        case GL_RGB5_A1:           return MTLPixelFormatRGBA8Unorm;
+        case GL_RGB10:             return MTLPixelFormatRGBA16Unorm;
+        case GL_RGB12:             return MTLPixelFormatRGBA16Unorm;
+        case GL_RGBA12:            return MTLPixelFormatRGBA16Unorm;
+        // RGB-only — promoted to RGBA counterpart (alpha padded at upload).
+        case GL_RGB16:             return MTLPixelFormatRGBA16Unorm;
+        case GL_RGB16_SNORM:       return MTLPixelFormatRGBA16Snorm;
+        case GL_RGB16F:            return MTLPixelFormatRGBA16Float;
+        case GL_RGB32F:            return MTLPixelFormatRGBA32Float;
+        case GL_SRGB8:             return MTLPixelFormatRGBA8Unorm_sRGB;
+        case GL_RGB8I:             return MTLPixelFormatRGBA8Sint;
+        case GL_RGB8UI:            return MTLPixelFormatRGBA8Uint;
+        case GL_RGB16I:            return MTLPixelFormatRGBA16Sint;
+        case GL_RGB16UI:           return MTLPixelFormatRGBA16Uint;
+        case GL_RGB32I:            return MTLPixelFormatRGBA32Sint;
+        case GL_RGB32UI:           return MTLPixelFormatRGBA32Uint;
+        // Shared-exponent float.
+        case GL_RGB9_E5:           return MTLPixelFormatRGB9E5Float;
         default:
             return MTLPixelFormatInvalid;
     }
@@ -311,7 +383,29 @@ bool isColorFormat(GLenum internalFormat) {
 }
 
 bool isTextureTarget(GLenum target) {
-    return target == GL_TEXTURE_1D || target == GL_TEXTURE_2D || target == GL_TEXTURE_3D;
+    switch (target) {
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_BUFFER:
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+        // Cube map face targets (used by glTexImage2D for individual faces).
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+            return true;
+        default:
+            return false;
+    }
 }
 
 bool isSupportedInternalTextureFormat(const GLCapabilities& caps, GLenum internalFormat) {
@@ -338,19 +432,27 @@ bool isSupportedInternalTextureFormat(const GLCapabilities& caps, GLenum interna
 std::size_t componentCountForFormat(GLenum format) {
     switch (format) {
         case GL_RED:
+        case GL_RED_INTEGER:
+        case GL_GREEN:
+        case GL_BLUE:
+        case GL_DEPTH_COMPONENT:
+        case GL_STENCIL_INDEX:
             return 1;
         case GL_RG:
+        case GL_RG_INTEGER:
+        case GL_DEPTH_STENCIL:
             return 2;
         case GL_RGB:
+        case GL_RGB_INTEGER:
+        case GL_BGR:
+        case GL_BGR_INTEGER:
             return 3;
         case GL_RGBA:
+        case GL_RGBA_INTEGER:
+        case GL_BGRA:
+        case GL_BGRA_INTEGER:
             return 4;
-        // Compat-profile upload formats. componentCountForFormat is the
-        // byte-stride helper used by buildRGBA8Upload to walk the source
-        // pixel buffer; the channel-fill rule that decides which RGBA
-        // slots receive each source byte is in buildRGBA8Upload itself.
-        // GL_ALPHA, GL_LUMINANCE, and GL_INTENSITY are single-byte uploads,
-        // GL_LUMINANCE_ALPHA is a two-byte upload (luminance then alpha).
+        // Compat-profile upload formats.
         case GL_ALPHA:
         case GL_LUMINANCE:
         case GL_INTENSITY:
@@ -360,6 +462,82 @@ std::size_t componentCountForFormat(GLenum format) {
         default:
             return 0;
     }
+}
+
+// Returns bytes per component for a given GL pixel type.
+// For packed types, returns the total packed pixel size.
+std::size_t bytesPerComponent(GLenum type) {
+    switch (type) {
+        case GL_UNSIGNED_BYTE:
+        case GL_BYTE:
+            return 1;
+        case GL_UNSIGNED_SHORT:
+        case GL_SHORT:
+        case GL_HALF_FLOAT:
+            return 2;
+        case GL_UNSIGNED_INT:
+        case GL_INT:
+        case GL_FLOAT:
+            return 4;
+        default:
+            return 0;  // packed types handled separately
+    }
+}
+
+// Returns true if the type is a packed pixel type (single value per pixel).
+bool isPackedPixelType(GLenum type) {
+    switch (type) {
+        case GL_UNSIGNED_BYTE_3_3_2:
+        case GL_UNSIGNED_BYTE_2_3_3_REV:
+        case GL_UNSIGNED_SHORT_5_6_5:
+        case GL_UNSIGNED_SHORT_5_6_5_REV:
+        case GL_UNSIGNED_SHORT_4_4_4_4:
+        case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+        case GL_UNSIGNED_SHORT_5_5_5_1:
+        case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+        case GL_UNSIGNED_INT_8_8_8_8:
+        case GL_UNSIGNED_INT_8_8_8_8_REV:
+        case GL_UNSIGNED_INT_10_10_10_2:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_24_8:
+        case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+        case GL_UNSIGNED_INT_5_9_9_9_REV:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Bytes per pixel for a given format + type combination.
+std::size_t bytesPerPixel(GLenum format, GLenum type) {
+    if (isPackedPixelType(type)) {
+        switch (type) {
+            case GL_UNSIGNED_BYTE_3_3_2:
+            case GL_UNSIGNED_BYTE_2_3_3_REV:
+                return 1;
+            case GL_UNSIGNED_SHORT_5_6_5:
+            case GL_UNSIGNED_SHORT_5_6_5_REV:
+            case GL_UNSIGNED_SHORT_4_4_4_4:
+            case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+            case GL_UNSIGNED_SHORT_5_5_5_1:
+            case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+                return 2;
+            case GL_UNSIGNED_INT_8_8_8_8:
+            case GL_UNSIGNED_INT_8_8_8_8_REV:
+            case GL_UNSIGNED_INT_10_10_10_2:
+            case GL_UNSIGNED_INT_2_10_10_10_REV:
+            case GL_UNSIGNED_INT_24_8:
+            case GL_UNSIGNED_INT_10F_11F_11F_REV:
+            case GL_UNSIGNED_INT_5_9_9_9_REV:
+                return 4;
+            case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+                return 8;
+            default:
+                return 4;
+        }
+    }
+    return componentCountForFormat(format) * bytesPerComponent(type);
 }
 
 bool isPowerOfTwoAlignment(GLint value) {
@@ -562,7 +740,9 @@ bool isSupportedMapBufferRangeAccess(GLbitfield access) {
         | GL_MAP_INVALIDATE_RANGE_BIT
         | GL_MAP_INVALIDATE_BUFFER_BIT
         | GL_MAP_FLUSH_EXPLICIT_BIT
-        | GL_MAP_UNSYNCHRONIZED_BIT;
+        | GL_MAP_UNSYNCHRONIZED_BIT
+        | GL_MAP_PERSISTENT_BIT
+        | GL_MAP_COHERENT_BIT;
     if ((access & ~kSupportedAccessBits) != 0) {
         return false;
     }
@@ -645,6 +825,9 @@ bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const
                 static_cast<GLfloat>(values[2]),
                 static_cast<GLfloat>(values[3])
             };
+            return true;
+        case GL_DEPTH_STENCIL_TEXTURE_MODE:
+            params.depthStencilTextureMode = values[0];
             return true;
         case GL_DEPTH_TEXTURE_MODE:
             // Compat-profile shadow-map channel-routing pname (GL 1.4..3.0).
@@ -757,6 +940,9 @@ bool getTextureParameterInteger(const GLTextureParameters& params, GLenum pname,
             values[2] = static_cast<GLint>(params.borderColor[2]);
             values[3] = static_cast<GLint>(params.borderColor[3]);
             return true;
+        case GL_DEPTH_STENCIL_TEXTURE_MODE:
+            values[0] = params.depthStencilTextureMode;
+            return true;
         default:
             return false;
     }
@@ -840,7 +1026,7 @@ struct GLContext::Impl {
         objects = std::make_unique<GLObjectStore>();
         state = std::make_unique<GLStateTracker>();
         if (frameGraph != nullptr) {
-            frameGraph->resizeDrawable(viewportWidth, viewportHeight);
+            frameGraph->resizeDrawable(drawableSurfaceWidth(), drawableSurfaceHeight());
             if (offscreen) {
                 frameGraph->enableOffscreenDrawable(viewportWidth, viewportHeight);
             }
@@ -881,6 +1067,9 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalSampler);
         object.metalSampler = nullptr;
         object.samplerDirty = true;
+        releaseRetainedMetalObject(object.metalSwizzledView);
+        object.metalSwizzledView = nullptr;
+        object.swizzleDirty = true;
         object.desc = {};
         object.levels.clear();
     }
@@ -912,6 +1101,388 @@ struct GLContext::Impl {
         return objects->textures().get(name);
     }
 
+    // Read a single source component and normalize it to [0..255] for
+    // the RGBA8 shadow texture. Handles all GL pixel data types.
+    static std::uint8_t readComponentAsU8(const std::uint8_t* src, GLenum type, std::size_t componentIndex) {
+        switch (type) {
+            case GL_UNSIGNED_BYTE:
+                return src[componentIndex];
+            case GL_BYTE: {
+                auto v = reinterpret_cast<const std::int8_t*>(src)[componentIndex];
+                return static_cast<std::uint8_t>(std::max(0, static_cast<int>(v) * 255 / 127));
+            }
+            case GL_UNSIGNED_SHORT: {
+                auto v = reinterpret_cast<const std::uint16_t*>(src)[componentIndex];
+                return static_cast<std::uint8_t>(v >> 8);
+            }
+            case GL_SHORT: {
+                auto v = reinterpret_cast<const std::int16_t*>(src)[componentIndex];
+                return static_cast<std::uint8_t>(std::max(0, static_cast<int>(v) * 255 / 32767));
+            }
+            case GL_UNSIGNED_INT: {
+                auto v = reinterpret_cast<const std::uint32_t*>(src)[componentIndex];
+                return static_cast<std::uint8_t>(v >> 24);
+            }
+            case GL_INT: {
+                auto v = reinterpret_cast<const std::int32_t*>(src)[componentIndex];
+                return static_cast<std::uint8_t>(std::max(0, static_cast<int>(static_cast<double>(v) * 255.0 / 2147483647.0)));
+            }
+            case GL_FLOAT: {
+                auto v = reinterpret_cast<const float*>(src)[componentIndex];
+                float clamped = std::max(0.0f, std::min(1.0f, v));
+                return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
+            }
+            case GL_HALF_FLOAT: {
+                // IEEE 754 half-float → float conversion
+                auto bits = reinterpret_cast<const std::uint16_t*>(src)[componentIndex];
+                std::uint32_t sign = (bits & 0x8000u) << 16;
+                std::uint32_t exponent = (bits >> 10) & 0x1F;
+                std::uint32_t mantissa = bits & 0x3FF;
+                float f;
+                if (exponent == 0) {
+                    // Denormalized or zero
+                    f = std::ldexp(static_cast<float>(mantissa), -24);
+                    if (sign) f = -f;
+                } else if (exponent == 31) {
+                    f = mantissa ? 0.0f : ((sign ? -1.0f : 1.0f) * std::numeric_limits<float>::infinity());
+                } else {
+                    std::uint32_t fbits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+                    std::memcpy(&f, &fbits, sizeof(f));
+                }
+                float clamped = std::max(0.0f, std::min(1.0f, f));
+                return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
+            }
+            default:
+                return 0;
+        }
+    }
+
+    // ── Native-format texture upload infrastructure ──────────────────
+    //
+    // When the GL internal format maps to a Metal pixel format other than
+    // RGBA8Unorm (e.g. R16F, RGBA32F, R8_SNORM …), we build a second
+    // pixel buffer in the Metal-native layout so replaceMetalTexture()
+    // can create a texture with the correct pixel format. This preserves
+    // precision that the RGBA8 shadow path would lose.
+
+    struct NativeFormatInfo {
+        int channels;        // 1, 2, or 4 (0 = packed/unsupported)
+        int bytesPerChannel; // 1, 2, or 4
+        int bytesPerPixel;   // channels * bytesPerChannel
+        enum CompType { UNorm, SNorm, UInt, SInt, Float } compType;
+    };
+
+    static NativeFormatInfo nativeFormatInfo(MTLPixelFormat fmt) {
+        switch (fmt) {
+            // ── 8-bit 1-channel ──
+            case MTLPixelFormatR8Unorm:       return {1, 1, 1, NativeFormatInfo::UNorm};
+            case MTLPixelFormatR8Snorm:       return {1, 1, 1, NativeFormatInfo::SNorm};
+            case MTLPixelFormatR8Uint:        return {1, 1, 1, NativeFormatInfo::UInt};
+            case MTLPixelFormatR8Sint:        return {1, 1, 1, NativeFormatInfo::SInt};
+            // ── 8-bit 2-channel ──
+            case MTLPixelFormatRG8Unorm:      return {2, 1, 2, NativeFormatInfo::UNorm};
+            case MTLPixelFormatRG8Snorm:      return {2, 1, 2, NativeFormatInfo::SNorm};
+            case MTLPixelFormatRG8Uint:       return {2, 1, 2, NativeFormatInfo::UInt};
+            case MTLPixelFormatRG8Sint:       return {2, 1, 2, NativeFormatInfo::SInt};
+            // ── 8-bit 4-channel ──
+            case MTLPixelFormatRGBA8Unorm:    return {4, 1, 4, NativeFormatInfo::UNorm};
+            case MTLPixelFormatRGBA8Snorm:    return {4, 1, 4, NativeFormatInfo::SNorm};
+            case MTLPixelFormatRGBA8Uint:     return {4, 1, 4, NativeFormatInfo::UInt};
+            case MTLPixelFormatRGBA8Sint:     return {4, 1, 4, NativeFormatInfo::SInt};
+            case MTLPixelFormatRGBA8Unorm_sRGB: return {4, 1, 4, NativeFormatInfo::UNorm};
+            // ── 16-bit 1-channel ──
+            case MTLPixelFormatR16Unorm:      return {1, 2, 2, NativeFormatInfo::UNorm};
+            case MTLPixelFormatR16Snorm:      return {1, 2, 2, NativeFormatInfo::SNorm};
+            case MTLPixelFormatR16Float:      return {1, 2, 2, NativeFormatInfo::Float};
+            case MTLPixelFormatR16Uint:       return {1, 2, 2, NativeFormatInfo::UInt};
+            case MTLPixelFormatR16Sint:       return {1, 2, 2, NativeFormatInfo::SInt};
+            // ── 16-bit 2-channel ──
+            case MTLPixelFormatRG16Unorm:     return {2, 2, 4, NativeFormatInfo::UNorm};
+            case MTLPixelFormatRG16Snorm:     return {2, 2, 4, NativeFormatInfo::SNorm};
+            case MTLPixelFormatRG16Float:     return {2, 2, 4, NativeFormatInfo::Float};
+            case MTLPixelFormatRG16Uint:      return {2, 2, 4, NativeFormatInfo::UInt};
+            case MTLPixelFormatRG16Sint:      return {2, 2, 4, NativeFormatInfo::SInt};
+            // ── 16-bit 4-channel ──
+            case MTLPixelFormatRGBA16Unorm:   return {4, 2, 8, NativeFormatInfo::UNorm};
+            case MTLPixelFormatRGBA16Snorm:   return {4, 2, 8, NativeFormatInfo::SNorm};
+            case MTLPixelFormatRGBA16Float:   return {4, 2, 8, NativeFormatInfo::Float};
+            case MTLPixelFormatRGBA16Uint:    return {4, 2, 8, NativeFormatInfo::UInt};
+            case MTLPixelFormatRGBA16Sint:    return {4, 2, 8, NativeFormatInfo::SInt};
+            // ── 32-bit 1-channel ──
+            case MTLPixelFormatR32Float:      return {1, 4, 4, NativeFormatInfo::Float};
+            case MTLPixelFormatR32Uint:       return {1, 4, 4, NativeFormatInfo::UInt};
+            case MTLPixelFormatR32Sint:       return {1, 4, 4, NativeFormatInfo::SInt};
+            // ── 32-bit 2-channel ──
+            case MTLPixelFormatRG32Float:     return {2, 4, 8, NativeFormatInfo::Float};
+            case MTLPixelFormatRG32Uint:      return {2, 4, 8, NativeFormatInfo::UInt};
+            case MTLPixelFormatRG32Sint:      return {2, 4, 8, NativeFormatInfo::SInt};
+            // ── 32-bit 4-channel ──
+            case MTLPixelFormatRGBA32Float:   return {4, 4, 16, NativeFormatInfo::Float};
+            case MTLPixelFormatRGBA32Uint:    return {4, 4, 16, NativeFormatInfo::UInt};
+            case MTLPixelFormatRGBA32Sint:    return {4, 4, 16, NativeFormatInfo::SInt};
+            // ── Packed (not supported for native upload) ──
+            case MTLPixelFormatRGB10A2Unorm:  return {0, 0, 4, NativeFormatInfo::UNorm};
+            case MTLPixelFormatRGB10A2Uint:   return {0, 0, 4, NativeFormatInfo::UInt};
+            case MTLPixelFormatRG11B10Float:  return {0, 0, 4, NativeFormatInfo::Float};
+            default: return {0, 0, 0, NativeFormatInfo::UNorm};
+        }
+    }
+
+    // Read a single source component as a double. The `asInteger` flag
+    // controls whether integer types are returned as raw ints (true) or
+    // as normalized [0,1]/[-1,1] values (false). GL_FLOAT / GL_HALF_FLOAT
+    // always return the float value regardless of the flag.
+    static double readSourceComponentDouble(
+        const std::uint8_t* src, GLenum type, std::size_t idx, bool asInteger
+    ) {
+        switch (type) {
+            case GL_UNSIGNED_BYTE: {
+                std::uint8_t v = src[idx];
+                return asInteger ? static_cast<double>(v) : v / 255.0;
+            }
+            case GL_BYTE: {
+                auto v = reinterpret_cast<const std::int8_t*>(src)[idx];
+                return asInteger ? static_cast<double>(v) : std::max(-1.0, v / 127.0);
+            }
+            case GL_UNSIGNED_SHORT: {
+                auto v = reinterpret_cast<const std::uint16_t*>(src)[idx];
+                return asInteger ? static_cast<double>(v) : v / 65535.0;
+            }
+            case GL_SHORT: {
+                auto v = reinterpret_cast<const std::int16_t*>(src)[idx];
+                return asInteger ? static_cast<double>(v) : std::max(-1.0, v / 32767.0);
+            }
+            case GL_UNSIGNED_INT: {
+                auto v = reinterpret_cast<const std::uint32_t*>(src)[idx];
+                return asInteger ? static_cast<double>(v) : v / 4294967295.0;
+            }
+            case GL_INT: {
+                auto v = reinterpret_cast<const std::int32_t*>(src)[idx];
+                return asInteger ? static_cast<double>(v) : std::max(-1.0, v / 2147483647.0);
+            }
+            case GL_FLOAT: {
+                return static_cast<double>(reinterpret_cast<const float*>(src)[idx]);
+            }
+            case GL_HALF_FLOAT: {
+                auto bits = reinterpret_cast<const std::uint16_t*>(src)[idx];
+                std::uint32_t sign = (bits & 0x8000u) << 16;
+                std::uint32_t exponent = (bits >> 10) & 0x1Fu;
+                std::uint32_t mantissa = bits & 0x3FFu;
+                float f;
+                if (exponent == 0) {
+                    f = std::ldexp(static_cast<float>(mantissa), -24);
+                    if (sign) f = -f;
+                } else if (exponent == 31) {
+                    f = mantissa ? 0.0f : ((sign ? -1.0f : 1.0f) * std::numeric_limits<float>::infinity());
+                } else {
+                    std::uint32_t fbits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+                    std::memcpy(&f, &fbits, sizeof(f));
+                }
+                return static_cast<double>(f);
+            }
+            default:
+                return 0.0;
+        }
+    }
+
+    static std::uint16_t floatToHalf(float f) {
+        std::uint32_t bits;
+        std::memcpy(&bits, &f, sizeof(bits));
+        std::uint16_t sign = static_cast<std::uint16_t>((bits >> 16) & 0x8000u);
+        std::int32_t exponent = static_cast<std::int32_t>((bits >> 23) & 0xFFu) - 127;
+        std::uint32_t mantissa = bits & 0x7FFFFFu;
+        if ((bits & 0x7F800000u) == 0x7F800000u) {
+            // Inf or NaN
+            return sign | 0x7C00u | static_cast<std::uint16_t>(mantissa ? 0x0200u : 0);
+        }
+        if (exponent > 15) {
+            return sign | 0x7C00u; // overflow → infinity
+        }
+        if (exponent < -14) {
+            // denorm or zero
+            mantissa |= 0x800000u;
+            int shift = -14 - exponent + 13;
+            if (shift > 24) return sign;
+            return sign | static_cast<std::uint16_t>(mantissa >> shift);
+        }
+        return sign
+             | static_cast<std::uint16_t>((exponent + 15) << 10)
+             | static_cast<std::uint16_t>(mantissa >> 13);
+    }
+
+    // Write a component value to a native-format buffer at `dst`.
+    static void writeNativeComponent(
+        std::uint8_t* dst,
+        NativeFormatInfo::CompType compType,
+        int bytesPerChannel,
+        double value
+    ) {
+        switch (compType) {
+            case NativeFormatInfo::UNorm: {
+                double clamped = std::max(0.0, std::min(1.0, value));
+                if (bytesPerChannel == 1) {
+                    *dst = static_cast<std::uint8_t>(clamped * 255.0 + 0.5);
+                } else { // 2
+                    std::uint16_t v = static_cast<std::uint16_t>(clamped * 65535.0 + 0.5);
+                    std::memcpy(dst, &v, 2);
+                }
+                break;
+            }
+            case NativeFormatInfo::SNorm: {
+                double clamped = std::max(-1.0, std::min(1.0, value));
+                if (bytesPerChannel == 1) {
+                    std::int8_t v = static_cast<std::int8_t>(
+                        clamped >= 0 ? (clamped * 127.0 + 0.5) : (clamped * 127.0 - 0.5));
+                    std::memcpy(dst, &v, 1);
+                } else { // 2
+                    std::int16_t v = static_cast<std::int16_t>(
+                        clamped >= 0 ? (clamped * 32767.0 + 0.5) : (clamped * 32767.0 - 0.5));
+                    std::memcpy(dst, &v, 2);
+                }
+                break;
+            }
+            case NativeFormatInfo::UInt: {
+                if (bytesPerChannel == 1) {
+                    *dst = static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, value)));
+                } else if (bytesPerChannel == 2) {
+                    std::uint16_t v = static_cast<std::uint16_t>(std::max(0.0, std::min(65535.0, value)));
+                    std::memcpy(dst, &v, 2);
+                } else { // 4
+                    std::uint32_t v = static_cast<std::uint32_t>(std::max(0.0, std::min(4294967295.0, value)));
+                    std::memcpy(dst, &v, 4);
+                }
+                break;
+            }
+            case NativeFormatInfo::SInt: {
+                if (bytesPerChannel == 1) {
+                    std::int8_t v = static_cast<std::int8_t>(std::max(-128.0, std::min(127.0, value)));
+                    std::memcpy(dst, &v, 1);
+                } else if (bytesPerChannel == 2) {
+                    std::int16_t v = static_cast<std::int16_t>(std::max(-32768.0, std::min(32767.0, value)));
+                    std::memcpy(dst, &v, 2);
+                } else { // 4
+                    std::int32_t v = static_cast<std::int32_t>(std::max(-2147483648.0, std::min(2147483647.0, value)));
+                    std::memcpy(dst, &v, 4);
+                }
+                break;
+            }
+            case NativeFormatInfo::Float: {
+                if (bytesPerChannel == 2) {
+                    std::uint16_t h = floatToHalf(static_cast<float>(value));
+                    std::memcpy(dst, &h, 2);
+                } else { // 4
+                    float fv = static_cast<float>(value);
+                    std::memcpy(dst, &fv, 4);
+                }
+                break;
+            }
+        }
+    }
+
+    // Build pixel data in the Metal-native format for `internalFormat`.
+    // Returns true if native data was produced; false means the caller
+    // should fall back to the rgba8 shadow path. On success, `outBpp`
+    // contains the bytes-per-pixel of the produced data.
+    bool buildNativeUpload(
+        GLenum internalFormat,
+        GLsizei width, GLsizei height, GLsizei depth,
+        GLenum format, GLenum type,
+        const void* pixels,
+        std::vector<std::uint8_t>& nativeData,
+        std::size_t& outBpp
+    ) {
+        // Packed source types are complex — let them go through rgba8.
+        if (isPackedPixelType(type)) return false;
+
+        MTLPixelFormat mtlFmt = metalRenderbufferFormat(internalFormat);
+        if (mtlFmt == MTLPixelFormatInvalid) return false;
+        // RGBA8Unorm is already handled perfectly by the rgba8 path.
+        if (mtlFmt == MTLPixelFormatRGBA8Unorm) return false;
+
+        auto info = nativeFormatInfo(mtlFmt);
+        // Skip packed Metal formats (RGB10A2, RG11B10F) — fall back.
+        if (info.channels == 0 || info.bytesPerPixel == 0) return false;
+
+        outBpp = static_cast<std::size_t>(info.bytesPerPixel);
+        const std::size_t totalPixels = static_cast<std::size_t>(width)
+                                      * static_cast<std::size_t>(height)
+                                      * static_cast<std::size_t>(depth);
+        nativeData.assign(totalPixels * outBpp, 0);
+
+        if (pixels == nullptr || totalPixels == 0) return true;
+
+        const std::size_t srcComponents = componentCountForFormat(format);
+        if (srcComponents == 0) return false;
+        const std::size_t srcPixelBytes = bytesPerPixel(format, type);
+        if (srcPixelBytes == 0) return false;
+
+        // Determine how to interpret source values: integer targets
+        // read raw ints; normalized/float targets read normalized.
+        const bool asInteger = (info.compType == NativeFormatInfo::UInt
+                             || info.compType == NativeFormatInfo::SInt);
+
+        // Pixel-store state
+        const auto& store = state->pixelStore();
+        const std::size_t sourceWidth  = static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
+        const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
+        const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
+        const std::size_t imageBytes   = rowBytes * sourceHeight;
+        const std::size_t sourceOffset =
+            static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+            + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
+            + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
+        const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
+
+        const bool isBGR  = (format == GL_BGR  || format == GL_BGR_INTEGER);
+        const bool isBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
+
+        for (GLsizei z = 0; z < depth; ++z) {
+            for (GLsizei y = 0; y < height; ++y) {
+                for (GLsizei x = 0; x < width; ++x) {
+                    const std::size_t srcByteIdx =
+                        static_cast<std::size_t>(z) * imageBytes
+                        + static_cast<std::size_t>(y) * rowBytes
+                        + static_cast<std::size_t>(x) * srcPixelBytes;
+                    const std::size_t dstPixelIdx =
+                        (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                         + static_cast<std::size_t>(y))
+                        * static_cast<std::size_t>(width)
+                        + static_cast<std::size_t>(x);
+                    const std::uint8_t* pixel = source + srcByteIdx;
+                    std::uint8_t* dstPixel = nativeData.data() + dstPixelIdx * outBpp;
+
+                    // Read source components into RGBA doubles.
+                    double comps[4] = {0.0, 0.0, 0.0, 1.0};
+
+                    if (isBGR && srcComponents >= 3) {
+                        comps[0] = readSourceComponentDouble(pixel, type, 2, asInteger);
+                        comps[1] = readSourceComponentDouble(pixel, type, 1, asInteger);
+                        comps[2] = readSourceComponentDouble(pixel, type, 0, asInteger);
+                        if (srcComponents > 3)
+                            comps[3] = readSourceComponentDouble(pixel, type, 3, asInteger);
+                    } else if (isBGRA && srcComponents >= 4) {
+                        comps[0] = readSourceComponentDouble(pixel, type, 2, asInteger);
+                        comps[1] = readSourceComponentDouble(pixel, type, 1, asInteger);
+                        comps[2] = readSourceComponentDouble(pixel, type, 0, asInteger);
+                        comps[3] = readSourceComponentDouble(pixel, type, 3, asInteger);
+                    } else {
+                        for (std::size_t c = 0; c < srcComponents && c < 4; ++c) {
+                            comps[c] = readSourceComponentDouble(pixel, type, c, asInteger);
+                        }
+                    }
+
+                    // Write to native format.
+                    for (int c = 0; c < info.channels; ++c) {
+                        writeNativeComponent(
+                            dstPixel + c * info.bytesPerChannel,
+                            info.compType, info.bytesPerChannel, comps[c]);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     bool buildRGBA8Upload(
         GLsizei width,
         GLsizei height,
@@ -928,120 +1499,182 @@ struct GLContext::Impl {
         if (pixels == nullptr || width == 0 || height == 0 || depth == 0) {
             return true;
         }
-        if (type != GL_UNSIGNED_BYTE) {
-            return false;
-        }
         const std::size_t components = componentCountForFormat(format);
         if (components == 0) {
+            return false;
+        }
+
+        const std::size_t pixelBytes = bytesPerPixel(format, type);
+        if (pixelBytes == 0) {
             return false;
         }
 
         const auto& store = state->pixelStore();
         const std::size_t sourceWidth = static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
         const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
-        const std::size_t rowBytes = alignByteCount(sourceWidth * components, store.unpackAlignment);
+        const std::size_t rowBytes = alignByteCount(sourceWidth * pixelBytes, store.unpackAlignment);
         const std::size_t imageBytes = rowBytes * sourceHeight;
         const std::size_t sourceOffset =
             static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
             + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
-            + static_cast<std::size_t>(store.unpackSkipPixels) * components;
+            + static_cast<std::size_t>(store.unpackSkipPixels) * pixelBytes;
         const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
 
-        // Channel-fill rules. Most uploads (GL_RED / GL_RG / GL_RGB /
-        // GL_RGBA) use the natural byte-position-to-channel mapping with
-        // sentinel fill (zero for unused color channels, 255 for the
-        // unused alpha channel). The compat-profile aliases need
-        // bespoke routing because their byte-stride doesn't match the
-        // RGBA8 storage layout:
-        //
-        //   GL_ALPHA          (1 byte)  → (S0, S0, S0, S0) [see note below]
-        //   GL_LUMINANCE      (1 byte)  → (S0, S0, S0, 255)
-        //   GL_INTENSITY      (1 byte)  → (S0, S0, S0, S0)
-        //   GL_LUMINANCE_ALPHA(2 bytes) → (S0, S0, S0, S1)
-        //
-        // After this pass the downstream Metal upload sees a normal
-        // RGBA8 texture with the spec-correct sampling result, so no
-        // per-texture swizzle table is required and the existing
-        // shader code path doesn't need to learn about luminance.
-        //
-        // GL_ALPHA broadcast note (Phase 8X Group 4d follow-up¹⁸):
-        // the GL spec defines GL_ALPHA as `(0, 0, 0, S0)` — zero for
-        // the color channels, source byte in alpha. That layout is
-        // correct for a compat-profile consumer that reads the texel
-        // back through `texture2D(..).a` in a fixed-function or
-        // hand-written GLSL 1.x shader, but AppGL only ever serves
-        // CORE-profile shader consumers (because Metal has no compat
-        // profile, the compat-shader-rewriter rewrites everything up
-        // to GLSL 3.30+). Every core-profile font renderer in BAR and
-        // Spring reads the single source channel as `.r` / `.x` —
-        // specifically, Spring's CglShaderFontRenderer in
-        // `rts/Rendering/Fonts/glFont.cpp` samples the alpha-texture
-        // atlas with `float alpha = tex.sample(texSmplr, uv).x`, and
-        // with the spec-literal (0,0,0,A) layout every glyph fragment
-        // reads `.x = 0` and draws fully transparent. fw¹⁷ verified
-        // this is *exactly* what happens in BYAR-Chobby: the Chili
-        // widget chrome renders correctly but all engine-drawn text
-        // is invisible. See
-        // `docs/phase-8x-group-4d-followup17-verification.md` §4 for
-        // the terminal-capture trace that pinned it down.
-        //
-        // We fold GL_ALPHA into the same broadcast branch as
-        // GL_INTENSITY so every RGBA channel carries the same coverage
-        // byte. A core-profile shader can then read the texel via any
-        // channel (`.r`, `.g`, `.b`, or `.a`) and get the same answer,
-        // which is what happens in practice anyway — nothing in the
-        // BAR menu path reads back through `.a` expecting the classic
-        // compat-profile layout. If a future consumer does need the
-        // spec-literal (0,0,0,A) semantics, we can gate it on
-        // `isCompatGlyphFormat` or add a per-texture opt-out — but the
-        // unconditional broadcast is the simpler starting point and
-        // matches the de facto core-profile convention.
+        // Compat-profile aliases
         const bool isAlphaOnly = (format == GL_ALPHA);
         const bool isLuminance = (format == GL_LUMINANCE);
         const bool isIntensity = (format == GL_INTENSITY);
         const bool isLuminanceAlpha = (format == GL_LUMINANCE_ALPHA);
+        // BGR ordering: swap R and B channels
+        const bool isBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
+        const bool isBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
+
+        // For packed pixel types, do a simplified conversion (extract and
+        // normalize to RGBA8). For standard component types, read per-component.
+        const bool packed = isPackedPixelType(type);
 
         for (GLsizei z = 0; z < depth; ++z) {
             for (GLsizei y = 0; y < height; ++y) {
                 for (GLsizei x = 0; x < width; ++x) {
-                    const std::size_t sourceIndex =
+                    const std::size_t sourceByteIndex =
                         static_cast<std::size_t>(z) * imageBytes
                         + static_cast<std::size_t>(y) * rowBytes
-                        + static_cast<std::size_t>(x) * components;
+                        + static_cast<std::size_t>(x) * pixelBytes;
                     const std::size_t destIndex =
                         ((static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
                             + static_cast<std::size_t>(y))
                             * static_cast<std::size_t>(width)
                             + static_cast<std::size_t>(x))
                         * 4u;
-                    if (isAlphaOnly || isIntensity) {
-                        // Broadcast the single source byte to all four
-                        // channels — see the block comment above for why
-                        // GL_ALPHA folds into this path in AppGL alongside
-                        // the spec-native GL_INTENSITY broadcast.
-                        const std::uint8_t coverage = source[sourceIndex + 0];
-                        rgba8[destIndex + 0] = coverage;
-                        rgba8[destIndex + 1] = coverage;
-                        rgba8[destIndex + 2] = coverage;
-                        rgba8[destIndex + 3] = coverage;
+                    const std::uint8_t* pixel = source + sourceByteIndex;
+
+                    if (packed) {
+                        // Best-effort packed type conversion to RGBA8
+                        if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) {
+                            std::uint32_t val;
+                            std::memcpy(&val, pixel, 4);
+                            if (type == GL_UNSIGNED_INT_8_8_8_8) {
+                                rgba8[destIndex + 0] = static_cast<std::uint8_t>((val >> 24) & 0xFF);
+                                rgba8[destIndex + 1] = static_cast<std::uint8_t>((val >> 16) & 0xFF);
+                                rgba8[destIndex + 2] = static_cast<std::uint8_t>((val >> 8) & 0xFF);
+                                rgba8[destIndex + 3] = static_cast<std::uint8_t>(val & 0xFF);
+                            } else {
+                                rgba8[destIndex + 0] = static_cast<std::uint8_t>(val & 0xFF);
+                                rgba8[destIndex + 1] = static_cast<std::uint8_t>((val >> 8) & 0xFF);
+                                rgba8[destIndex + 2] = static_cast<std::uint8_t>((val >> 16) & 0xFF);
+                                rgba8[destIndex + 3] = static_cast<std::uint8_t>((val >> 24) & 0xFF);
+                            }
+                        } else if (type == GL_UNSIGNED_SHORT_5_6_5 || type == GL_UNSIGNED_SHORT_5_6_5_REV) {
+                            std::uint16_t val;
+                            std::memcpy(&val, pixel, 2);
+                            if (type == GL_UNSIGNED_SHORT_5_6_5) {
+                                rgba8[destIndex + 0] = static_cast<std::uint8_t>(((val >> 11) & 0x1F) * 255 / 31);
+                                rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 5) & 0x3F) * 255 / 63);
+                                rgba8[destIndex + 2] = static_cast<std::uint8_t>((val & 0x1F) * 255 / 31);
+                            } else {
+                                rgba8[destIndex + 0] = static_cast<std::uint8_t>((val & 0x1F) * 255 / 31);
+                                rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 5) & 0x3F) * 255 / 63);
+                                rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 11) & 0x1F) * 255 / 31);
+                            }
+                            rgba8[destIndex + 3] = 255;
+                        } else if (type == GL_UNSIGNED_INT_2_10_10_10_REV) {
+                            std::uint32_t val;
+                            std::memcpy(&val, pixel, 4);
+                            rgba8[destIndex + 0] = static_cast<std::uint8_t>((val & 0x3FF) * 255 / 1023);
+                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 10) & 0x3FF) * 255 / 1023);
+                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 20) & 0x3FF) * 255 / 1023);
+                            rgba8[destIndex + 3] = static_cast<std::uint8_t>(((val >> 30) & 0x3) * 255 / 3);
+                        } else if (type == GL_UNSIGNED_INT_10_10_10_2) {
+                            std::uint32_t val;
+                            std::memcpy(&val, pixel, 4);
+                            rgba8[destIndex + 0] = static_cast<std::uint8_t>(((val >> 22) & 0x3FF) * 255 / 1023);
+                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 12) & 0x3FF) * 255 / 1023);
+                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 2) & 0x3FF) * 255 / 1023);
+                            rgba8[destIndex + 3] = static_cast<std::uint8_t>((val & 0x3) * 255 / 3);
+                        } else if (type == GL_UNSIGNED_BYTE_3_3_2) {
+                            std::uint8_t val = pixel[0];
+                            rgba8[destIndex + 0] = static_cast<std::uint8_t>(((val >> 5) & 0x7) * 255 / 7);
+                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 2) & 0x7) * 255 / 7);
+                            rgba8[destIndex + 2] = static_cast<std::uint8_t>((val & 0x3) * 255 / 3);
+                            rgba8[destIndex + 3] = 255;
+                        } else if (type == GL_UNSIGNED_BYTE_2_3_3_REV) {
+                            std::uint8_t val = pixel[0];
+                            rgba8[destIndex + 0] = static_cast<std::uint8_t>((val & 0x7) * 255 / 7);
+                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 3) & 0x7) * 255 / 7);
+                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 6) & 0x3) * 255 / 3);
+                            rgba8[destIndex + 3] = 255;
+                        } else if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
+                            std::uint16_t val;
+                            std::memcpy(&val, pixel, 2);
+                            rgba8[destIndex + 0] = static_cast<std::uint8_t>(((val >> 12) & 0xF) * 255 / 15);
+                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 8) & 0xF) * 255 / 15);
+                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 4) & 0xF) * 255 / 15);
+                            rgba8[destIndex + 3] = static_cast<std::uint8_t>((val & 0xF) * 255 / 15);
+                        } else if (type == GL_UNSIGNED_SHORT_4_4_4_4_REV) {
+                            std::uint16_t val;
+                            std::memcpy(&val, pixel, 2);
+                            rgba8[destIndex + 0] = static_cast<std::uint8_t>((val & 0xF) * 255 / 15);
+                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 4) & 0xF) * 255 / 15);
+                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 8) & 0xF) * 255 / 15);
+                            rgba8[destIndex + 3] = static_cast<std::uint8_t>(((val >> 12) & 0xF) * 255 / 15);
+                        } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
+                            std::uint16_t val;
+                            std::memcpy(&val, pixel, 2);
+                            rgba8[destIndex + 0] = static_cast<std::uint8_t>(((val >> 11) & 0x1F) * 255 / 31);
+                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 6) & 0x1F) * 255 / 31);
+                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 1) & 0x1F) * 255 / 31);
+                            rgba8[destIndex + 3] = static_cast<std::uint8_t>((val & 0x1) * 255);
+                        } else if (type == GL_UNSIGNED_SHORT_1_5_5_5_REV) {
+                            std::uint16_t val;
+                            std::memcpy(&val, pixel, 2);
+                            rgba8[destIndex + 0] = static_cast<std::uint8_t>((val & 0x1F) * 255 / 31);
+                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 5) & 0x1F) * 255 / 31);
+                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 10) & 0x1F) * 255 / 31);
+                            rgba8[destIndex + 3] = static_cast<std::uint8_t>(((val >> 15) & 0x1) * 255);
+                        } else {
+                            // Other packed types (10F_11F_11F_REV, 5_9_9_9_REV,
+                            // 24_8, float32_ui24_8): zero-fill shadow — not yet
+                            // covered by this CTS subset.
+                            rgba8[destIndex + 0] = 0;
+                            rgba8[destIndex + 1] = 0;
+                            rgba8[destIndex + 2] = 0;
+                            rgba8[destIndex + 3] = 255;
+                        }
+                    } else if (isAlphaOnly || isIntensity) {
+                        std::uint8_t c = readComponentAsU8(pixel, type, 0);
+                        rgba8[destIndex + 0] = c;
+                        rgba8[destIndex + 1] = c;
+                        rgba8[destIndex + 2] = c;
+                        rgba8[destIndex + 3] = c;
                     } else if (isLuminance) {
-                        const std::uint8_t luminance = source[sourceIndex + 0];
-                        rgba8[destIndex + 0] = luminance;
-                        rgba8[destIndex + 1] = luminance;
-                        rgba8[destIndex + 2] = luminance;
+                        std::uint8_t c = readComponentAsU8(pixel, type, 0);
+                        rgba8[destIndex + 0] = c;
+                        rgba8[destIndex + 1] = c;
+                        rgba8[destIndex + 2] = c;
                         rgba8[destIndex + 3] = 255;
                     } else if (isLuminanceAlpha) {
-                        const std::uint8_t luminance = source[sourceIndex + 0];
-                        const std::uint8_t alpha = source[sourceIndex + 1];
-                        rgba8[destIndex + 0] = luminance;
-                        rgba8[destIndex + 1] = luminance;
-                        rgba8[destIndex + 2] = luminance;
-                        rgba8[destIndex + 3] = alpha;
+                        std::uint8_t lum = readComponentAsU8(pixel, type, 0);
+                        std::uint8_t alp = readComponentAsU8(pixel, type, 1);
+                        rgba8[destIndex + 0] = lum;
+                        rgba8[destIndex + 1] = lum;
+                        rgba8[destIndex + 2] = lum;
+                        rgba8[destIndex + 3] = alp;
+                    } else if (isBGR) {
+                        rgba8[destIndex + 0] = readComponentAsU8(pixel, type, 2); // B→R
+                        rgba8[destIndex + 1] = readComponentAsU8(pixel, type, 1); // G→G
+                        rgba8[destIndex + 2] = readComponentAsU8(pixel, type, 0); // R→B
+                        rgba8[destIndex + 3] = 255;
+                    } else if (isBGRA) {
+                        rgba8[destIndex + 0] = readComponentAsU8(pixel, type, 2); // B→R
+                        rgba8[destIndex + 1] = readComponentAsU8(pixel, type, 1); // G→G
+                        rgba8[destIndex + 2] = readComponentAsU8(pixel, type, 0); // R→B
+                        rgba8[destIndex + 3] = readComponentAsU8(pixel, type, 3); // A→A
                     } else {
-                        rgba8[destIndex + 0] = source[sourceIndex + 0];
-                        rgba8[destIndex + 1] = components > 1 ? source[sourceIndex + 1] : 0;
-                        rgba8[destIndex + 2] = components > 2 ? source[sourceIndex + 2] : 0;
-                        rgba8[destIndex + 3] = components > 3 ? source[sourceIndex + 3] : 255;
+                        // Standard GL_RED/RG/RGB/RGBA and _INTEGER variants
+                        rgba8[destIndex + 0] = readComponentAsU8(pixel, type, 0);
+                        rgba8[destIndex + 1] = components > 1 ? readComponentAsU8(pixel, type, 1) : 0;
+                        rgba8[destIndex + 2] = components > 2 ? readComponentAsU8(pixel, type, 2) : 0;
+                        rgba8[destIndex + 3] = components > 3 ? readComponentAsU8(pixel, type, 3) : 255;
                     }
                 }
             }
@@ -1080,14 +1713,38 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
 
+        // Choose the native Metal pixel format when possible. Fall back
+        // to RGBA8Unorm if the internal format isn't recognized or if
+        // no native data was built for level 0.
+        const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
+        MTLPixelFormat chosenFormat = MTLPixelFormatRGBA8Unorm;
+        if (hasNativeData) {
+            MTLPixelFormat nativeFmt = metalRenderbufferFormat(baseLevel.desc.internalFormat);
+            if (nativeFmt != MTLPixelFormatInvalid) {
+                chosenFormat = nativeFmt;
+            }
+        }
+
         MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
         descriptor.textureType = metalTextureTypeForTarget(object.target);
-        descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        descriptor.pixelFormat = chosenFormat;
         descriptor.width = static_cast<NSUInteger>(baseLevel.desc.width);
-        descriptor.height = static_cast<NSUInteger>(object.target == GL_TEXTURE_1D ? 1 : baseLevel.desc.height);
+        // GL_TEXTURE_1D_ARRAY stores its layer count in `height` (2-arg GL API).
+        // Metal requires height=1 for 1D array textures; layers come from arrayLength.
+        const bool is1DArray = (object.target == GL_TEXTURE_1D_ARRAY);
+        const bool is2DArray = (object.target == GL_TEXTURE_2D_ARRAY);
+        descriptor.height = static_cast<NSUInteger>(
+            (object.target == GL_TEXTURE_1D || is1DArray) ? 1 : baseLevel.desc.height);
         descriptor.depth = static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1);
+        // Arrayed textures: Metal uses arrayLength. GL puts layer count in
+        // `height` for 1D_ARRAY and `depth` for 2D_ARRAY.
+        if (is1DArray) {
+            descriptor.arrayLength = static_cast<NSUInteger>(baseLevel.desc.height);
+        } else if (is2DArray) {
+            descriptor.arrayLength = static_cast<NSUInteger>(baseLevel.desc.depth);
+        }
         descriptor.mipmapLevelCount = static_cast<NSUInteger>(highestDefinedLevel + 1);
-        descriptor.usage = MTLTextureUsageShaderRead;
+        descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         descriptor.storageMode = MTLStorageModeShared;
 
         id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
@@ -1095,12 +1752,26 @@ struct GLContext::Impl {
             return false;
         }
 
+        const bool useNativePath = (chosenFormat != MTLPixelFormatRGBA8Unorm);
+
         for (const auto& [levelIndex, image] : object.levels) {
-            if (levelIndex < 0 || !image.defined || image.rgba8.empty()) {
+            if (levelIndex < 0 || !image.defined) {
+                continue;
+            }
+            // Decide which data buffer to upload from.
+            const std::uint8_t* uploadBytes = nullptr;
+            std::size_t bpp = 4; // default RGBA8
+            if (useNativePath && image.nativeBpp > 0 && !image.nativeData.empty()) {
+                uploadBytes = image.nativeData.data();
+                bpp = image.nativeBpp;
+            } else if (!image.rgba8.empty()) {
+                uploadBytes = image.rgba8.data();
+                bpp = 4;
+            } else {
                 continue;
             }
             const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
-            const NSUInteger bytesPerRow = static_cast<NSUInteger>(safeDimension(image.desc.width) * 4u);
+            const NSUInteger bytesPerRow = static_cast<NSUInteger>(safeDimension(image.desc.width) * bpp);
             const NSUInteger bytesPerImage = bytesPerRow * static_cast<NSUInteger>(safeDimension(image.desc.height));
             const MTLRegion region = MTLRegionMake3D(
                 0,
@@ -1113,14 +1784,49 @@ struct GLContext::Impl {
             if (object.target == GL_TEXTURE_3D) {
                 for (NSUInteger slice = 0; slice < region.size.depth; ++slice) {
                     const MTLRegion sliceRegion = MTLRegionMake3D(0, 0, slice, region.size.width, region.size.height, 1);
-                    const auto* sliceBytes = image.rgba8.data() + static_cast<std::size_t>(slice * bytesPerImage);
+                    const auto* sliceBytes = uploadBytes + static_cast<std::size_t>(slice * bytesPerImage);
                     [texture replaceRegion:sliceRegion mipmapLevel:mipLevel withBytes:sliceBytes bytesPerRow:bytesPerRow];
                 }
+            } else if (object.target == GL_TEXTURE_2D_ARRAY) {
+                // Each array layer is a separate Metal slice.
+                const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.depth));
+                const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, region.size.height);
+                for (NSUInteger layer = 0; layer < layers; ++layer) {
+                    const auto* layerBytes = uploadBytes + static_cast<std::size_t>(layer * bytesPerImage);
+                    [texture replaceRegion:layerRegion
+                               mipmapLevel:mipLevel
+                                     slice:layer
+                                 withBytes:layerBytes
+                               bytesPerRow:bytesPerRow
+                             bytesPerImage:bytesPerImage];
+                }
+            } else if (object.target == GL_TEXTURE_1D_ARRAY) {
+                // GL stores the 1D array layer count in `height`. Each layer
+                // is one row of `width` pixels; Metal expects height=1 with
+                // the layer index carried in `slice`.
+                const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.height));
+                const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, 1);
+                for (NSUInteger layer = 0; layer < layers; ++layer) {
+                    const auto* layerBytes = uploadBytes + static_cast<std::size_t>(layer * bytesPerRow);
+                    [texture replaceRegion:layerRegion
+                               mipmapLevel:mipLevel
+                                     slice:layer
+                                 withBytes:layerBytes
+                               bytesPerRow:bytesPerRow
+                             bytesPerImage:bytesPerRow];
+                }
             } else {
-                [texture replaceRegion:region mipmapLevel:mipLevel withBytes:image.rgba8.data() bytesPerRow:bytesPerRow];
+                [texture replaceRegion:region mipmapLevel:mipLevel withBytes:uploadBytes bytesPerRow:bytesPerRow];
             }
         }
         object.metalTexture = transferRetainedMetalObject(texture);
+        // Mark the texture as instantiated so consumers (getTextureImage,
+        // sampler resolve, etc) stop treating it as unpopulated. Without
+        // this, anything that invalidates by setting instantiated=false
+        // (e.g. copyImageSubData) is followed by a re-upload here that
+        // never gets observed — the caller still sees !instantiated and
+        // bails.
+        object.instantiated = true;
 
         // Phase 8X Group 4d follow-up¹⁰ — §Primary upload-bytes
         // fingerprint for BAR's Theory A/B split.
@@ -1282,9 +1988,12 @@ struct GLContext::Impl {
                                                                                                    width:static_cast<NSUInteger>(width)
                                                                                                   height:static_cast<NSUInteger>(height)
                                                                                                mipmapped:NO];
-            descriptor.storageMode = MTLStorageModePrivate;
+            // Use Shared storage so CPU can read back rendered data via
+            // [MTLTexture getBytes:].  On Apple Silicon the unified memory
+            // architecture makes Shared equivalent to Private in performance.
+            descriptor.storageMode = MTLStorageModeShared;
             descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-            if (samples > 0) {
+            if (samples > 1) {
                 descriptor.textureType = MTLTextureType2DMultisample;
                 descriptor.sampleCount = static_cast<NSUInteger>(samples);
             }
@@ -1631,6 +2340,83 @@ struct GLContext::Impl {
         return true;
     }
 
+    // ---------- Texture swizzle view ----------
+    //
+    // GL_TEXTURE_SWIZZLE_* parameters are applied via a Metal texture
+    // view with MTLTextureSwizzleChannels. The view shares the same
+    // storage as the base texture (no data copy). Created lazily when
+    // non-default swizzle is detected; cached on the texture object.
+    //
+    static MTLTextureSwizzle metalTextureSwizzle(GLint glSwizzle) {
+        switch (glSwizzle) {
+            case GL_RED:   return MTLTextureSwizzleRed;
+            case GL_GREEN: return MTLTextureSwizzleGreen;
+            case GL_BLUE:  return MTLTextureSwizzleBlue;
+            case GL_ALPHA: return MTLTextureSwizzleAlpha;
+            case GL_ZERO:  return MTLTextureSwizzleZero;
+            case GL_ONE:   return MTLTextureSwizzleOne;
+            default:       return MTLTextureSwizzleRed;
+        }
+    }
+
+    static bool isDefaultSwizzle(const std::array<GLint, 4>& sw) {
+        return sw[0] == GL_RED && sw[1] == GL_GREEN &&
+               sw[2] == GL_BLUE && sw[3] == GL_ALPHA;
+    }
+
+    // Returns the texture to bind — either the swizzled view (if
+    // non-default swizzle) or the base metalTexture. Lazily rebuilds
+    // the swizzled view when `swizzleDirty` is set.
+    void* resolveSwizzledTexture(GLTextureObject& texObj) {
+        const auto& sw = texObj.params.swizzle;
+
+        // Fast path: default swizzle — use base texture, release any
+        // stale view.
+        if (isDefaultSwizzle(sw)) {
+            if (texObj.metalSwizzledView != nullptr) {
+                releaseRetainedMetalObject(texObj.metalSwizzledView);
+                texObj.metalSwizzledView = nullptr;
+            }
+            texObj.swizzleDirty = false;
+            return texObj.metalTexture;
+        }
+
+        // Non-default swizzle — rebuild view if dirty.
+        if (!texObj.swizzleDirty && texObj.metalSwizzledView != nullptr) {
+            return texObj.metalSwizzledView;
+        }
+
+        // Release the old view.
+        releaseRetainedMetalObject(texObj.metalSwizzledView);
+        texObj.metalSwizzledView = nullptr;
+
+        id<MTLTexture> baseTex = (__bridge id<MTLTexture>)texObj.metalTexture;
+        if (baseTex == nil) {
+            texObj.swizzleDirty = false;
+            return texObj.metalTexture;
+        }
+
+        MTLTextureSwizzleChannels channels;
+        channels.red   = metalTextureSwizzle(sw[0]);
+        channels.green = metalTextureSwizzle(sw[1]);
+        channels.blue  = metalTextureSwizzle(sw[2]);
+        channels.alpha = metalTextureSwizzle(sw[3]);
+
+        id<MTLTexture> swizzledView = [baseTex
+            newTextureViewWithPixelFormat:baseTex.pixelFormat
+                             textureType:baseTex.textureType
+                                  levels:NSMakeRange(0, baseTex.mipmapLevelCount)
+                                  slices:NSMakeRange(0, baseTex.arrayLength)
+                                 swizzle:channels];
+        if (swizzledView != nil) {
+            texObj.metalSwizzledView = transferRetainedMetalObject(swizzledView);
+        }
+        texObj.swizzleDirty = false;
+        return texObj.metalSwizzledView != nullptr
+            ? texObj.metalSwizzledView
+            : texObj.metalTexture;
+    }
+
     // Phase 8X Group 4d follow-up⁷ — walk a program's fragment/vertex
     // reflection, match each sampled-texture entry to the GL sampler
     // uniform that selects its texture unit, resolve the unit binding
@@ -1883,28 +2669,40 @@ struct GLContext::Impl {
                 return;
             }
             for (const auto& sampledTex : reflection->sampledTextures) {
-                // Step 1: find the GL sampler uniform by name.
+                // Step 1: find the GL sampler uniform by name. For sampler
+                // arrays (`uniform sampler2D samp[N]`), SPIRV-Cross emits a
+                // single sampledTextures entry whose metalBinding spans N
+                // consecutive slots. The matching GL uniform has
+                // arraySize > 1, and `ints[i]` holds the texture unit for
+                // element i. We loop over all elements below.
                 GLint uniformLocation = -1;
+                GLint samplerArraySize = 1;
                 for (const auto& uinfo : program.uniforms) {
                     if (uinfo.name == sampledTex.name) {
                         uniformLocation = uinfo.location;
+                        samplerArraySize = std::max<GLint>(uinfo.arraySize, 1);
                         break;
                     }
                 }
 
-                // Step 2: resolve the texture unit index. Sampler
-                // uniforms default to 0 per GL spec when the app
-                // never called glUniform1i, so a missing entry in
-                // uniformValues also reads as unit 0.
-                GLint glUnit = 0;
-                bool uniformValueWasSet = false;
+                const GLProgramUniformValue* samplerValue = nullptr;
                 if (uniformLocation >= 0) {
                     auto it = program.uniformValues.find(uniformLocation);
-                    if (it != program.uniformValues.end() && !it->second.ints.empty()) {
-                        glUnit = it->second.ints[0];
-                        uniformValueWasSet = true;
+                    if (it != program.uniformValues.end()) {
+                        samplerValue = &it->second;
                     }
                 }
+
+                for (GLint arrayElement = 0; arrayElement < samplerArraySize; ++arrayElement) {
+                    // Step 2: resolve the texture unit index for this
+                    // array element. Sampler uniforms default to 0 per GL
+                    // spec when the app never called glUniform1i.
+                    GLint glUnit = 0;
+                    bool uniformValueWasSet = false;
+                    if (samplerValue != nullptr && static_cast<std::size_t>(arrayElement) < samplerValue->ints.size()) {
+                        glUnit = samplerValue->ints[arrayElement];
+                        uniformValueWasSet = true;
+                    }
                 if (glUnit < 0) {
                     if (logThisCall) {
                         NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
@@ -1981,9 +2779,11 @@ struct GLContext::Impl {
                 }
 
                 // Step 5: push the binding at the reflected Metal slot.
+                // For sampler arrays, each array element maps to a
+                // consecutive Metal slot starting at metalBinding.
                 TranslatedDrawInfo::TextureBinding binding;
-                binding.metalSlot = sampledTex.metalBinding;
-                binding.metalTexture = texObject->metalTexture;
+                binding.metalSlot = sampledTex.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                binding.metalTexture = resolveSwizzledTexture(*texObject);
                 binding.metalSamplerState = metalSamplerState;
                 outBindings.push_back(binding);
 
@@ -2037,11 +2837,91 @@ struct GLContext::Impl {
                           texObject->params.maxLevel,
                           static_cast<unsigned>(texObject->params.compareMode));
                 }
+                }
             }
         };
 
         resolveStage("frag", info.fragmentReflection, info.fragmentTextures);
         resolveStage("vert", info.vertexReflection, info.vertexTextures);
+    }
+
+    // Resolve Uniform Buffer Object bindings from the GL state and
+    // populate tdi.uboBindings so encodeTranslatedDraw can bind them
+    // to the Metal render encoder.
+    void resolveUBOBindings(
+        GLProgramObject& program,
+        TranslatedDrawInfo& info)
+    {
+        info.uboBindings.clear();
+
+        auto resolveBlocks = [&](const ShaderReflection* reflection,
+                                 bool isVertex, bool isFragment) {
+            if (reflection == nullptr) return;
+            for (const auto& block : reflection->uniformBlocks) {
+                // Handle UBO arrays: each element gets its own binding.
+                const int numInstances = (block.blockArraySize > 0)
+                    ? static_cast<int>(block.blockArraySize) : 1;
+                const bool isArray = (block.blockArraySize > 0);
+
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    // Build the lookup name: "BlockA" or "BlockA[0]", "BlockA[1]"…
+                    std::string lookupName = block.name;
+                    if (isArray) {
+                        lookupName += "[" + std::to_string(inst) + "]";
+                    }
+
+                    // Find the GL binding point for this block/element by matching
+                    // against resourceUniformBlocks.
+                    GLuint glBindingPoint = block.glBinding + static_cast<GLuint>(inst);
+                    for (std::size_t bi = 0; bi < program.resourceUniformBlocks.size(); ++bi) {
+                        if (program.resourceUniformBlocks[bi].name == lookupName) {
+                            GLint bp = program.resourceUniformBlocks[bi].location;
+                            if (bp >= 0) {
+                                glBindingPoint = static_cast<GLuint>(bp);
+                            }
+                            break;
+                        }
+                    }
+
+                    // Look up the buffer bound to GL_UNIFORM_BUFFER at this binding point.
+                    GLIndexedBufferBinding binding = state->indexedBufferBinding(
+                        GL_UNIFORM_BUFFER, glBindingPoint);
+                    if (binding.buffer == 0) continue;
+
+                    const GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
+                    if (bufObj == nullptr || bufObj->shadowBytes.empty()) continue;
+
+                    const std::uint8_t* dataPtr = bufObj->shadowBytes.data();
+                    std::size_t dataSize = bufObj->shadowBytes.size();
+
+                    if (binding.offset > 0) {
+                        if (static_cast<std::size_t>(binding.offset) >= dataSize) continue;
+                        dataPtr += binding.offset;
+                        dataSize -= static_cast<std::size_t>(binding.offset);
+                    }
+                    if (binding.size > 0 && static_cast<std::size_t>(binding.size) < dataSize) {
+                        dataSize = static_cast<std::size_t>(binding.size);
+                    }
+
+                    TranslatedDrawInfo::UBOBinding ubo;
+                    ubo.metalSlot = block.metalBinding + static_cast<std::uint32_t>(inst);
+                    ubo.data = dataPtr;
+                    ubo.size = dataSize;
+                    // For UBOs > 4KB, use the Metal buffer directly (setVertexBytes
+                    // has a 4096-byte limit on Apple GPUs).
+                    if (dataSize > 4096 && bufObj->metalBuffer != nullptr) {
+                        ubo.metalBuffer = bufObj->metalBuffer;
+                        ubo.metalBufferOffset = static_cast<std::size_t>(binding.offset);
+                    }
+                    ubo.isVertex = isVertex;
+                    ubo.isFragment = isFragment;
+                    info.uboBindings.push_back(ubo);
+                }
+            }
+        };
+
+        resolveBlocks(info.vertexReflection, true, false);
+        resolveBlocks(info.fragmentReflection, false, true);
     }
 
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
@@ -2067,6 +2947,8 @@ struct GLContext::Impl {
         object.shadowBytes = std::move(shadowBytes);
         object.metalBuffer = retainedMetalBuffer;
         resetBufferMapping(object);
+        // ADV-10: invalidate cached index expansion on data change.
+        ++object.indexExpansionGeneration;
         return true;
     }
 
@@ -2309,6 +3191,61 @@ struct GLContext::Impl {
         return nullptr;
     }
 
+    // Resolve the bound draw-framebuffer's color attachment to a Metal
+    // texture suitable for use as a render target.  Returns nullptr when
+    // the default framebuffer is bound (FBO 0) or when the attachment
+    // has no Metal texture.  Also populates width/height/depthStencil.
+    void* resolveFBOColorTarget(GLsizei& outWidth, GLsizei& outHeight,
+                                void*& outDepthStencil) const {
+        const GLuint fboName = state->boundDrawFramebuffer();
+        if (fboName == 0) {
+            return nullptr;
+        }
+        const GLFramebufferObject* fbo = objects->framebuffers().get(fboName);
+        if (fbo == nullptr) return nullptr;
+
+        // Find the first active draw buffer's color attachment.
+        void* colorTex = nullptr;
+        outWidth = 0;
+        outHeight = 0;
+        for (GLenum buf : fbo->drawBuffers) {
+            if (buf == GL_NONE) continue;
+            const GLFramebufferAttachment* att = framebufferAttachment(*fbo, buf);
+            if (att == nullptr) continue;
+            if (att->kind == GLFramebufferAttachment::Kind::Texture) {
+                const GLTextureObject* tex = objects->textures().get(att->object);
+                if (tex != nullptr && tex->metalTexture != nullptr) {
+                    colorTex = tex->metalTexture;
+                    const auto lvl = tex->levels.find(att->level);
+                    if (lvl != tex->levels.end()) {
+                        outWidth = lvl->second.desc.width;
+                        outHeight = lvl->second.desc.height;
+                    }
+                }
+            } else if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
+                if (rb != nullptr && rb->metalTexture != nullptr) {
+                    colorTex = rb->metalTexture;
+                    outWidth = rb->width;
+                    outHeight = rb->height;
+                }
+            }
+            if (colorTex != nullptr) break;
+        }
+
+        // Depth/stencil
+        outDepthStencil = nullptr;
+        const GLFramebufferAttachment* depthAtt = framebufferAttachment(*fbo, GL_DEPTH_ATTACHMENT);
+        if (depthAtt != nullptr && depthAtt->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            const GLRenderbufferObject* rb = objects->renderbuffers().get(depthAtt->object);
+            if (rb != nullptr && rb->metalTexture != nullptr) {
+                outDepthStencil = rb->metalTexture;
+            }
+        }
+
+        return colorTex;
+    }
+
     bool clearColorAttachment(const GLFramebufferAttachment& attachment, const GLfloat color[4]) {
         const std::uint8_t rgba[4] = {
             normalizedByte(color[0]),
@@ -2431,56 +3368,132 @@ struct GLContext::Impl {
     }
 
     bool readColorAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
-        const std::uint8_t* source = nullptr;
+        // RC-A02: Try reading from the actual Metal texture first (has GPU-
+        // rendered data).  Fall back to CPU shadow if no Metal texture exists.
+        id<MTLTexture> metalTex = nil;
         GLsizei sourceWidth = 0;
         GLsizei sourceHeight = 0;
-        GLsizei sourceLayer = 0;
+        NSUInteger metalMipLevel = 0;
+        NSUInteger metalSlice = 0;
 
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
             const GLTextureObject* texture = objects->textures().get(attachment.object);
-            if (texture == nullptr) {
-                return false;
-            }
+            if (texture == nullptr) return false;
             const auto level = texture->levels.find(attachment.level);
-            if (level == texture->levels.end() || !level->second.defined || level->second.rgba8.empty()) {
-                return false;
-            }
-            source = level->second.rgba8.data();
+            if (level == texture->levels.end() || !level->second.defined) return false;
             sourceWidth = std::max<GLsizei>(level->second.desc.width, 1);
             sourceHeight = texture->target == GL_TEXTURE_1D ? 1 : std::max<GLsizei>(level->second.desc.height, 1);
-            sourceLayer = texture->target == GL_TEXTURE_3D ? attachment.layer : 0;
-            if (sourceLayer < 0 || sourceLayer >= std::max<GLsizei>(level->second.desc.depth, 1)) {
-                return false;
+            metalMipLevel = static_cast<NSUInteger>(attachment.level);
+            metalSlice = static_cast<NSUInteger>(attachment.layer);
+            if (texture->metalTexture != nullptr) {
+                metalTex = (__bridge id<MTLTexture>)texture->metalTexture;
+            }
+            // If no Metal texture, try CPU shadow
+            if (metalTex == nil) {
+                if (level->second.rgba8.empty()) return false;
+                const std::uint8_t* source = level->second.rgba8.data();
+                GLsizei sourceLayer = texture->target == GL_TEXTURE_3D ? attachment.layer : 0;
+                if (sourceLayer < 0 || sourceLayer >= std::max<GLsizei>(level->second.desc.depth, 1))
+                    return false;
+                auto* out = static_cast<std::uint8_t*>(pixels);
+                for (GLsizei row = 0; row < height; ++row) {
+                    for (GLsizei col = 0; col < width; ++col) {
+                        const GLint srcX = x + col;
+                        const GLint srcY = y + row;
+                        const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
+                        if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
+                            std::memset(out + dstOffset, 0, 4);
+                            continue;
+                        }
+                        const std::size_t srcOffset =
+                            ((static_cast<std::size_t>(sourceLayer) * static_cast<std::size_t>(sourceHeight)
+                                + static_cast<std::size_t>(srcY))
+                                * static_cast<std::size_t>(sourceWidth)
+                                + static_cast<std::size_t>(srcX))
+                            * 4u;
+                        std::memcpy(out + dstOffset, source + srcOffset, 4);
+                    }
+                }
+                return true;
             }
         } else if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
-            const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
-            if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->rgba8.empty()) {
-                return false;
+            const GLRenderbufferObject* rb = objects->renderbuffers().get(attachment.object);
+            if (rb == nullptr || !rb->storageDefined) return false;
+            sourceWidth = rb->width;
+            sourceHeight = rb->height;
+            if (rb->metalTexture != nullptr) {
+                metalTex = (__bridge id<MTLTexture>)rb->metalTexture;
             }
-            source = renderbuffer->rgba8.data();
-            sourceWidth = renderbuffer->width;
-            sourceHeight = renderbuffer->height;
+            if (metalTex == nil) {
+                if (rb->rgba8.empty()) return false;
+                const std::uint8_t* source = rb->rgba8.data();
+                auto* out = static_cast<std::uint8_t*>(pixels);
+                for (GLsizei row = 0; row < height; ++row) {
+                    for (GLsizei col = 0; col < width; ++col) {
+                        const GLint srcX = x + col;
+                        const GLint srcY = y + row;
+                        const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
+                        if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
+                            std::memset(out + dstOffset, 0, 4);
+                            continue;
+                        }
+                        const std::size_t srcOffset =
+                            (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(sourceWidth)
+                                + static_cast<std::size_t>(srcX))
+                            * 4u;
+                        std::memcpy(out + dstOffset, source + srcOffset, 4);
+                    }
+                }
+                return true;
+            }
         } else {
             return false;
         }
 
+        // Read from the Metal texture — this has the actual GPU-rendered data.
+        // The texture may be RGBA8 or BGRA8; we handle both.
+        const bool isBGRA = (metalTex.pixelFormat == MTLPixelFormatBGRA8Unorm);
+        const NSUInteger bytesPerRow = static_cast<NSUInteger>(sourceWidth) * 4u;
+
+        // Read the entire mip level into a temporary buffer, then extract
+        // the requested rectangle.
+        std::vector<std::uint8_t> fullLevel(static_cast<std::size_t>(sourceWidth) * static_cast<std::size_t>(sourceHeight) * 4u);
+        MTLRegion fullRegion = MTLRegionMake2D(0, 0,
+            static_cast<NSUInteger>(sourceWidth),
+            static_cast<NSUInteger>(sourceHeight));
+        [metalTex getBytes:fullLevel.data()
+               bytesPerRow:bytesPerRow
+            bytesPerImage:0
+               fromRegion:fullRegion
+              mipmapLevel:metalMipLevel
+                    slice:metalSlice];
+
+        // RC-A02: OpenGL framebuffer row 0 is at the bottom; Metal
+        // texture row 0 is at the top.  Flip Y during readback.
         auto* out = static_cast<std::uint8_t*>(pixels);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
                 const GLint srcX = x + col;
-                const GLint srcY = y + row;
+                const GLint glY = y + row;
+                const GLint srcY = sourceHeight - 1 - glY;
                 const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
                 if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
                     std::memset(out + dstOffset, 0, 4);
                     continue;
                 }
                 const std::size_t srcOffset =
-                    ((static_cast<std::size_t>(sourceLayer) * static_cast<std::size_t>(sourceHeight)
-                        + static_cast<std::size_t>(srcY))
-                        * static_cast<std::size_t>(sourceWidth)
+                    (static_cast<std::size_t>(srcY) * static_cast<std::size_t>(sourceWidth)
                         + static_cast<std::size_t>(srcX))
                     * 4u;
-                std::memcpy(out + dstOffset, source + srcOffset, 4);
+                if (isBGRA) {
+                    // BGRA → RGBA swizzle
+                    out[dstOffset + 0] = fullLevel[srcOffset + 2]; // R←B
+                    out[dstOffset + 1] = fullLevel[srcOffset + 1]; // G←G
+                    out[dstOffset + 2] = fullLevel[srcOffset + 0]; // B←R
+                    out[dstOffset + 3] = fullLevel[srcOffset + 3]; // A←A
+                } else {
+                    std::memcpy(out + dstOffset, fullLevel.data() + srcOffset, 4);
+                }
             }
         }
         return true;
@@ -2777,12 +3790,252 @@ struct GLContext::Impl {
         return false;
     }
 
+    // ── Native-format FBO color readback ──
+    // Reads the Metal texture backing a color attachment in its native pixel
+    // format and converts to the GL format/type requested by glReadPixels.
+    // Returns true on success, false if the attachment cannot be read natively
+    // (caller should fall back to the RGBA8 path).
+    bool readFBOColorNative(GLint x, GLint y, GLsizei width, GLsizei height,
+                            GLenum format, GLenum type, void* pixels) const {
+        const GLuint fbName = state->boundReadFramebuffer();
+        const GLFramebufferObject* fb = objects->framebuffers().get(fbName);
+        if (fbName == 0 || fb == nullptr) return false;
+
+        const GLFramebufferAttachment* att = framebufferAttachment(*fb, fb->readBuffer);
+        if (att == nullptr) return false;
+
+        id<MTLTexture> metalTex = nil;
+        GLsizei sourceWidth = 0, sourceHeight = 0;
+        NSUInteger metalMipLevel = 0;
+        NSUInteger metalSlice = 0;
+
+        if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
+            if (!rb || !rb->storageDefined || rb->metalTexture == nullptr) return false;
+            metalTex = (__bridge id<MTLTexture>)rb->metalTexture;
+            sourceWidth = rb->width;
+            sourceHeight = rb->height;
+        } else if (att->kind == GLFramebufferAttachment::Kind::Texture) {
+            const GLTextureObject* tex = objects->textures().get(att->object);
+            if (!tex || tex->metalTexture == nullptr) return false;
+            metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
+            metalMipLevel = static_cast<NSUInteger>(att->level);
+            metalSlice = static_cast<NSUInteger>(att->layer);
+            sourceWidth = static_cast<GLsizei>(metalTex.width >> metalMipLevel);
+            sourceHeight = static_cast<GLsizei>(metalTex.height >> metalMipLevel);
+            if (sourceWidth < 1) sourceWidth = 1;
+            if (sourceHeight < 1) sourceHeight = 1;
+        } else {
+            return false;
+        }
+
+        if (metalTex == nil) return false;
+
+        // Determine source bytes-per-pixel from the Metal pixel format.
+        MTLPixelFormat pf = metalTex.pixelFormat;
+        NSUInteger srcBpp = 0;
+        NSUInteger srcComponents = 0;
+        enum class SrcType { Float32, Float16, UNorm8, SNorm8, UNorm16, SNorm16, UInt8, SInt8, UInt16, SInt16, UInt32, SInt32, Packed };
+        SrcType srcType = SrcType::UNorm8;
+
+        switch (pf) {
+            case MTLPixelFormatR32Float:       srcBpp = 4;  srcComponents = 1; srcType = SrcType::Float32; break;
+            case MTLPixelFormatRG32Float:      srcBpp = 8;  srcComponents = 2; srcType = SrcType::Float32; break;
+            case MTLPixelFormatRGBA32Float:    srcBpp = 16; srcComponents = 4; srcType = SrcType::Float32; break;
+            case MTLPixelFormatR16Float:       srcBpp = 2;  srcComponents = 1; srcType = SrcType::Float16; break;
+            case MTLPixelFormatRG16Float:      srcBpp = 4;  srcComponents = 2; srcType = SrcType::Float16; break;
+            case MTLPixelFormatRGBA16Float:    srcBpp = 8;  srcComponents = 4; srcType = SrcType::Float16; break;
+            case MTLPixelFormatR8Unorm:        srcBpp = 1;  srcComponents = 1; srcType = SrcType::UNorm8; break;
+            case MTLPixelFormatRG8Unorm:       srcBpp = 2;  srcComponents = 2; srcType = SrcType::UNorm8; break;
+            case MTLPixelFormatRGBA8Unorm:     srcBpp = 4;  srcComponents = 4; srcType = SrcType::UNorm8; break;
+            case MTLPixelFormatBGRA8Unorm:     srcBpp = 4;  srcComponents = 4; srcType = SrcType::UNorm8; break;
+            case MTLPixelFormatR8Snorm:        srcBpp = 1;  srcComponents = 1; srcType = SrcType::SNorm8; break;
+            case MTLPixelFormatRG8Snorm:       srcBpp = 2;  srcComponents = 2; srcType = SrcType::SNorm8; break;
+            case MTLPixelFormatRGBA8Snorm:     srcBpp = 4;  srcComponents = 4; srcType = SrcType::SNorm8; break;
+            case MTLPixelFormatR16Unorm:       srcBpp = 2;  srcComponents = 1; srcType = SrcType::UNorm16; break;
+            case MTLPixelFormatRG16Unorm:      srcBpp = 4;  srcComponents = 2; srcType = SrcType::UNorm16; break;
+            case MTLPixelFormatRGBA16Unorm:    srcBpp = 8;  srcComponents = 4; srcType = SrcType::UNorm16; break;
+            case MTLPixelFormatR16Snorm:       srcBpp = 2;  srcComponents = 1; srcType = SrcType::SNorm16; break;
+            case MTLPixelFormatRG16Snorm:      srcBpp = 4;  srcComponents = 2; srcType = SrcType::SNorm16; break;
+            case MTLPixelFormatRGBA16Snorm:    srcBpp = 8;  srcComponents = 4; srcType = SrcType::SNorm16; break;
+            case MTLPixelFormatR8Uint:         srcBpp = 1;  srcComponents = 1; srcType = SrcType::UInt8; break;
+            case MTLPixelFormatRG8Uint:        srcBpp = 2;  srcComponents = 2; srcType = SrcType::UInt8; break;
+            case MTLPixelFormatRGBA8Uint:      srcBpp = 4;  srcComponents = 4; srcType = SrcType::UInt8; break;
+            case MTLPixelFormatR8Sint:         srcBpp = 1;  srcComponents = 1; srcType = SrcType::SInt8; break;
+            case MTLPixelFormatRG8Sint:        srcBpp = 2;  srcComponents = 2; srcType = SrcType::SInt8; break;
+            case MTLPixelFormatRGBA8Sint:      srcBpp = 4;  srcComponents = 4; srcType = SrcType::SInt8; break;
+            case MTLPixelFormatR16Uint:        srcBpp = 2;  srcComponents = 1; srcType = SrcType::UInt16; break;
+            case MTLPixelFormatRG16Uint:       srcBpp = 4;  srcComponents = 2; srcType = SrcType::UInt16; break;
+            case MTLPixelFormatRGBA16Uint:     srcBpp = 8;  srcComponents = 4; srcType = SrcType::UInt16; break;
+            case MTLPixelFormatR16Sint:        srcBpp = 2;  srcComponents = 1; srcType = SrcType::SInt16; break;
+            case MTLPixelFormatRG16Sint:       srcBpp = 4;  srcComponents = 2; srcType = SrcType::SInt16; break;
+            case MTLPixelFormatRGBA16Sint:     srcBpp = 8;  srcComponents = 4; srcType = SrcType::SInt16; break;
+            case MTLPixelFormatR32Uint:        srcBpp = 4;  srcComponents = 1; srcType = SrcType::UInt32; break;
+            case MTLPixelFormatRG32Uint:       srcBpp = 8;  srcComponents = 2; srcType = SrcType::UInt32; break;
+            case MTLPixelFormatRGBA32Uint:     srcBpp = 16; srcComponents = 4; srcType = SrcType::UInt32; break;
+            case MTLPixelFormatR32Sint:        srcBpp = 4;  srcComponents = 1; srcType = SrcType::SInt32; break;
+            case MTLPixelFormatRG32Sint:       srcBpp = 8;  srcComponents = 2; srcType = SrcType::SInt32; break;
+            case MTLPixelFormatRGBA32Sint:     srcBpp = 16; srcComponents = 4; srcType = SrcType::SInt32; break;
+            default:
+                return false; // Unsupported format — fall back to RGBA8
+        }
+
+        // Read the full mip level from the Metal texture.
+        const NSUInteger bytesPerRow = static_cast<NSUInteger>(sourceWidth) * srcBpp;
+        const std::size_t totalBytes = static_cast<std::size_t>(sourceWidth) * static_cast<std::size_t>(sourceHeight) * srcBpp;
+        std::vector<std::uint8_t> raw(totalBytes);
+        MTLRegion region = MTLRegionMake2D(0, 0,
+            static_cast<NSUInteger>(sourceWidth),
+            static_cast<NSUInteger>(sourceHeight));
+        [metalTex getBytes:raw.data()
+               bytesPerRow:bytesPerRow
+             bytesPerImage:0
+                fromRegion:region
+               mipmapLevel:metalMipLevel
+                     slice:metalSlice];
+
+        // Helper: read one source component as a double.
+        auto readSrcComponent = [&](const std::uint8_t* srcPixel, NSUInteger comp) -> double {
+            switch (srcType) {
+                case SrcType::Float32: {
+                    float v; std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v);
+                }
+                case SrcType::Float16: {
+                    std::uint16_t h; std::memcpy(&h, srcPixel + comp * 2, 2);
+                    // Decode half-float
+                    std::uint32_t sign = (h >> 15) & 1;
+                    std::uint32_t exp = (h >> 10) & 0x1F;
+                    std::uint32_t mant = h & 0x3FF;
+                    float result;
+                    if (exp == 0) {
+                        result = std::ldexp(static_cast<float>(mant), -24);
+                    } else if (exp == 31) {
+                        result = mant ? NAN : INFINITY;
+                    } else {
+                        result = std::ldexp(static_cast<float>(mant + 1024), static_cast<int>(exp) - 25);
+                    }
+                    return sign ? -result : result;
+                }
+                case SrcType::UNorm8:  return srcPixel[comp] / 255.0;
+                case SrcType::SNorm8:  return std::max(static_cast<double>(reinterpret_cast<const std::int8_t*>(srcPixel)[comp]) / 127.0, -1.0);
+                case SrcType::UNorm16: { std::uint16_t v; std::memcpy(&v, srcPixel + comp * 2, 2); return v / 65535.0; }
+                case SrcType::SNorm16: { std::int16_t v; std::memcpy(&v, srcPixel + comp * 2, 2); return std::max(static_cast<double>(v) / 32767.0, -1.0); }
+                case SrcType::UInt8:   return static_cast<double>(srcPixel[comp]);
+                case SrcType::SInt8:   return static_cast<double>(reinterpret_cast<const std::int8_t*>(srcPixel)[comp]);
+                case SrcType::UInt16:  { std::uint16_t v; std::memcpy(&v, srcPixel + comp * 2, 2); return static_cast<double>(v); }
+                case SrcType::SInt16:  { std::int16_t v; std::memcpy(&v, srcPixel + comp * 2, 2); return static_cast<double>(v); }
+                case SrcType::UInt32:  { std::uint32_t v; std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v); }
+                case SrcType::SInt32:  { std::int32_t v; std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v); }
+                default: return 0.0;
+            }
+        };
+
+        // Determine destination component count from GL format.
+        const bool isBGRA = (pf == MTLPixelFormatBGRA8Unorm);
+        const std::size_t dstComponents = componentCountForFormat(format);
+        const std::size_t dstBpc = bytesPerComponent(type);
+        if (dstComponents == 0 || dstBpc == 0) return false;
+
+        auto* dest = static_cast<std::uint8_t*>(pixels);
+
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint glY = y + row;
+                // RC-A02: OpenGL row 0 = bottom → Metal row 0 = top.
+                const GLint srcY = sourceHeight - 1 - glY;
+
+                const std::size_t dstPixelIdx = static_cast<std::size_t>(row) * width + col;
+
+                if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
+                    std::memset(dest + dstPixelIdx * dstComponents * dstBpc, 0, dstComponents * dstBpc);
+                    continue;
+                }
+
+                const std::uint8_t* srcPixel = raw.data() +
+                    (static_cast<std::size_t>(srcY) * sourceWidth + srcX) * srcBpp;
+
+                // Read source components as doubles.  Pad missing components
+                // with 0.0 for RGB, 1.0 for alpha.
+                double vals[4] = {0.0, 0.0, 0.0, 1.0};
+                for (NSUInteger c = 0; c < srcComponents && c < 4; ++c) {
+                    NSUInteger readComp = c;
+                    if (isBGRA) {
+                        // Swizzle BGRA → RGBA
+                        if (c == 0) readComp = 2;
+                        else if (c == 2) readComp = 0;
+                    }
+                    vals[c] = readSrcComponent(srcPixel, readComp);
+                }
+
+                // Write to destination in the requested format/type.
+                for (std::size_t dc = 0; dc < dstComponents; ++dc) {
+                    double v = vals[dc];
+                    switch (type) {
+                        case GL_FLOAT: {
+                            float fv = static_cast<float>(v);
+                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &fv, 4);
+                            break;
+                        }
+                        case GL_HALF_FLOAT: {
+                            float fv = static_cast<float>(v);
+                            std::uint32_t fbits; std::memcpy(&fbits, &fv, 4);
+                            std::uint32_t sign = (fbits >> 16) & 0x8000;
+                            std::int32_t exp = ((fbits >> 23) & 0xFF) - 127 + 15;
+                            std::uint32_t mant = (fbits >> 13) & 0x3FF;
+                            std::uint16_t half;
+                            if (exp <= 0) half = static_cast<std::uint16_t>(sign);
+                            else if (exp >= 31) half = static_cast<std::uint16_t>(sign | 0x7C00);
+                            else half = static_cast<std::uint16_t>(sign | (exp << 10) | mant);
+                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &half, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_BYTE:
+                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(
+                                std::max(0.0, std::min(255.0, v * 255.0)));
+                            break;
+                        case GL_BYTE: {
+                            auto sv = static_cast<std::int8_t>(std::max(-127.0, std::min(127.0, v * 127.0)));
+                            std::memcpy(dest + dstPixelIdx * dstComponents + dc, &sv, 1);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT: {
+                            auto sv = static_cast<std::uint16_t>(std::max(0.0, std::min(65535.0, v * 65535.0)));
+                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &sv, 2);
+                            break;
+                        }
+                        case GL_SHORT: {
+                            auto sv = static_cast<std::int16_t>(std::max(-32767.0, std::min(32767.0, v * 32767.0)));
+                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &sv, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_INT: {
+                            auto uv = static_cast<std::uint32_t>(v);
+                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &uv, 4);
+                            break;
+                        }
+                        case GL_INT: {
+                            auto iv = static_cast<std::int32_t>(v);
+                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &iv, 4);
+                            break;
+                        }
+                        default:
+                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(
+                                std::max(0.0, std::min(255.0, v)));
+                            break;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     void encodePendingWork() {
         if (!pendingClear || frameGraph == nullptr) {
             return;
         }
 
-        frameGraph->resizeDrawable(viewportWidth, viewportHeight);
+        frameGraph->resizeDrawable(drawableSurfaceWidth(), drawableSurfaceHeight());
         frameGraph->encodeDefaultFramebufferClear(
             pendingMask,
             state->clearState().color[0],
@@ -2934,6 +4187,15 @@ struct GLContext::Impl {
     GLint viewportY = 0;
     GLsizei viewportWidth = 1280;
     GLsizei viewportHeight = 720;
+
+    // RC-A02: compute the minimum drawable size that covers the viewport
+    // extent (offset + dimensions).  Used by draw paths and setViewport.
+    GLsizei drawableSurfaceWidth() const {
+        return static_cast<GLsizei>(std::max(0, viewportX)) + viewportWidth;
+    }
+    GLsizei drawableSurfaceHeight() const {
+        return static_cast<GLsizei>(std::max(0, viewportY)) + viewportHeight;
+    }
     GLDEBUGPROC debugCallback = nullptr;
     const void* debugUserParam = nullptr;
     std::deque<DebugMessageRecord> debugMessages;
@@ -2942,6 +4204,11 @@ struct GLContext::Impl {
     std::unordered_map<std::uint64_t, std::string> objectLabels;
     std::unordered_map<const void*, std::string> pointerLabels;
     std::deque<GLenum> errors;
+    // Transform feedback active state (CTS api_errors_test).
+    bool transformFeedbackActive = false;
+    bool transformFeedbackPaused = false;
+    GLenum transformFeedbackPrimitiveMode = GL_POINTS;
+    GLuint boundTransformFeedbackId = 0;
     // Per-context immediate double vertex attribute values (GL 4.1 glVertexAttribL*).
     // Indexed by attribute slot; each stores 4 doubles (default {0,0,0,1}).
     static constexpr std::size_t kMaxImmediateDoubleAttribs = 16;
@@ -3055,7 +4322,8 @@ void GLContext::setViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     impl_->viewportHeight = height > 0 ? height : 1;
     impl_->state->setViewport(x, y, width, height);
     if (impl_->frameGraph != nullptr) {
-        impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
+        // RC-A02: ensure the drawable covers the full viewport extent.
+        impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
     }
 }
 
@@ -3240,29 +4508,180 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     }
 
     if (impl_->state->boundReadFramebuffer() != 0) {
-        const bool supportedReadback =
-            (format == GL_RGBA && type == GL_UNSIGNED_BYTE)
-            || (format == GL_DEPTH_COMPONENT && type == GL_FLOAT)
-            || (format == GL_STENCIL_INDEX && type == GL_UNSIGNED_BYTE);
-        if (!supportedReadback) {
+        // Widen FBO readback acceptance to all color format/type combos.
+        // Depth/stencil remain gated to their specific combos.
+        const bool isColorReadback =
+            (format == GL_RED || format == GL_RG || format == GL_RGB || format == GL_RGBA
+             || format == GL_BGR || format == GL_BGRA
+             || format == GL_RED_INTEGER || format == GL_RG_INTEGER
+             || format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER);
+        const bool isDepthReadback = (format == GL_DEPTH_COMPONENT && type == GL_FLOAT);
+        const bool isStencilReadback = (format == GL_STENCIL_INDEX && type == GL_UNSIGNED_BYTE);
+        if (!isColorReadback && !isDepthReadback && !isStencilReadback) {
             pushError(GL_INVALID_ENUM);
             return false;
         }
-        if (!impl_->readFramebufferPixels(format, x, y, width, height, pixels)) {
+        // Flush the GPU before FBO readback — the render encoder may still
+        // be open from a prior draw, and the texture data won't be CPU-
+        // visible until the command buffer is committed and completed.
+        if (impl_->frameGraph != nullptr) {
+            impl_->frameGraph->flushForReadback();
+        }
+        if (isDepthReadback || isStencilReadback) {
+            if (!impl_->readFramebufferPixels(format, x, y, width, height, pixels)) {
+                pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+                return false;
+            }
+            return true;
+        }
+        // Try native-format readback first (preserves full precision for
+        // R32F, RGBA32F, integer formats, etc.).
+        if (impl_->readFBOColorNative(x, y, width, height, format, type, pixels)) {
+            return true;
+        }
+        // Color readback: read RGBA8 internally, then convert to requested format/type
+        if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
+            if (!impl_->readFramebufferPixels(format, x, y, width, height, pixels)) {
+                pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+                return false;
+            }
+            return true;
+        }
+        // For non-RGBA8 color readback, read as RGBA8 into temp buffer, then convert
+        const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        std::vector<std::uint8_t> rgba8(pixelCount * 4);
+        if (!impl_->readFramebufferPixels(GL_RGBA, x, y, width, height, rgba8.data())) {
             pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
             return false;
+        }
+        // Convert RGBA8 to the requested format/type
+        const std::size_t components = componentCountForFormat(format);
+        const std::size_t bpc = bytesPerComponent(type);
+        if (components == 0 || bpc == 0) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+        auto* dest = static_cast<std::uint8_t*>(pixels);
+        for (std::size_t i = 0; i < pixelCount; ++i) {
+            const std::uint8_t r = rgba8[i * 4 + 0];
+            const std::uint8_t g = rgba8[i * 4 + 1];
+            const std::uint8_t b = rgba8[i * 4 + 2];
+            const std::uint8_t a = rgba8[i * 4 + 3];
+            std::uint8_t src[4] = { r, g, b, a };
+            if (format == GL_BGR || format == GL_BGR_INTEGER) {
+                src[0] = b; src[1] = g; src[2] = r;
+            } else if (format == GL_BGRA || format == GL_BGRA_INTEGER) {
+                src[0] = b; src[1] = g; src[2] = r; src[3] = a;
+            }
+            for (std::size_t c = 0; c < components; ++c) {
+                const float normalized = static_cast<float>(src[c]) / 255.0f;
+                switch (type) {
+                    case GL_UNSIGNED_BYTE:
+                        dest[i * components * bpc + c] = src[c];
+                        break;
+                    case GL_BYTE:
+                        reinterpret_cast<std::int8_t*>(dest)[i * components + c] =
+                            static_cast<std::int8_t>(src[c] * 127 / 255);
+                        break;
+                    case GL_UNSIGNED_SHORT:
+                        reinterpret_cast<std::uint16_t*>(dest)[i * components + c] =
+                            static_cast<std::uint16_t>(src[c] * 257);
+                        break;
+                    case GL_SHORT:
+                        reinterpret_cast<std::int16_t*>(dest)[i * components + c] =
+                            static_cast<std::int16_t>(src[c] * 32767 / 255);
+                        break;
+                    case GL_UNSIGNED_INT:
+                        reinterpret_cast<std::uint32_t*>(dest)[i * components + c] =
+                            static_cast<std::uint32_t>(src[c]) * 16843009u;
+                        break;
+                    case GL_INT:
+                        reinterpret_cast<std::int32_t*>(dest)[i * components + c] =
+                            static_cast<std::int32_t>(static_cast<double>(src[c]) * 2147483647.0 / 255.0);
+                        break;
+                    case GL_FLOAT:
+                        reinterpret_cast<float*>(dest)[i * components + c] = normalized;
+                        break;
+                    case GL_HALF_FLOAT: {
+                        // Simple float-to-half conversion
+                        std::uint32_t fbits;
+                        std::memcpy(&fbits, &normalized, sizeof(fbits));
+                        std::uint32_t sign = (fbits >> 16) & 0x8000;
+                        std::int32_t exp = ((fbits >> 23) & 0xFF) - 127 + 15;
+                        std::uint32_t mant = (fbits >> 13) & 0x3FF;
+                        std::uint16_t half;
+                        if (exp <= 0) half = static_cast<std::uint16_t>(sign);
+                        else if (exp >= 31) half = static_cast<std::uint16_t>(sign | 0x7C00);
+                        else half = static_cast<std::uint16_t>(sign | (exp << 10) | mant);
+                        reinterpret_cast<std::uint16_t*>(dest)[i * components + c] = half;
+                        break;
+                    }
+                    default:
+                        dest[i * components * bpc + c] = src[c];
+                        break;
+                }
+            }
         }
         return true;
     }
 
-    if (format != GL_RGBA || type != GL_UNSIGNED_BYTE) {
+    // Default framebuffer readback — widen format/type acceptance
+    impl_->encodePendingWork();
+    if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
+        if (impl_->frameGraph == nullptr || !impl_->frameGraph->copyRGBA8Pixels(x, y, width, height, pixels)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        return true;
+    }
+    // For non-RGBA8 default framebuffer reads, read RGBA8 and convert
+    if (componentCountForFormat(format) == 0) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    impl_->encodePendingWork();
-    if (impl_->frameGraph == nullptr || !impl_->frameGraph->copyRGBA8Pixels(x, y, width, height, pixels)) {
+    const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    std::vector<std::uint8_t> rgba8(pixelCount * 4);
+    if (impl_->frameGraph == nullptr || !impl_->frameGraph->copyRGBA8Pixels(x, y, width, height, rgba8.data())) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    // Simple RGBA8 → requested format conversion (same as FBO path above)
+    const std::size_t components = componentCountForFormat(format);
+    const std::size_t bpc = bytesPerComponent(type);
+    if (components == 0 || bpc == 0) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    auto* dest = static_cast<std::uint8_t*>(pixels);
+    for (std::size_t i = 0; i < pixelCount; ++i) {
+        std::uint8_t src[4] = { rgba8[i*4], rgba8[i*4+1], rgba8[i*4+2], rgba8[i*4+3] };
+        if (format == GL_BGR || format == GL_BGR_INTEGER) {
+            std::swap(src[0], src[2]);
+        } else if (format == GL_BGRA || format == GL_BGRA_INTEGER) {
+            std::swap(src[0], src[2]);
+        }
+        for (std::size_t c = 0; c < components; ++c) {
+            const float normalized = static_cast<float>(src[c]) / 255.0f;
+            switch (type) {
+                case GL_UNSIGNED_BYTE:
+                    dest[i * components + c] = src[c];
+                    break;
+                case GL_FLOAT:
+                    reinterpret_cast<float*>(dest)[i * components + c] = normalized;
+                    break;
+                case GL_UNSIGNED_SHORT:
+                    reinterpret_cast<std::uint16_t*>(dest)[i * components + c] =
+                        static_cast<std::uint16_t>(src[c] * 257);
+                    break;
+                case GL_UNSIGNED_INT:
+                    reinterpret_cast<std::uint32_t*>(dest)[i * components + c] =
+                        static_cast<std::uint32_t>(src[c]) * 16843009u;
+                    break;
+                default:
+                    dest[i * components + c] = src[c];
+                    break;
+            }
+        }
     }
     return true;
 }
@@ -3462,6 +4881,16 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
         data[0] = static_cast<GLdouble>(floatData[0]);
         if (pname == GL_MAX_VIEWPORT_DIMS) {
             data[1] = static_cast<GLdouble>(floatData[1]);
+        }
+        return true;
+    }
+    // Fall through to integer caps — glGetDoublev must return all
+    // integer limits as double values per the GL spec.
+    GLint intData[4] = {};
+    if (impl_->capabilities != nullptr && impl_->capabilities->queryInteger(pname, intData)) {
+        data[0] = static_cast<GLdouble>(intData[0]);
+        if (pname == GL_MAX_VIEWPORT_DIMS) {
+            data[1] = static_cast<GLdouble>(intData[1]);
         }
         return true;
     }
@@ -3802,6 +5231,8 @@ bool GLContext::bufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
             static_cast<std::size_t>(size)
         );
         impl_->syncMetalFromShadow(*object, offset, size);
+        // ADV-10: invalidate cached index expansion on data change.
+        ++object->indexExpansionGeneration;
     }
     return true;
 }
@@ -3923,6 +5354,17 @@ void* GLContext::mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
         pushError(GL_INVALID_VALUE);
         return nullptr;
     }
+    // GL 4.4 spec: persistent/coherent access requires matching storage flags.
+    if ((access & GL_MAP_PERSISTENT_BIT) &&
+        !(object->storageFlags & GL_MAP_PERSISTENT_BIT)) {
+        pushError(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+    if ((access & GL_MAP_COHERENT_BIT) &&
+        !(object->storageFlags & GL_MAP_COHERENT_BIT)) {
+        pushError(GL_INVALID_OPERATION);
+        return nullptr;
+    }
 
     std::uint8_t* contents = impl_->mutableBufferContents(*object);
     if (contents == nullptr) {
@@ -4023,10 +5465,10 @@ bool GLContext::getBufferParameterInteger64(GLenum target, GLenum pname, GLint64
             *params = object->mapped ? object->mapLength : 0;
             return true;
         case GL_BUFFER_IMMUTABLE_STORAGE:
-            *params = GL_FALSE;
+            *params = object->immutable ? GL_TRUE : GL_FALSE;
             return true;
         case GL_BUFFER_STORAGE_FLAGS:
-            *params = 0;
+            *params = static_cast<GLint64>(object->storageFlags);
             return true;
         default:
             pushError(GL_INVALID_ENUM);
@@ -4600,7 +6042,7 @@ bool GLContext::texImage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (!isSupportedInternalTextureFormat(*impl_->capabilities, static_cast<GLenum>(internalformat)) || componentCountForFormat(format) == 0 || type != GL_UNSIGNED_BYTE) {
+    if (!isSupportedInternalTextureFormat(*impl_->capabilities, static_cast<GLenum>(internalformat)) || componentCountForFormat(format) == 0) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -4627,13 +6069,21 @@ bool GLContext::texImage(
     image.desc.sourceType = type;
     image.desc.width = width;
     image.desc.height = target == GL_TEXTURE_1D ? 1 : height;
-    image.desc.depth = target == GL_TEXTURE_3D ? depth : 1;
+    // GL_TEXTURE_3D and the array targets all carry layer/depth count in `depth`.
+    image.desc.depth = (target == GL_TEXTURE_3D
+                        || target == GL_TEXTURE_2D_ARRAY
+                        || target == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
     image.desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
     image.defined = true;
     if (!impl_->buildRGBA8Upload(image.desc.width, image.desc.height, image.desc.depth, format, type, pixels, image.rgba8)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // Also build native-format data for non-RGBA8 internal formats.
+    impl_->buildNativeUpload(
+        static_cast<GLenum>(internalformat),
+        image.desc.width, image.desc.height, image.desc.depth,
+        format, type, pixels, image.nativeData, image.nativeBpp);
 
     if (level == 0 || !object->levels.contains(0)) {
         object->desc = image.desc;
@@ -4669,7 +6119,7 @@ bool GLContext::texSubImage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (componentCountForFormat(format) == 0 || type != GL_UNSIGNED_BYTE) {
+    if (componentCountForFormat(format) == 0) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -4717,6 +6167,34 @@ bool GLContext::texSubImage(
                 upload.data() + sourceOffset,
                 static_cast<std::size_t>(width) * 4u
             );
+        }
+    }
+
+    // Also update native-format data when present.
+    if (image.nativeBpp > 0 && !image.nativeData.empty()) {
+        std::vector<std::uint8_t> nativeUpload;
+        std::size_t nativeBpp = 0;
+        if (impl_->buildNativeUpload(image.desc.internalFormat,
+                width, height, depth, format, type, pixels,
+                nativeUpload, nativeBpp) && nativeBpp == image.nativeBpp) {
+            for (GLsizei z = 0; z < depth; ++z) {
+                for (GLsizei y = 0; y < height; ++y) {
+                    const std::size_t srcOff =
+                        (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                         + static_cast<std::size_t>(y))
+                        * static_cast<std::size_t>(width) * nativeBpp;
+                    const std::size_t dstOff =
+                        ((static_cast<std::size_t>(z + zoffset) * static_cast<std::size_t>(image.desc.height)
+                          + static_cast<std::size_t>(y + yoffset))
+                         * static_cast<std::size_t>(image.desc.width)
+                         + static_cast<std::size_t>(xoffset))
+                        * nativeBpp;
+                    std::memcpy(
+                        image.nativeData.data() + dstOff,
+                        nativeUpload.data() + srcOff,
+                        static_cast<std::size_t>(width) * nativeBpp);
+                }
+            }
         }
     }
 
@@ -4823,7 +6301,9 @@ bool GLContext::texStorage(
     object->desc.internalFormat = internalformat;
     object->desc.width = width;
     object->desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
-    object->desc.depth = (target == GL_TEXTURE_3D) ? depth : 1;
+    object->desc.depth = (target == GL_TEXTURE_3D
+                          || target == GL_TEXTURE_2D_ARRAY
+                          || target == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
     object->desc.levels = levels;
     object->desc.immutable = true;
     object->target = target;
@@ -4832,8 +6312,22 @@ bool GLContext::texStorage(
     GLTextureImageLevel baseLevel;
     baseLevel.desc = object->desc;
     baseLevel.defined = true;
-    const std::size_t byteCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * static_cast<std::size_t>(object->desc.depth) * 4u;
-    baseLevel.rgba8.resize(byteCount, 0);
+    const std::size_t totalPixels = static_cast<std::size_t>(width)
+                                  * static_cast<std::size_t>(height)
+                                  * static_cast<std::size_t>(object->desc.depth);
+    baseLevel.rgba8.resize(totalPixels * 4u, 0);
+
+    // Also allocate native-format backing for non-RGBA8 internal formats.
+    {
+        MTLPixelFormat nativeFmt = metalRenderbufferFormat(internalformat);
+        if (nativeFmt != MTLPixelFormatInvalid && nativeFmt != MTLPixelFormatRGBA8Unorm) {
+            auto info = Impl::nativeFormatInfo(nativeFmt);
+            if (info.channels > 0 && info.bytesPerPixel > 0) {
+                baseLevel.nativeBpp = static_cast<std::size_t>(info.bytesPerPixel);
+                baseLevel.nativeData.resize(totalPixels * baseLevel.nativeBpp, 0);
+            }
+        }
+    }
     object->levels[0] = std::move(baseLevel);
 
     if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
@@ -4962,6 +6456,12 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
     // already filters out unknown names by returning false above), and
     // swizzle/border changes also require a rebuild via the descriptor.
     object->samplerDirty = true;
+    // Swizzle changes invalidate the cached texture view.
+    if (pname == GL_TEXTURE_SWIZZLE_R || pname == GL_TEXTURE_SWIZZLE_G ||
+        pname == GL_TEXTURE_SWIZZLE_B || pname == GL_TEXTURE_SWIZZLE_A ||
+        pname == GL_TEXTURE_SWIZZLE_RGBA) {
+        object->swizzleDirty = true;
+    }
     return true;
 }
 
@@ -5004,7 +6504,7 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
 
 bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* params) {
     GLTextureObject* object = impl_->currentTexture(target);
-    if (object == nullptr || !object->instantiated) {
+    if (object == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -5035,7 +6535,7 @@ bool GLContext::getTexParameterUnsignedInteger(GLenum target, GLenum pname, GLui
 
 bool GLContext::getTexParameterFloat(GLenum target, GLenum pname, GLfloat* params) {
     GLTextureObject* object = impl_->currentTexture(target);
-    if (object == nullptr || !object->instantiated) {
+    if (object == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -5135,6 +6635,23 @@ bool GLContext::renderbufferStorage(GLenum target, GLenum internalformat, GLsize
     if (!isSupportedRenderbufferFormat(internalformat)) {
         pushError(GL_INVALID_ENUM);
         return false;
+    }
+    // RC-D18: Validate samples against GL_MAX_SAMPLES (spec requires
+    // GL_INVALID_VALUE when samples exceeds the implementation limit).
+    // Also normalise samples <= 1 to 0: a single sample is logically
+    // non-multisample and avoids Metal rejecting sampleCount == 1 for
+    // MTLTextureType2DMultisample on some GPU families.
+    if (samples <= 1) {
+        samples = 0;
+    } else {
+        GLint maxSamples = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(GL_MAX_SAMPLES, &maxSamples);
+        }
+        if (maxSamples > 0 && samples > maxSamples) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
     }
     const GLuint name = impl_->state->boundRenderbuffer();
     GLRenderbufferObject* object = impl_->objects->renderbuffers().get(name);
@@ -5299,8 +6816,12 @@ GLenum GLContext::checkFramebufferStatus(GLenum target) const {
     }
     const GLFramebufferObject* object = impl_->objects->framebuffers().get(name);
     if (object == nullptr || !object->instantiated) {
-        const_cast<GLContext*>(this)->pushError(GL_INVALID_OPERATION);
-        return 0;
+        // RC-D18: Per the GL spec, glCheckFramebufferStatus only generates
+        // GL_INVALID_ENUM (for an invalid target). An incomplete or
+        // non-existent framebuffer is signalled via the return value, not
+        // via the error queue. Pushing GL_INVALID_OPERATION here was leaking
+        // a stale error into subsequent calls.
+        return GL_FRAMEBUFFER_UNDEFINED;
     }
     return impl_->framebufferStatus(*object);
 }
@@ -6208,7 +7729,7 @@ void GLContext::endImmediate() {
     }
 
     // Ensure any pending clear is flushed before the encode.
-    impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
+    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
     impl_->encodePendingWork();
 
     // Resolve the texture bound to unit 0 GL_TEXTURE_2D, if any.
@@ -6274,6 +7795,38 @@ std::uint64_t GLContext::metalAllocatedBytes() const {
     return 0;
 }
 
+bool GLContext::isTransformFeedbackActive() const {
+    return impl_->transformFeedbackActive;
+}
+
+void GLContext::setTransformFeedbackActive(bool active) {
+    impl_->transformFeedbackActive = active;
+}
+
+bool GLContext::isTransformFeedbackPaused() const {
+    return impl_->transformFeedbackPaused;
+}
+
+void GLContext::setTransformFeedbackPaused(bool paused) {
+    impl_->transformFeedbackPaused = paused;
+}
+
+GLenum GLContext::transformFeedbackPrimitiveMode() const {
+    return impl_->transformFeedbackPrimitiveMode;
+}
+
+void GLContext::setTransformFeedbackPrimitiveMode(GLenum mode) {
+    impl_->transformFeedbackPrimitiveMode = mode;
+}
+
+GLuint GLContext::boundTransformFeedback() const {
+    return impl_->boundTransformFeedbackId;
+}
+
+void GLContext::setBoundTransformFeedback(GLuint id) {
+    impl_->boundTransformFeedbackId = id;
+}
+
 // ============================================================================
 // Phase A Group 6 — Shaders and Programs
 // ============================================================================
@@ -6333,13 +7886,23 @@ void appendDeclarationsAsUniforms(
             if (existing->defaultUints.empty() && !decl.defaultUints.empty()) {
                 existing->defaultUints = decl.defaultUints;
             }
+            // RC-D06 / RC-D08: if the second stage carries an explicit
+            // location or binding that the first stage lacked, adopt it.
+            if (existing->explicitLocation < 0 && decl.explicitLocation >= 0) {
+                existing->explicitLocation = decl.explicitLocation;
+            }
+            if (existing->explicitBinding < 0 && decl.explicitBinding >= 0) {
+                existing->explicitBinding = decl.explicitBinding;
+            }
             continue;
         }
         GLProgramUniformInfo info;
         info.name = decl.name;
         info.type = decl.type;
         info.arraySize = decl.arraySize > 0 ? decl.arraySize : 1;
-        info.location = -1;  // assigned below
+        info.location = -1;  // assigned below in link-time location pass
+        info.explicitLocation = decl.explicitLocation;
+        info.explicitBinding = decl.explicitBinding;
         info.defaultFloats = decl.defaultFloats;
         info.defaultInts = decl.defaultInts;
         info.defaultUints = decl.defaultUints;
@@ -6494,6 +8057,31 @@ bool GLContext::compileShader(GLuint shader) {
     //    directly so interface blocks are visible even though the scanner
     //    ignores them.
     GLSLReflectionResult reflection = reflectGLSL(compileSource, object->stage);
+
+    // Reverse-map compat shader renames so GL queries report original names.
+    // The shader source uses `_appgl_sampler` (so glslang accepts it), but
+    // the GL API must expose the original `sampler` name to applications.
+    if (rewrite.didRewrite) {
+        auto reverseRename = [](std::string& s) {
+            const std::string from = "_appgl_sampler";
+            const std::string to = "sampler";
+            std::string::size_type pos = 0;
+            while ((pos = s.find(from, pos)) != std::string::npos) {
+                s.replace(pos, from.size(), to);
+                pos += to.size();
+            }
+        };
+        for (auto& decl : reflection.uniforms) {
+            reverseRename(decl.name);
+        }
+        for (auto& decl : reflection.inputs) {
+            reverseRename(decl.name);
+        }
+        for (auto& decl : reflection.outputs) {
+            reverseRename(decl.name);
+        }
+    }
+
     object->declaredUniforms = std::move(reflection.uniforms);
     object->declaredInputs = std::move(reflection.inputs);
     object->declaredOutputs = std::move(reflection.outputs);
@@ -6687,6 +8275,215 @@ bool GLContext::detachShader(GLuint program, GLuint shader) {
     return true;
 }
 
+// ── GLSL source parsing helpers for UBO metadata recovery ──
+//
+// SPIRV-Cross loses certain GLSL-level metadata when emitting SPIR-V for
+// uniform blocks. Two known gaps:
+//
+// 1. Instance names: SPIRV-Cross's `ubo.name` == type name for both
+//    instanced (`uniform B { ... } b;`) and non-instanced (`uniform B { ... };`)
+//    blocks. We parse the GLSL source for `} instanceName;` to recover this.
+//
+// 2. Bool types: SPIR-V represents `bool` in interface blocks as `uint`
+//    (OpTypeBool cannot appear in storage interfaces). We scan the block
+//    body for `bool`/`bvec2`/`bvec3`/`bvec4` member declarations to
+//    restore the original GL type.
+
+// Find the body of `uniform <blockName> { ... }` in GLSL source.
+// Returns (bodyStart, bodyEnd) — the byte range INSIDE the braces, or
+// (npos, npos) if not found.
+static std::pair<std::size_t, std::size_t>
+findBlockBody(const std::string& source, const std::string& blockName) {
+    const std::string token = "uniform " + blockName;
+    std::size_t pos = 0;
+    while (pos < source.size()) {
+        pos = source.find(token, pos);
+        if (pos == std::string::npos) return {std::string::npos, std::string::npos};
+        std::size_t end = pos + token.size();
+        if (end < source.size() && (std::isalnum(source[end]) || source[end] == '_')) {
+            pos = end;
+            continue;
+        }
+        std::size_t bracePos = source.find('{', end);
+        if (bracePos == std::string::npos) return {std::string::npos, std::string::npos};
+        int depth = 1;
+        std::size_t cur = bracePos + 1;
+        while (cur < source.size() && depth > 0) {
+            if (source[cur] == '{') ++depth;
+            else if (source[cur] == '}') --depth;
+            ++cur;
+        }
+        // cur is right after the closing '}'. Body is [bracePos+1, cur-2].
+        return {bracePos + 1, cur - 1};
+    }
+    return {std::string::npos, std::string::npos};
+}
+
+static bool glslBlockHasInstanceName(const std::string& source,
+                                      const std::string& blockName) {
+    auto [bodyStart, bodyEnd] = findBlockBody(source, blockName);
+    if (bodyStart == std::string::npos) return false;
+    // bodyEnd points at the '}'. Skip whitespace after it.
+    std::size_t cur = bodyEnd + 1;
+    while (cur < source.size() &&
+           (source[cur] == ' ' || source[cur] == '\t' ||
+            source[cur] == '\n' || source[cur] == '\r')) {
+        ++cur;
+    }
+    return cur < source.size() && (std::isalpha(source[cur]) || source[cur] == '_');
+}
+
+// Search a code region for "boolType name" where boolType is bool/bvec2/3/4.
+// Returns the GL_BOOL* enum, or 0 if not found.
+static GLenum searchForBoolType(std::string_view body, std::string_view name) {
+    struct BoolMapping { const char* keyword; GLenum type; };
+    static const BoolMapping mappings[] = {
+        {"bvec4", GL_BOOL_VEC4},
+        {"bvec3", GL_BOOL_VEC3},
+        {"bvec2", GL_BOOL_VEC2},
+        {"bool",  GL_BOOL},
+    };
+    for (const auto& m : mappings) {
+        std::string pattern = std::string(m.keyword) + " " + std::string(name);
+        auto fpos = body.find(pattern);
+        if (fpos != std::string_view::npos) {
+            std::size_t afterPattern = fpos + pattern.size();
+            if (afterPattern >= body.size() ||
+                body[afterPattern] == ';' || body[afterPattern] == '[' ||
+                body[afterPattern] == ' ' || body[afterPattern] == '\n' ||
+                body[afterPattern] == '\r') {
+                return m.type;
+            }
+        }
+    }
+    return 0;
+}
+
+// Detect bool/bvec member types that SPIR-V represents as uint/uvec.
+// Returns the correct GL_BOOL* type, or 0 if the member is not a bool type.
+//
+// For direct block members (no dots in name), we search within the block body.
+// For nested struct members ("s.c"), we resolve through the struct chain:
+// find the struct type name for each prefix component, then search the
+// innermost struct body for the leaf name.
+// Strip single-line comments ("// ...") from GLSL source. This prevents
+// member-name searches from matching inside comments like "// unused in
+// vertex shader" where a stray " i" would be misidentified as a declaration.
+static std::string stripGLSLComments(std::string_view src) {
+    std::string out;
+    out.reserve(src.size());
+    for (std::size_t i = 0; i < src.size(); ++i) {
+        if (i + 1 < src.size() && src[i] == '/' && src[i+1] == '/') {
+            // Skip to end of line
+            while (i < src.size() && src[i] != '\n') ++i;
+            if (i < src.size()) out += '\n';
+        } else {
+            out += src[i];
+        }
+    }
+    return out;
+}
+
+static GLenum detectBoolMemberType(const std::string& source,
+                                    const std::string& blockName,
+                                    const std::string& memberName) {
+    // Work on a comment-stripped copy to avoid false matches in comments.
+    const std::string cleanSource = stripGLSLComments(source);
+
+    // Split by dots first: "a[0].inner.c" → ["a[0]", "inner", "c"]
+    // Array indices are stripped per-component in the traversal loop,
+    // NOT up front (to preserve the dot-separated structure).
+    std::vector<std::string> parts;
+    std::size_t start = 0;
+    while (start < memberName.size()) {
+        auto dot = memberName.find('.', start);
+        if (dot == std::string::npos) {
+            parts.push_back(memberName.substr(start));
+            break;
+        }
+        parts.push_back(memberName.substr(start, dot - start));
+        start = dot + 1;
+    }
+    if (parts.empty()) return 0;
+
+    // Strip array suffixes from each part: "a[0]" → "a"
+    for (auto& p : parts) {
+        auto bracketPos = p.find('[');
+        if (bracketPos != std::string::npos) {
+            p = p.substr(0, bracketPos);
+        }
+    }
+
+    // For direct members (single part), search the block body.
+    if (parts.size() == 1) {
+        auto [bodyStart, bodyEnd] = findBlockBody(cleanSource, blockName);
+        if (bodyStart == std::string::npos) return 0;
+        std::string_view body(cleanSource.data() + bodyStart, bodyEnd - bodyStart);
+        return searchForBoolType(body, parts[0]);
+    }
+
+    // For nested members, traverse the struct chain.
+    // Start with the block body, find the type of each prefix, then
+    // search the struct definition for the next component.
+    auto [bodyStart, bodyEnd] = findBlockBody(cleanSource, blockName);
+    if (bodyStart == std::string::npos) return 0;
+    std::string_view searchBody(cleanSource.data() + bodyStart, bodyEnd - bodyStart);
+
+    for (std::size_t i = 0; i < parts.size() - 1; ++i) {
+        // Find the type name for part[i] in the current body.
+        // Pattern: "<TypeName> <partName>" or "<TypeName> <partName>[...]"
+        // We need to extract the type name that precedes the member name.
+        const std::string& partName = parts[i];
+        // Search for " partName" (with space before) to find declarations.
+        // Require a word boundary after the name (;, [, space, newline)
+        // to avoid matching "i" inside "ivec4" etc.
+        std::string needle = " " + partName;
+        std::string_view::size_type pos = std::string_view::npos;
+        {
+            std::string_view::size_type searchFrom = 0;
+            while (searchFrom < searchBody.size()) {
+                auto candidate = searchBody.find(needle, searchFrom);
+                if (candidate == std::string_view::npos) break;
+                std::size_t afterName = candidate + needle.size();
+                if (afterName >= searchBody.size() ||
+                    searchBody[afterName] == ';' || searchBody[afterName] == '[' ||
+                    searchBody[afterName] == ' ' || searchBody[afterName] == '\n' ||
+                    searchBody[afterName] == '\r' || searchBody[afterName] == '\t') {
+                    pos = candidate;
+                    break;
+                }
+                searchFrom = candidate + 1;
+            }
+        }
+        if (pos == std::string_view::npos) return 0;
+        // Walk backwards from the match to find the type name.
+        // Skip whitespace backwards, then collect identifier chars.
+        auto typeEnd = pos;
+        while (typeEnd > 0 && searchBody[typeEnd - 1] == ' ') --typeEnd;
+        auto typeStart = typeEnd;
+        while (typeStart > 0 && (std::isalnum(searchBody[typeStart - 1]) || searchBody[typeStart - 1] == '_')) --typeStart;
+        std::string typeName(searchBody.substr(typeStart, typeEnd - typeStart));
+        if (typeName.empty()) return 0;
+        // Find the struct definition for this type.
+        std::string structToken = "struct " + typeName;
+        auto structPos = cleanSource.find(structToken);
+        if (structPos == std::string::npos) return 0;
+        auto bracePos = cleanSource.find('{', structPos);
+        if (bracePos == std::string::npos) return 0;
+        int depth = 1;
+        auto cur = bracePos + 1;
+        while (cur < cleanSource.size() && depth > 0) {
+            if (cleanSource[cur] == '{') ++depth;
+            else if (cleanSource[cur] == '}') --depth;
+            ++cur;
+        }
+        searchBody = std::string_view(cleanSource.data() + bracePos + 1, cur - bracePos - 2);
+    }
+
+    // Search the final body for the leaf member name.
+    return searchForBoolType(searchBody, parts.back());
+}
+
 bool GLContext::linkProgram(GLuint program) {
     GLProgramObject* programObject = impl_->objects->programs().get(program);
     if (programObject == nullptr) {
@@ -6714,6 +8511,19 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->uniformValues.clear();
     programObject->linkLog.clear();
     programObject->linked = false;
+
+    // RC-D09: Clear resource tables from any previous link so stale
+    // introspection data never survives a failed re-link.
+    programObject->resourceUniforms.clear();
+    programObject->resourceUniformBlocks.clear();
+    programObject->resourceInputs.clear();
+    programObject->resourceOutputs.clear();
+    programObject->resourceStorageBlocks.clear();
+    programObject->resourceAtomicCounterBuffers.clear();
+    programObject->resourceBufferVariables.clear();
+    programObject->resourceTransformFeedbackVaryings.clear();
+    programObject->resourceTransformFeedbackBuffers.clear();
+    programObject->ssboBindingRemap.clear();
 
     // Small helper used in several diagnostic-recording sites below.
     const std::string programTag = "program-" + std::to_string(program);
@@ -6825,6 +8635,8 @@ bool GLContext::linkProgram(GLuint program) {
         VertexTessellationFragment,
         VertexOnly,
         FragmentOnly,
+        TessControlOnly,
+        TessEvalOnly,
     };
     ProgramKind kind = ProgramKind::Unknown;
     if (computeShader != nullptr && shaderCount == 1) {
@@ -6840,11 +8652,17 @@ bool GLContext::linkProgram(GLuint program) {
                tessControlShader != nullptr && tessEvalShader != nullptr) {
         kind = ProgramKind::VertexTessellationFragment;
     } else if (vertexShader != nullptr && fragmentShader == nullptr &&
-               computeShader == nullptr && geometryShader == nullptr) {
+               computeShader == nullptr && geometryShader == nullptr &&
+               tessControlShader == nullptr && tessEvalShader == nullptr) {
         kind = ProgramKind::VertexOnly;
     } else if (fragmentShader != nullptr && vertexShader == nullptr &&
-               computeShader == nullptr && geometryShader == nullptr) {
+               computeShader == nullptr && geometryShader == nullptr &&
+               tessControlShader == nullptr && tessEvalShader == nullptr) {
         kind = ProgramKind::FragmentOnly;
+    } else if (tessControlShader != nullptr && shaderCount == 1) {
+        kind = ProgramKind::TessControlOnly;
+    } else if (tessEvalShader != nullptr && shaderCount == 1) {
+        kind = ProgramKind::TessEvalOnly;
     }
 
     if (kind == ProgramKind::Unknown) {
@@ -6878,21 +8696,54 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->vertexSourceHash = linkVertexHash;
     programObject->fragmentSourceHash = linkFragmentHash;
 
-    // Assign sequential dense uniform locations and seed default values.
+    // Assign uniform locations and seed default values.
+    //
+    // RC-D06: honour explicit `layout(location=N)` qualifiers from the GLSL
+    // source.  CTS tests declare `layout(location=5) uniform float myUniform;`
+    // and expect `glGetUniformLocation` to return 5.  The old code assigned
+    // dense sequential locations starting from 0 regardless of any explicit
+    // qualifier, which made those tests get -1.
+    //
+    // Two-pass approach:
+    //   Pass 1 — assign explicit locations (those with explicitLocation >= 0).
+    //            Track which locations are occupied so pass 2 can skip them.
+    //   Pass 2 — assign auto-incremented locations for the rest, skipping
+    //            any slot already claimed by an explicit location.
     //
     // Phase 8X Group 4d follow-up¹⁵ — if the GLSL source carried a default
     // initializer (`uniform vec4 ucolor = vec4(1.0);`), the scanner has
     // populated `uniform.defaultFloats` / `defaultInts` / `defaultUints` with
     // the parsed constant. Seed from that when present; otherwise fall back
-    // to the historical zero-seed. Spring's BAR font/UI fragment shader
-    // template declares both `ucolor` and `alphaCtrl` with defaults the engine
-    // never overrides at runtime — the black-screen regression from
-    // follow-up¹⁴ came from zero-seeding those shadows, which made
-    // `outColor *= ucolor` evaluate to (0,0,0,0) and the AlphaDiscard path
-    // discard every fragment.
+    // to the historical zero-seed.
+
+    // Collect the set of locations claimed by explicit layout qualifiers so
+    // the auto-assignment pass can skip over them.
+    std::unordered_set<GLint> reservedLocations;
+    for (const auto& uniform : programObject->uniforms) {
+        if (uniform.explicitLocation >= 0) {
+            const GLint slots = std::max<GLint>(uniform.arraySize, 1);
+            for (GLint s = 0; s < slots; ++s) {
+                reservedLocations.insert(uniform.explicitLocation + s);
+            }
+        }
+    }
+
+    // Helper: find the next auto-location that doesn't collide with any
+    // explicitly reserved slot.
     GLint nextLocation = 0;
+    auto advancePastReserved = [&]() {
+        while (reservedLocations.count(nextLocation)) {
+            ++nextLocation;
+        }
+    };
+
     for (auto& uniform : programObject->uniforms) {
-        uniform.location = nextLocation;
+        if (uniform.explicitLocation >= 0) {
+            uniform.location = uniform.explicitLocation;
+        } else {
+            advancePastReserved();
+            uniform.location = nextLocation;
+        }
         const GLint components = glslComponentCount(uniform.type) * std::max<GLint>(uniform.arraySize, 1);
         const std::size_t componentCount = static_cast<std::size_t>(components);
         GLProgramUniformValue value;
@@ -6911,8 +8762,42 @@ bool GLContext::linkProgram(GLuint program) {
             case GL_SAMPLER_2D:
             case GL_SAMPLER_3D:
             case GL_SAMPLER_CUBE:
+            case GL_SAMPLER_1D_ARRAY:
             case GL_SAMPLER_2D_ARRAY:
+            case GL_SAMPLER_1D_SHADOW:
             case GL_SAMPLER_2D_SHADOW:
+            case GL_SAMPLER_1D_ARRAY_SHADOW:
+            case GL_SAMPLER_2D_ARRAY_SHADOW:
+            case GL_SAMPLER_CUBE_SHADOW:
+            case GL_SAMPLER_2D_RECT:
+            case GL_SAMPLER_2D_RECT_SHADOW:
+            case GL_SAMPLER_BUFFER:
+            case GL_SAMPLER_2D_MULTISAMPLE:
+            case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_SAMPLER_CUBE_MAP_ARRAY:
+            case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+            case GL_INT_SAMPLER_1D:
+            case GL_INT_SAMPLER_2D:
+            case GL_INT_SAMPLER_3D:
+            case GL_INT_SAMPLER_CUBE:
+            case GL_INT_SAMPLER_1D_ARRAY:
+            case GL_INT_SAMPLER_2D_ARRAY:
+            case GL_INT_SAMPLER_2D_RECT:
+            case GL_INT_SAMPLER_BUFFER:
+            case GL_INT_SAMPLER_2D_MULTISAMPLE:
+            case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_1D:
+            case GL_UNSIGNED_INT_SAMPLER_2D:
+            case GL_UNSIGNED_INT_SAMPLER_3D:
+            case GL_UNSIGNED_INT_SAMPLER_CUBE:
+            case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+            case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
                 if (uniform.defaultInts.size() == componentCount) {
                     value.ints = uniform.defaultInts;
                 } else {
@@ -6937,8 +8822,13 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 break;
         }
-        programObject->uniformValues[nextLocation] = std::move(value);
-        nextLocation += std::max<GLint>(uniform.arraySize, 1);
+        programObject->uniformValues[uniform.location] = std::move(value);
+        // Only advance the auto-location counter for non-explicit uniforms.
+        // Explicit-location uniforms occupy their declared slots (already
+        // recorded in reservedLocations) and must not shift the counter.
+        if (uniform.explicitLocation < 0) {
+            nextLocation += std::max<GLint>(uniform.arraySize, 1);
+        }
     }
 
     // Cache synthesized fixed-function matrix uniform locations. The
@@ -6982,6 +8872,174 @@ bool GLContext::linkProgram(GLuint program) {
             findLocByName(SUN::kTextureMatrix);
     }
 
+    // ─── Transform feedback link-time validation ───────────────────────
+    // GL 4.6 §11.1.2.1: the linker must reject programs whose transform
+    // feedback configuration is invalid. The four cases the CTS
+    // linking_errors_test expects:
+    //   1) TF varyings specified but no vertex/geometry shader present.
+    //   2) A TF varying name doesn't match any output of the last
+    //      vertex-processing stage.
+    //   3) The same output variable is captured more than once in
+    //      SEPARATE_ATTRIBS mode (or in INTERLEAVED_ATTRIBS w/o
+    //      gl_NextBuffer separation).
+    //   4) Total component count exceeds the implementation limit.
+    if (!programObject->transformFeedbackVaryingNames.empty()) {
+        // (1) No vertex-processing stage.
+        // The "last vertex-processing stage" determines the capturable outputs:
+        //   GS > TES > VS (in priority order).
+        const GLShaderObject* xfbStage = geometryShader
+            ? geometryShader
+            : (tessEvalShader ? tessEvalShader : vertexShader);
+        if (xfbStage == nullptr) {
+            programObject->linkLog = "transform feedback varyings specified but no vertex/geometry shader";
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+
+        // Build lookup of outputs from the last vertex-processing stage.
+        std::unordered_map<std::string, GLenum> outputTypeMap;
+        for (const auto& decl : xfbStage->declaredOutputs) {
+            outputTypeMap[decl.name] = decl.type;
+        }
+        // Built-in outputs that are always available for capture.
+        outputTypeMap["gl_Position"] = GL_FLOAT_VEC4;
+        outputTypeMap["gl_PointSize"] = GL_FLOAT;
+        outputTypeMap["gl_ClipDistance"] = GL_FLOAT;
+
+        // Special interleaved-mode names that are NOT real varyings:
+        auto isSpecialName = [](const std::string& n) {
+            return n == "gl_NextBuffer" ||
+                   n == "gl_SkipComponents1" || n == "gl_SkipComponents2" ||
+                   n == "gl_SkipComponents3" || n == "gl_SkipComponents4";
+        };
+
+        // Helper: component count for a GL type.
+        auto glTypeComponents = [](GLenum t) -> GLsizei {
+            switch (t) {
+                case GL_FLOAT: case GL_INT: case GL_UNSIGNED_INT: case GL_BOOL:
+                case GL_DOUBLE:
+                    return 1;
+                case GL_FLOAT_VEC2: case GL_INT_VEC2: case GL_UNSIGNED_INT_VEC2:
+                case GL_BOOL_VEC2: case GL_DOUBLE_VEC2:
+                    return 2;
+                case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_UNSIGNED_INT_VEC3:
+                case GL_BOOL_VEC3: case GL_DOUBLE_VEC3:
+                    return 3;
+                case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_UNSIGNED_INT_VEC4:
+                case GL_BOOL_VEC4: case GL_DOUBLE_VEC4:
+                    return 4;
+                case GL_FLOAT_MAT2: case GL_DOUBLE_MAT2:   return 4;
+                case GL_FLOAT_MAT3: case GL_DOUBLE_MAT3:   return 9;
+                case GL_FLOAT_MAT4: case GL_DOUBLE_MAT4:   return 16;
+                case GL_FLOAT_MAT2x3: case GL_DOUBLE_MAT2x3: return 6;
+                case GL_FLOAT_MAT2x4: case GL_DOUBLE_MAT2x4: return 8;
+                case GL_FLOAT_MAT3x2: case GL_DOUBLE_MAT3x2: return 6;
+                case GL_FLOAT_MAT3x4: case GL_DOUBLE_MAT3x4: return 12;
+                case GL_FLOAT_MAT4x2: case GL_DOUBLE_MAT4x2: return 8;
+                case GL_FLOAT_MAT4x3: case GL_DOUBLE_MAT4x3: return 12;
+                default: return 1;
+            }
+        };
+
+        // (2) Validate each varying name and resolve types.
+        programObject->resourceTransformFeedbackVaryings.clear();
+        std::unordered_set<std::string> seenNames;
+        GLsizei totalComponents = 0;
+        GLenum bufMode = programObject->transformFeedbackBufferMode;
+
+        // When the scanner has populated output declarations for the
+        // last vertex-processing stage, we can validate varying names
+        // and resolve types.  When it hasn't (e.g. older scanner gap),
+        // skip the name check and use GL_FLOAT as the fallback type.
+        const bool haveOutputDecls = !outputTypeMap.empty() ||
+            !xfbStage->declaredOutputs.empty();
+
+        for (const auto& varyName : programObject->transformFeedbackVaryingNames) {
+            if (isSpecialName(varyName)) {
+                // Special names are valid in interleaved mode; skip for
+                // duplicate/component checks.
+                continue;
+            }
+
+            GLenum resolvedType = GL_FLOAT; // fallback
+            if (haveOutputDecls) {
+                auto it = outputTypeMap.find(varyName);
+                if (it == outputTypeMap.end()) {
+                    programObject->linkLog = "transform feedback varying '" + varyName +
+                        "' is not an output of the last vertex-processing stage";
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+                resolvedType = it->second;
+            }
+
+            // (3) Duplicate check (applies to both interleaved and separate).
+            if (!seenNames.insert(varyName).second) {
+                programObject->linkLog = "transform feedback varying '" + varyName +
+                    "' is captured more than once";
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+
+            totalComponents += glTypeComponents(resolvedType);
+
+            GLProgramResourceEntry entry;
+            entry.name = varyName;
+            entry.type = resolvedType;
+            entry.arraySize = 1;
+            programObject->resourceTransformFeedbackVaryings.push_back(std::move(entry));
+        }
+
+        // (4) Component limit check.
+        // GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS = 64 (our reported value)
+        // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS = 4
+        // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS = 4
+        if (bufMode == GL_INTERLEAVED_ATTRIBS) {
+            constexpr GLsizei kMaxInterleavedComponents = 64;
+            if (totalComponents > kMaxInterleavedComponents) {
+                programObject->linkLog = "transform feedback exceeds GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS";
+                programObject->resourceTransformFeedbackVaryings.clear();
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+        } else if (bufMode == GL_SEPARATE_ATTRIBS) {
+            constexpr GLsizei kMaxSeparateComponents = 4;
+            constexpr GLsizei kMaxSeparateAttribs = 4;
+            GLsizei attribCount = static_cast<GLsizei>(programObject->resourceTransformFeedbackVaryings.size());
+            if (attribCount > kMaxSeparateAttribs) {
+                programObject->linkLog = "transform feedback exceeds GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS";
+                programObject->resourceTransformFeedbackVaryings.clear();
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+            for (const auto& res : programObject->resourceTransformFeedbackVaryings) {
+                if (glTypeComponents(res.type) > kMaxSeparateComponents) {
+                    programObject->linkLog = "transform feedback varying '" + res.name +
+                        "' exceeds GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS";
+                    programObject->resourceTransformFeedbackVaryings.clear();
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+            }
+        }
+    } else {
+        // No TF varyings — clear any stale resolved data from a previous link.
+        programObject->resourceTransformFeedbackVaryings.clear();
+    }
+    // ─── End transform feedback link-time validation ─────────────────
+
     programObject->linked = true;
     programObject->linkLog = "ok";
 
@@ -7001,6 +9059,7 @@ bool GLContext::linkProgram(GLuint program) {
         entry.name = u.name;
         entry.type = u.type;
         entry.location = u.location;
+        entry.binding = u.explicitBinding;  // RC-D08
         entry.arraySize = u.arraySize;
         entry.referencedBy = 0x03; // vertex + fragment (conservative)
         programObject->resourceUniforms.push_back(std::move(entry));
@@ -7416,6 +9475,23 @@ bool GLContext::linkProgram(GLuint program) {
             std::string unusedTcMSL, unusedTeMSL;
             (void)translateCachedStage("tess-control", tessControlShader, unusedTcMSL, tcRefl);
             (void)translateCachedStage("tess-eval", tessEvalShader, unusedTeMSL, teRefl);
+
+            // Extract tessellation execution modes from SPIR-V.
+            programObject->hasTessellation = true;
+            if (tessControlShader && !tessControlShader->spirv.empty()) {
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(), tessControlShader->spirv.size());
+                programObject->tessControlOutputVertices = static_cast<GLint>(tcModes.outputVertices);
+            }
+            if (tessEvalShader && !tessEvalShader->spirv.empty()) {
+                auto teModes = extractTessellationModes(
+                    tessEvalShader->spirv.data(), tessEvalShader->spirv.size());
+                programObject->tessGenMode = teModes.genMode;
+                programObject->tessGenSpacing = teModes.genSpacing;
+                programObject->tessGenVertexOrder = teModes.genVertexOrder;
+                programObject->tessGenPointMode = teModes.pointMode ? GL_TRUE : GL_FALSE;
+            }
+
             Runtime::shared().recordShaderTranslation({
                 programTag + "-tessellation-emulation", "tessellation",
                 quickHash(tessControlShader->source),
@@ -7432,6 +9508,46 @@ bool GLContext::linkProgram(GLuint program) {
             }
             break;
         }
+        case ProgramKind::TessControlOnly: {
+            // Separable TCS-only program (for use with program pipelines).
+            // Translate to MSL for reflection + extract tessellation modes.
+            std::string unusedTcMSL;
+            ShaderReflection tcRefl;
+            (void)translateCachedStage("tess-control", tessControlShader,
+                                       unusedTcMSL, tcRefl);
+            // Extract tessellation execution modes from SPIR-V.
+            programObject->hasTessellation = true;
+            if (!tessControlShader->spirv.empty()) {
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(),
+                    tessControlShader->spirv.size());
+                programObject->tessControlOutputVertices =
+                    static_cast<GLint>(tcModes.outputVertices);
+            }
+            rasterTranslationOk = true;
+            break;
+        }
+        case ProgramKind::TessEvalOnly: {
+            // Separable TES-only program (for use with program pipelines).
+            std::string unusedTeMSL;
+            ShaderReflection teRefl;
+            (void)translateCachedStage("tess-eval", tessEvalShader,
+                                       unusedTeMSL, teRefl);
+            // Extract tessellation execution modes from SPIR-V.
+            programObject->hasTessellation = true;
+            if (!tessEvalShader->spirv.empty()) {
+                auto teModes = extractTessellationModes(
+                    tessEvalShader->spirv.data(),
+                    tessEvalShader->spirv.size());
+                programObject->tessGenMode = teModes.genMode;
+                programObject->tessGenSpacing = teModes.genSpacing;
+                programObject->tessGenVertexOrder = teModes.genVertexOrder;
+                programObject->tessGenPointMode =
+                    teModes.pointMode ? GL_TRUE : GL_FALSE;
+            }
+            rasterTranslationOk = true;
+            break;
+        }
         case ProgramKind::Unknown:
             break;  // Already handled above; kept so -Wswitch stays happy.
     }
@@ -7443,6 +9559,82 @@ bool GLContext::linkProgram(GLuint program) {
           programObject->vertexReflection.uniformBlocks.size(),
           programObject->fragmentReflection.uniformBlocks.size());
     fflush(stderr);  // Phase 8X Group 4d follow-up²³ — synchronous flush
+
+    // ── Supplement scanner-discovered uniforms with SPIR-V reflection ──
+    //
+    // The lightweight GLSL scanner (GLSLReflection) can't parse struct-typed
+    // uniforms, interface-block members, or other complex declarations.
+    // SPIRV-Cross reflection IS authoritative for the _DefaultUniforms block
+    // members — it sees every uniform that survived dead-code elimination.
+    // Walk the _DefaultUniforms members from each stage's reflection and add
+    // any that the scanner missed to the program's uniform list with fresh
+    // locations and zero-seeded values.  This lets glGetUniformLocation /
+    // glUniform* work for struct members (e.g. "s.a"), array-of-struct
+    // elements ("s[0].a"), and any other uniform type the scanner can't parse.
+    if (rasterTranslationOk || kind == ProgramKind::Compute) {
+        // Build a set of names the scanner already discovered.
+        std::unordered_set<std::string> knownUniformNames;
+        for (const auto& u : programObject->uniforms) {
+            knownUniformNames.insert(u.name);
+        }
+
+        // Find the next available auto-location (past all existing ones).
+        GLint supplementNextLoc = 0;
+        for (const auto& u : programObject->uniforms) {
+            const GLint endLoc = u.location + std::max<GLint>(u.arraySize, 1);
+            if (endLoc > supplementNextLoc) {
+                supplementNextLoc = endLoc;
+            }
+        }
+
+        // Lambda: scan one stage's reflection for _DefaultUniforms members.
+        auto supplementFromReflection = [&](const ShaderReflection& refl) {
+            if (refl.uniformBlocks.empty()) return;
+            // The _DefaultUniforms block is always at index 0 when present.
+            const auto& block = refl.uniformBlocks[0];
+            if (block.name != "_DefaultUniforms") return;
+            for (const auto& member : block.members) {
+                if (knownUniformNames.count(member.name)) continue;
+                // New uniform discovered by SPIR-V but not by the scanner.
+                GLProgramUniformInfo info;
+                info.name = member.name;
+                info.type = member.type;
+                info.arraySize = (member.arraySize > 0)
+                    ? static_cast<GLint>(member.arraySize) : 1;
+                info.location = supplementNextLoc;
+                info.explicitLocation = -1;
+                info.explicitBinding = -1;
+                supplementNextLoc += std::max<GLint>(info.arraySize, 1);
+                knownUniformNames.insert(info.name);
+
+                // Zero-seed the uniform value.
+                const GLint components = glslComponentCount(info.type)
+                    * std::max<GLint>(info.arraySize, 1);
+                const std::size_t cnt = static_cast<std::size_t>(components);
+                GLProgramUniformValue value;
+                value.type = info.type;
+                value.arraySize = info.arraySize;
+                switch (info.type) {
+                    case GL_INT: case GL_INT_VEC2: case GL_INT_VEC3: case GL_INT_VEC4:
+                    case GL_BOOL: case GL_BOOL_VEC2: case GL_BOOL_VEC3: case GL_BOOL_VEC4:
+                        value.ints.assign(cnt, 0);
+                        break;
+                    case GL_UNSIGNED_INT: case GL_UNSIGNED_INT_VEC2:
+                    case GL_UNSIGNED_INT_VEC3: case GL_UNSIGNED_INT_VEC4:
+                        value.uints.assign(cnt, 0u);
+                        break;
+                    default:
+                        value.floats.assign(cnt, 0.0f);
+                        break;
+                }
+                programObject->uniformValues[info.location] = std::move(value);
+                programObject->uniforms.push_back(std::move(info));
+            }
+        };
+
+        supplementFromReflection(programObject->vertexReflection);
+        supplementFromReflection(programObject->fragmentReflection);
+    }
 
     // ── Merge SPIRV-Cross uniform block reflection into the program's
     //    resource introspection tables ──
@@ -7458,40 +9650,159 @@ bool GLContext::linkProgram(GLuint program) {
     // glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...) can find them.
     if (rasterTranslationOk || kind == ProgramKind::Compute) {
         auto mergeBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
-                               GLbitfield stageBit) {
+                               GLbitfield stageBit,
+                               const std::string& glslSource) {
             for (const auto& block : blocks) {
-                auto existing = std::find_if(
-                    programObject->resourceUniformBlocks.begin(),
-                    programObject->resourceUniformBlocks.end(),
-                    [&](const GLProgramResourceEntry& e) { return e.name == block.name; });
-                if (existing != programObject->resourceUniformBlocks.end()) {
-                    existing->referencedBy |= stageBit;
-                    continue;
-                }
-                GLProgramResourceEntry blockEntry;
-                blockEntry.name = block.name;
-                blockEntry.type = 0;  // blocks have no scalar type
-                blockEntry.location = static_cast<GLint>(block.glBinding);
-                blockEntry.arraySize = 1;
-                blockEntry.referencedBy = stageBit;
-                programObject->resourceUniformBlocks.push_back(std::move(blockEntry));
+                // SPIRV-Cross loses instance name info (varName == typeName
+                // for both instanced and non-instanced blocks). Parse the
+                // original GLSL source to recover it.
+                const bool hasInstance =
+                    glslBlockHasInstanceName(glslSource, block.name);
 
-                const GLint blockIndex =
-                    static_cast<GLint>(programObject->resourceUniformBlocks.size() - 1);
+                // For array blocks (`uniform B { ... } b[N]`), create one
+                // block entry per array element: "BlockName[0]", "BlockName[1]", ...
+                // For non-array blocks, create a single entry: "BlockName".
+                const int numInstances = (block.blockArraySize > 0)
+                    ? static_cast<int>(block.blockArraySize) : 1;
+                const bool isArray = (block.blockArraySize > 0);
+
+                // Create block entries for each instance.
+                GLint firstBlockIndex = -1;
+                bool anyNewBlocks = false;
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    std::string entryName = block.name;
+                    if (isArray) {
+                        entryName += "[" + std::to_string(inst) + "]";
+                    }
+                    auto existing = std::find_if(
+                        programObject->resourceUniformBlocks.begin(),
+                        programObject->resourceUniformBlocks.end(),
+                        [&](const GLProgramResourceEntry& e) { return e.name == entryName; });
+                    if (existing != programObject->resourceUniformBlocks.end()) {
+                        existing->referencedBy |= stageBit;
+                        if (inst == 0) {
+                            firstBlockIndex = static_cast<GLint>(
+                                existing - programObject->resourceUniformBlocks.begin());
+                        }
+                        continue;
+                    }
+                    anyNewBlocks = true;
+                    GLProgramResourceEntry blockEntry;
+                    blockEntry.name = entryName;
+                    blockEntry.type = 0;  // blocks have no scalar type
+                    blockEntry.location = static_cast<GLint>(block.glBinding);
+                    blockEntry.offset = static_cast<GLint>(block.byteSize); // GL_UNIFORM_BLOCK_DATA_SIZE
+                    blockEntry.arraySize = 1;
+                    blockEntry.referencedBy = stageBit;
+                    programObject->resourceUniformBlocks.push_back(std::move(blockEntry));
+                    if (inst == 0) {
+                        firstBlockIndex = static_cast<GLint>(
+                            programObject->resourceUniformBlocks.size() - 1);
+                    }
+                }
+
+                // Skip member creation if this block was already processed
+                // by an earlier stage (all entries deduped — no new blocks).
+                if (!anyNewBlocks) continue;
+
                 for (const auto& member : block.members) {
+                    // Push into resourceUniforms — the CTS and
+                    // glGetActiveUniform / glGetActiveUniformsiv enumerate
+                    // ALL active uniforms including those inside blocks.
+                    // Per GL spec §7.6, blocks WITHOUT an instance name use
+                    // just "memberName"; blocks WITH one use "blockName.memberName".
                     GLProgramResourceEntry memberEntry;
-                    memberEntry.name = block.name + "." + member.name;
+                    std::string uniformName;
+                    if (hasInstance) {
+                        uniformName = block.name + "." + member.name;
+                    } else {
+                        uniformName = member.name;
+                    }
+                    // GL spec: array uniforms have "[0]" appended to name.
+                    if (member.arraySize > 0) {
+                        uniformName += "[0]";
+                    }
+                    memberEntry.name = std::move(uniformName);
                     memberEntry.type = member.type;
+                    // SPIR-V represents bool in UBOs as uint — detect the
+                    // original bool type from the GLSL source.
+                    if (member.type == GL_UNSIGNED_INT ||
+                        member.type == GL_UNSIGNED_INT_VEC2 ||
+                        member.type == GL_UNSIGNED_INT_VEC3 ||
+                        member.type == GL_UNSIGNED_INT_VEC4) {
+                        GLenum boolType = detectBoolMemberType(
+                            glslSource, block.name, member.name);
+                        if (boolType != 0) {
+                            memberEntry.type = boolType;
+                        }
+                    }
                     memberEntry.location = -1;  // not queryable via glGetUniformLocation
                     memberEntry.offset = static_cast<GLint>(member.offset);
-                    memberEntry.blockIndex = blockIndex;
+                    // Store 0 for non-arrays, N for N-element arrays.
+                    // GL_UNIFORM_SIZE queries return max(arraySize, 1) so
+                    // non-arrays still report size 1.  GL_UNIFORM_ARRAY_STRIDE
+                    // checks arraySize > 0 to decide whether to compute a stride.
+                    memberEntry.arraySize = static_cast<GLint>(member.arraySize);
+                    memberEntry.blockIndex = firstBlockIndex;
                     memberEntry.referencedBy = stageBit;
-                    programObject->resourceBufferVariables.push_back(std::move(memberEntry));
+                    memberEntry.isRowMajor = member.isRowMajor;
+                    programObject->resourceUniforms.push_back(std::move(memberEntry));
+
+                    // Also push into resourceBufferVariables for
+                    // glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...).
+                    GLProgramResourceEntry bvEntry;
+                    bvEntry.name = block.name + "." + member.name;
+                    bvEntry.type = member.type;
+                    bvEntry.location = -1;
+                    bvEntry.offset = static_cast<GLint>(member.offset);
+                    bvEntry.blockIndex = firstBlockIndex;
+                    bvEntry.referencedBy = stageBit;
+                    programObject->resourceBufferVariables.push_back(std::move(bvEntry));
                 }
             }
         };
-        mergeBlocks(programObject->vertexReflection.uniformBlocks, 0x01);    // vertex
-        mergeBlocks(programObject->fragmentReflection.uniformBlocks, 0x02);  // fragment
+        static const std::string emptySource;
+        const std::string& vsSrc = vertexShader ? vertexShader->source : emptySource;
+        const std::string& fsSrc = fragmentShader ? fragmentShader->source : emptySource;
+        mergeBlocks(programObject->vertexReflection.uniformBlocks, 0x01, vsSrc);    // vertex
+        mergeBlocks(programObject->fragmentReflection.uniformBlocks, 0x02, fsSrc);  // fragment
+
+        // Post-pass: fix any remaining uint→bool member types that weren't
+        // detected during the stage that first created the members. This
+        // happens when a linked SPIR-V includes a block in both stages but
+        // the block is only declared in one stage's GLSL source.
+        for (auto& u : programObject->resourceUniforms) {
+            if (u.blockIndex < 0) continue;
+            if (u.type != GL_UNSIGNED_INT && u.type != GL_UNSIGNED_INT_VEC2 &&
+                u.type != GL_UNSIGNED_INT_VEC3 && u.type != GL_UNSIGNED_INT_VEC4) continue;
+            // Find the block name for this uniform.
+            const auto& blockEntry = programObject->resourceUniformBlocks[u.blockIndex];
+            // Strip array suffix from block name for detection.
+            std::string baseName = blockEntry.name;
+            auto bracket = baseName.find('[');
+            if (bracket != std::string::npos) baseName = baseName.substr(0, bracket);
+            // Extract member name: for instanced blocks "Block.member" → "member",
+            // for non-instanced blocks "member" stays as is.
+            std::string memberName = u.name;
+            // Strip trailing "[0]" from arrays
+            if (memberName.size() > 3 && memberName.substr(memberName.size()-3) == "[0]") {
+                memberName = memberName.substr(0, memberName.size()-3);
+            }
+            // For instanced blocks, strip "BlockName." prefix
+            std::string prefix = baseName + ".";
+            if (memberName.size() > prefix.size() &&
+                memberName.substr(0, prefix.size()) == prefix) {
+                memberName = memberName.substr(prefix.size());
+            }
+            // Try both VS and FS sources.
+            GLenum boolType = detectBoolMemberType(vsSrc, baseName, memberName);
+            if (boolType == 0) {
+                boolType = detectBoolMemberType(fsSrc, baseName, memberName);
+            }
+            if (boolType != 0) {
+                u.type = boolType;
+            }
+        }
     }
 
     return true;
@@ -7549,12 +9860,23 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = static_cast<GLint>(object->attachedShaders.size());
             return true;
         case GL_ACTIVE_UNIFORMS:
-            *params = static_cast<GLint>(object->uniforms.size());
+            // GL spec: includes ALL active uniforms (bare + in-block).
+            // resourceUniforms holds both; uniforms only holds bare ones.
+            *params = static_cast<GLint>(
+                object->resourceUniforms.empty()
+                    ? object->uniforms.size()
+                    : object->resourceUniforms.size());
             return true;
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
             std::size_t maxLen = 0;
-            for (const auto& u : object->uniforms) {
-                maxLen = std::max(maxLen, u.name.size() + 1);
+            if (!object->resourceUniforms.empty()) {
+                for (const auto& u : object->resourceUniforms) {
+                    maxLen = std::max(maxLen, u.name.size() + 1);
+                }
+            } else {
+                for (const auto& u : object->uniforms) {
+                    maxLen = std::max(maxLen, u.name.size() + 1);
+                }
             }
             *params = static_cast<GLint>(maxLen);
             return true;
@@ -7570,6 +9892,80 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = static_cast<GLint>(maxLen);
             return true;
         }
+        // Tessellation program queries (GL 4.0).
+        case GL_TESS_CONTROL_OUTPUT_VERTICES:
+            *params = object->tessControlOutputVertices;
+            return true;
+        case GL_TESS_GEN_MODE:
+            *params = static_cast<GLint>(object->tessGenMode);
+            return true;
+        case GL_TESS_GEN_SPACING:
+            *params = static_cast<GLint>(object->tessGenSpacing);
+            return true;
+        case GL_TESS_GEN_VERTEX_ORDER:
+            *params = static_cast<GLint>(object->tessGenVertexOrder);
+            return true;
+        case GL_TESS_GEN_POINT_MODE:
+            *params = static_cast<GLint>(object->tessGenPointMode);
+            return true;
+        // Uniform block queries (GL 3.1+)
+        case GL_ACTIVE_UNIFORM_BLOCKS:
+            *params = static_cast<GLint>(object->resourceUniformBlocks.size());
+            return true;
+        case GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH: {
+            std::size_t maxLen = 0;
+            for (const auto& block : object->resourceUniformBlocks) {
+                maxLen = std::max(maxLen, block.name.size() + 1);
+            }
+            *params = static_cast<GLint>(maxLen);
+            return true;
+        }
+        // Compute shader queries (GL 4.3+)
+        case GL_COMPUTE_WORK_GROUP_SIZE:
+            // Returns 3 values; default to (0,0,0) when no compute shader is attached
+            params[0] = 0;
+            params[1] = 0;
+            params[2] = 0;
+            return true;
+        // Transform feedback queries (GL 3.0+)
+        case GL_TRANSFORM_FEEDBACK_BUFFER_MODE:
+            *params = static_cast<GLint>(object->transformFeedbackBufferMode);
+            return true;
+        case GL_TRANSFORM_FEEDBACK_VARYINGS:
+            *params = static_cast<GLint>(object->transformFeedbackVaryingNames.size());
+            return true;
+        case GL_TRANSFORM_FEEDBACK_VARYING_MAX_LENGTH: {
+            std::size_t maxLen = 0;
+            for (const auto& v : object->transformFeedbackVaryingNames) {
+                maxLen = std::max(maxLen, v.size() + 1);
+            }
+            *params = static_cast<GLint>(maxLen);
+            return true;
+        }
+        // Geometry shader queries (GL 3.2+)
+        case GL_GEOMETRY_VERTICES_OUT:
+            *params = 0;
+            return true;
+        case GL_GEOMETRY_INPUT_TYPE:
+            *params = GL_TRIANGLES;
+            return true;
+        case GL_GEOMETRY_OUTPUT_TYPE:
+            *params = GL_TRIANGLE_STRIP;
+            return true;
+        // Program binary / separable (GL 4.1+)
+        case GL_PROGRAM_BINARY_LENGTH:
+            *params = 0;  // No binary program support
+            return true;
+        case GL_PROGRAM_SEPARABLE:
+            *params = GL_FALSE;
+            return true;
+        case GL_PROGRAM_BINARY_RETRIEVABLE_HINT:
+            *params = GL_FALSE;
+            return true;
+        // Atomic counter buffers (GL 4.2+)
+        case GL_ACTIVE_ATOMIC_COUNTER_BUFFERS:
+            *params = static_cast<GLint>(object->resourceAtomicCounterBuffers.size());
+            return true;
         default:
             pushError(GL_INVALID_ENUM);
             return false;
@@ -7671,6 +10067,36 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
             return uniform.location;
         }
     }
+    // Fallback: try with _appgl_ prefix reverse-mapping.
+    // CompatShaderRewrite renames `sampler` → `_appgl_sampler` for glslang
+    // compat; try the rewritten name if the original wasn't found.
+    {
+        std::string rewritten = lookup;
+        const std::string from = "sampler";
+        const std::string to = "_appgl_sampler";
+        std::string::size_type pos = 0;
+        bool changed = false;
+        while ((pos = rewritten.find(from, pos)) != std::string::npos) {
+            // Word-boundary check: don't replace inside sampler2D etc.
+            bool leftOk = (pos == 0) || !std::isalnum(static_cast<unsigned char>(rewritten[pos - 1])) && rewritten[pos - 1] != '_';
+            std::size_t end = pos + from.size();
+            bool rightOk = (end >= rewritten.size()) || (!std::isalnum(static_cast<unsigned char>(rewritten[end])) && rewritten[end] != '_');
+            if (leftOk && rightOk) {
+                rewritten.replace(pos, from.size(), to);
+                pos += to.size();
+                changed = true;
+            } else {
+                pos += 1;
+            }
+        }
+        if (changed) {
+            for (const auto& uniform : object->uniforms) {
+                if (uniform.name == rewritten) {
+                    return uniform.location;
+                }
+            }
+        }
+    }
     return -1;
 }
 
@@ -7679,6 +10105,23 @@ bool GLContext::getActiveUniform(GLuint program, GLuint index, GLsizei bufSize, 
     if (object == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    // Prefer resourceUniforms (includes UBO members); fall back to bare
+    // uniforms list for programs that never went through SPIRV-Cross.
+    if (!object->resourceUniforms.empty()) {
+        if (index >= static_cast<GLuint>(object->resourceUniforms.size())) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const auto& u = object->resourceUniforms[index];
+        if (size != nullptr) {
+            *size = std::max<GLint>(u.arraySize, 1);
+        }
+        if (type != nullptr) {
+            *type = u.type;
+        }
+        copyStringToBuffer(u.name, bufSize, length, name);
+        return true;
     }
     if (index >= object->uniforms.size()) {
         pushError(GL_INVALID_VALUE);
@@ -7702,10 +10145,63 @@ GLProgramUniformValue* lookupUniformValue(GLProgramObject* program, GLint locati
         return nullptr;
     }
     auto it = program->uniformValues.find(location);
-    if (it == program->uniformValues.end()) {
-        return nullptr;
+    if (it != program->uniformValues.end()) {
+        return &it->second;
     }
-    return &it->second;
+    // Array-element fallback: glUniform1i(loc+k, …) on a uniform declared
+    // with arraySize > 1 hits locations [base+1, base+arraySize). The slot
+    // lives at the base location; find it by walking the uniforms list.
+    for (const auto& u : program->uniforms) {
+        if (u.arraySize > 1 && location > u.location
+            && location < u.location + u.arraySize) {
+            auto base = program->uniformValues.find(u.location);
+            if (base != program->uniformValues.end()) {
+                return &base->second;
+            }
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+
+// Resolve (slot, elementIndex) for a uniform location. elementIndex is the
+// zero-based offset inside the array for array-element locations; 0 for the
+// base location or a non-array uniform. Returns (nullptr, 0) if the location
+// is invalid.
+struct UniformSlotRef {
+    GLProgramUniformValue* slot = nullptr;
+    GLint elementIndex = 0;
+    GLint arraySize = 1;
+    GLenum type = 0;
+};
+
+UniformSlotRef resolveUniformSlot(GLProgramObject* program, GLint location) {
+    UniformSlotRef r;
+    if (program == nullptr || location < 0) {
+        return r;
+    }
+    auto it = program->uniformValues.find(location);
+    if (it != program->uniformValues.end()) {
+        r.slot = &it->second;
+        r.elementIndex = 0;
+        r.arraySize = it->second.arraySize;
+        r.type = it->second.type;
+        return r;
+    }
+    for (const auto& u : program->uniforms) {
+        if (u.arraySize > 1 && location > u.location
+            && location < u.location + u.arraySize) {
+            auto base = program->uniformValues.find(u.location);
+            if (base != program->uniformValues.end()) {
+                r.slot = &base->second;
+                r.elementIndex = location - u.location;
+                r.arraySize = u.arraySize;
+                r.type = u.type;
+            }
+            return r;
+        }
+    }
+    return r;
 }
 
 }  // namespace
@@ -7799,32 +10295,44 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    GLProgramUniformValue* slot = lookupUniformValue(object, location);
-    if (slot == nullptr) {
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    const std::size_t expected = static_cast<std::size_t>(vectorSize) *
-                                 static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    GLProgramUniformValue* slot = ref.slot;
+
+    // Clamp count so writes don't overflow the declared array. GL spec: the
+    // effective update is min(count, arraySize - elementIndex).
+    const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
+    const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
+    const std::size_t components = static_cast<std::size_t>(vectorSize);
+    const std::size_t writeCount = components * static_cast<std::size_t>(effCount);
+    const std::size_t fullCount  = components * static_cast<std::size_t>(std::max<GLint>(ref.arraySize, 1));
+    const std::size_t writeOffset = components * static_cast<std::size_t>(ref.elementIndex);
+
+    auto writeInto = [&](auto& dstVec, auto& otherA, auto& otherB, const auto* src) {
+        using T = typename std::remove_reference<decltype(dstVec)>::type::value_type;
+        // Size the destination to hold the full array; preserve existing
+        // values where possible so per-element writes don't wipe siblings.
+        if (dstVec.size() < fullCount) {
+            dstVec.resize(fullCount, T{});
+        }
+        std::memcpy(dstVec.data() + writeOffset, src, writeCount * sizeof(T));
+        otherA.clear();
+        otherB.clear();
+    };
+
     switch (element) {
-        case UniformElementType::Float: {
-            slot->floats.assign(static_cast<const GLfloat*>(values), static_cast<const GLfloat*>(values) + expected);
-            slot->ints.clear();
-            slot->uints.clear();
+        case UniformElementType::Float:
+            writeInto(slot->floats, slot->ints, slot->uints, static_cast<const GLfloat*>(values));
             break;
-        }
-        case UniformElementType::Int: {
-            slot->ints.assign(static_cast<const GLint*>(values), static_cast<const GLint*>(values) + expected);
-            slot->floats.clear();
-            slot->uints.clear();
+        case UniformElementType::Int:
+            writeInto(slot->ints, slot->floats, slot->uints, static_cast<const GLint*>(values));
             break;
-        }
-        case UniformElementType::UnsignedInt: {
-            slot->uints.assign(static_cast<const GLuint*>(values), static_cast<const GLuint*>(values) + expected);
-            slot->floats.clear();
-            slot->ints.clear();
+        case UniformElementType::UnsignedInt:
+            writeInto(slot->uints, slot->floats, slot->ints, static_cast<const GLuint*>(values));
             break;
-        }
     }
     return true;
 }
@@ -7965,19 +10473,28 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
     if (count < 0 || vectorSize < 1 || vectorSize > 4) { pushError(GL_INVALID_VALUE); return false; }
     GLProgramObject* object = impl_->objects->programs().get(program);
     if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
-    GLProgramUniformValue* slot = lookupUniformValue(object, location);
-    if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
-    const std::size_t expected = static_cast<std::size_t>(vectorSize) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    GLProgramUniformValue* slot = ref.slot;
+    const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
+    const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
+    const std::size_t components = static_cast<std::size_t>(vectorSize);
+    const std::size_t writeCount = components * static_cast<std::size_t>(effCount);
+    const std::size_t fullCount  = components * static_cast<std::size_t>(std::max<GLint>(ref.arraySize, 1));
+    const std::size_t writeOffset = components * static_cast<std::size_t>(ref.elementIndex);
+    auto writeInto = [&](auto& dstVec, auto& otherA, auto& otherB, const auto* src) {
+        using T = typename std::remove_reference<decltype(dstVec)>::type::value_type;
+        if (dstVec.size() < fullCount) dstVec.resize(fullCount, T{});
+        std::memcpy(dstVec.data() + writeOffset, src, writeCount * sizeof(T));
+        otherA.clear(); otherB.clear();
+    };
     switch (element) {
         case UniformElementType::Float:
-            slot->floats.assign(static_cast<const GLfloat*>(values), static_cast<const GLfloat*>(values) + expected);
-            slot->ints.clear(); slot->uints.clear(); break;
+            writeInto(slot->floats, slot->ints, slot->uints, static_cast<const GLfloat*>(values)); break;
         case UniformElementType::Int:
-            slot->ints.assign(static_cast<const GLint*>(values), static_cast<const GLint*>(values) + expected);
-            slot->floats.clear(); slot->uints.clear(); break;
+            writeInto(slot->ints, slot->floats, slot->uints, static_cast<const GLint*>(values)); break;
         case UniformElementType::UnsignedInt:
-            slot->uints.assign(static_cast<const GLuint*>(values), static_cast<const GLuint*>(values) + expected);
-            slot->floats.clear(); slot->ints.clear(); break;
+            writeInto(slot->uints, slot->floats, slot->ints, static_cast<const GLuint*>(values)); break;
     }
     return true;
 }
@@ -8341,6 +10858,16 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.blend.colorMaskG = (gl.colorMask[1] != GL_FALSE);
     tdi.blend.colorMaskB = (gl.colorMask[2] != GL_FALSE);
     tdi.blend.colorMaskA = (gl.colorMask[3] != GL_FALSE);
+
+    // RC-A02: viewport state.
+    const auto& vp = state.viewport();
+    tdi.viewportX = vp.x;
+    tdi.viewportY = vp.y;
+    tdi.viewportWidth = vp.width;
+    tdi.viewportHeight = vp.height;
+    const auto& dr = state.depthRange();
+    tdi.depthRangeNear = dr.nearValue;
+    tdi.depthRangeFar = dr.farValue;
 }
 
 // Phase 8X Group 4d follow-up¹⁴ — VAO → VertexAttributeLayout field
@@ -8480,7 +11007,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // viewport BEFORE we flush the pending clear. Resizing invalidates any
     // unflushed command buffer, so doing it after the clear would drop the
     // clear on the floor and leave the offscreen attachment uninitialized.
-    impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
+    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
     // Flush any pending clear before we start the draw render pass; otherwise
     // the draw would run against an uncleared default attachment.
     impl_->encodePendingWork();
@@ -8488,17 +11015,87 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // Try the translated shader pipeline first (GPU-side vertex processing).
     const GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
-    NSLog(@"[GL] drawArrays: mode=0x%X count=%d program=%u hasTranslated=%d",
-          mode, count, programName, program ? (int)program->hasTranslatedPipeline : -1);
+    APPGL_LOG(DRAW, @"drawArrays: mode=0x%X count=%d program=%u hasTranslated=%d",
+              mode, count, programName, program ? (int)program->hasTranslatedPipeline : -1);
     if (program != nullptr && program->hasTranslatedPipeline) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
         const bool gateEmpty = (vao == nullptr || vao->attributes.empty());
-        if (gateEmpty) {
+        // Attributeless draw path: vertex shader has no vertex inputs
+        // (generates its own vertices via gl_VertexID / [[vertex_id]]).
+        const bool attributelessDraw = (vao != nullptr &&
+            program->vertexReflection.vertexInputs.empty());
+        if (attributelessDraw) {
+            TranslatedDrawInfo tdi;
+            tdi.mode = mode;
+            tdi.vertexCount = count;
+            // No vertex data — shader uses gl_VertexID / [[vertex_id]].
+            tdi.vertexData = nullptr;
+            tdi.vertexDataByteCount = 0;
+            tdi.vertexStride = 0;
+            populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+            tdi.vertexMSL = &program->vertexMSL;
+            tdi.fragmentMSL = &program->fragmentMSL;
+            tdi.vertexReflection = &program->vertexReflection;
+            tdi.fragmentReflection = &program->fragmentReflection;
+            tdi.pipelineStateOut = &program->metalPipelineState;
+            tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+            tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+            tdi.program = programName;
+
+            // Uniform layout (cached).
+            if (!program->uniformLayoutComputed) {
+                computeStageUniformLayout(program->vertexUniformLayout,
+                    program->vertexReflection, program->uniforms);
+                computeStageUniformLayout(program->fragmentUniformLayout,
+                    program->fragmentReflection, program->uniforms);
+                program->uniformLayoutComputed = true;
+            }
+            thread_local std::vector<std::uint8_t> vtxUniformScratch;
+            thread_local std::vector<std::uint8_t> fragUniformScratch;
+            pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+            buildStageUniformBuffer(vtxUniformScratch,
+                program->vertexReflection, program->uniformValues,
+                program->vertexUniformLayout);
+            buildStageUniformBuffer(fragUniformScratch,
+                program->fragmentReflection, program->uniformValues,
+                program->fragmentUniformLayout);
+            tdi.vertexUniformData = vtxUniformScratch.data();
+            tdi.vertexUniformSize = vtxUniformScratch.size();
+            tdi.fragmentUniformData = fragUniformScratch.data();
+            tdi.fragmentUniformSize = fragUniformScratch.size();
+
+            impl_->resolveSamplerBindings(*program, tdi);
+            impl_->resolveUBOBindings(*program, tdi);
+
+            // RC-A02: resolve FBO render target.
+            {
+                GLsizei fboW = 0, fboH = 0;
+                void* fboDSTex = nullptr;
+                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                if (fboColTex != nullptr) {
+                    tdi.fboColorTexture = fboColTex;
+                    tdi.fboDepthStencilTexture = fboDSTex;
+                    tdi.fboWidth = fboW;
+                    tdi.fboHeight = fboH;
+                }
+            }
+
+            thread_local std::string pipelineBuildError;
+            pipelineBuildError.clear();
+            tdi.pipelineBuildErrorOut = &pipelineBuildError;
+
+            const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+            if (ok) {
+                return true;
+            }
+            // Fall through to solid-color path on failure.
+        }
+        if (vao == nullptr) {
             reportTranslatedFallbackOnce(program, programName,
                 TranslatedFallbackGate::EmptyAttributes, "drawArrays",
-                vaoName, vao ? vao->attributes.size() : 0, 0, 0);
+                vaoName, 0, 0, 0);
         }
         if (vao != nullptr && !vao->attributes.empty()) {
             const auto& posAttr = vao->attributes[0];
@@ -8557,25 +11154,76 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
 
-                    // Collect per-attribute layout from the VAO.  All enabled
-                    // attributes whose resolved buffer matches the primary VBO
-                    // go into vertexAttributeLayouts (Metal buffer 0).
+                    // Collect per-attribute layout from the VAO.  Attributes
+                    // sharing the primary VBO AND the primary stride go into
+                    // vertexAttributeLayouts (Metal buffer 0).  Attributes in a
+                    // different VBO or with a different effective stride are
+                    // placed into extraVertexBuffers (Metal buffer 1+) so each
+                    // group gets its own MTLVertexDescriptor layout stride.
                     //
                     // Phase 8X Group 4d follow-up¹⁴ — the VAO fields
                     // (`glType/glComponentCount/glNormalized/glIsInteger`)
                     // are now carried end-to-end so encodeTranslatedDraw
                     // can derive the real MTLVertexFormat from the VBO
                     // layout rather than the shader-reflected scalar type.
+                    //
+                    // The extra-buffer grouping key is (bufferName, stride).
+                    // A helper map collects non-primary groups; after the loop
+                    // each group becomes one ExtraVertexBuffer entry.
+                    struct ExtraGroupKey {
+                        GLuint bufferName;
+                        std::size_t stride;
+                        bool operator==(const ExtraGroupKey& o) const {
+                            return bufferName == o.bufferName && stride == o.stride;
+                        }
+                    };
+                    struct ExtraGroupKeyHash {
+                        std::size_t operator()(const ExtraGroupKey& k) const {
+                            return std::hash<GLuint>()(k.bufferName) ^ (std::hash<std::size_t>()(k.stride) << 16);
+                        }
+                    };
+                    std::unordered_map<ExtraGroupKey, std::size_t, ExtraGroupKeyHash> extraGroupIndex;
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
                         const auto& attr = vao->attributes[ai];
                         if (!attr.enabled) continue;
                         auto attrRes = resolveVertexAttrib(attr, *vao);
-                        if (attrRes.bufferName != resolved.bufferName) continue;
                         TranslatedDrawInfo::VertexAttributeLayout layout;
                         layout.location = static_cast<GLuint>(ai);
-                        layout.offset = attrRes.offset - resolved.offset;
                         populateVertexAttributeLayoutVAOFields(layout, attr);
-                        tdi.vertexAttributeLayouts.push_back(layout);
+
+                        if (attrRes.bufferName == resolved.bufferName &&
+                            attrRes.stride == posStride) {
+                            // Primary group: same VBO + same stride → buffer 0.
+                            layout.offset = attrRes.offset - resolved.offset;
+                            tdi.vertexAttributeLayouts.push_back(layout);
+                        } else {
+                            // Different VBO or different stride → extra buffer.
+                            ExtraGroupKey key{attrRes.bufferName, attrRes.stride};
+                            auto it = extraGroupIndex.find(key);
+                            std::size_t idx;
+                            if (it == extraGroupIndex.end()) {
+                                idx = tdi.extraVertexBuffers.size();
+                                extraGroupIndex[key] = idx;
+                                GLBufferObject* extraVbo =
+                                    impl_->objects->buffers().get(attrRes.bufferName);
+                                TranslatedDrawInfo::ExtraVertexBuffer evb;
+                                evb.stride = attrRes.stride;
+                                evb.divisor = 0;
+                                if (extraVbo != nullptr && !extraVbo->shadowBytes.empty()) {
+                                    const std::size_t extraFirstOff =
+                                        static_cast<std::size_t>(first) * attrRes.stride;
+                                    evb.data = extraVbo->shadowBytes.data();
+                                    evb.byteCount = extraVbo->shadowBytes.size();
+                                    evb.metalBuffer = extraVbo->metalBuffer;
+                                    evb.metalBufferOffset = extraFirstOff;
+                                }
+                                tdi.extraVertexBuffers.push_back(std::move(evb));
+                            } else {
+                                idx = it->second;
+                            }
+                            layout.offset = attrRes.offset;
+                            tdi.extraVertexBuffers[idx].attributes.push_back(layout);
+                        }
                     }
 
                     // OPT-7: compute uniform layout once, reuse every draw.
@@ -8619,6 +11267,20 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // and the fragment shader sampled from an unbound
                     // slot.
                     impl_->resolveSamplerBindings(*program, tdi);
+                    impl_->resolveUBOBindings(*program, tdi);
+
+                    // RC-A02: resolve FBO render target when a user FBO is bound.
+                    {
+                        GLsizei fboW = 0, fboH = 0;
+                        void* fboDSTex = nullptr;
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                        if (fboColTex != nullptr) {
+                            tdi.fboColorTexture = fboColTex;
+                            tdi.fboDepthStencilTexture = fboDSTex;
+                            tdi.fboWidth = fboW;
+                            tdi.fboHeight = fboH;
+                        }
+                    }
 
                     // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
                     // pipeline-build error text plumbed out of the encode-failed
@@ -8701,7 +11363,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
     if (impl_->frameGraph == nullptr) {
         return false;
     }
-    impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
+    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
     impl_->encodePendingWork();
 
     // Translated shader pipeline with instancing.
@@ -8710,11 +11372,71 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
     if (program != nullptr && program->hasTranslatedPipeline) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
-        // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
-        if (vao == nullptr || vao->attributes.empty()) {
+        // Attributeless instanced draw path: vertex shader has no vertex inputs.
+        const bool attributelessInstDraw = (vao != nullptr &&
+            program->vertexReflection.vertexInputs.empty());
+        if (attributelessInstDraw) {
+            TranslatedDrawInfo tdi;
+            tdi.mode = mode;
+            tdi.vertexCount = count;
+            tdi.instanceCount = instancecount;
+            tdi.vertexData = nullptr;
+            tdi.vertexDataByteCount = 0;
+            tdi.vertexStride = 0;
+            populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+            tdi.vertexMSL = &program->vertexMSL;
+            tdi.fragmentMSL = &program->fragmentMSL;
+            tdi.vertexReflection = &program->vertexReflection;
+            tdi.fragmentReflection = &program->fragmentReflection;
+            tdi.pipelineStateOut = &program->metalPipelineState;
+            tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+            tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+            tdi.program = programName;
+            if (!program->uniformLayoutComputed) {
+                computeStageUniformLayout(program->vertexUniformLayout,
+                    program->vertexReflection, program->uniforms);
+                computeStageUniformLayout(program->fragmentUniformLayout,
+                    program->fragmentReflection, program->uniforms);
+                program->uniformLayoutComputed = true;
+            }
+            thread_local std::vector<std::uint8_t> vtxUniformScratch;
+            thread_local std::vector<std::uint8_t> fragUniformScratch;
+            pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+            buildStageUniformBuffer(vtxUniformScratch,
+                program->vertexReflection, program->uniformValues,
+                program->vertexUniformLayout);
+            buildStageUniformBuffer(fragUniformScratch,
+                program->fragmentReflection, program->uniformValues,
+                program->fragmentUniformLayout);
+            tdi.vertexUniformData = vtxUniformScratch.data();
+            tdi.vertexUniformSize = vtxUniformScratch.size();
+            tdi.fragmentUniformData = fragUniformScratch.data();
+            tdi.fragmentUniformSize = fragUniformScratch.size();
+            impl_->resolveSamplerBindings(*program, tdi);
+            impl_->resolveUBOBindings(*program, tdi);
+            {
+                GLsizei fboW = 0, fboH = 0;
+                void* fboDSTex = nullptr;
+                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                if (fboColTex != nullptr) {
+                    tdi.fboColorTexture = fboColTex;
+                    tdi.fboDepthStencilTexture = fboDSTex;
+                    tdi.fboWidth = fboW;
+                    tdi.fboHeight = fboH;
+                }
+            }
+            thread_local std::string pipelineBuildError;
+            pipelineBuildError.clear();
+            tdi.pipelineBuildErrorOut = &pipelineBuildError;
+            const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+            if (ok) {
+                return true;
+            }
+        }
+        if (vao == nullptr) {
             reportTranslatedFallbackOnce(program, programName,
                 TranslatedFallbackGate::EmptyAttributes, "drawArraysInstanced",
-                vaoName, vao ? vao->attributes.size() : 0, 0, 0);
+                vaoName, 0, 0, 0);
         }
         if (vao != nullptr && !vao->attributes.empty()) {
             const auto& posAttr = vao->attributes[0];
@@ -8771,17 +11493,33 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
 
-                    // Gather vertex attributes.  Attributes in the same VBO as
-                    // attribute 0 (per-vertex) go into vertexAttributeLayouts
-                    // (Metal buffer 0).  Attributes in OTHER VBOs (e.g. per-instance
-                    // data with glVertexAttribDivisor) become extraVertexBuffers.
+                    // Gather vertex attributes — group by (VBO, stride, divisor).
+                    // Primary group: same VBO + same stride + divisor=0 → buffer 0.
+                    // Everything else → extraVertexBuffers (buffer 1+).
                     //
                     // Phase 8X Group 4d follow-up¹⁴ — propagate VAO format
                     // fields (`glType/glComponentCount/glNormalized/
                     // glIsInteger`) for both the primary-buffer path and
                     // the extra-buffer path so encodeTranslatedDraw can
                     // derive the real MTLVertexFormat.
-                    std::unordered_map<GLuint, std::size_t> extraBufferMap;
+                    struct InstGroupKey {
+                        GLuint bufferName;
+                        std::size_t stride;
+                        GLuint divisor;
+                        bool operator==(const InstGroupKey& o) const {
+                            return bufferName == o.bufferName
+                                && stride == o.stride
+                                && divisor == o.divisor;
+                        }
+                    };
+                    struct InstGroupKeyHash {
+                        std::size_t operator()(const InstGroupKey& k) const {
+                            return std::hash<GLuint>()(k.bufferName)
+                                 ^ (std::hash<std::size_t>()(k.stride) << 16)
+                                 ^ (std::hash<GLuint>()(k.divisor) << 24);
+                        }
+                    };
+                    std::unordered_map<InstGroupKey, std::size_t, InstGroupKeyHash> extraBufferMap;
 
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
                         const auto& attr = vao->attributes[ai];
@@ -8794,41 +11532,41 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                                 : attr.divisor)
                             : attr.divisor;
 
-                        if (attrRes.bufferName == resolved.bufferName && attrDivisor == 0) {
-                            // Same VBO as primary, per-vertex — buffer 0.
-                            TranslatedDrawInfo::VertexAttributeLayout layout;
-                            layout.location = static_cast<GLuint>(ai);
+                        TranslatedDrawInfo::VertexAttributeLayout layout;
+                        layout.location = static_cast<GLuint>(ai);
+                        populateVertexAttributeLayoutVAOFields(layout, attr);
+
+                        if (attrRes.bufferName == resolved.bufferName
+                            && attrRes.stride == posStride
+                            && attrDivisor == 0) {
+                            // Same VBO + same stride + per-vertex → buffer 0.
                             layout.offset = attrRes.offset - resolved.offset;
-                            populateVertexAttributeLayoutVAOFields(layout, attr);
                             tdi.vertexAttributeLayouts.push_back(layout);
-                        } else if (attrRes.bufferName != resolved.bufferName) {
-                            // Different VBO — group by GL buffer name.
+                        } else {
                             GLBufferObject* extraVbo = impl_->objects->buffers().get(attrRes.bufferName);
                             if (extraVbo == nullptr || extraVbo->shadowBytes.empty()) continue;
 
-                            auto it = extraBufferMap.find(attrRes.bufferName);
+                            InstGroupKey key{attrRes.bufferName, attrRes.stride, attrDivisor};
+                            auto it = extraBufferMap.find(key);
                             std::size_t idx;
                             if (it == extraBufferMap.end()) {
                                 idx = tdi.extraVertexBuffers.size();
-                                extraBufferMap[attrRes.bufferName] = idx;
+                                extraBufferMap[key] = idx;
 
                                 TranslatedDrawInfo::ExtraVertexBuffer evb;
                                 evb.data = extraVbo->shadowBytes.data();
                                 evb.byteCount = extraVbo->shadowBytes.size();
                                 evb.stride = attrRes.stride;
                                 evb.divisor = attrDivisor;
-                                // OPT-5: direct Metal buffer for extra VBOs.
                                 evb.metalBuffer = extraVbo->metalBuffer;
-                                evb.metalBufferOffset = 0;
+                                evb.metalBufferOffset =
+                                    static_cast<std::size_t>(first) * attrRes.stride;
                                 tdi.extraVertexBuffers.push_back(std::move(evb));
                             } else {
                                 idx = it->second;
                             }
 
-                            TranslatedDrawInfo::VertexAttributeLayout layout;
-                            layout.location = static_cast<GLuint>(ai);
                             layout.offset = attrRes.offset;
-                            populateVertexAttributeLayoutVAOFields(layout, attr);
                             tdi.extraVertexBuffers[idx].attributes.push_back(layout);
                         }
                     }
@@ -8862,6 +11600,20 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // drawArrays for rationale; the instanced draw path
                     // needs identical sampler resolution.
                     impl_->resolveSamplerBindings(*program, tdi);
+                    impl_->resolveUBOBindings(*program, tdi);
+
+                    // RC-A02: resolve FBO render target.
+                    {
+                        GLsizei fboW = 0, fboH = 0;
+                        void* fboDSTex = nullptr;
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                        if (fboColTex != nullptr) {
+                            tdi.fboColorTexture = fboColTex;
+                            tdi.fboDepthStencilTexture = fboDSTex;
+                            tdi.fboWidth = fboW;
+                            tdi.fboHeight = fboH;
+                        }
+                    }
 
                     // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
                     // pipeline-build error text plumbed out of the encode-failed
@@ -8918,7 +11670,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     }
     // Size the drawable before flushing the clear — see glDrawArrays for the
     // rationale.
-    impl_->frameGraph->resizeDrawable(impl_->viewportWidth, impl_->viewportHeight);
+    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
     impl_->encodePendingWork();
 
     // Resolve element buffer early — needed by both translated and solid paths.
@@ -8948,18 +11700,33 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
 
     // GL_UNSIGNED_BYTE is not supported natively by Metal; expandElementIndices
     // promotes to GL_UNSIGNED_SHORT. For UINT16/UINT32 we can pass through.
-    std::vector<std::uint8_t> expanded;
+    //
+    // ADV-10: cache the expanded index buffer on the GLBufferObject so
+    // repeated drawElements calls with the same element buffer don't
+    // re-allocate and re-widen on every draw.  The cache covers the
+    // entire shadowBytes range (not per-offset subsets) and is
+    // invalidated when the buffer data changes via glBufferData /
+    // glBufferSubData (generation counter bump).
     GLenum effectiveType = type;
     const void* effectivePtr = indexPtr;
     if (elementIndexTypeNeedsExpansion(type)) {
-        IndexExpansionResult result = expandElementIndices(count, type, indexPtr);
-        if (!result.ok) {
-            pushError(result.error);
-            return false;
+        // Rebuild cache if stale or absent.
+        if (elementBuffer->cachedExpansionGeneration != elementBuffer->indexExpansionGeneration
+            || elementBuffer->cachedExpandedIndices.empty()) {
+            const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
+            IndexExpansionResult result = expandElementIndices(
+                totalIndices, type, elementBuffer->shadowBytes.data());
+            if (!result.ok) {
+                pushError(result.error);
+                return false;
+            }
+            elementBuffer->cachedExpandedIndices = std::move(result.bytes);
+            elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
         }
-        expanded = std::move(result.bytes);
-        effectiveType = result.outputType;
-        effectivePtr = expanded.data();
+        effectiveType = GL_UNSIGNED_SHORT;
+        // Recompute offset: each source byte becomes 2 bytes (uint16).
+        const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
+        effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
     }
 
     // Try the translated shader pipeline first (GPU-side vertex processing).
@@ -9011,7 +11778,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.indexType = effectiveType;
                     // OPT-5: pass Metal index buffer when indices weren't
                     // expanded (UINT16/UINT32 pass-through from element VBO).
-                    if (expanded.empty() && elementBuffer->metalBuffer != nullptr) {
+                    // ADV-10: use the type check instead of the old local vector.
+                    if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
@@ -9034,21 +11802,65 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     // correctness impact; zero is a valid placeholder.
                     tdi.program = programName;
 
-                    // Collect per-attribute layout from the VAO.
+                    // Collect per-attribute layout from the VAO — group
+                    // by (VBO, stride) so attributes with different strides
+                    // get separate Metal buffer indices.
                     //
                     // Phase 8X Group 4d follow-up¹⁴ — propagate VAO
                     // format fields so encodeTranslatedDraw derives
                     // the real MTLVertexFormat from the VBO layout.
-                    for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
-                        const auto& attr = vao->attributes[ai];
-                        if (!attr.enabled) continue;
-                        auto attrRes = resolveVertexAttrib(attr, *vao);
-                        if (attrRes.bufferName != resolved.bufferName) continue;
-                        TranslatedDrawInfo::VertexAttributeLayout layout;
-                        layout.location = static_cast<GLuint>(ai);
-                        layout.offset = attrRes.offset - resolved.offset;
-                        populateVertexAttributeLayoutVAOFields(layout, attr);
-                        tdi.vertexAttributeLayouts.push_back(layout);
+                    {
+                        struct DEGroupKey {
+                            GLuint bufferName;
+                            std::size_t stride;
+                            bool operator==(const DEGroupKey& o) const {
+                                return bufferName == o.bufferName && stride == o.stride;
+                            }
+                        };
+                        struct DEGroupKeyHash {
+                            std::size_t operator()(const DEGroupKey& k) const {
+                                return std::hash<GLuint>()(k.bufferName)
+                                     ^ (std::hash<std::size_t>()(k.stride) << 16);
+                            }
+                        };
+                        std::unordered_map<DEGroupKey, std::size_t, DEGroupKeyHash> deExtraMap;
+                        for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                            const auto& attr = vao->attributes[ai];
+                            if (!attr.enabled) continue;
+                            auto attrRes = resolveVertexAttrib(attr, *vao);
+                            TranslatedDrawInfo::VertexAttributeLayout layout;
+                            layout.location = static_cast<GLuint>(ai);
+                            populateVertexAttributeLayoutVAOFields(layout, attr);
+                            if (attrRes.bufferName == resolved.bufferName
+                                && attrRes.stride == posStride) {
+                                layout.offset = attrRes.offset - resolved.offset;
+                                tdi.vertexAttributeLayouts.push_back(layout);
+                            } else {
+                                GLBufferObject* extraVbo =
+                                    impl_->objects->buffers().get(attrRes.bufferName);
+                                if (extraVbo == nullptr || extraVbo->shadowBytes.empty())
+                                    continue;
+                                DEGroupKey key{attrRes.bufferName, attrRes.stride};
+                                auto it = deExtraMap.find(key);
+                                std::size_t idx;
+                                if (it == deExtraMap.end()) {
+                                    idx = tdi.extraVertexBuffers.size();
+                                    deExtraMap[key] = idx;
+                                    TranslatedDrawInfo::ExtraVertexBuffer evb;
+                                    evb.data = extraVbo->shadowBytes.data();
+                                    evb.byteCount = extraVbo->shadowBytes.size();
+                                    evb.stride = attrRes.stride;
+                                    evb.divisor = 0;
+                                    evb.metalBuffer = extraVbo->metalBuffer;
+                                    evb.metalBufferOffset = 0;
+                                    tdi.extraVertexBuffers.push_back(std::move(evb));
+                                } else {
+                                    idx = it->second;
+                                }
+                                layout.offset = attrRes.offset;
+                                tdi.extraVertexBuffers[idx].attributes.push_back(layout);
+                            }
+                        }
                     }
 
                     // OPT-7: compute uniform layout once, reuse every draw.
@@ -9062,8 +11874,6 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
 
                     thread_local std::vector<std::uint8_t> vtxUniformScratch;
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
-                    // Push synthesized fixed-function matrix uniforms (compat
-                    // shader path). Early-out for the common core-profile case.
                     pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
                     buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniformValues,
@@ -9076,11 +11886,21 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     tdi.fragmentUniformData = fragUniformScratch.data();
                     tdi.fragmentUniformSize = fragUniformScratch.size();
 
-                    // Phase 8X Group 4d follow-up⁷ — see matching comment in
-                    // drawArrays for rationale; drawElements needs identical
-                    // sampler resolution. BAR's select-menu glyph draws
-                    // arrive on this path (indexed quads).
                     impl_->resolveSamplerBindings(*program, tdi);
+                    impl_->resolveUBOBindings(*program, tdi);
+
+                    // RC-A02: resolve FBO render target.
+                    {
+                        GLsizei fboW = 0, fboH = 0;
+                        void* fboDSTex = nullptr;
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                        if (fboColTex != nullptr) {
+                            tdi.fboColorTexture = fboColTex;
+                            tdi.fboDepthStencilTexture = fboDSTex;
+                            tdi.fboWidth = fboW;
+                            tdi.fboHeight = fboH;
+                        }
+                    }
 
                     // Phase 8X Group 4d follow-up⁴ — scratch buffer for the
                     // pipeline-build error text plumbed out of the encode-failed
@@ -9135,6 +11955,562 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         );
     }
     return ok;
+}
+
+// ---------------------------------------------------------------------------
+// GL 3.2 — Base-vertex indexed drawing (ARB_draw_elements_base_vertex)
+// ---------------------------------------------------------------------------
+
+bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex) {
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (count == 0) {
+        return true;
+    }
+    if (!isSupportedElementIndexType(type)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!impl_->state->validateForDraw()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    if (impl_->frameGraph == nullptr) {
+        return false;
+    }
+    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
+    impl_->encodePendingWork();
+
+    // Resolve element buffer — same as drawElements.
+    const GLuint vaoName = impl_->state->boundVertexArray();
+    GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+    if (vao == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const GLuint elementBufferName = vao->elementArrayBuffer;
+    if (elementBufferName == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLBufferObject* elementBuffer = impl_->objects->buffers().get(elementBufferName);
+    if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    const std::size_t indexOffset = reinterpret_cast<std::uintptr_t>(indices);
+    if (indexOffset > elementBuffer->shadowBytes.size()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
+
+    // Handle GL_UNSIGNED_BYTE expansion (same as drawElements).
+    GLenum effectiveType = type;
+    const void* effectivePtr = indexPtr;
+    if (elementIndexTypeNeedsExpansion(type)) {
+        if (elementBuffer->cachedExpansionGeneration != elementBuffer->indexExpansionGeneration
+            || elementBuffer->cachedExpandedIndices.empty()) {
+            const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
+            IndexExpansionResult result = expandElementIndices(
+                totalIndices, type, elementBuffer->shadowBytes.data());
+            if (!result.ok) {
+                pushError(result.error);
+                return false;
+            }
+            elementBuffer->cachedExpandedIndices = std::move(result.bytes);
+            elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+        }
+        effectiveType = GL_UNSIGNED_SHORT;
+        const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
+        effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+    }
+
+    // Try translated shader pipeline first.
+    const GLuint programName = impl_->state->currentProgram();
+    GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+    if (program != nullptr && program->hasTranslatedPipeline) {
+        if (vao->attributes.empty()) {
+            reportTranslatedFallbackOnce(program, programName,
+                TranslatedFallbackGate::EmptyAttributes, "drawElementsBaseVertex",
+                vaoName, 0, 0, 0);
+        }
+        if (!vao->attributes.empty()) {
+            const auto& posAttr = vao->attributes[0];
+            auto resolved = resolveVertexAttrib(posAttr, *vao);
+            GLBufferObject* vbo = (resolved.bufferName != 0)
+                ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
+            if (vbo == nullptr) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::NullVBO, "drawElementsBaseVertex",
+                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+            } else if (vbo->shadowBytes.empty()) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::ShadowBytesEmpty, "drawElementsBaseVertex",
+                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+            }
+            if (vbo != nullptr && !vbo->shadowBytes.empty()) {
+                const std::size_t posStride = resolved.stride;
+                const std::size_t startOff = resolved.offset;
+
+                if (startOff > vbo->shadowBytes.size()) {
+                    reportTranslatedFallbackOnce(program, programName,
+                        TranslatedFallbackGate::OffsetOverflow, "drawElementsBaseVertex",
+                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vbo->shadowBytes.size());
+                }
+                if (startOff <= vbo->shadowBytes.size()) {
+                    TranslatedDrawInfo tdi;
+                    tdi.mode = mode;
+                    tdi.vertexCount = count;
+                    tdi.baseVertex = basevertex;
+                    tdi.vertexData = vbo->shadowBytes.data() + startOff;
+                    tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
+                    tdi.vertexStride = posStride;
+                    tdi.metalVertexBuffer = vbo->metalBuffer;
+                    tdi.metalVertexBufferOffset = startOff;
+                    tdi.indices = effectivePtr;
+                    tdi.indexCount = count;
+                    tdi.indexType = effectiveType;
+                    if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
+                        tdi.metalIndexBuffer = elementBuffer->metalBuffer;
+                        tdi.metalIndexBufferOffset = indexOffset;
+                    }
+                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+                    tdi.vertexMSL = &program->vertexMSL;
+                    tdi.fragmentMSL = &program->fragmentMSL;
+                    tdi.vertexReflection = &program->vertexReflection;
+                    tdi.fragmentReflection = &program->fragmentReflection;
+                    tdi.pipelineStateOut = &program->metalPipelineState;
+                    tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                    tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.program = programName;
+
+                    for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                        const auto& attr = vao->attributes[ai];
+                        if (!attr.enabled) continue;
+                        auto attrRes = resolveVertexAttrib(attr, *vao);
+                        if (attrRes.bufferName != resolved.bufferName) continue;
+                        TranslatedDrawInfo::VertexAttributeLayout layout;
+                        layout.location = static_cast<GLuint>(ai);
+                        layout.offset = attrRes.offset - resolved.offset;
+                        populateVertexAttributeLayoutVAOFields(layout, attr);
+                        tdi.vertexAttributeLayouts.push_back(layout);
+                    }
+
+                    if (!program->uniformLayoutComputed) {
+                        computeStageUniformLayout(program->vertexUniformLayout,
+                            program->vertexReflection, program->uniforms);
+                        computeStageUniformLayout(program->fragmentUniformLayout,
+                            program->fragmentReflection, program->uniforms);
+                        program->uniformLayoutComputed = true;
+                    }
+
+                    thread_local std::vector<std::uint8_t> vtxUniformScratch;
+                    thread_local std::vector<std::uint8_t> fragUniformScratch;
+                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+                    buildStageUniformBuffer(vtxUniformScratch,
+                        program->vertexReflection, program->uniformValues,
+                        program->vertexUniformLayout);
+                    buildStageUniformBuffer(fragUniformScratch,
+                        program->fragmentReflection, program->uniformValues,
+                        program->fragmentUniformLayout);
+                    tdi.vertexUniformData = vtxUniformScratch.data();
+                    tdi.vertexUniformSize = vtxUniformScratch.size();
+                    tdi.fragmentUniformData = fragUniformScratch.data();
+                    tdi.fragmentUniformSize = fragUniformScratch.size();
+
+                    impl_->resolveSamplerBindings(*program, tdi);
+                    impl_->resolveUBOBindings(*program, tdi);
+
+                    // RC-A02: resolve FBO render target.
+                    {
+                        GLsizei fboW = 0, fboH = 0;
+                        void* fboDSTex = nullptr;
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                        if (fboColTex != nullptr) {
+                            tdi.fboColorTexture = fboColTex;
+                            tdi.fboDepthStencilTexture = fboDSTex;
+                            tdi.fboWidth = fboW;
+                            tdi.fboHeight = fboH;
+                        }
+                    }
+
+                    thread_local std::string pipelineBuildError;
+                    pipelineBuildError.clear();
+                    tdi.pipelineBuildErrorOut = &pipelineBuildError;
+
+                    const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+                    if (ok) {
+                        return true;
+                    }
+                    if (reportTranslatedFallbackOnce(program, programName,
+                            TranslatedFallbackGate::EncodeFailed, "drawElementsBaseVertex",
+                            vaoName, vao->attributes.size(), resolved.bufferName,
+                            vbo->shadowBytes.size())) {
+                        recordPipelineBuildFailureOnce(program, programName, pipelineBuildError);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: solid-color draw path.
+    SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawElementsBaseVertex");
+    if (!setup.ok) {
+        emitDebugMessage(
+            GL_DEBUG_SOURCE_API,
+            GL_DEBUG_TYPE_OTHER,
+            0,
+            GL_DEBUG_SEVERITY_LOW,
+            "glDrawElementsBaseVertex: draw skipped (no translated pipeline and solid-color path unsupported)"
+        );
+        return false;
+    }
+
+    setup.info.vertexCount = count;
+    setup.info.baseVertex = basevertex;
+    setup.info.indices = effectivePtr;
+    setup.info.indexCount = count;
+    setup.info.indexType = effectiveType;
+
+    const bool solidOk = impl_->frameGraph->encodeSolidColorDraw(setup.info);
+    if (!solidOk) {
+        emitDebugMessage(
+            GL_DEBUG_SOURCE_API,
+            GL_DEBUG_TYPE_ERROR,
+            0,
+            GL_DEBUG_SEVERITY_HIGH,
+            "glDrawElementsBaseVertex: MetalFrameGraph failed to encode draw"
+        );
+    }
+    return solidOk;
+}
+
+bool GLContext::drawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices, GLint basevertex) {
+    // Per the GL spec, start/end are range hints only. The spec says we MAY
+    // use them for validation but MUST NOT reject draws where indices fall
+    // outside [start, end]. We validate the basic constraints and delegate
+    // to drawElementsBaseVertex for the actual draw.
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (end < start) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    return drawElementsBaseVertex(mode, count, type, indices, basevertex);
+}
+
+bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex) {
+    if (count < 0 || instancecount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (count == 0 || instancecount == 0) {
+        return true;
+    }
+    if (!isSupportedElementIndexType(type)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!impl_->state->validateForDraw()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    if (impl_->frameGraph == nullptr) {
+        return false;
+    }
+    impl_->frameGraph->resizeDrawable(impl_->drawableSurfaceWidth(), impl_->drawableSurfaceHeight());
+    impl_->encodePendingWork();
+
+    // Resolve element buffer.
+    const GLuint vaoName = impl_->state->boundVertexArray();
+    GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+    if (vao == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const GLuint elementBufferName = vao->elementArrayBuffer;
+    if (elementBufferName == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLBufferObject* elementBuffer = impl_->objects->buffers().get(elementBufferName);
+    if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    const std::size_t indexOffset = reinterpret_cast<std::uintptr_t>(indices);
+    if (indexOffset > elementBuffer->shadowBytes.size()) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
+
+    GLenum effectiveType = type;
+    const void* effectivePtr = indexPtr;
+    if (elementIndexTypeNeedsExpansion(type)) {
+        if (elementBuffer->cachedExpansionGeneration != elementBuffer->indexExpansionGeneration
+            || elementBuffer->cachedExpandedIndices.empty()) {
+            const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
+            IndexExpansionResult result = expandElementIndices(
+                totalIndices, type, elementBuffer->shadowBytes.data());
+            if (!result.ok) {
+                pushError(result.error);
+                return false;
+            }
+            elementBuffer->cachedExpandedIndices = std::move(result.bytes);
+            elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+        }
+        effectiveType = GL_UNSIGNED_SHORT;
+        const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
+        effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+    }
+
+    // Try translated shader pipeline first.
+    const GLuint programName = impl_->state->currentProgram();
+    GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+    if (program != nullptr && program->hasTranslatedPipeline) {
+        if (vao->attributes.empty()) {
+            reportTranslatedFallbackOnce(program, programName,
+                TranslatedFallbackGate::EmptyAttributes, "drawElementsInstancedBaseVertex",
+                vaoName, 0, 0, 0);
+        }
+        if (!vao->attributes.empty()) {
+            const auto& posAttr = vao->attributes[0];
+            auto resolved = resolveVertexAttrib(posAttr, *vao);
+            GLBufferObject* vbo = (resolved.bufferName != 0)
+                ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
+            if (vbo == nullptr) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::NullVBO, "drawElementsInstancedBaseVertex",
+                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+            } else if (vbo->shadowBytes.empty()) {
+                reportTranslatedFallbackOnce(program, programName,
+                    TranslatedFallbackGate::ShadowBytesEmpty, "drawElementsInstancedBaseVertex",
+                    vaoName, vao->attributes.size(), resolved.bufferName, 0);
+            }
+            if (vbo != nullptr && !vbo->shadowBytes.empty()) {
+                const std::size_t posStride = resolved.stride;
+                const std::size_t startOff = resolved.offset;
+
+                if (startOff > vbo->shadowBytes.size()) {
+                    reportTranslatedFallbackOnce(program, programName,
+                        TranslatedFallbackGate::OffsetOverflow, "drawElementsInstancedBaseVertex",
+                        vaoName, vao->attributes.size(), resolved.bufferName,
+                        vbo->shadowBytes.size());
+                }
+                if (startOff <= vbo->shadowBytes.size()) {
+                    TranslatedDrawInfo tdi;
+                    tdi.mode = mode;
+                    tdi.vertexCount = count;
+                    tdi.baseVertex = basevertex;
+                    tdi.instanceCount = instancecount;
+                    tdi.vertexData = vbo->shadowBytes.data() + startOff;
+                    tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
+                    tdi.vertexStride = posStride;
+                    tdi.metalVertexBuffer = vbo->metalBuffer;
+                    tdi.metalVertexBufferOffset = startOff;
+                    tdi.indices = effectivePtr;
+                    tdi.indexCount = count;
+                    tdi.indexType = effectiveType;
+                    if (!elementIndexTypeNeedsExpansion(type) && elementBuffer->metalBuffer != nullptr) {
+                        tdi.metalIndexBuffer = elementBuffer->metalBuffer;
+                        tdi.metalIndexBufferOffset = indexOffset;
+                    }
+                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+                    tdi.vertexMSL = &program->vertexMSL;
+                    tdi.fragmentMSL = &program->fragmentMSL;
+                    tdi.vertexReflection = &program->vertexReflection;
+                    tdi.fragmentReflection = &program->fragmentReflection;
+                    tdi.pipelineStateOut = &program->metalPipelineState;
+                    tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+                    tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.program = programName;
+
+                    // Gather vertex attributes — group by (VBO, stride, divisor).
+                    // Primary group: same VBO + same stride + divisor=0 → buffer 0.
+                    // Everything else → extraVertexBuffers (buffer 1+).
+                    struct DrawElemGroupKey {
+                        GLuint bufferName;
+                        std::size_t stride;
+                        GLuint divisor;
+                        bool operator==(const DrawElemGroupKey& o) const {
+                            return bufferName == o.bufferName
+                                && stride == o.stride
+                                && divisor == o.divisor;
+                        }
+                    };
+                    struct DrawElemGroupKeyHash {
+                        std::size_t operator()(const DrawElemGroupKey& k) const {
+                            return std::hash<GLuint>()(k.bufferName)
+                                 ^ (std::hash<std::size_t>()(k.stride) << 16)
+                                 ^ (std::hash<GLuint>()(k.divisor) << 24);
+                        }
+                    };
+                    std::unordered_map<DrawElemGroupKey, std::size_t, DrawElemGroupKeyHash> extraBufferMap;
+
+                    for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                        const auto& attr = vao->attributes[ai];
+                        if (!attr.enabled) continue;
+
+                        auto attrRes = resolveVertexAttrib(attr, *vao);
+                        GLuint attrDivisor = attr.useSeparatedFormat
+                            ? (attr.bindingIndex < vao->bindingPoints.size()
+                                ? vao->bindingPoints[attr.bindingIndex].divisor
+                                : attr.divisor)
+                            : attr.divisor;
+
+                        TranslatedDrawInfo::VertexAttributeLayout layout;
+                        layout.location = static_cast<GLuint>(ai);
+                        populateVertexAttributeLayoutVAOFields(layout, attr);
+
+                        if (attrRes.bufferName == resolved.bufferName
+                            && attrRes.stride == posStride
+                            && attrDivisor == 0) {
+                            layout.offset = attrRes.offset - resolved.offset;
+                            tdi.vertexAttributeLayouts.push_back(layout);
+                        } else {
+                            GLBufferObject* extraVbo = impl_->objects->buffers().get(attrRes.bufferName);
+                            if (extraVbo == nullptr || extraVbo->shadowBytes.empty()) continue;
+
+                            DrawElemGroupKey key{attrRes.bufferName, attrRes.stride, attrDivisor};
+                            auto it = extraBufferMap.find(key);
+                            std::size_t idx;
+                            if (it == extraBufferMap.end()) {
+                                idx = tdi.extraVertexBuffers.size();
+                                extraBufferMap[key] = idx;
+
+                                TranslatedDrawInfo::ExtraVertexBuffer evb;
+                                evb.data = extraVbo->shadowBytes.data();
+                                evb.byteCount = extraVbo->shadowBytes.size();
+                                evb.stride = attrRes.stride;
+                                evb.divisor = attrDivisor;
+                                evb.metalBuffer = extraVbo->metalBuffer;
+                                evb.metalBufferOffset = 0;
+                                tdi.extraVertexBuffers.push_back(std::move(evb));
+                            } else {
+                                idx = it->second;
+                            }
+
+                            layout.offset = attrRes.offset;
+                            tdi.extraVertexBuffers[idx].attributes.push_back(layout);
+                        }
+                    }
+
+                    if (!program->uniformLayoutComputed) {
+                        computeStageUniformLayout(program->vertexUniformLayout,
+                            program->vertexReflection, program->uniforms);
+                        computeStageUniformLayout(program->fragmentUniformLayout,
+                            program->fragmentReflection, program->uniforms);
+                        program->uniformLayoutComputed = true;
+                    }
+
+                    thread_local std::vector<std::uint8_t> vtxUniformScratch;
+                    thread_local std::vector<std::uint8_t> fragUniformScratch;
+                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+                    buildStageUniformBuffer(vtxUniformScratch,
+                        program->vertexReflection, program->uniformValues,
+                        program->vertexUniformLayout);
+                    buildStageUniformBuffer(fragUniformScratch,
+                        program->fragmentReflection, program->uniformValues,
+                        program->fragmentUniformLayout);
+                    tdi.vertexUniformData = vtxUniformScratch.data();
+                    tdi.vertexUniformSize = vtxUniformScratch.size();
+                    tdi.fragmentUniformData = fragUniformScratch.data();
+                    tdi.fragmentUniformSize = fragUniformScratch.size();
+
+                    impl_->resolveSamplerBindings(*program, tdi);
+                    impl_->resolveUBOBindings(*program, tdi);
+
+                    // RC-A02: resolve FBO render target.
+                    {
+                        GLsizei fboW = 0, fboH = 0;
+                        void* fboDSTex = nullptr;
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                        if (fboColTex != nullptr) {
+                            tdi.fboColorTexture = fboColTex;
+                            tdi.fboDepthStencilTexture = fboDSTex;
+                            tdi.fboWidth = fboW;
+                            tdi.fboHeight = fboH;
+                        }
+                    }
+
+                    thread_local std::string pipelineBuildError;
+                    pipelineBuildError.clear();
+                    tdi.pipelineBuildErrorOut = &pipelineBuildError;
+
+                    const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+                    if (ok) {
+                        return true;
+                    }
+                    if (reportTranslatedFallbackOnce(program, programName,
+                            TranslatedFallbackGate::EncodeFailed, "drawElementsInstancedBaseVertex",
+                            vaoName, vao->attributes.size(), resolved.bufferName,
+                            vbo->shadowBytes.size())) {
+                        recordPipelineBuildFailureOnce(program, programName, pipelineBuildError);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: solid-color draw path (no instancing support in solid-color).
+    SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawElementsInstancedBaseVertex");
+    if (!setup.ok) {
+        emitDebugMessage(
+            GL_DEBUG_SOURCE_API,
+            GL_DEBUG_TYPE_OTHER,
+            0,
+            GL_DEBUG_SEVERITY_LOW,
+            "glDrawElementsInstancedBaseVertex: draw skipped (no translated pipeline and solid-color path unsupported)"
+        );
+        return false;
+    }
+
+    setup.info.vertexCount = count;
+    setup.info.baseVertex = basevertex;
+    setup.info.indices = effectivePtr;
+    setup.info.indexCount = count;
+    setup.info.indexType = effectiveType;
+
+    const bool solidOk = impl_->frameGraph->encodeSolidColorDraw(setup.info);
+    if (!solidOk) {
+        emitDebugMessage(
+            GL_DEBUG_SOURCE_API,
+            GL_DEBUG_TYPE_ERROR,
+            0,
+            GL_DEBUG_SEVERITY_HIGH,
+            "glDrawElementsInstancedBaseVertex: MetalFrameGraph failed to encode draw"
+        );
+    }
+    return solidOk;
+}
+
+bool GLContext::multiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices, GLsizei drawcount, const GLint* basevertex) {
+    if (drawcount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!isSupportedElementIndexType(type)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    // Multi-draw decomposes into individual draws per the GL spec.
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        if (count[i] > 0) {
+            drawElementsBaseVertex(mode, count[i], type, indices[i], basevertex[i]);
+        }
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -9342,13 +12718,15 @@ namespace {
 
 const std::vector<GLProgramResourceEntry>* getResourceTable(const GLProgramObject& prog, GLenum programInterface) {
     switch (programInterface) {
-        case GL_UNIFORM:                return &prog.resourceUniforms;
-        case GL_UNIFORM_BLOCK:          return &prog.resourceUniformBlocks;
-        case GL_PROGRAM_INPUT:          return &prog.resourceInputs;
-        case GL_PROGRAM_OUTPUT:         return &prog.resourceOutputs;
-        case GL_SHADER_STORAGE_BLOCK:   return &prog.resourceStorageBlocks;
-        case GL_ATOMIC_COUNTER_BUFFER:  return &prog.resourceAtomicCounterBuffers;
-        case GL_BUFFER_VARIABLE:        return &prog.resourceBufferVariables;
+        case GL_UNIFORM:                      return &prog.resourceUniforms;
+        case GL_UNIFORM_BLOCK:                return &prog.resourceUniformBlocks;
+        case GL_PROGRAM_INPUT:                return &prog.resourceInputs;
+        case GL_PROGRAM_OUTPUT:               return &prog.resourceOutputs;
+        case GL_SHADER_STORAGE_BLOCK:         return &prog.resourceStorageBlocks;
+        case GL_ATOMIC_COUNTER_BUFFER:        return &prog.resourceAtomicCounterBuffers;
+        case GL_BUFFER_VARIABLE:              return &prog.resourceBufferVariables;
+        case GL_TRANSFORM_FEEDBACK_VARYING:   return &prog.resourceTransformFeedbackVaryings;
+        case GL_TRANSFORM_FEEDBACK_BUFFER:    return &prog.resourceTransformFeedbackBuffers;
         default: return nullptr;
     }
 }
@@ -9367,7 +12745,7 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
         case GL_REFERENCED_BY_GEOMETRY_SHADER: return GL_FALSE;
         case GL_REFERENCED_BY_TESS_CONTROL_SHADER: return GL_FALSE;
         case GL_REFERENCED_BY_TESS_EVALUATION_SHADER: return GL_FALSE;
-        case GL_BUFFER_BINDING:    return entry.location;
+        case GL_BUFFER_BINDING:    return entry.binding >= 0 ? entry.binding : entry.location;
         case GL_BUFFER_DATA_SIZE:  return 0;
         case GL_NUM_ACTIVE_VARIABLES: return 0;
         case GL_ACTIVE_VARIABLES:  return 0;
@@ -9605,7 +12983,9 @@ bool GLContext::drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GL
     if (count == 0 || instancecount == 0) {
         return true;
     }
-    return true;
+    // Delegate to the instanced+baseVertex path; baseinstance is ignored for now
+    // (requires MTLGPUFamily Apple3+ for non-zero base instance).
+    return drawElementsInstancedBaseVertex(mode, count, type, indices, instancecount, 0);
 }
 
 bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance) {
@@ -9619,6 +12999,47 @@ bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei
     }
     if (count == 0 || instancecount == 0) {
         return true;
+    }
+    // Delegate to the instanced+baseVertex path; baseinstance is ignored for now
+    // (requires MTLGPUFamily Apple3+ for non-zero base instance).
+    return drawElementsInstancedBaseVertex(mode, count, type, indices, instancecount, basevertex);
+}
+
+// ---------------------------------------------------------------------------
+// GL 4.0/4.3 — Indirect Draw Helpers
+// ---------------------------------------------------------------------------
+
+GLuint GLContext::getBoundVertexArray() const {
+    return impl_->state->boundVertexArray();
+}
+
+bool GLContext::readIndirectBuffer(GLenum target, const void* indirect, std::size_t size, void* out) {
+    const GLuint bufName = impl_->state->boundBuffer(target);
+    if (bufName != 0) {
+        // `indirect` is a byte offset into the bound buffer.
+        const auto offset = reinterpret_cast<uintptr_t>(indirect);
+        GLBufferObject* buf = impl_->objects->buffers().get(bufName);
+        if (buf == nullptr || !buf->instantiated) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (offset + size > static_cast<std::size_t>(buf->size)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (buf->shadowBytes.size() >= offset + size) {
+            std::memcpy(out, buf->shadowBytes.data() + offset, size);
+        } else {
+            // Shadow copy not available — zero-fill as a safe fallback.
+            std::memset(out, 0, size);
+        }
+    } else {
+        // No buffer bound — `indirect` is a client pointer.
+        if (indirect == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        std::memcpy(out, indirect, size);
     }
     return true;
 }
@@ -9636,8 +13057,40 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    // Stub: accepts parameters. Each draw command in the indirect buffer is a
-    // DrawArraysIndirectCommand (count, instanceCount, first, baseInstance).
+    // Core profile: drawing with default VAO (0) is INVALID_OPERATION.
+    if (impl_->state->boundVertexArray() == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // Offset into the indirect buffer must be 4-byte aligned.
+    if (reinterpret_cast<uintptr_t>(indirect) % 4 != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // DrawArraysIndirectCommand layout: { count, instanceCount, first, baseInstance }
+    struct DrawArraysIndirectCommand {
+        GLuint count;
+        GLuint instanceCount;
+        GLuint first;
+        GLuint baseInstance;
+    };
+    const GLsizei effectiveStride = (stride == 0) ? static_cast<GLsizei>(sizeof(DrawArraysIndirectCommand)) : stride;
+
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        const void* cmdPtr = reinterpret_cast<const void*>(
+            reinterpret_cast<uintptr_t>(indirect) + static_cast<uintptr_t>(i) * static_cast<uintptr_t>(effectiveStride));
+        DrawArraysIndirectCommand cmd{};
+        if (!readIndirectBuffer(GL_DRAW_INDIRECT_BUFFER, cmdPtr, sizeof(cmd), &cmd)) {
+            return false;
+        }
+        if (cmd.count == 0 || cmd.instanceCount == 0) {
+            continue;  // valid no-op for this sub-draw
+        }
+        drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
+                                        static_cast<GLsizei>(cmd.count),
+                                        static_cast<GLsizei>(cmd.instanceCount),
+                                        cmd.baseInstance);
+    }
     return true;
 }
 
@@ -9653,6 +13106,45 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
     if (stride != 0 && stride < 20) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    // Core profile: drawing with default VAO (0) is INVALID_OPERATION.
+    if (impl_->state->boundVertexArray() == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // Offset into the indirect buffer must be 4-byte aligned.
+    if (reinterpret_cast<uintptr_t>(indirect) % 4 != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // DrawElementsIndirectCommand layout: { count, instanceCount, firstIndex, baseVertex, baseInstance }
+    struct DrawElementsIndirectCommand {
+        GLuint count;
+        GLuint instanceCount;
+        GLuint firstIndex;
+        GLuint baseVertex;
+        GLuint baseInstance;
+    };
+    const GLsizei effectiveStride = (stride == 0) ? static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand)) : stride;
+    const GLsizei indexSize = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_SHORT) ? 2 : 1;
+
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        const void* cmdPtr = reinterpret_cast<const void*>(
+            reinterpret_cast<uintptr_t>(indirect) + static_cast<uintptr_t>(i) * static_cast<uintptr_t>(effectiveStride));
+        DrawElementsIndirectCommand cmd{};
+        if (!readIndirectBuffer(GL_DRAW_INDIRECT_BUFFER, cmdPtr, sizeof(cmd), &cmd)) {
+            return false;
+        }
+        if (cmd.count == 0 || cmd.instanceCount == 0) {
+            continue;
+        }
+        const void* indexOffset = reinterpret_cast<const void*>(
+            static_cast<uintptr_t>(cmd.firstIndex) * static_cast<uintptr_t>(indexSize));
+        drawElementsInstancedBaseVertexBaseInstance(mode,
+            static_cast<GLsizei>(cmd.count), type, indexOffset,
+            static_cast<GLsizei>(cmd.instanceCount),
+            static_cast<GLint>(cmd.baseVertex),
+            cmd.baseInstance);
     }
     return true;
 }
@@ -9854,9 +13346,204 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    // Stub: actual Metal blit encoder copy will be wired when texture Metal
-    // objects are fully instantiated at upload time.
-    warnBypassOnce("copyImageSubData", dstIsTex ? dstName : 0);
+    // No-op for zero-sized copies.
+    if (srcWidth == 0 || srcHeight == 0 || srcDepth == 0) return true;
+
+    // -----------------------------------------------------------------------
+    // Resolve source image shadow buffer, dimensions, and bytes-per-pixel.
+    // -----------------------------------------------------------------------
+    const std::uint8_t* srcPixels = nullptr;
+    GLsizei srcImgW = 0, srcImgH = 0;
+    std::size_t srcBpp = 4; // RGBA8 default
+
+    if (srcIsTex) {
+        GLTextureObject* srcTex = impl_->objects->textures().get(srcName);
+        if (!srcTex) { pushError(GL_INVALID_VALUE); return false; }
+        auto it = srcTex->levels.find(srcLevel);
+        if (it == srcTex->levels.end() || !it->second.defined) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const GLTextureImageLevel& srcImg = it->second;
+        srcImgW = srcImg.desc.width;
+        srcImgH = srcImg.desc.height;
+        // Prefer native data if available, else fall back to rgba8.
+        if (srcImg.nativeBpp > 0 && !srcImg.nativeData.empty()) {
+            srcPixels = srcImg.nativeData.data();
+            srcBpp = srcImg.nativeBpp;
+        } else if (!srcImg.rgba8.empty()) {
+            srcPixels = srcImg.rgba8.data();
+            srcBpp = 4;
+        }
+    } else {
+        GLRenderbufferObject* srcRB = impl_->objects->renderbuffers().get(srcName);
+        if (!srcRB || !srcRB->storageDefined) { pushError(GL_INVALID_VALUE); return false; }
+        srcImgW = srcRB->width;
+        srcImgH = srcRB->height;
+        if (!srcRB->rgba8.empty()) {
+            srcPixels = srcRB->rgba8.data();
+            srcBpp = 4;
+        }
+    }
+
+    if (srcPixels == nullptr) {
+        // Source has no CPU-side shadow data — nothing to copy.
+        return true;
+    }
+
+    // Bounds check source region.
+    if (srcX < 0 || srcY < 0 || srcZ < 0 ||
+        srcX + srcWidth > srcImgW || srcY + srcHeight > srcImgH) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    // -----------------------------------------------------------------------
+    // Resolve destination image shadow buffer.
+    // -----------------------------------------------------------------------
+    std::uint8_t* dstPixels = nullptr;
+    GLsizei dstImgW = 0, dstImgH = 0;
+    std::size_t dstBpp = 4;
+
+    // We need a writable pointer and the ability to invalidate the Metal texture.
+    GLTextureObject* dstTex = nullptr;
+    GLRenderbufferObject* dstRB = nullptr;
+    GLTextureImageLevel* dstImg = nullptr;
+
+    if (dstIsTex) {
+        dstTex = impl_->objects->textures().get(dstName);
+        if (!dstTex) { pushError(GL_INVALID_VALUE); return false; }
+        auto it = dstTex->levels.find(dstLevel);
+        if (it == dstTex->levels.end()) {
+            // Level not defined — create it on the fly with same dims as source.
+            GLTextureImageLevel newLevel;
+            newLevel.desc.width = srcImgW;
+            newLevel.desc.height = srcImgH;
+            newLevel.desc.depth = 1;
+            newLevel.defined = true;
+            auto ins = dstTex->levels.emplace(dstLevel, std::move(newLevel));
+            it = ins.first;
+        }
+        dstImg = &it->second;
+        if (!dstImg->defined) {
+            // Allocate matching storage if level was created by texStorage but not yet texImage'd.
+            dstImg->defined = true;
+        }
+        dstImgW = dstImg->desc.width;
+        dstImgH = dstImg->desc.height;
+
+        // Ensure the destination rgba8 buffer is large enough.
+        const std::size_t totalPixels = static_cast<std::size_t>(dstImgW) * dstImgH;
+        if (dstImg->nativeBpp > 0 && !dstImg->nativeData.empty()) {
+            dstPixels = dstImg->nativeData.data();
+            dstBpp = dstImg->nativeBpp;
+        } else {
+            if (dstImg->rgba8.size() < totalPixels * 4) {
+                dstImg->rgba8.resize(totalPixels * 4, 0);
+            }
+            dstPixels = dstImg->rgba8.data();
+            dstBpp = 4;
+        }
+    } else {
+        dstRB = impl_->objects->renderbuffers().get(dstName);
+        if (!dstRB || !dstRB->storageDefined) { pushError(GL_INVALID_VALUE); return false; }
+        dstImgW = dstRB->width;
+        dstImgH = dstRB->height;
+        const std::size_t totalPixels = static_cast<std::size_t>(dstImgW) * dstImgH;
+        if (dstRB->rgba8.size() < totalPixels * 4) {
+            dstRB->rgba8.resize(totalPixels * 4, 0);
+        }
+        dstPixels = dstRB->rgba8.data();
+        dstBpp = 4;
+    }
+
+    // Bounds check destination region.
+    if (dstX < 0 || dstY < 0 || dstZ < 0 ||
+        dstX + srcWidth > dstImgW || dstY + srcHeight > dstImgH) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    // -----------------------------------------------------------------------
+    // Perform the pixel copy — row-by-row within each depth slice.
+    // -----------------------------------------------------------------------
+    // When bpp matches between source and destination, do a direct memcpy per row.
+    // When bpp differs (e.g. native R8 → RGBA8), we need to convert; for now,
+    // use the rgba8 path as the common denominator.
+    if (srcBpp == dstBpp) {
+        const std::size_t srcRowBytes = static_cast<std::size_t>(srcImgW) * srcBpp;
+        const std::size_t dstRowBytes = static_cast<std::size_t>(dstImgW) * dstBpp;
+        const std::size_t srcSliceBytes = srcRowBytes * static_cast<std::size_t>(srcImgH);
+        const std::size_t dstSliceBytes = dstRowBytes * static_cast<std::size_t>(dstImgH);
+        const std::size_t copyRowBytes = static_cast<std::size_t>(srcWidth) * srcBpp;
+
+        for (GLsizei z = 0; z < srcDepth; ++z) {
+            const std::size_t srcSliceOff = static_cast<std::size_t>(srcZ + z) * srcSliceBytes;
+            const std::size_t dstSliceOff = static_cast<std::size_t>(dstZ + z) * dstSliceBytes;
+            for (GLsizei row = 0; row < srcHeight; ++row) {
+                const std::size_t srcOff = srcSliceOff
+                                         + static_cast<std::size_t>(srcY + row) * srcRowBytes
+                                         + static_cast<std::size_t>(srcX) * srcBpp;
+                const std::size_t dstOff = dstSliceOff
+                                         + static_cast<std::size_t>(dstY + row) * dstRowBytes
+                                         + static_cast<std::size_t>(dstX) * dstBpp;
+                std::memcpy(dstPixels + dstOff, srcPixels + srcOff, copyRowBytes);
+            }
+        }
+    } else {
+        // Mismatched bpp — fall back to rgba8 shadow for both src and dst.
+        // Re-resolve using rgba8 for both sides.
+        const std::uint8_t* srcRGBA = nullptr;
+        std::uint8_t* dstRGBA = nullptr;
+
+        if (srcIsTex) {
+            GLTextureObject* srcTex = impl_->objects->textures().get(srcName);
+            auto it = srcTex->levels.find(srcLevel);
+            if (it != srcTex->levels.end() && !it->second.rgba8.empty()) {
+                srcRGBA = it->second.rgba8.data();
+            }
+        } else {
+            GLRenderbufferObject* srcRB = impl_->objects->renderbuffers().get(srcName);
+            if (srcRB && !srcRB->rgba8.empty()) srcRGBA = srcRB->rgba8.data();
+        }
+
+        if (dstImg && !dstImg->rgba8.empty()) {
+            dstRGBA = dstImg->rgba8.data();
+        } else if (dstRB && !dstRB->rgba8.empty()) {
+            dstRGBA = dstRB->rgba8.data();
+        }
+
+        if (srcRGBA && dstRGBA) {
+            const std::size_t srcRow4 = static_cast<std::size_t>(srcImgW) * 4;
+            const std::size_t dstRow4 = static_cast<std::size_t>(dstImgW) * 4;
+            const std::size_t srcSlice4 = srcRow4 * static_cast<std::size_t>(srcImgH);
+            const std::size_t dstSlice4 = dstRow4 * static_cast<std::size_t>(dstImgH);
+            const std::size_t copyRow4 = static_cast<std::size_t>(srcWidth) * 4;
+            for (GLsizei z = 0; z < srcDepth; ++z) {
+                const std::size_t sSliceOff = static_cast<std::size_t>(srcZ + z) * srcSlice4;
+                const std::size_t dSliceOff = static_cast<std::size_t>(dstZ + z) * dstSlice4;
+                for (GLsizei row = 0; row < srcHeight; ++row) {
+                    const std::size_t sOff = sSliceOff + static_cast<std::size_t>(srcY + row) * srcRow4 + static_cast<std::size_t>(srcX) * 4;
+                    const std::size_t dOff = dSliceOff + static_cast<std::size_t>(dstY + row) * dstRow4 + static_cast<std::size_t>(dstX) * 4;
+                    std::memcpy(dstRGBA + dOff, srcRGBA + sOff, copyRow4);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Invalidate the destination Metal texture so it will be re-uploaded.
+    // We null out metalTexture rather than just flipping `instantiated`
+    // because bindTexture re-sets instantiated=true before any subsequent
+    // read, which would otherwise mask the pending re-upload.
+    // -----------------------------------------------------------------------
+    if (dstTex) {
+        releaseRetainedMetalObject(dstTex->metalTexture);
+        dstTex->metalTexture = nullptr;
+    }
+    if (dstRB) {
+        dstRB->instantiated = false;
+    }
     return true;
 }
 
@@ -9938,16 +13625,9 @@ bool GLContext::drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (stream > 0) {
-        // Metal doesn't support multiple TF streams.
-        pushError(GL_INVALID_VALUE);
-        return false;
-    }
-    GLTransformFeedbackObject* tfObj = impl_->objects->transformFeedbacks().get(id);
-    if (tfObj == nullptr) {
-        pushError(GL_INVALID_VALUE);
-        return false;
-    }
+    // Validation of id, stream, and mode is done in the AppGLRuntime wrapper.
+    // Stub: 0 captured primitives.
+    (void)mode; (void)id; (void)stream;
     return true;
 }
 
@@ -10110,9 +13790,50 @@ bool GLContext::bufferStorage(GLenum target, GLsizeiptr size, const void* data, 
 // GL 4.4 — Multi-bind.
 // ---------------------------------------------------------------------------
 
+static bool isIndexedBufferTarget(GLenum target) {
+    switch (target) {
+        case GL_ATOMIC_COUNTER_BUFFER:
+        case GL_TRANSFORM_FEEDBACK_BUFFER:
+        case GL_UNIFORM_BUFFER:
+        case GL_SHADER_STORAGE_BUFFER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+namespace {
+GLint64 queryLimit(const GLCapabilities* caps, GLenum pname, GLint64 fallback) {
+    GLint64 value = fallback;
+    if (caps != nullptr) {
+        caps->queryInteger64(pname, &value);
+    }
+    return value;
+}
+
+GLenum indexedBufferMaxPname(GLenum target) {
+    switch (target) {
+        case GL_UNIFORM_BUFFER:           return GL_MAX_UNIFORM_BUFFER_BINDINGS;
+        case GL_SHADER_STORAGE_BUFFER:    return GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS;
+        case GL_ATOMIC_COUNTER_BUFFER:    return GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS;
+        case GL_TRANSFORM_FEEDBACK_BUFFER: return GL_MAX_TRANSFORM_FEEDBACK_BUFFERS;
+        default: return 0;
+    }
+}
+}  // namespace
+
 bool GLContext::bindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers) {
+    if (!isIndexedBufferTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLint64 maxBindings = queryLimit(impl_->capabilities.get(), indexedBufferMaxPname(target), 0);
+    if (static_cast<GLint64>(first) + static_cast<GLint64>(count) > maxBindings) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
     for (GLsizei i = 0; i < count; ++i) {
@@ -10124,8 +13845,17 @@ bool GLContext::bindBuffersBase(GLenum target, GLuint first, GLsizei count, cons
 
 bool GLContext::bindBuffersRange(GLenum target, GLuint first, GLsizei count, const GLuint* buffers,
                                  const GLintptr* offsets, const GLsizeiptr* sizes) {
+    if (!isIndexedBufferTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLint64 maxBindings = queryLimit(impl_->capabilities.get(), indexedBufferMaxPname(target), 0);
+    if (static_cast<GLint64>(first) + static_cast<GLint64>(count) > maxBindings) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
     for (GLsizei i = 0; i < count; ++i) {
@@ -10143,6 +13873,11 @@ bool GLContext::bindVertexBuffers(GLuint first, GLsizei count, const GLuint* buf
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    const GLint64 maxBindings = queryLimit(impl_->capabilities.get(), GL_MAX_VERTEX_ATTRIB_BINDINGS, 16);
+    if (static_cast<GLint64>(first) + static_cast<GLint64>(count) > maxBindings) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     for (GLsizei i = 0; i < count; ++i) {
         GLuint buf = buffers ? buffers[i] : 0;
         GLintptr offset = (buffers && offsets) ? offsets[i] : 0;
@@ -10155,6 +13890,11 @@ bool GLContext::bindVertexBuffers(GLuint first, GLsizei count, const GLuint* buf
 bool GLContext::bindTextures(GLuint first, GLsizei count, const GLuint* textures) {
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLint64 maxUnits = queryLimit(impl_->capabilities.get(), GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, 80);
+    if (static_cast<GLint64>(first) + static_cast<GLint64>(count) > maxUnits) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
     for (GLsizei i = 0; i < count; ++i) {
@@ -10178,6 +13918,11 @@ bool GLContext::bindSamplers(GLuint first, GLsizei count, const GLuint* samplers
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    const GLint64 maxUnits = queryLimit(impl_->capabilities.get(), GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, 80);
+    if (static_cast<GLint64>(first) + static_cast<GLint64>(count) > maxUnits) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     for (GLsizei i = 0; i < count; ++i) {
         GLuint sampler = samplers ? samplers[i] : 0;
         bindSampler(first + static_cast<GLuint>(i), sampler);
@@ -10188,6 +13933,11 @@ bool GLContext::bindSamplers(GLuint first, GLsizei count, const GLuint* samplers
 bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* textures) {
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLint64 maxUnits = queryLimit(impl_->capabilities.get(), GL_MAX_IMAGE_UNITS, 8);
+    if (static_cast<GLint64>(first) + static_cast<GLint64>(count) > maxUnits) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
     for (GLsizei i = 0; i < count; ++i) {
@@ -10214,18 +13964,40 @@ bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // If level is -1 or data is null, clear all defined levels to zero.
+    if (level < 0) {
+        for (auto& [lvl, img] : tex->levels) {
+            if (img.defined) {
+                std::fill(img.rgba8.begin(), img.rgba8.end(), 0);
+            }
+        }
+        return true;
+    }
     auto it = tex->levels.find(level);
     if (it != tex->levels.end() && it->second.defined) {
         // Clear all texels to the provided value (or zero).
         std::fill(it->second.rgba8.begin(), it->second.rgba8.end(), 0);
         if (data) {
-            // Simplified: interpret first 4 bytes of clear data as RGBA8.
-            const auto* src = static_cast<const std::uint8_t*>(data);
-            std::size_t texelSize = 4;
+            // Convert clear color to RGBA8 based on format and type.
+            std::uint8_t clearRGBA[4] = {0, 0, 0, 255};
+            const std::size_t components = componentCountForFormat(format);
+            if (components > 0 && components <= 4) {
+                for (std::size_t c = 0; c < components && c < 4; ++c) {
+                    clearRGBA[c] = Impl::readComponentAsU8(
+                        static_cast<const std::uint8_t*>(data), type, c);
+                }
+                // If only 1-3 components, fill alpha to 255
+                if (components < 4) clearRGBA[3] = 255;
+            }
+            const std::size_t texelSize = 4;
             for (std::size_t j = 0; j + texelSize <= it->second.rgba8.size(); j += texelSize) {
-                std::memcpy(&it->second.rgba8[j], src, texelSize);
+                std::memcpy(&it->second.rgba8[j], clearRGBA, texelSize);
             }
         }
+    }
+    // Also upload the updated data to Metal
+    if (it != tex->levels.end() && it->second.defined && tex->metalTexture != nullptr) {
+        impl_->replaceMetalTexture(*tex);
     }
     return true;
 }
@@ -10254,6 +14026,8 @@ bool GLContext::createBuffers(GLsizei n, GLuint* buffers) {
     if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
     for (GLsizei i = 0; i < n; ++i) {
         buffers[i] = impl_->objects->buffers().reserveName();
+        auto* obj = impl_->objects->buffers().get(buffers[i]);
+        if (obj) obj->instantiated = true;
     }
     return true;
 }
@@ -10262,9 +14036,12 @@ bool GLContext::createTextures(GLenum target, GLsizei n, GLuint* textures) {
     if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
     for (GLsizei i = 0; i < n; ++i) {
         textures[i] = impl_->objects->textures().reserveName();
-        // DSA textures know their target from creation.
+        // DSA textures know their target from creation and are immediately usable.
         auto* obj = impl_->objects->textures().get(textures[i]);
-        if (obj) obj->target = target;
+        if (obj) {
+            obj->target = target;
+            obj->instantiated = true;
+        }
     }
     return true;
 }
@@ -10281,6 +14058,8 @@ bool GLContext::createFramebuffers(GLsizei n, GLuint* framebuffers) {
     if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
     for (GLsizei i = 0; i < n; ++i) {
         framebuffers[i] = impl_->objects->framebuffers().reserveName();
+        auto* obj = impl_->objects->framebuffers().get(framebuffers[i]);
+        if (obj) obj->instantiated = true;
     }
     return true;
 }
@@ -10289,6 +14068,8 @@ bool GLContext::createRenderbuffers(GLsizei n, GLuint* renderbuffers) {
     if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
     for (GLsizei i = 0; i < n; ++i) {
         renderbuffers[i] = impl_->objects->renderbuffers().reserveName();
+        auto* obj = impl_->objects->renderbuffers().get(renderbuffers[i]);
+        if (obj) obj->instantiated = true;
     }
     return true;
 }
@@ -10520,7 +14301,7 @@ bool GLContext::textureStorage2D(GLuint texture, GLsizei levels, GLenum internal
 
 bool GLContext::textureStorage3D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth) {
     DSA_TEX_WRAP(texture, {
-        bool ok = texStorage(GL_TEXTURE_3D, levels, internalformat, width, height, depth);
+        bool ok = texStorage(_target, levels, internalformat, width, height, depth);
         return ok;
     })
 }
@@ -10555,7 +14336,7 @@ bool GLContext::textureSubImage2D(GLuint texture, GLint level, GLint xoffset, GL
 
 bool GLContext::textureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels) {
     DSA_TEX_WRAP(texture, {
-        bool ok = texSubImage(GL_TEXTURE_3D, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
+        bool ok = texSubImage(_target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
         return ok;
     })
 }
@@ -10726,8 +14507,415 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
 bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)level; (void)format; (void)type; (void)bufSize; (void)pixels;
-    // Texture readback accepted — deferred to Metal readback path.
+    if (!obj->instantiated || obj->metalTexture == nullptr) {
+        // Re-upload shadow data to Metal texture (e.g. after copyImageSubData).
+        if (!obj->levels.empty()) {
+            impl_->replaceMetalTexture(*obj, texture);
+        }
+        if (!obj->instantiated || obj->metalTexture == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+    if (pixels == nullptr) return true;
+
+    const std::size_t dstComponents = componentCountForFormat(format);
+    const bool typeIsPacked = isPackedPixelType(type);
+    const std::size_t dstBpc = bytesPerComponent(type);
+    const std::size_t dstPixelBytes = bytesPerPixel(format, type);
+    if (dstComponents == 0 || dstPixelBytes == 0) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+
+    // Flush the GPU — the texture may have been rendered to and the data
+    // won't be CPU-visible until the command buffer completes.
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushForReadback();
+    }
+
+    id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
+    NSUInteger mipLevel = static_cast<NSUInteger>(level);
+    NSUInteger texWidth  = std::max<NSUInteger>(metalTex.width  >> mipLevel, 1);
+    NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+
+    // Determine source bytes-per-pixel from the Metal pixel format.
+    MTLPixelFormat pf = metalTex.pixelFormat;
+    NSUInteger srcBpp = 0;
+    NSUInteger srcComponents = 0;
+    enum class SrcType { Float32, Float16, UNorm8, SNorm8, UNorm16, SNorm16, UInt8, SInt8, UInt16, SInt16, UInt32, SInt32 };
+    SrcType srcType = SrcType::UNorm8;
+
+    switch (pf) {
+        case MTLPixelFormatR32Float:       srcBpp = 4;  srcComponents = 1; srcType = SrcType::Float32; break;
+        case MTLPixelFormatRG32Float:      srcBpp = 8;  srcComponents = 2; srcType = SrcType::Float32; break;
+        case MTLPixelFormatRGBA32Float:    srcBpp = 16; srcComponents = 4; srcType = SrcType::Float32; break;
+        case MTLPixelFormatR16Float:       srcBpp = 2;  srcComponents = 1; srcType = SrcType::Float16; break;
+        case MTLPixelFormatRG16Float:      srcBpp = 4;  srcComponents = 2; srcType = SrcType::Float16; break;
+        case MTLPixelFormatRGBA16Float:    srcBpp = 8;  srcComponents = 4; srcType = SrcType::Float16; break;
+        case MTLPixelFormatR8Unorm:        srcBpp = 1;  srcComponents = 1; srcType = SrcType::UNorm8; break;
+        case MTLPixelFormatRG8Unorm:       srcBpp = 2;  srcComponents = 2; srcType = SrcType::UNorm8; break;
+        case MTLPixelFormatRGBA8Unorm:     srcBpp = 4;  srcComponents = 4; srcType = SrcType::UNorm8; break;
+        case MTLPixelFormatBGRA8Unorm:     srcBpp = 4;  srcComponents = 4; srcType = SrcType::UNorm8; break;
+        case MTLPixelFormatR8Snorm:        srcBpp = 1;  srcComponents = 1; srcType = SrcType::SNorm8; break;
+        case MTLPixelFormatRG8Snorm:       srcBpp = 2;  srcComponents = 2; srcType = SrcType::SNorm8; break;
+        case MTLPixelFormatRGBA8Snorm:     srcBpp = 4;  srcComponents = 4; srcType = SrcType::SNorm8; break;
+        case MTLPixelFormatR16Unorm:       srcBpp = 2;  srcComponents = 1; srcType = SrcType::UNorm16; break;
+        case MTLPixelFormatRG16Unorm:      srcBpp = 4;  srcComponents = 2; srcType = SrcType::UNorm16; break;
+        case MTLPixelFormatRGBA16Unorm:    srcBpp = 8;  srcComponents = 4; srcType = SrcType::UNorm16; break;
+        case MTLPixelFormatR16Snorm:       srcBpp = 2;  srcComponents = 1; srcType = SrcType::SNorm16; break;
+        case MTLPixelFormatRG16Snorm:      srcBpp = 4;  srcComponents = 2; srcType = SrcType::SNorm16; break;
+        case MTLPixelFormatRGBA16Snorm:    srcBpp = 8;  srcComponents = 4; srcType = SrcType::SNorm16; break;
+        case MTLPixelFormatR8Uint:         srcBpp = 1;  srcComponents = 1; srcType = SrcType::UInt8; break;
+        case MTLPixelFormatRG8Uint:        srcBpp = 2;  srcComponents = 2; srcType = SrcType::UInt8; break;
+        case MTLPixelFormatRGBA8Uint:      srcBpp = 4;  srcComponents = 4; srcType = SrcType::UInt8; break;
+        case MTLPixelFormatR8Sint:         srcBpp = 1;  srcComponents = 1; srcType = SrcType::SInt8; break;
+        case MTLPixelFormatRG8Sint:        srcBpp = 2;  srcComponents = 2; srcType = SrcType::SInt8; break;
+        case MTLPixelFormatRGBA8Sint:      srcBpp = 4;  srcComponents = 4; srcType = SrcType::SInt8; break;
+        case MTLPixelFormatR16Uint:        srcBpp = 2;  srcComponents = 1; srcType = SrcType::UInt16; break;
+        case MTLPixelFormatRG16Uint:       srcBpp = 4;  srcComponents = 2; srcType = SrcType::UInt16; break;
+        case MTLPixelFormatRGBA16Uint:     srcBpp = 8;  srcComponents = 4; srcType = SrcType::UInt16; break;
+        case MTLPixelFormatR16Sint:        srcBpp = 2;  srcComponents = 1; srcType = SrcType::SInt16; break;
+        case MTLPixelFormatRG16Sint:       srcBpp = 4;  srcComponents = 2; srcType = SrcType::SInt16; break;
+        case MTLPixelFormatRGBA16Sint:     srcBpp = 8;  srcComponents = 4; srcType = SrcType::SInt16; break;
+        case MTLPixelFormatR32Uint:        srcBpp = 4;  srcComponents = 1; srcType = SrcType::UInt32; break;
+        case MTLPixelFormatRG32Uint:       srcBpp = 8;  srcComponents = 2; srcType = SrcType::UInt32; break;
+        case MTLPixelFormatRGBA32Uint:     srcBpp = 16; srcComponents = 4; srcType = SrcType::UInt32; break;
+        case MTLPixelFormatR32Sint:        srcBpp = 4;  srcComponents = 1; srcType = SrcType::SInt32; break;
+        case MTLPixelFormatRG32Sint:       srcBpp = 8;  srcComponents = 2; srcType = SrcType::SInt32; break;
+        case MTLPixelFormatRGBA32Sint:     srcBpp = 16; srcComponents = 4; srcType = SrcType::SInt32; break;
+        default:
+            // Unsupported Metal pixel format for readback.
+            pushError(GL_INVALID_OPERATION);
+            return false;
+    }
+
+    // Determine how many slices we need to read — 2D arrays use
+    // arrayLength, 3D textures use depth at this mip. Everything else
+    // is single-slice.
+    MTLTextureType textureType = metalTex.textureType;
+    NSUInteger numSlices = 1;
+    bool is3D = false;
+    bool isArray = false;
+    if (textureType == MTLTextureType3D) {
+        numSlices = std::max<NSUInteger>(metalTex.depth >> mipLevel, 1);
+        is3D = true;
+    } else if (textureType == MTLTextureType2DArray) {
+        numSlices = metalTex.arrayLength;
+        isArray = true;
+    }
+
+    // Check that the destination buffer is large enough.
+    const std::size_t dstRowBytes = texWidth * dstPixelBytes;
+    const std::size_t dstSliceBytes = dstRowBytes * texHeight;
+    const std::size_t dstTotalBytes = dstSliceBytes * numSlices;
+    if (bufSize > 0 && static_cast<std::size_t>(bufSize) < dstTotalBytes) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    // Read raw bytes from the Metal texture (all slices into a contiguous buffer).
+    const NSUInteger bytesPerRow = texWidth * srcBpp;
+    const NSUInteger bytesPerImage = bytesPerRow * texHeight;
+    const std::size_t totalBytes = static_cast<std::size_t>(bytesPerImage)
+                                 * static_cast<std::size_t>(numSlices);
+    std::vector<std::uint8_t> raw(totalBytes);
+    if (is3D) {
+        MTLRegion region = MTLRegionMake3D(0, 0, 0, texWidth, texHeight, numSlices);
+        [metalTex getBytes:raw.data()
+               bytesPerRow:bytesPerRow
+             bytesPerImage:bytesPerImage
+                fromRegion:region
+               mipmapLevel:mipLevel
+                     slice:0];
+    } else if (isArray) {
+        MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
+        for (NSUInteger s = 0; s < numSlices; ++s) {
+            [metalTex getBytes:raw.data() + s * bytesPerImage
+                   bytesPerRow:bytesPerRow
+                 bytesPerImage:bytesPerImage
+                    fromRegion:region
+                   mipmapLevel:mipLevel
+                         slice:s];
+        }
+    } else {
+        MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
+        [metalTex getBytes:raw.data()
+               bytesPerRow:bytesPerRow
+                fromRegion:region
+               mipmapLevel:mipLevel];
+    }
+
+    // Helper: read one source component as a double.
+    const bool isBGRA = (pf == MTLPixelFormatBGRA8Unorm);
+    auto readSrcComponent = [&](const std::uint8_t* srcPixel, NSUInteger comp) -> double {
+        switch (srcType) {
+            case SrcType::Float32: {
+                float v; std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v);
+            }
+            case SrcType::Float16: {
+                std::uint16_t h; std::memcpy(&h, srcPixel + comp * 2, 2);
+                std::uint32_t sign = (h >> 15) & 1;
+                std::uint32_t exp  = (h >> 10) & 0x1F;
+                std::uint32_t mant = h & 0x3FF;
+                float result;
+                if (exp == 0) {
+                    result = std::ldexp(static_cast<float>(mant), -24);
+                } else if (exp == 31) {
+                    result = mant ? NAN : INFINITY;
+                } else {
+                    result = std::ldexp(static_cast<float>(mant + 1024), static_cast<int>(exp) - 25);
+                }
+                return sign ? -result : result;
+            }
+            case SrcType::UNorm8:  return srcPixel[comp] / 255.0;
+            case SrcType::SNorm8:  return std::max(static_cast<double>(reinterpret_cast<const std::int8_t*>(srcPixel)[comp]) / 127.0, -1.0);
+            case SrcType::UNorm16: { std::uint16_t v; std::memcpy(&v, srcPixel + comp * 2, 2); return v / 65535.0; }
+            case SrcType::SNorm16: { std::int16_t v;  std::memcpy(&v, srcPixel + comp * 2, 2); return std::max(static_cast<double>(v) / 32767.0, -1.0); }
+            case SrcType::UInt8:   return static_cast<double>(srcPixel[comp]);
+            case SrcType::SInt8:   return static_cast<double>(reinterpret_cast<const std::int8_t*>(srcPixel)[comp]);
+            case SrcType::UInt16:  { std::uint16_t v; std::memcpy(&v, srcPixel + comp * 2, 2); return static_cast<double>(v); }
+            case SrcType::SInt16:  { std::int16_t v;  std::memcpy(&v, srcPixel + comp * 2, 2); return static_cast<double>(v); }
+            case SrcType::UInt32:  { std::uint32_t v; std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v); }
+            case SrcType::SInt32:  { std::int32_t v;  std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v); }
+            default: return 0.0;
+        }
+    };
+
+    // Determine whether the source is an integer format (no normalization on write).
+    const bool srcIsInteger = (srcType == SrcType::UInt8  || srcType == SrcType::SInt8  ||
+                               srcType == SrcType::UInt16 || srcType == SrcType::SInt16 ||
+                               srcType == SrcType::UInt32 || srcType == SrcType::SInt32);
+
+    auto* destBase = static_cast<std::uint8_t*>(pixels);
+
+    for (NSUInteger slice = 0; slice < numSlices; ++slice) {
+      const std::uint8_t* sliceRaw = raw.data() + slice * bytesPerImage;
+      std::uint8_t* dest = destBase + slice * dstSliceBytes;
+      for (NSUInteger row = 0; row < texHeight; ++row) {
+        for (NSUInteger col = 0; col < texWidth; ++col) {
+            const std::size_t srcPixelOffset = (row * texWidth + col) * srcBpp;
+            const std::uint8_t* srcPixel = sliceRaw + srcPixelOffset;
+
+            // Read source components as doubles. Pad missing components
+            // with 0.0 for RGB, 1.0 for alpha.
+            double vals[4] = {0.0, 0.0, 0.0, 1.0};
+            for (NSUInteger c = 0; c < srcComponents && c < 4; ++c) {
+                NSUInteger readComp = c;
+                if (isBGRA) {
+                    if (c == 0) readComp = 2;
+                    else if (c == 2) readComp = 0;
+                }
+                vals[c] = readSrcComponent(srcPixel, readComp);
+            }
+
+            // Write to destination in the requested format/type.
+            const std::size_t dstPixelIdx = row * texWidth + col;
+
+            if (typeIsPacked) {
+                // CTS copy_image & packed_pixels paths need packed-type readback.
+                // Pack the RGBA doubles into the requested packed format.
+                std::uint8_t* dp = dest + dstPixelIdx * dstPixelBytes;
+                auto packUN = [](double v, unsigned bits) -> std::uint32_t {
+                    if (v < 0.0) v = 0.0;
+                    if (v > 1.0) v = 1.0;
+                    const double maxVal = static_cast<double>((1u << bits) - 1u);
+                    return static_cast<std::uint32_t>(v * maxVal + 0.5);
+                };
+                switch (type) {
+                    case GL_UNSIGNED_BYTE_3_3_2: {
+                        auto r = packUN(vals[0], 3);
+                        auto g = packUN(vals[1], 3);
+                        auto b = packUN(vals[2], 2);
+                        dp[0] = static_cast<std::uint8_t>((r << 5) | (g << 2) | b);
+                        break;
+                    }
+                    case GL_UNSIGNED_BYTE_2_3_3_REV: {
+                        auto r = packUN(vals[0], 3);
+                        auto g = packUN(vals[1], 3);
+                        auto b = packUN(vals[2], 2);
+                        dp[0] = static_cast<std::uint8_t>((b << 6) | (g << 3) | r);
+                        break;
+                    }
+                    case GL_UNSIGNED_SHORT_5_6_5: {
+                        auto r = packUN(vals[0], 5);
+                        auto g = packUN(vals[1], 6);
+                        auto b = packUN(vals[2], 5);
+                        std::uint16_t v16 = static_cast<std::uint16_t>((r << 11) | (g << 5) | b);
+                        std::memcpy(dp, &v16, 2);
+                        break;
+                    }
+                    case GL_UNSIGNED_SHORT_5_6_5_REV: {
+                        auto r = packUN(vals[0], 5);
+                        auto g = packUN(vals[1], 6);
+                        auto b = packUN(vals[2], 5);
+                        std::uint16_t v16 = static_cast<std::uint16_t>((b << 11) | (g << 5) | r);
+                        std::memcpy(dp, &v16, 2);
+                        break;
+                    }
+                    case GL_UNSIGNED_SHORT_4_4_4_4: {
+                        auto r = packUN(vals[0], 4);
+                        auto g = packUN(vals[1], 4);
+                        auto b = packUN(vals[2], 4);
+                        auto a = packUN(vals[3], 4);
+                        std::uint16_t v16 = static_cast<std::uint16_t>((r << 12) | (g << 8) | (b << 4) | a);
+                        std::memcpy(dp, &v16, 2);
+                        break;
+                    }
+                    case GL_UNSIGNED_SHORT_4_4_4_4_REV: {
+                        auto r = packUN(vals[0], 4);
+                        auto g = packUN(vals[1], 4);
+                        auto b = packUN(vals[2], 4);
+                        auto a = packUN(vals[3], 4);
+                        std::uint16_t v16 = static_cast<std::uint16_t>((a << 12) | (b << 8) | (g << 4) | r);
+                        std::memcpy(dp, &v16, 2);
+                        break;
+                    }
+                    case GL_UNSIGNED_SHORT_5_5_5_1: {
+                        auto r = packUN(vals[0], 5);
+                        auto g = packUN(vals[1], 5);
+                        auto b = packUN(vals[2], 5);
+                        auto a = packUN(vals[3], 1);
+                        std::uint16_t v16 = static_cast<std::uint16_t>((r << 11) | (g << 6) | (b << 1) | a);
+                        std::memcpy(dp, &v16, 2);
+                        break;
+                    }
+                    case GL_UNSIGNED_SHORT_1_5_5_5_REV: {
+                        auto r = packUN(vals[0], 5);
+                        auto g = packUN(vals[1], 5);
+                        auto b = packUN(vals[2], 5);
+                        auto a = packUN(vals[3], 1);
+                        std::uint16_t v16 = static_cast<std::uint16_t>((a << 15) | (b << 10) | (g << 5) | r);
+                        std::memcpy(dp, &v16, 2);
+                        break;
+                    }
+                    case GL_UNSIGNED_INT_8_8_8_8: {
+                        std::uint32_t r = packUN(vals[0], 8);
+                        std::uint32_t g = packUN(vals[1], 8);
+                        std::uint32_t b = packUN(vals[2], 8);
+                        std::uint32_t a = packUN(vals[3], 8);
+                        std::uint32_t v32 = (r << 24) | (g << 16) | (b << 8) | a;
+                        std::memcpy(dp, &v32, 4);
+                        break;
+                    }
+                    case GL_UNSIGNED_INT_8_8_8_8_REV: {
+                        std::uint32_t r = packUN(vals[0], 8);
+                        std::uint32_t g = packUN(vals[1], 8);
+                        std::uint32_t b = packUN(vals[2], 8);
+                        std::uint32_t a = packUN(vals[3], 8);
+                        std::uint32_t v32 = (a << 24) | (b << 16) | (g << 8) | r;
+                        std::memcpy(dp, &v32, 4);
+                        break;
+                    }
+                    case GL_UNSIGNED_INT_10_10_10_2: {
+                        std::uint32_t r = packUN(vals[0], 10);
+                        std::uint32_t g = packUN(vals[1], 10);
+                        std::uint32_t b = packUN(vals[2], 10);
+                        std::uint32_t a = packUN(vals[3], 2);
+                        std::uint32_t v32 = (r << 22) | (g << 12) | (b << 2) | a;
+                        std::memcpy(dp, &v32, 4);
+                        break;
+                    }
+                    case GL_UNSIGNED_INT_2_10_10_10_REV: {
+                        std::uint32_t r = packUN(vals[0], 10);
+                        std::uint32_t g = packUN(vals[1], 10);
+                        std::uint32_t b = packUN(vals[2], 10);
+                        std::uint32_t a = packUN(vals[3], 2);
+                        std::uint32_t v32 = (a << 30) | (b << 20) | (g << 10) | r;
+                        std::memcpy(dp, &v32, 4);
+                        break;
+                    }
+                    default:
+                        // Remaining packed types (float-packed, depth/stencil)
+                        // not yet needed by the CTS subset we target.
+                        std::memset(dp, 0, dstPixelBytes);
+                        break;
+                }
+                continue;
+            }
+
+            for (std::size_t dc = 0; dc < dstComponents; ++dc) {
+                double v = vals[dc];
+                switch (type) {
+                    case GL_FLOAT: {
+                        float fv = static_cast<float>(v);
+                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &fv, 4);
+                        break;
+                    }
+                    case GL_HALF_FLOAT: {
+                        float fv = static_cast<float>(v);
+                        std::uint32_t fbits; std::memcpy(&fbits, &fv, 4);
+                        std::uint32_t sign = (fbits >> 16) & 0x8000;
+                        std::int32_t exp = ((fbits >> 23) & 0xFF) - 127 + 15;
+                        std::uint32_t mant = (fbits >> 13) & 0x3FF;
+                        std::uint16_t half;
+                        if (exp <= 0) half = static_cast<std::uint16_t>(sign);
+                        else if (exp >= 31) half = static_cast<std::uint16_t>(sign | 0x7C00);
+                        else half = static_cast<std::uint16_t>(sign | (exp << 10) | mant);
+                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &half, 2);
+                        break;
+                    }
+                    case GL_UNSIGNED_BYTE:
+                        if (srcIsInteger) {
+                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(v);
+                        } else {
+                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(
+                                std::max(0.0, std::min(255.0, v * 255.0)));
+                        }
+                        break;
+                    case GL_BYTE: {
+                        std::int8_t sv;
+                        if (srcIsInteger) {
+                            sv = static_cast<std::int8_t>(v);
+                        } else {
+                            sv = static_cast<std::int8_t>(std::max(-127.0, std::min(127.0, v * 127.0)));
+                        }
+                        std::memcpy(dest + dstPixelIdx * dstComponents + dc, &sv, 1);
+                        break;
+                    }
+                    case GL_UNSIGNED_SHORT: {
+                        std::uint16_t sv;
+                        if (srcIsInteger) {
+                            sv = static_cast<std::uint16_t>(v);
+                        } else {
+                            sv = static_cast<std::uint16_t>(std::max(0.0, std::min(65535.0, v * 65535.0)));
+                        }
+                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &sv, 2);
+                        break;
+                    }
+                    case GL_SHORT: {
+                        std::int16_t sv;
+                        if (srcIsInteger) {
+                            sv = static_cast<std::int16_t>(v);
+                        } else {
+                            sv = static_cast<std::int16_t>(std::max(-32767.0, std::min(32767.0, v * 32767.0)));
+                        }
+                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &sv, 2);
+                        break;
+                    }
+                    case GL_UNSIGNED_INT: {
+                        auto uv = static_cast<std::uint32_t>(v);
+                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &uv, 4);
+                        break;
+                    }
+                    case GL_INT: {
+                        auto iv = static_cast<std::int32_t>(v);
+                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &iv, 4);
+                        break;
+                    }
+                    default:
+                        if (srcIsInteger) {
+                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(v);
+                        } else {
+                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(
+                                std::max(0.0, std::min(255.0, v)));
+                        }
+                        break;
+                }
+            }
+        }
+      }
+    }
     return true;
 }
 
@@ -11179,8 +15367,10 @@ bool GLContext::getnUniformdv(GLuint program, GLint location, GLsizei bufSize, G
 
 bool GLContext::getnTexImage(GLenum target, GLint level, GLenum format, GLenum type,
                              GLsizei bufSize, void* pixels) {
-    (void)target; (void)level; (void)format; (void)type; (void)bufSize; (void)pixels;
-    return true;
+    if (bufSize < 0) { pushError(GL_INVALID_VALUE); return false; }
+    GLuint texName = impl_->state->boundTexture(target);
+    if (texName == 0) { pushError(GL_INVALID_OPERATION); return false; }
+    return getTextureImage(texName, level, format, type, bufSize, pixels);
 }
 
 bool GLContext::getnCompressedTexImage(GLenum target, GLint lod, GLsizei bufSize, void* pixels) {
@@ -11255,11 +15445,9 @@ bool GLContext::specializeShader(GLuint shader, const GLchar* pEntryPoint,
 }
 
 bool GLContext::polygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp) {
-    // Extends glPolygonOffset with a clamp value. Store the standard factor/units
-    // via existing path, clamp is recorded for Metal's setDepthBias:slopeScale:clamp:.
-    setPolygonOffset(factor, units);
-    // TODO: store clamp value on state tracker for Metal encoder
-    (void)clamp;
+    // Extends glPolygonOffset with a clamp value. Store factor/units/clamp via
+    // the state tracker for Metal's setDepthBias:slopeScale:clamp:.
+    impl_->state->setPolygonOffsetClamp(factor, units, clamp);
     return true;
 }
 

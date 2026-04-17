@@ -315,6 +315,9 @@ struct MetalFrameGraph::Impl {
             dispatch_semaphore_signal(frameSemaphore);
             ringSlotAcquired = false;
         }
+        // ADV-14: persist the pipeline binary archive to disk so the
+        // next launch gets pre-compiled GPU binaries.
+        savePipelineArchive();
     }
 
     void resize(GLsizei width, GLsizei height) {
@@ -400,14 +403,11 @@ struct MetalFrameGraph::Impl {
             currentCommandBuffer = [commandQueue commandBuffer];
             attachErrorHandler(currentCommandBuffer, @"beginRenderPass");
         }
-        if (!usesOffscreenTarget) {
-            currentDrawable = [layer nextDrawable];
-            if (currentDrawable == nil) {
-                return;
-            }
+        if (!acquireDrawableIfNeeded()) {  // ADV-7
+            return;
         }
 
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
         id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
         pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -461,15 +461,14 @@ struct MetalFrameGraph::Impl {
             attachErrorHandler(currentCommandBuffer, @"flushClear");
             if (currentCommandBuffer == nil) { hasPendingClear = false; return; }
         }
-        if (!usesOffscreenTarget && currentDrawable == nil) {
-            currentDrawable = [layer nextDrawable];
-            if (currentDrawable == nil) { hasPendingClear = false; return; }
+        if (!acquireDrawableIfNeeded()) {  // ADV-7
+            hasPendingClear = false; return;
         }
 
         id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
         if (colorTexture == nil) { hasPendingClear = false; return; }
 
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         pass.colorAttachments[0].loadAction = (pendingClearMask & GL_COLOR_BUFFER_BIT) ? MTLLoadActionClear : MTLLoadActionLoad;
@@ -538,12 +537,9 @@ struct MetalFrameGraph::Impl {
             }
         }
 
-        if (!usesOffscreenTarget && currentDrawable == nil) {
-            currentDrawable = [layer nextDrawable];
-            if (currentDrawable == nil) {
-                FG_TRACE(@"encodeSolidColorDraw: nextDrawable returned nil!");
-                return false;
-            }
+        if (!acquireDrawableIfNeeded()) {  // ADV-7
+            FG_TRACE(@"encodeSolidColorDraw: nextDrawable returned nil!");
+            return false;
         }
 
         id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
@@ -552,7 +548,7 @@ struct MetalFrameGraph::Impl {
         }
 
         // Merge any pending clear into this render pass's load action (OPT-4).
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
@@ -648,7 +644,10 @@ struct MetalFrameGraph::Impl {
                                 indexCount:static_cast<NSUInteger>(info.indexCount)
                                  indexType:metalIndexType
                                indexBuffer:iAlloc.buffer
-                         indexBufferOffset:iAlloc.offset];
+                         indexBufferOffset:iAlloc.offset
+                             instanceCount:1
+                                baseVertex:static_cast<NSUInteger>(info.baseVertex)
+                              baseInstance:0];
         } else {
             [encoder drawPrimitives:primitive
                         vertexStart:static_cast<NSUInteger>(info.baseVertex)
@@ -669,7 +668,16 @@ struct MetalFrameGraph::Impl {
             return false;
         }
         acquireRingSlot();  // OPT-8
-        if (info.vertexCount <= 0 || info.vertexData == nullptr || info.vertexDataByteCount == 0) {
+        if (info.vertexCount <= 0) {
+            FG_TRACE(@"encodeTranslatedDraw: vertexCount <= 0, returning false");
+            return false;
+        }
+        // Attributeless draws (gl_VertexID-driven) have no vertex data.
+        // Only reject missing vertex data when attributes are declared.
+        const bool attributelessDraw =
+            (info.vertexData == nullptr && info.metalVertexBuffer == nullptr &&
+             info.vertexAttributeLayouts.empty());
+        if (!attributelessDraw && info.vertexData == nullptr && info.metalVertexBuffer == nullptr) {
             FG_TRACE(@"encodeTranslatedDraw: bad vertex data, returning false");
             return false;
         }
@@ -681,8 +689,17 @@ struct MetalFrameGraph::Impl {
 
         ensureDrawableResources();
 
+        // RC-A02: when an FBO render target is provided, use it instead of
+        // the default framebuffer texture.
+        const bool isFBODraw = (info.fboColorTexture != nullptr);
+        id<MTLTexture> fboColorTex = isFBODraw
+            ? (__bridge id<MTLTexture>)info.fboColorTexture : nil;
+        id<MTLTexture> fboDepthStencilTex = (info.fboDepthStencilTexture != nullptr)
+            ? (__bridge id<MTLTexture>)info.fboDepthStencilTexture : nil;
+
         // Lazily create the MTLRenderPipelineState from translated MSL.
-        id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : nil;
+        id<MTLTexture> colorTexture = isFBODraw ? fboColorTex
+            : (usesOffscreenTarget ? offscreenColorTexture : nil);
         const MTLPixelFormat colorFormat = colorTexture != nil
             ? colorTexture.pixelFormat
             : MTLPixelFormatBGRA8Unorm;
@@ -759,13 +776,14 @@ struct MetalFrameGraph::Impl {
                 }
             };
 
-            // Compile vertex MSL.
-            NSError* error = nil;
-            NSString* vertSrc = [NSString stringWithUTF8String:info.vertexMSL->c_str()];
-            id<MTLLibrary> vertLib = [device newLibraryWithSource:vertSrc options:nil error:&error];
+            // ADV-2: compile vertex MSL via the library cache.
+            // Identical MSL text (e.g. the same vertex shader used
+            // by multiple pipeline variants) returns the cached
+            // MTLLibrary instead of recompiling.
+            id<MTLLibrary> vertLib = getOrCompileLibrary(*info.vertexMSL);
             if (vertLib == nil) {
-                FG_TRACE(@"encodeTranslatedDraw: newLibraryWithSource(vertex) failed: %@", error);
-                recordBuildFailure("vertex-library", error);
+                FG_TRACE(@"encodeTranslatedDraw: newLibraryWithSource(vertex) failed");
+                recordBuildFailure("vertex-library", nil);
                 return false;
             }
             // SPIRV-Cross names the entry points "main0" by default.
@@ -776,13 +794,11 @@ struct MetalFrameGraph::Impl {
                 return false;
             }
 
-            // Compile fragment MSL.
-            error = nil;  // reset before the next failable Metal call
-            NSString* fragSrc = [NSString stringWithUTF8String:info.fragmentMSL->c_str()];
-            id<MTLLibrary> fragLib = [device newLibraryWithSource:fragSrc options:nil error:&error];
+            // ADV-2: compile fragment MSL via the library cache.
+            id<MTLLibrary> fragLib = getOrCompileLibrary(*info.fragmentMSL);
             if (fragLib == nil) {
-                FG_TRACE(@"encodeTranslatedDraw: newLibraryWithSource(fragment) failed: %@", error);
-                recordBuildFailure("fragment-library", error);
+                FG_TRACE(@"encodeTranslatedDraw: newLibraryWithSource(fragment) failed");
+                recordBuildFailure("fragment-library", nil);
                 return false;
             }
             id<MTLFunction> fragFn = [fragLib newFunctionWithName:@"main0"];
@@ -876,12 +892,16 @@ struct MetalFrameGraph::Impl {
             }
 
             // Buffer 0 layout: primary per-vertex data.
-            const NSUInteger stride = info.vertexStride > 0
-                ? info.vertexStride
-                : sizeof(float) * 3u;
-            vertexDescriptor.layouts[0].stride = stride;
-            vertexDescriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
-            vertexDescriptor.layouts[0].stepRate = 1;
+            // Attributeless draws (gl_VertexID-based) skip vertex buffer
+            // layout entirely — the shader generates its own vertices.
+            if (!attributelessDraw) {
+                const NSUInteger stride = info.vertexStride > 0
+                    ? info.vertexStride
+                    : sizeof(float) * 3u;
+                vertexDescriptor.layouts[0].stride = stride;
+                vertexDescriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+                vertexDescriptor.layouts[0].stepRate = 1;
+            }
 
             // Extra buffer layouts (1+): per-instance or additional per-vertex.
             for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
@@ -900,7 +920,8 @@ struct MetalFrameGraph::Impl {
             MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
             desc.vertexFunction = vertFn;
             desc.fragmentFunction = fragFn;
-            desc.vertexDescriptor = vertexDescriptor;
+            // Attributeless draws don't need a vertex descriptor at all.
+            desc.vertexDescriptor = attributelessDraw ? nil : vertexDescriptor;
             desc.colorAttachments[0].pixelFormat = colorFormat;
             desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
@@ -1148,13 +1169,20 @@ struct MetalFrameGraph::Impl {
                 NSLog(@"[GL] pipeline-build first-build program=%u END", info.program);
             }
 
-            error = nil;  // reset before the final failable Metal call
+            NSError* error = nil;
+            // ADV-14: binary archive disabled pending investigation.
+            // TODO: re-enable once crash in pipeline build path is resolved.
+            // ensurePipelineArchive();
+            // if (pipelineArchive != nil) {
+            //     desc.binaryArchives = @[ pipelineArchive ];
+            // }
             pipelineState = [device newRenderPipelineStateWithDescriptor:desc error:&error];
             if (pipelineState == nil) {
                 FG_TRACE(@"encodeTranslatedDraw: newRenderPipelineStateWithDescriptor failed: %@", error);
                 recordBuildFailure("pipeline-state", error);
                 return false;
             }
+            // addPipelineToArchive(desc);  // ADV-14: disabled pending investigation
 
             const auto buildEnd = std::chrono::steady_clock::now();
             pipelineCumulativeBuildMs += std::chrono::duration<double, std::milli>(buildEnd - buildStart).count();
@@ -1197,11 +1225,19 @@ struct MetalFrameGraph::Impl {
             }
         }
 
+        // RC-A02: FBO draws need their own render pass targeting the FBO
+        // texture.  If a default-framebuffer encoder is open, close it first.
+        if (isFBODraw && currentRenderEncoder != nil) {
+            [currentRenderEncoder endEncoding];
+            currentRenderEncoder = nil;
+            resetCachedEncoderState();
+        }
+
         // Ensure a render encoder is open. Subsequent draws reuse the same
         // encoder without any GPU sync.
         if (currentRenderEncoder == nil) {
-            FG_TRACE(@"encodeTranslatedDraw: opening new render pass (prior cmdBuf=%p pendingClear=%d)",
-                     currentCommandBuffer, hasPendingClear);
+            FG_TRACE(@"encodeTranslatedDraw: opening new render pass (prior cmdBuf=%p pendingClear=%d fbo=%d)",
+                     currentCommandBuffer, hasPendingClear, isFBODraw);
             // Reuse the current command buffer if one exists (e.g. from a
             // prior solid-color draw), otherwise create a new one.
             if (currentCommandBuffer == nil) {
@@ -1212,21 +1248,26 @@ struct MetalFrameGraph::Impl {
                 }
             }
 
-            if (!usesOffscreenTarget && currentDrawable == nil) {
-                currentDrawable = [layer nextDrawable];
-                if (currentDrawable == nil) {
+            if (isFBODraw) {
+                // FBO path: use the caller-provided Metal texture as the
+                // render target.  No drawable acquisition needed.
+                colorTexture = fboColorTex;
+            } else {
+                if (!acquireDrawableIfNeeded()) {  // ADV-7
                     return false;
                 }
+                colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
             }
-
-            colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
             if (colorTexture == nil) {
                 return false;
             }
 
+            // Resolve depth/stencil for this render pass.
+            id<MTLTexture> passDepthStencil = isFBODraw ? fboDepthStencilTex : depthStencilTexture;
+
             // Ensure depth/stencil texture matches color attachment dimensions.
             // A mismatch here triggers Metal validation assertions on draw.
-            if (depthStencilTexture != nil &&
+            if (!isFBODraw && depthStencilTexture != nil &&
                 (depthStencilTexture.width != colorTexture.width ||
                  depthStencilTexture.height != colorTexture.height)) {
                 NSLog(@"[FG] depth/color size MISMATCH: depth=%lux%lu color=%lux%lu — rebuilding depth",
@@ -1242,40 +1283,43 @@ struct MetalFrameGraph::Impl {
                 dd.storageMode = MTLStorageModePrivate;
                 dd.usage = MTLTextureUsageRenderTarget;
                 depthStencilTexture = [device newTextureWithDescriptor:dd];
+                passDepthStencil = depthStencilTexture;
                 drawableWidth = static_cast<GLsizei>(colorTexture.width);
                 drawableHeight = static_cast<GLsizei>(colorTexture.height);
             }
 
             // Build the render pass, merging any pending clear into the load
             // action so clear+draws share a single render pass (OPT-4).
-            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
             pass.colorAttachments[0].texture = colorTexture;
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-            if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
+            if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
                 pass.colorAttachments[0].loadAction = MTLLoadActionClear;
                 pass.colorAttachments[0].clearColor = pendingClearColor;
             } else {
                 pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
             }
-            if (depthStencilTexture != nil) {
-                pass.depthAttachment.texture = depthStencilTexture;
+            if (passDepthStencil != nil) {
+                pass.depthAttachment.texture = passDepthStencil;
                 pass.depthAttachment.storeAction = MTLStoreActionStore;
-                pass.stencilAttachment.texture = depthStencilTexture;
+                pass.stencilAttachment.texture = passDepthStencil;
                 pass.stencilAttachment.storeAction = MTLStoreActionStore;
-                if (hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
+                if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
                     pass.depthAttachment.loadAction = MTLLoadActionClear;
                     pass.depthAttachment.clearDepth = pendingClearDepth;
                 } else {
                     pass.depthAttachment.loadAction = MTLLoadActionLoad;
                 }
-                if (hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
+                if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
                     pass.stencilAttachment.loadAction = MTLLoadActionClear;
                     pass.stencilAttachment.clearStencil = pendingClearStencil;
                 } else {
                     pass.stencilAttachment.loadAction = MTLLoadActionLoad;
                 }
             }
-            hasPendingClear = false;
+            if (!isFBODraw) {
+                hasPendingClear = false;
+            }
 
             currentRenderEncoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
             if (currentRenderEncoder == nil) {
@@ -1323,11 +1367,29 @@ struct MetalFrameGraph::Impl {
             cachedFillMode = desiredFill;
         }
 
+        // RC-A02: set Metal viewport from GL viewport state.
+        // Metal framebuffer Y is top-down while OpenGL viewport Y is
+        // bottom-up.  Convert: metalOriginY = renderTargetH - glY - glH.
+        if (info.viewportWidth > 0 && info.viewportHeight > 0) {
+            const double rtHeight = static_cast<double>(colorTexture.height);
+            MTLViewport vp;
+            vp.originX = static_cast<double>(info.viewportX);
+            vp.originY = rtHeight - static_cast<double>(info.viewportY) - static_cast<double>(info.viewportHeight);
+            vp.width   = static_cast<double>(info.viewportWidth);
+            vp.height  = static_cast<double>(info.viewportHeight);
+            vp.znear   = info.depthRangeNear;
+            vp.zfar    = info.depthRangeFar;
+            [currentRenderEncoder setViewport:vp];
+        }
+
         // Bind vertex data at buffer index 0.
+        // Attributeless draws (gl_VertexID-driven) skip vertex buffer binding.
         // OPT-5: when the VBO has a pre-uploaded Metal buffer, bind it
         // directly — zero memcpy.  Otherwise fall back to the ring buffer
         // sub-allocation path (OPT-1).
-        if (info.metalVertexBuffer != nullptr) {
+        if (attributelessDraw) {
+            // No vertex buffers needed — shader uses [[vertex_id]].
+        } else if (info.metalVertexBuffer != nullptr) {
             id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)info.metalVertexBuffer;
             [currentRenderEncoder setVertexBuffer:mtlBuf
                                            offset:static_cast<NSUInteger>(info.metalVertexBufferOffset)
@@ -1372,6 +1434,33 @@ struct MetalFrameGraph::Impl {
             [currentRenderEncoder setFragmentBytes:info.fragmentUniformData
                                             length:info.fragmentUniformSize
                                            atIndex:16];
+        }
+
+        // Bind UBO data to the Metal encoder at the reflection-specified
+        // [[buffer(N)]] slots.  Each entry was resolved by GLContext from
+        // the GL uniform buffer binding state.
+        for (const auto& ubo : info.uboBindings) {
+            if (ubo.size == 0) continue;
+            const NSUInteger slot = static_cast<NSUInteger>(ubo.metalSlot);
+            if (ubo.metalBuffer != nullptr) {
+                // Large UBO (>4KB): bind the Metal buffer directly.
+                id<MTLBuffer> buf = (__bridge id<MTLBuffer>)(ubo.metalBuffer);
+                const NSUInteger off = static_cast<NSUInteger>(ubo.metalBufferOffset);
+                if (ubo.isVertex)   [currentRenderEncoder setVertexBuffer:buf offset:off atIndex:slot];
+                if (ubo.isFragment) [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
+            } else if (ubo.data != nullptr) {
+                // Small UBO (≤4KB): inline bytes.
+                if (ubo.isVertex) {
+                    [currentRenderEncoder setVertexBytes:ubo.data
+                                                  length:static_cast<NSUInteger>(ubo.size)
+                                                 atIndex:slot];
+                }
+                if (ubo.isFragment) {
+                    [currentRenderEncoder setFragmentBytes:ubo.data
+                                                    length:static_cast<NSUInteger>(ubo.size)
+                                                   atIndex:slot];
+                }
+            }
         }
 
         // Phase 8X Group 4d follow-up⁷ — bind textures and samplers for
@@ -1553,13 +1642,65 @@ struct MetalFrameGraph::Impl {
                                                 atIndex:static_cast<NSUInteger>(binding.metalSlot)];
         }
 
-        const MTLPrimitiveType primitive = (info.mode == GL_TRIANGLE_STRIP)
-            ? MTLPrimitiveTypeTriangleStrip
-            : (info.mode == GL_LINES ? MTLPrimitiveTypeLine
-                : (info.mode == GL_LINE_STRIP ? MTLPrimitiveTypeLineStrip
-                    : MTLPrimitiveTypeTriangle));
+        MTLPrimitiveType primitive;
+        // GL_TRIANGLE_FAN and GL_LINE_LOOP have no Metal equivalent.
+        // We expand them to indexed GL_TRIANGLES / GL_LINE_STRIP here.
+        std::vector<std::uint32_t> expandedIndices;
+        bool useExpandedIndices = false;
 
-        if (info.indices != nullptr && info.indexCount > 0) {
+        switch (info.mode) {
+            case GL_POINTS:         primitive = MTLPrimitiveTypePoint; break;
+            case GL_LINES:          primitive = MTLPrimitiveTypeLine; break;
+            case GL_LINE_STRIP:     primitive = MTLPrimitiveTypeLineStrip; break;
+            case GL_TRIANGLE_STRIP: primitive = MTLPrimitiveTypeTriangleStrip; break;
+            case GL_TRIANGLE_FAN: {
+                // Expand: fan(v0,v1,v2,...,vN) → tri(v0,v1,v2), tri(v0,v2,v3), ...
+                primitive = MTLPrimitiveTypeTriangle;
+                const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
+                    ? info.indexCount : info.vertexCount;
+                if (n >= 3) {
+                    expandedIndices.reserve(static_cast<std::size_t>((n - 2) * 3));
+                    for (GLsizei i = 1; i < n - 1; ++i) {
+                        expandedIndices.push_back(0);
+                        expandedIndices.push_back(static_cast<std::uint32_t>(i));
+                        expandedIndices.push_back(static_cast<std::uint32_t>(i + 1));
+                    }
+                    useExpandedIndices = true;
+                }
+                break;
+            }
+            case GL_LINE_LOOP: {
+                // Expand: loop(v0,v1,...,vN) → strip(v0,v1,...,vN,v0)
+                primitive = MTLPrimitiveTypeLineStrip;
+                const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
+                    ? info.indexCount : info.vertexCount;
+                if (n >= 2) {
+                    expandedIndices.reserve(static_cast<std::size_t>(n + 1));
+                    for (GLsizei i = 0; i < n; ++i) {
+                        expandedIndices.push_back(static_cast<std::uint32_t>(i));
+                    }
+                    expandedIndices.push_back(0); // Close the loop
+                    useExpandedIndices = true;
+                }
+                break;
+            }
+            case GL_TRIANGLES:
+            default:                primitive = MTLPrimitiveTypeTriangle; break;
+        }
+
+        if (useExpandedIndices && !expandedIndices.empty()) {
+            // Primitive expansion path (GL_TRIANGLE_FAN, GL_LINE_LOOP).
+            const std::size_t indexBytes = expandedIndices.size() * sizeof(std::uint32_t);
+            auto iAlloc = ringSuballocate(expandedIndices.data(), indexBytes);
+            if (iAlloc.buffer == nil) {
+                return false;
+            }
+            [currentRenderEncoder drawIndexedPrimitives:primitive
+                                indexCount:static_cast<NSUInteger>(expandedIndices.size())
+                                 indexType:MTLIndexTypeUInt32
+                               indexBuffer:iAlloc.buffer
+                         indexBufferOffset:iAlloc.offset];
+        } else if (info.indices != nullptr && info.indexCount > 0) {
             MTLIndexType metalIndexType = MTLIndexTypeUInt16;
             std::size_t bytesPerIndex = 2;
             if (info.indexType == GL_UNSIGNED_INT) {
@@ -1583,14 +1724,14 @@ struct MetalFrameGraph::Impl {
                 idxOffset = iAlloc.offset;
             }
 
-            if (info.instanceCount > 1) {
+            if (info.instanceCount > 1 || info.baseVertex != 0 || info.baseInstance != 0) {
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(info.indexCount)
                                      indexType:metalIndexType
                                    indexBuffer:idxBuffer
                              indexBufferOffset:idxOffset
                                  instanceCount:static_cast<NSUInteger>(info.instanceCount)
-                                    baseVertex:0
+                                    baseVertex:static_cast<NSUInteger>(info.baseVertex)
                                   baseInstance:static_cast<NSUInteger>(info.baseInstance)];
             } else {
                 [currentRenderEncoder drawIndexedPrimitives:primitive
@@ -1611,6 +1752,18 @@ struct MetalFrameGraph::Impl {
                             vertexStart:0
                             vertexCount:static_cast<NSUInteger>(info.vertexCount)];
             }
+        }
+
+        // RC-A02: for FBO draws, close the render pass immediately, commit,
+        // and wait so the GPU results are available for CPU readback.
+        if (isFBODraw) {
+            [currentRenderEncoder endEncoding];
+            currentRenderEncoder = nil;
+            resetCachedEncoderState();
+
+            [currentCommandBuffer commit];
+            [currentCommandBuffer waitUntilCompleted];
+            currentCommandBuffer = nil;
         }
 
         pendingPresent = true;
@@ -1883,11 +2036,8 @@ fragment float4 appgl_immediate_textured_fs(
             }
         }
 
-        if (!usesOffscreenTarget && currentDrawable == nil) {
-            currentDrawable = [layer nextDrawable];
-            if (currentDrawable == nil) {
-                return false;
-            }
+        if (!acquireDrawableIfNeeded()) {  // ADV-7
+            return false;
         }
 
         id<MTLTexture> colorTexture = usesOffscreenTarget ? offscreenColorTexture : currentDrawable.texture;
@@ -1900,7 +2050,7 @@ fragment float4 appgl_immediate_textured_fs(
             return false;
         }
 
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
         pass.colorAttachments[0].texture = colorTexture;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         if (hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
@@ -2165,11 +2315,15 @@ fragment float4 appgl_immediate_textured_fs(
             sourceBytes = static_cast<const std::uint8_t*>([readbackBuffer contents]);
         }
 
+        // RC-A02: OpenGL framebuffer row 0 is at the bottom; Metal
+        // texture row 0 is at the top.  Flip Y during readback:
+        // metalRow = textureHeight - 1 - glRow.
         auto* bytes = static_cast<std::uint8_t*>(outPixels);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
                 const GLint srcX = x + col;
-                const GLint srcY = y + row;
+                const GLint glY = y + row;
+                const GLint srcY = static_cast<GLint>(sourceHeight) - 1 - glY;
                 const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4;
                 if (srcX < 0 || srcY < 0 || srcX >= static_cast<GLint>(sourceWidth) || srcY >= static_cast<GLint>(sourceHeight)) {
                     std::memset(bytes + dstOffset, 0, 4);
@@ -2188,6 +2342,23 @@ fragment float4 appgl_immediate_textured_fs(
             }
         }
         return true;
+    }
+
+    // Flush the GPU: end any open render encoder, commit and wait for the
+    // current command buffer.  After this call, all previously-encoded draws
+    // are guaranteed to have completed and their results are CPU-visible via
+    // [MTLTexture getBytes:].  Used by FBO readback paths.
+    void flushForReadback() {
+        endRenderPass();
+        if (currentCommandBuffer != nil) {
+            [currentCommandBuffer commit];
+            [currentCommandBuffer waitUntilCompleted];
+            if (ringSlotAcquired) {
+                dispatch_semaphore_signal(frameSemaphore);
+                ringSlotAcquired = false;
+            }
+            invalidateTransientState();
+        }
     }
 
     bool isReady() const {
@@ -2420,6 +2591,62 @@ private:
     double pendingClearDepth = 1.0;
     std::uint32_t pendingClearStencil = 0;
 
+    // ADV-2: MTLLibrary cache keyed by MSL source hash.  Avoids
+    // recompiling the same MSL text when multiple pipeline variants
+    // share the same vertex or fragment shader.  The hash is
+    // std::hash<std::string> (64-bit FNV on libc++); collisions would
+    // silently return the wrong library, but in practice MSL texts
+    // are unique-enough that this doesn't happen.
+    std::unordered_map<std::size_t, id<MTLLibrary>> mslLibraryCache;
+
+    // ADV-4: reusable render pass descriptor.  Avoids allocating a
+    // fresh autoreleased ObjC object at each of the five call sites.
+    // Reset fields before each use (attachments overwrite previous).
+    MTLRenderPassDescriptor* reusablePassDescriptor = nil;
+
+    MTLRenderPassDescriptor* getReusablePassDescriptor() {
+        if (reusablePassDescriptor == nil) {
+            reusablePassDescriptor = [MTLRenderPassDescriptor new];
+        }
+        // Reset to defaults so callers don't inherit stale state.
+        reusablePassDescriptor.colorAttachments[0].texture = nil;
+        reusablePassDescriptor.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        reusablePassDescriptor.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+        reusablePassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        reusablePassDescriptor.depthAttachment.texture = nil;
+        reusablePassDescriptor.depthAttachment.loadAction = MTLLoadActionDontCare;
+        reusablePassDescriptor.depthAttachment.storeAction = MTLStoreActionDontCare;
+        reusablePassDescriptor.stencilAttachment.texture = nil;
+        reusablePassDescriptor.stencilAttachment.loadAction = MTLLoadActionDontCare;
+        reusablePassDescriptor.stencilAttachment.storeAction = MTLStoreActionDontCare;
+        return reusablePassDescriptor;
+    }
+
+    // ADV-7: consolidated drawable acquisition.  Every render path
+    // calls this instead of inlining `[layer nextDrawable]`.
+    bool acquireDrawableIfNeeded() {
+        if (usesOffscreenTarget) return true;
+        if (currentDrawable != nil) return true;
+        currentDrawable = [layer nextDrawable];
+        return currentDrawable != nil;
+    }
+
+    // ADV-2: get-or-compile a Metal library from MSL source text,
+    // returning a cached copy if the same source was compiled before.
+    id<MTLLibrary> getOrCompileLibrary(const std::string& msl) {
+        const std::size_t hash = std::hash<std::string>{}(msl);
+        auto it = mslLibraryCache.find(hash);
+        if (it != mslLibraryCache.end()) return it->second;
+
+        NSString* src = [NSString stringWithUTF8String:msl.c_str()];
+        NSError* err = nil;
+        id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&err];
+        if (lib != nil) {
+            mslLibraryCache[hash] = lib;
+        }
+        return lib;  // nil on failure; caller handles
+    }
+
     // Depth/stencil state cache — keyed by packed (depthTestEnabled, depthFunc).
     // The state space is tiny (~16 combinations); after warmup every draw is
     // a pure hash-table hit with zero Metal allocations.
@@ -2596,6 +2823,70 @@ private:
     std::uint64_t pipelineBuildAttempts = 0;
     std::uint64_t pipelineBuildFailures = 0;
     double pipelineCumulativeBuildMs = 0.0;
+
+    // ── ADV-14: MTLBinaryArchive for cross-session pipeline persistence ──
+    // On first launch, pipelines compile from MSL source (~100–500 ms each).
+    // On second launch, the archive supplies pre-compiled GPU binaries and
+    // Metal skips the expensive compilation.  The archive lives at
+    //   ~/Library/Caches/dev.excalibur.AppGL/pipeline_archive.metallib
+    // Populated lazily: after each successful pipeline build, we add the
+    // descriptor to the archive.  Serialized to disk on context teardown.
+    id<MTLBinaryArchive> pipelineArchive = nil;
+    bool pipelineArchiveDirty = false;
+
+    NSURL* pipelineArchiveURL() {
+        static NSURL* url = nil;
+        if (url == nil) {
+            NSString* cacheDir = [NSSearchPathForDirectoriesInDomains(
+                NSCachesDirectory, NSUserDomainMask, YES) firstObject];
+            NSString* appglDir = [cacheDir stringByAppendingPathComponent:@"dev.excalibur.AppGL"];
+            [[NSFileManager defaultManager] createDirectoryAtPath:appglDir
+                                     withIntermediateDirectories:YES
+                                                      attributes:nil
+                                                           error:nil];
+            url = [NSURL fileURLWithPath:
+                [appglDir stringByAppendingPathComponent:@"pipeline_archive.metallib"]];
+        }
+        return url;
+    }
+
+    void ensurePipelineArchive() {
+        if (pipelineArchive != nil || device == nil) return;
+
+        MTLBinaryArchiveDescriptor* desc = [[MTLBinaryArchiveDescriptor alloc] init];
+        // Try to load existing archive from disk.
+        NSURL* url = pipelineArchiveURL();
+        if ([[NSFileManager defaultManager] fileExistsAtPath:[url path]]) {
+            desc.url = url;
+        }
+        NSError* err = nil;
+        pipelineArchive = [device newBinaryArchiveWithDescriptor:desc error:&err];
+        if (pipelineArchive == nil) {
+            // Failed to load (corrupt/stale) — create empty archive.
+            desc.url = nil;
+            pipelineArchive = [device newBinaryArchiveWithDescriptor:desc error:nil];
+        }
+    }
+
+    void addPipelineToArchive(MTLRenderPipelineDescriptor* pipelineDesc) {
+        if (pipelineArchive == nil) return;
+        NSError* err = nil;
+        // addRenderPipelineFunctions is a no-op if the pipeline is already
+        // present in the archive. On failure, we silently skip — the archive
+        // is an optimization, not a correctness requirement.
+        if ([pipelineArchive addRenderPipelineFunctionsWithDescriptor:pipelineDesc error:&err]) {
+            pipelineArchiveDirty = true;
+        }
+    }
+
+    void savePipelineArchive() {
+        if (pipelineArchive == nil || !pipelineArchiveDirty) return;
+        NSError* err = nil;
+        [pipelineArchive serializeToURL:pipelineArchiveURL() error:&err];
+        if (err == nil) {
+            pipelineArchiveDirty = false;
+        }
+    }
 };
 
 MetalFrameGraph::MetalFrameGraph(void* layer, void* device, void* commandQueue)
@@ -2634,6 +2925,10 @@ void* MetalFrameGraph::currentRenderEncoder() const {
 
 void MetalFrameGraph::endRenderPass() {
     impl_->endRenderPass();
+}
+
+void MetalFrameGraph::flushForReadback() {
+    impl_->flushForReadback();
 }
 
 bool MetalFrameGraph::encodeSolidColorDraw(const MetalDrawInfo& info) {

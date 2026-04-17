@@ -269,6 +269,9 @@ bool queryValue(
         case GL_POLYGON_OFFSET_UNITS:
             writeScalar(out, raster.polygonOffsetUnits);
             return true;
+        case GL_POLYGON_OFFSET_CLAMP:
+            writeScalar(out, raster.polygonOffsetClamp);
+            return true;
         case GL_LINE_WIDTH:
             writeScalar(out, raster.lineWidth);
             return true;
@@ -798,6 +801,13 @@ void GLStateTracker::setPolygonOffset(GLfloat factor, GLfloat units) {
     markDirty(DirtyBit::RasterState);
 }
 
+void GLStateTracker::setPolygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp) {
+    raster_.polygonOffsetFactor = factor;
+    raster_.polygonOffsetUnits = units;
+    raster_.polygonOffsetClamp = clamp;
+    markDirty(DirtyBit::RasterState);
+}
+
 void GLStateTracker::setLineWidth(GLfloat width) {
     raster_.lineWidth = width;
     markDirty(DirtyBit::RasterState);
@@ -886,6 +896,29 @@ bool GLStateTracker::isEnabled(GLenum cap) const {
 }
 
 bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
+    if (out) {
+        switch (pname) {
+            case GL_CLIP_ORIGIN:
+                *out = static_cast<GLboolean>(clipOrigin_ != 0);
+                return true;
+            case GL_CLIP_DEPTH_MODE:
+                *out = static_cast<GLboolean>(clipDepthMode_ != 0);
+                return true;
+            case GL_PATCH_VERTICES:
+                *out = static_cast<GLboolean>(tessellation_.patchVertices != 0);
+                return true;
+            case GL_PATCH_DEFAULT_OUTER_LEVEL:
+                for (int i = 0; i < 4; ++i)
+                    out[i] = static_cast<GLboolean>(tessellation_.defaultOuterLevel[i] != 0.0f);
+                return true;
+            case GL_PATCH_DEFAULT_INNER_LEVEL:
+                for (int i = 0; i < 2; ++i)
+                    out[i] = static_cast<GLboolean>(tessellation_.defaultInnerLevel[i] != 0.0f);
+                return true;
+            default:
+                break;
+        }
+    }
     return queryValue(
         pname,
         out,
@@ -914,6 +947,29 @@ bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
 }
 
 bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
+    if (out) {
+        switch (pname) {
+            case GL_CLIP_ORIGIN:
+                *out = static_cast<GLint>(clipOrigin_);
+                return true;
+            case GL_CLIP_DEPTH_MODE:
+                *out = static_cast<GLint>(clipDepthMode_);
+                return true;
+            case GL_PATCH_VERTICES:
+                *out = tessellation_.patchVertices;
+                return true;
+            case GL_PATCH_DEFAULT_OUTER_LEVEL:
+                for (int i = 0; i < 4; ++i)
+                    out[i] = static_cast<GLint>(tessellation_.defaultOuterLevel[i]);
+                return true;
+            case GL_PATCH_DEFAULT_INNER_LEVEL:
+                for (int i = 0; i < 2; ++i)
+                    out[i] = static_cast<GLint>(tessellation_.defaultInnerLevel[i]);
+                return true;
+            default:
+                break;
+        }
+    }
     return queryValue(
         pname,
         out,
@@ -942,6 +998,29 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
 }
 
 bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
+    if (out) {
+        switch (pname) {
+            case GL_CLIP_ORIGIN:
+                *out = static_cast<GLint64>(clipOrigin_);
+                return true;
+            case GL_CLIP_DEPTH_MODE:
+                *out = static_cast<GLint64>(clipDepthMode_);
+                return true;
+            case GL_PATCH_VERTICES:
+                *out = static_cast<GLint64>(tessellation_.patchVertices);
+                return true;
+            case GL_PATCH_DEFAULT_OUTER_LEVEL:
+                for (int i = 0; i < 4; ++i)
+                    out[i] = static_cast<GLint64>(tessellation_.defaultOuterLevel[i]);
+                return true;
+            case GL_PATCH_DEFAULT_INNER_LEVEL:
+                for (int i = 0; i < 2; ++i)
+                    out[i] = static_cast<GLint64>(tessellation_.defaultInnerLevel[i]);
+                return true;
+            default:
+                break;
+        }
+    }
     return queryValue(
         pname,
         out,
@@ -970,6 +1049,29 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
 }
 
 bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
+    if (out) {
+        switch (pname) {
+            case GL_CLIP_ORIGIN:
+                *out = static_cast<GLfloat>(clipOrigin_);
+                return true;
+            case GL_CLIP_DEPTH_MODE:
+                *out = static_cast<GLfloat>(clipDepthMode_);
+                return true;
+            case GL_PATCH_VERTICES:
+                *out = static_cast<GLfloat>(tessellation_.patchVertices);
+                return true;
+            case GL_PATCH_DEFAULT_OUTER_LEVEL:
+                for (int i = 0; i < 4; ++i)
+                    out[i] = tessellation_.defaultOuterLevel[i];
+                return true;
+            case GL_PATCH_DEFAULT_INNER_LEVEL:
+                for (int i = 0; i < 2; ++i)
+                    out[i] = tessellation_.defaultInnerLevel[i];
+                return true;
+            default:
+                break;
+        }
+    }
     return queryValue(
         pname,
         out,
@@ -998,6 +1100,29 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
 }
 
 bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
+    if (out) {
+        switch (pname) {
+            case GL_CLIP_ORIGIN:
+                *out = static_cast<GLdouble>(clipOrigin_);
+                return true;
+            case GL_CLIP_DEPTH_MODE:
+                *out = static_cast<GLdouble>(clipDepthMode_);
+                return true;
+            case GL_PATCH_VERTICES:
+                *out = static_cast<GLdouble>(tessellation_.patchVertices);
+                return true;
+            case GL_PATCH_DEFAULT_OUTER_LEVEL:
+                for (int i = 0; i < 4; ++i)
+                    out[i] = static_cast<GLdouble>(tessellation_.defaultOuterLevel[i]);
+                return true;
+            case GL_PATCH_DEFAULT_INNER_LEVEL:
+                for (int i = 0; i < 2; ++i)
+                    out[i] = static_cast<GLdouble>(tessellation_.defaultInnerLevel[i]);
+                return true;
+            default:
+                break;
+        }
+    }
     return queryValue(
         pname,
         out,

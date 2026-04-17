@@ -36,12 +36,49 @@ const std::unordered_map<std::string, TypeEntry>& typeTable() {
         {"mat2", {GL_FLOAT_MAT2, 4, "mat2"}},
         {"mat3", {GL_FLOAT_MAT3, 9, "mat3"}},
         {"mat4", {GL_FLOAT_MAT4, 16, "mat4"}},
+        // Float sampler types.
         {"sampler1D", {GL_SAMPLER_1D, 1, "sampler1D"}},
         {"sampler2D", {GL_SAMPLER_2D, 1, "sampler2D"}},
         {"sampler3D", {GL_SAMPLER_3D, 1, "sampler3D"}},
         {"samplerCube", {GL_SAMPLER_CUBE, 1, "samplerCube"}},
+        {"sampler1DArray", {GL_SAMPLER_1D_ARRAY, 1, "sampler1DArray"}},
         {"sampler2DArray", {GL_SAMPLER_2D_ARRAY, 1, "sampler2DArray"}},
+        {"sampler1DShadow", {GL_SAMPLER_1D_SHADOW, 1, "sampler1DShadow"}},
         {"sampler2DShadow", {GL_SAMPLER_2D_SHADOW, 1, "sampler2DShadow"}},
+        {"sampler1DArrayShadow", {GL_SAMPLER_1D_ARRAY_SHADOW, 1, "sampler1DArrayShadow"}},
+        {"sampler2DArrayShadow", {GL_SAMPLER_2D_ARRAY_SHADOW, 1, "sampler2DArrayShadow"}},
+        {"samplerCubeShadow", {GL_SAMPLER_CUBE_SHADOW, 1, "samplerCubeShadow"}},
+        {"sampler2DRect", {GL_SAMPLER_2D_RECT, 1, "sampler2DRect"}},
+        {"sampler2DRectShadow", {GL_SAMPLER_2D_RECT_SHADOW, 1, "sampler2DRectShadow"}},
+        {"samplerBuffer", {GL_SAMPLER_BUFFER, 1, "samplerBuffer"}},
+        {"sampler2DMS", {GL_SAMPLER_2D_MULTISAMPLE, 1, "sampler2DMS"}},
+        {"sampler2DMSArray", {GL_SAMPLER_2D_MULTISAMPLE_ARRAY, 1, "sampler2DMSArray"}},
+        {"samplerCubeArray", {GL_SAMPLER_CUBE_MAP_ARRAY, 1, "samplerCubeArray"}},
+        {"samplerCubeArrayShadow", {GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW, 1, "samplerCubeArrayShadow"}},
+        // Integer sampler types.
+        {"isampler1D", {GL_INT_SAMPLER_1D, 1, "isampler1D"}},
+        {"isampler2D", {GL_INT_SAMPLER_2D, 1, "isampler2D"}},
+        {"isampler3D", {GL_INT_SAMPLER_3D, 1, "isampler3D"}},
+        {"isamplerCube", {GL_INT_SAMPLER_CUBE, 1, "isamplerCube"}},
+        {"isampler1DArray", {GL_INT_SAMPLER_1D_ARRAY, 1, "isampler1DArray"}},
+        {"isampler2DArray", {GL_INT_SAMPLER_2D_ARRAY, 1, "isampler2DArray"}},
+        {"isampler2DRect", {GL_INT_SAMPLER_2D_RECT, 1, "isampler2DRect"}},
+        {"isamplerBuffer", {GL_INT_SAMPLER_BUFFER, 1, "isamplerBuffer"}},
+        {"isampler2DMS", {GL_INT_SAMPLER_2D_MULTISAMPLE, 1, "isampler2DMS"}},
+        {"isampler2DMSArray", {GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY, 1, "isampler2DMSArray"}},
+        {"isamplerCubeArray", {GL_INT_SAMPLER_CUBE_MAP_ARRAY, 1, "isamplerCubeArray"}},
+        // Unsigned integer sampler types.
+        {"usampler1D", {GL_UNSIGNED_INT_SAMPLER_1D, 1, "usampler1D"}},
+        {"usampler2D", {GL_UNSIGNED_INT_SAMPLER_2D, 1, "usampler2D"}},
+        {"usampler3D", {GL_UNSIGNED_INT_SAMPLER_3D, 1, "usampler3D"}},
+        {"usamplerCube", {GL_UNSIGNED_INT_SAMPLER_CUBE, 1, "usamplerCube"}},
+        {"usampler1DArray", {GL_UNSIGNED_INT_SAMPLER_1D_ARRAY, 1, "usampler1DArray"}},
+        {"usampler2DArray", {GL_UNSIGNED_INT_SAMPLER_2D_ARRAY, 1, "usampler2DArray"}},
+        {"usampler2DRect", {GL_UNSIGNED_INT_SAMPLER_2D_RECT, 1, "usampler2DRect"}},
+        {"usamplerBuffer", {GL_UNSIGNED_INT_SAMPLER_BUFFER, 1, "usamplerBuffer"}},
+        {"usampler2DMS", {GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE, 1, "usampler2DMS"}},
+        {"usampler2DMSArray", {GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY, 1, "usampler2DMSArray"}},
+        {"usamplerCubeArray", {GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY, 1, "usamplerCubeArray"}},
     };
     return table;
 }
@@ -104,16 +141,23 @@ std::vector<std::string> tokenize(std::string_view stmt) {
     return tokens;
 }
 
-// Parse `layout(location = N)` and similar. Returns the explicit location if
-// found, otherwise -1. The tokens vector is mutated to drop the layout block.
-GLint extractLayoutLocation(std::vector<std::string>& tokens) {
+// RC-D06 / RC-D08: extracted layout qualifiers from a `layout(...)` block.
+struct LayoutQualifiers {
+    GLint location = -1;  // layout(location = N), -1 = unspecified
+    GLint binding  = -1;  // layout(binding  = N), -1 = unspecified
+};
+
+// Parse `layout(location = N, binding = M)` and similar.  Returns the
+// explicit location and binding if found, otherwise -1 for each.  The
+// tokens vector is mutated to drop the layout block.
+LayoutQualifiers extractLayoutQualifiers(std::vector<std::string>& tokens) {
+    LayoutQualifiers result;
     if (tokens.empty() || tokens.front() != "layout") {
-        return -1;
+        return result;
     }
     if (tokens.size() < 3 || tokens[1] != "(") {
-        return -1;
+        return result;
     }
-    GLint location = -1;
     std::size_t i = 2;
     std::size_t depth = 1;
     while (i < tokens.size() && depth > 0) {
@@ -125,13 +169,17 @@ GLint extractLayoutLocation(std::vector<std::string>& tokens) {
                 ++i;
                 break;
             }
-        } else if (tokens[i] == "location" && i + 2 < tokens.size() && tokens[i + 1] == "=") {
-            location = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 10));
+        } else if (i + 2 < tokens.size() && tokens[i + 1] == "=") {
+            if (tokens[i] == "location") {
+                result.location = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 10));
+            } else if (tokens[i] == "binding") {
+                result.binding = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 10));
+            }
         }
         ++i;
     }
     tokens.erase(tokens.begin(), tokens.begin() + static_cast<std::ptrdiff_t>(i));
-    return location;
+    return result;
 }
 
 // Phase 8X Group 4d follow-up¹⁵ — scalar kind routing for default-value
@@ -353,7 +401,7 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         if (tokens.empty()) {
             return;
         }
-        GLint explicitLocation = extractLayoutLocation(tokens);
+        LayoutQualifiers layoutQ = extractLayoutQualifiers(tokens);
         if (tokens.empty()) {
             return;
         }
@@ -377,19 +425,116 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         if (!parseDeclTail(tokens, decl)) {
             return;
         }
-        decl.explicitLocation = explicitLocation;
-        if (keyword == "uniform") {
-            result.uniforms.push_back(std::move(decl));
-        } else if (keyword == "in" || keyword == "attribute") {
-            // Only treat as a vertex input when at the vertex stage; for fragment
-            // stage `in` declarations are stage-interface varyings.
-            if (stage == GL_VERTEX_SHADER) {
-                result.inputs.push_back(std::move(decl));
+        decl.explicitLocation = layoutQ.location;
+        decl.explicitBinding  = layoutQ.binding;
+
+        // Save the GL type for any additional comma-separated declarations.
+        const GLenum declaredType = decl.type;
+
+        // Helper to add a declaration to the appropriate result list.
+        auto addDecl = [&](GLShaderDeclaration d) {
+            if (keyword == "uniform") {
+                result.uniforms.push_back(std::move(d));
+            } else if (keyword == "in" || keyword == "attribute") {
+                if (stage == GL_VERTEX_SHADER) {
+                    result.inputs.push_back(std::move(d));
+                }
+            } else if (keyword == "out" || keyword == "varying") {
+                if (stage == GL_FRAGMENT_SHADER || stage == GL_VERTEX_SHADER ||
+                    stage == GL_GEOMETRY_SHADER || stage == GL_TESS_EVALUATION_SHADER ||
+                    stage == GL_TESS_CONTROL_SHADER) {
+                    result.outputs.push_back(std::move(d));
+                }
             }
-        } else if (keyword == "out" || keyword == "varying") {
-            if (stage == GL_FRAGMENT_SHADER || stage == GL_VERTEX_SHADER) {
-                result.outputs.push_back(std::move(decl));
+        };
+
+        addDecl(std::move(decl));
+
+        // Handle comma-separated additional declarations in the same statement,
+        // e.g. "uniform int a, b, c;" or "in vec3 pos, norm;".
+        // After parseDeclTail, tokens[0] = type, tokens[1] = first name.
+        // Scan past the first declaration's optional array suffix and initializer
+        // to find commas introducing additional variable names.
+        std::size_t pos = 2;
+        // Skip array suffix [N] if present as separate tokens.
+        if (pos < tokens.size() && tokens[pos] == "[") {
+            while (pos < tokens.size() && tokens[pos] != "]") {
+                ++pos;
             }
+            if (pos < tokens.size()) {
+                ++pos; // skip ']'
+            }
+        }
+        // Skip initializer = expr (respecting nested parens).
+        if (pos < tokens.size() && tokens[pos] == "=") {
+            ++pos;
+            std::size_t depth = 0;
+            while (pos < tokens.size()) {
+                if (tokens[pos] == "(") {
+                    ++depth;
+                } else if (tokens[pos] == ")") {
+                    if (depth > 0) --depth;
+                } else if (tokens[pos] == "," && depth == 0) {
+                    break;
+                }
+                ++pos;
+            }
+        }
+        // Parse additional comma-separated variable declarations.
+        while (pos < tokens.size() && tokens[pos] == ",") {
+            ++pos; // skip comma
+            if (pos >= tokens.size()) {
+                break;
+            }
+            GLShaderDeclaration extra;
+            extra.type     = declaredType;
+            extra.name     = tokens[pos];
+            extra.arraySize = 1;
+            extra.explicitLocation = -1;
+            extra.explicitBinding  = -1;
+            ++pos;
+            // Handle bracket embedded in name token (e.g. "arr[4]").
+            auto bracket = extra.name.find('[');
+            if (bracket != std::string::npos) {
+                auto end = extra.name.find(']', bracket);
+                if (end != std::string::npos) {
+                    std::string sizeText = extra.name.substr(bracket + 1, end - bracket - 1);
+                    if (!sizeText.empty()) {
+                        extra.arraySize = static_cast<GLint>(
+                            std::strtol(sizeText.c_str(), nullptr, 10));
+                    }
+                }
+                extra.name.erase(bracket);
+            } else if (pos < tokens.size() && tokens[pos] == "[") {
+                ++pos; // skip '['
+                if (pos < tokens.size()) {
+                    extra.arraySize = static_cast<GLint>(
+                        std::strtol(tokens[pos].c_str(), nullptr, 10));
+                    ++pos;
+                }
+                if (pos < tokens.size() && tokens[pos] == "]") {
+                    ++pos;
+                }
+            }
+            if (extra.name.empty()) {
+                break;
+            }
+            // Skip initializer for this extra variable.
+            if (pos < tokens.size() && tokens[pos] == "=") {
+                ++pos;
+                std::size_t depth = 0;
+                while (pos < tokens.size()) {
+                    if (tokens[pos] == "(") {
+                        ++depth;
+                    } else if (tokens[pos] == ")") {
+                        if (depth > 0) --depth;
+                    } else if (tokens[pos] == "," && depth == 0) {
+                        break;
+                    }
+                    ++pos;
+                }
+            }
+            addDecl(std::move(extra));
         }
     };
 

@@ -95,6 +95,7 @@ struct GLRasterState {
     GLenum polygonFillMode = GL_FILL;   // GL_FILL, GL_LINE, or GL_POINT
     GLfloat polygonOffsetFactor = 0.0f;
     GLfloat polygonOffsetUnits = 0.0f;
+    GLfloat polygonOffsetClamp = 0.0f;
     GLfloat lineWidth = 1.0f;
     GLfloat pointSize = 1.0f;
 };
@@ -192,6 +193,7 @@ public:
     void setFrontFace(GLenum mode);
     void setPolygonFillMode(GLenum mode);
     void setPolygonOffset(GLfloat factor, GLfloat units);
+    void setPolygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp);
     void setLineWidth(GLfloat width);
     void setPointSize(GLfloat size);
     void setHint(GLenum target, GLenum mode);

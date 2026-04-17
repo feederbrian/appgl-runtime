@@ -8,6 +8,7 @@
 #include "AppGLRuntime.h"
 
 #include "../context/GLContext.h"
+#include "../state/GLStateTracker.h"
 #include "../debug/CoverageStore.h"
 #include "../generated/gl_dispatch.gen.h"
 #include "../generated/gl_function_ids.gen.h"
@@ -15,6 +16,7 @@
 #include "../../include/AppGL/glcorearb.h"
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <unordered_set>
 
@@ -71,25 +73,120 @@ static void APIENTRY glLogicOp(GLenum opcode) {
 }
 
 static void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, void *pixels) {
-    (void)target;
-    (void)level;
-    (void)format;
-    (void)type;
-    (void)pixels;
+    auto* context = currentContextOrNull();
+    if (context == nullptr || pixels == nullptr) return;
+
+    GLuint texName = context->state().boundTexture(target);
+    if (texName == 0) {
+        context->pushError(GL_INVALID_OPERATION);
+        return;
+    }
+
+    // Delegate to the DSA getTextureImage with bufSize=0 (no size bound for
+    // the legacy non-robustness path).
+    context->getTextureImage(texName, level, format, type, 0, pixels);
 }
 
 static void APIENTRY glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat *params) {
-    (void)target;
-    (void)level;
-    (void)pname;
-    (void)params;
+    // Route through the integer path and convert
+    GLint intVal = 0;
+    glGetTexLevelParameteriv(target, level, pname, &intVal);
+    if (params) *params = static_cast<GLfloat>(intVal);
 }
 
 static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *params) {
-    (void)target;
-    (void)level;
-    (void)pname;
-    (void)params;
+    auto* context = currentContextOrNull();
+    if (context == nullptr || params == nullptr) return;
+
+    // Find the bound texture for this target
+    GLuint texName = context->state().boundTexture(target);
+    GLTextureObject* tex = context->objects().textures().get(texName);
+    if (tex == nullptr || !tex->instantiated) {
+        context->pushError(GL_INVALID_OPERATION);
+        return;
+    }
+    auto it = tex->levels.find(level);
+    bool hasMip = (it != tex->levels.end() && it->second.defined);
+    const auto& desc = hasMip ? it->second.desc : tex->desc;
+
+    switch (pname) {
+        case GL_TEXTURE_WIDTH:
+            *params = hasMip ? desc.width : 0;
+            break;
+        case GL_TEXTURE_HEIGHT:
+            *params = hasMip ? desc.height : 0;
+            break;
+        case GL_TEXTURE_DEPTH:
+            *params = hasMip ? desc.depth : 0;
+            break;
+        case GL_TEXTURE_INTERNAL_FORMAT:
+            *params = hasMip ? static_cast<GLint>(desc.internalFormat) : static_cast<GLint>(GL_RGBA8);
+            break;
+        case GL_TEXTURE_RED_SIZE:
+        case GL_TEXTURE_GREEN_SIZE:
+        case GL_TEXTURE_BLUE_SIZE:
+        case GL_TEXTURE_ALPHA_SIZE:
+            // Return 8 for RGBA8-class formats, approximate for others
+            *params = 8;
+            break;
+        case GL_TEXTURE_DEPTH_SIZE:
+            *params = 0;
+            break;
+        case GL_TEXTURE_STENCIL_SIZE:
+            *params = 0;
+            break;
+        case GL_TEXTURE_RED_TYPE:
+        case GL_TEXTURE_GREEN_TYPE:
+        case GL_TEXTURE_BLUE_TYPE:
+        case GL_TEXTURE_ALPHA_TYPE: {
+            // Determine component type from internal format
+            GLenum fmt = desc.internalFormat;
+            if (fmt == GL_R32F || fmt == GL_RG32F || fmt == GL_RGB32F || fmt == GL_RGBA32F
+                || fmt == GL_R16F || fmt == GL_RG16F || fmt == GL_RGB16F || fmt == GL_RGBA16F
+                || fmt == GL_R11F_G11F_B10F || fmt == GL_RGB9_E5) {
+                *params = GL_FLOAT;
+            } else if (fmt == GL_R8I || fmt == GL_RG8I || fmt == GL_RGB8I || fmt == GL_RGBA8I
+                || fmt == GL_R16I || fmt == GL_RG16I || fmt == GL_RGB16I || fmt == GL_RGBA16I
+                || fmt == GL_R32I || fmt == GL_RG32I || fmt == GL_RGB32I || fmt == GL_RGBA32I) {
+                *params = GL_INT;
+            } else if (fmt == GL_R8UI || fmt == GL_RG8UI || fmt == GL_RGB8UI || fmt == GL_RGBA8UI
+                || fmt == GL_R16UI || fmt == GL_RG16UI || fmt == GL_RGB16UI || fmt == GL_RGBA16UI
+                || fmt == GL_R32UI || fmt == GL_RG32UI || fmt == GL_RGB32UI || fmt == GL_RGBA32UI
+                || fmt == GL_RGB10_A2UI) {
+                *params = GL_UNSIGNED_INT;
+            } else if (fmt == GL_R8_SNORM || fmt == GL_RG8_SNORM || fmt == GL_RGB8_SNORM || fmt == GL_RGBA8_SNORM
+                || fmt == GL_R16_SNORM || fmt == GL_RG16_SNORM || fmt == GL_RGB16_SNORM || fmt == GL_RGBA16_SNORM) {
+                *params = GL_SIGNED_NORMALIZED;
+            } else {
+                *params = GL_UNSIGNED_NORMALIZED;
+            }
+            break;
+        }
+        case GL_TEXTURE_SAMPLES:
+            *params = desc.samples;
+            break;
+        case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:
+            *params = GL_TRUE;
+            break;
+        case GL_TEXTURE_COMPRESSED:
+            *params = GL_FALSE;
+            break;
+        case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:
+            *params = 0;
+            break;
+        case GL_TEXTURE_BUFFER_DATA_STORE_BINDING:
+            *params = 0;
+            break;
+        case GL_TEXTURE_BUFFER_OFFSET:
+            *params = 0;
+            break;
+        case GL_TEXTURE_BUFFER_SIZE:
+            *params = 0;
+            break;
+        default:
+            context->pushError(GL_INVALID_ENUM);
+            break;
+    }
 }
 
 static void APIENTRY glCopyTexImage1D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border) {
@@ -552,28 +649,193 @@ static GLboolean APIENTRY glIsEnabledi(GLenum target, GLuint index) {
 }
 
 static void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
-    (void)primitiveMode;
+    auto* ctx = currentContextOrNull();
+    if (!ctx) return;
+    if (ctx->isTransformFeedbackActive()) {
+        ctx->pushError(GL_INVALID_OPERATION, "glBeginTransformFeedback",
+                       "transform feedback is already active");
+        return;
+    }
+    switch (primitiveMode) {
+        case GL_POINTS:
+        case GL_LINES:
+        case GL_TRIANGLES:
+            break;
+        default:
+            ctx->pushError(GL_INVALID_ENUM, "glBeginTransformFeedback",
+                           "primitiveMode must be POINTS, LINES, or TRIANGLES");
+            return;
+    }
+    // GL 4.6 §13.3: INVALID_OPERATION if no program is active.
+    GLuint prog = ctx->state().currentProgram();
+    if (prog == 0) {
+        ctx->pushError(GL_INVALID_OPERATION, "glBeginTransformFeedback",
+                       "no program is active");
+        return;
+    }
+    // GL 4.6 §13.3: INVALID_OPERATION if no varyings are specified to be captured.
+    auto* progObj = ctx->objects().programs().get(prog);
+    GLsizei tfVaryingCount = progObj ? static_cast<GLsizei>(progObj->transformFeedbackVaryingNames.size()) : 0;
+    if (tfVaryingCount <= 0) {
+        ctx->pushError(GL_INVALID_OPERATION, "glBeginTransformFeedback",
+                       "no transform feedback varyings specified in the active program");
+        return;
+    }
+    // GL 4.6 §13.3: INVALID_OPERATION if any binding point used by XFB does not
+    // have a buffer bound.
+    {
+        GLenum bufMode = progObj->transformFeedbackBufferMode;
+        GLsizei requiredBindings = (bufMode == GL_SEPARATE_ATTRIBS) ? tfVaryingCount : 1;
+        for (GLsizei i = 0; i < requiredBindings; ++i) {
+            auto binding = ctx->state().indexedBufferBinding(GL_TRANSFORM_FEEDBACK_BUFFER,
+                                                             static_cast<GLuint>(i));
+            if (binding.buffer == 0) {
+                ctx->pushError(GL_INVALID_OPERATION, "glBeginTransformFeedback",
+                               "transform feedback binding point has no buffer bound");
+                return;
+            }
+        }
+    }
+    ctx->setTransformFeedbackPrimitiveMode(primitiveMode);
+    ctx->setTransformFeedbackActive(true);
+    // Store the mode on the bound XFB object for DrawTransformFeedback* validation.
+    GLuint xfbId = ctx->boundTransformFeedback();
+    if (xfbId != 0) {
+        auto* tfObj = ctx->objects().transformFeedbacks().get(xfbId);
+        if (tfObj) {
+            tfObj->capturedPrimitiveMode = primitiveMode;
+        }
+    }
 }
 
 static void APIENTRY glEndTransformFeedback(void) {
-
+    auto* ctx = currentContextOrNull();
+    if (!ctx) return;
+    if (!ctx->isTransformFeedbackActive()) {
+        ctx->pushError(GL_INVALID_OPERATION, "glEndTransformFeedback",
+                       "transform feedback is not active");
+        return;
+    }
+    // Mark the bound XFB object as having completed a Begin/End cycle.
+    GLuint xfbId = ctx->boundTransformFeedback();
+    if (xfbId != 0) {
+        auto* tfObj = ctx->objects().transformFeedbacks().get(xfbId);
+        if (tfObj) {
+            tfObj->hasCompleted = true;
+        }
+    }
+    ctx->setTransformFeedbackActive(false);
+    ctx->setTransformFeedbackPaused(false);
 }
 
 static void APIENTRY glTransformFeedbackVaryings(GLuint program, GLsizei count, const GLchar *const*varyings, GLenum bufferMode) {
-    (void)program;
-    (void)count;
-    (void)varyings;
-    (void)bufferMode;
+    auto* ctx = currentContextOrNull();
+    if (!ctx) return;
+    // GL 4.6 §11.1.2.1: INVALID_VALUE if program is not a program object.
+    if (!ctx->objects().programs().contains(program)) {
+        ctx->pushError(GL_INVALID_VALUE, "glTransformFeedbackVaryings",
+                       "program is not a valid program object");
+        return;
+    }
+    // GL 4.6 §11.1.2.1: INVALID_VALUE if bufferMode is SEPARATE_ATTRIBS
+    // and count > GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS (4).
+    if (bufferMode == GL_SEPARATE_ATTRIBS && count > 4) {
+        ctx->pushError(GL_INVALID_VALUE, "glTransformFeedbackVaryings",
+                       "count exceeds GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS");
+        return;
+    }
+    // GL 4.6 §11.1.2.1: INVALID_OPERATION if bufferMode is SEPARATE_ATTRIBS
+    // and any varying name is a special name (gl_NextBuffer, gl_SkipComponents*).
+    if (bufferMode == GL_SEPARATE_ATTRIBS) {
+        for (GLsizei i = 0; i < count; ++i) {
+            if (varyings[i]) {
+                std::string_view name(varyings[i]);
+                if (name == "gl_NextBuffer" || name == "gl_SkipComponents1" ||
+                    name == "gl_SkipComponents2" || name == "gl_SkipComponents3" ||
+                    name == "gl_SkipComponents4") {
+                    ctx->pushError(GL_INVALID_OPERATION, "glTransformFeedbackVaryings",
+                                   "special name not allowed with SEPARATE_ATTRIBS");
+                    return;
+                }
+            }
+        }
+    }
+    // GL 4.6 §11.1.2.1: INVALID_OPERATION if INTERLEAVED_ATTRIBS and
+    // varyings contains more gl_NextBuffer entries than MAX_TRANSFORM_FEEDBACK_BUFFERS.
+    if (bufferMode == GL_INTERLEAVED_ATTRIBS) {
+        GLsizei nextBufferCount = 0;
+        for (GLsizei i = 0; i < count; ++i) {
+            if (varyings[i] && std::string_view(varyings[i]) == "gl_NextBuffer") {
+                ++nextBufferCount;
+            }
+        }
+        constexpr GLsizei kMaxTransformFeedbackBuffers = 4;
+        // gl_NextBuffer advances to next buffer; N occurrences → N+1 buffers,
+        // so the number of buffers (N+1) must not exceed the limit.
+        if (nextBufferCount + 1 > kMaxTransformFeedbackBuffers) {
+            ctx->pushError(GL_INVALID_OPERATION, "glTransformFeedbackVaryings",
+                           "too many gl_NextBuffer entries for MAX_TRANSFORM_FEEDBACK_BUFFERS");
+            return;
+        }
+    }
+    auto* prog = ctx->objects().programs().get(program);
+    if (prog) {
+        prog->transformFeedbackVaryingNames.clear();
+        for (GLsizei i = 0; i < count; ++i) {
+            if (varyings[i]) {
+                prog->transformFeedbackVaryingNames.emplace_back(varyings[i]);
+            }
+        }
+        prog->transformFeedbackBufferMode = bufferMode;
+    }
 }
 
 static void APIENTRY glGetTransformFeedbackVarying(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name) {
-    (void)program;
-    (void)index;
-    (void)bufSize;
-    (void)length;
-    (void)size;
-    (void)type;
-    (void)name;
+    auto* ctx = currentContextOrNull();
+    if (!ctx) return;
+    auto* prog = ctx->objects().programs().get(program);
+    if (!prog) {
+        ctx->pushError(GL_INVALID_VALUE, "glGetTransformFeedbackVarying",
+                       "program is not a valid program object");
+        return;
+    }
+    // GL 4.6 §11.1.2.1: INVALID_VALUE if index >= TRANSFORM_FEEDBACK_VARYINGS.
+    // Use the resolved resource table (populated at link time) when available;
+    // fall back to the pre-link name list otherwise.
+    const auto& resolvedVaryings = prog->resourceTransformFeedbackVaryings;
+    const auto& nameList = prog->transformFeedbackVaryingNames;
+    GLuint varyingCount = resolvedVaryings.empty()
+        ? static_cast<GLuint>(nameList.size())
+        : static_cast<GLuint>(resolvedVaryings.size());
+    if (index >= varyingCount) {
+        ctx->pushError(GL_INVALID_VALUE, "glGetTransformFeedbackVarying",
+                       "index exceeds number of transform feedback varyings");
+        return;
+    }
+
+    // Prefer the resolved data (with correct types) from the linked program.
+    std::string varyingName;
+    GLenum varyingType = GL_FLOAT;
+    GLsizei varyingSize = 1;
+    if (!resolvedVaryings.empty() && index < static_cast<GLuint>(resolvedVaryings.size())) {
+        const auto& entry = resolvedVaryings[index];
+        varyingName = entry.name;
+        varyingType = entry.type;
+        varyingSize = entry.arraySize;
+    } else if (index < static_cast<GLuint>(nameList.size())) {
+        varyingName = nameList[index];
+    }
+
+    if (size) *size = varyingSize;
+    if (type) *type = varyingType;
+    if (name && bufSize > 0) {
+        GLsizei written = std::min(bufSize - 1, static_cast<GLsizei>(varyingName.size()));
+        std::memcpy(name, varyingName.data(), static_cast<std::size_t>(written));
+        name[written] = '\0';
+        if (length) *length = written;
+    } else if (length) {
+        *length = 0;
+    }
 }
 
 static void APIENTRY glClampColor(GLenum target, GLenum clamp) {
@@ -863,6 +1125,13 @@ static const GLubyte * APIENTRY glGetStringi(GLenum name, GLuint index) {
         }
         return nullptr;
     }
+    if (name == GL_SPIR_V_EXTENSIONS) {
+        // No SPIR-V extensions exposed; any index is out of range.
+        auto* ctx = currentContextOrNull();
+        if (ctx) ctx->pushError(GL_INVALID_VALUE, "glGetStringi",
+                                "index exceeds GL_NUM_SPIR_V_EXTENSIONS");
+        return nullptr;
+    }
     return nullptr;
 }
 
@@ -890,53 +1159,254 @@ static void APIENTRY glPrimitiveRestartIndex(GLuint index) {
 }
 
 static void APIENTRY glGetUniformIndices(GLuint program, GLsizei uniformCount, const GLchar *const*uniformNames, GLuint *uniformIndices) {
-    (void)program;
-    (void)uniformCount;
-    (void)uniformNames;
-    (void)uniformIndices;
+    auto* context = currentContextOrNull();
+    if (context == nullptr || uniformNames == nullptr || uniformIndices == nullptr) return;
+    GLProgramObject* obj = context->objects().programs().get(program);
+    if (obj == nullptr) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    for (GLsizei i = 0; i < uniformCount; ++i) {
+        uniformIndices[i] = GL_INVALID_INDEX;
+        if (uniformNames[i] == nullptr) continue;
+        const std::string name(uniformNames[i]);
+        for (GLuint j = 0; j < static_cast<GLuint>(obj->resourceUniforms.size()); ++j) {
+            if (obj->resourceUniforms[j].name == name) {
+                uniformIndices[i] = j;
+                break;
+            }
+        }
+    }
 }
 
 static void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount, const GLuint *uniformIndices, GLenum pname, GLint *params) {
-    (void)program;
-    (void)uniformCount;
-    (void)uniformIndices;
-    (void)pname;
-    (void)params;
+    auto* context = currentContextOrNull();
+    if (context == nullptr || params == nullptr || uniformIndices == nullptr) return;
+    GLProgramObject* obj = context->objects().programs().get(program);
+    if (obj == nullptr) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    for (GLsizei i = 0; i < uniformCount; ++i) {
+        GLuint idx = uniformIndices[i];
+        if (idx >= static_cast<GLuint>(obj->resourceUniforms.size())) {
+            context->pushError(GL_INVALID_VALUE);
+            return;
+        }
+        const auto& u = obj->resourceUniforms[idx];
+        switch (pname) {
+            case GL_UNIFORM_TYPE:
+                params[i] = static_cast<GLint>(u.type);
+                break;
+            case GL_UNIFORM_SIZE:
+                // arraySize == 0 means non-array → GL reports size 1.
+                params[i] = u.arraySize > 0 ? u.arraySize : 1;
+                break;
+            case GL_UNIFORM_NAME_LENGTH:
+                params[i] = static_cast<GLint>(u.name.size() + 1);
+                break;
+            case GL_UNIFORM_BLOCK_INDEX:
+                params[i] = u.blockIndex;
+                break;
+            case GL_UNIFORM_OFFSET:
+                params[i] = u.offset;
+                break;
+            case GL_UNIFORM_ARRAY_STRIDE: {
+                // For non-block or non-array uniforms, stride is 0.
+                if (u.blockIndex < 0 || u.arraySize <= 0) {
+                    params[i] = 0;
+                    break;
+                }
+                // std140: compute stride from type. Each array element
+                // is rounded up to vec4 (16 bytes).
+                // For matrices, stride = vectors × 16.
+                // In column-major: vectors = columns.
+                // In row-major: vectors = rows.
+                GLenum at = u.type;
+                int cols = 1, rows = 1;
+                bool isMatrix = false;
+                // matCxR → C columns, R rows
+                if (at == GL_FLOAT_MAT2)   { cols=2; rows=2; isMatrix=true; }
+                else if (at == GL_FLOAT_MAT2x3) { cols=2; rows=3; isMatrix=true; }
+                else if (at == GL_FLOAT_MAT2x4) { cols=2; rows=4; isMatrix=true; }
+                else if (at == GL_FLOAT_MAT3x2) { cols=3; rows=2; isMatrix=true; }
+                else if (at == GL_FLOAT_MAT3)   { cols=3; rows=3; isMatrix=true; }
+                else if (at == GL_FLOAT_MAT3x4) { cols=3; rows=4; isMatrix=true; }
+                else if (at == GL_FLOAT_MAT4x2) { cols=4; rows=2; isMatrix=true; }
+                else if (at == GL_FLOAT_MAT4x3) { cols=4; rows=3; isMatrix=true; }
+                else if (at == GL_FLOAT_MAT4)   { cols=4; rows=4; isMatrix=true; }
+                if (isMatrix) {
+                    int vectors = u.isRowMajor ? rows : cols;
+                    params[i] = vectors * 16;
+                } else {
+                    params[i] = 16;  // scalar/vector arrays: one vec4 per element
+                }
+                break;
+            }
+            case GL_UNIFORM_MATRIX_STRIDE: {
+                // std140: each column of a matrix is stored in a vec4 (16 bytes).
+                GLenum t = u.type;
+                bool isMatrix = (t == GL_FLOAT_MAT2 || t == GL_FLOAT_MAT3 || t == GL_FLOAT_MAT4 ||
+                                 t == GL_FLOAT_MAT2x3 || t == GL_FLOAT_MAT2x4 ||
+                                 t == GL_FLOAT_MAT3x2 || t == GL_FLOAT_MAT3x4 ||
+                                 t == GL_FLOAT_MAT4x2 || t == GL_FLOAT_MAT4x3 ||
+                                 t == GL_DOUBLE_MAT2 || t == GL_DOUBLE_MAT3 || t == GL_DOUBLE_MAT4 ||
+                                 t == GL_DOUBLE_MAT2x3 || t == GL_DOUBLE_MAT2x4 ||
+                                 t == GL_DOUBLE_MAT3x2 || t == GL_DOUBLE_MAT3x4 ||
+                                 t == GL_DOUBLE_MAT4x2 || t == GL_DOUBLE_MAT4x3);
+                params[i] = (isMatrix && u.blockIndex >= 0) ? 16 : 0;
+                break;
+            }
+            case GL_UNIFORM_IS_ROW_MAJOR:
+                params[i] = u.isRowMajor ? GL_TRUE : GL_FALSE;
+                break;
+            case GL_UNIFORM_ATOMIC_COUNTER_BUFFER_INDEX:
+                params[i] = -1;
+                break;
+            default:
+                context->pushError(GL_INVALID_ENUM);
+                return;
+        }
+    }
 }
 
 static void APIENTRY glGetActiveUniformName(GLuint program, GLuint uniformIndex, GLsizei bufSize, GLsizei *length, GLchar *uniformName) {
-    (void)program;
-    (void)uniformIndex;
-    (void)bufSize;
-    (void)length;
-    (void)uniformName;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    GLProgramObject* obj = context->objects().programs().get(program);
+    if (obj == nullptr) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (uniformIndex >= static_cast<GLuint>(obj->resourceUniforms.size())) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    const auto& u = obj->resourceUniforms[uniformIndex];
+    const GLsizei nameLen = static_cast<GLsizei>(u.name.size());
+    const GLsizei copyLen = std::min<GLsizei>(nameLen, bufSize > 0 ? bufSize - 1 : 0);
+    if (uniformName != nullptr && bufSize > 0) {
+        std::memcpy(uniformName, u.name.c_str(), copyLen);
+        uniformName[copyLen] = '\0';
+    }
+    if (length != nullptr) {
+        *length = copyLen;
+    }
 }
 
 static GLuint APIENTRY glGetUniformBlockIndex(GLuint program, const GLchar *uniformBlockName) {
-    (void)program;
-    (void)uniformBlockName;
-    return 0;
+    auto* context = currentContextOrNull();
+    if (context == nullptr || uniformBlockName == nullptr) return GL_INVALID_INDEX;
+    GLProgramObject* obj = context->objects().programs().get(program);
+    if (obj == nullptr) return GL_INVALID_INDEX;
+    for (GLuint i = 0; i < static_cast<GLuint>(obj->resourceUniformBlocks.size()); ++i) {
+        if (obj->resourceUniformBlocks[i].name == uniformBlockName) {
+            return i;
+        }
+    }
+    return GL_INVALID_INDEX;
 }
 
 static void APIENTRY glGetActiveUniformBlockiv(GLuint program, GLuint uniformBlockIndex, GLenum pname, GLint *params) {
-    (void)program;
-    (void)uniformBlockIndex;
-    (void)pname;
-    (void)params;
+    auto* context = currentContextOrNull();
+    if (context == nullptr || params == nullptr) return;
+    GLProgramObject* obj = context->objects().programs().get(program);
+    if (obj == nullptr) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (uniformBlockIndex >= static_cast<GLuint>(obj->resourceUniformBlocks.size())) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    const auto& block = obj->resourceUniformBlocks[uniformBlockIndex];
+    switch (pname) {
+        case GL_UNIFORM_BLOCK_BINDING:
+            *params = static_cast<GLint>(block.location >= 0 ? block.location : uniformBlockIndex);
+            break;
+        case GL_UNIFORM_BLOCK_DATA_SIZE:
+            // Report 16 bytes minimum when block size is unknown
+            *params = block.offset > 0 ? block.offset : 16;
+            break;
+        case GL_UNIFORM_BLOCK_NAME_LENGTH:
+            *params = static_cast<GLint>(block.name.size() + 1);
+            break;
+        case GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS: {
+            GLint count = 0;
+            for (const auto& u : obj->resourceUniforms) {
+                if (u.blockIndex == static_cast<GLint>(uniformBlockIndex)) count++;
+            }
+            *params = count;
+            break;
+        }
+        case GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES: {
+            GLint idx = 0;
+            for (GLint i = 0; i < static_cast<GLint>(obj->resourceUniforms.size()); ++i) {
+                if (obj->resourceUniforms[i].blockIndex == static_cast<GLint>(uniformBlockIndex)) {
+                    params[idx++] = i;
+                }
+            }
+            break;
+        }
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
+            *params = (block.referencedBy & 1) ? GL_TRUE : GL_FALSE;
+            break;
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
+            *params = (block.referencedBy & 2) ? GL_TRUE : GL_FALSE;
+            break;
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
+            *params = (block.referencedBy & 8) ? GL_TRUE : GL_FALSE;
+            break;
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_TESS_CONTROL_SHADER:
+            *params = (block.referencedBy & 16) ? GL_TRUE : GL_FALSE;
+            break;
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_TESS_EVALUATION_SHADER:
+            *params = (block.referencedBy & 32) ? GL_TRUE : GL_FALSE;
+            break;
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER:
+            *params = (block.referencedBy & 4) ? GL_TRUE : GL_FALSE;
+            break;
+        default:
+            context->pushError(GL_INVALID_ENUM);
+            break;
+    }
 }
 
 static void APIENTRY glGetActiveUniformBlockName(GLuint program, GLuint uniformBlockIndex, GLsizei bufSize, GLsizei *length, GLchar *uniformBlockName) {
-    (void)program;
-    (void)uniformBlockIndex;
-    (void)bufSize;
-    (void)length;
-    (void)uniformBlockName;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    GLProgramObject* obj = context->objects().programs().get(program);
+    if (obj == nullptr) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (uniformBlockIndex >= static_cast<GLuint>(obj->resourceUniformBlocks.size())) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    const auto& block = obj->resourceUniformBlocks[uniformBlockIndex];
+    const GLsizei nameLen = static_cast<GLsizei>(block.name.size());
+    const GLsizei copyLen = std::min<GLsizei>(nameLen, bufSize > 0 ? bufSize - 1 : 0);
+    if (uniformBlockName != nullptr && bufSize > 0) {
+        std::memcpy(uniformBlockName, block.name.c_str(), copyLen);
+        uniformBlockName[copyLen] = '\0';
+    }
+    if (length != nullptr) {
+        *length = copyLen;
+    }
 }
 
 static void APIENTRY glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding) {
-    (void)program;
-    (void)uniformBlockIndex;
-    (void)uniformBlockBinding;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    GLProgramObject* obj = context->objects().programs().get(program);
+    if (obj == nullptr) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (uniformBlockIndex < static_cast<GLuint>(obj->resourceUniformBlocks.size())) {
+        obj->resourceUniformBlocks[uniformBlockIndex].location = static_cast<GLint>(uniformBlockBinding);
+    }
 }
 
 static void APIENTRY glGetIntegeri_v(GLenum target, GLuint index, GLint *data) {
@@ -954,39 +1424,23 @@ static void APIENTRY glGetIntegeri_v(GLenum target, GLuint index, GLint *data) {
 }
 
 static void APIENTRY glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void *indices, GLint basevertex) {
-    (void)mode;
-    (void)count;
-    (void)type;
-    (void)indices;
-    (void)basevertex;
+    auto* ctx = currentContextOrNull();
+    if (ctx) ctx->drawElementsBaseVertex(mode, count, type, indices, basevertex);
 }
 
 static void APIENTRY glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices, GLint basevertex) {
-    (void)mode;
-    (void)start;
-    (void)end;
-    (void)count;
-    (void)type;
-    (void)indices;
-    (void)basevertex;
+    auto* ctx = currentContextOrNull();
+    if (ctx) ctx->drawRangeElementsBaseVertex(mode, start, end, count, type, indices, basevertex);
 }
 
 static void APIENTRY glDrawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLint basevertex) {
-    (void)mode;
-    (void)count;
-    (void)type;
-    (void)indices;
-    (void)instancecount;
-    (void)basevertex;
+    auto* ctx = currentContextOrNull();
+    if (ctx) ctx->drawElementsInstancedBaseVertex(mode, count, type, indices, instancecount, basevertex);
 }
 
 static void APIENTRY glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei *count, GLenum type, const void *const*indices, GLsizei drawcount, const GLint *basevertex) {
-    (void)mode;
-    (void)count;
-    (void)type;
-    (void)indices;
-    (void)drawcount;
-    (void)basevertex;
+    auto* ctx = currentContextOrNull();
+    if (ctx) ctx->multiDrawElementsBaseVertex(mode, count, type, indices, drawcount, basevertex);
 }
 
 static void APIENTRY glProvokingVertex(GLenum mode) {
@@ -1042,21 +1496,48 @@ static void APIENTRY glGetInteger64i_v(GLenum target, GLuint index, GLint64 *dat
 }
 
 static void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {
-    (void)target;
-    (void)samples;
-    (void)internalformat;
-    (void)width;
-    (void)height;
-    (void)fixedsamplelocations;
+    // RC-C03: Delegate to the existing texStorageMultisample path.
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    if (target != GL_TEXTURE_2D_MULTISAMPLE) {
+        context->pushError(GL_INVALID_ENUM);
+        return;
+    }
+    if (samples < 1) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    // Allow 0-sized dimensions (CTS state reset uses 0x0 to clear texture state).
+    if (width < 0 || height < 0) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (width == 0 || height == 0) {
+        return; // Silently accept 0-sized multisample textures (no-op)
+    }
+    context->texStorageMultisample(target, samples, internalformat, width, height, 1, fixedsamplelocations);
 }
 
 static void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations) {
-    (void)target;
-    (void)samples;
-    (void)internalformat;
-    (void)width;
-    (void)height;
-    (void)depth;
+    // RC-C03: Same delegation for 3D multisample.
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    if (target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+        context->pushError(GL_INVALID_ENUM);
+        return;
+    }
+    if (samples < 1) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (width < 0 || height < 0 || depth < 0) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (width == 0 || height == 0 || depth == 0) {
+        return; // Silently accept 0-sized multisample textures (no-op)
+    }
+    context->texStorageMultisample(target, samples, internalformat, width, height, depth, fixedsamplelocations);
     (void)fixedsamplelocations;
 }
 
@@ -1189,6 +1670,14 @@ static void APIENTRY glBeginQuery(GLenum target, GLuint id) {
         context->pushError(GL_INVALID_OPERATION, "glBeginQuery", "query id is not a valid query object");
         return;
     }
+    // GL spec: once a query object has been used with a target, it cannot be
+    // reused with a different target.  Enforce target exclusivity.
+    if (query->boundTarget != 0 && query->boundTarget != target) {
+        context->pushError(GL_INVALID_OPERATION, "glBeginQuery",
+                           "query object was previously used with a different target");
+        return;
+    }
+    query->boundTarget = target;
     query->target = target;
     query->active = true;
     query->result = 0;

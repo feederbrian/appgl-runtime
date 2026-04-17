@@ -198,6 +198,15 @@ struct TranslatedDrawInfo {
     GLenum frontFace = GL_CCW;
     bool wireframe = false;
 
+    // RC-A02: viewport state.  Plumbed from glViewport so Metal's render
+    // encoder receives the correct viewport rectangle.
+    GLint viewportX = 0;
+    GLint viewportY = 0;
+    GLsizei viewportWidth = 0;
+    GLsizei viewportHeight = 0;
+    GLdouble depthRangeNear = 0.0;
+    GLdouble depthRangeFar = 1.0;
+
     // Phase 8X Group 4d follow-up¹⁴ — blend state plumbing.
     //
     // Before follow-up¹⁴ the pipeline descriptor's
@@ -235,6 +244,22 @@ struct TranslatedDrawInfo {
         bool colorMaskA = true;
     };
     BlendState blend;
+
+    // Uniform Buffer Object bindings.  Resolved from the GL state by
+    // GLContext::drawArrays at draw time, then bound to the Metal encoder
+    // by encodeTranslatedDraw. Each entry pairs a Metal [[buffer(N)]] slot
+    // with a pointer to the CPU-side buffer data. The data lifetime is the
+    // GLBufferObject's backing store, which outlives the encode call.
+    struct UBOBinding {
+        std::uint32_t metalSlot = 0;
+        const void* data = nullptr;
+        std::size_t size = 0;
+        void* metalBuffer = nullptr;  // raw retained Metal buffer for >4KB UBOs
+        std::size_t metalBufferOffset = 0;
+        bool isVertex = false;    // bind to vertex stage
+        bool isFragment = false;  // bind to fragment stage
+    };
+    std::vector<UBOBinding> uboBindings;
 
     // Translated MSL + reflection (borrowed from GLProgramObject).
     const std::string* vertexMSL = nullptr;
@@ -280,6 +305,16 @@ struct TranslatedDrawInfo {
     // EncodeFailed bit so the record fires once per program rather than
     // once per draw.
     std::string* pipelineBuildErrorOut = nullptr;
+
+    // FBO render target override.  When non-null, encodeTranslatedDraw
+    // renders into this texture instead of the default framebuffer's
+    // drawable/offscreen texture.  The caller (GLContext::drawArrays etc.)
+    // resolves the bound draw-framebuffer's color attachment Metal texture
+    // and sets this field; nullptr means draw to default framebuffer.
+    void* fboColorTexture = nullptr;       // id<MTLTexture>
+    void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nil
+    GLsizei fboWidth = 0;
+    GLsizei fboHeight = 0;
 };
 
 // Phase 8X Group 4d follow-up¹⁷ — describes a single immediate-mode
@@ -348,6 +383,11 @@ public:
     void endFrame(GLObjectStore& objects);
     void present();
     bool copyRGBA8Pixels(GLint x, GLint y, GLsizei width, GLsizei height, void* outPixels);
+    // Ends any open render encoder and commits/waits the current command
+    // buffer so GPU-rendered texture data can be read back by the CPU.
+    // Called before FBO readback to ensure data written by prior draws is
+    // visible to [MTLTexture getBytes:].
+    void flushForReadback();
     bool hasValidAttachments() const;
 
     // Pipeline cache metrics for benchmarking.

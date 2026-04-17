@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <deque>
 #include <memory>
 #include <source_location>
@@ -237,6 +238,12 @@ public:
     bool drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount);
     bool drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
 
+    // GL 3.2 — base-vertex indexed drawing (ARB_draw_elements_base_vertex).
+    bool drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex);
+    bool drawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void* indices, GLint basevertex);
+    bool drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex);
+    bool multiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices, GLsizei drawcount, const GLint* basevertex);
+
     // GL 4.2/4.3 — compute shaders and memory barriers.
     // Stubs: validate parameters and record state. Actual Metal compute encoding
     // will be wired when compute shader programs are created at link time.
@@ -265,6 +272,15 @@ public:
     bool drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance);
     bool drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLuint baseinstance);
     bool drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance);
+
+    // GL 4.0/4.3 — indirect draw helpers.
+    // Reads `size` bytes from the bound GL_DRAW_INDIRECT_BUFFER at byte offset
+    // `indirect`, or from the client pointer if no buffer is bound.  Returns
+    // false and pushes GL_INVALID_OPERATION on out-of-bounds reads.
+    bool readIndirectBuffer(GLenum target, const void* indirect, std::size_t size, void* out);
+
+    // Query the currently-bound vertex array object name (for validation).
+    GLuint getBoundVertexArray() const;
 
     // GL 4.3 — multi-draw indirect.
     bool multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsizei drawcount, GLsizei stride);
@@ -540,6 +556,16 @@ public:
     PipelineCacheMetrics pipelineCacheMetrics() const;
     void resetPipelineCacheMetrics();
     std::uint64_t metalAllocatedBytes() const;
+
+    // Transform feedback active state tracking (for CTS api_errors_test).
+    bool isTransformFeedbackActive() const;
+    void setTransformFeedbackActive(bool active);
+    bool isTransformFeedbackPaused() const;
+    void setTransformFeedbackPaused(bool paused);
+    GLenum transformFeedbackPrimitiveMode() const;
+    void setTransformFeedbackPrimitiveMode(GLenum mode);
+    GLuint boundTransformFeedback() const;
+    void setBoundTransformFeedback(GLuint id);
 
 private:
     struct Impl;

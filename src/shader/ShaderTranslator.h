@@ -39,13 +39,17 @@ struct ShaderReflection {
         std::size_t offset = 0;   // byte offset within the struct
         std::size_t size = 0;     // byte size (includes column padding)
         GLenum type = 0;          // GL type (GL_FLOAT_MAT4, GL_FLOAT_VEC3…)
+        bool isRowMajor = false;  // SPIR-V DecorationRowMajor for matrices
+        std::uint32_t arraySize = 0; // >0 if the member is an array (element count)
     };
 
     struct ResourceBinding {
         GLuint glBinding = 0;
         std::uint32_t metalBinding = 0;
         std::size_t byteSize = 0;
-        std::string name;
+        std::string name;               // block type name (always)
+        bool hasInstanceName = false;    // true if GLSL had an instance name
+        std::uint32_t blockArraySize = 0; // >0 for `uniform B { ... } b[N]` arrays
         std::vector<UniformMember> members;
     };
 
@@ -81,6 +85,18 @@ struct LinkedProgramSpirv {
     std::vector<std::uint32_t> fragmentSpirv;
     bool linkSucceeded = false;
 };
+
+// Tessellation execution mode properties extracted from SPIR-V.
+struct TessellationModes {
+    int outputVertices = 0;           // from TCS ExecutionModeOutputVertices
+    GLenum genMode = GL_TRIANGLES;    // GL_TRIANGLES, GL_QUADS, GL_ISOLINES (from TES)
+    GLenum genSpacing = GL_EQUAL;     // GL_EQUAL, GL_FRACTIONAL_EVEN, GL_FRACTIONAL_ODD
+    GLenum genVertexOrder = GL_CCW;   // GL_CCW, GL_CW
+    bool pointMode = false;
+};
+
+// Extract tessellation execution modes from compiled SPIR-V for a TCS or TES stage.
+TessellationModes extractTessellationModes(const std::uint32_t* spirv, std::size_t wordCount);
 
 class ShaderTranslator {
 public:

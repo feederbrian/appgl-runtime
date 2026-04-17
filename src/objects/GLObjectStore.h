@@ -45,6 +45,14 @@ struct GLBufferObject {
     GLsizeiptr mapLength = 0;
     void* mapPointer = nullptr;
     std::vector<std::uint8_t> shadowBytes;
+
+    // ADV-10: cached uint8→uint16 index expansion.  Populated on the first
+    // drawElements call with GL_UNSIGNED_BYTE; invalidated when buffer data
+    // changes (glBufferData / glBufferSubData).  Avoids per-draw heap
+    // allocation and byte-widening loop for 8-bit index buffers.
+    std::vector<std::uint8_t> cachedExpandedIndices;
+    uint32_t indexExpansionGeneration = 0;   // bumped on data change
+    uint32_t cachedExpansionGeneration = 0;  // generation when cache was built
 };
 
 struct GLTextureDesc {
@@ -68,6 +76,14 @@ struct GLTextureDesc {
 struct GLTextureImageLevel {
     GLTextureDesc desc;
     std::vector<std::uint8_t> rgba8;
+    // Native-format pixel data for non-RGBA8 Metal textures (e.g. R16F,
+    // RGBA32F, R8_SNORM …). Built alongside rgba8 by buildNativeUpload()
+    // and used by replaceMetalTexture() when the Metal pixel format
+    // differs from RGBA8Unorm. Empty when the internal format maps to
+    // RGBA8Unorm or is unsupported — replaceMetalTexture falls back to
+    // the rgba8 shadow in that case.
+    std::vector<std::uint8_t> nativeData;
+    std::size_t nativeBpp = 0; // bytes-per-pixel for nativeData (0 = not available)
     bool defined = false;
 };
 
@@ -85,6 +101,7 @@ struct GLTextureParameters {
     GLint compareFunc = GL_LEQUAL;
     std::array<GLfloat, 4> borderColor = {0.0f, 0.0f, 0.0f, 0.0f};
     std::array<GLint, 4> swizzle = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA};
+    GLint depthStencilTextureMode = GL_DEPTH_COMPONENT;
 };
 
 struct GLTextureObject {
@@ -128,6 +145,15 @@ struct GLTextureObject {
     //    therefore releases both the storage and the cached sampler.
     void* metalSampler = nullptr;
     bool samplerDirty = true;
+
+    // GL_TEXTURE_SWIZZLE — lazy MTLTexture view with swizzle channels.
+    // Created on demand when non-default swizzle is detected at draw time
+    // via `newTextureViewWithPixelFormat:textureType:levels:slices:swizzle:`.
+    // The view shares the same storage as `metalTexture` (no data copy).
+    // `swizzleDirty` is set whenever any GL_TEXTURE_SWIZZLE_* parameter
+    // changes, so the view is rebuilt on the next draw.
+    void* metalSwizzledView = nullptr;
+    bool swizzleDirty = true;
 };
 
 struct GLSamplerObject {
@@ -225,6 +251,13 @@ struct GLShaderDeclaration {
     GLenum type = 0;
     GLint arraySize = 1;
     GLint explicitLocation = -1;
+    // RC-D08: explicit `layout(binding=N)` qualifier from the GLSL source.
+    // -1 means no explicit binding was specified.  The GLSL scanner
+    // (`extractLayoutQualifiers`) populates this when it finds a
+    // `binding = N` token inside a `layout(...)` block.  Propagated through
+    // `appendDeclarationsAsUniforms` into `GLProgramUniformInfo` and from
+    // there into the GL 4.3 program-resource introspection table.
+    GLint explicitBinding = -1;
     // Phase 8X Group 4d follow-up¹⁵ — GLSL 4.20 / ARB_shading_language_420pack
     // lets uniform declarations carry a default-value initializer, e.g.
     //   uniform vec4 ucolor   = vec4(1.0);
@@ -275,6 +308,15 @@ struct GLProgramUniformInfo {
     GLenum type = 0;
     GLint arraySize = 1;
     GLint location = -1;
+    // RC-D06: explicit location from GLSL `layout(location=N)`.  -1 means
+    // the author did not specify one and linkProgram assigns a dense
+    // sequential location.  When >= 0 the link-time location assignment
+    // honours this value so `glGetUniformLocation` returns the
+    // author-specified number, matching CTS expectations.
+    GLint explicitLocation = -1;
+    // RC-D08: explicit binding from GLSL `layout(binding=N)`.  -1 means
+    // unspecified.  Propagated into the GL 4.3 resource introspection table.
+    GLint explicitBinding = -1;
     // Phase 8X Group 4d follow-up¹⁵ — parallel to GLShaderDeclaration.
     // linkProgram (appendDeclarationsAsUniforms) forwards these from the
     // shader-stage declarations into the program-level uniform table so
@@ -305,11 +347,13 @@ struct GLProgramUniformValue {
 struct GLProgramResourceEntry {
     std::string name;
     GLenum type = 0;          // GL_FLOAT, GL_FLOAT_VEC4, etc.
-    GLint location = -1;      // location/binding
+    GLint location = -1;      // uniform location (glGetUniformLocation)
+    GLint binding = -1;       // RC-D08: explicit layout(binding=N), -1 = unspecified
     GLint arraySize = 1;
     GLint offset = -1;        // byte offset within block (-1 = N/A)
     GLint blockIndex = -1;    // parent block index (-1 = not in a block)
     GLbitfield referencedBy = 0; // bitmask: 1=vertex, 2=fragment, 4=compute, etc.
+    bool isRowMajor = false;  // GL_UNIFORM_IS_ROW_MAJOR for matrix block members
 };
 
 // Cached uniform locations for the synthesized `appgl_*` fixed-function
@@ -355,6 +399,14 @@ struct GLProgramObject {
     std::unordered_map<GLint, GLProgramUniformValue> uniformValues;
     std::unordered_map<std::string, GLuint> requestedAttribLocations;
     GLSynthesizedMatrixSlots synthesizedMatrixSlots;
+
+    // Tessellation program properties (extracted from SPIR-V at link time).
+    GLint tessControlOutputVertices = 0;
+    GLenum tessGenMode = GL_TRIANGLES;     // GL_TRIANGLES, GL_QUADS, GL_ISOLINES
+    GLenum tessGenSpacing = GL_EQUAL;      // GL_EQUAL, GL_FRACTIONAL_EVEN, GL_FRACTIONAL_ODD
+    GLenum tessGenVertexOrder = GL_CCW;    // GL_CCW, GL_CW
+    GLboolean tessGenPointMode = GL_FALSE;
+    bool hasTessellation = false;
 
     // Translated shader pipeline (populated at link time when the shader
     // compiler is available).  The MSL sources are consumed by MetalFrameGraph
@@ -411,6 +463,10 @@ struct GLProgramObject {
     // drowning in per-draw spam.
     std::uint32_t translatedFallbackGatesReported = 0;
 
+    // Transform feedback varyings (set by glTransformFeedbackVaryings, used at link time).
+    std::vector<std::string> transformFeedbackVaryingNames;
+    GLenum transformFeedbackBufferMode = GL_INTERLEAVED_ATTRIBS;
+
     // GL 4.3 program resource introspection tables (populated at link time).
     std::vector<GLProgramResourceEntry> resourceUniforms;
     std::vector<GLProgramResourceEntry> resourceUniformBlocks;
@@ -419,6 +475,8 @@ struct GLProgramObject {
     std::vector<GLProgramResourceEntry> resourceStorageBlocks;
     std::vector<GLProgramResourceEntry> resourceAtomicCounterBuffers;
     std::vector<GLProgramResourceEntry> resourceBufferVariables;
+    std::vector<GLProgramResourceEntry> resourceTransformFeedbackVaryings;
+    std::vector<GLProgramResourceEntry> resourceTransformFeedbackBuffers;
 
     // GL 4.3 SSBO binding remapping (block index → user-specified binding).
     std::unordered_map<GLuint, GLuint> ssboBindingRemap;
@@ -440,6 +498,7 @@ struct GLProgramObject {
 
 struct GLQueryObject {
     GLenum target = 0;
+    GLenum boundTarget = 0;   // First target used with this query; 0 = unbound
     bool active = false;
     GLuint64 result = 0;
 };
@@ -452,6 +511,8 @@ struct GLSyncObject {
 struct GLTransformFeedbackObject {
     bool active = false;
     bool paused = false;
+    bool hasCompleted = false;  // set to true when EndTransformFeedback is called
+    GLenum capturedPrimitiveMode = GL_POINTS;  // mode from beginTransformFeedback
     GLsizei capturedPrimitives = 0;  // for glDrawTransformFeedback
 };
 

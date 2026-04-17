@@ -592,6 +592,31 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
     }
 
+    // ---- 2b. Strip GL_ARB extension directives unknown to glslang ---------
+    // Under Vulkan-targeted compilation, some GL_ARB extensions exist as
+    // core features in Vulkan/SPIR-V but glslang's Vulkan front-end
+    // doesn't register them as known extension names. The `#extension`
+    // directive then fails with "extension not supported." Comment out
+    // only those directives — extensions that glslang DOES recognize
+    // (like GL_ARB_compute_shader, GL_ARB_shader_image_load_store) must
+    // be kept so glslang enables the corresponding functionality.
+    {
+        static const char* const kUnknownExtensions[] = {
+            "GL_ARB_cull_distance",
+        };
+        for (const char* ext : kUnknownExtensions) {
+            std::string needle = std::string("#extension ") + ext;
+            std::size_t pos = 0;
+            while ((pos = result.source.find(needle, pos)) != std::string::npos) {
+                // Comment out the entire line by replacing `#extension`
+                // with `// xtension` (same length to preserve offsets).
+                result.source.replace(pos, 10, "// xtensio");
+                result.didRewrite = true;
+                pos += 10;
+            }
+        }
+    }
+
     // ---- 3. Decide whether to inject preamble ----------------------------
     // We inject when EITHER the original source was compat profile, OR
     // the fw¹⁹ version-floor upgrade triggered, OR any matrix identifier
@@ -600,7 +625,41 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     const bool needPreamble = result.usage.any() || legacy.any();
     const bool didAnyRewrite =
         result.wasCompatProfile || legacy.upgradedVersion || needPreamble;
-    if (!didAnyRewrite) {
+    // ---- 3b. Unconditional CTS fixups — run before early-return ----------
+    // `sampler` is used as a plain variable name in CTS shaders (e.g.
+    // `uniform usampler2DArray sampler;`). glslang rejects it as a
+    // reserved word. Rename unconditionally regardless of compat rewrite.
+    bool didSamplerFixup = false;
+    if (containsIdentifier(result.source, "sampler")) {
+        replaceIdentifier(result.source, "sampler", "_appgl_sampler");
+        didSamplerFixup = true;
+    }
+    // RC-D23: strip ESSL precision qualifiers on sampler types.
+    {
+        std::size_t searchPos = 0;
+        while (true) {
+            const std::size_t pIdx = result.source.find("precision", searchPos);
+            if (pIdx == std::string::npos) break;
+            if (pIdx > 0 && isIdentChar(result.source[pIdx - 1])) {
+                searchPos = pIdx + 1;
+                continue;
+            }
+            std::size_t eol = result.source.find('\n', pIdx);
+            if (eol == std::string::npos) eol = result.source.size();
+            const std::string_view line(result.source.data() + pIdx, eol - pIdx);
+            if (line.find("sampler") != std::string_view::npos ||
+                line.find("Sampler") != std::string_view::npos ||
+                line.find("_appgl_sampler") != std::string_view::npos) {
+                result.source.insert(pIdx, "//");
+                searchPos = eol + 2;
+                didSamplerFixup = true;
+            } else {
+                searchPos = eol;
+            }
+        }
+    }
+
+    if (!didAnyRewrite && !didSamplerFixup) {
         return result;
     }
     result.didRewrite = true;
@@ -761,6 +820,11 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     if (legacy.anyLight()) {
         rewriteLightSourceSubscripts(result.source);
     }
+
+    // ---- 4b. CTS fixups — (moved to section 3b above for unconditional
+    // execution; sampler rename and precision strip run even for modern
+    // core-profile shaders that skip the compat rewrite path) -----------
+
     // The version line rewrite may have moved versionEol, but the
     // text rewrites above operate on bytes AFTER the version line
     // (identifier scans are body-scoped in practice, and even if they
