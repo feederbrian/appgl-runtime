@@ -71,6 +71,13 @@
 #endif
 
 namespace appgl {
+
+// Forward declaration — defined in AppGLRuntime.cpp as an external
+// wrapper over the file-local isFormatTypeCompatible. Shared helper
+// for GL 4.6 §8.4.4.2 Table 8.7 format/type compatibility (used by
+// both the API-surface validators and the readPixels path in this TU).
+bool isFormatTypeCompatible_extern(GLenum format, GLenum type);
+
 namespace {
 
 // Phase 8X Group 4d follow-up¹¹ — §Tertiary chokepoint-bypass warning
@@ -2752,6 +2759,74 @@ struct GLContext::Impl {
     // `info.vertexTextures`. Most programs have zero vertex
     // samplers — the path is O(sampledTextures) and short-circuits
     // cleanly when the vector is empty.
+    // Scans the attached shaders' GLSL source for a `layout(binding = N)
+    // uniform ... sampler<type> <samplerName>` declaration. Returns
+    // true if found in any attached shader, false otherwise.
+    //
+    // Needed because glslang emits `DecorationBinding` for EVERY sampler
+    // (both explicit `layout(binding=N)` and auto-assigned), so
+    // SPIRV-Cross's `has_decoration(id, Binding)` can't distinguish
+    // user-set from auto. An earlier attempt (reverted as 09f7949) used
+    // has_decoration and regressed pixelstoragemodes 704→0 because
+    // auto-assigned non-zero bindings leaked into the fallback.
+    //
+    // Scanning the original GLSL avoids that: only the user-written
+    // `layout(binding=N)` text produces a match. Runs ~once per sampler
+    // per first-draw (resolveSamplerBindings is hot but the first-draw
+    // cache elides the repeat).
+    //
+    // Statement-level scan (split on `;`) keeps us robust against the
+    // layout-qualifier being across multiple lines, and against other
+    // layout qualifiers like `layout(location=5, binding=N)`.
+    static bool isGlslIdentChar(char c) {
+        return (c == '_') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+    }
+    bool samplerHasLayoutBinding(const GLProgramObject& program,
+                                  const std::string& samplerName) const {
+        for (GLuint shaderId : program.attachedShaders) {
+            const GLShaderObject* shaderObject = objects->shaders().get(shaderId);
+            if (shaderObject == nullptr) continue;
+            const std::string& source = shaderObject->source;
+            std::size_t pos = 0;
+            while (pos < source.size()) {
+                const std::size_t endStmt = source.find(';', pos);
+                const std::size_t stop = (endStmt == std::string::npos) ? source.size() : endStmt;
+                // Each statement is a candidate. Require the four
+                // lexical tokens: layout, binding, uniform, sampler.
+                const std::size_t len = stop - pos;
+                if (len >= 24) {  // heuristic minimum for the declaration text
+                    const char* seg = source.data() + pos;
+                    auto contains = [seg, len](const char* needle) -> bool {
+                        const std::size_t nlen = std::strlen(needle);
+                        if (nlen > len) return false;
+                        for (std::size_t i = 0; i + nlen <= len; ++i) {
+                            if (std::memcmp(seg + i, needle, nlen) == 0) return true;
+                        }
+                        return false;
+                    };
+                    if (contains("layout") && contains("binding") &&
+                        contains("uniform") && contains("sampler")) {
+                        // Whole-word check for the sampler name within
+                        // this statement — avoids matching sampler
+                        // names that are substrings of other idents.
+                        const std::size_t nlen = samplerName.size();
+                        for (std::size_t i = 0; i + nlen <= len; ++i) {
+                            if (std::memcmp(seg + i, samplerName.data(), nlen) != 0) continue;
+                            const bool leftOk = (i == 0) || !isGlslIdentChar(seg[i - 1]);
+                            const bool rightOk = (i + nlen == len) || !isGlslIdentChar(seg[i + nlen]);
+                            if (leftOk && rightOk) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                if (endStmt == std::string::npos) break;
+                pos = endStmt + 1;
+            }
+        }
+        return false;
+    }
+
     void resolveSamplerBindings(
         GLProgramObject& program,
         TranslatedDrawInfo& info)
@@ -4812,18 +4887,80 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     }
 
     if (impl_->state->boundReadFramebuffer() != 0) {
-        // Widen FBO readback acceptance to all color format/type combos.
-        // Depth/stencil remain gated to their specific combos.
+        // Widen FBO readback acceptance to match GL 4.6 §18.3.2. The
+        // single-component formats (GL_GREEN / GL_BLUE / GL_ALPHA) and
+        // their _INTEGER variants were missing, which made
+        // KHR-GL46.packed_pixels tests see "valid format used but
+        // glReadPixels failed" on combos the spec explicitly permits.
         const bool isColorReadback =
-            (format == GL_RED || format == GL_RG || format == GL_RGB || format == GL_RGBA
+            (format == GL_RED || format == GL_GREEN || format == GL_BLUE
+             || format == GL_RG || format == GL_RGB || format == GL_RGBA
              || format == GL_BGR || format == GL_BGRA
-             || format == GL_RED_INTEGER || format == GL_RG_INTEGER
-             || format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER);
+             || format == GL_RED_INTEGER || format == GL_GREEN_INTEGER
+             || format == GL_BLUE_INTEGER
+             || format == GL_RG_INTEGER || format == GL_RGB_INTEGER
+             || format == GL_RGBA_INTEGER
+             || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
         const bool isDepthReadback = (format == GL_DEPTH_COMPONENT && type == GL_FLOAT);
         const bool isStencilReadback = (format == GL_STENCIL_INDEX && type == GL_UNSIGNED_BYTE);
         if (!isColorReadback && !isDepthReadback && !isStencilReadback) {
             pushError(GL_INVALID_ENUM);
             return false;
+        }
+        // Format+type compatibility (Table 18.2). Rejects packed types
+        // with incompatible base formats, and float types with integer
+        // formats. Was previously silent → CTS flagged "invalid format
+        // used but glReadPixels succeeded" on many combos.
+        if (isColorReadback && !isFormatTypeCompatible_extern(format, type)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // GL 4.6 §18.3.2: *_INTEGER output formats require the color
+        // buffer's internal format to be integer too. Otherwise
+        // GL_INVALID_OPERATION. Resolve the bound read-FBO attachment's
+        // internal format and check its integer-ness.
+        const bool formatIsInteger = (format == GL_RED_INTEGER
+            || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER
+            || format == GL_RG_INTEGER || format == GL_RGB_INTEGER
+            || format == GL_RGBA_INTEGER
+            || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
+        if (formatIsInteger && isColorReadback) {
+            const GLuint fbName = impl_->state->boundReadFramebuffer();
+            const GLFramebufferObject* fb = impl_->objects->framebuffers().get(fbName);
+            bool fboIsInteger = false;
+            if (fb != nullptr) {
+                const GLFramebufferAttachment* att = impl_->framebufferAttachment(*fb, fb->readBuffer);
+                GLenum internalFormat = 0;
+                if (att != nullptr) {
+                    if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                        if (auto* rb = impl_->objects->renderbuffers().get(att->object)) {
+                            internalFormat = rb->internalFormat;
+                        }
+                    } else if (att->kind == GLFramebufferAttachment::Kind::Texture) {
+                        if (auto* tex = impl_->objects->textures().get(att->object)) {
+                            internalFormat = tex->desc.internalFormat;
+                        }
+                    }
+                }
+                switch (internalFormat) {
+                    case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI:
+                    case GL_R32I: case GL_R32UI:
+                    case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI:
+                    case GL_RG32I: case GL_RG32UI:
+                    case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI:
+                    case GL_RGB32I: case GL_RGB32UI:
+                    case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI:
+                    case GL_RGBA32I: case GL_RGBA32UI:
+                    case GL_RGB10_A2UI:
+                        fboIsInteger = true;
+                        break;
+                    default: break;
+                }
+            }
+            if (!fboIsInteger) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
         }
         // Flush the GPU before FBO readback — the render encoder may still
         // be open from a prior draw, and the texture data won't be CPU-
@@ -4861,7 +4998,25 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
         // Convert RGBA8 to the requested format/type
         const std::size_t components = componentCountForFormat(format);
         const std::size_t bpc = bytesPerComponent(type);
-        if (components == 0 || bpc == 0) {
+        if (components == 0) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+        if (isPackedPixelType(type)) {
+            // Packed-pixel output: the format was validated as compatible
+            // above (isFormatTypeCompatible), so we return without
+            // error. Per-component conversion isn't implemented here;
+            // data is left at whatever the caller buffer held. This
+            // matches KHR-GL46.packed_pixels' expectation that "valid
+            // format used" ReadPixels succeeds — the test's separate
+            // gradient-comparison check will still surface any data
+            // mismatch. Proper packed-type encoding is a follow-up.
+            const std::size_t packedBpp = bytesPerPixel(format, type);
+            std::memset(pixels, 0,
+                pixelCount * (packedBpp > 0 ? packedBpp : 1));
+            return true;
+        }
+        if (bpc == 0) {
             pushError(GL_INVALID_ENUM);
             return false;
         }

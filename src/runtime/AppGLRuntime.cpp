@@ -932,6 +932,89 @@ bool isFormatCompatibleWithInternalFormat(GLenum format, GLenum internalFormat) 
     }
 }
 
+// Format-type compatibility per GL 4.6 §8.4.4.2 Table 8.7 (texture
+// upload) and §18.3.2 Table 18.2 (readback). Plain integer/float types
+// are compatible with any base format; packed types are constrained
+// to specific format families. Used by glTexImage* / glTexSubImage* /
+// glReadPixels paths to reject invalid combos that the pre-this-fix
+// code accepted silently — matches CTS packed_pixels expectations.
+bool isFormatTypeCompatible(GLenum format, GLenum type) {
+    // Classify the base format.
+    const bool isDepthFormat = (format == GL_DEPTH_COMPONENT);
+    const bool isDepthStencilFormat = (format == GL_DEPTH_STENCIL);
+    const bool isStencilFormat = (format == GL_STENCIL_INDEX);
+    const bool isIntegerFormat = (format == GL_RED_INTEGER || format == GL_RG_INTEGER
+        || format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER
+        || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER
+        || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER);
+    const bool isRGB = (format == GL_RGB || format == GL_RGB_INTEGER);
+    const bool isBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
+    const bool isRGBA_family = (format == GL_RGBA || format == GL_RGBA_INTEGER
+        || format == GL_BGRA || format == GL_BGRA_INTEGER);
+
+    switch (type) {
+        // Plain integer/float types accept any base color format, plus
+        // depth/stencil under narrow rules that CTS enforces via
+        // isFormatCompatibleWithInternalFormat rather than here.
+        case GL_UNSIGNED_BYTE:
+        case GL_BYTE:
+        case GL_UNSIGNED_SHORT:
+        case GL_SHORT:
+        case GL_UNSIGNED_INT:
+        case GL_INT:
+        case GL_HALF_FLOAT:
+        case GL_FLOAT:
+            // Float type with integer format is invalid (Table 8.7 "F"
+            // column rejects *_INTEGER formats).
+            if (type == GL_FLOAT || type == GL_HALF_FLOAT) {
+                return !isIntegerFormat;
+            }
+            return true;
+        // RGB-packed types: format must be one of GL_RGB / GL_RGB_INTEGER.
+        case GL_UNSIGNED_BYTE_3_3_2:
+        case GL_UNSIGNED_BYTE_2_3_3_REV:
+        case GL_UNSIGNED_SHORT_5_6_5:
+        case GL_UNSIGNED_SHORT_5_6_5_REV:
+            return isRGB;
+        // RGBA-packed types: format must be GL_RGBA / GL_BGRA (or their
+        // _INTEGER variants).
+        case GL_UNSIGNED_SHORT_4_4_4_4:
+        case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+        case GL_UNSIGNED_SHORT_5_5_5_1:
+        case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+        case GL_UNSIGNED_INT_8_8_8_8:
+        case GL_UNSIGNED_INT_8_8_8_8_REV:
+        case GL_UNSIGNED_INT_10_10_10_2:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+            return isRGBA_family;
+        // Depth-stencil packed types.
+        case GL_UNSIGNED_INT_24_8:
+        case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+            return isDepthStencilFormat;
+        // Float-packed RGB types (§8.4.4.2): RGB only, non-integer.
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+        case GL_UNSIGNED_INT_5_9_9_9_REV:
+            return format == GL_RGB;
+        default:
+            // Unknown type — don't reject here; the type-validity check
+            // catches truly invalid enums.
+            return true;
+    }
+    (void)isBGR; (void)isDepthFormat; (void)isStencilFormat;
+}
+
+}  // end file-local anonymous namespace scope for isFormatTypeCompatible
+
+// Re-expose at namespace appgl {} scope so GLContext.mm's readPixels
+// path can link against it. The anonymous-namespace copy above is
+// the definition; this pass-through provides external linkage.
+bool isFormatTypeCompatible_extern(GLenum format, GLenum type);
+bool isFormatTypeCompatible_extern(GLenum format, GLenum type) {
+    return isFormatTypeCompatible(format, type);
+}
+
+namespace {
+
 bool isValidTextureFilter(GLint filter, bool minFilter) {
     if (filter == GL_NEAREST || filter == GL_LINEAR) {
         return true;
@@ -2911,6 +2994,10 @@ void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat, GLs
         warnUploadRejectionOnce("glTexImage1D", format, type, static_cast<GLenum>(internalformat));
         return;
     }
+    if (!isFormatTypeCompatible(format, type)) {
+        recordValidationError(context, "glTexImage1D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
+        return;
+    }
     if (!isFormatCompatibleWithInternalFormat(format, static_cast<GLenum>(internalformat))) {
         recordValidationError(context, "glTexImage1D", GL_INVALID_OPERATION, "format/internalformat mismatch");
         return;
@@ -2941,6 +3028,10 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLs
     if (!isValidLegacyUploadInternalFormat(static_cast<GLenum>(internalformat)) || !isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexImage2D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
         warnUploadRejectionOnce("glTexImage2D", format, type, static_cast<GLenum>(internalformat));
+        return;
+    }
+    if (!isFormatTypeCompatible(format, type)) {
+        recordValidationError(context, "glTexImage2D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
         return;
     }
     if (!isFormatCompatibleWithInternalFormat(format, static_cast<GLenum>(internalformat))) {
@@ -2980,6 +3071,10 @@ void APIENTRY glTexImage3D(
         warnUploadRejectionOnce("glTexImage3D", format, type, static_cast<GLenum>(internalformat));
         return;
     }
+    if (!isFormatTypeCompatible(format, type)) {
+        recordValidationError(context, "glTexImage3D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
+        return;
+    }
     if (!isFormatCompatibleWithInternalFormat(format, static_cast<GLenum>(internalformat))) {
         recordValidationError(context, "glTexImage3D", GL_INVALID_OPERATION, "format/internalformat mismatch");
         return;
@@ -3002,6 +3097,10 @@ void APIENTRY glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei
     if (!isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexSubImage1D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
         warnUploadRejectionOnce("glTexSubImage1D", format, type, 0);
+        return;
+    }
+    if (!isFormatTypeCompatible(format, type)) {
+        recordValidationError(context, "glTexSubImage1D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
         return;
     }
     if (context->texSubImage(target, level, xoffset, 0, 0, width, 1, 1, format, type, pixels)) {
@@ -3030,6 +3129,10 @@ void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint y
     if (!isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexSubImage2D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
         warnUploadRejectionOnce("glTexSubImage2D", format, type, 0);
+        return;
+    }
+    if (!isFormatTypeCompatible(format, type)) {
+        recordValidationError(context, "glTexSubImage2D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
         return;
     }
     if (context->texSubImage(target, level, xoffset, yoffset, 0, width, height, 1, format, type, pixels)) {
@@ -3064,6 +3167,10 @@ void APIENTRY glTexSubImage3D(
     if (!isValidTextureUploadFormat(format) || !isValidTextureUploadType(type)) {
         recordValidationError(context, "glTexSubImage3D", GL_INVALID_ENUM, "format/type combination is outside the Phase A RGBA8 upload path");
         warnUploadRejectionOnce("glTexSubImage3D", format, type, 0);
+        return;
+    }
+    if (!isFormatTypeCompatible(format, type)) {
+        recordValidationError(context, "glTexSubImage3D", GL_INVALID_OPERATION, "format/type combination is invalid (Table 8.7)");
         return;
     }
     if (context->texSubImage(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels)) {
