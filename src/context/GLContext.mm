@@ -6102,6 +6102,28 @@ bool GLContext::texImage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // Enforce GL_MAX_TEXTURE_SIZE/GL_MAX_3D_TEXTURE_SIZE before reaching
+    // Metal (which asserts on oversize dims).
+    if (impl_->capabilities != nullptr) {
+        GLint maxTex = 0, max3D = 0, maxLayers = 0;
+        impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
+        impl_->capabilities->queryInteger(GL_MAX_3D_TEXTURE_SIZE, &max3D);
+        impl_->capabilities->queryInteger(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+        if (maxTex > 0 && (width > maxTex || height > maxTex)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (target == GL_TEXTURE_3D && max3D > 0 && (width > max3D || height > max3D || depth > max3D)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if ((target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_1D_ARRAY ||
+             target == GL_TEXTURE_CUBE_MAP_ARRAY) &&
+            maxLayers > 0 && depth > maxLayers) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
 
     GLTextureObject* object = impl_->currentTexture(target);
     // CTS state reset (gluStateReset.cpp) calls texImage{2,3}D with size 0x0
@@ -6341,6 +6363,30 @@ bool GLContext::texStorage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // GL 4.6 §8.19 + Metal reality: oversize textures must be rejected before
+    // reaching MTLTextureDescriptor (which asserts rather than errors).
+    // KHR-GL46.direct_state_access.textures_storage_errors etc. try 32768+
+    // deliberately. Pull caps from GLCapabilities and enforce here.
+    if (impl_->capabilities != nullptr) {
+        GLint maxTex = 0, max3D = 0, maxLayers = 0;
+        impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
+        impl_->capabilities->queryInteger(GL_MAX_3D_TEXTURE_SIZE, &max3D);
+        impl_->capabilities->queryInteger(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+        if (maxTex > 0 && (width > maxTex || height > maxTex)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (target == GL_TEXTURE_3D && max3D > 0 && (width > max3D || height > max3D || depth > max3D)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if ((target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_1D_ARRAY ||
+             target == GL_TEXTURE_CUBE_MAP_ARRAY) &&
+            maxLayers > 0 && depth > maxLayers) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
     if (!isSupportedInternalTextureFormat(*impl_->capabilities, internalformat)) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -6412,6 +6458,23 @@ bool GLContext::texStorageMultisample(
     if (samples < 1 || width < 1 || height < 1 || depth < 1) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    // Enforce GL_MAX_TEXTURE_SIZE / array layers before reaching Metal
+    // (which asserts on oversize). CTS textures_storage_multisample_errors
+    // deliberately calls this with max_texture_size*2.
+    if (impl_->capabilities != nullptr) {
+        GLint maxTex = 0, maxLayers = 0;
+        impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
+        impl_->capabilities->queryInteger(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxLayers);
+        if (maxTex > 0 && (width > maxTex || height > maxTex)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY &&
+            maxLayers > 0 && depth > maxLayers) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
     }
     if (!isSupportedInternalTextureFormat(*impl_->capabilities, internalformat)) {
         pushError(GL_INVALID_ENUM);
@@ -6730,6 +6793,16 @@ bool GLContext::renderbufferStorage(GLenum target, GLenum internalformat, GLsize
     if (width < 0 || height < 0 || samples < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    // GL 4.6 §9.2.4: INVALID_VALUE if width or height exceeds
+    // GL_MAX_RENDERBUFFER_SIZE (matches Metal's texture size ceiling).
+    if (impl_->capabilities != nullptr) {
+        GLint maxRB = 0;
+        impl_->capabilities->queryInteger(GL_MAX_RENDERBUFFER_SIZE, &maxRB);
+        if (maxRB > 0 && (width > maxRB || height > maxRB)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
     }
     if (!isSupportedRenderbufferFormat(internalformat)) {
         pushError(GL_INVALID_ENUM);
