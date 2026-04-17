@@ -6590,9 +6590,17 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
 
 bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* params) {
     GLTextureObject* object = impl_->currentTexture(target);
+    // OpenGL 4.6 §8.11: querying the default texture is valid — return the
+    // GL spec's initial parameter values. CTS texture_swizzle.intial_state
+    // (note CTS typo "intial") deletes and rebinds the same texture name
+    // in a loop, so subsequent iterations bind name=0 and query defaults.
     if (object == nullptr) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+        const GLTextureParameters defaults;
+        if (!getTextureParameterInteger(defaults, pname, params)) {
+            pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+            return false;
+        }
+        return true;
     }
     if (!getTextureParameterInteger(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
@@ -6621,9 +6629,14 @@ bool GLContext::getTexParameterUnsignedInteger(GLenum target, GLenum pname, GLui
 
 bool GLContext::getTexParameterFloat(GLenum target, GLenum pname, GLfloat* params) {
     GLTextureObject* object = impl_->currentTexture(target);
+    // Default texture query returns spec defaults (see getTexParameterInteger).
     if (object == nullptr) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+        const GLTextureParameters defaults;
+        if (!getTextureParameterFloat(defaults, pname, params)) {
+            pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+            return false;
+        }
+        return true;
     }
     if (!getTextureParameterFloat(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
