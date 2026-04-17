@@ -2994,18 +2994,6 @@ struct GLContext::Impl {
                     if (samplerValue != nullptr && static_cast<std::size_t>(arrayElement) < samplerValue->ints.size()) {
                         glUnit = samplerValue->ints[arrayElement];
                         uniformValueWasSet = true;
-                    } else if (sampledTex.hasExplicitBinding) {
-                        // GL 4.2+ shading_language_420pack: when the GLSL
-                        // declares `layout(binding = N) uniform sampler2D s;`
-                        // and the app never calls glUniform1i, the default
-                        // texture unit is N (not 0). Gated on
-                        // `hasExplicitBinding` so SPIRV-Cross's auto-
-                        // assigned DecorationBinding (for shaders without
-                        // explicit bindings) doesn't contaminate the
-                        // fallback — the bd73acc regression
-                        // (pixelstoragemodes 264→0) was caused by trusting
-                        // any non-zero binding here regardless of source.
-                        glUnit = static_cast<GLint>(sampledTex.glBinding) + arrayElement;
                     }
                 if (glUnit < 0) {
                     if (logThisCall) {

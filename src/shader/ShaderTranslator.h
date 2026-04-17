@@ -50,14 +50,6 @@ struct ShaderReflection {
         std::string name;               // block type name (always)
         bool hasInstanceName = false;    // true if GLSL had an instance name
         std::uint32_t blockArraySize = 0; // >0 for `uniform B { ... } b[N]` arrays
-        // True iff the underlying SPIR-V variable carries an explicit
-        // `DecorationBinding` — i.e. the original GLSL had
-        // `layout(binding = N)`. False when the binding was auto-
-        // assigned by SPIRV-Cross or left unset. Critical for
-        // layout(binding=N) sampler defaults (GL 4.2+ 420pack) where
-        // we only want to fall back to the binding if the user
-        // actually wrote it.
-        bool hasExplicitBinding = false;
         std::vector<UniformMember> members;
     };
 
