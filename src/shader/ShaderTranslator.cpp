@@ -464,6 +464,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             for (auto& entry : sortedUBOs) {
                 auto& ubo = *entry.res;
             ShaderReflection::ResourceBinding rb;
+            rb.hasExplicitBinding = compiler.has_decoration(ubo.id, spv::DecorationBinding);
             rb.glBinding = entry.glBinding;
             if (entry.active) {
                 rb.metalBinding = nextSlot;
@@ -618,6 +619,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // Sampled images.
         for (auto& img : resources.sampled_images) {
             ShaderReflection::ResourceBinding rb;
+            rb.hasExplicitBinding = compiler.has_decoration(img.id, spv::DecorationBinding);
             rb.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
             rb.metalBinding = bindings.textureBase + rb.glBinding;
             rb.name = img.name;
@@ -633,6 +635,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // future vertex/fragment SSBO paths.
         for (auto& ssbo : resources.storage_buffers) {
             ShaderReflection::ResourceBinding rb;
+            rb.hasExplicitBinding = compiler.has_decoration(ssbo.id, spv::DecorationBinding);
             rb.glBinding = compiler.get_decoration(ssbo.id, spv::DecorationBinding);
             rb.metalBinding = bindings.storageBufferBase + rb.glBinding;
             const auto& ssboType = compiler.get_type(ssbo.base_type_id);
