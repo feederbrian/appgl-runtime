@@ -2711,6 +2711,13 @@ struct GLContext::Impl {
                     if (samplerValue != nullptr && static_cast<std::size_t>(arrayElement) < samplerValue->ints.size()) {
                         glUnit = samplerValue->ints[arrayElement];
                         uniformValueWasSet = true;
+                    } else {
+                        // GL 4.2+ shading_language_420pack:
+                        // `layout(binding = N) uniform sampler2D s;` sets the
+                        // default texture unit to N when the app never calls
+                        // glUniform1i. sampledTex.glBinding is the
+                        // DecorationBinding from SPIR-V (0 when unset).
+                        glUnit = static_cast<GLint>(sampledTex.glBinding) + arrayElement;
                     }
                 if (glUnit < 0) {
                     if (logThisCall) {
