@@ -2102,8 +2102,12 @@ struct GLContext::Impl {
         descriptor.sAddressMode = metalAddressMode(object.params.wrapS);
         descriptor.tAddressMode = metalAddressMode(object.params.wrapT);
         descriptor.rAddressMode = metalAddressMode(object.params.wrapR);
-        descriptor.lodMinClamp = object.params.minLod;
-        descriptor.lodMaxClamp = object.params.maxLod;
+        // Metal requires lodMinClamp >= 0 and lodMaxClamp >= lodMinClamp.
+        // GL's defaults are minLod=-1000, maxLod=1000 which Metal rejects.
+        // Clamp to [0, max(0, maxLod)] — for the common GL default this
+        // collapses to [0, 1000], which is still effectively unbounded.
+        descriptor.lodMinClamp = std::max(0.0f, object.params.minLod);
+        descriptor.lodMaxClamp = std::max(descriptor.lodMinClamp, object.params.maxLod);
         descriptor.compareFunction = object.params.compareMode == GL_COMPARE_REF_TO_TEXTURE
             ? metalCompareFunction(object.params.compareFunc)
             : MTLCompareFunctionNever;
@@ -2154,8 +2158,12 @@ struct GLContext::Impl {
         descriptor.sAddressMode = metalAddressMode(object.params.wrapS);
         descriptor.tAddressMode = metalAddressMode(object.params.wrapT);
         descriptor.rAddressMode = metalAddressMode(object.params.wrapR);
-        descriptor.lodMinClamp = object.params.minLod;
-        descriptor.lodMaxClamp = object.params.maxLod;
+        // Metal requires lodMinClamp >= 0 and lodMaxClamp >= lodMinClamp.
+        // GL's defaults are minLod=-1000, maxLod=1000 which Metal rejects.
+        // Clamp to [0, max(0, maxLod)] — for the common GL default this
+        // collapses to [0, 1000], which is still effectively unbounded.
+        descriptor.lodMinClamp = std::max(0.0f, object.params.minLod);
+        descriptor.lodMaxClamp = std::max(descriptor.lodMinClamp, object.params.maxLod);
         descriptor.compareFunction = object.params.compareMode == GL_COMPARE_REF_TO_TEXTURE
             ? metalCompareFunction(object.params.compareFunc)
             : MTLCompareFunctionNever;
