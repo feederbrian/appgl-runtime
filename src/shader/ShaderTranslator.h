@@ -23,6 +23,21 @@ struct BindingMap {
     std::uint32_t samplerBase = 0;
 };
 
+// Compute pipelines have no vertex inputs, so the low 16 Metal buffer
+// slots (normally reserved for VBOs on graphics pipelines) are free.
+// This lets us give compute SSBOs 16 slots — comfortably above the GL
+// 4.3 spec floor of GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS ≥ 8. The
+// default-uniform push-constant stays at slot 16 to match the
+// hardcoded `atIndex:16` in MetalFrameGraph::encodeComputeDispatch,
+// and user UBOs stack above it at [17..30).
+inline BindingMap makeComputeBindingMap() {
+    BindingMap m;
+    m.storageBufferBase = 0;   // [ 0..16) — SSBOs: 16 slots (spec floor 8)
+    m.uniformBufferBase = 16;  // [16..31) — default uniform (16) + UBOs (17..30)
+    m.vertexBufferBase = 0;    // unused for compute
+    return m;
+}
+
 struct ShaderReflection {
     struct VertexInput {
         GLuint location = 0;

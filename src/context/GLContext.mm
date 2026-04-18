@@ -11130,9 +11130,20 @@ bool GLContext::linkProgram(GLuint program) {
         case ProgramKind::Compute: {
             // Translate compute to MSL + stash on the program object so
             // glDispatchCompute can encode against the cached pipeline.
+            //
+            // Compute uses a distinct BindingMap: SSBOs at slots [0..16),
+            // UBOs at [16..31). This differs from the graphics pipeline
+            // map (where slots [0..16) are reserved for VBOs) and lets
+            // GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS honestly hit the spec
+            // floor of 8 (actually 16). Scoped swap of `bindings` is safe
+            // because translateStage captures by reference and compute
+            // doesn't share the binding map with any other stage.
+            const BindingMap savedBindings = bindings;
+            bindings = makeComputeBindingMap();
             ShaderReflection csRefl;
             const bool csOk = translateCachedStage(
                 "compute", computeShader, programObject->computeMSL, csRefl);
+            bindings = savedBindings;
             if (csOk) {
                 programObject->computeReflection = std::move(csRefl);
                 // Extract local_size_{x,y,z} so dispatch knows the

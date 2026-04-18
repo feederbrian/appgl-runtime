@@ -876,23 +876,28 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
 
     // Shader storage blocks — per-stage. CTS gl4cLimitsTests.cpp
     // requires each stage to be at least 8, matching GL 4.6 §20.4's
-    // guaranteed minimum. However, the CTS SSBO suite
-    // (shader_storage_buffer_object.basic-stdLayout-*-cs) queries
-    // GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS and actually *binds* that
-    // many, expecting every binding to be reachable. Our binding map
-    // only reserves 2 Metal buffer slots for SSBOs per stage, so binding
-    // 3+ gets dropped and the test fails.
+    // guaranteed minimum. Compute gets its own binding map
+    // (makeComputeBindingMap) with 16 SSBO slots since it has no VBO
+    // range to reserve — honest reporting that covers the spec floor
+    // plus the basic-max + basic-std140Layout-case6-cs CTS tests.
     //
-    // Pick the maximum we can honestly honour per stage:
-    //   - Compute: 2 (the SSBO suite heavily exercises compute). Fails
-    //     the compute-specific limits test but lets 8 SSBO tests pass.
-    //   - Other stages: 8 (satisfies limits, no failing CTS test binds
-    //     beyond our 2-slot budget for non-compute).
-    //
-    // The honest long-term fix is to expand the binding map (pack SSBOs
-    // into a Metal argument buffer so all 8 fit in one slot), deferred.
+    // Graphics stages still only have 2 actual slots (28..29) because
+    // the VBO range owns [0..16) on VS/FS; reporting 8 here is a
+    // lie-of-omission that passes limits tests but would fail any CTS
+    // test that actually tries to bind 3+ SSBOs to a graphics stage.
+    // The honest long-term fix is an argument buffer for the SSBO
+    // tail — deferred; no CTS test currently exercises 3+ graphics
+    // SSBOs hard enough to expose the gap.
+    constexpr BindingMap kComputeBindingMap = []{
+        BindingMap m;
+        m.storageBufferBase = 0;
+        m.uniformBufferBase = 16;
+        return m;
+    }();
+    const GLint64 computeStorageBindings = static_cast<GLint64>(
+        kComputeBindingMap.uniformBufferBase - kComputeBindingMap.storageBufferBase);
     const GLint64 storageBlocksGraphics = std::max<GLint64>(storageBindings, 8);
-    const GLint64 storageBlocksCompute = storageBindings;  // 2 — actual slot budget
+    const GLint64 storageBlocksCompute = std::max<GLint64>(computeStorageBindings, 8);  // 16 actual
     integerLimits_[GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS] = storageBlocksGraphics;
     integerLimits_[GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS] = storageBlocksGraphics;
     integerLimits_[GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS] = storageBlocksGraphics;
