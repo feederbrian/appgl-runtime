@@ -1953,6 +1953,123 @@ struct GLContext::Impl {
             return true;
         }
 
+        // Fast path: when the existing MTLTexture already matches the
+        // descriptor shape we're about to build, REUSE it and only
+        // refresh the per-level bytes via replaceRegion. Destroy-and-
+        // recreate for every texSubImage call churns the Metal texture
+        // pointer rapidly, which surfaces as the VS-stage texture_gather
+        // flake cluster: an in-flight or cached GPU view of a previously
+        // dropped MTLTexture can serve the next draw if the new one
+        // hasn't made it into the texture L2 cache yet. Keeping the
+        // same MTLTexture across subimage calls is also faster (no
+        // allocator churn) and matches what real drivers do.
+        //
+        // Only the byte uploads happen here; the descriptor-time
+        // branches below (new MTLTexture allocation) still run when any
+        // shape parameter drifts (mipmap count change, internalFormat
+        // change, size change).
+        id<MTLTexture> existing = (__bridge id<MTLTexture>)object.metalTexture;
+        if (existing != nil) {
+            const NSUInteger wantWidth = static_cast<NSUInteger>(baseLevel.desc.width);
+            const NSUInteger wantHeight = static_cast<NSUInteger>(
+                (object.target == GL_TEXTURE_1D || object.target == GL_TEXTURE_1D_ARRAY)
+                ? 1 : baseLevel.desc.height);
+            const NSUInteger wantDepth = static_cast<NSUInteger>(
+                object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1);
+            const NSUInteger wantArray = (object.target == GL_TEXTURE_1D_ARRAY)
+                ? static_cast<NSUInteger>(baseLevel.desc.height)
+                : (object.target == GL_TEXTURE_2D_ARRAY
+                   ? static_cast<NSUInteger>(baseLevel.desc.depth)
+                   : 1);
+            const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
+            MTLPixelFormat wantFormat = MTLPixelFormatRGBA8Unorm;
+            if (hasNativeData) {
+                MTLPixelFormat native = metalRenderbufferFormat(baseLevel.desc.internalFormat);
+                if (native != MTLPixelFormatInvalid) wantFormat = native;
+            }
+            GLint maxLevelExisting = 0;
+            for (const auto& [levelIndex, image] : object.levels) {
+                if (levelIndex >= 0 && image.defined) {
+                    maxLevelExisting = std::max(maxLevelExisting, levelIndex);
+                }
+            }
+            const NSUInteger wantMipCount = (object.target == GL_TEXTURE_1D)
+                ? 1u
+                : static_cast<NSUInteger>(maxLevelExisting + 1);
+            const bool shapeMatches =
+                existing.width == wantWidth &&
+                existing.height == wantHeight &&
+                existing.depth == wantDepth &&
+                existing.arrayLength == wantArray &&
+                existing.mipmapLevelCount == wantMipCount &&
+                existing.pixelFormat == wantFormat;
+            if (shapeMatches) {
+                const bool useNativePath = (wantFormat != MTLPixelFormatRGBA8Unorm);
+                for (const auto& [levelIndex, image] : object.levels) {
+                    if (levelIndex < 0 || !image.defined) continue;
+                    const std::uint8_t* bytes = nullptr;
+                    std::size_t bpp = 4;
+                    if (useNativePath && image.nativeBpp > 0 && !image.nativeData.empty()) {
+                        bytes = image.nativeData.data();
+                        bpp = image.nativeBpp;
+                    } else if (useNativePath) {
+                        continue;  // same rationale as the full-replace loop
+                    } else if (!image.rgba8.empty()) {
+                        bytes = image.rgba8.data();
+                    } else {
+                        continue;
+                    }
+                    const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
+                    const NSUInteger rowStride = static_cast<NSUInteger>(safeDimension(image.desc.width)) * bpp;
+                    const NSUInteger imageStride = rowStride * static_cast<NSUInteger>(
+                        object.target == GL_TEXTURE_1D ? 1 : safeDimension(image.desc.height));
+                    if (object.target == GL_TEXTURE_3D) {
+                        const NSUInteger slices = static_cast<NSUInteger>(safeDimension(image.desc.depth));
+                        for (NSUInteger slice = 0; slice < slices; ++slice) {
+                            const MTLRegion r = MTLRegionMake3D(0, 0, slice,
+                                static_cast<NSUInteger>(safeDimension(image.desc.width)),
+                                static_cast<NSUInteger>(safeDimension(image.desc.height)), 1);
+                            [existing replaceRegion:r mipmapLevel:mipLevel
+                                          withBytes:bytes + slice * imageStride
+                                        bytesPerRow:rowStride];
+                        }
+                    } else if (object.target == GL_TEXTURE_2D_ARRAY) {
+                        const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.depth));
+                        const MTLRegion r = MTLRegionMake2D(0, 0,
+                            static_cast<NSUInteger>(safeDimension(image.desc.width)),
+                            static_cast<NSUInteger>(safeDimension(image.desc.height)));
+                        for (NSUInteger layer = 0; layer < layers; ++layer) {
+                            [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
+                                          withBytes:bytes + layer * imageStride
+                                        bytesPerRow:rowStride
+                                      bytesPerImage:imageStride];
+                        }
+                    } else if (object.target == GL_TEXTURE_1D_ARRAY) {
+                        const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.height));
+                        const MTLRegion r = MTLRegionMake2D(0, 0,
+                            static_cast<NSUInteger>(safeDimension(image.desc.width)), 1);
+                        for (NSUInteger layer = 0; layer < layers; ++layer) {
+                            [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
+                                          withBytes:bytes + layer * rowStride
+                                        bytesPerRow:rowStride
+                                      bytesPerImage:rowStride];
+                        }
+                    } else {
+                        const MTLRegion r = MTLRegionMake2D(0, 0,
+                            static_cast<NSUInteger>(safeDimension(image.desc.width)),
+                            static_cast<NSUInteger>(
+                                object.target == GL_TEXTURE_1D ? 1 : safeDimension(image.desc.height)));
+                        [existing replaceRegion:r mipmapLevel:mipLevel
+                                      withBytes:bytes
+                                    bytesPerRow:rowStride];
+                    }
+                }
+                object.instantiated = true;
+                (void)texName;
+                return true;
+            }
+        }
+
         GLint highestDefinedLevel = 0;
         for (const auto& [levelIndex, image] : object.levels) {
             if (levelIndex >= 0 && image.defined) {
