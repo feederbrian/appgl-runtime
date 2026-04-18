@@ -84,7 +84,6 @@ bool isFormatTypeCompatible_extern(GLenum format, GLenum type);
 // `_NSLogv` path ends up dominating wall time (sampled, confirmed).
 // Set APPGL_LOG_LINK=1 in the environment to restore the verbose
 // output when debugging a specific program.
-static const bool kLogLink = (std::getenv("APPGL_LOG_LINK") != nullptr);
 
 namespace {
 
@@ -2307,9 +2306,7 @@ struct GLContext::Impl {
         // textures (texture_swizzle, packed_pixels) make this the
         // single biggest NSLog cost. APPGL_LOG_TEXTURE_UPLOAD=1
         // restores the original logging (for BAR Theory A/B chasing).
-        static const bool kLogUploadFingerprint =
-            (std::getenv("APPGL_LOG_TEXTURE_UPLOAD") != nullptr);
-        if (shouldFireFingerprint && kLogUploadFingerprint) {
+        if (shouldFireFingerprint) {
             const auto& levelZero = baseLevel;
             const std::size_t byteCount = levelZero.rgba8.size();
             const std::uint8_t* bytes = levelZero.rgba8.data();
@@ -2360,7 +2357,7 @@ struct GLContext::Impl {
                 hexPeek[0] = '\0';
             }
 
-            NSLog(@"[GL] replaceMetalTexture upload texName=%u reFire=%s"
+            APPGL_LOG(TEXTURE, @"[GL] replaceMetalTexture upload texName=%u reFire=%s"
                   @" internalFormat=0x%04X sourceFormat=0x%04X sourceType=0x%04X"
                   @" width=%d height=%d depth=%d rgba8Bytes=%zu"
                   @" fnv1a_head256=0x%08X fnv1a_tail256=0x%08X"
@@ -2769,7 +2766,7 @@ struct GLContext::Impl {
                     overrideAddressModeTag = "ClampToEdge (pre-10.12)";
                 }
             }
-            NSLog(@"[GL] rebuildTextureSamplerState first-build texName=%u"
+            APPGL_LOG(TEXTURE, @"[GL] rebuildTextureSamplerState first-build texName=%u"
                   @" internalFormat=0x%04X override=%s"
                   @" overrideAddressMode=%s"
                   @" minFilter=0x%04X magFilter=0x%04X"
@@ -3001,20 +2998,17 @@ struct GLContext::Impl {
         // opt-in env var. The tight summary line still fires on the
         // error / skip paths below, unconditionally, so the common
         // "why didn't this sampler bind?" debugging stays loud.
-        static const bool kLogFirstCall = (std::getenv("APPGL_LOG_FIRST_DRAW") != nullptr);
-        const bool logThisCall = kLogFirstCall && (info.program != 0) &&
+        const bool logThisCall = (info.program != 0) &&
             loggedSamplerResolvePrograms.insert(info.program).second;
         if (logThisCall) {
             const std::size_t fragCount = info.fragmentReflection
                 ? info.fragmentReflection->sampledTextures.size() : 0;
             const std::size_t vertCount = info.vertexReflection
                 ? info.vertexReflection->sampledTextures.size() : 0;
-            if (kLogLink) {
-                NSLog(@"[GL] resolveSamplerBindings first-call program=%u"
-                      @" fragment.sampledTextures=%zu vertex.sampledTextures=%zu"
-                      @" uniforms=%zu",
-                      info.program, fragCount, vertCount, program.uniforms.size());
-            }
+            APPGL_LOG(TEXTURE, @"[GL] resolveSamplerBindings first-call program=%u"
+                  @" fragment.sampledTextures=%zu vertex.sampledTextures=%zu"
+                  @" uniforms=%zu",
+                  info.program, fragCount, vertCount, program.uniforms.size());
 
             // Phase 8X Group 4d follow-up¹² — §Secondary: dump the full
             // translated MSL source and uniform snapshot for this
@@ -3081,7 +3075,7 @@ struct GLContext::Impl {
                     ++lineCount;  // account for the unterminated final line
                 }
 
-                NSLog(@"[GL]   %s.summary bytes=%zu lines=%zu"
+                APPGL_LOG(SHADER, @"[GL]   %s.summary bytes=%zu lines=%zu"
                       @" hasTextureSize=%d hasGetWidth=%d hasGetHeight=%d",
                       stageTag,
                       msl.size(),
@@ -3101,16 +3095,16 @@ struct GLContext::Impl {
                         ++lineIdx;
                         const std::size_t len = i - start;
                         const std::string line = msl.substr(start, len);
-                        NSLog(@"[GL]   %s.L%03zu: %s",
+                        APPGL_LOG(SHADER, @"[GL]   %s.L%03zu: %s",
                               stageTag, lineIdx, line.c_str());
                         start = i + 1;
                         if (i == msl.size()) break;
                     }
                 }
-                NSLog(@"[GL]   %s.END", stageTag);
+                APPGL_LOG(SHADER, @"[GL]   %s.END", stageTag);
             };
 
-            NSLog(@"[GL] msl-dump program=%u BEGIN", info.program);
+            APPGL_LOG(SHADER, @"[GL] msl-dump program=%u BEGIN", info.program);
             emitMslDump("vs", program.vertexMSL);
             emitMslDump("fs", program.fragmentMSL);
 
@@ -3120,7 +3114,7 @@ struct GLContext::Impl {
             // uniform plumbed into program 5 at all?" without
             // having to cross-reference the link-time reflection
             // against a separate uniformValues dump.
-            NSLog(@"[GL]   uniforms-snapshot program=%u count=%zu",
+            APPGL_LOG(SHADER, @"[GL]   uniforms-snapshot program=%u count=%zu",
                   info.program, program.uniforms.size());
             for (std::size_t ui = 0; ui < program.uniforms.size(); ++ui) {
                 const auto& uinfo = program.uniforms[ui];
@@ -3183,7 +3177,7 @@ struct GLContext::Impl {
                     std::snprintf(valueBuf, sizeof(valueBuf), "unset");
                 }
 
-                NSLog(@"[GL]     uniform[%zu] name='%s' location=%d"
+                APPGL_LOG(SHADER, @"[GL]     uniform[%zu] name='%s' location=%d"
                       @" type=0x%04X arraySize=%d value=%s",
                       ui,
                       uinfo.name.c_str(),
@@ -3192,7 +3186,7 @@ struct GLContext::Impl {
                       uinfo.arraySize,
                       valueBuf);
             }
-            NSLog(@"[GL] msl-dump program=%u END", info.program);
+            APPGL_LOG(SHADER, @"[GL] msl-dump program=%u END", info.program);
         }
 
         auto resolveStage = [&](const char* stageTag,
@@ -3253,7 +3247,7 @@ struct GLContext::Impl {
                     // glUniform1i.
                 if (glUnit < 0) {
                     if (logThisCall) {
-                        NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
+                        APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
                               @" SKIP reason=negative-unit glUnit=%d",
                               stageTag, sampledTex.name.c_str(),
                               sampledTex.metalBinding, glUnit);
@@ -3280,7 +3274,7 @@ struct GLContext::Impl {
                 }
                 if (texName == 0) {
                     if (logThisCall) {
-                        NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
+                        APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
                               @" SKIP reason=unit-empty glUnit=%d uniformLoc=%d"
                               @" valueSet=%d",
                               stageTag, sampledTex.name.c_str(),
@@ -3293,7 +3287,7 @@ struct GLContext::Impl {
                 if (texObject == nullptr || !texObject->instantiated ||
                     texObject->metalTexture == nullptr) {
                     if (logThisCall) {
-                        NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
+                        APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
                               @" SKIP reason=tex-not-ready glUnit=%d texName=%u"
                               @" hasObject=%d instantiated=%d hasMetalTex=%d",
                               stageTag, sampledTex.name.c_str(),
@@ -3328,7 +3322,7 @@ struct GLContext::Impl {
                 }
                 if (metalSamplerState == nullptr) {
                     if (logThisCall) {
-                        NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
+                        APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u"
                               @" SKIP reason=sampler-build-failed glUnit=%d"
                               @" texName=%u standAloneSampler=%u",
                               stageTag, sampledTex.name.c_str(),
@@ -3375,7 +3369,7 @@ struct GLContext::Impl {
                         fmt == GL_LUMINANCE_ALPHA ||
                         fmt == GL_LUMINANCE8_ALPHA8 ||
                         fmt == GL_INTENSITY || fmt == GL_INTENSITY8;
-                    NSLog(@"[GL]   %s sampler='%s' metalSlot=%u BOUND"
+                    APPGL_LOG(TEXTURE, @"[GL]   %s sampler='%s' metalSlot=%u BOUND"
                           @" glUnit=%d uniformLoc=%d valueSet=%d texName=%u"
                           @" standAloneSampler=%u internalFormat=0x%04X"
                           @" override=%s drawTimeParams{"
@@ -7348,7 +7342,7 @@ bool GLContext::texSubImage(
                               "%02X ", subBytes[i]);
             }
             if (peekLen > 0) { hexPeek[peekLen * 3 - 1] = '\0'; }
-            NSLog(@"[GL] texSubImage first-call texName=%u target=0x%04X level=%d"
+            APPGL_LOG(TEXTURE, @"[GL] texSubImage first-call texName=%u target=0x%04X level=%d"
                   @" subregion=[%d,%d,%d,%d] sourceFormat=0x%04X sourceType=0x%04X"
                   @" rgba8Bytes=%zu fnv1a=0x%08X nonzero=%u peek16=[%s]",
                   subTexName,
@@ -8938,7 +8932,7 @@ bool reportTranslatedFallbackOnce(GLProgramObject* program,
         return false;
     }
     program->translatedFallbackGatesReported |= bit;
-    NSLog(@"[GL] %s-fallback: program=%u gate=%s vao=%u vbo=%u attrCount=%zu shadowBytes=%zu",
+    APPGL_LOG(DRAW, @"[GL] %s-fallback: program=%u gate=%s vao=%u vbo=%u attrCount=%zu shadowBytes=%zu",
           siteName,
           static_cast<unsigned>(programName),
           translatedFallbackGateName(gate),
@@ -10203,10 +10197,8 @@ bool GLContext::linkProgram(GLuint program) {
     // an explicit `fflush(stderr)` to survive the libunwind double-abort that
     // fw²² verification §5.3 documented (`fsync(STDERR_FILENO)` Spring-side
     // fix is separate and still deferred).
-    if (kLogLink) {
-        NSLog(@"[GL] linkProgram-begin program=%u", program);
-        fflush(stderr);
-    }
+    APPGL_LOG(SHADER, @"[GL] linkProgram-begin program=%u", program);
+    fflush(stderr);
 
     programObject->uniforms.clear();
     programObject->attributes.clear();
@@ -10911,9 +10903,7 @@ bool GLContext::linkProgram(GLuint program) {
         // fires and the process SIGABRTs. Catch here so a throw becomes a
         // clean translation failure (MSL empty + diagnostic record) instead
         // of the fw²² Sky-program-28 crash signature.
-        if (kLogLink) {
-            NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s", program, stageName);
-        }
+        APPGL_LOG(SHADER, @"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s", program, stageName);
         fflush(stderr);
         std::string mslLog;
         std::string msl;
@@ -10921,10 +10911,8 @@ bool GLContext::linkProgram(GLuint program) {
             msl = translator.spirvToMSL(
                 spirvData, spirvWords, bindings, &mslLog);
         } catch (const std::exception& e) {
-            if (kLogLink) {
-                NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW: %s",
-                      program, stageName, e.what());
-            }
+            APPGL_LOG(SHADER, @"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW: %s",
+                  program, stageName, e.what());
             fflush(stderr);
             Runtime::shared().recordShaderTranslation({
                 stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
@@ -10933,10 +10921,8 @@ bool GLContext::linkProgram(GLuint program) {
             });
             return false;
         } catch (...) {
-            if (kLogLink) {
-                NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW unknown exception",
-                      program, stageName);
-            }
+            APPGL_LOG(SHADER, @"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW unknown exception",
+                  program, stageName);
             fflush(stderr);
             Runtime::shared().recordShaderTranslation({
                 stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
@@ -10956,18 +10942,14 @@ bool GLContext::linkProgram(GLuint program) {
         // Phase 8X Group 4d follow-up²³ — sub-step marker + exception guard
         // around reflect. SPIRV-Cross reflection re-walks the SPIR-V and is
         // the other plausible throw site in the translator's critical path.
-        if (kLogLink) {
-            NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s", program, stageName);
-        }
+        APPGL_LOG(SHADER, @"[GL] linkProgram-step=reflect program=%u stage=%s", program, stageName);
         fflush(stderr);
         try {
             reflectionOut = translator.reflect(
                 spirvData, spirvWords, bindings, nullptr);
         } catch (const std::exception& e) {
-            if (kLogLink) {
-                NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s THREW: %s",
-                      program, stageName, e.what());
-            }
+            APPGL_LOG(SHADER, @"[GL] linkProgram-step=reflect program=%u stage=%s THREW: %s",
+                  program, stageName, e.what());
             fflush(stderr);
             Runtime::shared().recordShaderTranslation({
                 stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
@@ -10976,10 +10958,8 @@ bool GLContext::linkProgram(GLuint program) {
             });
             return false;
         } catch (...) {
-            if (kLogLink) {
-                NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s THREW unknown exception",
-                      program, stageName);
-            }
+            APPGL_LOG(SHADER, @"[GL] linkProgram-step=reflect program=%u stage=%s THREW unknown exception",
+                  program, stageName);
             fflush(stderr);
             Runtime::shared().recordShaderTranslation({
                 stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
@@ -11048,18 +11028,14 @@ bool GLContext::linkProgram(GLuint program) {
         // glslang cross-stage link. First candidate on the abort-site ladder
         // is glslang's TProgram::link re-entry, since that's the first heavy
         // operation inside this lambda.
-        if (kLogLink) {
-            NSLog(@"[GL] linkProgram-step=compile-glsl-program program=%u", program);
-        }
+        APPGL_LOG(SHADER, @"[GL] linkProgram-step=compile-glsl-program program=%u", program);
         fflush(stderr);
         std::string linkErrorLog;
         LinkedProgramSpirv linked = translator.compileGLSLProgram(
             vsLinkSource, fsLinkSource, 330, &linkErrorLog);
-        if (kLogLink) {
-            NSLog(@"[GL] compileGLSLProgram: program=%u success=%d log=%s",
-                  program, linked.linkSucceeded ? 1 : 0,
-                  linkErrorLog.c_str());
-        }
+        APPGL_LOG(SHADER, @"[GL] compileGLSLProgram: program=%u success=%d log=%s",
+              program, linked.linkSucceeded ? 1 : 0,
+              linkErrorLog.c_str());
         fflush(stderr);
         if (!linked.linkSucceeded) {
             // Record the cross-stage link failure so BAR can see why the
@@ -11179,7 +11155,7 @@ bool GLContext::linkProgram(GLuint program) {
                         programObject->computeMSL, &psoError);
                     if (pso != nullptr) {
                         programObject->metalComputePipelineState = pso;
-                        NSLog(@"[GL] linkProgram: compute pipeline built for program=%u "
+                        APPGL_LOG(SHADER, @"[GL] linkProgram: compute pipeline built for program=%u "
                               @"localSize=[%u,%u,%u]",
                               program,
                               programObject->computeLocalSizeX,
@@ -11375,7 +11351,7 @@ bool GLContext::linkProgram(GLuint program) {
             break;  // Already handled above; kept so -Wswitch stays happy.
     }
 
-    NSLog(@"[GL] linkProgram: program=%u kind=%d translationOk=%d "
+    APPGL_LOG(SHADER, @"[GL] linkProgram: program=%u kind=%d translationOk=%d "
           @"vertexInputs=%zu vsUniformBlocks=%zu fsUniformBlocks=%zu",
           program, static_cast<int>(kind), rasterTranslationOk ? 1 : 0,
           programObject->vertexReflection.vertexInputs.size(),

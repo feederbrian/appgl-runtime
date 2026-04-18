@@ -1,6 +1,7 @@
 #include "MetalFrameGraph.h"
 
 #include "../objects/GLObjectStore.h"
+#include "../runtime/AppGLLog.h"
 #include "../state/GLStateTracker.h"
 
 #import <Metal/Metal.h>
@@ -26,9 +27,6 @@
 
 namespace appgl {
 
-// CTS-sweep hot-path NSLog gate. See GLContext.mm for the matching
-// file-scope bool. Enabled via APPGL_LOG_LINK=1.
-static const bool kLogLink = (std::getenv("APPGL_LOG_LINK") != nullptr);
 
 
 // Phase 8X Group 4d follow-up¹⁴ — shared Metal translation helpers.
@@ -1026,7 +1024,7 @@ struct MetalFrameGraph::Impl {
             // (program, pipelineCacheKey), not program alone. See the
             // member declaration of `loggedPipelineBuildPrograms` for
             // the rationale (was hiding the `entries=5` cache growth).
-            if (kLogLink && info.program != 0 &&
+            if (info.program != 0 &&
                 loggedPipelineBuildPrograms.insert({info.program, pipelineCacheKey}).second) {
                 auto vertexFormatName = [](MTLVertexFormat f) -> const char* {
                     switch (f) {
@@ -1123,20 +1121,18 @@ struct MetalFrameGraph::Impl {
                     }
                 };
 
-                if (kLogLink) {
-                    NSLog(@"[GL] pipeline-build first-build program=%u"
-                          @" colorFormat=0x%lX depthFormat=0x%lX",
-                          info.program,
-                          (unsigned long)desc.colorAttachments[0].pixelFormat,
-                          (unsigned long)desc.depthAttachmentPixelFormat);
-                }
+                APPGL_LOG(PIPELINE, @"[GL] pipeline-build first-build program=%u"
+                      @" colorFormat=0x%lX depthFormat=0x%lX",
+                      info.program,
+                      (unsigned long)desc.colorAttachments[0].pixelFormat,
+                      (unsigned long)desc.depthAttachmentPixelFormat);
 
                 // Vertex descriptor: walk attributes 0..15 and layouts
                 // 0..15. A slot with MTLVertexFormatInvalid is either
                 // unused or reserved by the attribute-layout map; we
                 // emit those at a lower verbosity by suppressing them
                 // unless every slot is Invalid.
-                NSLog(@"[GL]   vertexDescriptor attributes:");
+                APPGL_LOG(PIPELINE, @"[GL]   vertexDescriptor attributes:");
                 std::size_t nonInvalidAttrs = 0;
                 for (NSUInteger i = 0; i < 16; ++i) {
                     MTLVertexAttributeDescriptor* a = vertexDescriptor.attributes[i];
@@ -1144,7 +1140,7 @@ struct MetalFrameGraph::Impl {
                         continue;
                     }
                     ++nonInvalidAttrs;
-                    NSLog(@"[GL]     attr[%lu] format=MTLVertexFormat%s(%lu)"
+                    APPGL_LOG(PIPELINE, @"[GL]     attr[%lu] format=MTLVertexFormat%s(%lu)"
                           @" offset=%lu bufferIndex=%lu",
                           (unsigned long)i,
                           vertexFormatName(a.format),
@@ -1153,9 +1149,9 @@ struct MetalFrameGraph::Impl {
                           (unsigned long)a.bufferIndex);
                 }
                 if (nonInvalidAttrs == 0) {
-                    NSLog(@"[GL]     (no attributes set — vertex stage runs without vertex descriptor input)");
+                    APPGL_LOG(PIPELINE, @"[GL]     (no attributes set — vertex stage runs without vertex descriptor input)");
                 }
-                NSLog(@"[GL]   vertexDescriptor layouts:");
+                APPGL_LOG(PIPELINE, @"[GL]   vertexDescriptor layouts:");
                 std::size_t nonEmptyLayouts = 0;
                 for (NSUInteger i = 0; i < 16; ++i) {
                     MTLVertexBufferLayoutDescriptor* l = vertexDescriptor.layouts[i];
@@ -1163,7 +1159,7 @@ struct MetalFrameGraph::Impl {
                         continue;
                     }
                     ++nonEmptyLayouts;
-                    NSLog(@"[GL]     layout[%lu] stride=%lu"
+                    APPGL_LOG(PIPELINE, @"[GL]     layout[%lu] stride=%lu"
                           @" stepFunction=MTLVertexStepFunction%s(%lu)"
                           @" stepRate=%lu",
                           (unsigned long)i,
@@ -1173,7 +1169,7 @@ struct MetalFrameGraph::Impl {
                           (unsigned long)l.stepRate);
                 }
                 if (nonEmptyLayouts == 0) {
-                    NSLog(@"[GL]     (no layouts set — stride=0 on every slot)");
+                    APPGL_LOG(PIPELINE, @"[GL]     (no layouts set — stride=0 on every slot)");
                 }
 
                 // Color attachment 0 blend state. BAR §Candidate 1.
@@ -1190,27 +1186,25 @@ struct MetalFrameGraph::Impl {
                 // still what you'd see for an opaque draw that
                 // runs with `glDisable(GL_BLEND)`.
                 MTLRenderPipelineColorAttachmentDescriptor* ca = desc.colorAttachments[0];
-                NSLog(@"[GL]   colorAttachment[0].blendingEnabled=%d (gl-plumbed=yes)",
+                APPGL_LOG(PIPELINE, @"[GL]   colorAttachment[0].blendingEnabled=%d (gl-plumbed=yes)",
                       ca.blendingEnabled ? 1 : 0);
-                NSLog(@"[GL]   colorAttachment[0].rgb   src=%s(%lu) dst=%s(%lu) op=%s(%lu)",
+                APPGL_LOG(PIPELINE, @"[GL]   colorAttachment[0].rgb   src=%s(%lu) dst=%s(%lu) op=%s(%lu)",
                       blendFactorName(ca.sourceRGBBlendFactor),
                       (unsigned long)ca.sourceRGBBlendFactor,
                       blendFactorName(ca.destinationRGBBlendFactor),
                       (unsigned long)ca.destinationRGBBlendFactor,
                       blendOpName(ca.rgbBlendOperation),
                       (unsigned long)ca.rgbBlendOperation);
-                NSLog(@"[GL]   colorAttachment[0].alpha src=%s(%lu) dst=%s(%lu) op=%s(%lu)",
+                APPGL_LOG(PIPELINE, @"[GL]   colorAttachment[0].alpha src=%s(%lu) dst=%s(%lu) op=%s(%lu)",
                       blendFactorName(ca.sourceAlphaBlendFactor),
                       (unsigned long)ca.sourceAlphaBlendFactor,
                       blendFactorName(ca.destinationAlphaBlendFactor),
                       (unsigned long)ca.destinationAlphaBlendFactor,
                       blendOpName(ca.alphaBlendOperation),
                       (unsigned long)ca.alphaBlendOperation);
-                NSLog(@"[GL]   colorAttachment[0].writeMask=0x%lX (all=0xF)",
+                APPGL_LOG(PIPELINE, @"[GL]   colorAttachment[0].writeMask=0x%lX (all=0xF)",
                       (unsigned long)ca.writeMask);
-                if (kLogLink) {
-                    NSLog(@"[GL] pipeline-build first-build program=%u END", info.program);
-                }
+                APPGL_LOG(PIPELINE, @"[GL] pipeline-build first-build program=%u END", info.program);
             }
 
             NSError* error = nil;
@@ -1314,7 +1308,7 @@ struct MetalFrameGraph::Impl {
             if (!isFBODraw && depthStencilTexture != nil &&
                 (depthStencilTexture.width != colorTexture.width ||
                  depthStencilTexture.height != colorTexture.height)) {
-                NSLog(@"[FG] depth/color size MISMATCH: depth=%lux%lu color=%lux%lu — rebuilding depth",
+                APPGL_LOG(PIPELINE, @"[FG] depth/color size MISMATCH: depth=%lux%lu color=%lux%lu — rebuilding depth",
                       (unsigned long)depthStencilTexture.width,
                       (unsigned long)depthStencilTexture.height,
                       (unsigned long)colorTexture.width,
@@ -1569,113 +1563,111 @@ struct MetalFrameGraph::Impl {
         // GLContext). Single-threaded GL context means no mutex is
         // needed. See `loggedBindingPrograms` on Impl for the
         // multi-context rationale.
-        if (kLogLink) {
-            if (info.program != 0 &&
-                loggedBindingPrograms.insert(info.program).second) {
-                NSLog(@"[GL] encodeTranslatedDraw first-draw program=%u"
-                      @" fragmentTextures.size=%zu vertexTextures.size=%zu",
-                      info.program,
-                      info.fragmentTextures.size(),
-                      info.vertexTextures.size());
-                for (std::size_t i = 0; i < info.fragmentTextures.size(); ++i) {
-                    const auto& b = info.fragmentTextures[i];
-                    NSLog(@"[GL]   frag[%zu] slot=%u hasTexture=%d hasSampler=%d",
-                          i,
-                          static_cast<unsigned>(b.metalSlot),
-                          b.metalTexture != nullptr ? 1 : 0,
-                          b.metalSamplerState != nullptr ? 1 : 0);
-                }
-                for (std::size_t i = 0; i < info.vertexTextures.size(); ++i) {
-                    const auto& b = info.vertexTextures[i];
-                    NSLog(@"[GL]   vert[%zu] slot=%u hasTexture=%d hasSampler=%d",
-                          i,
-                          static_cast<unsigned>(b.metalSlot),
-                          b.metalTexture != nullptr ? 1 : 0,
-                          b.metalSamplerState != nullptr ? 1 : 0);
-                }
+        if (info.program != 0 &&
+            loggedBindingPrograms.insert(info.program).second) {
+            APPGL_LOG(DRAW, @"[GL] encodeTranslatedDraw first-draw program=%u"
+                  @" fragmentTextures.size=%zu vertexTextures.size=%zu",
+                  info.program,
+                  info.fragmentTextures.size(),
+                  info.vertexTextures.size());
+            for (std::size_t i = 0; i < info.fragmentTextures.size(); ++i) {
+                const auto& b = info.fragmentTextures[i];
+                APPGL_LOG(DRAW, @"[GL]   frag[%zu] slot=%u hasTexture=%d hasSampler=%d",
+                      i,
+                      static_cast<unsigned>(b.metalSlot),
+                      b.metalTexture != nullptr ? 1 : 0,
+                      b.metalSamplerState != nullptr ? 1 : 0);
+            }
+            for (std::size_t i = 0; i < info.vertexTextures.size(); ++i) {
+                const auto& b = info.vertexTextures[i];
+                APPGL_LOG(DRAW, @"[GL]   vert[%zu] slot=%u hasTexture=%d hasSampler=%d",
+                      i,
+                      static_cast<unsigned>(b.metalSlot),
+                      b.metalTexture != nullptr ? 1 : 0,
+                      b.metalSamplerState != nullptr ? 1 : 0);
+            }
 
-                // Phase 8X Group 4d follow-up¹⁰ — §Secondary VBO peek
-                // for BAR's Theory A/B split. Dump the first 32 bytes
-                // of the vertex data, the stride, and the attribute
-                // layout list so BAR can decide whether the UVs on
-                // programs 8/10 are tightly inside `[0, 1)` (Theory A
-                // out — REPEAT wrap doesn't matter) or whether
-                // they're scrambled / out-of-range (Theory B hint —
-                // VBO upload bug, or Recoil-side vertex data problem).
-                //
-                // The peek reads from `info.vertexData` when non-null
-                // (CPU scratch path) or from the Metal buffer's CPU-
-                // visible contents when the draw path bound a shared-
-                // storage MTLBuffer directly (OPT-5 path). Private-
-                // storage buffers are not readable from CPU so we
-                // silently skip the hex dump in that case — BAR can
-                // still see the stride and layout list to cross-check
-                // against native GL's vertex array setup.
-                //
-                // Also dumps the attribute layout list so BAR knows
-                // which byte offsets inside the stride hold `uv`
-                // attributes — UI quad VBOs typically have something
-                // like (pos.xy, uv.xy) packed tight or
-                // (pos.xyz, uv.xy, color.rgba) in a 36-byte stride.
-                NSLog(@"[GL]   vbo stride=%zu vertexDataByteCount=%zu"
-                      @" metalBuf=%d extraBufs=%zu attrLayouts=%zu",
-                      info.vertexStride,
-                      info.vertexDataByteCount,
-                      info.metalVertexBuffer != nullptr ? 1 : 0,
-                      info.extraVertexBuffers.size(),
-                      info.vertexAttributeLayouts.size());
-                for (std::size_t i = 0; i < info.vertexAttributeLayouts.size(); ++i) {
-                    const auto& a = info.vertexAttributeLayouts[i];
-                    NSLog(@"[GL]     attr[%zu] location=%u offset=%zu",
-                          i, a.location, a.offset);
-                }
+            // Phase 8X Group 4d follow-up¹⁰ — §Secondary VBO peek
+            // for BAR's Theory A/B split. Dump the first 32 bytes
+            // of the vertex data, the stride, and the attribute
+            // layout list so BAR can decide whether the UVs on
+            // programs 8/10 are tightly inside `[0, 1)` (Theory A
+            // out — REPEAT wrap doesn't matter) or whether
+            // they're scrambled / out-of-range (Theory B hint —
+            // VBO upload bug, or Recoil-side vertex data problem).
+            //
+            // The peek reads from `info.vertexData` when non-null
+            // (CPU scratch path) or from the Metal buffer's CPU-
+            // visible contents when the draw path bound a shared-
+            // storage MTLBuffer directly (OPT-5 path). Private-
+            // storage buffers are not readable from CPU so we
+            // silently skip the hex dump in that case — BAR can
+            // still see the stride and layout list to cross-check
+            // against native GL's vertex array setup.
+            //
+            // Also dumps the attribute layout list so BAR knows
+            // which byte offsets inside the stride hold `uv`
+            // attributes — UI quad VBOs typically have something
+            // like (pos.xy, uv.xy) packed tight or
+            // (pos.xyz, uv.xy, color.rgba) in a 36-byte stride.
+            APPGL_LOG(DRAW, @"[GL]   vbo stride=%zu vertexDataByteCount=%zu"
+                  @" metalBuf=%d extraBufs=%zu attrLayouts=%zu",
+                  info.vertexStride,
+                  info.vertexDataByteCount,
+                  info.metalVertexBuffer != nullptr ? 1 : 0,
+                  info.extraVertexBuffers.size(),
+                  info.vertexAttributeLayouts.size());
+            for (std::size_t i = 0; i < info.vertexAttributeLayouts.size(); ++i) {
+                const auto& a = info.vertexAttributeLayouts[i];
+                APPGL_LOG(DRAW, @"[GL]     attr[%zu] location=%u offset=%zu",
+                      i, a.location, a.offset);
+            }
 
-                // Resolve a CPU pointer to the start of the vertex
-                // stream we're about to encode.
-                const std::uint8_t* peekPtr = nullptr;
-                if (info.vertexData != nullptr) {
-                    peekPtr = static_cast<const std::uint8_t*>(info.vertexData);
-                } else if (info.metalVertexBuffer != nullptr) {
-                    id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)info.metalVertexBuffer;
-                    // storageMode shared/managed → contents is a
-                    // valid CPU pointer. Private is nil/garbage.
-                    if ([mtlBuf storageMode] == MTLStorageModeShared ||
-                        [mtlBuf storageMode] == MTLStorageModeManaged) {
-                        const std::uint8_t* base =
-                            static_cast<const std::uint8_t*>([mtlBuf contents]);
-                        if (base != nullptr) {
-                            peekPtr = base + info.metalVertexBufferOffset;
-                        }
+            // Resolve a CPU pointer to the start of the vertex
+            // stream we're about to encode.
+            const std::uint8_t* peekPtr = nullptr;
+            if (info.vertexData != nullptr) {
+                peekPtr = static_cast<const std::uint8_t*>(info.vertexData);
+            } else if (info.metalVertexBuffer != nullptr) {
+                id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)info.metalVertexBuffer;
+                // storageMode shared/managed → contents is a
+                // valid CPU pointer. Private is nil/garbage.
+                if ([mtlBuf storageMode] == MTLStorageModeShared ||
+                    [mtlBuf storageMode] == MTLStorageModeManaged) {
+                    const std::uint8_t* base =
+                        static_cast<const std::uint8_t*>([mtlBuf contents]);
+                    if (base != nullptr) {
+                        peekPtr = base + info.metalVertexBufferOffset;
                     }
                 }
+            }
 
-                if (peekPtr != nullptr) {
-                    // Peek 32 bytes — enough to cover a full 32-byte
-                    // stride (pos.xyz + uv.xy + color.rgba layouts) or
-                    // two 16-byte stride quads (pos.xy + uv.xy). BAR
-                    // can decode by stride; the stride is on the
-                    // preceding line.
-                    const std::size_t peekLen = 32;
-                    char hexBuf[128];
-                    char floatBuf[128];
-                    for (std::size_t i = 0; i < peekLen; ++i) {
-                        std::snprintf(hexBuf + i * 3, sizeof(hexBuf) - i * 3,
-                                      "%02X ", peekPtr[i]);
-                    }
-                    hexBuf[peekLen * 3 - 1] = '\0';
-                    // Also interpret as 8 floats for quick visual
-                    // sanity-check of position/UV ranges.
-                    float asFloats[8];
-                    std::memcpy(asFloats, peekPtr, sizeof(asFloats));
-                    std::snprintf(floatBuf, sizeof(floatBuf),
-                        "%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
-                        asFloats[0], asFloats[1], asFloats[2], asFloats[3],
-                        asFloats[4], asFloats[5], asFloats[6], asFloats[7]);
-                    NSLog(@"[GL]     vbo peek32 hex=[%s]", hexBuf);
-                    NSLog(@"[GL]     vbo peek32 f32=[%s]", floatBuf);
-                } else {
-                    NSLog(@"[GL]     vbo peek32 skip=private-or-null");
+            if (peekPtr != nullptr) {
+                // Peek 32 bytes — enough to cover a full 32-byte
+                // stride (pos.xyz + uv.xy + color.rgba layouts) or
+                // two 16-byte stride quads (pos.xy + uv.xy). BAR
+                // can decode by stride; the stride is on the
+                // preceding line.
+                const std::size_t peekLen = 32;
+                char hexBuf[128];
+                char floatBuf[128];
+                for (std::size_t i = 0; i < peekLen; ++i) {
+                    std::snprintf(hexBuf + i * 3, sizeof(hexBuf) - i * 3,
+                                  "%02X ", peekPtr[i]);
                 }
+                hexBuf[peekLen * 3 - 1] = '\0';
+                // Also interpret as 8 floats for quick visual
+                // sanity-check of position/UV ranges.
+                float asFloats[8];
+                std::memcpy(asFloats, peekPtr, sizeof(asFloats));
+                std::snprintf(floatBuf, sizeof(floatBuf),
+                    "%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
+                    asFloats[0], asFloats[1], asFloats[2], asFloats[3],
+                    asFloats[4], asFloats[5], asFloats[6], asFloats[7]);
+                APPGL_LOG(DRAW, @"[GL]     vbo peek32 hex=[%s]", hexBuf);
+                APPGL_LOG(DRAW, @"[GL]     vbo peek32 f32=[%s]", floatBuf);
+            } else {
+                APPGL_LOG(DRAW, @"[GL]     vbo peek32 skip=private-or-null");
             }
         }
         for (const auto& binding : info.fragmentTextures) {
