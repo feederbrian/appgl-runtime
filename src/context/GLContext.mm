@@ -7104,6 +7104,14 @@ bool GLContext::getVertexAttribInteger(GLuint index, GLenum pname, GLint* params
         case GL_VERTEX_ATTRIB_ARRAY_LONG:
             params[0] = attribute.longData ? GL_TRUE : GL_FALSE;
             return true;
+        case GL_VERTEX_ATTRIB_BINDING:
+            // GL 4.3 separated-format binding index; default = attribute index.
+            params[0] = static_cast<GLint>(attribute.bindingIndex);
+            return true;
+        case GL_VERTEX_ATTRIB_RELATIVE_OFFSET:
+            // GL 4.3 separated-format relative offset within the binding.
+            params[0] = static_cast<GLint>(attribute.relativeOffset);
+            return true;
         case GL_CURRENT_VERTEX_ATTRIB:
             params[0] = 0;
             params[1] = 0;
