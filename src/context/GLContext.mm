@@ -3063,13 +3063,28 @@ struct GLContext::Impl {
                 for (GLint arrayElement = 0; arrayElement < samplerArraySize; ++arrayElement) {
                     // Step 2: resolve the texture unit index for this
                     // array element. Sampler uniforms default to 0 per GL
-                    // spec when the app never called glUniform1i.
+                    // spec when the app never called glUniform1i — but
+                    // GL 4.2 §7.6 says that when the GLSL declared
+                    // `layout(binding = N)`, N is the default unit. We
+                    // track that explicit declaration via the source-
+                    // parsed `samplerExplicitBindings` map populated at
+                    // link time (bd73acc's SPIRV-Cross `has_decoration`
+                    // approach couldn't tell user-declared apart from
+                    // glslang-auto-assigned, which regressed
+                    // pixelstoragemodes — the GLSL-source parse is
+                    // unambiguous).
                     GLint glUnit = 0;
                     bool uniformValueWasSet = false;
                     if (samplerValue != nullptr && static_cast<std::size_t>(arrayElement) < samplerValue->ints.size()) {
                         glUnit = samplerValue->ints[arrayElement];
                         uniformValueWasSet = true;
                     }
+                    // Note: GL 4.2 layout(binding=N) default-unit is
+                    // baked into `samplerValue->ints[arrayElement]`
+                    // at link time (see the samplerExplicitBindings
+                    // seed in linkProgram), so this path picks it up
+                    // naturally when the app hasn't called
+                    // glUniform1i.
                 if (glUnit < 0) {
                     if (logThisCall) {
                         NSLog(@"[GL]   %s sampler='%s' metalSlot=%u"
@@ -9137,6 +9152,163 @@ findBlockBody(const std::string& source, const std::string& blockName) {
     return {std::string::npos, std::string::npos};
 }
 
+// Strip line + block comments from GLSL source. Used as input to the
+// layout(binding=N) scanner below so that commented-out layout
+// qualifiers don't get matched.
+static std::string stripGlslComments(const std::string& source) {
+    std::string s;
+    s.reserve(source.size());
+    for (std::size_t i = 0; i < source.size(); ) {
+        if (i + 1 < source.size() && source[i] == '/' && source[i + 1] == '/') {
+            while (i < source.size() && source[i] != '\n') ++i;
+        } else if (i + 1 < source.size() && source[i] == '/' && source[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < source.size() && !(source[i] == '*' && source[i + 1] == '/')) ++i;
+            if (i + 1 < source.size()) i += 2;
+        } else {
+            s += source[i];
+            ++i;
+        }
+    }
+    return s;
+}
+
+// Parse `layout(binding = N) ... uniform <sampler|image>Type <name>[...];`
+// declarations out of the comment-stripped GLSL source. Returns a map
+// from sampler uniform name to its explicit binding index.
+//
+// This is the source-of-truth for "did the user write layout(binding)"
+// because glslang auto-assigns DecorationBinding on every sampler
+// variable regardless of whether the GLSL had an explicit qualifier —
+// see bd73acc / 9c496f4 where the previous attempts relied on
+// SPIRV-Cross's `has_decoration(id, DecorationBinding)` and that
+// returned true for both auto-assigned and user-declared bindings,
+// which wrecked pixelstoragemodes (samplers without explicit bindings
+// got shifted to non-zero units).
+//
+// Parser approach: bespoke scan rather than <regex> for determinism
+// and to avoid C++ regex overhead. Handles:
+//   layout(binding = 5) uniform sampler2D foo;
+//   layout(binding=5) uniform sampler2D foo;
+//   layout(binding = 5, location = 2) uniform sampler2D foo;
+//   layout(location = 2, binding = 5) uniform highp sampler2D foo;
+//   layout(binding=5) uniform sampler2D foo[3];
+// Does NOT handle macro-expanded names, preprocessor conditionals that
+// leave declarations out, or GLSL #version gates — if those ever matter
+// we add them in a follow-up.
+static std::unordered_map<std::string, GLuint>
+parseExplicitSamplerBindings(const std::string& rawSource) {
+    std::unordered_map<std::string, GLuint> result;
+    const std::string s = stripGlslComments(rawSource);
+
+    auto isIdentChar = [](char c) -> bool {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+    };
+    auto skipWhitespace = [&](std::size_t& i) {
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+    };
+
+    std::size_t pos = 0;
+    while (pos < s.size()) {
+        const auto layoutPos = s.find("layout", pos);
+        if (layoutPos == std::string::npos) break;
+
+        // Word boundary before / after "layout".
+        if (layoutPos > 0 && isIdentChar(s[layoutPos - 1])) {
+            pos = layoutPos + 1;
+            continue;
+        }
+        std::size_t after = layoutPos + 6;
+        skipWhitespace(after);
+        if (after >= s.size() || s[after] != '(') {
+            pos = layoutPos + 1;
+            continue;
+        }
+
+        // Find matching ')'.
+        int depth = 0;
+        std::size_t closeIdx = after;
+        for (; closeIdx < s.size(); ++closeIdx) {
+            if (s[closeIdx] == '(') ++depth;
+            else if (s[closeIdx] == ')') {
+                if (--depth == 0) break;
+            }
+        }
+        if (closeIdx >= s.size()) {
+            pos = layoutPos + 1;
+            continue;
+        }
+        const std::string body = s.substr(after + 1, closeIdx - after - 1);
+
+        // Extract `binding = N` from the layout body. Word-boundary
+        // match so `decl_binding` or similar doesn't trigger.
+        int binding = -1;
+        std::size_t bPos = 0;
+        while ((bPos = body.find("binding", bPos)) != std::string::npos) {
+            if (bPos > 0 && isIdentChar(body[bPos - 1])) {
+                bPos += 1;
+                continue;
+            }
+            std::size_t eqPos = bPos + 7;
+            while (eqPos < body.size() && std::isspace(static_cast<unsigned char>(body[eqPos]))) ++eqPos;
+            if (eqPos < body.size() && body[eqPos] == '=') {
+                ++eqPos;
+                while (eqPos < body.size() && std::isspace(static_cast<unsigned char>(body[eqPos]))) ++eqPos;
+                char* endp = nullptr;
+                const long val = std::strtol(body.c_str() + eqPos, &endp, 10);
+                if (endp != body.c_str() + eqPos && val >= 0) {
+                    binding = static_cast<int>(val);
+                }
+            }
+            break;
+        }
+
+        if (binding >= 0) {
+            // Scan post-`)` for `uniform? precision? sampler-type name`.
+            std::size_t cur = closeIdx + 1;
+            skipWhitespace(cur);
+            // Optional "uniform" keyword.
+            if (s.compare(cur, 7, "uniform") == 0 &&
+                (cur + 7 >= s.size() || !isIdentChar(s[cur + 7]))) {
+                cur += 7;
+                skipWhitespace(cur);
+            }
+            // Optional precision qualifier.
+            for (const char* prec : {"highp", "mediump", "lowp"}) {
+                const std::size_t plen = std::strlen(prec);
+                if (s.compare(cur, plen, prec) == 0 &&
+                    (cur + plen >= s.size() || !isIdentChar(s[cur + plen]))) {
+                    cur += plen;
+                    skipWhitespace(cur);
+                    break;
+                }
+            }
+            // Read the type name (must contain "sampler" / "image" /
+            // case-insensitive `Sampler`).
+            const std::size_t typeStart = cur;
+            while (cur < s.size() && isIdentChar(s[cur])) ++cur;
+            const std::string typeName = s.substr(typeStart, cur - typeStart);
+            const bool isOpaqueType =
+                typeName.find("sampler") != std::string::npos ||
+                typeName.find("Sampler") != std::string::npos ||
+                typeName.find("image") != std::string::npos ||
+                typeName.find("Image") != std::string::npos;
+            if (isOpaqueType) {
+                skipWhitespace(cur);
+                const std::size_t nameStart = cur;
+                while (cur < s.size() && isIdentChar(s[cur])) ++cur;
+                if (cur > nameStart) {
+                    std::string name = s.substr(nameStart, cur - nameStart);
+                    result[std::move(name)] = static_cast<GLuint>(binding);
+                }
+            }
+        }
+
+        pos = closeIdx + 1;
+    }
+    return result;
+}
+
 static bool glslBlockHasInstanceName(const std::string& source,
                                       const std::string& blockName) {
     auto [bodyStart, bodyEnd] = findBlockBody(source, blockName);
@@ -9342,6 +9514,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->resourceTransformFeedbackVaryings.clear();
     programObject->resourceTransformFeedbackBuffers.clear();
     programObject->ssboBindingRemap.clear();
+    programObject->samplerExplicitBindings.clear();
 
     // Small helper used in several diagnostic-recording sites below.
     const std::string programTag = "program-" + std::to_string(program);
@@ -9405,6 +9578,19 @@ bool GLContext::linkProgram(GLuint program) {
             default: break;
         }
         appendDeclarationsAsUniforms(programObject->uniforms, shaderObject->declaredUniforms);
+
+        // GL 4.2 §7.6: harvest `layout(binding = N)` from the original
+        // GLSL source across every attached shader. The map is used at
+        // draw-time to substitute the declared unit for any sampler
+        // uniform the application hasn't explicitly glUniform1i'd.
+        // Later-stage declarations override earlier ones if names
+        // collide — safe in practice because the same sampler name in
+        // multiple stages must refer to the same resource by GL's
+        // cross-stage interface rules.
+        auto stageBindings = parseExplicitSamplerBindings(shaderObject->source);
+        for (auto& [name, binding] : stageBindings) {
+            programObject->samplerExplicitBindings[name] = binding;
+        }
     }
 
     // Build the vertex attribute table from the scanner's declared inputs
@@ -9656,6 +9842,29 @@ bool GLContext::linkProgram(GLuint program) {
         // recorded in reservedLocations) and must not shift the counter.
         if (uniform.explicitLocation < 0) {
             nextLocation += std::max<GLint>(uniform.arraySize, 1);
+        }
+    }
+
+    // GL 4.2 §7.6: for any sampler uniform declared with
+    // `layout(binding = N)` in the GLSL source, seed its integer value
+    // to N. Subsequent glUniform1i calls override this. For arrays,
+    // element i gets N+i (spec says consecutive binding points).
+    // Populated after the main uniform-init loop so all uniformValues
+    // entries exist and we only need to overwrite the sampler ones.
+    // Harmless on programs with no explicit bindings — the map is empty.
+    if (!programObject->samplerExplicitBindings.empty()) {
+        for (const auto& uinfo : programObject->uniforms) {
+            auto it = programObject->samplerExplicitBindings.find(uinfo.name);
+            if (it == programObject->samplerExplicitBindings.end()) continue;
+            auto valIt = programObject->uniformValues.find(uinfo.location);
+            if (valIt == programObject->uniformValues.end()) continue;
+            auto& v = valIt->second;
+            const GLint arraySize = std::max<GLint>(uinfo.arraySize, 1);
+            v.ints.assign(static_cast<std::size_t>(arraySize), 0);
+            for (GLint i = 0; i < arraySize; ++i) {
+                v.ints[static_cast<std::size_t>(i)] =
+                    static_cast<GLint>(it->second) + i;
+            }
         }
     }
 

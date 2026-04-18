@@ -507,6 +507,18 @@ struct GLProgramObject {
     // GL 4.3 SSBO binding remapping (block index → user-specified binding).
     std::unordered_map<GLuint, GLuint> ssboBindingRemap;
 
+    // GL 4.2 `layout(binding = N)` sampler default unit (§7.6). Maps
+    // sampler uniform name → explicit binding. Populated at link time
+    // via a GLSL source regex scan across every attached shader; used
+    // by the draw-time sampler resolver to substitute N as the texture
+    // unit when the application never called `glUniform1i(loc, ...)`.
+    // Restricts fallback to user-declared bindings — glslang's auto-
+    // assigned DecorationBinding values would otherwise shadow the
+    // spec-intended "0 when unset" behaviour (the bd73acc / 9c496f4
+    // regression that broke pixelstoragemodes). A GLSL source parse
+    // is the unambiguous source of truth since it runs before glslang.
+    std::unordered_map<std::string, GLuint> samplerExplicitBindings;
+
     // ── Precomputed uniform layout (OPT-7) ──
     // Maps push-constant struct members to GL uniform locations, eliminating
     // O(N*M) string comparisons from the per-draw uniform packing path.
