@@ -16852,45 +16852,158 @@ bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* tex
 // GL 4.4 — Texture clear.
 // ---------------------------------------------------------------------------
 
+namespace {
+
+struct FillLevelArgs {
+    GLenum format;
+    GLenum type;
+    const void* data;
+    GLint xoff;
+    GLint yoff;
+    GLint zoff;
+    GLsizei regionW;
+    GLsizei regionH;
+    GLsizei regionD;
+};
+
+}  // namespace
+
+// Helper: fill an existing level's rgba8 + native-format buffers with
+// a single `data` texel (or zeros). `data==nullptr` means GL-spec-zero
+// (RGBA8 {0,0,0,0}, native zero-fill; alpha defaults to 1 for formats
+// that have an alpha channel, matching GL 4.6 §8.19).
+// Declared as free-file-scope function to keep the clearTexImage body
+// compact; delegates format/native conversion back into `impl_` via the
+// public `Impl*` pointer passed in.
+template <typename ImplT>
+static void fillLevelWithClearValue_T(ImplT* impl, GLTextureObject& tex,
+                                      GLTextureImageLevel& img,
+                                      GLint xoff, GLint yoff, GLint zoff,
+                                      GLsizei regionW, GLsizei regionH, GLsizei regionD,
+                                      GLenum format, GLenum type, const void* data)
+{
+    // RGBA8 shadow fill — drop to 8-bit per channel, used for sampling
+    // paths that fall back to rgba8.
+    std::uint8_t clearRGBA[4] = {0, 0, 0, 0};
+    if (data != nullptr) {
+        const std::size_t components = componentCountForFormat(format);
+        for (std::size_t c = 0; c < components && c < 4; ++c) {
+            clearRGBA[c] = ImplT::readComponentAsU8(
+                static_cast<const std::uint8_t*>(data), type, c);
+        }
+    }
+    // For a full-level clear (region == image size, offsets == 0), just
+    // fill the whole backing store. Otherwise, fill per-pixel over the
+    // specified rectangle.
+    const std::size_t levelW = static_cast<std::size_t>(img.desc.width);
+    const std::size_t levelH = static_cast<std::size_t>(img.desc.height);
+    const std::size_t levelD = std::max<std::size_t>(1, img.desc.depth);
+    const bool wholeLevel = (xoff == 0 && yoff == 0 && zoff == 0 &&
+                             static_cast<std::size_t>(regionW) == levelW &&
+                             static_cast<std::size_t>(regionH) == levelH &&
+                             static_cast<std::size_t>(regionD) == levelD);
+
+    // Clamp region to level bounds defensively.
+    const std::size_t x0 = std::min<std::size_t>(static_cast<std::size_t>(xoff), levelW);
+    const std::size_t y0 = std::min<std::size_t>(static_cast<std::size_t>(yoff), levelH);
+    const std::size_t z0 = std::min<std::size_t>(static_cast<std::size_t>(zoff), levelD);
+    const std::size_t x1 = std::min<std::size_t>(x0 + static_cast<std::size_t>(regionW), levelW);
+    const std::size_t y1 = std::min<std::size_t>(y0 + static_cast<std::size_t>(regionH), levelH);
+    const std::size_t z1 = std::min<std::size_t>(z0 + static_cast<std::size_t>(regionD), levelD);
+
+    if (!img.rgba8.empty()) {
+        if (wholeLevel) {
+            for (std::size_t j = 0; j + 4 <= img.rgba8.size(); j += 4) {
+                std::memcpy(img.rgba8.data() + j, clearRGBA, 4);
+            }
+        } else {
+            for (std::size_t z = z0; z < z1; ++z) {
+                for (std::size_t y = y0; y < y1; ++y) {
+                    for (std::size_t x = x0; x < x1; ++x) {
+                        const std::size_t idx = ((z * levelH) + y) * levelW + x;
+                        if (idx * 4 + 4 <= img.rgba8.size()) {
+                            std::memcpy(img.rgba8.data() + idx * 4, clearRGBA, 4);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Native-format fill — build a 1×1×1 native pixel via buildNativeUpload,
+    // then replicate across the native buffer. This is required for
+    // non-RGBA8 formats where glGetTexImage reads from nativeData.
+    if (img.nativeBpp > 0 && !img.nativeData.empty()) {
+        std::vector<std::uint8_t> singlePixel;
+        std::size_t pixelBpp = 0;
+        bool built = false;
+        if (data != nullptr) {
+            built = impl->buildNativeUpload(img.desc.internalFormat,
+                                            1, 1, 1,
+                                            format, type, data,
+                                            singlePixel, pixelBpp);
+        }
+        if (!built || singlePixel.size() != img.nativeBpp) {
+            // Null `data` or non-representable → zero-fill, matching GL spec.
+            singlePixel.assign(img.nativeBpp, 0);
+            pixelBpp = img.nativeBpp;
+        }
+        if (wholeLevel) {
+            for (std::size_t j = 0; j + img.nativeBpp <= img.nativeData.size(); j += img.nativeBpp) {
+                std::memcpy(img.nativeData.data() + j, singlePixel.data(), img.nativeBpp);
+            }
+        } else {
+            for (std::size_t z = z0; z < z1; ++z) {
+                for (std::size_t y = y0; y < y1; ++y) {
+                    for (std::size_t x = x0; x < x1; ++x) {
+                        const std::size_t idx = ((z * levelH) + y) * levelW + x;
+                        const std::size_t byteIdx = idx * img.nativeBpp;
+                        if (byteIdx + img.nativeBpp <= img.nativeData.size()) {
+                            std::memcpy(img.nativeData.data() + byteIdx,
+                                        singlePixel.data(), img.nativeBpp);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (void)tex;
+}
+
 bool GLContext::clearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, const void* data) {
     auto* tex = impl_->objects->textures().get(texture);
     if (!tex) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    // If level is -1 or data is null, clear all defined levels to zero.
+    // If level is -1, clear all defined levels to zero.
     if (level < 0) {
         for (auto& [lvl, img] : tex->levels) {
             if (img.defined) {
-                std::fill(img.rgba8.begin(), img.rgba8.end(), 0);
+                fillLevelWithClearValue_T(impl_.get(), *tex, img,
+                                          0, 0, 0,
+                                          img.desc.width, img.desc.height, img.desc.depth,
+                                          format, type, data);
             }
+        }
+        if (tex->metalTexture != nullptr) {
+            impl_->replaceMetalTexture(*tex);
         }
         return true;
     }
     auto it = tex->levels.find(level);
-    if (it != tex->levels.end() && it->second.defined) {
-        // Clear all texels to the provided value (or zero).
-        std::fill(it->second.rgba8.begin(), it->second.rgba8.end(), 0);
-        if (data) {
-            // Convert clear color to RGBA8 based on format and type.
-            std::uint8_t clearRGBA[4] = {0, 0, 0, 255};
-            const std::size_t components = componentCountForFormat(format);
-            if (components > 0 && components <= 4) {
-                for (std::size_t c = 0; c < components && c < 4; ++c) {
-                    clearRGBA[c] = Impl::readComponentAsU8(
-                        static_cast<const std::uint8_t*>(data), type, c);
-                }
-                // If only 1-3 components, fill alpha to 255
-                if (components < 4) clearRGBA[3] = 255;
-            }
-            const std::size_t texelSize = 4;
-            for (std::size_t j = 0; j + texelSize <= it->second.rgba8.size(); j += texelSize) {
-                std::memcpy(&it->second.rgba8[j], clearRGBA, texelSize);
-            }
-        }
+    if (it == tex->levels.end() || !it->second.defined) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
     }
-    // Also upload the updated data to Metal
-    if (it != tex->levels.end() && it->second.defined && tex->metalTexture != nullptr) {
+    fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
+                            0, 0, 0,
+                            it->second.desc.width,
+                            it->second.desc.height,
+                            it->second.desc.depth,
+                            format, type, data);
+    if (tex->metalTexture != nullptr) {
         impl_->replaceMetalTexture(*tex);
     }
     return true;
@@ -16905,10 +17018,20 @@ bool GLContext::clearTexSubImage(GLuint texture, GLint level,
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
-    (void)width; (void)height; (void)depth;
-    (void)format; (void)type; (void)data;
-    // Accepted — sub-region clear deferred to Metal blit encoder when textures are instantiated.
+    auto it = tex->levels.find(level);
+    if (it == tex->levels.end() || !it->second.defined) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // Zero-dimension sub-image is a no-op per GL spec — accept and return.
+    if (width == 0 || height == 0 || depth == 0) return true;
+    fillLevelWithClearValue_T(impl_.get(), *tex, it->second,
+                            xoffset, yoffset, zoffset,
+                            width, height, depth,
+                            format, type, data);
+    if (tex->metalTexture != nullptr) {
+        impl_->replaceMetalTexture(*tex);
+    }
     return true;
 }
 
