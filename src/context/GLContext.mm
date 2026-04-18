@@ -14988,7 +14988,72 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
 // GL 4.3 — Buffer Clear
 // ---------------------------------------------------------------------------
 
+// Figure out the width-in-bytes of the clear-data tuple for glClearBuffer*.
+// Spec §6.6: the pattern is `N` bytes where N is the data size of the
+// (format, type) pair — e.g. GL_R8 + GL_RED + GL_UNSIGNED_BYTE is 1 byte,
+// GL_RGBA8 + GL_RGBA + GL_UNSIGNED_BYTE is 4 bytes, GL_RG32F + GL_RG +
+// GL_FLOAT is 8 bytes. Caller replicates the pattern for every element.
+static std::size_t bufferClearPatternBytes(GLenum format, GLenum type) {
+    std::size_t components = 1;
+    switch (format) {
+        case GL_RED: case GL_RED_INTEGER: case GL_GREEN: case GL_BLUE:
+        case GL_GREEN_INTEGER: case GL_BLUE_INTEGER: components = 1; break;
+        case GL_RG: case GL_RG_INTEGER: components = 2; break;
+        case GL_RGB: case GL_BGR: case GL_RGB_INTEGER: case GL_BGR_INTEGER: components = 3; break;
+        case GL_RGBA: case GL_BGRA: case GL_RGBA_INTEGER: case GL_BGRA_INTEGER: components = 4; break;
+        case GL_DEPTH_COMPONENT: components = 1; break;
+        case GL_STENCIL_INDEX: components = 1; break;
+        default: components = 1; break;
+    }
+    std::size_t bytesPerComponent = 1;
+    switch (type) {
+        case GL_UNSIGNED_BYTE: case GL_BYTE: bytesPerComponent = 1; break;
+        case GL_UNSIGNED_SHORT: case GL_SHORT: case GL_HALF_FLOAT: bytesPerComponent = 2; break;
+        case GL_UNSIGNED_INT: case GL_INT: case GL_FLOAT: bytesPerComponent = 4; break;
+        // Packed types: one packed element covers all components.
+        case GL_UNSIGNED_BYTE_3_3_2:
+        case GL_UNSIGNED_BYTE_2_3_3_REV: return 1;
+        case GL_UNSIGNED_SHORT_5_6_5:
+        case GL_UNSIGNED_SHORT_5_6_5_REV:
+        case GL_UNSIGNED_SHORT_4_4_4_4:
+        case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+        case GL_UNSIGNED_SHORT_5_5_5_1:
+        case GL_UNSIGNED_SHORT_1_5_5_5_REV: return 2;
+        case GL_UNSIGNED_INT_8_8_8_8:
+        case GL_UNSIGNED_INT_8_8_8_8_REV:
+        case GL_UNSIGNED_INT_10_10_10_2:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+        case GL_UNSIGNED_INT_5_9_9_9_REV: return 4;
+        default: bytesPerComponent = 4; break;
+    }
+    return components * bytesPerComponent;
+}
+
+// Apply a clear pattern to the buffer's shadow AND to its Metal buffer
+// (when present). GL 4.6 §6.6 treats the (format, type) tuple as a single
+// pattern element whose width determines the replication stride. Prior
+// implementation hard-coded 4 bytes — that worked for RGBA8 but corrupted
+// R8 / RG16F / etc., and also skipped the Metal-buffer sync so subsequent
+// readPixels / map paths saw stale data.
+static void fillBufferClearPattern(std::uint8_t* dst, std::size_t bytes,
+                                    const void* data, std::size_t patternBytes) {
+    if (patternBytes == 0) {
+        std::memset(dst, 0, bytes);
+        return;
+    }
+    if (data == nullptr) {
+        std::memset(dst, 0, bytes);
+        return;
+    }
+    for (std::size_t i = 0; i < bytes; i += patternBytes) {
+        const std::size_t remaining = std::min(patternBytes, bytes - i);
+        std::memcpy(dst + i, data, remaining);
+    }
+}
+
 bool GLContext::clearBufferData(GLenum target, GLenum internalformat, GLenum format, GLenum type, const void* data) {
+    (void)internalformat;
     GLuint boundBuffer = impl_->state->boundBuffer(target);
     if (boundBuffer == 0) {
         pushError(GL_INVALID_OPERATION);
@@ -15006,21 +15071,26 @@ bool GLContext::clearBufferData(GLenum target, GLenum internalformat, GLenum for
     if (buffer->shadowBytes.size() < static_cast<std::size_t>(buffer->size)) {
         buffer->shadowBytes.resize(static_cast<std::size_t>(buffer->size), 0);
     }
-    if (data == nullptr) {
-        std::memset(buffer->shadowBytes.data(), 0, buffer->shadowBytes.size());
-    } else {
-        // Simple fill: replicate first 4 bytes across the buffer.
-        std::uint8_t pattern[4] = {0, 0, 0, 0};
-        std::memcpy(pattern, data, std::min<std::size_t>(4, buffer->shadowBytes.size()));
-        for (std::size_t i = 0; i < buffer->shadowBytes.size(); i += 4) {
-            std::size_t remaining = std::min<std::size_t>(4, buffer->shadowBytes.size() - i);
-            std::memcpy(buffer->shadowBytes.data() + i, pattern, remaining);
+    const std::size_t patternBytes = bufferClearPatternBytes(format, type);
+    fillBufferClearPattern(buffer->shadowBytes.data(), buffer->shadowBytes.size(),
+                            data, patternBytes);
+    // Sync into the Metal buffer so getBufferSubData / glMap paths see the
+    // cleared pattern rather than whatever the Metal buffer previously held
+    // (the readback helper prefers Metal contents when the object has a
+    // Metal buffer backing it).
+    id<MTLBuffer> metalBuffer = (__bridge id<MTLBuffer>)buffer->metalBuffer;
+    if (metalBuffer != nil) {
+        std::uint8_t* metalBytes = static_cast<std::uint8_t*>([metalBuffer contents]);
+        if (metalBytes != nullptr) {
+            fillBufferClearPattern(metalBytes, buffer->shadowBytes.size(),
+                                    data, patternBytes);
         }
     }
     return true;
 }
 
 bool GLContext::clearBufferSubData(GLenum target, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data) {
+    (void)internalformat;
     if (offset < 0 || size < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -15045,14 +15115,15 @@ bool GLContext::clearBufferSubData(GLenum target, GLenum internalformat, GLintpt
     if (buffer->shadowBytes.size() < static_cast<std::size_t>(buffer->size)) {
         buffer->shadowBytes.resize(static_cast<std::size_t>(buffer->size), 0);
     }
-    if (data == nullptr) {
-        std::memset(buffer->shadowBytes.data() + offset, 0, static_cast<std::size_t>(size));
-    } else {
-        std::uint8_t pattern[4] = {0, 0, 0, 0};
-        std::memcpy(pattern, data, std::min<std::size_t>(4, static_cast<std::size_t>(size)));
-        for (GLsizeiptr i = 0; i < size; i += 4) {
-            GLsizeiptr remaining = std::min<GLsizeiptr>(4, size - i);
-            std::memcpy(buffer->shadowBytes.data() + offset + i, pattern, static_cast<std::size_t>(remaining));
+    const std::size_t patternBytes = bufferClearPatternBytes(format, type);
+    fillBufferClearPattern(buffer->shadowBytes.data() + offset,
+                            static_cast<std::size_t>(size), data, patternBytes);
+    id<MTLBuffer> metalBuffer = (__bridge id<MTLBuffer>)buffer->metalBuffer;
+    if (metalBuffer != nil) {
+        std::uint8_t* metalBytes = static_cast<std::uint8_t*>([metalBuffer contents]);
+        if (metalBytes != nullptr) {
+            fillBufferClearPattern(metalBytes + offset,
+                                    static_cast<std::size_t>(size), data, patternBytes);
         }
     }
     return true;
