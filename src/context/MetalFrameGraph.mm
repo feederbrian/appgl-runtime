@@ -2479,6 +2479,16 @@ fragment float4 appgl_immediate_textured_fs(
         }
         [enc setComputePipelineState:pso];
 
+        // Default-uniform push constants (bare GL uniforms packed into
+        // one buffer at Metal index 16 — matches the graphics-stage
+        // convention used by drawArrays/drawElements). Lets compute
+        // shaders see bare `uniform vec4 u0;` updates via glUniform4fv.
+        if (info.computeUniformData != nullptr && info.computeUniformSize > 0) {
+            [enc setBytes:info.computeUniformData
+                   length:info.computeUniformSize
+                  atIndex:16];
+        }
+
         for (const auto& bb : info.buffers) {
             id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bb.metalBuffer;
             if (buf == nil) continue;

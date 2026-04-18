@@ -14264,6 +14264,32 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     info.localY = programObject->computeLocalSizeY;
     info.localZ = programObject->computeLocalSizeZ;
 
+    // Pack default uniforms (bare GL uniforms in the _DefaultUniforms
+    // block) for the compute stage. Mirrors the graphics-stage path:
+    // lazy layout compute + per-dispatch rebuild of the byte buffer
+    // from uniformValues. Without this, location-based glUniform*
+    // updates for a compute program never reach the MSL kernel.
+    // KHR-GL46.explicit_uniform_location.* with a compute variant
+    // specifically relies on this.
+    thread_local std::vector<std::uint8_t> computeUniformScratch;
+    if (!programObject->uniformLayoutComputed
+        || programObject->computeUniformLayout.empty()) {
+        // Only (re)build the layout vector when we haven't seen this
+        // program before OR the compute-side layout is still empty on
+        // a program that previously had graphics stages computed.
+        computeStageUniformLayout(programObject->computeUniformLayout,
+            programObject->computeReflection, programObject->uniforms);
+        programObject->uniformLayoutComputed = true;
+    }
+    pushSynthesizedMatrixUniforms(*programObject, impl_->matrixState);
+    buildStageUniformBuffer(computeUniformScratch,
+        programObject->computeReflection, programObject->uniformValues,
+        programObject->computeUniformLayout);
+    if (!computeUniformScratch.empty()) {
+        info.computeUniformData = computeUniformScratch.data();
+        info.computeUniformSize = computeUniformScratch.size();
+    }
+
     // Resolve shader-storage buffer bindings. For each SSBO the shader
     // declares, look up whatever buffer the app has bound to
     // GL_SHADER_STORAGE_BUFFER at its layout(binding=N) slot via

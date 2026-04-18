@@ -373,6 +373,14 @@ struct ComputeDispatchInfo {
         std::uint32_t metalSlot = 0;
     };
     std::vector<TextureBinding> textures;
+
+    // Default-uniform push-constant bytes for the compute stage.
+    // Bound at Metal buffer index 16 (same slot as graphics stages).
+    // Populated by GLContext::dispatchCompute from the packed uniform
+    // layout so bare `uniform vec4 u0;` style declarations reach
+    // location-based glUniform* updates.
+    const void* computeUniformData = nullptr;
+    std::size_t computeUniformSize = 0;
 };
 
 class MetalFrameGraph {

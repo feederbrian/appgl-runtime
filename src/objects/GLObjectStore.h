@@ -531,6 +531,7 @@ struct GLProgramObject {
     };
     std::vector<UniformLayoutEntry> vertexUniformLayout;
     std::vector<UniformLayoutEntry> fragmentUniformLayout;
+    std::vector<UniformLayoutEntry> computeUniformLayout;
     bool uniformLayoutComputed = false;
 };
 
