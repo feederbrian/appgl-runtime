@@ -507,6 +507,89 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // keep their declared size because they take the `else if(size)`
         // branch in CompilerGLSL::to_array_size.
 
+        // gl_ClipDistance / gl_CullDistance array-to-flattened rewrite:
+        // SPIRV-Cross's MSL backend declares ClipDistance/CullDistance as
+        // split individual `[[user(clipN)]]` / `[[user(cullN)]]` outputs
+        // on `main0_out` (see CompilerMSL::entry_point_args around
+        // BuiltInClipDistance/BuiltInCullDistance). But function-body
+        // access chains like `out.gl_CullDistance[0] = ...` still
+        // reference the unsplit array member that no longer exists on
+        // the struct, causing MSL compilation to fail with:
+        //   error: no member named 'gl_CullDistance' in 'main0_out'
+        //
+        // CTS KHR-GL46.cull_distance.* (201 tests) all trip on this.
+        // Rewrite the literal access-chain pattern to the split name:
+        //   out.gl_CullDistance[N] → out.gl_CullDistance_N
+        //   out.gl_ClipDistance[N] → out.gl_ClipDistance_N
+        // for N in [0..15] (gl_MaxCullDistances + gl_MaxClipDistances
+        // are each 8 per GL spec, but grow the window to 16 so any
+        // vendor extension or test that crosses the floor still matches).
+        {
+            std::string out;
+            out.reserve(msl.size());
+            const auto rewriteOne = [&out](const std::string& s, const char* arrayName) {
+                std::string pattern = std::string(".") + arrayName + "[";
+                std::size_t pos = 0;
+                while (pos < s.size()) {
+                    const std::size_t idx = s.find(pattern, pos);
+                    if (idx == std::string::npos) {
+                        out.append(s, pos, std::string::npos);
+                        return;
+                    }
+                    out.append(s, pos, idx - pos);
+                    // Parse the N in `[N]`.
+                    const std::size_t numStart = idx + pattern.size();
+                    std::size_t numEnd = numStart;
+                    while (numEnd < s.size() && s[numEnd] >= '0' && s[numEnd] <= '9') ++numEnd;
+                    if (numEnd == numStart || numEnd >= s.size() || s[numEnd] != ']') {
+                        // Not a literal integer subscript — bail without rewriting this instance.
+                        out.append(s, idx, pattern.size());
+                        pos = idx + pattern.size();
+                        continue;
+                    }
+                    out.append(".");
+                    out.append(arrayName);
+                    out.append("_");
+                    out.append(s, numStart, numEnd - numStart);
+                    pos = numEnd + 1;  // skip ']'
+                }
+            };
+            rewriteOne(msl, "gl_CullDistance");
+            std::string pass1 = std::move(out);
+            out.clear();
+            out.reserve(pass1.size());
+            rewriteOne(pass1, "gl_ClipDistance");
+            msl = std::move(out);
+        }
+
+        // SPIRV-Cross's "copy internal per-vertex block to split user(N)
+        // outputs" pass sometimes leaves dangling references to a SPIR-V
+        // variable ID that's never emitted as a local (observed as
+        // `_NN._RESERVED_IDENTIFIER_FIXUP_gl_CullDistance[K]` on the RHS
+        // of the redundant copy-back writes). The immediately-preceding
+        // statements already wrote the correct values to the split
+        // outputs (e.g. `out.gl_CullDistance_0 = culldistance_data[0];`),
+        // so the reserved-identifier copy-back is a duplicate that only
+        // fails because its source variable was optimized away. Strip
+        // any line containing that prefix — the earlier write is the
+        // real one and carries the user's intended value.
+        {
+            const std::string kMarker = "_RESERVED_IDENTIFIER_FIXUP_gl_";
+            std::string out;
+            out.reserve(msl.size());
+            std::size_t pos = 0;
+            while (pos < msl.size()) {
+                const std::size_t nl = msl.find('\n', pos);
+                const std::size_t lineEnd = (nl == std::string::npos) ? msl.size() : nl + 1;
+                const std::string_view line(msl.data() + pos, lineEnd - pos);
+                if (line.find(kMarker) == std::string_view::npos) {
+                    out.append(line);
+                }
+                pos = lineEnd;
+            }
+            msl = std::move(out);
+        }
+
         if (log != nullptr) {
             *log = "ok";
         }

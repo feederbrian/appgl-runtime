@@ -821,6 +821,10 @@ struct MetalFrameGraph::Impl {
                                                    constantValues:emptyConstants
                                                             error:&vertFnError];
             if (vertFn == nil) {
+                if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+                    std::fprintf(stderr, "[APPGL] vertex-function build failed: %s\n",
+                        vertFnError ? vertFnError.localizedDescription.UTF8String : "(no err)");
+                }
                 FG_TRACE(@"encodeTranslatedDraw: newFunctionWithName(vertex,main0) failed: %@", vertFnError);
                 recordBuildFailure("vertex-function", vertFnError);
                 return false;
@@ -2858,6 +2862,9 @@ private:
         id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&err];
         if (lib != nil) {
             mslLibraryCache[hash] = lib;
+        } else if (std::getenv("APPGL_TRACE_SHADER_BUILD")) {
+            std::fprintf(stderr, "[APPGL] MSL library build failed: %s\n",
+                err ? err.localizedDescription.UTF8String : "(no err)");
         }
         return lib;  // nil on failure; caller handles
     }
