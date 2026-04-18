@@ -3456,6 +3456,41 @@ struct GLContext::Impl {
         resolveBlocks(info.fragmentReflection, false, true);
     }
 
+    // Graphics-stage SSBO binding. GL 4.3+ allows VS/FS to declare
+    // `layout(std430, binding=N) buffer X` and read/write through the
+    // bound MTLBuffer. This mirrors the compute-dispatch SSBO path but
+    // targets the render encoder instead of the compute encoder.
+    // Covers KHR-GL46.shader_storage_buffer_object.*-{vs,fs} which
+    // currently fail because the encoder never binds the SSBO buffer
+    // to the Metal slot the MSL expects.
+    void resolveSSBOBindings(
+        GLProgramObject& program,
+        TranslatedDrawInfo& info)
+    {
+        info.ssboBindings.clear();
+
+        auto resolveStage = [&](const ShaderReflection* reflection,
+                                bool isVertex, bool isFragment) {
+            if (reflection == nullptr) return;
+            for (const auto& ssbo : reflection->storageBuffers) {
+                const GLIndexedBufferBinding binding =
+                    state->indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, ssbo.glBinding);
+                if (binding.buffer == 0) continue;
+                const GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
+                if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+                TranslatedDrawInfo::SSBOBinding sb;
+                sb.metalSlot = ssbo.metalBinding;
+                sb.metalBuffer = bufObj->metalBuffer;
+                sb.offset = static_cast<std::size_t>(binding.offset);
+                sb.isVertex = isVertex;
+                sb.isFragment = isFragment;
+                info.ssboBindings.push_back(sb);
+            }
+        };
+        resolveStage(info.vertexReflection, true, false);
+        resolveStage(info.fragmentReflection, false, true);
+    }
+
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
         std::vector<std::uint8_t> shadowBytes(static_cast<std::size_t>(size), 0);
         if (data != nullptr && size > 0) {
@@ -12949,6 +12984,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
 
             impl_->resolveSamplerBindings(*program, tdi);
             impl_->resolveUBOBindings(*program, tdi);
+            impl_->resolveSSBOBindings(*program, tdi);
 
             // RC-A02: resolve FBO render target.
             {
@@ -13149,6 +13185,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // slot.
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
+                    impl_->resolveSSBOBindings(*program, tdi);
 
                     // RC-A02: resolve FBO render target when a user FBO is bound.
                     {
@@ -13295,6 +13332,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             tdi.fragmentUniformSize = fragUniformScratch.size();
             impl_->resolveSamplerBindings(*program, tdi);
             impl_->resolveUBOBindings(*program, tdi);
+            impl_->resolveSSBOBindings(*program, tdi);
             {
                 GLsizei fboW = 0, fboH = 0;
                 void* fboDSTex = nullptr;
@@ -13482,6 +13520,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // needs identical sampler resolution.
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
+                    impl_->resolveSSBOBindings(*program, tdi);
 
                     // RC-A02: resolve FBO render target.
                     {
@@ -13769,6 +13808,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
 
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
+                    impl_->resolveSSBOBindings(*program, tdi);
 
                     // RC-A02: resolve FBO render target.
                     {
@@ -14007,6 +14047,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
 
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
+                    impl_->resolveSSBOBindings(*program, tdi);
 
                     // RC-A02: resolve FBO render target.
                     {
@@ -14311,6 +14352,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
 
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
+                    impl_->resolveSSBOBindings(*program, tdi);
 
                     // RC-A02: resolve FBO render target.
                     {

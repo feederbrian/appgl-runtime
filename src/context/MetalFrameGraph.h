@@ -263,6 +263,21 @@ struct TranslatedDrawInfo {
     };
     std::vector<UBOBinding> uboBindings;
 
+    // Shader Storage Buffer Object bindings for graphics stages.
+    // GL 4.3+ lets vertex/fragment/geometry/tess shaders declare
+    // `layout(binding=N) buffer X` and access the underlying MTLBuffer
+    // as `device T* x [[buffer(metalSlot)]]`. Compute already has its
+    // own dispatch-time resolver; this is the graphics-stage analog
+    // bound by encodeTranslatedDraw.
+    struct SSBOBinding {
+        std::uint32_t metalSlot = 0;
+        void* metalBuffer = nullptr;
+        std::size_t offset = 0;
+        bool isVertex = false;
+        bool isFragment = false;
+    };
+    std::vector<SSBOBinding> ssboBindings;
+
     // Translated MSL + reflection (borrowed from GLProgramObject).
     const std::string* vertexMSL = nullptr;
     const std::string* fragmentMSL = nullptr;

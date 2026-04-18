@@ -1499,6 +1499,20 @@ struct MetalFrameGraph::Impl {
             }
         }
 
+        // Bind SSBOs to the render encoder. GL 4.3+ permits vertex and
+        // fragment stages to declare `layout(binding=N) buffer X` for
+        // arbitrary indexed-buffer-bound SSBOs. KHR-GL46.shader_storage_
+        // buffer_object.*-{vs,fs} exercises this from both stages. MSL
+        // expects the buffer at the reflected [[buffer(metalSlot)]].
+        for (const auto& ssbo : info.ssboBindings) {
+            if (ssbo.metalBuffer == nullptr) continue;
+            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)ssbo.metalBuffer;
+            const NSUInteger slot = static_cast<NSUInteger>(ssbo.metalSlot);
+            const NSUInteger off = static_cast<NSUInteger>(ssbo.offset);
+            if (ssbo.isVertex)   [currentRenderEncoder setVertexBuffer:buf offset:off atIndex:slot];
+            if (ssbo.isFragment) [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
+        }
+
         // Phase 8X Group 4d follow-up⁷ — bind textures and samplers for
         // this draw. GLContext::drawArrays / drawArraysInstanced /
         // drawElements populates `info.fragmentTextures` and
