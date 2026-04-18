@@ -15029,12 +15029,48 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
         pushError(GL_INVALID_ENUM);
         return false;
     }
+    // GL 4.6 §9.4: pname sets differ between the default framebuffer
+    // and user FBOs. Routing DSA getNamedFramebufferParameteriv through
+    // bindFramebuffer(0) surfaces this split at the non-DSA path.
+    const GLuint fbName = target == GL_READ_FRAMEBUFFER
+        ? impl_->state->boundReadFramebuffer()
+        : impl_->state->boundDrawFramebuffer();
+    const bool isDefaultFb = (fbName == 0);
+    if (isDefaultFb) {
+        switch (pname) {
+            case GL_DOUBLEBUFFER:                     *params = GL_TRUE;  return true;
+            case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;  return true;
+            case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return true;
+            case GL_SAMPLES:                          *params = 0;        return true;
+            case GL_SAMPLE_BUFFERS:                   *params = 0;        return true;
+            case GL_STEREO:                           *params = GL_FALSE; return true;
+            default:
+                // Wrong pname class for the default FB (e.g. one of the
+                // FRAMEBUFFER_DEFAULT_* user-FB pnames). Spec says this
+                // is INVALID_OPERATION, not INVALID_ENUM — enum is
+                // recognised, it just doesn't apply to this FB kind.
+                // framebuffers_get_parameter_errors distinguishes the two.
+                pushError(GL_INVALID_OPERATION);
+                return false;
+        }
+    }
+    // User FBO: accept the FRAMEBUFFER_DEFAULT_* pnames, plus the
+    // default-FB-class pnames (DOUBLEBUFFER/IMPL_COLOR_READ_*/SAMPLES/
+    // SAMPLE_BUFFERS/STEREO) which framebuffers_get_parameters expects
+    // to cross-validate against the non-DSA query. Only default FB
+    // rejects the user-FB-only FRAMEBUFFER_DEFAULT_* pnames.
     switch (pname) {
         case GL_FRAMEBUFFER_DEFAULT_WIDTH:       *params = 0; return true;
         case GL_FRAMEBUFFER_DEFAULT_HEIGHT:      *params = 0; return true;
         case GL_FRAMEBUFFER_DEFAULT_LAYERS:      *params = 0; return true;
         case GL_FRAMEBUFFER_DEFAULT_SAMPLES:     *params = 0; return true;
         case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS: *params = GL_TRUE; return true;
+        case GL_DOUBLEBUFFER:                    *params = GL_TRUE;  return true;
+        case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;         return true;
+        case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return true;
+        case GL_SAMPLES:                          *params = 0;               return true;
+        case GL_SAMPLE_BUFFERS:                   *params = 0;               return true;
+        case GL_STEREO:                           *params = GL_FALSE;        return true;
         default:
             pushError(GL_INVALID_ENUM);
             return false;
