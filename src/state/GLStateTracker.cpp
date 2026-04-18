@@ -298,30 +298,6 @@ bool queryValue(
         case GL_TEXTURE_BINDING_3D:
             writeScalar(out, boundTexture(GL_TEXTURE_3D));
             return true;
-        case GL_TEXTURE_BINDING_1D_ARRAY:
-            writeScalar(out, boundTexture(GL_TEXTURE_1D_ARRAY));
-            return true;
-        case GL_TEXTURE_BINDING_2D_ARRAY:
-            writeScalar(out, boundTexture(GL_TEXTURE_2D_ARRAY));
-            return true;
-        case GL_TEXTURE_BINDING_CUBE_MAP:
-            writeScalar(out, boundTexture(GL_TEXTURE_CUBE_MAP));
-            return true;
-        case GL_TEXTURE_BINDING_CUBE_MAP_ARRAY:
-            writeScalar(out, boundTexture(GL_TEXTURE_CUBE_MAP_ARRAY));
-            return true;
-        case GL_TEXTURE_BINDING_RECTANGLE:
-            writeScalar(out, boundTexture(GL_TEXTURE_RECTANGLE));
-            return true;
-        case GL_TEXTURE_BINDING_BUFFER:
-            writeScalar(out, boundTexture(GL_TEXTURE_BUFFER));
-            return true;
-        case GL_TEXTURE_BINDING_2D_MULTISAMPLE:
-            writeScalar(out, boundTexture(GL_TEXTURE_2D_MULTISAMPLE));
-            return true;
-        case GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY:
-            writeScalar(out, boundTexture(GL_TEXTURE_2D_MULTISAMPLE_ARRAY));
-            return true;
         case GL_SAMPLER_BINDING:
             writeScalar(out, activeTextureUnitState.sampler);
             return true;

@@ -274,7 +274,7 @@ public:
     void applyDirtyStateForDraw(GLObjectStore& objects);
 
 private:
-    static constexpr std::size_t kMaxTextureUnits = 48;
+    static constexpr std::size_t kMaxTextureUnits = 32;
     static constexpr std::size_t kMaxDrawBuffers = 8;
     static constexpr std::size_t kMaxIndexedBufferBindings = 32;
 

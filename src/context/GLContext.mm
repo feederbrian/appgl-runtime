@@ -1082,30 +1082,6 @@ bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const
             (void)params;
             (void)values;
             return true;
-        // Float-typed parameters accepted via int path per GL 4.6
-        // §8.10 "Texture Parameter Functions": glTexParameteri{v} must
-        // accept any pname glTexParameterf{v} accepts, converting the
-        // int value to float. CTS texture_cube_map_array.getter_calls
-        // calls `glTexParameteriv(cube_map_array, MIN_LOD, -10)` and
-        // expects success; we previously hit the default case and
-        // pushed GL_INVALID_ENUM.
-        case GL_TEXTURE_MIN_LOD:
-            params.minLod = static_cast<GLfloat>(values[0]);
-            return true;
-        case GL_TEXTURE_MAX_LOD:
-            params.maxLod = static_cast<GLfloat>(values[0]);
-            return true;
-        case GL_TEXTURE_LOD_BIAS:
-        case GL_TEXTURE_MAX_ANISOTROPY:
-            // GLTextureParameters has no storage for these — the float
-            // setter also silently accepts them (falls into the default
-            // case that casts to int and recurses, where this case now
-            // accepts it). Matching float behaviour: no-op store, but
-            // return true so the glTexParameteri{v} call doesn't fire
-            // GL_INVALID_ENUM. Real plumbing into the sampler state is
-            // a separate follow-up.
-            (void)values;
-            return true;
         default:
             return false;
     }
