@@ -336,8 +336,29 @@ bool isColorAttachment(GLenum attachment) {
     return attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + 8;
 }
 
+// Any GL_COLOR_ATTACHMENT0..GL_COLOR_ATTACHMENT31 — i.e. the enum
+// range spec'd in GL 4.6 §9.2.8. Used to distinguish
+// "color-attachment-shaped enum that exceeds MAX_COLOR_ATTACHMENTS"
+// (INVALID_OPERATION) from "not a recognised attachment enum at all"
+// (INVALID_ENUM). Matches the error-class CTS expects in
+// KHR-GL46.direct_state_access.framebuffers_*_errors.
+bool isColorAttachmentEnum(GLenum attachment) {
+    return attachment >= GL_COLOR_ATTACHMENT0 && attachment <= GL_COLOR_ATTACHMENT0 + 31;
+}
+
 bool isFramebufferAttachment(GLenum attachment) {
     return isColorAttachment(attachment)
+        || attachment == GL_DEPTH_ATTACHMENT
+        || attachment == GL_STENCIL_ATTACHMENT
+        || attachment == GL_DEPTH_STENCIL_ATTACHMENT;
+}
+
+// Accepts a color-attachment-shaped enum (incl. out-of-range) plus the
+// depth/stencil attachments. Callers use this to decide between
+// INVALID_ENUM (not this function's return) and INVALID_OPERATION
+// (function returns true but isColorAttachment is false).
+bool isFramebufferAttachmentEnum(GLenum attachment) {
+    return isColorAttachmentEnum(attachment)
         || attachment == GL_DEPTH_ATTACHMENT
         || attachment == GL_STENCIL_ATTACHMENT
         || attachment == GL_DEPTH_STENCIL_ATTACHMENT;
@@ -7656,8 +7677,20 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (!isFramebufferAttachment(attachment) || (textarget != 0 && !isTextureTarget(textarget))) {
+    if (textarget != 0 && !isTextureTarget(textarget)) {
         pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    // GL 4.6 §9.2.8: attachment enum shape check split from MAX-range
+    // check. Unrecognised attachment → INVALID_ENUM; color-attachment-
+    // shaped but >= MAX_COLOR_ATTACHMENTS → INVALID_OPERATION. See
+    // framebuffers_texture_attachment_errors.
+    if (!isFramebufferAttachmentEnum(attachment)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (isColorAttachmentEnum(attachment) && !isColorAttachment(attachment)) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
     if (level < 0 || layer < 0) {
@@ -7678,8 +7711,19 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
         return true;
     }
 
+    // Invalid-texture-name error code differs per entry-point variant
+    // (GL 4.6 §9.2.8):
+    //  - glFramebufferTexture / glNamedFramebufferTexture (layered=true):
+    //    INVALID_VALUE when texture is non-zero but not a valid name.
+    //  - glFramebufferTextureLayer / glNamedFramebufferTextureLayer
+    //    (layered=false here): INVALID_OPERATION for the same case.
+    // The not-instantiated case stays INVALID_OPERATION for both.
     const GLTextureObject* textureObject = impl_->objects->textures().get(texture);
-    if (textureObject == nullptr || !textureObject->instantiated) {
+    if (textureObject == nullptr) {
+        pushError(layered ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!textureObject->instantiated) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -7745,8 +7789,19 @@ bool GLContext::framebufferRenderbuffer(GLenum target, GLenum attachment, GLenum
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (!isFramebufferAttachment(attachment) || renderbuffertarget != GL_RENDERBUFFER) {
+    if (renderbuffertarget != GL_RENDERBUFFER) {
         pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    // GL 4.6 §9.2.8 splits attachment validation into two error classes:
+    // an unrecognised enum → INVALID_ENUM; a color-attachment-shaped
+    // enum >= MAX_COLOR_ATTACHMENTS → INVALID_OPERATION.
+    if (!isFramebufferAttachmentEnum(attachment)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (isColorAttachmentEnum(attachment) && !isColorAttachment(attachment)) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
     const GLuint framebufferName = target == GL_READ_FRAMEBUFFER
@@ -14577,10 +14632,65 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
 // GL 4.3 — Invalidation Hints
 // ---------------------------------------------------------------------------
 
+// GL 4.6 §17.4.4: attachment-enum validation for Invalidate*Framebuffer.
+// Split into a helper so both invalidateFramebuffer and the DSA
+// invalidateNamedFramebufferData/SubData paths share the same rules.
+// Returns:
+//   0           → attachment is accepted for this target
+//   INVALID_ENUM      → attachment is unrecognised
+//   INVALID_OPERATION → attachment is color-attachment-shaped but >= MAX
+//
+// For the default framebuffer the valid set is
+// {FRONT_LEFT, FRONT_RIGHT, BACK_LEFT, BACK_RIGHT, COLOR, DEPTH, STENCIL}.
+// For a user framebuffer the valid set is
+// {COLOR_ATTACHMENT0..MAX-1, DEPTH_ATTACHMENT, STENCIL_ATTACHMENT, DEPTH_STENCIL_ATTACHMENT}.
+static GLenum classifyInvalidateAttachment(GLenum attachment, bool isDefaultFb) {
+    if (isDefaultFb) {
+        switch (attachment) {
+            case GL_FRONT_LEFT:
+            case GL_FRONT_RIGHT:
+            case GL_BACK_LEFT:
+            case GL_BACK_RIGHT:
+            case GL_COLOR:
+            case GL_DEPTH:
+            case GL_STENCIL:
+                return 0;
+            default:
+                return GL_INVALID_ENUM;
+        }
+    }
+    if (attachment == GL_DEPTH_ATTACHMENT
+        || attachment == GL_STENCIL_ATTACHMENT
+        || attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+        return 0;
+    }
+    // Color attachment: shape check vs MAX range check.
+    if (attachment >= GL_COLOR_ATTACHMENT0 && attachment <= GL_COLOR_ATTACHMENT0 + 31) {
+        const GLuint idx = attachment - GL_COLOR_ATTACHMENT0;
+        return idx < 8 ? 0 : GL_INVALID_OPERATION;
+    }
+    return GL_INVALID_ENUM;
+}
+
 bool GLContext::invalidateFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments) {
     if (numAttachments < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    // Attachment enum validation per §17.4.4. The validation rules
+    // differ for the default framebuffer (name 0) vs user framebuffer.
+    const GLuint fbName = (target == GL_READ_FRAMEBUFFER)
+        ? impl_->state->boundReadFramebuffer()
+        : impl_->state->boundDrawFramebuffer();
+    const bool isDefaultFb = (fbName == 0);
+    if (attachments != nullptr) {
+        for (GLsizei i = 0; i < numAttachments; ++i) {
+            const GLenum err = classifyInvalidateAttachment(attachments[i], isDefaultFb);
+            if (err != 0) {
+                pushError(err);
+                return false;
+            }
+        }
     }
     // Performance hint: signal that attachment contents can be discarded.
     // Maps to MTLStoreAction.dontCare in a future optimization pass.
@@ -14591,6 +14701,19 @@ bool GLContext::invalidateSubFramebuffer(GLenum target, GLsizei numAttachments, 
     if (numAttachments < 0 || width < 0 || height < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    const GLuint fbName = (target == GL_READ_FRAMEBUFFER)
+        ? impl_->state->boundReadFramebuffer()
+        : impl_->state->boundDrawFramebuffer();
+    const bool isDefaultFb = (fbName == 0);
+    if (attachments != nullptr) {
+        for (GLsizei i = 0; i < numAttachments; ++i) {
+            const GLenum err = classifyInvalidateAttachment(attachments[i], isDefaultFb);
+            if (err != 0) {
+                pushError(err);
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -16314,7 +16437,14 @@ bool GLContext::namedFramebufferTexture(GLuint framebuffer, GLenum attachment, G
     DSA_FB_CHECK(framebuffer)
     GLuint prev = impl_->state->boundDrawFramebuffer();
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
-    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, GL_TEXTURE_2D, texture, level, 0, false);
+    // glNamedFramebufferTexture binds the *whole* texture (all layers)
+    // as a layered attachment — passes `layered=true` so the internal
+    // framebufferTexture reaches the spec-correct INVALID_VALUE path
+    // for invalid texture names (the non-layer-variant uses
+    // INVALID_OPERATION per §9.2.8 distinction). Also textarget=0 so
+    // we don't force-check against GL_TEXTURE_2D when the texture was
+    // created with a different target (array / cube / 3D).
+    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, 0, texture, level, 0, true);
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
     return ok;
 }
@@ -16323,7 +16453,25 @@ bool GLContext::namedFramebufferTextureLayer(GLuint framebuffer, GLenum attachme
     DSA_FB_CHECK(framebuffer)
     GLuint prev = impl_->state->boundDrawFramebuffer();
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
-    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, GL_TEXTURE_2D, texture, level, layer, true);
+    // glNamedFramebufferTextureLayer binds a *specific* layer of a
+    // texture (3D/Array/Cube-Array). Two wiring points for correct
+    // error-code mapping:
+    //
+    //  - `textarget = 0` (don't check texture target against a passed
+    //    enum): the spec lets this entry point accept whatever target
+    //    the texture was created with, so passing GL_TEXTURE_2D here
+    //    would reject 3D/array textures with INVALID_OPERATION before
+    //    we ever reach the layer-bounds validator.
+    //
+    //  - `layered = false`: `layered=true` means "bind all layers as
+    //    one attachment" (glFramebufferTexture semantics); this is
+    //    the specific-layer variant, so bounds validation has to run.
+    //
+    // Together these let `framebufferTexture` reach the spec-required
+    // INVALID_VALUE for an out-of-range layer instead of bailing
+    // earlier on target mismatch or skipping the layer check entirely
+    // (framebuffers_texture_attachment_errors).
+    bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, 0, texture, level, layer, false);
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
     return ok;
 }
@@ -16436,15 +16584,50 @@ bool GLContext::clearNamedFramebufferfi(GLuint framebuffer, GLenum buffer, GLint
 }
 
 bool GLContext::invalidateNamedFramebufferData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments) {
-    DSA_FB_CHECK(framebuffer)
-    (void)numAttachments; (void)attachments;
+    if (numAttachments < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // `framebuffer == 0` means the default framebuffer — no
+    // DSA_FB_CHECK; per-attachment validation uses the default-FB enum set.
+    if (framebuffer != 0) {
+        auto* obj = impl_->objects->framebuffers().get(framebuffer);
+        if (obj == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    }
+    const bool isDefaultFb = (framebuffer == 0);
+    if (attachments != nullptr) {
+        for (GLsizei i = 0; i < numAttachments; ++i) {
+            const GLenum err = classifyInvalidateAttachment(attachments[i], isDefaultFb);
+            if (err != 0) {
+                pushError(err);
+                return false;
+            }
+        }
+    }
     return true;
 }
 
 bool GLContext::invalidateNamedFramebufferSubData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments,
                                                     GLint x, GLint y, GLsizei width, GLsizei height) {
-    DSA_FB_CHECK(framebuffer)
-    (void)numAttachments; (void)attachments; (void)x; (void)y; (void)width; (void)height;
+    (void)x; (void)y;
+    if (numAttachments < 0 || width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (framebuffer != 0) {
+        auto* obj = impl_->objects->framebuffers().get(framebuffer);
+        if (obj == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    }
+    const bool isDefaultFb = (framebuffer == 0);
+    if (attachments != nullptr) {
+        for (GLsizei i = 0; i < numAttachments; ++i) {
+            const GLenum err = classifyInvalidateAttachment(attachments[i], isDefaultFb);
+            if (err != 0) {
+                pushError(err);
+                return false;
+            }
+        }
+    }
     return true;
 }
 
