@@ -538,7 +538,20 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // desktop drivers (glGetIntegerv(GL_MAX_VERTEX_ATTRIBS)). The VAO's
     // attribute array size in GLObjectStore is raised to match.
     integerLimits_[GL_MAX_VERTEX_ATTRIBS] = 32;
-    integerLimits_[GL_MAX_TEXTURE_IMAGE_UNITS] = 16;
+    // Per-stage texture image units bumped from 16 → 48 to unblock CTS
+    // `layout_binding` which uses `layout(binding=39) uniform sampler2D`.
+    // GL 4.6 spec floor is 16; Apple Silicon argument-table limit is 128
+    // per stage, so 48 is well within Metal's real budget.
+    //
+    // **DO NOT bump COMBINED above the runtime's per-stage activeTexture
+    // limit (kPhaseAMaxTextureUnits = 80 in AppGLRuntime.cpp).**
+    // gluStateReset iterates `glActiveTexture(GL_TEXTURE0 + i)` for
+    // `i ∈ [0, COMBINED)`, so a COMBINED > 80 pushes GL_INVALID_ENUM for
+    // units 80..COMBINED-1 on every state-reset, cascading into the
+    // test-run abort observed in s8 (session 7's first attempt). 80
+    // keeps the iterator inside our activeTexture range, which is the
+    // binding we'd grow next if we ever need more CTS coverage.
+    integerLimits_[GL_MAX_TEXTURE_IMAGE_UNITS] = 48;
     integerLimits_[GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS] = 80;
     integerLimits_[GL_MAX_UNIFORM_BLOCK_SIZE] = maxUniformBlockSize;
     // Phase 8X Group 4d follow-up⁶ — UBO offset alignment. Metal's
@@ -637,11 +650,13 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // log — the engine walks several MAX_* variants and the *first one that
     // comes back false stops the probe, so the two that do answer (COMBINED
     // + fragment) get reported.
-    integerLimits_[GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS] = 16;
-    integerLimits_[GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS] = 16;
-    integerLimits_[GL_MAX_COMPUTE_TEXTURE_IMAGE_UNITS] = 16;
-    integerLimits_[GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS] = 16;
-    integerLimits_[GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS] = 16;
+    // Per-stage texture image units matched to MAX_TEXTURE_IMAGE_UNITS
+    // above (48). Apple Silicon argument-table limit is 128/stage.
+    integerLimits_[GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS] = 48;
+    integerLimits_[GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS] = 48;
+    integerLimits_[GL_MAX_COMPUTE_TEXTURE_IMAGE_UNITS] = 48;
+    integerLimits_[GL_MAX_TESS_CONTROL_TEXTURE_IMAGE_UNITS] = 48;
+    integerLimits_[GL_MAX_TESS_EVALUATION_TEXTURE_IMAGE_UNITS] = 48;
 
     // Phase 8X Group 4d follow-up⁶ — fixed-function multi-texture limit.
     // GL_MAX_TEXTURE_COORDS (0x8871) was a GL 1.3 query that reported the
