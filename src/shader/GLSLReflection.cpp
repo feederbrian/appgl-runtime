@@ -170,10 +170,16 @@ LayoutQualifiers extractLayoutQualifiers(std::vector<std::string>& tokens) {
                 break;
             }
         } else if (i + 2 < tokens.size() && tokens[i + 1] == "=") {
+            // GL 4.6 §4.10 permits the integer literal in a layout
+            // qualifier to use any of the standard integer notations:
+            // decimal (42), octal (052), or hexadecimal (0x2a). Base 0
+            // lets strtol auto-detect from the prefix. Hard-coding base
+            // 10 was failing KHR-GL46.explicit_uniform_location.uniform-loc-nondecimal
+            // which declares `layout(location = 0xa)` and `layout(location = 010)`.
             if (tokens[i] == "location") {
-                result.location = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 10));
+                result.location = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 0));
             } else if (tokens[i] == "binding") {
-                result.binding = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 10));
+                result.binding = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 0));
             }
         }
         ++i;

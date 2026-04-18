@@ -525,9 +525,18 @@ struct GLProgramObject {
     // Computed lazily on first draw and reused for all subsequent draws.
     struct UniformLayoutEntry {
         std::size_t memberOffset = 0;   // byte offset in push-constant struct
-        std::size_t copyBytes = 0;      // bytes to memcpy (0 = skip)
+        std::size_t copyBytes = 0;      // total bytes to memcpy (0 = skip)
         GLint location = -1;            // GL uniform location for value lookup
         bool isMat3Padded = false;      // needs col-by-col padding (12->16 bytes/col)
+        // Array-member unpadding fields. Non-zero arrayCount means the
+        // member is an array with `arrayCount` elements where each GPU-
+        // side element occupies `arrayStride` bytes (std140 rounds up to
+        // at least 16), while each GL-side element is `glElementBytes`
+        // tight-packed. Caller loops elementwise instead of a single
+        // memcpy.
+        std::uint32_t arrayCount = 0;
+        std::size_t arrayStride = 0;
+        std::size_t glElementBytes = 0;
     };
     std::vector<UniformLayoutEntry> vertexUniformLayout;
     std::vector<UniformLayoutEntry> fragmentUniformLayout;

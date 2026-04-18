@@ -11854,6 +11854,34 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
             return uniform.location;
         }
     }
+    // GL 4.6 §7.6.1: array-element lookup — `glGetUniformLocation(prog,
+    // "u[k]")` for a uniform declared `uniform T u[N]` must return
+    // `location(u) + k` when 0 <= k < N. Uniforms are stored by base name
+    // ("u"), so the exact-match loop above misses. Parse the trailing
+    // [k] subscript and index into the base.
+    //
+    // Covers KHR-GL46.explicit_uniform_location.uniform-loc-arrays-*
+    // which exercise `layout(location = N) uniform T arr[M]` and expect
+    // u[0]=N, u[1]=N+1, …, u[M-1]=N+M-1.
+    const auto openBracket = lookup.find('[');
+    if (openBracket != std::string::npos && lookup.back() == ']') {
+        const std::string baseName = lookup.substr(0, openBracket);
+        const std::string indexStr = lookup.substr(openBracket + 1, lookup.size() - openBracket - 2);
+        if (!baseName.empty() && !indexStr.empty()) {
+            // Parse the subscript (decimal only; GLSL array subscripts are plain ints).
+            char* endp = nullptr;
+            const long idx = std::strtol(indexStr.c_str(), &endp, 10);
+            if (endp && *endp == '\0' && idx >= 0) {
+                for (const auto& uniform : object->uniforms) {
+                    if (uniform.name == baseName && uniform.arraySize >= 1
+                        && idx < static_cast<long>(uniform.arraySize)
+                        && uniform.location >= 0) {
+                        return uniform.location + static_cast<GLint>(idx);
+                    }
+                }
+            }
+        }
+    }
     // Fallback: try with _appgl_ prefix reverse-mapping.
     // CompatShaderRewrite renames `sampler` → `_appgl_sampler` for glslang
     // compat; try the rewritten name if the original wasn't found.
@@ -12416,6 +12444,51 @@ static void computeStageUniformLayout(
         entry.location = -1;
         entry.isMat3Padded = (member.type == GL_FLOAT_MAT3 && member.size == 48);
 
+        // Array uniforms need per-element unpadding in std140 layout:
+        // GL stores a float[3] as 12 packed bytes; std140 stores it as
+        // 48 bytes (3 elements × 16-byte stride, only 4 used per). We
+        // cache the stride and per-element GL byte count so the hot
+        // packing loop iterates element-wise when arrayCount > 0.
+        // KHR-GL46.explicit_uniform_location.uniform-loc-arrays-*
+        // exercises this — declares `uniform float u0[3]` at location N
+        // and expects each glUniform1f(N+i, …) to land at u0[i].
+        if (member.arraySize > 1 && member.size > 0 && !entry.isMat3Padded) {
+            entry.arrayCount = member.arraySize;
+            entry.arrayStride = member.size / member.arraySize;
+            // Compute the GL-packed element byte count from the element
+            // type (array's declared type is the element type — for
+            // arrays glslang reports the element type + arraySize > 0).
+            auto scalarBytes = [](GLenum t) -> std::size_t {
+                switch (t) {
+                    case GL_FLOAT: case GL_FLOAT_VEC2: case GL_FLOAT_VEC3: case GL_FLOAT_VEC4:
+                    case GL_INT: case GL_INT_VEC2: case GL_INT_VEC3: case GL_INT_VEC4:
+                    case GL_UNSIGNED_INT: case GL_UNSIGNED_INT_VEC2: case GL_UNSIGNED_INT_VEC3: case GL_UNSIGNED_INT_VEC4:
+                    case GL_BOOL:  case GL_BOOL_VEC2:  case GL_BOOL_VEC3:  case GL_BOOL_VEC4:
+                        return 4;
+                    case GL_DOUBLE: case GL_DOUBLE_VEC2: case GL_DOUBLE_VEC3: case GL_DOUBLE_VEC4:
+                        return 8;
+                    default:
+                        return 4;
+                }
+            };
+            auto componentCount = [](GLenum t) -> std::size_t {
+                switch (t) {
+                    case GL_FLOAT: case GL_INT: case GL_UNSIGNED_INT: case GL_DOUBLE: case GL_BOOL: return 1;
+                    case GL_FLOAT_VEC2: case GL_INT_VEC2: case GL_UNSIGNED_INT_VEC2: case GL_DOUBLE_VEC2: case GL_BOOL_VEC2: return 2;
+                    case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_UNSIGNED_INT_VEC3: case GL_DOUBLE_VEC3: case GL_BOOL_VEC3: return 3;
+                    case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_UNSIGNED_INT_VEC4: case GL_DOUBLE_VEC4: case GL_BOOL_VEC4: return 4;
+                    case GL_FLOAT_MAT2: return 4;
+                    case GL_FLOAT_MAT3: return 9;
+                    case GL_FLOAT_MAT4: return 16;
+                    case GL_FLOAT_MAT2x3: case GL_FLOAT_MAT3x2: return 6;
+                    case GL_FLOAT_MAT2x4: case GL_FLOAT_MAT4x2: return 8;
+                    case GL_FLOAT_MAT3x4: case GL_FLOAT_MAT4x3: return 12;
+                    default: return 1;
+                }
+            };
+            entry.glElementBytes = componentCount(member.type) * scalarBytes(member.type);
+        }
+
         // One-time name lookup: find the GL uniform location for this member.
         for (const auto& u : uniforms) {
             if (u.name == member.name) {
@@ -12561,6 +12634,25 @@ static void buildStageUniformBuffer(
         if (entry.isMat3Padded && val.floats.size() >= 9) {
             for (int col = 0; col < 3; ++col) {
                 std::memcpy(dst + col * 16, val.floats.data() + col * 3, 3 * sizeof(float));
+            }
+            continue;
+        }
+
+        // Array element unpadding: GL stores element [k] at byte offset
+        // k * glElementBytes (tight); std140 places it at k * arrayStride
+        // (>= 16). Loop per element, memcpy the GL-packed element into
+        // its std140 slot, leave padding bytes zero. Applies to arrays
+        // of scalars (float arr[N], int arr[N]) and vec3 arrays which
+        // have slightly-wasted but still padded layout.
+        if (entry.arrayCount > 0 && entry.arrayStride > entry.glElementBytes) {
+            const std::size_t perEl = entry.glElementBytes;
+            const std::size_t stride = entry.arrayStride;
+            const auto* srcBytesPtr = static_cast<const std::uint8_t*>(srcData);
+            for (std::uint32_t k = 0; k < entry.arrayCount; ++k) {
+                const std::size_t srcOff = static_cast<std::size_t>(k) * perEl;
+                const std::size_t dstOff = static_cast<std::size_t>(k) * stride;
+                if (srcOff + perEl > srcBytes) break;
+                std::memcpy(dst + dstOff, srcBytesPtr + srcOff, perEl);
             }
             continue;
         }
@@ -14878,9 +14970,37 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
     if (table == nullptr) {
         return -1;
     }
+    const std::string lookup = name;
+    // Direct match — but skip entries with location=-1. SPIRV-Cross
+    // reflection sometimes emits both "u0" (the real base with valid
+    // location) and "u0[0]" (a per-element duplicate that was never
+    // assigned a location). Without the -1 guard the direct match
+    // would hit the duplicate first and short-circuit to -1.
     for (const auto& entry : *table) {
-        if (entry.name == name) {
+        if (entry.name == lookup && entry.location >= 0) {
             return entry.location;
+        }
+    }
+    // Array-element lookup parity with getUniformLocation: "u[k]"
+    // resolves to location(u) + k when u is declared as an array of
+    // size > k. GL 4.6 §7.3.1 says both entry points return the same
+    // thing for the same name — including array subscript syntax.
+    const auto openBracket = lookup.find('[');
+    if (openBracket != std::string::npos && !lookup.empty() && lookup.back() == ']') {
+        const std::string baseName = lookup.substr(0, openBracket);
+        const std::string indexStr = lookup.substr(openBracket + 1, lookup.size() - openBracket - 2);
+        if (!baseName.empty() && !indexStr.empty()) {
+            char* endp = nullptr;
+            const long idx = std::strtol(indexStr.c_str(), &endp, 10);
+            if (endp && *endp == '\0' && idx >= 0) {
+                for (const auto& entry : *table) {
+                    if (entry.name == baseName && entry.arraySize >= 1
+                        && idx < static_cast<long>(entry.arraySize)
+                        && entry.location >= 0) {
+                        return entry.location + static_cast<GLint>(idx);
+                    }
+                }
+            }
         }
     }
     return -1;
