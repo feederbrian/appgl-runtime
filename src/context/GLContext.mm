@@ -614,6 +614,77 @@ std::size_t alignByteCount(std::size_t value, GLint alignment) {
     return ((value + align - 1u) / align) * align;
 }
 
+// Encode a float as an N-bit unsigned float (GL 4.6 §2.3.4.3):
+// `mantissaBits` is the mantissa width (5 for 10-bit B channel,
+// 6 for 11-bit R/G channels in GL_UNSIGNED_INT_10F_11F_11F_REV).
+// Exponent is 5 bits, bias 15, no sign bit — negative and NaN
+// inputs both become 0.
+std::uint32_t floatToUnsignedFP(float v, int mantissaBits) {
+    if (!std::isfinite(v) || v <= 0.0f) {
+        // NaN, -Inf, negative, zero → 0. Positive Inf → max finite.
+        if (std::isinf(v) && v > 0.0f) {
+            return ((31u << mantissaBits)) - 1u;  // exp=30, mant=max
+        }
+        return 0u;
+    }
+    std::uint32_t fbits;
+    std::memcpy(&fbits, &v, sizeof(fbits));
+    const std::int32_t fExp = static_cast<std::int32_t>((fbits >> 23) & 0xFFu) - 127;
+    // Bias for N-bit exp(5) is 15.
+    std::int32_t outExp = fExp + 15;
+    // 23-bit IEEE mantissa → N-bit mantissa (shift right by 23 - N).
+    const int shift = 23 - mantissaBits;
+    std::uint32_t outMant = (fbits >> shift) & ((1u << mantissaBits) - 1u);
+    if (outExp <= 0) return 0u;  // underflow → 0 (denormal approx)
+    if (outExp >= 31) {
+        // Overflow → max finite: exp=30, mant=all-ones.
+        return (30u << mantissaBits) | ((1u << mantissaBits) - 1u);
+    }
+    return (static_cast<std::uint32_t>(outExp) << mantissaBits) | outMant;
+}
+
+// Encode RGB as GL_UNSIGNED_INT_10F_11F_11F_REV packed into u32:
+//   bits  0-10:  R (11-bit, 5-exp + 6-mant)
+//   bits 11-21:  G (11-bit)
+//   bits 22-31:  B (10-bit, 5-exp + 5-mant)
+std::uint32_t packUF_10F11F11F_REV(double r, double g, double b) {
+    const std::uint32_t rBits = floatToUnsignedFP(static_cast<float>(r), 6);
+    const std::uint32_t gBits = floatToUnsignedFP(static_cast<float>(g), 6);
+    const std::uint32_t bBits = floatToUnsignedFP(static_cast<float>(b), 5);
+    return (bBits << 22) | (gBits << 11) | rBits;
+}
+
+// Encode RGB as GL_UNSIGNED_INT_5_9_9_9_REV packed into u32
+// (shared-exponent RGB9E5). Simpler encoding: find the largest
+// magnitude, pick an exponent that fits, then encode each mantissa.
+std::uint32_t packUF_5_9_9_9_REV(double r, double g, double b) {
+    // Clamp negatives to 0 (format is unsigned).
+    r = std::max(0.0, r); g = std::max(0.0, g); b = std::max(0.0, b);
+    const double maxVal = std::max(std::max(r, g), b);
+    if (maxVal <= 0.0 || !std::isfinite(maxVal)) return 0u;
+    // RGB9E5: bias 15, mantissa 9 bits, max value = 65408.
+    // Shared exponent chosen so max scaled value fits in 9 bits.
+    // E = clamp(ceil(log2(maxVal)) + 15 + 1, 0, 31)
+    int sharedExp;
+    const double log2max = std::log2(maxVal);
+    int expCandidate = static_cast<int>(std::ceil(log2max)) + 15 + 1;
+    if (expCandidate < 0) expCandidate = 0;
+    if (expCandidate > 31) expCandidate = 31;
+    sharedExp = expCandidate;
+    const double scale = std::ldexp(1.0, 9 - sharedExp + 15);
+    auto encM = [&](double v) -> std::uint32_t {
+        if (v <= 0.0) return 0u;
+        auto m = static_cast<std::uint32_t>(v * scale + 0.5);
+        if (m > 0x1FFu) m = 0x1FFu;
+        return m;
+    };
+    const std::uint32_t rM = encM(r);
+    const std::uint32_t gM = encM(g);
+    const std::uint32_t bM = encM(b);
+    return (static_cast<std::uint32_t>(sharedExp) << 27)
+         | (bM << 18) | (gM << 9) | rM;
+}
+
 std::size_t safeDimension(GLsizei value) {
     return static_cast<std::size_t>(std::max<GLsizei>(value, 1));
 }
@@ -5016,12 +5087,21 @@ struct GLContext::Impl {
                             std::memcpy(dstPtr, &v32, 4);
                             break;
                         }
+                        case GL_UNSIGNED_INT_10F_11F_11F_REV: {
+                            std::uint32_t v32 = packUF_10F11F11F_REV(d(0), d(1), d(2));
+                            std::memcpy(dstPtr, &v32, 4);
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_5_9_9_9_REV: {
+                            std::uint32_t v32 = packUF_5_9_9_9_REV(d(0), d(1), d(2));
+                            std::memcpy(dstPtr, &v32, 4);
+                            break;
+                        }
                         default: {
                             // Unhandled packed type: zero the destination
-                            // so we don't leak undefined memory. Keeps
-                            // the previous hack-behaviour for the long
-                            // tail (10F_11F_11F_REV, 5_9_9_9_REV, 24_8,
-                            // 32F_24_8_REV) until a follow-up encoder.
+                            // so we don't leak undefined memory. Tail
+                            // remaining (24_8, 32F_24_8_REV) are depth-
+                            // stencil formats — a separate encoder path.
                             std::memset(dstPtr, 0, dstPackedBpp);
                             break;
                         }
@@ -17962,9 +18042,19 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                         std::memcpy(dp, &v32, 4);
                         break;
                     }
+                    case GL_UNSIGNED_INT_10F_11F_11F_REV: {
+                        std::uint32_t v32 = packUF_10F11F11F_REV(vals[0], vals[1], vals[2]);
+                        std::memcpy(dp, &v32, 4);
+                        break;
+                    }
+                    case GL_UNSIGNED_INT_5_9_9_9_REV: {
+                        std::uint32_t v32 = packUF_5_9_9_9_REV(vals[0], vals[1], vals[2]);
+                        std::memcpy(dp, &v32, 4);
+                        break;
+                    }
                     default:
-                        // Remaining packed types (float-packed, depth/stencil)
-                        // not yet needed by the CTS subset we target.
+                        // Remaining packed types (depth/stencil-specific:
+                        // 24_8, 32F_24_8_REV) need a different path.
                         std::memset(dp, 0, dstPixelBytes);
                         break;
                 }
