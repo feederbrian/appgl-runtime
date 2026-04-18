@@ -4821,6 +4821,23 @@ struct GLContext::Impl {
         if (!typeIsPacked && dstBpc == 0) return false;
         // Bytes per pixel for packed types (bytesPerComponent returns 0).
         const std::size_t dstPackedBpp = typeIsPacked ? bytesPerPixel(format, type) : 0;
+        const std::size_t dstPixelBytes = typeIsPacked
+            ? dstPackedBpp : (dstComponents * dstBpc);
+
+        // Respect GL PACK state for destination row layout. CTS
+        // packed_pixels.rectangle uses PACK_ALIGNMENT=4 with 7-wide R8
+        // output — row stride is 8, not 7. Writing tightly packed
+        // caused column-shifts in the caller's buffer (the padding
+        // byte collided with the next row's pixel 0).
+        const auto& packStore = state->pixelStore();
+        const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+            ? static_cast<std::size_t>(packStore.packRowLength)
+            : static_cast<std::size_t>(width);
+        const std::size_t dstRowBytes = alignByteCount(
+            dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+        const std::size_t dstSkipBytes =
+            static_cast<std::size_t>(packStore.packSkipRows)   * dstRowBytes +
+            static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
 
         // Is the destination format swizzled (BGR/BGRA components)? Packed
         // encoders need component-index remapping: `vals[]` is in RGBA
@@ -4859,10 +4876,15 @@ struct GLContext::Impl {
                 // RC-A02: OpenGL row 0 = bottom → Metal row 0 = top.
                 const GLint srcY = sourceHeight - 1 - glY;
 
-                const std::size_t dstPixelIdx = static_cast<std::size_t>(row) * width + col;
+                // Destination byte offset honours PACK_ALIGNMENT,
+                // PACK_ROW_LENGTH, and PACK_SKIP_{ROWS,PIXELS}.
+                const std::size_t dstByteOffset = dstSkipBytes
+                    + static_cast<std::size_t>(row) * dstRowBytes
+                    + static_cast<std::size_t>(col) * dstPixelBytes;
+                std::uint8_t* dstPixelBase = dest + dstByteOffset;
 
                 if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
-                    std::memset(dest + dstPixelIdx * dstComponents * dstBpc, 0, dstComponents * dstBpc);
+                    std::memset(dstPixelBase, 0, dstPixelBytes);
                     continue;
                 }
 
@@ -4888,7 +4910,7 @@ struct GLContext::Impl {
                 // drawn from `vals[]` in format order via getComponent.
                 if (typeIsPacked) {
                     auto d = [&](int i) { return getComponent(vals, i); };
-                    std::uint8_t* dstPtr = dest + dstPixelIdx * dstPackedBpp;
+                    std::uint8_t* dstPtr = dstPixelBase;
                     switch (type) {
                         case GL_UNSIGNED_BYTE_3_3_2: {
                             // MSB → LSB: R(3) G(3) B(2)
@@ -5008,12 +5030,34 @@ struct GLContext::Impl {
                 }
 
                 // Write to destination in the requested format/type.
+                // Component c goes to dstPixelBase + c * dstBpc.
+                //
+                // Source-color conversion semantics (GL 4.6 §18.2.3,
+                // Table 18.1): vals[] carries the source data in one
+                // of two representations depending on srcType:
+                //   - Normalized (Float32/Float16/UNorm*/SNorm*):
+                //     vals[c] is a float in [-1,1] or [0,1].
+                //   - Integer (UInt*/SInt*): vals[c] is the raw signed
+                //     or unsigned integer value.
+                // The destination type (uint/int/float) then selects
+                // whether we scale or cast directly.
+                const bool srcIsNormalized =
+                    (srcType == SrcType::Float32 || srcType == SrcType::Float16 ||
+                     srcType == SrcType::UNorm8 || srcType == SrcType::SNorm8 ||
+                     srcType == SrcType::UNorm16 || srcType == SrcType::SNorm16);
                 for (std::size_t dc = 0; dc < dstComponents; ++dc) {
-                    double v = vals[dc];
+                    // BGR/BGRA formats swizzle component order at write time.
+                    // Previously scalars wrote vals[dc] (always RGBA order)
+                    // which silently dropped the swizzle — output[GL_BGR,
+                    // GL_UNSIGNED_BYTE] on a RED source ended up with the
+                    // R value in slot 0 (thinking it was B) and 0s at slot 2
+                    // (thinking it was R).  `getComponent` handles BGR/BGRA.
+                    double v = getComponent(vals, static_cast<int>(dc));
+                    std::uint8_t* dstP = dstPixelBase + dc * dstBpc;
                     switch (type) {
                         case GL_FLOAT: {
                             float fv = static_cast<float>(v);
-                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &fv, 4);
+                            std::memcpy(dstP, &fv, 4);
                             break;
                         }
                         case GL_HALF_FLOAT: {
@@ -5026,40 +5070,58 @@ struct GLContext::Impl {
                             if (exp <= 0) half = static_cast<std::uint16_t>(sign);
                             else if (exp >= 31) half = static_cast<std::uint16_t>(sign | 0x7C00);
                             else half = static_cast<std::uint16_t>(sign | (exp << 10) | mant);
-                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &half, 2);
+                            std::memcpy(dstP, &half, 2);
                             break;
                         }
-                        case GL_UNSIGNED_BYTE:
-                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(
-                                std::max(0.0, std::min(255.0, v * 255.0)));
+                        case GL_UNSIGNED_BYTE: {
+                            // Normalized src: v * 255. Integer src: clamped cast.
+                            double scaled = srcIsNormalized ? (v * 255.0 + 0.5) : v;
+                            auto bv = static_cast<std::uint8_t>(
+                                std::max(0.0, std::min(255.0, scaled)));
+                            dstP[0] = bv;
                             break;
+                        }
                         case GL_BYTE: {
-                            auto sv = static_cast<std::int8_t>(std::max(-127.0, std::min(127.0, v * 127.0)));
-                            std::memcpy(dest + dstPixelIdx * dstComponents + dc, &sv, 1);
+                            double scaled = srcIsNormalized ? (v * 127.0) : v;
+                            if (scaled >= 0) scaled += 0.5; else scaled -= 0.5;
+                            auto sv = static_cast<std::int8_t>(
+                                std::max(-128.0, std::min(127.0, scaled)));
+                            std::memcpy(dstP, &sv, 1);
                             break;
                         }
                         case GL_UNSIGNED_SHORT: {
-                            auto sv = static_cast<std::uint16_t>(std::max(0.0, std::min(65535.0, v * 65535.0)));
-                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &sv, 2);
+                            double scaled = srcIsNormalized ? (v * 65535.0 + 0.5) : v;
+                            auto sv = static_cast<std::uint16_t>(
+                                std::max(0.0, std::min(65535.0, scaled)));
+                            std::memcpy(dstP, &sv, 2);
                             break;
                         }
                         case GL_SHORT: {
-                            auto sv = static_cast<std::int16_t>(std::max(-32767.0, std::min(32767.0, v * 32767.0)));
-                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &sv, 2);
+                            double scaled = srcIsNormalized ? (v * 32767.0) : v;
+                            if (scaled >= 0) scaled += 0.5; else scaled -= 0.5;
+                            auto sv = static_cast<std::int16_t>(
+                                std::max(-32768.0, std::min(32767.0, scaled)));
+                            std::memcpy(dstP, &sv, 2);
                             break;
                         }
                         case GL_UNSIGNED_INT: {
-                            auto uv = static_cast<std::uint32_t>(v);
-                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &uv, 4);
+                            double scaled = srcIsNormalized
+                                ? (v * 4294967295.0 + 0.5) : v;
+                            auto uv = static_cast<std::uint32_t>(
+                                std::max(0.0, std::min(4294967295.0, scaled)));
+                            std::memcpy(dstP, &uv, 4);
                             break;
                         }
                         case GL_INT: {
-                            auto iv = static_cast<std::int32_t>(v);
-                            std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &iv, 4);
+                            double scaled = srcIsNormalized ? (v * 2147483647.0) : v;
+                            if (scaled >= 0) scaled += 0.5; else scaled -= 0.5;
+                            auto iv = static_cast<std::int32_t>(
+                                std::max(-2147483648.0, std::min(2147483647.0, scaled)));
+                            std::memcpy(dstP, &iv, 4);
                             break;
                         }
                         default:
-                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(
+                            dstP[0] = static_cast<std::uint8_t>(
                                 std::max(0.0, std::min(255.0, v)));
                             break;
                     }
@@ -17729,12 +17791,42 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     const bool srcIsInteger = (srcType == SrcType::UInt8  || srcType == SrcType::SInt8  ||
                                srcType == SrcType::UInt16 || srcType == SrcType::SInt16 ||
                                srcType == SrcType::UInt32 || srcType == SrcType::SInt32);
+    const bool srcIsNormalized = !srcIsInteger;
 
-    auto* destBase = static_cast<std::uint8_t*>(pixels);
+    // BGR/BGRA swizzle for destination format. Mirrors readFBOColorNative.
+    const bool formatIsBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
+    const bool formatIsBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
+    auto pickComponent = [&](const double* vals4, int glCompIdx) -> double {
+        if (formatIsBGR) {
+            static const int map[3] = {2, 1, 0};
+            return glCompIdx < 3 ? vals4[map[glCompIdx]] : 1.0;
+        } else if (formatIsBGRA) {
+            static const int map[4] = {2, 1, 0, 3};
+            return glCompIdx < 4 ? vals4[map[glCompIdx]] : 1.0;
+        }
+        return vals4[glCompIdx];
+    };
+
+    // Respect GL PACK state for destination row layout (CTS
+    // packed_pixels uses PACK_ALIGNMENT=4 with small textures).
+    const auto& packStore = impl_->state->pixelStore();
+    const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+        ? static_cast<std::size_t>(packStore.packRowLength)
+        : static_cast<std::size_t>(texWidth);
+    const std::size_t dstRowBytesAligned = alignByteCount(
+        dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+    const std::size_t dstSliceBytesAligned = dstRowBytesAligned
+        * (packStore.packImageHeight > 0 ? static_cast<std::size_t>(packStore.packImageHeight) : texHeight);
+    const std::size_t dstSkipBytes =
+        static_cast<std::size_t>(packStore.packSkipImages) * dstSliceBytesAligned +
+        static_cast<std::size_t>(packStore.packSkipRows)   * dstRowBytesAligned +
+        static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+
+    auto* destBase = static_cast<std::uint8_t*>(pixels) + dstSkipBytes;
 
     for (NSUInteger slice = 0; slice < numSlices; ++slice) {
       const std::uint8_t* sliceRaw = raw.data() + slice * bytesPerImage;
-      std::uint8_t* dest = destBase + slice * dstSliceBytes;
+      std::uint8_t* dest = destBase + slice * dstSliceBytesAligned;
       for (NSUInteger row = 0; row < texHeight; ++row) {
         for (NSUInteger col = 0; col < texWidth; ++col) {
             const std::size_t srcPixelOffset = (row * texWidth + col) * srcBpp;
@@ -17752,13 +17844,15 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 vals[c] = readSrcComponent(srcPixel, readComp);
             }
 
-            // Write to destination in the requested format/type.
-            const std::size_t dstPixelIdx = row * texWidth + col;
+            // Write to destination using PACK-aligned row stride.
+            const std::size_t dstByteOffset =
+                row * dstRowBytesAligned + col * dstPixelBytes;
+            std::uint8_t* dstPixelBase = dest + dstByteOffset;
 
             if (typeIsPacked) {
                 // CTS copy_image & packed_pixels paths need packed-type readback.
                 // Pack the RGBA doubles into the requested packed format.
-                std::uint8_t* dp = dest + dstPixelIdx * dstPixelBytes;
+                std::uint8_t* dp = dstPixelBase;
                 auto packUN = [](double v, unsigned bits) -> std::uint32_t {
                     if (v < 0.0) v = 0.0;
                     if (v > 1.0) v = 1.0;
@@ -17878,11 +17972,12 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             }
 
             for (std::size_t dc = 0; dc < dstComponents; ++dc) {
-                double v = vals[dc];
+                double v = pickComponent(vals, static_cast<int>(dc));
+                std::uint8_t* dstP = dstPixelBase + dc * dstBpc;
                 switch (type) {
                     case GL_FLOAT: {
                         float fv = static_cast<float>(v);
-                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &fv, 4);
+                        std::memcpy(dstP, &fv, 4);
                         break;
                     }
                     case GL_HALF_FLOAT: {
@@ -17895,64 +17990,57 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                         if (exp <= 0) half = static_cast<std::uint16_t>(sign);
                         else if (exp >= 31) half = static_cast<std::uint16_t>(sign | 0x7C00);
                         else half = static_cast<std::uint16_t>(sign | (exp << 10) | mant);
-                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &half, 2);
+                        std::memcpy(dstP, &half, 2);
                         break;
                     }
-                    case GL_UNSIGNED_BYTE:
-                        if (srcIsInteger) {
-                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(v);
-                        } else {
-                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(
-                                std::max(0.0, std::min(255.0, v * 255.0)));
-                        }
+                    case GL_UNSIGNED_BYTE: {
+                        double scaled = srcIsNormalized ? (v * 255.0 + 0.5) : v;
+                        dstP[0] = static_cast<std::uint8_t>(
+                            std::max(0.0, std::min(255.0, scaled)));
                         break;
+                    }
                     case GL_BYTE: {
-                        std::int8_t sv;
-                        if (srcIsInteger) {
-                            sv = static_cast<std::int8_t>(v);
-                        } else {
-                            sv = static_cast<std::int8_t>(std::max(-127.0, std::min(127.0, v * 127.0)));
-                        }
-                        std::memcpy(dest + dstPixelIdx * dstComponents + dc, &sv, 1);
+                        double scaled = srcIsNormalized ? (v * 127.0) : v;
+                        if (scaled >= 0) scaled += 0.5; else scaled -= 0.5;
+                        auto sv = static_cast<std::int8_t>(
+                            std::max(-128.0, std::min(127.0, scaled)));
+                        std::memcpy(dstP, &sv, 1);
                         break;
                     }
                     case GL_UNSIGNED_SHORT: {
-                        std::uint16_t sv;
-                        if (srcIsInteger) {
-                            sv = static_cast<std::uint16_t>(v);
-                        } else {
-                            sv = static_cast<std::uint16_t>(std::max(0.0, std::min(65535.0, v * 65535.0)));
-                        }
-                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &sv, 2);
+                        double scaled = srcIsNormalized ? (v * 65535.0 + 0.5) : v;
+                        auto sv = static_cast<std::uint16_t>(
+                            std::max(0.0, std::min(65535.0, scaled)));
+                        std::memcpy(dstP, &sv, 2);
                         break;
                     }
                     case GL_SHORT: {
-                        std::int16_t sv;
-                        if (srcIsInteger) {
-                            sv = static_cast<std::int16_t>(v);
-                        } else {
-                            sv = static_cast<std::int16_t>(std::max(-32767.0, std::min(32767.0, v * 32767.0)));
-                        }
-                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 2, &sv, 2);
+                        double scaled = srcIsNormalized ? (v * 32767.0) : v;
+                        if (scaled >= 0) scaled += 0.5; else scaled -= 0.5;
+                        auto sv = static_cast<std::int16_t>(
+                            std::max(-32768.0, std::min(32767.0, scaled)));
+                        std::memcpy(dstP, &sv, 2);
                         break;
                     }
                     case GL_UNSIGNED_INT: {
-                        auto uv = static_cast<std::uint32_t>(v);
-                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &uv, 4);
+                        double scaled = srcIsNormalized
+                            ? (v * 4294967295.0 + 0.5) : v;
+                        auto uv = static_cast<std::uint32_t>(
+                            std::max(0.0, std::min(4294967295.0, scaled)));
+                        std::memcpy(dstP, &uv, 4);
                         break;
                     }
                     case GL_INT: {
-                        auto iv = static_cast<std::int32_t>(v);
-                        std::memcpy(dest + (dstPixelIdx * dstComponents + dc) * 4, &iv, 4);
+                        double scaled = srcIsNormalized ? (v * 2147483647.0) : v;
+                        if (scaled >= 0) scaled += 0.5; else scaled -= 0.5;
+                        auto iv = static_cast<std::int32_t>(
+                            std::max(-2147483648.0, std::min(2147483647.0, scaled)));
+                        std::memcpy(dstP, &iv, 4);
                         break;
                     }
                     default:
-                        if (srcIsInteger) {
-                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(v);
-                        } else {
-                            dest[dstPixelIdx * dstComponents + dc] = static_cast<std::uint8_t>(
-                                std::max(0.0, std::min(255.0, v)));
-                        }
+                        dstP[0] = static_cast<std::uint8_t>(
+                            std::max(0.0, std::min(255.0, v)));
                         break;
                 }
             }
