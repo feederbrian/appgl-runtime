@@ -2976,7 +2976,17 @@ struct GLContext::Impl {
         // once per GL program name (zero hot-path cost after first
         // exercise). Same set guards both stages; the stage tag in the
         // summary line disambiguates which one is being walked.
-        const bool logThisCall = (info.program != 0) &&
+        // Diagnostic logging was previously unconditional at first-draw
+        // per program. For CTS sweeps that create thousands of unique
+        // programs (texture_swizzle creates ~700 one-off variants) the
+        // NSLog storm became the dominant sweep cost — sampling showed
+        // the sweep spending most time in NSLog. Gate the whole
+        // first-call dump (summary + MSL + uniform snapshot) on an
+        // opt-in env var. The tight summary line still fires on the
+        // error / skip paths below, unconditionally, so the common
+        // "why didn't this sampler bind?" debugging stays loud.
+        static const bool kLogFirstCall = (std::getenv("APPGL_LOG_FIRST_DRAW") != nullptr);
+        const bool logThisCall = kLogFirstCall && (info.program != 0) &&
             loggedSamplerResolvePrograms.insert(info.program).second;
         if (logThisCall) {
             const std::size_t fragCount = info.fragmentReflection
