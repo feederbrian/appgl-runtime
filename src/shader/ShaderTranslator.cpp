@@ -493,58 +493,16 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         std::string msl = compiler.compile();
 
-        // SPIRV-Cross emits SSBO runtime arrays wrapped in a struct with
-        // size [1] (e.g. `struct Output { uint4 local_id[1]; };`). This
-        // reflects the GLSL source's unsized array declaration, but the
-        // [1] size then causes MSL's `device Output& g_out` reference
-        // semantics to bound all writes to index 0 — subsequent
-        // `g_out.local_id[k]` for k > 0 either drops or aliases on Apple
-        // GPUs. For compute shaders in CTS
-        // (compute_shader.one-work-group, shader_storage_buffer_object.*)
-        // every work-item writes a distinct slot past index 0, so the
-        // bound silently drops 15/16 writes.
-        //
-        // Post-process to rewrite `<type> <name>[1];` → `<type> <name>[65536];`
-        // inside SSBO-style structs. This enlarges the struct's apparent
-        // size past any realistic runtime-array footprint, so Metal
-        // treats the indexed write as in-bounds relative to the
-        // reference and the pointer arithmetic matches what the
-        // underlying MTLBuffer expects.
-        //
-        // We restrict the rewrite to arrays that appear as the LAST
-        // member of a struct (the only place GLSL allows unsized
-        // arrays) to avoid touching legitimately-sized `[1]` arrays
-        // elsewhere.
-        {
-            // Find each `struct ... { ... <type> <name>[1]; };` pattern
-            // and resize the trailing `[1]` to `[65536]`. We identify it
-            // by finding `;` at end of declaration that precedes `};`
-            // (struct close).
-            std::string out;
-            out.reserve(msl.size());
-            std::size_t pos = 0;
-            while (pos < msl.size()) {
-                // Look for "[1];" specifically — the MSL emits no spaces.
-                std::size_t idx = msl.find("[1];", pos);
-                if (idx == std::string::npos) {
-                    out.append(msl, pos, std::string::npos);
-                    break;
-                }
-                // Look ahead for `};` within a short window → trailing member.
-                std::size_t look = idx + 4;  // past "[1];"
-                // Skip whitespace.
-                while (look < msl.size() && (msl[look] == ' ' || msl[look] == '\n' || msl[look] == '\t')) ++look;
-                const bool isTrailingMember = (look < msl.size() && msl[look] == '}');
-                out.append(msl, pos, idx - pos);
-                if (isTrailingMember) {
-                    out.append("[65536];");
-                } else {
-                    out.append("[1];");
-                }
-                pos = idx + 4;
-            }
-            msl = std::move(out);
-        }
+        // Runtime-sized array handling for SSBOs: SPIRV-Cross emits MSL
+        // with `[65536]` for trailing `OpTypeRuntimeArray` members
+        // (configured via backend.unsized_array_fallback_literal in the
+        // patched third_party/SPIRV-Cross). The "1" default — which the
+        // upstream MSL backend previously used — caused Apple GPUs to
+        // silently drop `device T&` writes past index 0 under reference
+        // semantics. Only actual runtime arrays get the large fallback;
+        // fixed-size `[1]` members (e.g. `struct sC { uint3 mA[1]; };`)
+        // keep their declared size because they take the `else if(size)`
+        // branch in CompilerGLSL::to_array_size.
 
         if (log != nullptr) {
             *log = "ok";

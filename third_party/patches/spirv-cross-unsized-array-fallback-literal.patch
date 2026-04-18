@@ -1,0 +1,56 @@
+diff --git a/spirv_glsl.cpp b/spirv_glsl.cpp
+index a20f449..fdcd1ee 100644
+--- a/spirv_glsl.cpp
++++ b/spirv_glsl.cpp
+@@ -16695,12 +16695,17 @@ string CompilerGLSL::to_array_size(const SPIRType &type, uint32_t index)
+ 	else if (!backend.unsized_array_supported)
+ 	{
+ 		// For runtime-sized arrays, we can work around
+-		// lack of standard support for this by simply having
+-		// a single element array.
++		// lack of standard support for this by emitting a
++		// fixed-size array with a backend-configurable fallback
++		// literal. Default "1" matches the historical GLSL/HLSL
++		// behaviour; MSL bumps this to "65536" because Apple GPUs
++		// silently drop `device T&` writes past index 0 when the
++		// declared size is 1 (even when the underlying MTLBuffer
++		// is sized to fit many elements).
+ 		//
+ 		// Runtime length arrays must always be the last element
+ 		// in an interface block.
+-		return "1";
++		return backend.unsized_array_fallback_literal;
+ 	}
+ 	else
+ 		return "";
+diff --git a/spirv_glsl.hpp b/spirv_glsl.hpp
+index d6c2024..442ea3b 100644
+--- a/spirv_glsl.hpp
++++ b/spirv_glsl.hpp
+@@ -639,6 +639,14 @@ protected:
+ 		bool swizzle_is_function = false;
+ 		bool shared_is_implied = false;
+ 		bool unsized_array_supported = true;
++		// When unsized_array_supported is false, this is the fallback
++		// array size emitted for runtime-sized arrays. Default "1"
++		// matches GLSL/HLSL behaviour; MSL overrides to a large value
++		// (65536) so Apple GPUs don't silently drop writes past index 0
++		// under `device T&` reference semantics — the [1] bound causes
++		// implementation-defined behaviour even though the underlying
++		// MTLBuffer is sized to fit many elements. See CompilerMSL ctor.
++		const char *unsized_array_fallback_literal = "1";
+ 		bool explicit_struct_type = false;
+ 		bool use_initializer_list = false;
+ 		bool use_typed_initializer_list = false;
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index e613699..4f38d01 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -1687,6 +1687,7 @@ string CompilerMSL::compile()
+ 	backend.use_typed_initializer_list = true;
+ 	backend.native_row_major_matrix = false;
+ 	backend.unsized_array_supported = false;
++	backend.unsized_array_fallback_literal = "65536";
+ 	backend.can_declare_arrays_inline = false;
+ 	backend.allow_truncated_access_chain = true;
+ 	backend.comparison_image_samples_scalar = true;
