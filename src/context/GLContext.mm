@@ -4313,7 +4313,39 @@ struct GLContext::Impl {
         const bool isBGRA = (pf == MTLPixelFormatBGRA8Unorm);
         const std::size_t dstComponents = componentCountForFormat(format);
         const std::size_t dstBpc = bytesPerComponent(type);
-        if (dstComponents == 0 || dstBpc == 0) return false;
+        const bool typeIsPacked = isPackedPixelType(type);
+        if (dstComponents == 0) return false;
+        if (!typeIsPacked && dstBpc == 0) return false;
+        // Bytes per pixel for packed types (bytesPerComponent returns 0).
+        const std::size_t dstPackedBpp = typeIsPacked ? bytesPerPixel(format, type) : 0;
+
+        // Is the destination format swizzled (BGR/BGRA components)? Packed
+        // encoders need component-index remapping: `vals[]` is in RGBA
+        // order from the source read, but format=GL_BGR expects components
+        // encoded as (B, G, R) from the "first to last" packing position.
+        const bool formatIsBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
+        const bool formatIsBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
+
+        // Helper: return the `i`-th GL component (per format's component
+        // order) drawn from `vals[]` (which is in RGBA order). Used by
+        // the packed-type encoders below.
+        auto getComponent = [&](const double* vals4, int glCompIndex) -> double {
+            if (formatIsBGR) {
+                // BGR packing: slot 0 → B (vals[2]), slot 1 → G, slot 2 → R
+                static const int map[3] = {2, 1, 0};
+                return glCompIndex < 3 ? vals4[map[glCompIndex]] : 1.0;
+            } else if (formatIsBGRA) {
+                static const int map[4] = {2, 1, 0, 3};
+                return glCompIndex < 4 ? vals4[map[glCompIndex]] : 1.0;
+            }
+            return vals4[glCompIndex];
+        };
+
+        // UNorm-clamp a float-ish value to an integer range [0, maxVal].
+        auto toUNormBits = [](double v, std::uint32_t maxVal) -> std::uint32_t {
+            const double clamped = std::max(0.0, std::min(1.0, v));
+            return static_cast<std::uint32_t>(clamped * static_cast<double>(maxVal) + 0.5);
+        };
 
         auto* dest = static_cast<std::uint8_t*>(pixels);
 
@@ -4345,6 +4377,131 @@ struct GLContext::Impl {
                         else if (c == 2) readComp = 0;
                     }
                     vals[c] = readSrcComponent(srcPixel, readComp);
+                }
+
+                // Packed-type encoding: one packed word per pixel rather
+                // than per-component. GL 4.6 §8.4.4.4 + Table 8.8 define
+                // the bit layout per (format, type) pair. Components are
+                // drawn from `vals[]` in format order via getComponent.
+                if (typeIsPacked) {
+                    auto d = [&](int i) { return getComponent(vals, i); };
+                    std::uint8_t* dstPtr = dest + dstPixelIdx * dstPackedBpp;
+                    switch (type) {
+                        case GL_UNSIGNED_BYTE_3_3_2: {
+                            // MSB → LSB: R(3) G(3) B(2)
+                            const std::uint32_t r = toUNormBits(d(0), 7);
+                            const std::uint32_t g = toUNormBits(d(1), 7);
+                            const std::uint32_t b = toUNormBits(d(2), 3);
+                            dstPtr[0] = static_cast<std::uint8_t>((r << 5) | (g << 2) | b);
+                            break;
+                        }
+                        case GL_UNSIGNED_BYTE_2_3_3_REV: {
+                            // MSB → LSB: B(2) G(3) R(3) — reversed order
+                            const std::uint32_t r = toUNormBits(d(0), 7);
+                            const std::uint32_t g = toUNormBits(d(1), 7);
+                            const std::uint32_t b = toUNormBits(d(2), 3);
+                            dstPtr[0] = static_cast<std::uint8_t>((b << 6) | (g << 3) | r);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_5_6_5: {
+                            const std::uint32_t r = toUNormBits(d(0), 31);
+                            const std::uint32_t g = toUNormBits(d(1), 63);
+                            const std::uint32_t b = toUNormBits(d(2), 31);
+                            std::uint16_t v16 = static_cast<std::uint16_t>((r << 11) | (g << 5) | b);
+                            std::memcpy(dstPtr, &v16, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_5_6_5_REV: {
+                            const std::uint32_t r = toUNormBits(d(0), 31);
+                            const std::uint32_t g = toUNormBits(d(1), 63);
+                            const std::uint32_t b = toUNormBits(d(2), 31);
+                            std::uint16_t v16 = static_cast<std::uint16_t>((b << 11) | (g << 5) | r);
+                            std::memcpy(dstPtr, &v16, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_4_4_4_4: {
+                            const std::uint32_t r = toUNormBits(d(0), 15);
+                            const std::uint32_t g = toUNormBits(d(1), 15);
+                            const std::uint32_t b = toUNormBits(d(2), 15);
+                            const std::uint32_t a = toUNormBits(d(3), 15);
+                            std::uint16_t v16 = static_cast<std::uint16_t>((r << 12) | (g << 8) | (b << 4) | a);
+                            std::memcpy(dstPtr, &v16, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_4_4_4_4_REV: {
+                            const std::uint32_t r = toUNormBits(d(0), 15);
+                            const std::uint32_t g = toUNormBits(d(1), 15);
+                            const std::uint32_t b = toUNormBits(d(2), 15);
+                            const std::uint32_t a = toUNormBits(d(3), 15);
+                            std::uint16_t v16 = static_cast<std::uint16_t>((a << 12) | (b << 8) | (g << 4) | r);
+                            std::memcpy(dstPtr, &v16, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_5_5_5_1: {
+                            const std::uint32_t r = toUNormBits(d(0), 31);
+                            const std::uint32_t g = toUNormBits(d(1), 31);
+                            const std::uint32_t b = toUNormBits(d(2), 31);
+                            const std::uint32_t a = toUNormBits(d(3), 1);
+                            std::uint16_t v16 = static_cast<std::uint16_t>((r << 11) | (g << 6) | (b << 1) | a);
+                            std::memcpy(dstPtr, &v16, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_1_5_5_5_REV: {
+                            const std::uint32_t r = toUNormBits(d(0), 31);
+                            const std::uint32_t g = toUNormBits(d(1), 31);
+                            const std::uint32_t b = toUNormBits(d(2), 31);
+                            const std::uint32_t a = toUNormBits(d(3), 1);
+                            std::uint16_t v16 = static_cast<std::uint16_t>((a << 15) | (b << 10) | (g << 5) | r);
+                            std::memcpy(dstPtr, &v16, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_8_8_8_8: {
+                            const std::uint32_t r = toUNormBits(d(0), 255);
+                            const std::uint32_t g = toUNormBits(d(1), 255);
+                            const std::uint32_t b = toUNormBits(d(2), 255);
+                            const std::uint32_t a = toUNormBits(d(3), 255);
+                            std::uint32_t v32 = (r << 24) | (g << 16) | (b << 8) | a;
+                            std::memcpy(dstPtr, &v32, 4);
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_8_8_8_8_REV: {
+                            const std::uint32_t r = toUNormBits(d(0), 255);
+                            const std::uint32_t g = toUNormBits(d(1), 255);
+                            const std::uint32_t b = toUNormBits(d(2), 255);
+                            const std::uint32_t a = toUNormBits(d(3), 255);
+                            std::uint32_t v32 = (a << 24) | (b << 16) | (g << 8) | r;
+                            std::memcpy(dstPtr, &v32, 4);
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_10_10_10_2: {
+                            const std::uint32_t r = toUNormBits(d(0), 1023);
+                            const std::uint32_t g = toUNormBits(d(1), 1023);
+                            const std::uint32_t b = toUNormBits(d(2), 1023);
+                            const std::uint32_t a = toUNormBits(d(3), 3);
+                            std::uint32_t v32 = (r << 22) | (g << 12) | (b << 2) | a;
+                            std::memcpy(dstPtr, &v32, 4);
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_2_10_10_10_REV: {
+                            const std::uint32_t r = toUNormBits(d(0), 1023);
+                            const std::uint32_t g = toUNormBits(d(1), 1023);
+                            const std::uint32_t b = toUNormBits(d(2), 1023);
+                            const std::uint32_t a = toUNormBits(d(3), 3);
+                            std::uint32_t v32 = (a << 30) | (b << 20) | (g << 10) | r;
+                            std::memcpy(dstPtr, &v32, 4);
+                            break;
+                        }
+                        default: {
+                            // Unhandled packed type: zero the destination
+                            // so we don't leak undefined memory. Keeps
+                            // the previous hack-behaviour for the long
+                            // tail (10F_11F_11F_REV, 5_9_9_9_REV, 24_8,
+                            // 32F_24_8_REV) until a follow-up encoder.
+                            std::memset(dstPtr, 0, dstPackedBpp);
+                            break;
+                        }
+                    }
+                    continue;
                 }
 
                 // Write to destination in the requested format/type.
