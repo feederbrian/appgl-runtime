@@ -475,6 +475,22 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             compiler.add_msl_resource_binding(binding);
         }
 
+        // Remap storage images (imageLoad/imageStore — GL `image2D` etc.).
+        // These map to MSL `texture2d<T, access::read|write|read_write>`
+        // and use the same textureBase slot space as sampled images.
+        // KHR-GL46.compute_shader.copy-image and resource-image rely on
+        // this routing to read a sampled binding back into an image
+        // binding at draw time.
+        for (auto& img : resources.storage_images) {
+            uint32_t glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
+            spirv_cross::MSLResourceBinding binding;
+            binding.stage = compiler.get_execution_model();
+            binding.desc_set = compiler.get_decoration(img.id, spv::DecorationDescriptorSet);
+            binding.binding = glBinding;
+            binding.msl_texture = bindings.textureBase + glBinding;
+            compiler.add_msl_resource_binding(binding);
+        }
+
         std::string msl = compiler.compile();
 
         // SPIRV-Cross emits SSBO runtime arrays wrapped in a struct with
@@ -751,6 +767,20 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             rb.metalBinding = bindings.textureBase + rb.glBinding;
             rb.name = img.name;
             result.sampledTextures.push_back(std::move(rb));
+        }
+
+        // Storage images (imageLoad/imageStore targets). Distinct from
+        // sampled textures because the GL binding model differs: storage
+        // images are bound via glBindImageTexture(unit, tex, …), not via
+        // a sampler uniform that names a texture unit. Dispatch-time
+        // binding resolution iterates this list separately and looks up
+        // imageBindings[glBinding] rather than a uniform value.
+        for (auto& img : resources.storage_images) {
+            ShaderReflection::ResourceBinding rb;
+            rb.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
+            rb.metalBinding = bindings.textureBase + rb.glBinding;
+            rb.name = img.name;
+            result.storageImages.push_back(std::move(rb));
         }
 
         // Shader-storage buffer objects (GL 4.3+). Metal side: SSBOs live

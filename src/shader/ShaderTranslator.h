@@ -60,6 +60,12 @@ struct ShaderReflection {
     // but primarily consumed by the compute-dispatch path, which binds
     // them against GL_SHADER_STORAGE_BUFFER indexed bindings.
     std::vector<ResourceBinding> storageBuffers;
+    // Storage images (imageLoad/imageStore). Separate from sampledTextures
+    // because the GL binding model differs — these are bound via
+    // glBindImageTexture(unit, tex, …) and the dispatch-time resolver
+    // reads the texture unit's imageBindings[] slot directly, not a
+    // sampler uniform value.
+    std::vector<ResourceBinding> storageImages;
     bool usesPointSize = false;
 };
 

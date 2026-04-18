@@ -14581,6 +14581,23 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         info.textures.push_back(tb);
     }
 
+    // Storage images (imageLoad/imageStore). Bound via
+    // glBindImageTexture(unit, …) rather than a sampler uniform. The
+    // shader's `layout(binding=N)` selects imageBindings[N] directly.
+    // KHR-GL46.compute_shader.copy-image exercises this.
+    for (const auto& img : programObject->computeReflection.storageImages) {
+        if (img.glBinding >= Impl::kMaxImageUnits) continue;
+        const auto& ib = impl_->imageBindings[img.glBinding];
+        if (ib.texture == 0) continue;
+        GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
+        if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+        ComputeDispatchInfo::TextureBinding tb;
+        tb.metalTexture = texObj->metalTexture;
+        tb.metalSamplerState = nullptr;  // no sampler for storage images
+        tb.metalSlot = img.metalBinding;
+        info.textures.push_back(tb);
+    }
+
     (void)impl_->frameGraph->encodeComputeDispatch(info);
     return true;
 }
@@ -14711,6 +14728,19 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         tb.metalTexture = texObj->metalTexture;
         tb.metalSamplerState = texObj->metalSampler;
         tb.metalSlot = samp.metalBinding;
+        info.textures.push_back(tb);
+    }
+    // Storage images for the indirect path — mirror the direct path.
+    for (const auto& img : programObject->computeReflection.storageImages) {
+        if (img.glBinding >= Impl::kMaxImageUnits) continue;
+        const auto& ib = impl_->imageBindings[img.glBinding];
+        if (ib.texture == 0) continue;
+        GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
+        if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+        ComputeDispatchInfo::TextureBinding tb;
+        tb.metalTexture = texObj->metalTexture;
+        tb.metalSamplerState = nullptr;
+        tb.metalSlot = img.metalBinding;
         info.textures.push_back(tb);
     }
 
