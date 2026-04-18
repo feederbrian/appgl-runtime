@@ -2001,15 +2001,6 @@ struct GLContext::Impl {
         descriptor.mipmapLevelCount = (object.target == GL_TEXTURE_1D) ? 1u : requestedLevels;
         descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         descriptor.storageMode = MTLStorageModeShared;
-        // Explicit tracked hazard mode. Default for shared storage is
-        // hazard-tracked, but being explicit ensures that VS-stage
-        // `texture.gather()` following a CPU `replaceRegion:` on the
-        // same texture serialises correctly. Under Untracked mode the
-        // VS-stage gather sometimes read stale data (the texture_gather
-        // ±12 flake cluster — CPU probe showed the texture bytes were
-        // correct in both pass and fail outcomes, so the race is
-        // strictly on the GPU-visibility side).
-        descriptor.hazardTrackingMode = MTLHazardTrackingModeTracked;
 
         id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
         if (texture == nil) {
@@ -7743,21 +7734,30 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
     // GL 4.6 §9.2.8 attachability rules on texture target.
     //
     // - GL_TEXTURE_BUFFER is never attachable to a framebuffer (it's
-    //   backed by a buffer object, not image storage).
-    // - The single-layer variant (FramebufferTextureLayer, `layered ==
-    //   false` here) additionally rejects non-layered targets:
-    //   TEXTURE_RECTANGLE, TEXTURE_2D, TEXTURE_CUBE_MAP, etc. — layer
-    //   indexing is only meaningful for 3D / array / multisample-array.
+    //   backed by a buffer object, not image storage). Applies to every
+    //   entry point (FramebufferTexture / FramebufferTexture2D /
+    //   FramebufferTextureLayer).
+    // - The single-layer variant (FramebufferTextureLayer and
+    //   NamedFramebufferTextureLayer) additionally rejects non-layered
+    //   targets: TEXTURE_RECTANGLE, TEXTURE_2D, TEXTURE_CUBE_MAP, etc.
+    //   — layer indexing is only meaningful for 3D / array /
+    //   multisample-array.
     // - TEXTURE_2D_MULTISAMPLE is accepted by FramebufferTexture
     //   (layered attachment; sample-level layering) but not by
     //   FramebufferTextureLayer because there's no "layer" concept on
-    //   single-sample MS (vs MS array). Matches the CTS
-    //   framebuffers_texture_attachment_errors sub-checks.
+    //   single-sample MS (vs MS array).
+    //
+    // The Layer variant is identified by `textarget == 0 && !layered`
+    // (callers: glFramebufferTextureLayer, glNamedFramebufferTextureLayer).
+    // glFramebufferTexture{1,2,3}D pass a non-zero textarget and are
+    // already bounded by the textarget-vs-object-target match check
+    // above, so they must not be swept up in the layer-attachable check.
     if (textureObject->target == GL_TEXTURE_BUFFER) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (!layered) {
+    const bool isLayerVariant = (!layered && textarget == 0);
+    if (isLayerVariant) {
         const bool isLayerAttachableTarget =
             textureObject->target == GL_TEXTURE_3D ||
             textureObject->target == GL_TEXTURE_2D_ARRAY ||
