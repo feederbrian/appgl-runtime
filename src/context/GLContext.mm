@@ -11268,9 +11268,16 @@ bool GLContext::linkProgram(GLuint program) {
                 "vertex", vertexShader, programObject->vertexMSL, vsRefl);
             if (vsOk) {
                 programObject->vertexReflection = std::move(vsRefl);
-                // No fragment stage, so `hasTranslatedPipeline` stays false
-                // — separable vertex programs are pipeline-state components,
-                // not standalone pipelines.
+                // A VS-only program is drawable when paired with
+                // GL_RASTERIZER_DISCARD (no fragment stage required).
+                // The CTS SSBO `*-vs` tests bind ONLY a vertex shader,
+                // enable rasterizer discard, and read back SSBO writes
+                // produced by the VS alone. Set hasTranslatedPipeline
+                // = true and let encodeTranslatedDraw drop the FS when
+                // info.rasterizerDiscard is true (the pipeline
+                // descriptor will set fragmentFunction = nil +
+                // rasterizationEnabled = NO at that point).
+                programObject->hasTranslatedPipeline = true;
                 rasterTranslationOk = true;
             }
             break;
@@ -12951,6 +12958,7 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.cullFaceMode = state.rasterState().cullFaceMode;
     tdi.frontFace = state.rasterState().frontFace;
     tdi.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
+    tdi.rasterizerDiscard = state.isEnabled(GL_RASTERIZER_DISCARD);
 
     const auto& gl = state.blendState();
     tdi.blend.enabled = state.isEnabled(GL_BLEND);
@@ -14653,9 +14661,27 @@ bool GLContext::memoryBarrier(GLbitfield barriers) {
         return false;
     }
 
-    // Validated no-op. Metal command queue ordering handles most barriers
-    // implicitly; explicit MTLFence/MTLEvent synchronization will be added
-    // when compute pipelines are fully wired.
+    // For CPU-visible barrier bits (BUFFER_UPDATE | TEXTURE_UPDATE |
+    // PIXEL_BUFFER | CLIENT_MAPPED_BUFFER) we need to commit + wait so
+    // subsequent glMapBuffer* / glGetTexImage / glReadPixels calls see
+    // the GPU writes. Metal handles GPU-to-GPU ordering implicitly but
+    // there's no implicit sync to CPU, and SSBO writes via a VS under
+    // GL_RASTERIZER_DISCARD (CTS shader_storage_buffer_object.*-vs)
+    // are only readable after the draw's command buffer completes.
+    constexpr GLbitfield kCpuVisibleBarriers =
+        GL_BUFFER_UPDATE_BARRIER_BIT |
+        GL_TEXTURE_UPDATE_BARRIER_BIT |
+        GL_PIXEL_BUFFER_BARRIER_BIT;
+    const bool requiresCpuSync =
+        (barriers == GL_ALL_BARRIER_BITS) ||
+        (barriers & kCpuVisibleBarriers) != 0;
+    if (requiresCpuSync && impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushForReadback();
+    }
+    // GPU-to-GPU barriers (UNIFORM / TEXTURE_FETCH / SHADER_STORAGE / etc.)
+    // are implicit on Metal's command queue — same-queue ordering is
+    // preserved so the next pipeline's reads see the previous pipeline's
+    // writes without an explicit fence.
     return true;
 }
 

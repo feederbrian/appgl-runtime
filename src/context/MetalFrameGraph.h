@@ -199,6 +199,13 @@ struct TranslatedDrawInfo {
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
     bool wireframe = false;
+    // GL_RASTERIZER_DISCARD: when true, Metal pipeline has
+    // rasterizationEnabled=NO — the VS runs for side effects (SSBO
+    // writes, transform feedback) but no fragment shader stage is
+    // required. This lets SPIRV-Cross's `vertex void main0` (emitted
+    // for VS-only shaders with no gl_Position assignment, common in
+    // SSBO-write-only VS tests) build as a valid Metal pipeline.
+    bool rasterizerDiscard = false;
 
     // RC-A02: viewport state.  Plumbed from glViewport so Metal's render
     // encoder receives the correct viewport rectangle.

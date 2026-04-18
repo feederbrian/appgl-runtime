@@ -7,6 +7,9 @@
 #include <SPIRV/GlslangToSpv.h>
 #include <spirv_msl.hpp>
 
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 
 namespace appgl {
@@ -506,6 +509,21 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         if (log != nullptr) {
             *log = "ok";
+        }
+        // Diagnostic dump: if APPGL_DUMP_MSL is set to a directory path,
+        // write the generated MSL for every translated shader to
+        // msl_NNNN.metal. Used for debugging SPIRV-Cross output (std140
+        // matrix stride, runtime-array declarations, rasterizer-discard
+        // vertex-void shapes) against failing CTS tests.
+        if (const char* dumpPath = std::getenv("APPGL_DUMP_MSL")) {
+            static std::atomic<int> counter{0};
+            const int n = counter.fetch_add(1);
+            char path[512];
+            std::snprintf(path, sizeof(path), "%s/msl_%04d.metal", dumpPath, n);
+            if (FILE* f = std::fopen(path, "w")) {
+                std::fwrite(msl.data(), 1, msl.size(), f);
+                std::fclose(f);
+            }
         }
         return msl;
     } catch (const spirv_cross::CompilerError& e) {

@@ -255,6 +255,11 @@ static std::uint64_t computePipelineCacheKey(
     key |= srcA   << 33;
     key |= dstA   << 29;
 
+    // Bit 28: rasterizer discard — pipelines built with
+    // rasterizationEnabled=NO can't be reused when raster is enabled
+    // (the fragment function is nil) and vice versa.
+    key |= (info.rasterizerDiscard ? 1ULL : 0ULL) << 28;
+
     // FNV-1a over the per-attribute format tuple. 29 bits is enough
     // to discriminate the half-dozen distinct layouts BAR's draw
     // path sees in practice — grow if collisions show up.
@@ -281,7 +286,7 @@ static std::uint64_t computePipelineCacheKey(
             hashLayout(l);
         }
     }
-    key |= static_cast<std::uint64_t>(hash & 0x1FFFFFFFu);
+    key |= static_cast<std::uint64_t>(hash & 0x0FFFFFFFu);  // 28 bits (bit 28 = rasterizerDiscard)
     return key;
 }
 
@@ -684,9 +689,18 @@ struct MetalFrameGraph::Impl {
             FG_TRACE(@"encodeTranslatedDraw: bad vertex data, returning false");
             return false;
         }
-        if (info.vertexMSL == nullptr || info.fragmentMSL == nullptr ||
-            info.vertexMSL->empty() || info.fragmentMSL->empty()) {
-            FG_TRACE(@"encodeTranslatedDraw: no MSL source, returning false");
+        if (info.vertexMSL == nullptr || info.vertexMSL->empty()) {
+            FG_TRACE(@"encodeTranslatedDraw: no vertex MSL, returning false");
+            return false;
+        }
+        // Fragment MSL is only required when rasterization runs. Under
+        // GL_RASTERIZER_DISCARD the pipeline skips the fragment stage
+        // entirely (see the rasterizerDiscard branch in the pipeline
+        // descriptor setup below), so a VS-only program — the shape CTS
+        // shader_storage_buffer_object.*-vs tests create — is a valid draw.
+        const bool hasFragmentStage = (info.fragmentMSL != nullptr && !info.fragmentMSL->empty());
+        if (!hasFragmentStage && !info.rasterizerDiscard) {
+            FG_TRACE(@"encodeTranslatedDraw: no fragment MSL and raster enabled, returning false");
             return false;
         }
 
@@ -813,20 +827,27 @@ struct MetalFrameGraph::Impl {
             }
 
             // ADV-2: compile fragment MSL via the library cache.
-            id<MTLLibrary> fragLib = getOrCompileLibrary(*info.fragmentMSL);
-            if (fragLib == nil) {
-                FG_TRACE(@"encodeTranslatedDraw: newLibraryWithSource(fragment) failed");
-                recordBuildFailure("fragment-library", nil);
-                return false;
-            }
-            NSError* fragFnError = nil;
-            id<MTLFunction> fragFn = [fragLib newFunctionWithName:@"main0"
-                                                   constantValues:emptyConstants
-                                                            error:&fragFnError];
-            if (fragFn == nil) {
-                FG_TRACE(@"encodeTranslatedDraw: newFunctionWithName(fragment,main0) failed: %@", fragFnError);
-                recordBuildFailure("fragment-function", fragFnError);
-                return false;
+            // Skipped entirely for VS-only + rasterizerDiscard draws —
+            // the pipeline descriptor will set fragmentFunction = nil
+            // and rasterizationEnabled = NO below, so the fragment
+            // library / function are never used.
+            id<MTLFunction> fragFn = nil;
+            if (hasFragmentStage) {
+                id<MTLLibrary> fragLib = getOrCompileLibrary(*info.fragmentMSL);
+                if (fragLib == nil) {
+                    FG_TRACE(@"encodeTranslatedDraw: newLibraryWithSource(fragment) failed");
+                    recordBuildFailure("fragment-library", nil);
+                    return false;
+                }
+                NSError* fragFnError = nil;
+                fragFn = [fragLib newFunctionWithName:@"main0"
+                                      constantValues:emptyConstants
+                                               error:&fragFnError];
+                if (fragFn == nil) {
+                    FG_TRACE(@"encodeTranslatedDraw: newFunctionWithName(fragment,main0) failed: %@", fragFnError);
+                    recordBuildFailure("fragment-function", fragFnError);
+                    return false;
+                }
             }
 
             // Build vertex descriptor from reflection data.  Primary vertex
@@ -957,12 +978,23 @@ struct MetalFrameGraph::Impl {
 
             MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
             desc.vertexFunction = vertFn;
-            desc.fragmentFunction = fragFn;
+            desc.fragmentFunction = info.rasterizerDiscard ? nil : fragFn;
             // Attributeless draws don't need a vertex descriptor at all.
             desc.vertexDescriptor = attributelessDraw ? nil : vertexDescriptor;
             desc.colorAttachments[0].pixelFormat = colorFormat;
             desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            // GL_RASTERIZER_DISCARD → Metal rasterization disabled.
+            // The VS still runs (and can write SSBOs / transform feedback)
+            // but no fragment stage executes, no raster output is produced,
+            // and Metal doesn't require a fragment function or a valid
+            // [[position]] output from the vertex function. This is the
+            // only Metal pipeline shape that accepts SPIRV-Cross's
+            // `vertex void main0(...)` output for GL shaders that write
+            // SSBOs without setting gl_Position.
+            if (info.rasterizerDiscard) {
+                desc.rasterizationEnabled = NO;
+            }
 
             // Phase 8X Group 4d follow-up¹⁴ — apply the GL blend
             // state to the Metal pipeline color attachment. Before
