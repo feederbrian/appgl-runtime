@@ -120,7 +120,13 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxVertexAttribs = 32;
     r.maxVertexUniformComponents = 4096;
     r.maxVertexUniformVectors = 1024;        // components / 4
-    r.maxVertexTextureImageUnits = 16;
+    // Per-stage texture-image-unit limits must match
+    // GLCapabilities.mm's GL_MAX_*_TEXTURE_IMAGE_UNITS = 48 (bumped
+    // in 4245d6b). CTS KHR-GL46.limits.max_*_texture_image_units
+    // cross-checks the GLSL built-in gl_MaxVertex/Tess/Geom/Compute/-
+    // TextureImageUnits against the GL advertised value; they must
+    // agree. Previously 16 vs advertised-48 made 6 tests fail.
+    r.maxVertexTextureImageUnits = 48;
     r.maxVertexOutputComponents = 128;
     r.maxVertexOutputVectors = 32;
     r.maxVertexAtomicCounters = 0;
@@ -135,7 +141,7 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxFragmentAtomicCounterBuffers = 1;
     r.maxFragmentImageUniforms = 8;
     // Combined / pipeline.
-    r.maxTextureImageUnits = 16;
+    r.maxTextureImageUnits = 48;            // per-stage fragment tex units
     r.maxCombinedTextureImageUnits = 80;
     r.maxDrawBuffers = 8;
     r.maxVaryingComponents = 128;
@@ -156,11 +162,16 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxTessControlImageUniforms = 8;
     r.maxTessEvaluationImageUniforms = 8;
     r.maxGeometryImageUniforms = 8;
+    // Per-stage tess / geometry texture image units (match GL advert
+    // per 4245d6b).
+    r.maxTessControlTextureImageUnits = 48;
+    r.maxTessEvaluationTextureImageUnits = 48;
+    r.maxGeometryTextureImageUnits = 48;
     // Compute stage.
     r.maxComputeAtomicCounterBuffers = 8;
     r.maxComputeAtomicCounters = 8;
     r.maxComputeImageUniforms = 8;
-    r.maxComputeTextureImageUnits = 16;
+    r.maxComputeTextureImageUnits = 48;
     return r;
 }
 

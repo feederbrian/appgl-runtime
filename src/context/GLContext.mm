@@ -12371,6 +12371,38 @@ UniformSlotRef resolveUniformSlot(GLProgramObject* program, GLint location) {
     return r;
 }
 
+// Returns the number of scalar components a uniform of the given GLenum
+// type contains (1 for scalar/sampler, 4 for vec4, 16 for mat4, etc.).
+// Used by glGetUniform* to cap the memcpy at the real per-element width —
+// without this, querying location+k of a sampler-array uniform would
+// clobber the caller's single-int stack buffer (memcpy'd the full
+// ints.size()). Observed as SIGSEGV in CTS layout_binding.sampler3D
+// because the bumped per-stage tex cap made the test exercise a path
+// that stressed the latent buffer overrun.
+std::size_t uniformTypeComponentCount(GLenum type) {
+    switch (type) {
+        case GL_FLOAT_VEC2: case GL_INT_VEC2: case GL_UNSIGNED_INT_VEC2:
+        case GL_BOOL_VEC2: case GL_DOUBLE_VEC2:
+            return 2;
+        case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_UNSIGNED_INT_VEC3:
+        case GL_BOOL_VEC3: case GL_DOUBLE_VEC3:
+            return 3;
+        case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_UNSIGNED_INT_VEC4:
+        case GL_BOOL_VEC4: case GL_DOUBLE_VEC4:
+            return 4;
+        case GL_FLOAT_MAT2: case GL_DOUBLE_MAT2:       return 4;
+        case GL_FLOAT_MAT3: case GL_DOUBLE_MAT3:       return 9;
+        case GL_FLOAT_MAT4: case GL_DOUBLE_MAT4:       return 16;
+        case GL_FLOAT_MAT2x3: case GL_DOUBLE_MAT2x3:   return 6;
+        case GL_FLOAT_MAT2x4: case GL_DOUBLE_MAT2x4:   return 8;
+        case GL_FLOAT_MAT3x2: case GL_DOUBLE_MAT3x2:   return 6;
+        case GL_FLOAT_MAT3x4: case GL_DOUBLE_MAT3x4:   return 12;
+        case GL_FLOAT_MAT4x2: case GL_DOUBLE_MAT4x2:   return 8;
+        case GL_FLOAT_MAT4x3: case GL_DOUBLE_MAT4x3:   return 12;
+        default: return 1;  // scalars, samplers, images
+    }
+}
+
 }  // namespace
 
 bool GLContext::getUniformfv(GLuint program, GLint location, GLfloat* params) {
@@ -12379,20 +12411,31 @@ bool GLContext::getUniformfv(GLuint program, GLint location, GLfloat* params) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    GLProgramUniformValue* value = lookupUniformValue(object, location);
-    if (value == nullptr) {
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    GLProgramUniformValue* value = ref.slot;
+    const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
+    const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
     if (!value->floats.empty()) {
-        std::memcpy(params, value->floats.data(), value->floats.size() * sizeof(GLfloat));
+        const std::size_t avail = value->floats.size() > offset
+            ? std::min(components, value->floats.size() - offset) : 0;
+        if (avail > 0) {
+            std::memcpy(params, value->floats.data() + offset, avail * sizeof(GLfloat));
+        }
     } else if (!value->ints.empty()) {
-        for (std::size_t i = 0; i < value->ints.size(); ++i) {
-            params[i] = static_cast<GLfloat>(value->ints[i]);
+        const std::size_t avail = value->ints.size() > offset
+            ? std::min(components, value->ints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLfloat>(value->ints[offset + i]);
         }
     } else if (!value->uints.empty()) {
-        for (std::size_t i = 0; i < value->uints.size(); ++i) {
-            params[i] = static_cast<GLfloat>(value->uints[i]);
+        const std::size_t avail = value->uints.size() > offset
+            ? std::min(components, value->uints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLfloat>(value->uints[offset + i]);
         }
     }
     return true;
@@ -12404,20 +12447,31 @@ bool GLContext::getUniformiv(GLuint program, GLint location, GLint* params) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    GLProgramUniformValue* value = lookupUniformValue(object, location);
-    if (value == nullptr) {
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    GLProgramUniformValue* value = ref.slot;
+    const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
+    const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
     if (!value->ints.empty()) {
-        std::memcpy(params, value->ints.data(), value->ints.size() * sizeof(GLint));
+        const std::size_t avail = value->ints.size() > offset
+            ? std::min(components, value->ints.size() - offset) : 0;
+        if (avail > 0) {
+            std::memcpy(params, value->ints.data() + offset, avail * sizeof(GLint));
+        }
     } else if (!value->floats.empty()) {
-        for (std::size_t i = 0; i < value->floats.size(); ++i) {
-            params[i] = static_cast<GLint>(value->floats[i]);
+        const std::size_t avail = value->floats.size() > offset
+            ? std::min(components, value->floats.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLint>(value->floats[offset + i]);
         }
     } else if (!value->uints.empty()) {
-        for (std::size_t i = 0; i < value->uints.size(); ++i) {
-            params[i] = static_cast<GLint>(value->uints[i]);
+        const std::size_t avail = value->uints.size() > offset
+            ? std::min(components, value->uints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLint>(value->uints[offset + i]);
         }
     }
     return true;
@@ -12429,20 +12483,31 @@ bool GLContext::getUniformuiv(GLuint program, GLint location, GLuint* params) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    GLProgramUniformValue* value = lookupUniformValue(object, location);
-    if (value == nullptr) {
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    GLProgramUniformValue* value = ref.slot;
+    const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
+    const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
     if (!value->uints.empty()) {
-        std::memcpy(params, value->uints.data(), value->uints.size() * sizeof(GLuint));
+        const std::size_t avail = value->uints.size() > offset
+            ? std::min(components, value->uints.size() - offset) : 0;
+        if (avail > 0) {
+            std::memcpy(params, value->uints.data() + offset, avail * sizeof(GLuint));
+        }
     } else if (!value->ints.empty()) {
-        for (std::size_t i = 0; i < value->ints.size(); ++i) {
-            params[i] = static_cast<GLuint>(value->ints[i]);
+        const std::size_t avail = value->ints.size() > offset
+            ? std::min(components, value->ints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLuint>(value->ints[offset + i]);
         }
     } else if (!value->floats.empty()) {
-        for (std::size_t i = 0; i < value->floats.size(); ++i) {
-            params[i] = static_cast<GLuint>(value->floats[i]);
+        const std::size_t avail = value->floats.size() > offset
+            ? std::min(components, value->floats.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLuint>(value->floats[offset + i]);
         }
     }
     return true;
