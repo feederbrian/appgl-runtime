@@ -7907,8 +7907,16 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
         const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (!isFramebufferAttachment(attachment)) {
+    // GL 4.6 §9.2.3 attachment validation: split shape/range so
+    // COLOR_ATTACHMENTm with m >= MAX_COLOR_ATTACHMENTS returns
+    // INVALID_OPERATION rather than INVALID_ENUM (matches
+    // framebuffers_get_attachment_parameter_errors).
+    if (!isFramebufferAttachmentEnum(attachment)) {
         const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (isColorAttachmentEnum(attachment) && !isColorAttachment(attachment)) {
+        const_cast<GLContext*>(this)->pushError(GL_INVALID_OPERATION);
         return false;
     }
 
@@ -7940,6 +7948,27 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
     const GLFramebufferAttachment attachmentState = found == framebuffer->attachments.end() ? GLFramebufferAttachment{} : found->second;
     const auto attachmentInfo = impl_->framebufferAttachmentInfo(attachmentState);
 
+    // GL 4.6 §9.2.3: when the attachment object type is GL_NONE, only
+    // FRAMEBUFFER_ATTACHMENT_OBJECT_NAME and
+    // FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE are valid pnames. Anything
+    // else → INVALID_OPERATION. Additionally
+    // FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE with
+    // DEPTH_STENCIL_ATTACHMENT → INVALID_OPERATION (a depth-stencil
+    // attachment has two component types, so asking for one makes no
+    // sense).
+    const bool objectIsNone = (attachmentState.kind == GLFramebufferAttachment::Kind::None);
+    if (objectIsNone
+        && pname != GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+        && pname != GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) {
+        const_cast<GLContext*>(this)->pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (pname == GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE
+        && attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+        const_cast<GLContext*>(this)->pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
     switch (pname) {
         case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
             params[0] = attachmentState.kind == GLFramebufferAttachment::Kind::Texture
@@ -7950,13 +7979,23 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
             params[0] = static_cast<GLint>(attachmentState.object);
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
-            params[0] = attachmentState.kind == GLFramebufferAttachment::Kind::Texture ? attachmentState.level : 0;
-            return true;
         case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
-            params[0] = attachmentState.kind == GLFramebufferAttachment::Kind::Texture ? attachmentState.layer : 0;
-            return true;
         case GL_FRAMEBUFFER_ATTACHMENT_LAYERED:
-            params[0] = attachmentState.layered ? GL_TRUE : GL_FALSE;
+            // GL 4.6 §9.2.3: these pnames are only valid when
+            // FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE is GL_TEXTURE. For a
+            // renderbuffer attachment they generate INVALID_ENUM.
+            // (The ObjectType==None case is already handled above.)
+            if (attachmentState.kind != GLFramebufferAttachment::Kind::Texture) {
+                const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
+                return false;
+            }
+            if (pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL) {
+                params[0] = attachmentState.level;
+            } else if (pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER) {
+                params[0] = attachmentState.layer;
+            } else {
+                params[0] = attachmentState.layered ? GL_TRUE : GL_FALSE;
+            }
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
             params[0] = attachmentInfo.complete && isColorFormat(attachmentInfo.internalFormat) ? 8 : 0;
