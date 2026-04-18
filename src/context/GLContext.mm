@@ -3576,6 +3576,40 @@ struct GLContext::Impl {
         resolveStage(info.fragmentReflection, false, true);
     }
 
+    // Graphics-stage storage-image binding (imageLoad/imageStore in VS/FS).
+    // Mirrors the compute-dispatch storage-image path but appends to the
+    // TranslatedDrawInfo texture lists so the render encoder picks up the
+    // binding. CTS shader_image_load_store.*-{vs,fs} declare
+    // `layout(binding=N, rgba32f) uniform image2D img;` and expect the
+    // texture bound via glBindImageTexture(N, …) to be visible at
+    // [[texture(N)]] in the matching stage. Without this, vertex/
+    // fragment storage images get a nil texture slot and imageLoad
+    // returns zeros.
+    void resolveImageBindings(
+        GLProgramObject& program,
+        TranslatedDrawInfo& info)
+    {
+        (void)program;
+        auto resolveStage = [&](const ShaderReflection* reflection,
+                                std::vector<TranslatedDrawInfo::TextureBinding>& outList) {
+            if (reflection == nullptr) return;
+            for (const auto& img : reflection->storageImages) {
+                if (img.glBinding >= Impl::kMaxImageUnits) continue;
+                const auto& ib = imageBindings[img.glBinding];
+                if (ib.texture == 0) continue;
+                GLTextureObject* texObj = objects->textures().get(ib.texture);
+                if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+                TranslatedDrawInfo::TextureBinding tb;
+                tb.metalTexture = texObj->metalTexture;
+                tb.metalSamplerState = nullptr;  // no sampler for storage images
+                tb.metalSlot = img.metalBinding;
+                outList.push_back(tb);
+            }
+        };
+        resolveStage(info.vertexReflection, info.vertexTextures);
+        resolveStage(info.fragmentReflection, info.fragmentTextures);
+    }
+
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
         std::vector<std::uint8_t> shadowBytes(static_cast<std::size_t>(size), 0);
         if (data != nullptr && size > 0) {
@@ -13269,6 +13303,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             impl_->resolveSamplerBindings(*program, tdi);
             impl_->resolveUBOBindings(*program, tdi);
             impl_->resolveSSBOBindings(*program, tdi);
+            impl_->resolveImageBindings(*program, tdi);
 
             // RC-A02: resolve FBO render target.
             {
@@ -13470,6 +13505,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
                     impl_->resolveSSBOBindings(*program, tdi);
+                    impl_->resolveImageBindings(*program, tdi);
 
                     // RC-A02: resolve FBO render target when a user FBO is bound.
                     {
@@ -13617,6 +13653,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             impl_->resolveSamplerBindings(*program, tdi);
             impl_->resolveUBOBindings(*program, tdi);
             impl_->resolveSSBOBindings(*program, tdi);
+            impl_->resolveImageBindings(*program, tdi);
             {
                 GLsizei fboW = 0, fboH = 0;
                 void* fboDSTex = nullptr;
@@ -13805,6 +13842,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
                     impl_->resolveSSBOBindings(*program, tdi);
+                    impl_->resolveImageBindings(*program, tdi);
 
                     // RC-A02: resolve FBO render target.
                     {
@@ -14093,6 +14131,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
                     impl_->resolveSSBOBindings(*program, tdi);
+                    impl_->resolveImageBindings(*program, tdi);
 
                     // RC-A02: resolve FBO render target.
                     {
@@ -14332,6 +14371,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
                     impl_->resolveSSBOBindings(*program, tdi);
+                    impl_->resolveImageBindings(*program, tdi);
 
                     // RC-A02: resolve FBO render target.
                     {
@@ -14637,6 +14677,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     impl_->resolveSamplerBindings(*program, tdi);
                     impl_->resolveUBOBindings(*program, tdi);
                     impl_->resolveSSBOBindings(*program, tdi);
+                    impl_->resolveImageBindings(*program, tdi);
 
                     // RC-A02: resolve FBO render target.
                     {
