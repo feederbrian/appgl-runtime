@@ -3715,6 +3715,176 @@ struct GLContext::Impl {
             for (std::size_t offset = 0; offset < renderbuffer->rgba8.size(); offset += 4u) {
                 std::memcpy(renderbuffer->rgba8.data() + offset, rgba, 4);
             }
+            // Also clear the Metal texture so that readPixels — which
+            // prefers the Metal texture over the CPU shadow — sees the
+            // cleared value at the texture's native precision.
+            // Without this, glClear on a float renderbuffer followed by
+            // glReadPixels(FLOAT) returns whatever the Metal texture was
+            // last written with (initially zeros), not the clear color.
+            // Matches framebuffers_draw_buffers which uses RGBA32F.
+            if (renderbuffer->metalTexture != nullptr && renderbuffer->width > 0 && renderbuffer->height > 0) {
+                id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                // Skip MS textures — replaceRegion is not permitted on
+                // multisample textures (they'd need a resolve render
+                // pass to clear properly; single-sample float is the
+                // common case and all draw_buffers tests target it).
+                if (metalTex.sampleCount > 1) {
+                    return true;
+                }
+                MTLPixelFormat pf = metalTex.pixelFormat;
+                // Encode the clear color for the Metal pixel format. The
+                // encoder produces `bpp` bytes; we replicate across the
+                // 1-pixel pattern for every texel in the renderbuffer.
+                std::uint8_t px[16] = {0};
+                std::size_t bpp = 0;
+                auto encF32 = [&](int comps) {
+                    bpp = static_cast<std::size_t>(comps) * 4u;
+                    float fv[4] = { color[0], color[1], color[2], color[3] };
+                    std::memcpy(px, fv, bpp);
+                };
+                auto encF16 = [&](int comps) {
+                    // Minimal float-to-half converter. Handles normals /
+                    // denormals / zero / inf / nan for the common clear-
+                    // color range.
+                    bpp = static_cast<std::size_t>(comps) * 2u;
+                    auto toHalf = [](float f) -> std::uint16_t {
+                        std::uint32_t u;
+                        std::memcpy(&u, &f, 4);
+                        std::uint32_t sign = (u >> 31) & 1;
+                        std::int32_t  exp  = static_cast<std::int32_t>((u >> 23) & 0xFF) - 127;
+                        std::uint32_t mant = u & 0x7FFFFF;
+                        if (exp == 128) return static_cast<std::uint16_t>((sign << 15) | 0x7C00 | (mant ? 0x200 : 0));
+                        if (exp > 15)   return static_cast<std::uint16_t>((sign << 15) | 0x7C00);
+                        if (exp < -14) {
+                            std::uint32_t m = mant | 0x800000;
+                            int shift = -14 - exp + 13;
+                            if (shift >= 24) return static_cast<std::uint16_t>(sign << 15);
+                            std::uint32_t half = (m >> shift);
+                            return static_cast<std::uint16_t>((sign << 15) | half);
+                        }
+                        return static_cast<std::uint16_t>((sign << 15) | ((exp + 15) << 10) | (mant >> 13));
+                    };
+                    for (int c = 0; c < comps; ++c) {
+                        std::uint16_t h = toHalf(color[c]);
+                        std::memcpy(px + c * 2, &h, 2);
+                    }
+                };
+                auto encUN8  = [&](int comps) { bpp = static_cast<std::size_t>(comps); for (int c=0;c<comps;++c) px[c] = rgba[c]; };
+                auto encSN8  = [&](int comps) {
+                    bpp = static_cast<std::size_t>(comps);
+                    for (int c = 0; c < comps; ++c) {
+                        float v = std::clamp(color[c], -1.0f, 1.0f);
+                        std::int8_t s = static_cast<std::int8_t>(std::lround(v * 127.0f));
+                        std::memcpy(px + c, &s, 1);
+                    }
+                };
+                auto encUN16 = [&](int comps) {
+                    bpp = static_cast<std::size_t>(comps) * 2u;
+                    for (int c = 0; c < comps; ++c) {
+                        float v = std::clamp(color[c], 0.0f, 1.0f);
+                        std::uint16_t u = static_cast<std::uint16_t>(std::lround(v * 65535.0f));
+                        std::memcpy(px + c * 2, &u, 2);
+                    }
+                };
+                auto encSN16 = [&](int comps) {
+                    bpp = static_cast<std::size_t>(comps) * 2u;
+                    for (int c = 0; c < comps; ++c) {
+                        float v = std::clamp(color[c], -1.0f, 1.0f);
+                        std::int16_t s = static_cast<std::int16_t>(std::lround(v * 32767.0f));
+                        std::memcpy(px + c * 2, &s, 2);
+                    }
+                };
+                auto encUI = [&](int comps, int bytes) {
+                    bpp = static_cast<std::size_t>(comps) * static_cast<std::size_t>(bytes);
+                    for (int c = 0; c < comps; ++c) {
+                        // Clear-color floats carry the integer value directly for
+                        // integer textures (GL 4.6 §17.4.3.1 says clearColor on
+                        // integer FB is undefined → we still clear to 0 /
+                        // whatever; the common CTS pattern uses float clearColor
+                        // only for unorm/float FBs).
+                        std::uint64_t u = static_cast<std::uint64_t>(std::max(color[c], 0.0f));
+                        for (int b = 0; b < bytes; ++b) {
+                            px[c * bytes + b] = static_cast<std::uint8_t>((u >> (8 * b)) & 0xFFu);
+                        }
+                    }
+                };
+                auto encSI = [&](int comps, int bytes) {
+                    bpp = static_cast<std::size_t>(comps) * static_cast<std::size_t>(bytes);
+                    for (int c = 0; c < comps; ++c) {
+                        std::int64_t s = static_cast<std::int64_t>(color[c]);
+                        for (int b = 0; b < bytes; ++b) {
+                            px[c * bytes + b] = static_cast<std::uint8_t>((static_cast<std::uint64_t>(s) >> (8 * b)) & 0xFFu);
+                        }
+                    }
+                };
+                switch (pf) {
+                    case MTLPixelFormatR32Float:       encF32(1); break;
+                    case MTLPixelFormatRG32Float:      encF32(2); break;
+                    case MTLPixelFormatRGBA32Float:    encF32(4); break;
+                    case MTLPixelFormatR16Float:       encF16(1); break;
+                    case MTLPixelFormatRG16Float:      encF16(2); break;
+                    case MTLPixelFormatRGBA16Float:    encF16(4); break;
+                    case MTLPixelFormatR8Unorm:        encUN8(1); break;
+                    case MTLPixelFormatRG8Unorm:       encUN8(2); break;
+                    case MTLPixelFormatRGBA8Unorm:
+                    case MTLPixelFormatRGBA8Unorm_sRGB: encUN8(4); break;
+                    case MTLPixelFormatBGRA8Unorm:     {
+                        bpp = 4;
+                        px[0] = rgba[2]; px[1] = rgba[1]; px[2] = rgba[0]; px[3] = rgba[3];
+                        break;
+                    }
+                    case MTLPixelFormatR8Snorm:        encSN8(1); break;
+                    case MTLPixelFormatRG8Snorm:       encSN8(2); break;
+                    case MTLPixelFormatRGBA8Snorm:     encSN8(4); break;
+                    case MTLPixelFormatR16Unorm:       encUN16(1); break;
+                    case MTLPixelFormatRG16Unorm:      encUN16(2); break;
+                    case MTLPixelFormatRGBA16Unorm:    encUN16(4); break;
+                    case MTLPixelFormatR16Snorm:       encSN16(1); break;
+                    case MTLPixelFormatRG16Snorm:      encSN16(2); break;
+                    case MTLPixelFormatRGBA16Snorm:    encSN16(4); break;
+                    case MTLPixelFormatR8Uint:         encUI(1, 1); break;
+                    case MTLPixelFormatRG8Uint:        encUI(2, 1); break;
+                    case MTLPixelFormatRGBA8Uint:      encUI(4, 1); break;
+                    case MTLPixelFormatR8Sint:         encSI(1, 1); break;
+                    case MTLPixelFormatRG8Sint:        encSI(2, 1); break;
+                    case MTLPixelFormatRGBA8Sint:      encSI(4, 1); break;
+                    case MTLPixelFormatR16Uint:        encUI(1, 2); break;
+                    case MTLPixelFormatRG16Uint:       encUI(2, 2); break;
+                    case MTLPixelFormatRGBA16Uint:     encUI(4, 2); break;
+                    case MTLPixelFormatR16Sint:        encSI(1, 2); break;
+                    case MTLPixelFormatRG16Sint:       encSI(2, 2); break;
+                    case MTLPixelFormatRGBA16Sint:     encSI(4, 2); break;
+                    case MTLPixelFormatR32Uint:        encUI(1, 4); break;
+                    case MTLPixelFormatRG32Uint:       encUI(2, 4); break;
+                    case MTLPixelFormatRGBA32Uint:     encUI(4, 4); break;
+                    case MTLPixelFormatR32Sint:        encSI(1, 4); break;
+                    case MTLPixelFormatRG32Sint:       encSI(2, 4); break;
+                    case MTLPixelFormatRGBA32Sint:     encSI(4, 4); break;
+                    default:
+                        // Unsupported pixel format — the rgba8 shadow
+                        // already holds the cleared value, so readPixels
+                        // through the rgba8 fallback path still works
+                        // for this renderbuffer when Metal-tex readback
+                        // doesn't match any format above.
+                        return true;
+                }
+                if (bpp == 0) return true;
+                // Build a full-texture buffer by replicating the encoded
+                // pixel across every texel, then a single replaceRegion
+                // uploads the whole thing.
+                const NSUInteger width = static_cast<NSUInteger>(renderbuffer->width);
+                const NSUInteger height = static_cast<NSUInteger>(renderbuffer->height);
+                const NSUInteger bytesPerRow = width * static_cast<NSUInteger>(bpp);
+                std::vector<std::uint8_t> buf(bytesPerRow * height);
+                for (NSUInteger i = 0; i < buf.size(); i += bpp) {
+                    std::memcpy(buf.data() + i, px, bpp);
+                }
+                MTLRegion fullRegion = MTLRegionMake2D(0, 0, width, height);
+                [metalTex replaceRegion:fullRegion
+                            mipmapLevel:0
+                              withBytes:buf.data()
+                            bytesPerRow:bytesPerRow];
+            }
             return true;
         }
 
