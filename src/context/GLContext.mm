@@ -3513,6 +3513,7 @@ struct GLContext::Impl {
 
     GLenum framebufferStatus(const GLFramebufferObject& framebuffer) const {
         bool hasAttachment = false;
+        bool hasColorAttachment = false;
         bool hasDimensions = false;
         GLsizei width = 0;
         GLsizei height = 0;
@@ -3524,6 +3525,9 @@ struct GLContext::Impl {
                 continue;
             }
             hasAttachment = true;
+            if (isColorAttachment(attachmentPoint)) {
+                hasColorAttachment = true;
+            }
             if (!info.complete) {
                 return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
             }
@@ -3564,19 +3568,32 @@ struct GLContext::Impl {
             }
         }
 
-        for (GLenum buffer : framebuffer.drawBuffers) {
-            if (buffer == GL_NONE) {
-                continue;
+        // Per GL 4.6 §9.4.1 the DRAW_BUFFER / READ_BUFFER incomplete
+        // classifications apply only when the FB actually has color
+        // attachments. A depth-or-stencil-only FB is perfectly valid
+        // even though DRAW_BUFFER0 defaults to COLOR_ATTACHMENT0 (which
+        // is unattached) — real drivers silently treat writes to
+        // unattached draw buffers as discarded rather than reporting
+        // the FB incomplete. CTS framebuffers_clear with
+        // PrepareFramebuffer(GL_DEPTH_STENCIL, GL_DEPTH24_STENCIL8)
+        // specifically relies on this: it creates only the combined
+        // depth-stencil attachment and expects GL_FRAMEBUFFER_COMPLETE
+        // without ever touching glDrawBuffer.
+        if (hasColorAttachment) {
+            for (GLenum buffer : framebuffer.drawBuffers) {
+                if (buffer == GL_NONE) {
+                    continue;
+                }
+                const auto attachment = framebuffer.attachments.find(buffer);
+                if (attachment == framebuffer.attachments.end() || framebufferAttachmentInfo(attachment->second).present == false) {
+                    return GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER;
+                }
             }
-            const auto attachment = framebuffer.attachments.find(buffer);
-            if (attachment == framebuffer.attachments.end() || framebufferAttachmentInfo(attachment->second).present == false) {
-                return GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER;
-            }
-        }
-        if (framebuffer.readBuffer != GL_NONE) {
-            const auto attachment = framebuffer.attachments.find(framebuffer.readBuffer);
-            if (attachment == framebuffer.attachments.end() || framebufferAttachmentInfo(attachment->second).present == false) {
-                return GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER;
+            if (framebuffer.readBuffer != GL_NONE) {
+                const auto attachment = framebuffer.attachments.find(framebuffer.readBuffer);
+                if (attachment == framebuffer.attachments.end() || framebufferAttachmentInfo(attachment->second).present == false) {
+                    return GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER;
+                }
             }
         }
         return GL_FRAMEBUFFER_COMPLETE;
@@ -5265,7 +5282,15 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
              || format == GL_RGBA_INTEGER
              || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
         const bool isDepthReadback = (format == GL_DEPTH_COMPONENT && type == GL_FLOAT);
-        const bool isStencilReadback = (format == GL_STENCIL_INDEX && type == GL_UNSIGNED_BYTE);
+        // GL 4.6 Table 8.3: GL_STENCIL_INDEX accepts any scalar type
+        // (byte/short/int/float and their variants). Narrowing to only
+        // GL_UNSIGNED_BYTE fails CTS framebuffers_clear which reads
+        // stencil as GL_INT.
+        const bool isStencilReadback = (format == GL_STENCIL_INDEX
+            && (type == GL_UNSIGNED_BYTE || type == GL_BYTE
+                || type == GL_UNSIGNED_SHORT || type == GL_SHORT
+                || type == GL_UNSIGNED_INT || type == GL_INT
+                || type == GL_FLOAT || type == GL_HALF_FLOAT));
         if (!isColorReadback && !isDepthReadback && !isStencilReadback) {
             pushError(GL_INVALID_ENUM);
             return false;
@@ -16946,29 +16971,147 @@ bool GLContext::blitNamedFramebuffer(GLuint readFB, GLuint drawFB,
     return ok;
 }
 
+// DSA clear dispatch. `buffer` selects which attachment class (COLOR,
+// DEPTH, STENCIL, DEPTH_STENCIL); `drawbuffer` is an index into the FBO's
+// draw-buffer array when buffer==COLOR, otherwise must be 0 per GL 4.6
+// §17.4.3.1. `value` is a 4-element vector for color clears and a scalar
+// for DEPTH / STENCIL. Validation errors (INVALID_ENUM / INVALID_VALUE)
+// are pushed via pushError; the return value is the accept-clear bool.
 bool GLContext::clearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLfloat* value) {
     DSA_FB_CHECK(framebuffer)
-    (void)buffer; (void)drawbuffer; (void)value;
-    // Accepted — framebuffer clear deferred to draw encoder.
-    return true;
+    if (value == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLFramebufferObject* fbo = impl_->objects->framebuffers().get(framebuffer);
+    if (fbo == nullptr) {
+        // DSA_FB_CHECK already handles non-existent FB. framebuffer==0 is
+        // the default FB, which isn't currently backed as a GLFramebufferObject
+        // in our store.
+        return true;
+    }
+    if (buffer == GL_COLOR) {
+        if (drawbuffer < 0 || static_cast<std::size_t>(drawbuffer) >= fbo->drawBuffers.size()) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const GLenum attachmentEnum = fbo->drawBuffers[static_cast<std::size_t>(drawbuffer)];
+        if (attachmentEnum == GL_NONE) {
+            // No-op per spec (no error).
+            return true;
+        }
+        GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, attachmentEnum);
+        if (att == nullptr) return true;
+        return impl_->clearColorAttachment(*att, value);
+    }
+    if (buffer == GL_DEPTH) {
+        if (drawbuffer != 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, GL_DEPTH_ATTACHMENT);
+        if (att == nullptr) return true;
+        return impl_->clearDepthAttachment(*att, value[0]);
+    }
+    pushError(GL_INVALID_ENUM);
+    return false;
 }
 
 bool GLContext::clearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLint* value) {
     DSA_FB_CHECK(framebuffer)
-    (void)buffer; (void)drawbuffer; (void)value;
-    return true;
+    if (value == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLFramebufferObject* fbo = impl_->objects->framebuffers().get(framebuffer);
+    if (fbo == nullptr) return true;
+    if (buffer == GL_COLOR) {
+        if (drawbuffer < 0 || static_cast<std::size_t>(drawbuffer) >= fbo->drawBuffers.size()) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const GLenum attachmentEnum = fbo->drawBuffers[static_cast<std::size_t>(drawbuffer)];
+        if (attachmentEnum == GL_NONE) return true;
+        GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, attachmentEnum);
+        if (att == nullptr) return true;
+        // For signed-integer attachments, bit-pattern the int into the
+        // Metal texture's encoding. The float passthrough
+        // (clearColorAttachment) would truncate the value on norm formats;
+        // for SInt textures we want the raw bit width preserved.
+        float fv[4] = {
+            static_cast<float>(value[0]),
+            static_cast<float>(value[1]),
+            static_cast<float>(value[2]),
+            static_cast<float>(value[3]),
+        };
+        return impl_->clearColorAttachment(*att, fv);
+    }
+    if (buffer == GL_STENCIL) {
+        if (drawbuffer != 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, GL_STENCIL_ATTACHMENT);
+        if (att == nullptr) return true;
+        return impl_->clearStencilAttachment(*att, value[0]);
+    }
+    pushError(GL_INVALID_ENUM);
+    return false;
 }
 
 bool GLContext::clearNamedFramebufferuiv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLuint* value) {
     DSA_FB_CHECK(framebuffer)
-    (void)buffer; (void)drawbuffer; (void)value;
-    return true;
+    if (value == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (buffer != GL_COLOR) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    GLFramebufferObject* fbo = impl_->objects->framebuffers().get(framebuffer);
+    if (fbo == nullptr) return true;
+    if (drawbuffer < 0 || static_cast<std::size_t>(drawbuffer) >= fbo->drawBuffers.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLenum attachmentEnum = fbo->drawBuffers[static_cast<std::size_t>(drawbuffer)];
+    if (attachmentEnum == GL_NONE) return true;
+    GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, attachmentEnum);
+    if (att == nullptr) return true;
+    float fv[4] = {
+        static_cast<float>(value[0]),
+        static_cast<float>(value[1]),
+        static_cast<float>(value[2]),
+        static_cast<float>(value[3]),
+    };
+    return impl_->clearColorAttachment(*att, fv);
 }
 
 bool GLContext::clearNamedFramebufferfi(GLuint framebuffer, GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
     DSA_FB_CHECK(framebuffer)
-    (void)buffer; (void)drawbuffer; (void)depth; (void)stencil;
-    return true;
+    if (buffer != GL_DEPTH_STENCIL) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (drawbuffer != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLFramebufferObject* fbo = impl_->objects->framebuffers().get(framebuffer);
+    if (fbo == nullptr) return true;
+    // Resolve via either DEPTH_STENCIL_ATTACHMENT (combined) or the
+    // separate DEPTH/STENCIL attachment entries. framebufferAttachment
+    // already handles the combined fallback when the query is for
+    // DEPTH_ATTACHMENT / STENCIL_ATTACHMENT specifically.
+    bool ok = true;
+    if (GLFramebufferAttachment* depthAtt = impl_->framebufferAttachment(*fbo, GL_DEPTH_ATTACHMENT)) {
+        ok = impl_->clearDepthAttachment(*depthAtt, depth) && ok;
+    }
+    if (GLFramebufferAttachment* stencilAtt = impl_->framebufferAttachment(*fbo, GL_STENCIL_ATTACHMENT)) {
+        ok = impl_->clearStencilAttachment(*stencilAtt, stencil) && ok;
+    }
+    return ok;
 }
 
 bool GLContext::invalidateNamedFramebufferData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments) {
