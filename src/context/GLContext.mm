@@ -3569,29 +3569,38 @@ struct GLContext::Impl {
         }
 
         // Per GL 4.6 §9.4.1 the DRAW_BUFFER / READ_BUFFER incomplete
-        // classifications apply only when the FB actually has color
-        // attachments. A depth-or-stencil-only FB is perfectly valid
-        // even though DRAW_BUFFER0 defaults to COLOR_ATTACHMENT0 (which
-        // is unattached) — real drivers silently treat writes to
-        // unattached draw buffers as discarded rather than reporting
-        // the FB incomplete. CTS framebuffers_clear with
-        // PrepareFramebuffer(GL_DEPTH_STENCIL, GL_DEPTH24_STENCIL8)
-        // specifically relies on this: it creates only the combined
-        // depth-stencil attachment and expects GL_FRAMEBUFFER_COMPLETE
-        // without ever touching glDrawBuffer.
-        if (hasColorAttachment) {
-            for (GLenum buffer : framebuffer.drawBuffers) {
-                if (buffer == GL_NONE) {
-                    continue;
-                }
-                const auto attachment = framebuffer.attachments.find(buffer);
-                if (attachment == framebuffer.attachments.end() || framebufferAttachmentInfo(attachment->second).present == false) {
+        // classifications are interpreted leniently by real drivers:
+        // writes to a draw buffer that references an unattached point
+        // are treated as write-to-discard rather than incompleteness.
+        // CTS agrees on two fronts:
+        //   - framebuffers_clear creates a depth-only FB and expects
+        //     GL_FRAMEBUFFER_COMPLETE even though DRAW_BUFFER0 defaults
+        //     to COLOR_ATTACHMENT0 (which is unattached).
+        //   - framebuffers_renderbuffer_attachment attaches a single RB
+        //     at COLOR_ATTACHMENTn (n>0) and checks completeness; the
+        //     default drawBuffer still points at ATTACHMENT0 which is
+        //     unattached, but the FB should still be COMPLETE.
+        // The stricter INCOMPLETE_DRAW_BUFFER check only fires when an
+        // attachment point is explicitly referenced via glDrawBuffers
+        // AND the attachment itself is incomplete (not just missing).
+        (void)hasColorAttachment;
+        for (GLenum buffer : framebuffer.drawBuffers) {
+            if (buffer == GL_NONE) {
+                continue;
+            }
+            const auto attachment = framebuffer.attachments.find(buffer);
+            if (attachment != framebuffer.attachments.end()) {
+                const auto info = framebufferAttachmentInfo(attachment->second);
+                if (info.present && !info.complete) {
                     return GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER;
                 }
             }
-            if (framebuffer.readBuffer != GL_NONE) {
-                const auto attachment = framebuffer.attachments.find(framebuffer.readBuffer);
-                if (attachment == framebuffer.attachments.end() || framebufferAttachmentInfo(attachment->second).present == false) {
+        }
+        if (framebuffer.readBuffer != GL_NONE) {
+            const auto attachment = framebuffer.attachments.find(framebuffer.readBuffer);
+            if (attachment != framebuffer.attachments.end()) {
+                const auto info = framebufferAttachmentInfo(attachment->second);
+                if (info.present && !info.complete) {
                     return GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER;
                 }
             }
@@ -8102,7 +8111,79 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
         const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
         return false;
     }
-    // GL 4.6 §9.2.3 attachment validation: split shape/range so
+
+    const GLuint framebufferName = target == GL_READ_FRAMEBUFFER
+        ? impl_->state->boundReadFramebuffer()
+        : impl_->state->boundDrawFramebuffer();
+
+    // Default FB has its own attachment enum set per GL 4.6 §9.2.3:
+    //   {FRONT_LEFT, FRONT_RIGHT, BACK_LEFT, BACK_RIGHT, DEPTH, STENCIL}
+    // plus the standard COLOR_ATTACHMENTi / DEPTH_ATTACHMENT /
+    // STENCIL_ATTACHMENT / DEPTH_STENCIL_ATTACHMENT subset (COLOR_ATTACHMENT0
+    // aliases FRONT_LEFT per §9.2.9). framebuffers_get_attachment_parameters
+    // queries the default set.
+    const bool isDefaultFbAttachment = (attachment == GL_FRONT_LEFT
+        || attachment == GL_FRONT_RIGHT
+        || attachment == GL_BACK_LEFT
+        || attachment == GL_BACK_RIGHT
+        || attachment == GL_DEPTH
+        || attachment == GL_STENCIL);
+    if (framebufferName == 0) {
+        if (!isDefaultFbAttachment && !isFramebufferAttachmentEnum(attachment)) {
+            const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
+            return false;
+        }
+        // On the default FB all requested attachments behave as if
+        // implementation-provided: return GL_FRAMEBUFFER_DEFAULT for
+        // OBJECT_TYPE, 0 for NAME/LEVEL/LAYER, and fixed component sizes
+        // and component type for the color/depth/stencil queries so the
+        // DSA cross-check against the legacy path agrees.
+        const bool isColorAttachment = (attachment == GL_FRONT_LEFT
+            || attachment == GL_FRONT_RIGHT
+            || attachment == GL_BACK_LEFT
+            || attachment == GL_BACK_RIGHT
+            || (attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + 8));
+        const bool isDepthSlot = (attachment == GL_DEPTH || attachment == GL_DEPTH_ATTACHMENT);
+        const bool isStencilSlot = (attachment == GL_STENCIL || attachment == GL_STENCIL_ATTACHMENT);
+        switch (pname) {
+            case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+                params[0] = GL_FRAMEBUFFER_DEFAULT;
+                return true;
+            case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+                params[0] = 0;
+                return true;
+            case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+            case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+            case GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+                params[0] = isColorAttachment ? 8 : 0;
+                return true;
+            case GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+                params[0] = isColorAttachment ? 8 : 0;
+                return true;
+            case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+                params[0] = isDepthSlot ? 24 : 0;
+                return true;
+            case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+                params[0] = isStencilSlot ? 8 : 0;
+                return true;
+            case GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+                if (isColorAttachment) { params[0] = GL_UNSIGNED_NORMALIZED; return true; }
+                if (isDepthSlot)       { params[0] = GL_UNSIGNED_NORMALIZED; return true; }
+                if (isStencilSlot)     { params[0] = GL_UNSIGNED_INT;        return true; }
+                params[0] = GL_NONE;
+                return true;
+            case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+                params[0] = isColorAttachment ? GL_LINEAR : GL_NONE;
+                return true;
+            default:
+                const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
+                return false;
+        }
+    }
+
+    // User FB path. Attachment enum validation splits shape/range so
     // COLOR_ATTACHMENTm with m >= MAX_COLOR_ATTACHMENTS returns
     // INVALID_OPERATION rather than INVALID_ENUM (matches
     // framebuffers_get_attachment_parameter_errors).
@@ -8113,25 +8194,6 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
     if (isColorAttachmentEnum(attachment) && !isColorAttachment(attachment)) {
         const_cast<GLContext*>(this)->pushError(GL_INVALID_OPERATION);
         return false;
-    }
-
-    const GLuint framebufferName = target == GL_READ_FRAMEBUFFER
-        ? impl_->state->boundReadFramebuffer()
-        : impl_->state->boundDrawFramebuffer();
-    if (framebufferName == 0) {
-        switch (pname) {
-            case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
-                params[0] = GL_FRAMEBUFFER_DEFAULT;
-                return true;
-            case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
-            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
-            case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
-                params[0] = 0;
-                return true;
-            default:
-                const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
-                return false;
-        }
     }
 
     const GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
