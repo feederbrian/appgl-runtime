@@ -42,6 +42,7 @@ public:
     void setDepthRangeArray(GLuint first, GLsizei count, const GLdouble* v);
     bool queryFloatIndexed(GLenum target, GLuint index, GLfloat* data);
     bool queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data);
+    bool queryBooleanIndexed(GLenum target, GLuint index, GLboolean* data);
 
     // Tessellation state (GL 4.0).
     void setPatchParameteri(GLenum pname, GLint value);

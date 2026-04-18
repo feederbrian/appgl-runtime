@@ -633,9 +633,31 @@ static void APIENTRY glUniformMatrix4x3fv(GLint location, GLsizei count, GLboole
 }
 
 static void APIENTRY glGetBooleani_v(GLenum target, GLuint index, GLboolean *data) {
-    (void)target;
-    (void)index;
-    (void)data;
+    // Route through GLContext so indexed buffer-binding state
+    // (GL_SHADER_STORAGE_BUFFER_BINDING/START/SIZE at [i], and the
+    // UBO/XFB/ATOMIC counterparts) becomes a GLboolean value. Without
+    // this CTS shader_storage_buffer_object.basic-binding saw stale
+    // stack data in the caller's `GLboolean b` and failed the
+    // per-index consistency check.
+    auto* context = currentContextOrNull();
+    if (context == nullptr || data == nullptr) return;
+    (void)context->queryBooleanIndexed(target, index, data);
+}
+
+static void APIENTRY glGetFloati_v(GLenum target, GLuint index, GLfloat *data) {
+    // Indexed float query. Same rationale as glGetBooleani_v — the
+    // gl4c-variant of CheckIndexed uses all five scalar forms and
+    // compares each against the expected integer cast to that type,
+    // so unimplemented no-op here → uninitialized stack → failure.
+    auto* context = currentContextOrNull();
+    if (context == nullptr || data == nullptr) return;
+    (void)context->queryFloatIndexed(target, index, data);
+}
+
+static void APIENTRY glGetDoublei_v(GLenum target, GLuint index, GLdouble *data) {
+    auto* context = currentContextOrNull();
+    if (context == nullptr || data == nullptr) return;
+    (void)context->queryDoubleIndexed(target, index, data);
 }
 
 static void APIENTRY glEnablei(GLenum target, GLuint index) {
@@ -1888,6 +1910,8 @@ constexpr FunctionId kGroup8CoverageIds[] = {
     FunctionId::glUniformMatrix3x4fv,
     FunctionId::glUniformMatrix4x3fv,
     FunctionId::glGetBooleani_v,
+    FunctionId::glGetFloati_v,
+    FunctionId::glGetDoublei_v,
     FunctionId::glEnablei,
     FunctionId::glDisablei,
     FunctionId::glIsEnabledi,
@@ -2051,6 +2075,8 @@ void installGroup8Dispatch(GLDispatchTable& dispatch, CoverageStore& coverage) {
     dispatch.glUniformMatrix3x4fv = &glUniformMatrix3x4fv;
     dispatch.glUniformMatrix4x3fv = &glUniformMatrix4x3fv;
     dispatch.glGetBooleani_v = &glGetBooleani_v;
+    dispatch.glGetFloati_v = &glGetFloati_v;
+    dispatch.glGetDoublei_v = &glGetDoublei_v;
     dispatch.glEnablei = &glEnablei;
     dispatch.glDisablei = &glDisablei;
     dispatch.glIsEnabledi = &glIsEnabledi;
@@ -2210,6 +2236,8 @@ void installGroup8Dispatch(GLDispatchTable& dispatch, CoverageStore& coverage) {
     coverage.markImplemented(FunctionId::glUniformMatrix3x4fv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glUniformMatrix4x3fv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glGetBooleani_v, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
+    coverage.markImplemented(FunctionId::glGetFloati_v, "Indexed float query — routes through GLContext::queryFloatIndexed.");
+    coverage.markImplemented(FunctionId::glGetDoublei_v, "Indexed double query — routes through GLContext::queryDoubleIndexed.");
     coverage.markImplemented(FunctionId::glEnablei, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glDisablei, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glIsEnabledi, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");

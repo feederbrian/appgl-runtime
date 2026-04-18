@@ -87,6 +87,36 @@ bool isFormatTypeCompatible_extern(GLenum format, GLenum type);
 
 namespace {
 
+// Map GL_*_BUFFER_{BINDING,START,SIZE} pname pairs to the indexed-buffer
+// target they query and the field they extract. Used by all five
+// indexed-query paths (int/int64/float/double/boolean) — these pnames
+// don't live in GLCapabilities::indexedIntegerLimits_ because the
+// values come from per-frame glBindBufferBase/Range state, not
+// initialization caps. CTS's shader_storage_buffer_object.basic-binding
+// exercises all three of {BINDING, START, SIZE} × {UBO, SSBO, ATOMIC,
+// XFB} in all five scalar forms at every index.
+struct IndexedBufferPname {
+    GLenum target;
+    enum Field { Buffer, Offset, Size } field;
+};
+inline bool lookupIndexedBufferPname(GLenum pname, IndexedBufferPname& out) {
+    switch (pname) {
+        case GL_UNIFORM_BUFFER_BINDING:          out = {GL_UNIFORM_BUFFER, IndexedBufferPname::Buffer}; return true;
+        case GL_UNIFORM_BUFFER_START:            out = {GL_UNIFORM_BUFFER, IndexedBufferPname::Offset}; return true;
+        case GL_UNIFORM_BUFFER_SIZE:             out = {GL_UNIFORM_BUFFER, IndexedBufferPname::Size};   return true;
+        case GL_SHADER_STORAGE_BUFFER_BINDING:   out = {GL_SHADER_STORAGE_BUFFER, IndexedBufferPname::Buffer}; return true;
+        case GL_SHADER_STORAGE_BUFFER_START:     out = {GL_SHADER_STORAGE_BUFFER, IndexedBufferPname::Offset}; return true;
+        case GL_SHADER_STORAGE_BUFFER_SIZE:      out = {GL_SHADER_STORAGE_BUFFER, IndexedBufferPname::Size};   return true;
+        case GL_ATOMIC_COUNTER_BUFFER_BINDING:   out = {GL_ATOMIC_COUNTER_BUFFER, IndexedBufferPname::Buffer}; return true;
+        case GL_ATOMIC_COUNTER_BUFFER_START:     out = {GL_ATOMIC_COUNTER_BUFFER, IndexedBufferPname::Offset}; return true;
+        case GL_ATOMIC_COUNTER_BUFFER_SIZE:      out = {GL_ATOMIC_COUNTER_BUFFER, IndexedBufferPname::Size};   return true;
+        case GL_TRANSFORM_FEEDBACK_BUFFER_BINDING: out = {GL_TRANSFORM_FEEDBACK_BUFFER, IndexedBufferPname::Buffer}; return true;
+        case GL_TRANSFORM_FEEDBACK_BUFFER_START:   out = {GL_TRANSFORM_FEEDBACK_BUFFER, IndexedBufferPname::Offset}; return true;
+        case GL_TRANSFORM_FEEDBACK_BUFFER_SIZE:    out = {GL_TRANSFORM_FEEDBACK_BUFFER, IndexedBufferPname::Size};   return true;
+        default: return false;
+    }
+}
+
 // Phase 8X Group 4d follow-up¹¹ — §Tertiary chokepoint-bypass warning
 // helper for DSA / copy entry points that currently drop data.
 // Mirrors AppGLGroup8.cpp's `warnDataDroppedOnce`; duplicated here
@@ -5304,11 +5334,93 @@ void GLContext::setDepthRangeArray(GLuint first, GLsizei count, const GLdouble* 
 }
 
 bool GLContext::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) {
-    return impl_->state->queryFloatIndexed(target, index, data);
+    if (data == nullptr) return false;
+    // Array-state path (viewport[i], depthRange[i], etc.) lives on the state tracker.
+    if (impl_->state->queryFloatIndexed(target, index, data)) return true;
+    // Indexed buffer binding state: BINDING/START/SIZE cast to float per
+    // GL spec. Needed by CTS shader_storage_buffer_object.basic-binding
+    // which calls glGetFloati_v on the SSBO_BINDING/START/SIZE pnames.
+    IndexedBufferPname ibp;
+    if (lookupIndexedBufferPname(target, ibp)) {
+        const auto b = impl_->state->indexedBufferBinding(ibp.target, index);
+        switch (ibp.field) {
+            case IndexedBufferPname::Buffer: *data = static_cast<GLfloat>(b.buffer); break;
+            case IndexedBufferPname::Offset: *data = static_cast<GLfloat>(b.offset); break;
+            case IndexedBufferPname::Size:   *data = static_cast<GLfloat>(b.size);   break;
+        }
+        return true;
+    }
+    // Fall through to capability/integer path for scalar caps queried
+    // via the indexed API at index 0 (GL-spec leniency).
+    if (index == 0) {
+        GLfloat capValue = 0.0f;
+        if (impl_->capabilities != nullptr && impl_->capabilities->queryFloat(target, &capValue)) {
+            *data = capValue;
+            return true;
+        }
+        GLint intValue = 0;
+        if (impl_->state->queryInteger(target, &intValue)) {
+            *data = static_cast<GLfloat>(intValue);
+            return true;
+        }
+    }
+    return false;
 }
 
 bool GLContext::queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) {
-    return impl_->state->queryDoubleIndexed(target, index, data);
+    if (data == nullptr) return false;
+    if (impl_->state->queryDoubleIndexed(target, index, data)) return true;
+    IndexedBufferPname ibp;
+    if (lookupIndexedBufferPname(target, ibp)) {
+        const auto b = impl_->state->indexedBufferBinding(ibp.target, index);
+        switch (ibp.field) {
+            case IndexedBufferPname::Buffer: *data = static_cast<GLdouble>(b.buffer); break;
+            case IndexedBufferPname::Offset: *data = static_cast<GLdouble>(b.offset); break;
+            case IndexedBufferPname::Size:   *data = static_cast<GLdouble>(b.size);   break;
+        }
+        return true;
+    }
+    if (index == 0) {
+        GLint intValue = 0;
+        if (impl_->state->queryInteger(target, &intValue)) {
+            *data = static_cast<GLdouble>(intValue);
+            return true;
+        }
+        if (impl_->capabilities != nullptr && impl_->capabilities->queryInteger(target, &intValue)) {
+            *data = static_cast<GLdouble>(intValue);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool GLContext::queryBooleanIndexed(GLenum target, GLuint index, GLboolean* data) {
+    if (data == nullptr) return false;
+    IndexedBufferPname ibp;
+    if (lookupIndexedBufferPname(target, ibp)) {
+        const auto b = impl_->state->indexedBufferBinding(ibp.target, index);
+        GLint64 value = 0;
+        switch (ibp.field) {
+            case IndexedBufferPname::Buffer: value = b.buffer; break;
+            case IndexedBufferPname::Offset: value = b.offset; break;
+            case IndexedBufferPname::Size:   value = b.size;   break;
+        }
+        // GL spec: glGetBooleanv returns TRUE iff the integer value is non-zero.
+        *data = (value != 0) ? GL_TRUE : GL_FALSE;
+        return true;
+    }
+    if (index == 0) {
+        GLint intValue = 0;
+        if (impl_->state->queryInteger(target, &intValue)) {
+            *data = (intValue != 0) ? GL_TRUE : GL_FALSE;
+            return true;
+        }
+        if (impl_->capabilities != nullptr && impl_->capabilities->queryInteger(target, &intValue)) {
+            *data = (intValue != 0) ? GL_TRUE : GL_FALSE;
+            return true;
+        }
+    }
+    return false;
 }
 
 // --- Tessellation state (GL 4.0) ---
@@ -5869,6 +5981,18 @@ bool GLContext::queryIntegerIndexed(GLenum pname, GLuint index, GLint* data) {
         && impl_->capabilities->queryIntegerIndexed(pname, index, data)) {
         return true;
     }
+    // Indexed buffer-binding state: BINDING / START / SIZE for all four
+    // indexed targets. Lives on the state tracker, not the cap layer.
+    IndexedBufferPname ibp;
+    if (lookupIndexedBufferPname(pname, ibp)) {
+        const auto b = impl_->state->indexedBufferBinding(ibp.target, index);
+        switch (ibp.field) {
+            case IndexedBufferPname::Buffer: *data = static_cast<GLint>(b.buffer); break;
+            case IndexedBufferPname::Offset: *data = static_cast<GLint>(b.offset); break;
+            case IndexedBufferPname::Size:   *data = static_cast<GLint>(b.size);   break;
+        }
+        return true;
+    }
     // Fall back to the scalar state tracker path for state that has a
     // per-index representation (buffer binding stacks) — match the existing
     // queryInteger behaviour when no indexed handler exists.
@@ -5886,6 +6010,16 @@ bool GLContext::queryInteger64Indexed(GLenum pname, GLuint index, GLint64* data)
     }
     if (impl_->capabilities != nullptr
         && impl_->capabilities->queryInteger64Indexed(pname, index, data)) {
+        return true;
+    }
+    IndexedBufferPname ibp;
+    if (lookupIndexedBufferPname(pname, ibp)) {
+        const auto b = impl_->state->indexedBufferBinding(ibp.target, index);
+        switch (ibp.field) {
+            case IndexedBufferPname::Buffer: *data = static_cast<GLint64>(b.buffer); break;
+            case IndexedBufferPname::Offset: *data = static_cast<GLint64>(b.offset); break;
+            case IndexedBufferPname::Size:   *data = static_cast<GLint64>(b.size);   break;
+        }
         return true;
     }
     if (index == 0 && impl_->state->queryInteger64(pname, data)) {
@@ -5911,11 +6045,28 @@ bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
     if (impl_->state->queryFloat(pname, data)) {
         return true;
     }
-    if (impl_->capabilities == nullptr || !impl_->capabilities->queryFloat(pname, data)) {
-        pushError(GL_INVALID_ENUM);
-        return false;
+    if (impl_->capabilities != nullptr && impl_->capabilities->queryFloat(pname, data)) {
+        return true;
     }
-    return true;
+    // GL spec: glGetFloatv must return any integer state cast to float
+    // (e.g. GL_SHADER_STORAGE_BUFFER_BINDING). Fall through to the
+    // integer path and cast. Note: we do NOT call queryInteger() here
+    // because that pushes GL_INVALID_ENUM on miss — instead probe
+    // state + caps directly.
+    GLint intData[4] = {};
+    if (impl_->state->queryInteger(pname, intData)) {
+        *data = static_cast<GLfloat>(intData[0]);
+        return true;
+    }
+    if (impl_->capabilities != nullptr && impl_->capabilities->queryInteger(pname, intData)) {
+        *data = static_cast<GLfloat>(intData[0]);
+        if (pname == GL_MAX_VIEWPORT_DIMS) {
+            data[1] = static_cast<GLfloat>(intData[1]);
+        }
+        return true;
+    }
+    pushError(GL_INVALID_ENUM);
+    return false;
 }
 
 bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
@@ -5942,9 +6093,16 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
         }
         return true;
     }
-    // Fall through to integer caps — glGetDoublev must return all
-    // integer limits as double values per the GL spec.
+    // GL spec: glGetDoublev must return any integer state cast to
+    // double (e.g. GL_SHADER_STORAGE_BUFFER_BINDING). Probe the
+    // state-tracker integer path first, then caps. Don't call
+    // queryInteger() directly because it pushes GL_INVALID_ENUM
+    // on miss, which would fire before our own pushError below.
     GLint intData[4] = {};
+    if (impl_->state->queryInteger(pname, intData)) {
+        data[0] = static_cast<GLdouble>(intData[0]);
+        return true;
+    }
     if (impl_->capabilities != nullptr && impl_->capabilities->queryInteger(pname, intData)) {
         data[0] = static_cast<GLdouble>(intData[0]);
         if (pname == GL_MAX_VIEWPORT_DIMS) {
