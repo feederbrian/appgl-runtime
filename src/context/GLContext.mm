@@ -2001,6 +2001,15 @@ struct GLContext::Impl {
         descriptor.mipmapLevelCount = (object.target == GL_TEXTURE_1D) ? 1u : requestedLevels;
         descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         descriptor.storageMode = MTLStorageModeShared;
+        // Explicit tracked hazard mode. Default for shared storage is
+        // hazard-tracked, but being explicit ensures that VS-stage
+        // `texture.gather()` following a CPU `replaceRegion:` on the
+        // same texture serialises correctly. Under Untracked mode the
+        // VS-stage gather sometimes read stale data (the texture_gather
+        // ±12 flake cluster — CPU probe showed the texture bytes were
+        // correct in both pass and fail outcomes, so the race is
+        // strictly on the GPU-visibility side).
+        descriptor.hazardTrackingMode = MTLHazardTrackingModeTracked;
 
         id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
         if (texture == nil) {
