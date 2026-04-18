@@ -78,6 +78,14 @@ namespace appgl {
 // both the API-surface validators and the readPixels path in this TU).
 bool isFormatTypeCompatible_extern(GLenum format, GLenum type);
 
+// Global-ish gate for the CTS-sweep hot-path NSLog calls — the
+// per-program linkProgram / spirv-to-msl / reflect / pipeline-build
+// markers fire thousands of times in a sweep and Foundation's
+// `_NSLogv` path ends up dominating wall time (sampled, confirmed).
+// Set APPGL_LOG_LINK=1 in the environment to restore the verbose
+// output when debugging a specific program.
+static const bool kLogLink = (std::getenv("APPGL_LOG_LINK") != nullptr);
+
 namespace {
 
 // Phase 8X Group 4d follow-up¹¹ — §Tertiary chokepoint-bypass warning
@@ -2293,7 +2301,15 @@ struct GLContext::Impl {
                 shouldFireFingerprint = true;
             }
         }
-        if (shouldFireFingerprint) {
+        // Upload-fingerprint diagnostic gated behind env var. The log
+        // message is ~200 chars and fires once per unique (texName,
+        // dims) pair; CTS sweeps that allocate thousands of unique
+        // textures (texture_swizzle, packed_pixels) make this the
+        // single biggest NSLog cost. APPGL_LOG_TEXTURE_UPLOAD=1
+        // restores the original logging (for BAR Theory A/B chasing).
+        static const bool kLogUploadFingerprint =
+            (std::getenv("APPGL_LOG_TEXTURE_UPLOAD") != nullptr);
+        if (shouldFireFingerprint && kLogUploadFingerprint) {
             const auto& levelZero = baseLevel;
             const std::size_t byteCount = levelZero.rgba8.size();
             const std::uint8_t* bytes = levelZero.rgba8.data();
@@ -2993,10 +3009,12 @@ struct GLContext::Impl {
                 ? info.fragmentReflection->sampledTextures.size() : 0;
             const std::size_t vertCount = info.vertexReflection
                 ? info.vertexReflection->sampledTextures.size() : 0;
-            NSLog(@"[GL] resolveSamplerBindings first-call program=%u"
-                  @" fragment.sampledTextures=%zu vertex.sampledTextures=%zu"
-                  @" uniforms=%zu",
-                  info.program, fragCount, vertCount, program.uniforms.size());
+            if (kLogLink) {
+                NSLog(@"[GL] resolveSamplerBindings first-call program=%u"
+                      @" fragment.sampledTextures=%zu vertex.sampledTextures=%zu"
+                      @" uniforms=%zu",
+                      info.program, fragCount, vertCount, program.uniforms.size());
+            }
 
             // Phase 8X Group 4d follow-up¹² — §Secondary: dump the full
             // translated MSL source and uniform snapshot for this
@@ -10185,8 +10203,10 @@ bool GLContext::linkProgram(GLuint program) {
     // an explicit `fflush(stderr)` to survive the libunwind double-abort that
     // fw²² verification §5.3 documented (`fsync(STDERR_FILENO)` Spring-side
     // fix is separate and still deferred).
-    NSLog(@"[GL] linkProgram-begin program=%u", program);
-    fflush(stderr);
+    if (kLogLink) {
+        NSLog(@"[GL] linkProgram-begin program=%u", program);
+        fflush(stderr);
+    }
 
     programObject->uniforms.clear();
     programObject->attributes.clear();
@@ -10891,7 +10911,9 @@ bool GLContext::linkProgram(GLuint program) {
         // fires and the process SIGABRTs. Catch here so a throw becomes a
         // clean translation failure (MSL empty + diagnostic record) instead
         // of the fw²² Sky-program-28 crash signature.
-        NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s", program, stageName);
+        if (kLogLink) {
+            NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s", program, stageName);
+        }
         fflush(stderr);
         std::string mslLog;
         std::string msl;
@@ -10899,8 +10921,10 @@ bool GLContext::linkProgram(GLuint program) {
             msl = translator.spirvToMSL(
                 spirvData, spirvWords, bindings, &mslLog);
         } catch (const std::exception& e) {
-            NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW: %s",
-                  program, stageName, e.what());
+            if (kLogLink) {
+                NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW: %s",
+                      program, stageName, e.what());
+            }
             fflush(stderr);
             Runtime::shared().recordShaderTranslation({
                 stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
@@ -10909,8 +10933,10 @@ bool GLContext::linkProgram(GLuint program) {
             });
             return false;
         } catch (...) {
-            NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW unknown exception",
-                  program, stageName);
+            if (kLogLink) {
+                NSLog(@"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW unknown exception",
+                      program, stageName);
+            }
             fflush(stderr);
             Runtime::shared().recordShaderTranslation({
                 stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
@@ -10930,14 +10956,18 @@ bool GLContext::linkProgram(GLuint program) {
         // Phase 8X Group 4d follow-up²³ — sub-step marker + exception guard
         // around reflect. SPIRV-Cross reflection re-walks the SPIR-V and is
         // the other plausible throw site in the translator's critical path.
-        NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s", program, stageName);
+        if (kLogLink) {
+            NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s", program, stageName);
+        }
         fflush(stderr);
         try {
             reflectionOut = translator.reflect(
                 spirvData, spirvWords, bindings, nullptr);
         } catch (const std::exception& e) {
-            NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s THREW: %s",
-                  program, stageName, e.what());
+            if (kLogLink) {
+                NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s THREW: %s",
+                      program, stageName, e.what());
+            }
             fflush(stderr);
             Runtime::shared().recordShaderTranslation({
                 stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
@@ -10946,8 +10976,10 @@ bool GLContext::linkProgram(GLuint program) {
             });
             return false;
         } catch (...) {
-            NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s THREW unknown exception",
-                  program, stageName);
+            if (kLogLink) {
+                NSLog(@"[GL] linkProgram-step=reflect program=%u stage=%s THREW unknown exception",
+                      program, stageName);
+            }
             fflush(stderr);
             Runtime::shared().recordShaderTranslation({
                 stageTag, stageName, hash, linkVertexHash, linkFragmentHash,
@@ -11016,14 +11048,18 @@ bool GLContext::linkProgram(GLuint program) {
         // glslang cross-stage link. First candidate on the abort-site ladder
         // is glslang's TProgram::link re-entry, since that's the first heavy
         // operation inside this lambda.
-        NSLog(@"[GL] linkProgram-step=compile-glsl-program program=%u", program);
+        if (kLogLink) {
+            NSLog(@"[GL] linkProgram-step=compile-glsl-program program=%u", program);
+        }
         fflush(stderr);
         std::string linkErrorLog;
         LinkedProgramSpirv linked = translator.compileGLSLProgram(
             vsLinkSource, fsLinkSource, 330, &linkErrorLog);
-        NSLog(@"[GL] compileGLSLProgram: program=%u success=%d log=%s",
-              program, linked.linkSucceeded ? 1 : 0,
-              linkErrorLog.c_str());
+        if (kLogLink) {
+            NSLog(@"[GL] compileGLSLProgram: program=%u success=%d log=%s",
+                  program, linked.linkSucceeded ? 1 : 0,
+                  linkErrorLog.c_str());
+        }
         fflush(stderr);
         if (!linked.linkSucceeded) {
             // Record the cross-stage link failure so BAR can see why the
