@@ -9248,6 +9248,19 @@ void GLContext::pushError(GLenum error,
     // error class to render — empty-message records dropped on the floor
     // were unactionable for downstream consumers (BAR worker feedback,
     // Phase 8X Group 4c handoff §2c).
+    // Cap the error queue at 64 entries. The GL contract only guarantees
+    // that glGetError returns *an* error when one is pending — it doesn't
+    // promise the full FIFO history, and drivers vary. gluStateReset's
+    // drain loop (framework/opengl/gluStateReset.cpp:45) bounds itself
+    // at MAX_ERROR_COUNT (typically 10) and aborts the whole sweep if
+    // the queue can't be drained — an unbounded queue from a test with
+    // many errors (packed_pixels, cull_distance pipeline-build cascade,
+    // DSA texture_buffer_* sequence) overflows that cap and kills the
+    // run. 64 is comfortably above any single test's transient error
+    // footprint while staying within every CTS drain loop we've seen.
+    if (impl_->errors.size() >= 64) {
+        impl_->errors.pop_front();
+    }
     impl_->errors.push_back(error);
     Runtime::ErrorRecord record;
     const bool internalCallSite = functionName.empty();
