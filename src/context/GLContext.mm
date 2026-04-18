@@ -3525,8 +3525,20 @@ struct GLContext::Impl {
                                 bool isVertex, bool isFragment) {
             if (reflection == nullptr) return;
             for (const auto& ssbo : reflection->storageBuffers) {
+                // Resolve the effective GL binding: the shader's
+                // layout(binding=N) value UNLESS glShaderStorageBlockBinding
+                // has remapped it. resourceStorageBlocks holds the
+                // current remap in `.location` — seeded from reflection
+                // at link time, updated by shaderStorageBlockBinding().
+                GLuint effectiveBinding = ssbo.glBinding;
+                for (const auto& rb : program.resourceStorageBlocks) {
+                    if (rb.name == ssbo.name && rb.location >= 0) {
+                        effectiveBinding = static_cast<GLuint>(rb.location);
+                        break;
+                    }
+                }
                 const GLIndexedBufferBinding binding =
-                    state->indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, ssbo.glBinding);
+                    state->indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, effectiveBinding);
                 if (binding.buffer == 0) continue;
                 const GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
                 if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
@@ -11742,6 +11754,42 @@ bool GLContext::linkProgram(GLuint program) {
         mergeBlocks(programObject->vertexReflection.uniformBlocks, 0x01, vsSrc);    // vertex
         mergeBlocks(programObject->fragmentReflection.uniformBlocks, 0x02, fsSrc);  // fragment
 
+        // Build resourceStorageBlocks from each stage's SSBO reflection so
+        // glShaderStorageBlockBinding can look up a block by index and
+        // update its effective binding. Dedup by name (an SSBO declared
+        // in both VS and FS produces a single resource entry whose
+        // `referencedBy` bits OR the stage flags). `location` starts at
+        // the shader's `layout(binding=N)` value and is later overwritten
+        // by glShaderStorageBlockBinding(program, index, newBinding);
+        // resolveSSBOBindings consults this field as the authoritative
+        // effective binding for each draw/dispatch. Without this list
+        // glShaderStorageBlockBinding hits the range check in
+        // shaderStorageBlockBinding() and silently drops the remap.
+        auto mergeStorageBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
+                                       GLbitfield stageBit) {
+            for (const auto& block : blocks) {
+                auto existing = std::find_if(
+                    programObject->resourceStorageBlocks.begin(),
+                    programObject->resourceStorageBlocks.end(),
+                    [&](const GLProgramResourceEntry& e) { return e.name == block.name; });
+                if (existing != programObject->resourceStorageBlocks.end()) {
+                    existing->referencedBy |= stageBit;
+                    continue;
+                }
+                GLProgramResourceEntry entry;
+                entry.name = block.name;
+                entry.type = 0;
+                entry.location = static_cast<GLint>(block.glBinding);
+                entry.offset = static_cast<GLint>(block.byteSize);
+                entry.arraySize = 1;
+                entry.referencedBy = stageBit;
+                programObject->resourceStorageBlocks.push_back(std::move(entry));
+            }
+        };
+        mergeStorageBlocks(programObject->vertexReflection.storageBuffers, 0x01);
+        mergeStorageBlocks(programObject->fragmentReflection.storageBuffers, 0x02);
+        mergeStorageBlocks(programObject->computeReflection.storageBuffers, 0x20);
+
         // Post-pass: fix any remaining uint→bool member types that weren't
         // detected during the stage that first created the members. This
         // happens when a linked SPIR-V includes a block in both stages but
@@ -14766,8 +14814,18 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     // are simply omitted — Metal's unbound-slot behaviour is undefined
     // but won't crash, and the test will fail verification cleanly.
     for (const auto& ssbo : programObject->computeReflection.storageBuffers) {
+        // Effective binding may be remapped by glShaderStorageBlockBinding;
+        // consult resourceStorageBlocks (same pattern as the graphics
+        // path's resolveSSBOBindings).
+        GLuint effectiveBinding = ssbo.glBinding;
+        for (const auto& rb : programObject->resourceStorageBlocks) {
+            if (rb.name == ssbo.name && rb.location >= 0) {
+                effectiveBinding = static_cast<GLuint>(rb.location);
+                break;
+            }
+        }
         const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
-            GL_SHADER_STORAGE_BUFFER, ssbo.glBinding);
+            GL_SHADER_STORAGE_BUFFER, effectiveBinding);
         if (binding.buffer == 0) continue;
         const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
         if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;

@@ -1,0 +1,60 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index 4f38d01..f98f84d 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -11516,7 +11516,12 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+ 		exp += ", &";
+ 		exp += to_name(vec4_temporary_id ? vec4_temporary_id : result_id);
+ 		exp += ", ";
+-		exp += to_expression(op2);
++		// [appgl-local] to_unpacked_expression so op2 (the `desired`
++		// arg of atomic_compare_exchange_weak) applies the .x swizzle
++		// when the source value is stored in a std140-padded physical
++		// type. Same rationale as the op1/op2 patch on the non-
++		// compare_exchange path a few lines below.
++		exp += to_unpacked_expression(op2);
+ 
+ 		if (!use_native_image_atomic)
+ 		{
+@@ -11549,8 +11554,16 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+ 		else
+ 			scalar_expression = to_expression(result_id);
+ 
+-		statement(scalar_expression, " = ", to_expression(op1), ";");
+-		end_scope_decl(join("while (!", exp, " && ", scalar_expression, " == ", to_enclosed_expression(op1), ")"));
++		// [appgl-local] op1 may be a scalar stored in a padded physical
++		// type (e.g. `uint` laid out as `uint4` under std140 default-
++		// uniform rules). to_unpacked_expression applies the .x / cast
++		// required to read the scalar out of the packed slot, where
++		// to_expression would yield the full uint4 and trip MSL's
++		// strict `uint = uint4` assignment check. Same for the
++		// while-loop compare below.
++		const std::string op1_unpacked_expr = to_unpacked_expression(op1);
++		statement(scalar_expression, " = ", op1_unpacked_expr, ";");
++		end_scope_decl(join("while (!", exp, " && ", scalar_expression, " == ", enclose_expression(op1_unpacked_expr), ")"));
+ 		if (vec4_temporary_id)
+ 			statement(to_expression(result_id), " = ", scalar_expression, ";");
+ 
+@@ -11574,11 +11587,20 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id,
+ 			if (op1_is_literal)
+ 				exp += to_string(op1);
+ 			else
+-				exp += bitcast_expression(expected_type, op1);
++				// [appgl-local] to_unpacked_expression so a scalar
++				// stored in a std140-padded physical type (e.g.
++				// `uint` laid out as `uint4` under default-uniform
++				// rules) gets the `.x` swizzle before being passed
++				// as the `operand` argument of an MSL atomic. The
++				// upstream bitcast_expression wraps to_expression,
++				// which produces the full uint4 in that scenario,
++				// and MSL's atomic_exchange / fetch_add / ... only
++				// accept scalar operands.
++				exp += to_unpacked_expression(op1);
+ 		}
+ 
+ 		if (op2)
+-			exp += ", " + to_expression(op2);
++			exp += ", " + to_unpacked_expression(op2);
+ 
+ 		if (!use_native_image_atomic)
+ 		{

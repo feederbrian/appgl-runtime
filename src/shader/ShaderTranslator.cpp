@@ -730,6 +730,26 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 member.size = compiler.get_declared_struct_member_size(type, mi);
                 const auto& memberType = compiler.get_type(type.member_types[mi]);
                 member.type = spirvBaseTypeToGL(memberType);
+                // Detect array members. Default-uniform arrays need this
+                // so computeStageUniformLayout's arrayCount/arrayStride/
+                // glElementBytes path expands GL-packed values into
+                // std140-padded slots (e.g. `uniform uint g_uint_value[8]`
+                // writes 32 bytes from the GL side but the MSL struct
+                // lays it out as `uint4[8]` = 128 bytes). Mirrors the
+                // named-UBO block above; missing from the push-constant
+                // path caused the entire SSBO basic-atomic-* cluster to
+                // read stale zeros via uniform[i] accesses after the
+                // first element.
+                if (!memberType.array.empty() && memberType.array[0] > 0) {
+                    member.arraySize = memberType.array[0];
+                }
+                // Detect row_major decoration on matrix members (same
+                // as the named-UBO path) so matrix-row iteration in
+                // the packing loop uses the correct stride.
+                if (memberType.columns > 1) {
+                    member.isRowMajor = compiler.has_member_decoration(
+                        type.self, mi, spv::DecorationRowMajor);
+                }
                 rb.members.push_back(std::move(member));
             }
 
