@@ -3050,11 +3050,66 @@ private:
     }
 };
 
-MetalFrameGraph::MetalFrameGraph(void* layer, void* device, void* commandQueue)
-    : impl_(std::make_unique<Impl>(layer, device, commandQueue)) {
+// Programmatic Metal GPU-trace capture gated on APPGL_METAL_CAPTURE_PATH.
+// Opens a capture scope for the whole process lifetime and writes a
+// .gputrace document to the given path when the runtime shuts down.
+// Primary use: diagnosing the VS-stage texture_gather flake (pass/fail
+// captures of the same test case diffed in Xcode).
+//
+// Env vars required:
+//   APPGL_METAL_CAPTURE_PATH=/abs/path/to/capture.gputrace
+//   MTL_CAPTURE_ENABLED=1          (Metal's own opt-in — without this
+//                                   the capture manager refuses outside
+//                                   Xcode-launched processes)
+static bool g_captureActive = false;
+
+static void startMetalCaptureIfRequested(id<MTLDevice> device) {
+    if (device == nil || g_captureActive) return;
+    const char* path = std::getenv("APPGL_METAL_CAPTURE_PATH");
+    if (path == nullptr || *path == '\0') return;
+
+    MTLCaptureManager* mgr = [MTLCaptureManager sharedCaptureManager];
+    if (![mgr supportsDestination:MTLCaptureDestinationGPUTraceDocument]) {
+        NSLog(@"[GL] MTLCapture: GPU-trace-document destination unsupported "
+              @"(need MTL_CAPTURE_ENABLED=1 in env)");
+        return;
+    }
+
+    // Overwrite existing trace at the same path — re-running the test
+    // is the common case.
+    NSString* nsPath = [NSString stringWithUTF8String:path];
+    NSURL* url = [NSURL fileURLWithPath:nsPath];
+    [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+
+    MTLCaptureDescriptor* desc = [[MTLCaptureDescriptor alloc] init];
+    desc.captureObject = device;
+    desc.destination = MTLCaptureDestinationGPUTraceDocument;
+    desc.outputURL = url;
+
+    NSError* err = nil;
+    if ([mgr startCaptureWithDescriptor:desc error:&err]) {
+        g_captureActive = true;
+        NSLog(@"[GL] MTLCapture: started → %@", url.path);
+    } else {
+        NSLog(@"[GL] MTLCapture: startCapture failed: %@", err);
+    }
 }
 
-MetalFrameGraph::~MetalFrameGraph() = default;
+static void stopMetalCaptureIfActive() {
+    if (!g_captureActive) return;
+    [[MTLCaptureManager sharedCaptureManager] stopCapture];
+    g_captureActive = false;
+    NSLog(@"[GL] MTLCapture: stopped, trace flushed");
+}
+
+MetalFrameGraph::MetalFrameGraph(void* layer, void* device, void* commandQueue)
+    : impl_(std::make_unique<Impl>(layer, device, commandQueue)) {
+    startMetalCaptureIfRequested((__bridge id<MTLDevice>)device);
+}
+
+MetalFrameGraph::~MetalFrameGraph() {
+    stopMetalCaptureIfActive();
+}
 
 void MetalFrameGraph::resizeDrawable(GLsizei width, GLsizei height) {
     impl_->resize(width, height);
