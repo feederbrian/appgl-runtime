@@ -2519,7 +2519,14 @@ fragment float4 appgl_immediate_textured_fs(
             std::max<NSUInteger>(1, info.localX),
             std::max<NSUInteger>(1, info.localY),
             std::max<NSUInteger>(1, info.localZ));
-        [enc dispatchThreadgroups:threadGroups threadsPerThreadgroup:threadsPerGroup];
+        id<MTLBuffer> indirectBuf = (__bridge id<MTLBuffer>)info.indirectBuffer;
+        if (indirectBuf != nil) {
+            [enc dispatchThreadgroupsWithIndirectBuffer:indirectBuf
+                                   indirectBufferOffset:static_cast<NSUInteger>(info.indirectOffset)
+                                  threadsPerThreadgroup:threadsPerGroup];
+        } else {
+            [enc dispatchThreadgroups:threadGroups threadsPerThreadgroup:threadsPerGroup];
+        }
         [enc endEncoding];
         [cmdBuf commit];
         [cmdBuf waitUntilCompleted];

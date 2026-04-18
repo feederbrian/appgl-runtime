@@ -428,12 +428,19 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             compiler.add_msl_resource_binding(binding);
         }
 
-        // Remap shader-storage buffer objects (GL 4.3+). SSBO slots start
-        // at `storageBufferBase` and increment by GL binding index —
-        // matches the reflection path's assignment so draw/dispatch
-        // bind the same slot the shader reads from. Deterministic
-        // ordering ensures dispatch-time SSBO bindings line up across
-        // reflection and MSL emission.
+        // Remap shader-storage buffer objects (GL 4.3+). Assign Metal
+        // buffer slots SEQUENTIALLY from `storageBufferBase` in
+        // glBinding-sorted order — NOT `storageBufferBase + glBinding`
+        // directly. GL permits bindings up to GL_MAX_SHADER_STORAGE_
+        // BUFFER_BINDINGS (spec minimum 8), but Metal only exposes
+        // 31 total buffer slots per stage of which we've reserved a
+        // handful for SSBOs. Sequential allocation lets a shader
+        // declare `layout(binding=7) buffer X` without us overflowing
+        // Metal's slot budget — the reflection path mirrors this
+        // ordering so dispatch-time bindings line up.
+        //
+        // Covers KHR-GL46.compute_shader.one-work-group which
+        // iterates through bindings 0..7 over several sub-dispatches.
         {
             struct SSBORef { std::uint32_t glBinding; spirv_cross::Resource* res; };
             std::vector<SSBORef> sortedSSBOs;
@@ -445,12 +452,13 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             }
             std::sort(sortedSSBOs.begin(), sortedSSBOs.end(),
                       [](const SSBORef& a, const SSBORef& b) { return a.glBinding < b.glBinding; });
+            std::uint32_t nextSSBOSlot = bindings.storageBufferBase;
             for (auto& entry : sortedSSBOs) {
                 spirv_cross::MSLResourceBinding binding;
                 binding.stage = compiler.get_execution_model();
                 binding.desc_set = compiler.get_decoration(entry.res->id, spv::DecorationDescriptorSet);
                 binding.binding = entry.glBinding;
-                binding.msl_buffer = bindings.storageBufferBase + entry.glBinding;
+                binding.msl_buffer = nextSSBOSlot++;
                 compiler.add_msl_resource_binding(binding);
             }
         }
@@ -468,6 +476,60 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
 
         std::string msl = compiler.compile();
+
+        // SPIRV-Cross emits SSBO runtime arrays wrapped in a struct with
+        // size [1] (e.g. `struct Output { uint4 local_id[1]; };`). This
+        // reflects the GLSL source's unsized array declaration, but the
+        // [1] size then causes MSL's `device Output& g_out` reference
+        // semantics to bound all writes to index 0 — subsequent
+        // `g_out.local_id[k]` for k > 0 either drops or aliases on Apple
+        // GPUs. For compute shaders in CTS
+        // (compute_shader.one-work-group, shader_storage_buffer_object.*)
+        // every work-item writes a distinct slot past index 0, so the
+        // bound silently drops 15/16 writes.
+        //
+        // Post-process to rewrite `<type> <name>[1];` → `<type> <name>[65536];`
+        // inside SSBO-style structs. This enlarges the struct's apparent
+        // size past any realistic runtime-array footprint, so Metal
+        // treats the indexed write as in-bounds relative to the
+        // reference and the pointer arithmetic matches what the
+        // underlying MTLBuffer expects.
+        //
+        // We restrict the rewrite to arrays that appear as the LAST
+        // member of a struct (the only place GLSL allows unsized
+        // arrays) to avoid touching legitimately-sized `[1]` arrays
+        // elsewhere.
+        {
+            // Find each `struct ... { ... <type> <name>[1]; };` pattern
+            // and resize the trailing `[1]` to `[65536]`. We identify it
+            // by finding `;` at end of declaration that precedes `};`
+            // (struct close).
+            std::string out;
+            out.reserve(msl.size());
+            std::size_t pos = 0;
+            while (pos < msl.size()) {
+                // Look for "[1];" specifically — the MSL emits no spaces.
+                std::size_t idx = msl.find("[1];", pos);
+                if (idx == std::string::npos) {
+                    out.append(msl, pos, std::string::npos);
+                    break;
+                }
+                // Look ahead for `};` within a short window → trailing member.
+                std::size_t look = idx + 4;  // past "[1];"
+                // Skip whitespace.
+                while (look < msl.size() && (msl[look] == ' ' || msl[look] == '\n' || msl[look] == '\t')) ++look;
+                const bool isTrailingMember = (look < msl.size() && msl[look] == '}');
+                out.append(msl, pos, idx - pos);
+                if (isTrailingMember) {
+                    out.append("[65536];");
+                } else {
+                    out.append("[1];");
+                }
+                pos = idx + 4;
+            }
+            msl = std::move(out);
+        }
+
         if (log != nullptr) {
             *log = "ok";
         }
@@ -692,16 +754,26 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         }
 
         // Shader-storage buffer objects (GL 4.3+). Metal side: SSBOs live
-        // in buffer slots above UBOs. The `storageBufferBase` in the
-        // BindingMap is the first SSBO slot; each SSBO gets the next
-        // consecutive slot keyed on GL binding index so the shader-side
-        // `layout(binding=N)` maps to a specific Metal buffer slot.
-        // Used by glDispatchCompute's encoder-binding path and also by
-        // future vertex/fragment SSBO paths.
+        // in buffer slots above UBOs. Sequential allocation in glBinding-
+        // sorted order, matching spirvToMSL's MSLResourceBinding setup
+        // — a shader with `layout(binding=7)` gets Metal slot
+        // storageBufferBase+1 (2nd in sorted order) even though the GL
+        // binding is 7, because Metal only has 31 buffer slots total.
+        //
+        // First: collect and sort SSBOs by glBinding to match spirvToMSL.
+        std::vector<std::pair<std::uint32_t, spirv_cross::Resource*>> sortedSSBOs;
         for (auto& ssbo : resources.storage_buffers) {
+            sortedSSBOs.emplace_back(
+                compiler.get_decoration(ssbo.id, spv::DecorationBinding), &ssbo);
+        }
+        std::sort(sortedSSBOs.begin(), sortedSSBOs.end(),
+                  [](auto& a, auto& b) { return a.first < b.first; });
+        std::uint32_t nextSSBOSlot = bindings.storageBufferBase;
+        for (auto& ssboEntry : sortedSSBOs) {
+            auto& ssbo = *ssboEntry.second;
             ShaderReflection::ResourceBinding rb;
-            rb.glBinding = compiler.get_decoration(ssbo.id, spv::DecorationBinding);
-            rb.metalBinding = bindings.storageBufferBase + rb.glBinding;
+            rb.glBinding = ssboEntry.first;
+            rb.metalBinding = nextSSBOSlot++;
             const auto& ssboType = compiler.get_type(ssbo.base_type_id);
             const std::string typeName = compiler.get_name(ssboType.self);
             rb.name = typeName.empty() ? ssbo.name : typeName;

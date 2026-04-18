@@ -381,6 +381,13 @@ struct ComputeDispatchInfo {
     // location-based glUniform* updates.
     const void* computeUniformData = nullptr;
     std::size_t computeUniformSize = 0;
+
+    // Indirect dispatch: when indirectBuffer != nullptr the work-group
+    // counts (groupsX/Y/Z above) are ignored and Metal reads them from
+    // `indirectBuffer + indirectOffset` at dispatch time. Three GLuints
+    // in GPU-native order (matching GL_DISPATCH_INDIRECT_BUFFER layout).
+    void* indirectBuffer = nullptr;  // id<MTLBuffer>
+    std::size_t indirectOffset = 0;
 };
 
 class MetalFrameGraph {

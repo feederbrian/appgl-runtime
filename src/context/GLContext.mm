@@ -14629,12 +14629,92 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         return false;
     }
 
-    // Stub: indirect compute dispatch. The offset points into the currently
-    // bound GL_DISPATCH_INDIRECT_BUFFER. The dispatch parameters (group
-    // counts) need to be read from the Metal buffer at offset `indirect`
-    // and forwarded to dispatchThreadgroups. Left stubbed for now —
-    // landing the indirect-dispatch encoder is a discrete follow-up
-    // (one CTS test depends on it: compute_shader.dispatch-indirect).
+    // Route the indirect dispatch through the same encoder as the
+    // direct path. Metal reads the (groupsX, groupsY, groupsZ) triple
+    // out of the buffer at dispatch time via
+    // dispatchThreadgroupsWithIndirectBuffer — we just hand it the
+    // MTLBuffer + offset.
+    if (impl_->frameGraph == nullptr) {
+        return true;  // teardown — silently no-op, same as direct path
+    }
+    ComputeDispatchInfo info;
+    info.metalComputePipelineState = programObject->metalComputePipelineState;
+    info.localX = programObject->computeLocalSizeX;
+    info.localY = programObject->computeLocalSizeY;
+    info.localZ = programObject->computeLocalSizeZ;
+    info.indirectBuffer = dispatchBuf->metalBuffer;
+    info.indirectOffset = static_cast<std::size_t>(indirect);
+
+    // Same resource plumbing as the direct dispatch path: SSBOs, UBOs,
+    // default-uniform push constants, sampled textures. Keep in sync
+    // with GLContext::dispatchCompute.
+    for (const auto& ssbo : programObject->computeReflection.storageBuffers) {
+        const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
+            GL_SHADER_STORAGE_BUFFER, ssbo.glBinding);
+        if (binding.buffer == 0) continue;
+        const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+        ComputeDispatchInfo::BufferBinding bb;
+        bb.metalBuffer = bufObj->metalBuffer;
+        bb.offset = static_cast<std::size_t>(binding.offset);
+        bb.metalSlot = ssbo.metalBinding;
+        info.buffers.push_back(bb);
+    }
+    for (const auto& ubo : programObject->computeReflection.uniformBlocks) {
+        const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
+            GL_UNIFORM_BUFFER, ubo.glBinding);
+        if (binding.buffer == 0) continue;
+        const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+        ComputeDispatchInfo::BufferBinding bb;
+        bb.metalBuffer = bufObj->metalBuffer;
+        bb.offset = static_cast<std::size_t>(binding.offset);
+        bb.metalSlot = ubo.metalBinding;
+        info.buffers.push_back(bb);
+    }
+    thread_local std::vector<std::uint8_t> computeUniformScratchIndirect;
+    if (!programObject->uniformLayoutComputed
+        || programObject->computeUniformLayout.empty()) {
+        computeStageUniformLayout(programObject->computeUniformLayout,
+            programObject->computeReflection, programObject->uniforms);
+        programObject->uniformLayoutComputed = true;
+    }
+    pushSynthesizedMatrixUniforms(*programObject, impl_->matrixState);
+    buildStageUniformBuffer(computeUniformScratchIndirect,
+        programObject->computeReflection, programObject->uniformValues,
+        programObject->computeUniformLayout);
+    if (!computeUniformScratchIndirect.empty()) {
+        info.computeUniformData = computeUniformScratchIndirect.data();
+        info.computeUniformSize = computeUniformScratchIndirect.size();
+    }
+    for (const auto& samp : programObject->computeReflection.sampledTextures) {
+        GLint uniformLoc = -1;
+        for (const auto& u : programObject->uniforms) {
+            if (u.name == samp.name) { uniformLoc = u.location; break; }
+        }
+        if (uniformLoc < 0) continue;
+        auto uvIt = programObject->uniformValues.find(uniformLoc);
+        const GLuint unit = (uvIt != programObject->uniformValues.end() && !uvIt->second.ints.empty())
+            ? static_cast<GLuint>(uvIt->second.ints[0]) : 0;
+        GLenum discoveredTarget = GL_TEXTURE_2D;
+        GLuint texName = impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_2D);
+        if (texName == 0) {
+            texName = impl_->state->boundTextureOnUnitAny(unit, &discoveredTarget);
+        }
+        if (texName == 0) continue;
+        GLTextureObject* texObj = impl_->objects->textures().get(texName);
+        if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+        if (texObj->samplerDirty) {
+            impl_->rebuildTextureSamplerState(texName, *texObj);
+        }
+        ComputeDispatchInfo::TextureBinding tb;
+        tb.metalTexture = texObj->metalTexture;
+        tb.metalSamplerState = texObj->metalSampler;
+        tb.metalSlot = samp.metalBinding;
+        info.textures.push_back(tb);
+    }
+
+    (void)impl_->frameGraph->encodeComputeDispatch(info);
     return true;
 }
 
