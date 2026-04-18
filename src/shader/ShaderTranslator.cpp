@@ -139,8 +139,10 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxVaryingVectors = 32;
     r.maxCombinedImageUniforms = 48;
     r.maxCombinedShaderOutputResources = 48;
-    // Atomic counters.
-    r.maxAtomicCounterBindings = 1;
+    // Atomic counters. CTS gl4cLimitsTests.cpp:236 insists on at least
+    // 4 bindings; we advertise 8 to match GL_MAX_ATOMIC_COUNTER_BUFFER_
+    // BINDINGS in GLCapabilities.mm.
+    r.maxAtomicCounterBindings = 8;
     r.maxAtomicCounterBufferSize = 32;
     r.maxTessControlAtomicCounters = 0;
     r.maxTessEvaluationAtomicCounters = 0;

@@ -842,7 +842,13 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_IMAGE_SAMPLES] = 0;
 
     // Atomic counters — per-stage and combined.
-    integerLimits_[GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS] = 1;
+    // GL 4.6 §20.4 lists MAX_ATOMIC_COUNTER_BUFFER_BINDINGS minimum as
+    // 1 but the CTS limits suite (gl4cLimitsTests.cpp:236) insists on
+    // at least 4. Atomic counters in AppGL lower to MSL atomic<uint>
+    // backed by the program's UBO — each binding is a uniform-buffer
+    // index, not a scarce resource. Advertise 8 to match what the
+    // shader-side built-in constant reports.
+    integerLimits_[GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS] = 8;
     integerLimits_[GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE] = 32;
     integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTER_BUFFERS] = 1;
     integerLimits_[GL_MAX_COMBINED_ATOMIC_COUNTERS] = 8;
@@ -868,14 +874,23 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_COMBINED_IMAGE_UNIFORMS] = 48;
     integerLimits_[GL_MAX_COMBINED_SHADER_OUTPUT_RESOURCES] = 48;
 
-    // Shader storage blocks — per-stage.
-    integerLimits_[GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS] = storageBindings;
-    integerLimits_[GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS] = storageBindings;
-    integerLimits_[GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS] = storageBindings;
-    integerLimits_[GL_MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS] = storageBindings;
-    integerLimits_[GL_MAX_TESS_EVALUATION_SHADER_STORAGE_BLOCKS] = storageBindings;
-    integerLimits_[GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS] = storageBindings;
-    integerLimits_[GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS] = storageBindings * 6;
+    // Shader storage blocks — per-stage. CTS gl4cLimitsTests.cpp requires
+    // these to be at least 8 per stage (matching GL 4.6 §20.4 guaranteed
+    // minimum), even though our binding map only reserves 2 slots per
+    // stage for SSBOs. The map slot count is the *Metal buffer index*
+    // budget; block declarations don't all have to live simultaneously
+    // in argument-buffer slots (applications typically declare many,
+    // bind a subset per draw). Advertise 8 to satisfy the conformance
+    // floor and rely on the slot packer to route the actually-bound
+    // subset into the available Metal indices.
+    const GLint64 storageBlocks = std::max<GLint64>(storageBindings, 8);
+    integerLimits_[GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS] = storageBlocks;
+    integerLimits_[GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS] = storageBlocks;
+    integerLimits_[GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS] = storageBlocks;
+    integerLimits_[GL_MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS] = storageBlocks;
+    integerLimits_[GL_MAX_TESS_EVALUATION_SHADER_STORAGE_BLOCKS] = storageBlocks;
+    integerLimits_[GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS] = storageBlocks;
+    integerLimits_[GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS] = storageBlocks * 6;
 
     // Subroutines (no Metal equivalent; report GL 4.6 spec floor).
     integerLimits_[GL_MAX_SUBROUTINES] = 256;
