@@ -7731,6 +7731,35 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §9.2.8 attachability rules on texture target.
+    //
+    // - GL_TEXTURE_BUFFER is never attachable to a framebuffer (it's
+    //   backed by a buffer object, not image storage).
+    // - The single-layer variant (FramebufferTextureLayer, `layered ==
+    //   false` here) additionally rejects non-layered targets:
+    //   TEXTURE_RECTANGLE, TEXTURE_2D, TEXTURE_CUBE_MAP, etc. — layer
+    //   indexing is only meaningful for 3D / array / multisample-array.
+    // - TEXTURE_2D_MULTISAMPLE is accepted by FramebufferTexture
+    //   (layered attachment; sample-level layering) but not by
+    //   FramebufferTextureLayer because there's no "layer" concept on
+    //   single-sample MS (vs MS array). Matches the CTS
+    //   framebuffers_texture_attachment_errors sub-checks.
+    if (textureObject->target == GL_TEXTURE_BUFFER) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!layered) {
+        const bool isLayerAttachableTarget =
+            textureObject->target == GL_TEXTURE_3D ||
+            textureObject->target == GL_TEXTURE_2D_ARRAY ||
+            textureObject->target == GL_TEXTURE_1D_ARRAY ||
+            textureObject->target == GL_TEXTURE_CUBE_MAP_ARRAY ||
+            textureObject->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+        if (!isLayerAttachableTarget) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
     // Spec: GL_INVALID_VALUE if level is greater than the texture's effective max level.
     // Immutable textures pin a hard ceiling at desc.levels - 1; mutable textures fall back
     // on the highest defined level via desc.levels (initialized to 1 by texImage).
@@ -7945,7 +7974,50 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
 }
 
 bool GLContext::drawBuffer(GLenum buffer) {
-    return drawBuffers(1, &buffer);
+    // glDrawBuffer (singular) has looser rules than glDrawBuffers: on
+    // the default framebuffer it also accepts the combined tokens
+    // (FRONT, BACK, LEFT, RIGHT, FRONT_AND_BACK). Route through the
+    // single-buffer validator rather than forwarding to the plural
+    // form which would reject combined tokens.
+    const GLuint framebufferName = impl_->state->boundDrawFramebuffer();
+    if (framebufferName == 0) {
+        // Default framebuffer — accepts every §17.4.1 single-target
+        // token including the combined ones.
+        if (!isDefaultFramebufferBuffer(buffer)) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+        return impl_->state->setDrawBuffers(1, &buffer);
+    }
+    GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
+    if (framebuffer == nullptr || !framebuffer->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // User FBO — only NONE and COLOR_ATTACHMENTi tokens accepted.
+    // Combined tokens are a recognized enum shape but invalid here.
+    if (buffer == GL_NONE) {
+        framebuffer->drawBuffers.fill(GL_NONE);
+        framebuffer->drawBuffers[0] = GL_NONE;
+        return true;
+    }
+    if (isColorAttachmentEnum(buffer)) {
+        if (!isColorAttachment(buffer)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        framebuffer->drawBuffers.fill(GL_NONE);
+        framebuffer->drawBuffers[0] = buffer;
+        return true;
+    }
+    // `buffer` is a recognized default-FB token (FRONT, BACK, etc.) —
+    // not legal on a user FBO per §17.4.1.
+    if (isDefaultFramebufferBuffer(buffer)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    pushError(GL_INVALID_ENUM);
+    return false;
 }
 
 bool GLContext::drawBuffers(GLsizei count, const GLenum* buffers) {
@@ -7955,10 +8027,41 @@ bool GLContext::drawBuffers(GLsizei count, const GLenum* buffers) {
     }
     const GLuint framebufferName = impl_->state->boundDrawFramebuffer();
     if (framebufferName == 0) {
-        for (GLsizei index = 0; index < count; ++index) {
-            if (!isDefaultFramebufferBuffer(buffers[index])) {
+        // Default framebuffer, plural variant. Per GL 4.6 §17.4.1:
+        //  - Valid in bufs: NONE, FRONT_LEFT/RIGHT, BACK_LEFT/RIGHT,
+        //    BACK (must be alone).
+        //  - COLOR_ATTACHMENTi on default framebuffer → INVALID_OPERATION
+        //    (recognised enum shape but wrong FB kind).
+        //  - FRONT, FRONT_AND_BACK, LEFT, RIGHT, etc. → INVALID_ENUM
+        //    (accepted on singular glDrawBuffer but not the plural).
+        //  - Anything else → INVALID_ENUM.
+        for (GLsizei i = 0; i < count; ++i) {
+            const GLenum b = buffers[i];
+            const bool isSingleDefault = (b == GL_NONE || b == GL_FRONT_LEFT ||
+                b == GL_FRONT_RIGHT || b == GL_BACK_LEFT || b == GL_BACK_RIGHT ||
+                b == GL_BACK);
+            if (!isSingleDefault) {
+                if (isColorAttachmentEnum(b)) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
                 pushError(GL_INVALID_ENUM);
                 return false;
+            }
+            // BACK, if present, must be the sole entry.
+            if (b == GL_BACK && count != 1) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+        }
+        // Duplicate check: no non-NONE token may appear twice.
+        for (GLsizei i = 0; i < count; ++i) {
+            if (buffers[i] == GL_NONE) continue;
+            for (GLsizei j = i + 1; j < count; ++j) {
+                if (buffers[j] == buffers[i]) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
             }
         }
         return impl_->state->setDrawBuffers(count, buffers);
@@ -7969,12 +8072,59 @@ bool GLContext::drawBuffers(GLsizei count, const GLenum* buffers) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    framebuffer->drawBuffers.fill(GL_NONE);
-    for (GLsizei index = 0; index < count; ++index) {
-        if (buffers[index] != GL_NONE && !isFramebufferColorBuffer(buffers[index])) {
+    // User FBO (plural). CTS distinguishes two classes of invalid
+    // tokens per GL 4.6 §17.4.1's prose and examples:
+    //   - Combined tokens: FRONT, LEFT, RIGHT, FRONT_AND_BACK — never
+    //     valid in the plural form on ANY framebuffer → INVALID_ENUM.
+    //   - Single-target default-FB tokens: FRONT_LEFT, FRONT_RIGHT,
+    //     BACK_LEFT, BACK_RIGHT, BACK — valid for default FB but wrong
+    //     for a user FBO → INVALID_OPERATION.
+    //   - COLOR_ATTACHMENTi with i >= MAX → INVALID_OPERATION.
+    //   - Unrecognised enum → INVALID_OPERATION (matches the test's
+    //     "anything other than NONE or COLOR_ATTACHMENTn" clause).
+    auto isCombinedDefaultFBToken = [](GLenum b) {
+        return b == GL_FRONT || b == GL_LEFT || b == GL_RIGHT ||
+               b == GL_FRONT_AND_BACK;
+    };
+    auto isSingleDefaultFBToken = [](GLenum b) {
+        return b == GL_FRONT_LEFT || b == GL_FRONT_RIGHT ||
+               b == GL_BACK_LEFT  || b == GL_BACK_RIGHT  || b == GL_BACK;
+    };
+    for (GLsizei i = 0; i < count; ++i) {
+        const GLenum b = buffers[i];
+        if (b == GL_NONE) continue;
+        if (isColorAttachmentEnum(b)) {
+            if (!isColorAttachment(b)) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            continue;
+        }
+        if (isCombinedDefaultFBToken(b)) {
             pushError(GL_INVALID_ENUM);
             return false;
         }
+        if (isSingleDefaultFBToken(b)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // Truly unrecognised enum (e.g. GL_TRUE = 1, random garbage):
+        // INVALID_ENUM per §17.4.1's "not an accepted value".
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    // Duplicate check.
+    for (GLsizei i = 0; i < count; ++i) {
+        if (buffers[i] == GL_NONE) continue;
+        for (GLsizei j = i + 1; j < count; ++j) {
+            if (buffers[j] == buffers[i]) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+        }
+    }
+    framebuffer->drawBuffers.fill(GL_NONE);
+    for (GLsizei index = 0; index < count; ++index) {
         framebuffer->drawBuffers[static_cast<std::size_t>(index)] = buffers[index];
     }
     return true;
@@ -7983,24 +8133,44 @@ bool GLContext::drawBuffers(GLsizei count, const GLenum* buffers) {
 bool GLContext::readBuffer(GLenum buffer) {
     const GLuint framebufferName = impl_->state->boundReadFramebuffer();
     if (framebufferName == 0) {
-        if (!isDefaultFramebufferBuffer(buffer)) {
-            pushError(GL_INVALID_ENUM);
+        // Default framebuffer: accepts §17.4.1 default-FB tokens plus
+        // NONE. Anything else — including COLOR_ATTACHMENTi — is
+        // INVALID_OPERATION when the enum is recognised but
+        // inappropriate for the target, INVALID_ENUM when unrecognised.
+        if (isDefaultFramebufferBuffer(buffer)) {
+            return impl_->state->setReadBuffer(buffer);
+        }
+        if (isColorAttachmentEnum(buffer)) {
+            pushError(GL_INVALID_OPERATION);
             return false;
         }
-        return impl_->state->setReadBuffer(buffer);
+        pushError(GL_INVALID_ENUM);
+        return false;
     }
-
     GLFramebufferObject* framebuffer = impl_->objects->framebuffers().get(framebufferName);
     if (framebuffer == nullptr || !framebuffer->instantiated) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (buffer != GL_NONE && !isFramebufferColorBuffer(buffer)) {
-        pushError(GL_INVALID_ENUM);
+    // User FBO: NONE or COLOR_ATTACHMENTi (where i < MAX).
+    if (buffer == GL_NONE) {
+        framebuffer->readBuffer = buffer;
+        return true;
+    }
+    if (isColorAttachmentEnum(buffer)) {
+        if (!isColorAttachment(buffer)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        framebuffer->readBuffer = buffer;
+        return true;
+    }
+    if (isDefaultFramebufferBuffer(buffer)) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
-    framebuffer->readBuffer = buffer;
-    return true;
+    pushError(GL_INVALID_ENUM);
+    return false;
 }
 
 bool GLContext::genSamplers(GLsizei count, GLuint* samplers) {
