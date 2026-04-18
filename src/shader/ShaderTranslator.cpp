@@ -102,6 +102,63 @@ GLenum spirvBaseTypeToGL(const spirv_cross::SPIRType& type) {
     return GL_FLOAT;
 }
 
+// Clone glslang's default TBuiltInResource and overwrite the limits
+// that the CTS KHR-GL46.limits tests cross-check between
+// glGetIntegerv(GL_MAX_*) on the CPU side and the GLSL built-in
+// constants (gl_MaxVertexAttribs, gl_MaxDrawBuffers, …) that glslang
+// materialises inside compiled shaders. Without matching values the
+// tests flag the mismatch and fail.
+//
+// Values must match GLCapabilities.mm's `integerLimits_` table. Kept
+// in lockstep manually — the per-category tests will surface any drift.
+static TBuiltInResource makeAppGLBuiltInResources() {
+    TBuiltInResource r = *GetDefaultResources();
+    // Vertex stage.
+    r.maxVertexAttribs = 32;
+    r.maxVertexUniformComponents = 4096;
+    r.maxVertexUniformVectors = 1024;        // components / 4
+    r.maxVertexTextureImageUnits = 16;
+    r.maxVertexOutputComponents = 128;
+    r.maxVertexOutputVectors = 32;
+    r.maxVertexAtomicCounters = 0;
+    r.maxVertexAtomicCounterBuffers = 0;
+    r.maxVertexImageUniforms = 8;
+    // Fragment stage.
+    r.maxFragmentUniformComponents = 4096;
+    r.maxFragmentUniformVectors = 1024;
+    r.maxFragmentInputComponents = 128;
+    r.maxFragmentInputVectors = 32;
+    r.maxFragmentAtomicCounters = 8;
+    r.maxFragmentAtomicCounterBuffers = 1;
+    r.maxFragmentImageUniforms = 8;
+    // Combined / pipeline.
+    r.maxTextureImageUnits = 16;
+    r.maxCombinedTextureImageUnits = 80;
+    r.maxDrawBuffers = 8;
+    r.maxVaryingComponents = 128;
+    r.maxVaryingVectors = 32;
+    r.maxCombinedImageUniforms = 48;
+    r.maxCombinedShaderOutputResources = 48;
+    // Atomic counters.
+    r.maxAtomicCounterBindings = 1;
+    r.maxAtomicCounterBufferSize = 32;
+    r.maxTessControlAtomicCounters = 0;
+    r.maxTessEvaluationAtomicCounters = 0;
+    r.maxGeometryAtomicCounters = 0;
+    r.maxCombinedAtomicCounters = 8;
+    r.maxCombinedAtomicCounterBuffers = 1;
+    // Image uniforms per tess / geometry.
+    r.maxTessControlImageUniforms = 8;
+    r.maxTessEvaluationImageUniforms = 8;
+    r.maxGeometryImageUniforms = 8;
+    // Compute stage.
+    r.maxComputeAtomicCounterBuffers = 8;
+    r.maxComputeAtomicCounters = 8;
+    r.maxComputeImageUniforms = 8;
+    r.maxComputeTextureImageUnits = 16;
+    return r;
+}
+
 }  // namespace
 
 std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source, GLenum stage, int version, std::string* log) const {
@@ -127,7 +184,11 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     shader.setGlobalUniformSet(0);
     shader.setGlobalUniformBinding(0);
 
-    const TBuiltInResource* resources = GetDefaultResources();
+    // AppGL built-in-resource overrides: match the CPU-side caps
+    // reported by GLCapabilities.mm so CTS limits tests (which
+    // compare GLSL gl_Max* constants against glGetIntegerv) pass.
+    static const TBuiltInResource appglResources = makeAppGLBuiltInResources();
+    const TBuiltInResource* resources = &appglResources;
     EShMessages messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
 
     if (!shader.parse(resources, version, false, messages)) {
@@ -218,7 +279,11 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
     fsShader.setGlobalUniformBlockName("_DefaultUniforms");
     fsShader.setGlobalUniformSet(0);
     fsShader.setGlobalUniformBinding(0);
-    const TBuiltInResource* resources = GetDefaultResources();
+    // AppGL built-in-resource overrides: match the CPU-side caps
+    // reported by GLCapabilities.mm so CTS limits tests (which
+    // compare GLSL gl_Max* constants against glGetIntegerv) pass.
+    static const TBuiltInResource appglResources = makeAppGLBuiltInResources();
+    const TBuiltInResource* resources = &appglResources;
     EShMessages messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
 
     if (!vsShader.parse(resources, version, false, messages)) {
