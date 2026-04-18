@@ -26,6 +26,11 @@
 
 namespace appgl {
 
+// CTS-sweep hot-path NSLog gate. See GLContext.mm for the matching
+// file-scope bool. Enabled via APPGL_LOG_LINK=1.
+static const bool kLogLink = (std::getenv("APPGL_LOG_LINK") != nullptr);
+
+
 // Phase 8X Group 4d follow-up¹⁴ — shared Metal translation helpers.
 //
 // These replace the inline `glTypeToMTLFormat` lambda that used to
@@ -1021,7 +1026,7 @@ struct MetalFrameGraph::Impl {
             // (program, pipelineCacheKey), not program alone. See the
             // member declaration of `loggedPipelineBuildPrograms` for
             // the rationale (was hiding the `entries=5` cache growth).
-            if (info.program != 0 &&
+            if (kLogLink && info.program != 0 &&
                 loggedPipelineBuildPrograms.insert({info.program, pipelineCacheKey}).second) {
                 auto vertexFormatName = [](MTLVertexFormat f) -> const char* {
                     switch (f) {
@@ -1118,11 +1123,13 @@ struct MetalFrameGraph::Impl {
                     }
                 };
 
-                NSLog(@"[GL] pipeline-build first-build program=%u"
-                      @" colorFormat=0x%lX depthFormat=0x%lX",
-                      info.program,
-                      (unsigned long)desc.colorAttachments[0].pixelFormat,
-                      (unsigned long)desc.depthAttachmentPixelFormat);
+                if (kLogLink) {
+                    NSLog(@"[GL] pipeline-build first-build program=%u"
+                          @" colorFormat=0x%lX depthFormat=0x%lX",
+                          info.program,
+                          (unsigned long)desc.colorAttachments[0].pixelFormat,
+                          (unsigned long)desc.depthAttachmentPixelFormat);
+                }
 
                 // Vertex descriptor: walk attributes 0..15 and layouts
                 // 0..15. A slot with MTLVertexFormatInvalid is either
@@ -1201,7 +1208,9 @@ struct MetalFrameGraph::Impl {
                       (unsigned long)ca.alphaBlendOperation);
                 NSLog(@"[GL]   colorAttachment[0].writeMask=0x%lX (all=0xF)",
                       (unsigned long)ca.writeMask);
-                NSLog(@"[GL] pipeline-build first-build program=%u END", info.program);
+                if (kLogLink) {
+                    NSLog(@"[GL] pipeline-build first-build program=%u END", info.program);
+                }
             }
 
             NSError* error = nil;
@@ -1560,7 +1569,7 @@ struct MetalFrameGraph::Impl {
         // GLContext). Single-threaded GL context means no mutex is
         // needed. See `loggedBindingPrograms` on Impl for the
         // multi-context rationale.
-        {
+        if (kLogLink) {
             if (info.program != 0 &&
                 loggedBindingPrograms.insert(info.program).second) {
                 NSLog(@"[GL] encodeTranslatedDraw first-draw program=%u"
