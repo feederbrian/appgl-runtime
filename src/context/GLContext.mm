@@ -15326,20 +15326,64 @@ bool GLContext::getProgramInterfaceiv(GLuint program, GLenum programInterface, G
         return false;
     }
     GLProgramObject* prog = impl_->objects->programs().get(program);
-    if (prog == nullptr || !prog->linked) {
-        pushError(GL_INVALID_OPERATION);
+    if (prog == nullptr) {
+        pushError(GL_INVALID_VALUE);
         return false;
     }
-    const auto* table = getResourceTable(*prog, programInterface);
-    if (table == nullptr) {
+    // CTS program_interface_query.empty-shaders constructs a program
+    // with no shaders attached, never links it, and queries every
+    // interface — expecting ACTIVE_RESOURCES=0 and MAX_NAME_LENGTH=0
+    // without an error. A strict GL_INVALID_OPERATION on unlinked
+    // programs makes 39/43 of program_interface_query fail; instead
+    // the empty-program path returns 0 for numeric pnames and still
+    // rejects unknown pnames with INVALID_ENUM. Linked programs go
+    // through the normal resource-table path.
+    const bool isLinked = prog->linked;
+    const auto* table = isLinked ? getResourceTable(*prog, programInterface) : nullptr;
+    // Validate programInterface enum even if not linked (unknown
+    // interfaces should still raise INVALID_ENUM). The accepted set
+    // mirrors getResourceTable.
+    if (!isLinked) {
+        switch (programInterface) {
+            case GL_UNIFORM:
+            case GL_UNIFORM_BLOCK:
+            case GL_PROGRAM_INPUT:
+            case GL_PROGRAM_OUTPUT:
+            case GL_SHADER_STORAGE_BLOCK:
+            case GL_ATOMIC_COUNTER_BUFFER:
+            case GL_BUFFER_VARIABLE:
+            case GL_TRANSFORM_FEEDBACK_VARYING:
+            case GL_TRANSFORM_FEEDBACK_BUFFER:
+            case GL_VERTEX_SUBROUTINE:
+            case GL_TESS_CONTROL_SUBROUTINE:
+            case GL_TESS_EVALUATION_SUBROUTINE:
+            case GL_GEOMETRY_SUBROUTINE:
+            case GL_FRAGMENT_SUBROUTINE:
+            case GL_COMPUTE_SUBROUTINE:
+            case GL_VERTEX_SUBROUTINE_UNIFORM:
+            case GL_TESS_CONTROL_SUBROUTINE_UNIFORM:
+            case GL_TESS_EVALUATION_SUBROUTINE_UNIFORM:
+            case GL_GEOMETRY_SUBROUTINE_UNIFORM:
+            case GL_FRAGMENT_SUBROUTINE_UNIFORM:
+            case GL_COMPUTE_SUBROUTINE_UNIFORM:
+                break;
+            default:
+                pushError(GL_INVALID_ENUM);
+                return false;
+        }
+    } else if (table == nullptr) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
     switch (pname) {
         case GL_ACTIVE_RESOURCES:
-            *params = static_cast<GLint>(table->size());
+            *params = isLinked ? static_cast<GLint>(table->size()) : 0;
             return true;
         case GL_MAX_NAME_LENGTH: {
+            if (!isLinked) {
+                *params = 0;
+                return true;
+            }
             GLint maxLen = 0;
             for (const auto& entry : *table) {
                 GLint len = static_cast<GLint>(entry.name.size() + 1);
@@ -15440,8 +15484,15 @@ GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterfac
         return GL_INVALID_INDEX;
     }
     GLProgramObject* prog = impl_->objects->programs().get(program);
-    if (prog == nullptr || !prog->linked) {
-        pushError(GL_INVALID_OPERATION);
+    if (prog == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return GL_INVALID_INDEX;
+    }
+    // Unlinked program: silently return INVALID_INDEX (no match).
+    // CTS empty-shaders queries resource indices on an unlinked
+    // program and asserts no error is raised; strict
+    // INVALID_OPERATION makes that subcase fail.
+    if (!prog->linked) {
         return GL_INVALID_INDEX;
     }
     const auto* table = getResourceTable(*prog, programInterface);
