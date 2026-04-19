@@ -482,3 +482,31 @@ rebuild catches the drift at compile time.
   shader-diagnostic tooling can still distinguish "program
   has a GS the emulator rejects" from "program runs on the
   emulator".
+- **2026-04-19** — **Step 6** (opcode / ext-inst coverage
+  expansion): proactive scale-out for the full
+  `constant_expressions.*_geometry` matrix (+224 tests) —
+  most tests hit functions that weren't in the MVP's
+  Radians/Sin/Cos/FAbs set.
+    - **SPIR-V opcodes** added to the primary switch
+      (and the `isSupportedGsOpcode` allowlist): `OpFNegate`,
+      `OpDot`, `OpVectorTimesScalar`, `OpVectorShuffle`.
+      `OpDot` is what GLSL `dot()` compiles to — it's a core
+      opcode, not a GLSL.std.450 ext-inst.
+    - **GLSL.std.450** added to `evalExtInst`: `Round`,
+      `RoundEven`, `Trunc`, `FSign`, `Floor`, `Ceil`,
+      `Fract`, `Sinh`, `Cosh`, `Tanh`, `Asinh`, `Acosh`,
+      `Atanh`, `Atan2`, `Pow` (was partially covered),
+      `FMin`, `FMax`, `FClamp`, `FMix`, `Step`, `SmoothStep`,
+      `Length`, `Distance`, `Normalize`, `Cross`, `Reflect`.
+      Unary / binary / ternary lambdas let new ops be a
+      one-liner.
+    - Stub namespace (`!APPGL_HAS_SHADER_COMPILER`) updated
+      with matching enum values so the emulator still builds
+      when the shader-compiler backend isn't vendored.
+  Expected coverage: every `constant_expressions.basic_*`
+  function × `float`/`vec2`/`vec3`/`vec4` in the geometry
+  stage, which is where the +224 come from. Matrix-output /
+  `int`-vector varyings land in a follow-up cycle — the MSL
+  synthesis currently assumes `float`-widthed output
+  varyings, so an `ivec4` output would need a type-aware
+  branch in `synthesisePassThroughVertexMSL`.

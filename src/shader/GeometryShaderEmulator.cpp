@@ -34,6 +34,9 @@ namespace spv {
         OpFunction = 54, OpFunctionEnd = 56,
         OpVariable = 59, OpLoad = 61, OpStore = 62, OpAccessChain = 65,
         OpCompositeExtract = 81, OpCompositeConstruct = 80,
+        OpVectorShuffle = 79,
+        OpVectorTimesScalar = 142, OpDot = 148,
+        OpFNegate = 127,
         OpFAdd = 129, OpFSub = 131, OpFMul = 133, OpFDiv = 136,
         OpIAdd = 128,  OpIMul = 132,
         OpConvertFToS = 110, OpConvertSToF = 111,
@@ -66,17 +69,29 @@ namespace spv {
         BuiltInPosition = 0, BuiltInPointSize = 1,
         BuiltInClipDistance = 3, BuiltInCullDistance = 4
     };
-    enum GLSLstd450 : std::uint32_t {
-        GLSLstd450Radians = 11, GLSLstd450Degrees = 12,
-        GLSLstd450Sin = 13, GLSLstd450Cos = 14, GLSLstd450Tan = 15,
-        GLSLstd450Asin = 16, GLSLstd450Acos = 17, GLSLstd450Atan = 18,
-        GLSLstd450Pow = 26, GLSLstd450Exp = 27, GLSLstd450Log = 28,
-        GLSLstd450Exp2 = 29, GLSLstd450Log2 = 30, GLSLstd450Sqrt = 31,
-        GLSLstd450InverseSqrt = 32, GLSLstd450Abs = 4,
-        GLSLstd450Length = 66, GLSLstd450Distance = 67,
-        GLSLstd450Normalize = 69, GLSLstd450Dot = 0xCAFEBABE,  // stub
-    };
 }
+// GLSL.std.450 stub — free (non-namespaced) to match the real
+// `third_party/SPIRV-Cross/GLSL.std.450.h`. The interpreter's
+// evalExtInst switches on these values by name, so any addition here
+// must mirror the real header.
+enum GLSLstd450 : std::uint32_t {
+    GLSLstd450Round = 1, GLSLstd450RoundEven = 2, GLSLstd450Trunc = 3,
+    GLSLstd450FAbs = 4, GLSLstd450FSign = 6,
+    GLSLstd450Floor = 8, GLSLstd450Ceil = 9, GLSLstd450Fract = 10,
+    GLSLstd450Radians = 11, GLSLstd450Degrees = 12,
+    GLSLstd450Sin = 13, GLSLstd450Cos = 14, GLSLstd450Tan = 15,
+    GLSLstd450Asin = 16, GLSLstd450Acos = 17, GLSLstd450Atan = 18,
+    GLSLstd450Sinh = 19, GLSLstd450Cosh = 20, GLSLstd450Tanh = 21,
+    GLSLstd450Asinh = 22, GLSLstd450Acosh = 23, GLSLstd450Atanh = 24,
+    GLSLstd450Atan2 = 25,
+    GLSLstd450Pow = 26, GLSLstd450Exp = 27, GLSLstd450Log = 28,
+    GLSLstd450Exp2 = 29, GLSLstd450Log2 = 30, GLSLstd450Sqrt = 31,
+    GLSLstd450InverseSqrt = 32,
+    GLSLstd450FMin = 37, GLSLstd450FMax = 40, GLSLstd450FClamp = 43,
+    GLSLstd450FMix = 46, GLSLstd450Step = 48, GLSLstd450SmoothStep = 49,
+    GLSLstd450Length = 66, GLSLstd450Distance = 67, GLSLstd450Cross = 68,
+    GLSLstd450Normalize = 69, GLSLstd450Reflect = 71,
+};
 #endif
 
 #include <algorithm>
@@ -881,9 +896,17 @@ void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
 Value Interpreter::evalExtInst(std::uint32_t glslOp,
                                const std::uint32_t* operands,
                                std::uint32_t nOperands) {
-    Value a;
+    Value a, b, c;
     if (nOperands >= 1 && !tryGetValue(operands[0], a)) {
         bail("OpExtInst: unknown operand 0");
+        return a;
+    }
+    if (nOperands >= 2 && !tryGetValue(operands[1], b)) {
+        bail("OpExtInst: unknown operand 1");
+        return a;
+    }
+    if (nOperands >= 3 && !tryGetValue(operands[2], c)) {
+        bail("OpExtInst: unknown operand 2");
         return a;
     }
     auto scalarMap = [&](float (*fn)(float)) {
@@ -891,7 +914,18 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
         for (int k = 0; k < a.componentCount(); ++k) r.f[k] = fn(a.f[k]);
         return r;
     };
+    auto binaryMap = [&](float (*fn)(float, float)) {
+        Value r = a;
+        for (int k = 0; k < a.componentCount(); ++k) r.f[k] = fn(a.f[k], b.f[k]);
+        return r;
+    };
+    auto ternaryMap = [&](float (*fn)(float, float, float)) {
+        Value r = a;
+        for (int k = 0; k < a.componentCount(); ++k) r.f[k] = fn(a.f[k], b.f[k], c.f[k]);
+        return r;
+    };
     switch (glslOp) {
+        // ─ Unary transcendentals / sign / rounding ─
         case ::GLSLstd450Radians: return scalarMap([](float x) { return x * 0.017453292519943295f; });
         case ::GLSLstd450Degrees: return scalarMap([](float x) { return x * 57.29577951308232f; });
         case ::GLSLstd450Sin:     return scalarMap([](float x) { return std::sin(x); });
@@ -900,6 +934,12 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
         case ::GLSLstd450Asin:    return scalarMap([](float x) { return std::asin(x); });
         case ::GLSLstd450Acos:    return scalarMap([](float x) { return std::acos(x); });
         case ::GLSLstd450Atan:    return scalarMap([](float x) { return std::atan(x); });
+        case ::GLSLstd450Sinh:    return scalarMap([](float x) { return std::sinh(x); });
+        case ::GLSLstd450Cosh:    return scalarMap([](float x) { return std::cosh(x); });
+        case ::GLSLstd450Tanh:    return scalarMap([](float x) { return std::tanh(x); });
+        case ::GLSLstd450Asinh:   return scalarMap([](float x) { return std::asinh(x); });
+        case ::GLSLstd450Acosh:   return scalarMap([](float x) { return std::acosh(x); });
+        case ::GLSLstd450Atanh:   return scalarMap([](float x) { return std::atanh(x); });
         case ::GLSLstd450Exp:     return scalarMap([](float x) { return std::exp(x); });
         case ::GLSLstd450Log:     return scalarMap([](float x) { return std::log(x); });
         case ::GLSLstd450Exp2:    return scalarMap([](float x) { return std::exp2(x); });
@@ -907,6 +947,107 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
         case ::GLSLstd450Sqrt:    return scalarMap([](float x) { return std::sqrt(x); });
         case ::GLSLstd450InverseSqrt: return scalarMap([](float x) { return 1.0f / std::sqrt(x); });
         case ::GLSLstd450FAbs:    return scalarMap([](float x) { return std::fabs(x); });
+        case ::GLSLstd450FSign:   return scalarMap([](float x) { return static_cast<float>((x > 0) - (x < 0)); });
+        case ::GLSLstd450Floor:   return scalarMap([](float x) { return std::floor(x); });
+        case ::GLSLstd450Ceil:    return scalarMap([](float x) { return std::ceil(x); });
+        case ::GLSLstd450Fract:   return scalarMap([](float x) { return x - std::floor(x); });
+        case ::GLSLstd450Trunc:   return scalarMap([](float x) { return std::trunc(x); });
+        case ::GLSLstd450Round:   return scalarMap([](float x) { return std::round(x); });
+        case ::GLSLstd450RoundEven: return scalarMap([](float x) {
+            // Banker's rounding — round-half-to-even. Matches GLSL spec 8.3.
+            float r = std::round(x);
+            if (std::fabs(x - std::trunc(x)) == 0.5f) {
+                r = 2.0f * std::round(x * 0.5f);
+            }
+            return r;
+        });
+
+        // ─ Binary ─
+        case ::GLSLstd450Pow:     return binaryMap([](float x, float y) { return std::pow(x, y); });
+        case ::GLSLstd450Atan2:   return binaryMap([](float y, float x) { return std::atan2(y, x); });
+        case ::GLSLstd450FMin:    return binaryMap([](float x, float y) { return std::fmin(x, y); });
+        case ::GLSLstd450FMax:    return binaryMap([](float x, float y) { return std::fmax(x, y); });
+        case ::GLSLstd450Step: {
+            // step(edge, x) — edge is operand0 in GLSL, x is operand1.
+            Value r = b;   // result matches x shape
+            for (int k = 0; k < b.componentCount(); ++k) r.f[k] = (b.f[k] < a.f[k]) ? 0.0f : 1.0f;
+            return r;
+        }
+
+        // ─ Ternary ─
+        case ::GLSLstd450FClamp:  return ternaryMap([](float x, float lo, float hi) {
+            return std::fmin(std::fmax(x, lo), hi);
+        });
+        case ::GLSLstd450FMix:    return ternaryMap([](float x, float y, float t) {
+            return x * (1.0f - t) + y * t;
+        });
+        case ::GLSLstd450SmoothStep: {
+            // smoothstep(edge0, edge1, x) — ops are (edge0, edge1, x).
+            Value r = c;   // result matches x shape
+            for (int k = 0; k < c.componentCount(); ++k) {
+                const float e0 = a.f[k], e1 = b.f[k], x = c.f[k];
+                float t = (x - e0) / (e1 - e0);
+                t = std::fmin(std::fmax(t, 0.0f), 1.0f);
+                r.f[k] = t * t * (3.0f - 2.0f * t);
+            }
+            return r;
+        }
+
+        // ─ Vector reductions ─
+        case ::GLSLstd450Length: {
+            Value r;
+            r.kind = Value::Kind::Float;
+            float s = 0.0f;
+            for (int k = 0; k < a.componentCount(); ++k) s += a.f[k] * a.f[k];
+            r.f[0] = std::sqrt(s);
+            return r;
+        }
+        case ::GLSLstd450Distance: {
+            Value r;
+            r.kind = Value::Kind::Float;
+            float s = 0.0f;
+            for (int k = 0; k < a.componentCount(); ++k) {
+                const float d = a.f[k] - b.f[k];
+                s += d * d;
+            }
+            r.f[0] = std::sqrt(s);
+            return r;
+        }
+        // GLSL `dot()` maps to SPIR-V OpDot (not an ext-inst), which is
+        // handled in the interpreter's primary switch. If it ever
+        // surfaces as an ExtInst on some weird glslang build, the
+        // default arm below will bail with a useful diagnostic.
+        case ::GLSLstd450Normalize: {
+            Value r = a;
+            float s = 0.0f;
+            for (int k = 0; k < a.componentCount(); ++k) s += a.f[k] * a.f[k];
+            s = std::sqrt(s);
+            if (s > 0.0f) {
+                for (int k = 0; k < a.componentCount(); ++k) r.f[k] = a.f[k] / s;
+            } else {
+                for (int k = 0; k < a.componentCount(); ++k) r.f[k] = 0.0f;
+            }
+            return r;
+        }
+        case ::GLSLstd450Cross: {
+            Value r;
+            r.kind = Value::Kind::Float3;
+            r.f[0] = a.f[1] * b.f[2] - a.f[2] * b.f[1];
+            r.f[1] = a.f[2] * b.f[0] - a.f[0] * b.f[2];
+            r.f[2] = a.f[0] * b.f[1] - a.f[1] * b.f[0];
+            return r;
+        }
+        case ::GLSLstd450Reflect: {
+            // reflect(I, N) = I - 2 * dot(N, I) * N
+            Value r = a;
+            float dotNI = 0.0f;
+            for (int k = 0; k < a.componentCount(); ++k) dotNI += b.f[k] * a.f[k];
+            for (int k = 0; k < a.componentCount(); ++k) {
+                r.f[k] = a.f[k] - 2.0f * dotNI * b.f[k];
+            }
+            return r;
+        }
+
         default:
             bail("OpExtInst: unsupported GLSL.std.450 op " + std::to_string(glslOp));
             return a;
@@ -1117,6 +1258,65 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            case spv::OpFNegate: {
+                Value a;
+                if (!tryGetValue(w[2], a)) { bail("OpFNegate: unknown operand"); break; }
+                Value r = a;
+                for (int k = 0; k < a.componentCount(); ++k) r.f[k] = -a.f[k];
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpDot: {
+                // w[0]=type, w[1]=resultId, w[2]=a, w[3]=b — result is scalar float.
+                Value a, b;
+                if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("OpDot: unknown operand"); break; }
+                Value r;
+                r.kind = Value::Kind::Float;
+                float s = 0.0f;
+                const int n = a.componentCount();
+                for (int k = 0; k < n; ++k) s += a.f[k] * b.f[k];
+                r.f[0] = s;
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpVectorTimesScalar: {
+                // w[2]=vector, w[3]=scalar.
+                Value v, s;
+                if (!tryGetValue(w[2], v) || !tryGetValue(w[3], s)) { bail("OpVectorTimesScalar: unknown operand"); break; }
+                Value r = v;
+                for (int k = 0; k < v.componentCount(); ++k) r.f[k] = v.f[k] * s.f[0];
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpVectorShuffle: {
+                // w[0]=type, w[1]=resultId, w[2]=v1, w[3]=v2, w[4..]=indices
+                Value v1, v2;
+                if (!tryGetValue(w[2], v1) || !tryGetValue(w[3], v2)) { bail("OpVectorShuffle: unknown operand"); break; }
+                const std::uint32_t n = wc - 5;   // result component count
+                Value r;
+                r.kind = (n == 2) ? Value::Kind::Float2 :
+                         (n == 3) ? Value::Kind::Float3 :
+                         (n == 4) ? Value::Kind::Float4 : Value::Kind::Float;
+                const int v1n = v1.componentCount();
+                for (std::uint32_t k = 0; k < n && k < 4; ++k) {
+                    const std::uint32_t sel = w[4 + k];
+                    // sel < v1n → pick from v1; else sel - v1n → pick from v2.
+                    // 0xFFFFFFFF means "undefined" — we treat as 0.
+                    if (sel == 0xFFFFFFFFu) {
+                        r.f[k] = 0.0f;
+                    } else if (sel < static_cast<std::uint32_t>(v1n)) {
+                        r.f[k] = v1.f[sel];
+                    } else {
+                        r.f[k] = v2.f[sel - v1n];
+                    }
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
             case spv::OpExtInst: {
                 // w[0]=type, w[1]=resultId, w[2]=setId, w[3]=glslOp, w[4..]=operands
                 if (module_.extInstImports.count(w[2]) == 0) {
@@ -1202,10 +1402,14 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpAccessChain:
         case spv::OpCompositeExtract:
         case spv::OpCompositeConstruct:
+        case spv::OpVectorShuffle:
+        case spv::OpVectorTimesScalar:
+        case spv::OpDot:
         case spv::OpFAdd:
         case spv::OpFSub:
         case spv::OpFMul:
         case spv::OpFDiv:
+        case spv::OpFNegate:
         case spv::OpExtInst:
         case spv::OpBranch:
         case spv::OpBranchConditional:
