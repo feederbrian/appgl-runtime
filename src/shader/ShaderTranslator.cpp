@@ -573,6 +573,139 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             msl = std::move(out);
         }
 
+        // gl_CullDistance → [[clip_distance]] routing (vertex stages only).
+        //
+        // Metal has no `[[cull_distance]]` attribute. GL 4.6 §14.6.3 cull
+        // semantics are per-primitive — "discard the whole primitive iff
+        // ∃ channel i such that ALL vertices have cull_distance[i] < 0" —
+        // and can only be exactly emulated through a compute pre-pass
+        // that sees every vertex of a primitive before rasterization
+        // (deferred). The pragmatic quick-fix is to route each cull
+        // channel into an extra `[[clip_distance]]` slot, which gives
+        // correct behaviour for two of three cases:
+        //   - all-positive on a channel → primitive drawn (matches cull)
+        //   - all-negative on a channel → primitive discarded (matches)
+        //   - mixed-sign on a channel   → per-pixel clip instead of full
+        //     draw. Over-clips on triangles/lines with mixed-sign cull
+        //     channels. Exact for points (1-vertex primitives).
+        //
+        // SPIRV-Cross emits `gl_CullDistance_K [[user(cullK)]]` user
+        // varyings for cull distances — they carry the value as plain
+        // interpolated data but don't drive HW culling. We post-process:
+        //   1. Count `gl_CullDistance_K` declarations in main0_out (M).
+        //   2. Locate `float gl_ClipDistance [[clip_distance]] [N];` and
+        //      resize to [N+M]. If absent (0-clip shader), insert with
+        //      size [M].
+        //   3. For each `out.gl_CullDistance_K = EXPR;` statement, append
+        //      a sibling `out.gl_ClipDistance[N+K] = EXPR;` so the HW
+        //      clip array sees the cull value.
+        // Only applied to vertex shaders (MSL `vertex main0_out main0(`).
+        // Fragment/compute stages have no rasterizer clipping and don't
+        // declare `[[clip_distance]]` at all.
+        if (msl.find("vertex ") != std::string::npos
+            && msl.find("gl_CullDistance_0 [[user(cull0)]]") != std::string::npos) {
+            // Count cull distances (gl_CullDistance_0 through _7).
+            int cullCount = 0;
+            for (int k = 0; k < 8; ++k) {
+                char needle[64];
+                std::snprintf(needle, sizeof(needle),
+                              "gl_CullDistance_%d [[user(cull%d)]]", k, k);
+                if (msl.find(needle) != std::string::npos) {
+                    cullCount = k + 1;
+                } else {
+                    break;
+                }
+            }
+            if (cullCount > 0) {
+                // Find the HW clip-distance declaration and extract N.
+                // Pattern: `float gl_ClipDistance [[clip_distance]] [N];`
+                int clipCount = 0;
+                const std::string clipDeclPrefix = "float gl_ClipDistance [[clip_distance]] [";
+                std::size_t clipDeclPos = msl.find(clipDeclPrefix);
+                if (clipDeclPos != std::string::npos) {
+                    // Parse N between '[' and ']'.
+                    std::size_t nStart = clipDeclPos + clipDeclPrefix.size();
+                    std::size_t nEnd = nStart;
+                    while (nEnd < msl.size() && msl[nEnd] >= '0' && msl[nEnd] <= '9') ++nEnd;
+                    if (nEnd > nStart && nEnd < msl.size() && msl[nEnd] == ']') {
+                        clipCount = std::stoi(msl.substr(nStart, nEnd - nStart));
+                        // Resize in place by rewriting the size digits.
+                        const int newSize = clipCount + cullCount;
+                        if (newSize <= 8) {   // Metal HW clip cap is 8 total
+                            std::string newSizeStr = std::to_string(newSize);
+                            msl.replace(nStart, nEnd - nStart, newSizeStr);
+                        } else {
+                            clipCount = -1;   // Skip if we'd overflow.
+                        }
+                    }
+                } else {
+                    // No HW clip distance. Insert a fresh declaration
+                    // before the first `gl_CullDistance_0` declaration.
+                    const std::string firstCullDecl = "float gl_CullDistance_0 [[user(cull0)]];";
+                    std::size_t insertPos = msl.find(firstCullDecl);
+                    if (insertPos != std::string::npos && cullCount <= 8) {
+                        std::string newDecl = "float gl_ClipDistance [[clip_distance]] ["
+                            + std::to_string(cullCount) + "];\n    ";
+                        msl.insert(insertPos, newDecl);
+                        clipCount = 0;
+                    } else {
+                        clipCount = -1;   // Skip.
+                    }
+                }
+
+                if (clipCount >= 0) {
+                    // For each cull write (`out.gl_CullDistance_K = EXPR;`)
+                    // append a sibling HW clip write at slot clipCount+K.
+                    std::string rebuilt;
+                    rebuilt.reserve(msl.size() + cullCount * 64);
+                    std::size_t pos = 0;
+                    while (pos < msl.size()) {
+                        const std::size_t nl = msl.find('\n', pos);
+                        const std::size_t lineEnd = (nl == std::string::npos) ? msl.size() : nl + 1;
+                        rebuilt.append(msl, pos, lineEnd - pos);
+                        // Check for `out.gl_CullDistance_K = EXPR;`.
+                        const std::string_view line(msl.data() + pos, lineEnd - pos);
+                        const std::string cullLhs = "out.gl_CullDistance_";
+                        std::size_t lhsPos = line.find(cullLhs);
+                        if (lhsPos != std::string_view::npos) {
+                            // Parse K.
+                            std::size_t kStart = lhsPos + cullLhs.size();
+                            std::size_t kEnd = kStart;
+                            while (kEnd < line.size() && line[kEnd] >= '0' && line[kEnd] <= '9') ++kEnd;
+                            if (kEnd > kStart && kEnd < line.size()) {
+                                int k = std::stoi(std::string(line.substr(kStart, kEnd - kStart)));
+                                if (k < cullCount) {
+                                    // Find " = " and the trailing ";".
+                                    std::size_t eqPos = line.find(" = ", kEnd);
+                                    std::size_t semiPos = line.rfind(';', line.size() - 1);
+                                    if (eqPos != std::string_view::npos
+                                        && semiPos != std::string_view::npos
+                                        && semiPos > eqPos + 3) {
+                                        std::string rhs(line.substr(eqPos + 3, semiPos - (eqPos + 3)));
+                                        // Preserve the leading whitespace.
+                                        std::size_t wsEnd = 0;
+                                        while (wsEnd < line.size()
+                                               && (line[wsEnd] == ' ' || line[wsEnd] == '\t')) {
+                                            ++wsEnd;
+                                        }
+                                        std::string prefix(line.substr(0, wsEnd));
+                                        rebuilt.append(prefix);
+                                        rebuilt.append("out.gl_ClipDistance[");
+                                        rebuilt.append(std::to_string(clipCount + k));
+                                        rebuilt.append("] = ");
+                                        rebuilt.append(rhs);
+                                        rebuilt.append(";\n");
+                                    }
+                                }
+                            }
+                        }
+                        pos = lineEnd;
+                    }
+                    msl = std::move(rebuilt);
+                }
+            }
+        }
+
         // SPIRV-Cross's "copy internal per-vertex block to split user(N)
         // outputs" pass sometimes leaves dangling references to a SPIR-V
         // variable ID that's never emitted as a local (observed as
