@@ -566,11 +566,72 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 }
             };
             rewriteOne(msl, "gl_CullDistance");
-            std::string pass1 = std::move(out);
-            out.clear();
-            out.reserve(pass1.size());
-            rewriteOne(pass1, "gl_ClipDistance");
             msl = std::move(out);
+            // Intentionally do NOT rewrite `gl_ClipDistance[N]`. Unlike
+            // CullDistance, Metal has a hardware `[[clip_distance]]`
+            // attribute which SPIRV-Cross emits on `main0_out` under the
+            // exact unsplit name `gl_ClipDistance`. SPIRV-Cross's own
+            // output *writes both* the split user-varying
+            // (`out.gl_ClipDistance_N = EXPR;`) and the hardware copy-back
+            // (`out.gl_ClipDistance[N] = out.gl_ClipDistance_N;`) in the
+            // emitted function body. Rewriting the hardware write to
+            // `out.gl_ClipDistance_N = out.gl_ClipDistance_N;` made it a
+            // no-op, leaving the `[[clip_distance]]` array uninitialised —
+            // Metal then read garbage (typically negative) and clipped
+            // every pixel. That was the root cause of CTS
+            // clip_distance.functional + cull_distance.functional_*
+            // (~400 tests) all reporting "vertex unexpectedly clipped".
+        }
+
+        // Default [[point_size]] for vertex shaders that don't write
+        // gl_PointSize. Metal rasterises points with zero-size when
+        // the vertex function doesn't emit a [[point_size]] output —
+        // the point covers no pixels and appears invisible. GL's
+        // default gl_PointSize is 1.0; SPIRV-Cross only emits the
+        // [[point_size]] attribute when the shader explicitly writes
+        // gl_PointSize, so we need to inject a default here for the
+        // common case of shaders that render points but don't touch
+        // the size. This patches shaders of the shape:
+        //   struct main0_out {
+        //       float4 gl_Position [[position]];
+        //       ...
+        //   };
+        //   vertex main0_out main0(...) {
+        //       main0_out out = {};
+        //       ...
+        //       return out;
+        //   }
+        // → inserts `float gl_PointSize [[point_size]];` into main0_out,
+        //   and `out.gl_PointSize = 1.0;` before the return statement.
+        if (msl.find("vertex ") != std::string::npos
+            && msl.find("[[point_size]]") == std::string::npos
+            && msl.find("float4 gl_Position [[position]]") != std::string::npos) {
+            // Inject the declaration immediately after the position line.
+            const std::string positionLine = "float4 gl_Position [[position]];";
+            std::size_t posDeclPos = msl.find(positionLine);
+            if (posDeclPos != std::string::npos) {
+                std::size_t insertAt = posDeclPos + positionLine.size();
+                std::size_t lineStart = msl.rfind('\n', posDeclPos);
+                lineStart = (lineStart == std::string::npos) ? 0 : lineStart + 1;
+                std::string indent(msl.data() + lineStart, posDeclPos - lineStart);
+                std::string decl = "\n" + indent + "float gl_PointSize [[point_size]];";
+                msl.insert(insertAt, decl);
+            }
+            // Inject default write just before every `return out;` in
+            // vertex main0. Leaves fragment / compute shaders untouched
+            // because they don't declare gl_Position with [[position]]
+            // and never take this branch.
+            std::size_t pos = 0;
+            while (true) {
+                std::size_t retPos = msl.find("return out;", pos);
+                if (retPos == std::string::npos) break;
+                std::size_t lineStart = msl.rfind('\n', retPos);
+                lineStart = (lineStart == std::string::npos) ? 0 : lineStart + 1;
+                std::string indent(msl.data() + lineStart, retPos - lineStart);
+                std::string assign = indent + "out.gl_PointSize = 1.0;\n";
+                msl.insert(retPos, assign);
+                pos = retPos + assign.size() + std::strlen("return out;");
+            }
         }
 
         // gl_CullDistance → [[clip_distance]] routing (vertex stages only).
@@ -767,14 +828,76 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         spirv_cross::Compiler compiler(spirv, wordCount);
         auto resources = compiler.get_shader_resources();
 
-        // Vertex inputs (stage_inputs).
+        // Vertex inputs (stage_inputs). SPIR-V assigns one OpDecorate
+        // Location per input, but SPIRV-Cross MSL EXPANDS arrays into
+        // N individual `[[attribute(K)]]` slots (one per element).
+        // The reflection's .location must match the EXPANDED MSL slot
+        // numbers so getAttribLocation("arr[K]") resolves to the real
+        // Metal attribute — otherwise a later non-array input ends up
+        // colliding with an earlier array's element slots. For example:
+        //   in float clipdistance_data[1];  // SPIR-V loc 0 → MSL attr 0
+        //   in float culldistance_data[8];  // SPIR-V loc 1 → MSL attr 1..8
+        //   in vec2 position;               // SPIR-V loc 2 → MSL attr 9
+        // Pre-fix, position was reported at location 2 and CTS's
+        // vertexAttribPointer(getAttribLocation("position"), …) wrote
+        // into Metal attribute 2 which is actually culldistance_data_1.
+        //
+        // Re-derive the expanded locations by sorting inputs by their
+        // SPIR-V Location and walking them, accumulating per-array
+        // slot counts so each subsequent input starts after the
+        // previous one's full size.
+        struct InputEntry {
+            spirv_cross::Resource* res;
+            std::uint32_t spirvLocation;
+            std::uint32_t slotCount;
+        };
+        std::vector<InputEntry> sortedInputs;
+        sortedInputs.reserve(resources.stage_inputs.size());
         for (auto& input : resources.stage_inputs) {
-            ShaderReflection::VertexInput vi;
-            vi.location = compiler.get_decoration(input.id, spv::DecorationLocation);
-            vi.name = input.name;
+            InputEntry e;
+            e.res = &input;
+            e.spirvLocation = compiler.get_decoration(input.id, spv::DecorationLocation);
             const auto& type = compiler.get_type(input.type_id);
-            vi.type = spirvBaseTypeToGL(type);
-            result.vertexInputs.push_back(std::move(vi));
+            // Array inputs: each outer-dimension element consumes one
+            // location slot. Non-array inputs consume 1. Matrices and
+            // dvec3/dvec4 technically consume multiple slots but are
+            // unlikely in vertex-attribute declarations (GL 4.6 spec
+            // restricts vertex attributes to scalar/vector/dvec).
+            e.slotCount = (!type.array.empty() && type.array[0] > 0)
+                ? static_cast<std::uint32_t>(type.array[0]) : 1u;
+            sortedInputs.push_back(e);
+        }
+        std::sort(sortedInputs.begin(), sortedInputs.end(),
+                  [](const InputEntry& a, const InputEntry& b) {
+                      return a.spirvLocation < b.spirvLocation;
+                  });
+        // Walk in SPIR-V location order; emit MSL-remapped locations so
+        // each array takes contiguous slots and the next input starts
+        // after the previous input's final slot. Array inputs emit one
+        // VertexInput per element — this matches SPIRV-Cross MSL
+        // output, where `in float arr[8]` becomes 8 separate
+        // `[[attribute(N..N+7)]]` declarations. The pipeline builder
+        // in MetalFrameGraph.mm iterates `vertexInputs` and sets
+        // `vertexDescriptor.attributes[input.location].format`, so
+        // missing per-element entries would leave Metal attributes
+        // 2..8 unset even with a correctly-bound VAO.
+        std::uint32_t nextMslLocation = 0;
+        for (auto& entry : sortedInputs) {
+            if (entry.spirvLocation > nextMslLocation) {
+                nextMslLocation = entry.spirvLocation;
+            }
+            const auto& type = compiler.get_type(entry.res->type_id);
+            const GLenum glType = spirvBaseTypeToGL(type);
+            for (std::uint32_t slot = 0; slot < entry.slotCount; ++slot) {
+                ShaderReflection::VertexInput vi;
+                vi.location = nextMslLocation + slot;
+                vi.name = entry.slotCount > 1
+                    ? (entry.res->name + "[" + std::to_string(slot) + "]")
+                    : entry.res->name;
+                vi.type = glType;
+                result.vertexInputs.push_back(std::move(vi));
+            }
+            nextMslLocation += entry.slotCount;
         }
 
         // Uniform buffers — two-pass approach:

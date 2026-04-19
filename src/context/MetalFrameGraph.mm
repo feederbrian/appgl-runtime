@@ -988,6 +988,24 @@ struct MetalFrameGraph::Impl {
             desc.colorAttachments[0].pixelFormat = colorFormat;
             desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            // Set input primitive topology class. Metal requires this to
+            // match the primitive topology for point rendering to emit
+            // [[point_size]] correctly; leaving it at Unspecified
+            // silently breaks point rasterisation on some Apple GPU
+            // generations even when the VS writes [[point_size]].
+            switch (info.mode) {
+                case GL_POINTS:
+                    desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
+                    break;
+                case GL_LINES:
+                case GL_LINE_STRIP:
+                case GL_LINE_LOOP:
+                    desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassLine;
+                    break;
+                default:
+                    desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+                    break;
+            }
             // GL_RASTERIZER_DISCARD → Metal rasterization disabled.
             // The VS still runs (and can write SSBOs / transform feedback)
             // but no fragment stage executes, no raster output is produced,

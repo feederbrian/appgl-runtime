@@ -10525,17 +10525,38 @@ bool GLContext::deleteProgram(GLuint program) {
         return true;
     }
     object->deleteRequested = true;
+    // GL 4.6 §7.3: a program object currently in use is NOT erased
+    // immediately. It stays alive (and in use) until it is no longer
+    // part of any context's current state. The actual erase happens
+    // when the currently-bound program changes (via glUseProgram of a
+    // different name, including 0).
+    //
+    // This matters because CTS helper classes (e.g. ClipDistance::
+    // Utility::Program, CullDistance::Utility::Program) wrap GL
+    // programs in RAII, and their `bool useAsShaderInput(Program ...)`
+    // helpers take the Program argument BY VALUE. The copy's
+    // destructor runs at call-return while the program is still
+    // current — if we erase on delete, the subsequent draw sees
+    // programName=N in `state->currentProgram()` but programs().get(N)
+    // returns nullptr, the translated-pipeline branch skips, and the
+    // draw silently no-ops. CTS's clip_distance.functional and
+    // cull_distance.functional_* suites (~400 tests) all trip on
+    // this — "vertex unexpectedly clipped" is actually "nothing
+    // rendered because no program was bound by draw time."
+    //
+    // Defer both the state-clear and the object-store erase. When a
+    // different program takes over in `useProgram`, that call finishes
+    // the deletion for any delete-requested predecessor.
     if (impl_->state->currentProgram() == program) {
-        impl_->state->useProgram(0);
+        // Live — defer actual erase until a different program becomes
+        // current. `useProgram` finalises the deletion at that point.
+        return true;
     }
-    // Walk the attached-shader list and run the same decrement-and-maybe-erase
-    // pass detachShader uses. A program tear-down counts as a synthetic
-    // detach for every shader it still holds, and any shader whose
-    // deleteRequested flag was set earlier (and is now down to zero
-    // attachments) finally gets erased here. Snapshot the IDs first so the
-    // shader-table mutation inside the loop can't invalidate the program's
-    // attached-shader vector — though the program itself is about to be
-    // erased so the mutation is harmless either way.
+    // Inline helper: decrement shader attachment counts (mirrors the
+    // synthetic-detach that deleteProgram has always performed) and
+    // erase the program. Used from both the immediate-erase path (not
+    // currently bound) and the deferred-erase path (`useProgram` when
+    // replacing a delete-requested program).
     std::vector<GLuint> attached = object->attachedShaders;
     for (GLuint shaderId : attached) {
         GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
@@ -11111,11 +11132,25 @@ bool GLContext::linkProgram(GLuint program) {
                 if (requested != programObject->requestedAttribLocations.end()) {
                     attrib.location = static_cast<GLint>(requested->second);
                 } else {
-                    attrib.location = static_cast<GLint>(nextAttribLocation++);
+                    attrib.location = static_cast<GLint>(nextAttribLocation);
                 }
             }
-            if (static_cast<GLuint>(attrib.location) >= nextAttribLocation) {
-                nextAttribLocation = static_cast<GLuint>(attrib.location) + 1;
+            // GL 4.6 §11.1.1: array vertex inputs consume arraySize
+            // consecutive attribute locations (one per element). SPIRV-
+            // Cross's MSL backend expands the array into individual
+            // `[[attribute(N)]]` slots so each element needs its own
+            // location. Advance `nextAttribLocation` by the full size so
+            // the NEXT input lands AFTER the array, not on top of its
+            // second element. CTS cull_distance tests have
+            //   in float clipdistance_data[1];
+            //   in float culldistance_data[8];
+            //   in vec2 position;
+            // and expect position at MSL attribute(9), not (2). Before
+            // this fix, getAttribLocation("position")=2 collided with
+            // culldistance_data[1]'s MSL slot.
+            const GLuint slotCount = std::max<GLint>(1, input.arraySize);
+            if (static_cast<GLuint>(attrib.location) + slotCount > nextAttribLocation) {
+                nextAttribLocation = static_cast<GLuint>(attrib.location) + slotCount;
             }
             programObject->attributes.push_back(std::move(attrib));
         }
@@ -12467,6 +12502,33 @@ bool GLContext::useProgram(GLuint program) {
         if (!object->linked) {
             pushError(GL_INVALID_OPERATION);
             return false;
+        }
+    }
+    // GL 4.6 §7.3 deferred-delete protocol: if the outgoing current
+    // program was already flagged deleteRequested by a prior
+    // glDeleteProgram, this is the moment it actually gets erased —
+    // "no longer part of any context's current state" is satisfied by
+    // the upcoming state->useProgram() call. See deleteProgram for
+    // the rationale. Skip when the outgoing program is the same as
+    // the incoming program (redundant glUseProgram(N)→glUseProgram(N)).
+    const GLuint outgoing = impl_->state->currentProgram();
+    if (outgoing != 0 && outgoing != program) {
+        GLProgramObject* outgoingObj = impl_->objects->programs().get(outgoing);
+        if (outgoingObj != nullptr && outgoingObj->deleteRequested) {
+            std::vector<GLuint> attached = outgoingObj->attachedShaders;
+            for (GLuint shaderId : attached) {
+                GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
+                if (shaderObject == nullptr) {
+                    continue;
+                }
+                if (shaderObject->attachmentCount > 0) {
+                    --shaderObject->attachmentCount;
+                }
+                if (shaderObject->deleteRequested && shaderObject->attachmentCount == 0) {
+                    impl_->objects->shaders().erase(shaderId);
+                }
+            }
+            impl_->objects->programs().erase(outgoing);
         }
     }
     impl_->state->useProgram(program);
@@ -13954,7 +14016,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 vaoName, 0, 0, 0);
         }
         if (vao != nullptr && !vao->attributes.empty()) {
-            const auto& posAttr = vao->attributes[0];
+            // Find the first ENABLED attribute for primary-VBO detection.
+            // Shaders that bind via `layout(location=N)` with N > 0 leave
+            // attribute 0 disabled — cull_distance CTS tests (9 attributes
+            // at locations 1..9, attribute 0 unused) were silently
+            // skipping the encodeTranslatedDraw path entirely because the
+            // unused attribute 0 has bufferName=0.
+            std::size_t primaryIdx = 0;
+            for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                if (vao->attributes[ai].enabled) { primaryIdx = ai; break; }
+            }
+            const auto& posAttr = vao->attributes[primaryIdx];
             auto resolved = resolveVertexAttrib(posAttr, *vao);
             GLBufferObject* vbo = (resolved.bufferName != 0)
                 ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
@@ -14299,7 +14371,17 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 vaoName, 0, 0, 0);
         }
         if (vao != nullptr && !vao->attributes.empty()) {
-            const auto& posAttr = vao->attributes[0];
+            // Find the first ENABLED attribute for primary-VBO detection.
+            // Shaders that bind via `layout(location=N)` with N > 0 leave
+            // attribute 0 disabled — cull_distance CTS tests (9 attributes
+            // at locations 1..9, attribute 0 unused) were silently
+            // skipping the encodeTranslatedDraw path entirely because the
+            // unused attribute 0 has bufferName=0.
+            std::size_t primaryIdx = 0;
+            for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                if (vao->attributes[ai].enabled) { primaryIdx = ai; break; }
+            }
+            const auto& posAttr = vao->attributes[primaryIdx];
             auto resolved = resolveVertexAttrib(posAttr, *vao);
             GLBufferObject* vbo = (resolved.bufferName != 0)
                 ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
