@@ -10146,6 +10146,31 @@ bool GLContext::isTransformFeedbackActive() const {
 bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     GLProgramObject& program, const appgl::EmulatedDraw& ed)
 {
+    // Vertices-per-primitive for the emulator's *expanded*
+    // topology. Strip outputs were decomposed to list form in
+    // `emulateGeometryDraw`, so ed.topology is one of GL_POINTS /
+    // GL_LINES / GL_TRIANGLES (plus adjacency variants, which count
+    // the same for primitive-count purposes after decomposition).
+    auto vertsPerPrim = [](GLenum topo) -> std::size_t {
+        switch (topo) {
+            case GL_POINTS:                   return 1;
+            case GL_LINES:
+            case GL_LINE_STRIP:
+            case GL_LINE_LOOP:                return 2;
+            case GL_TRIANGLES:
+            case GL_TRIANGLE_STRIP:
+            case GL_TRIANGLE_FAN:             return 3;
+            case GL_LINES_ADJACENCY:
+            case GL_LINE_STRIP_ADJACENCY:     return 4;
+            case GL_TRIANGLES_ADJACENCY:
+            case GL_TRIANGLE_STRIP_ADJACENCY: return 6;
+            default:                          return 1;
+        }
+    };
+    const std::size_t vpp = vertsPerPrim(ed.topology);
+    const std::size_t primsGenerated = (vpp > 0) ? (ed.vertexCount / vpp) : 0;
+    std::size_t primsWritten = 0;
+
     // When transform feedback is active and the program has TF
     // varyings configured, the emulator's expanded vertex data is
     // the canonical source of truth for what the GS emitted. Write
@@ -10207,33 +10232,157 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
             }
         };
 
+        // Checks whether a range `[cursor .. cursor + size)` fits
+        // inside the given buffer binding, considering both the
+        // indexed-binding size (if non-zero) and the actual backing
+        // storage. Used to implement GL 4.6 §13.2 "if the bytes
+        // required for a primitive are not available, TF ends for
+        // that primitive and every subsequent primitive".
+        auto primFits = [this](GLenum target, GLuint binding, GLuint bufferName,
+                               std::size_t cursor, std::size_t rangeStart,
+                               std::size_t rangeSize, std::size_t needBytes) -> bool {
+            (void)target;
+            (void)binding;
+            if (bufferName == 0 || needBytes == 0) return false;
+            GLBufferObject* buf = objects->buffers().get(bufferName);
+            if (buf == nullptr) return false;
+            const std::size_t capacity = (rangeSize > 0)
+                ? (rangeStart + rangeSize) : buf->shadowBytes.size();
+            return cursor + needBytes <= capacity;
+        };
+
+        // Primitive-aware TF write. Each primitive consumes
+        // `vpp` vertices; we advance the per-buffer cursor by
+        // exactly that many vertex strides, and only commit the
+        // write if the full primitive fits. As soon as one
+        // primitive doesn't fit, all subsequent primitives are
+        // also dropped (per GL 4.6 §13.2), and we stop
+        // incrementing `primsWritten`.
         if (interleaved) {
             auto binding = state->indexedBufferBinding(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
-            std::size_t cursor = static_cast<std::size_t>(binding.offset);
-            for (std::size_t v = 0; v < vCount; ++v) {
-                const float* vertexBase = ed.expandedVertexData.data() + v * fpv;
-                for (const auto& s : sources) {
-                    writeToBuffer(binding.buffer, cursor,
-                                  vertexBase + s.offset, s.count);
-                    cursor += s.count * sizeof(float);
+            const std::size_t baseOffset = static_cast<std::size_t>(binding.offset);
+            const std::size_t rangeSize = static_cast<std::size_t>(binding.size);
+            std::size_t perVertexBytes = 0;
+            for (const auto& s : sources) perVertexBytes += s.count * sizeof(float);
+            const std::size_t perPrimBytes = perVertexBytes * vpp;
+            std::size_t cursor = baseOffset;
+            const std::size_t nPrim = (vpp > 0) ? (vCount / vpp) : 0;
+            bool truncated = false;
+            for (std::size_t p = 0; p < nPrim; ++p) {
+                if (truncated ||
+                    !primFits(GL_TRANSFORM_FEEDBACK_BUFFER, 0,
+                              binding.buffer, cursor, baseOffset,
+                              rangeSize, perPrimBytes)) {
+                    truncated = true;
+                    continue;
                 }
+                for (std::size_t vi = 0; vi < vpp; ++vi) {
+                    const std::size_t v = p * vpp + vi;
+                    const float* vertexBase = ed.expandedVertexData.data() + v * fpv;
+                    for (const auto& s : sources) {
+                        writeToBuffer(binding.buffer, cursor,
+                                      vertexBase + s.offset, s.count);
+                        cursor += s.count * sizeof(float);
+                    }
+                }
+                ++primsWritten;
             }
         } else {
+            // GL_SEPARATE_ATTRIBS — each source writes to its own
+            // TF binding. A primitive counts as "written" iff all
+            // sources fit their per-primitive slice. Track fit per
+            // binding so we count once per primitive regardless of
+            // how many varyings it captures.
+            struct SepBinding {
+                GLuint buffer = 0;
+                std::size_t baseOffset = 0;
+                std::size_t rangeSize = 0;
+                std::size_t cursor = 0;
+                std::size_t perVertexBytes = 0;
+                std::size_t perPrimBytes = 0;
+                bool truncated = false;
+            };
+            std::vector<SepBinding> binds(sources.size());
             for (std::size_t i = 0; i < sources.size(); ++i) {
-                auto binding = state->indexedBufferBinding(
+                auto b = state->indexedBufferBinding(
                     GL_TRANSFORM_FEEDBACK_BUFFER, static_cast<GLuint>(i));
-                std::size_t cursor = static_cast<std::size_t>(binding.offset);
-                const std::size_t stride = sources[i].count * sizeof(float);
-                for (std::size_t v = 0; v < vCount; ++v) {
-                    const float* vertexBase = ed.expandedVertexData.data() + v * fpv;
-                    writeToBuffer(binding.buffer, cursor,
-                                  vertexBase + sources[i].offset,
-                                  sources[i].count);
-                    cursor += stride;
+                binds[i].buffer     = b.buffer;
+                binds[i].baseOffset = static_cast<std::size_t>(b.offset);
+                binds[i].rangeSize  = static_cast<std::size_t>(b.size);
+                binds[i].cursor     = binds[i].baseOffset;
+                binds[i].perVertexBytes = sources[i].count * sizeof(float);
+                binds[i].perPrimBytes   = binds[i].perVertexBytes * vpp;
+            }
+            const std::size_t nPrim = (vpp > 0) ? (vCount / vpp) : 0;
+            for (std::size_t p = 0; p < nPrim; ++p) {
+                // Check all bindings fit this primitive. If any
+                // is already truncated or wouldn't fit, mark them
+                // all truncated from here on (this primitive and
+                // every subsequent are dropped).
+                bool allFit = true;
+                for (std::size_t i = 0; i < sources.size(); ++i) {
+                    if (binds[i].truncated ||
+                        !primFits(GL_TRANSFORM_FEEDBACK_BUFFER,
+                                  static_cast<GLuint>(i), binds[i].buffer,
+                                  binds[i].cursor, binds[i].baseOffset,
+                                  binds[i].rangeSize, binds[i].perPrimBytes)) {
+                        allFit = false;
+                        break;
+                    }
                 }
+                if (!allFit) {
+                    for (auto& b : binds) b.truncated = true;
+                    continue;
+                }
+                for (std::size_t i = 0; i < sources.size(); ++i) {
+                    for (std::size_t vi = 0; vi < vpp; ++vi) {
+                        const std::size_t v = p * vpp + vi;
+                        const float* vertexBase = ed.expandedVertexData.data() + v * fpv;
+                        writeToBuffer(binds[i].buffer, binds[i].cursor,
+                                      vertexBase + sources[i].offset,
+                                      sources[i].count);
+                        binds[i].cursor += binds[i].perVertexBytes;
+                    }
+                }
+                ++primsWritten;
             }
         }
+    } else if (transformFeedbackActive) {
+        // TF active with no recorded varyings — still count
+        // primitives written (implementations typically count
+        // PRIMITIVES_WRITTEN against the TF mode). For us the
+        // simplest correct behaviour is "everything the GS
+        // emitted" when no buffer constraint applies.
+        primsWritten = primsGenerated;
     }
+
+    // Accumulate counts into any active occlusion / primitive
+    // queries. GL 4.6 §4.2.1 says these counters sum across draw
+    // calls during a single query scope. Per-target accumulation
+    // is what CTS primitive_queries.* test.
+    //
+    // We only touch the queries the emulator can answer
+    // definitively: PRIMITIVES_GENERATED counts every primitive
+    // the GS emitted (regardless of TF state);
+    // TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN counts the subset that
+    // fit into the bound TF buffers. Other query targets
+    // (SAMPLES_PASSED, TIME_ELAPSED, …) stay on the synthetic-1
+    // fallback path — the legacy behaviour.
+    objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
+        if (!q.active) return;
+        switch (q.target) {
+            case GL_PRIMITIVES_GENERATED:
+                q.result += static_cast<GLuint64>(primsGenerated);
+                break;
+            case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+                if (transformFeedbackActive) {
+                    q.result += static_cast<GLuint64>(primsWritten);
+                }
+                break;
+            default:
+                break;
+        }
+    });
 
     // Rasterizer-discard early-out. With GL_RASTERIZER_DISCARD
     // enabled the Metal draw would fail ("RasterizationEnabled is

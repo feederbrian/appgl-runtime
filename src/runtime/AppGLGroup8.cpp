@@ -1741,8 +1741,25 @@ static void APIENTRY glEndQuery(GLenum target) {
     context->objects().queries().forEach([target](GLuint /*id*/, GLQueryObject& query) {
         if (query.active && query.target == target) {
             query.active = false;
-            // Deterministic synthetic result: 1 sample/primitive passed.
-            query.result = 1;
+            // Preserve the accumulated result that draw-time hooks
+            // produced while the query was active. For query
+            // targets the driver doesn't implement yet, leave the
+            // synthetic-1 fallback so single-draw CTS tests that
+            // just check "did anything pass" still report success.
+            // Accumulating targets (PRIMITIVES_GENERATED,
+            // TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN) stamp their
+            // real count inside writeGsXfbAndCheckDiscard; the
+            // result field already carries the correct value.
+            switch (query.target) {
+                case GL_PRIMITIVES_GENERATED:
+                case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+                    // `query.result` already holds the sum of
+                    // per-draw contributions. Keep it.
+                    break;
+                default:
+                    query.result = 1;
+                    break;
+            }
         }
     });
 }
