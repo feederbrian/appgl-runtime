@@ -13958,6 +13958,45 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
     APPGL_LOG(DRAW, @"drawArrays: mode=0x%X count=%d program=%u hasTranslated=%d",
               mode, count, programName, program ? (int)program->hasTranslatedPipeline : -1);
+
+    // CPU GS emulation — step 3 hook. Metal has no geometry-shader
+    // stage; for the narrow subset in KHR-GL46.constant_expressions.
+    // *_geometry we run the GS on the CPU (see
+    // docs/geometry-shader-emulation.md §4) and draw the expanded
+    // vertex buffer through a synthesised pass-through VS (step 4).
+    //
+    // Detection happened at link time. If detectGeometryEmulatable
+    // returned false, geometryEmulated is false and the draw falls
+    // through to the normal translated path (which emits a VS+FS
+    // pipeline without the GS effect — same behaviour as before the
+    // emulator existed). If true, we call emulateGeometryDraw to
+    // produce the expanded vertex buffer; .ok == false still falls
+    // through so a runtime diagnostic on any single vertex doesn't
+    // abort the frame.
+    if (program != nullptr && program->geometryEmulated) {
+        const GLuint vaoName = impl_->state->boundVertexArray();
+        GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        if (vao != nullptr) {
+            appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, first, /*indices=*/nullptr, /*indexType=*/0);
+            if (ed.ok) {
+                // Step 4 lands the expanded-vertex draw path. For
+                // now we have no way to route the buffer into the
+                // translated-draw encoder without a synthesised VS,
+                // so log + fall through. The log is load-bearing for
+                // trace-based verification of step 3 wiring.
+                APPGL_LOG(DRAW, @"drawArrays GS-emul: ok verts=%zu topo=0x%X (step-4 draw path pending)",
+                          ed.vertexCount, ed.topology);
+            } else if (!ed.diagnostic.empty()) {
+                APPGL_LOG(SHADER, @"drawArrays GS-emul: %s", ed.diagnostic.c_str());
+            }
+            // Fall through whether .ok is true or false — step 4
+            // will add the expanded-vertex draw encoder before the
+            // fall-through.
+        }
+    }
+
     if (program != nullptr && program->hasTranslatedPipeline) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
