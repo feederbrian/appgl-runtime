@@ -70,6 +70,19 @@ struct EmulatedDraw {
     // qualifier — the FS MSL was translated against that location and
     // expects it to match.
     std::vector<std::uint32_t> varyingLocations;
+    // Interpolation qualifier (per-varying). 0=smooth (default), 1=flat,
+    // 2=noperspective, 3=centroid. Metal requires VS output qualifiers
+    // to match FS input qualifiers or the pipeline-state validator
+    // rejects the build — integer varyings must always be flat, and
+    // any `flat out float` in the GS GLSL also needs the matching tag
+    // on the synthesised VS output.
+    std::vector<std::uint8_t> varyingInterp;
+    // Scalar base type (per-varying): 0=float, 1=int, 2=uint. Width
+    // combines with this to give the final MSL type (`float3`, `int2`,
+    // etc.). CTS `array_*_geometry` tests surface integer outputs —
+    // `flat out int geom_out_out0;` — that fail Metal pipeline-state
+    // validation if the synthesised VS emits `float` on them.
+    std::vector<std::uint8_t> varyingBaseType;
     // True if emulation succeeded. False leaves expandedVertexData empty
     // and the caller should fall back to the existing no-GS path.
     bool ok = false;

@@ -59,7 +59,10 @@ namespace spv {
         ExecutionModeOutputLineStrip = 28,
         ExecutionModeOutputTriangleStrip = 29,
     };
-    enum Decoration : std::uint32_t { DecorationLocation = 30, DecorationBuiltIn = 11 };
+    enum Decoration : std::uint32_t {
+        DecorationLocation = 30, DecorationBuiltIn = 11,
+        DecorationNoPerspective = 13, DecorationFlat = 14, DecorationCentroid = 16,
+    };
     enum StorageClass : std::uint32_t {
         StorageClassUniformConstant = 0, StorageClassInput = 1,
         StorageClassUniform = 2, StorageClassOutput = 3,
@@ -214,6 +217,16 @@ struct DecorationSet {
     std::uint32_t location = 0;
     bool hasBuiltIn = false;
     std::uint32_t builtIn = 0;
+    // Interpolation qualifiers. GL 4.6 §4.5: `flat` requires non-
+    // interpolated, `noperspective` disables perspective correction,
+    // `centroid` shifts sampling to the centroid. The synthesised
+    // pass-through VS must emit matching MSL attributes
+    // (`[[user(locnN), flat]]` / `[[center_no_perspective]]` etc.)
+    // or the Metal pipeline-state validator rejects the build with
+    // "Fragment input mismatching vertex shader output".
+    bool isFlat = false;
+    bool isNoPerspective = false;
+    bool isCentroid = false;
 };
 
 struct MemberDecorations {
@@ -388,6 +401,12 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 } else if (deco == spv::DecorationBuiltIn && wc >= 4) {
                     decorations[target].hasBuiltIn = true;
                     decorations[target].builtIn = w[2];
+                } else if (deco == spv::DecorationFlat) {
+                    decorations[target].isFlat = true;
+                } else if (deco == spv::DecorationNoPerspective) {
+                    decorations[target].isNoPerspective = true;
+                } else if (deco == spv::DecorationCentroid) {
+                    decorations[target].isCentroid = true;
                 }
                 break;
             }
@@ -1460,29 +1479,37 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     if (program.geometrySpirv.empty()) return false;
 
     SpirvModule mod;
-    if (!mod.parse(program.geometrySpirv.data(), program.geometrySpirv.size())) {
-        return false;
-    }
+    if (!mod.parse(program.geometrySpirv.data(), program.geometrySpirv.size())) return false;
     if (!mod.haveFuncBody) return false;
 
-    // Topology + max_vertices. All three must be present; otherwise the
-    // shader is malformed and we let the normal path complain.
+    // Topology + max_vertices. GL_POINTS is literally 0x0, so we use
+    // explicit haveInput/haveOutput flags rather than comparing the
+    // resolved GL enum against 0 (that bug ate a round-trip of sweep
+    // wiring before we noticed `inputTopo == GL_POINTS == 0` was
+    // being treated as "unset").
     GLenum inputTopo = 0;
     GLenum outputTopo = 0;
+    bool haveInputTopo = false;
+    bool haveOutputTopo = false;
     std::uint32_t maxVertices = 0;
     std::uint32_t invocations = 1;   // default if ExecutionModeInvocations absent
     for (const auto& [mode, operands] : mod.executionModes) {
-        if (GLenum g = inputModeToGL(mode); g != 0) {
-            inputTopo = g;
-        } else if (GLenum g2 = outputModeToGL(mode); g2 != 0) {
-            outputTopo = g2;
+        if (mode == spv::ExecutionModeInputPoints || mode == spv::ExecutionModeInputLines ||
+            mode == spv::ExecutionModeInputLinesAdjacency || mode == spv::ExecutionModeTriangles ||
+            mode == spv::ExecutionModeInputTrianglesAdjacency) {
+            inputTopo = inputModeToGL(mode);
+            haveInputTopo = true;
+        } else if (mode == spv::ExecutionModeOutputPoints || mode == spv::ExecutionModeOutputLineStrip ||
+                   mode == spv::ExecutionModeOutputTriangleStrip) {
+            outputTopo = outputModeToGL(mode);
+            haveOutputTopo = true;
         } else if (mode == spv::ExecutionModeOutputVertices && !operands.empty()) {
             maxVertices = operands[0];
         } else if (mode == spv::ExecutionModeInvocations && !operands.empty()) {
             invocations = operands[0];
         }
     }
-    if (inputTopo == 0 || outputTopo == 0 || maxVertices == 0) return false;
+    if (!haveInputTopo || !haveOutputTopo || maxVertices == 0) return false;
     // MVP supports only single-invocation GS (CTS constant_expressions
     // never uses GL_ARB_gpu_shader5 invocation counts). Multi-
     // invocation lands in a follow-up.
@@ -1528,29 +1555,102 @@ std::uint32_t vertsPerInputPrim(GLenum topo) {
 // consistent varying table.
 struct OutputVaryingDesc {
     std::string name;
-    std::uint32_t width = 0;     // flat float count
+    std::uint32_t width = 0;     // flat scalar count (always in scalar units)
     std::uint32_t location = 0;
+    std::uint8_t interp = 0;     // 0=smooth, 1=flat, 2=noperspective, 3=centroid
+    std::uint8_t baseType = 0;   // 0=float, 1=int, 2=uint
 };
 
 std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
     std::vector<OutputVaryingDesc> out;
+    // Implicit-location varyings (no explicit `layout(location=N)` in
+    // the GLSL) carry no DecorationLocation from glslang. GL 4.6 §4.4.2
+    // says the linker assigns them sequentially starting from 0; we
+    // mirror that here by collecting them separately and auto-numbering
+    // after the explicitly-located ones settle, sorted by SPIR-V id so
+    // the order is stable across runs.
+    std::vector<OutputVaryingDesc> implicits;
     for (const auto& [varId, info] : mod.variables) {
         if (info.storageClass != spv::StorageClassOutput) continue;
         auto dIt = mod.decorations.find(varId);
-        if (dIt == mod.decorations.end()) continue;
         // Built-ins (gl_Position, gl_PointSize) have BuiltIn decoration;
-        // those are captured separately via currentPosition_.
-        if (dIt->second.hasBuiltIn) continue;
-        if (!dIt->second.hasLocation) continue;
+        // those are captured separately via currentPosition_. A variable
+        // with no decoration block at all is also a candidate — that's
+        // what glslang emits for `out float foo;` with no layout
+        // qualifier.
+        if (dIt != mod.decorations.end() && dIt->second.hasBuiltIn) continue;
         OutputVaryingDesc d;
         d.name = info.name;
-        d.location = dIt->second.location;
         auto tIt = mod.types.find(info.typeId);
         if (tIt != mod.types.end()) {
             d.width = mod.scalarWidth(tIt->second.pointeeType);
         }
         if (d.width == 0) continue;   // empty or unresolved — skip
-        out.push_back(std::move(d));
+        // If the type pointee is a struct (e.g. the gl_PerVertex
+        // output block), skip — our gl_Position / built-in handling
+        // owns that and we only want standalone user varyings.
+        if (tIt != mod.types.end()) {
+            const auto pIt = mod.types.find(tIt->second.pointeeType);
+            if (pIt != mod.types.end() && pIt->second.kind == TypeInfo::Kind::Struct) {
+                continue;
+            }
+            // Determine scalar base type by walking vec → scalar.
+            if (pIt != mod.types.end()) {
+                std::uint32_t scalarTypeId = 0;
+                if (pIt->second.kind == TypeInfo::Kind::Vec2 ||
+                    pIt->second.kind == TypeInfo::Kind::Vec3 ||
+                    pIt->second.kind == TypeInfo::Kind::Vec4) {
+                    scalarTypeId = pIt->second.componentType;
+                } else {
+                    scalarTypeId = tIt->second.pointeeType;
+                }
+                const auto sIt = mod.types.find(scalarTypeId);
+                if (sIt != mod.types.end()) {
+                    switch (sIt->second.kind) {
+                        case TypeInfo::Kind::Int:   d.baseType = 1; break;
+                        case TypeInfo::Kind::UInt:  d.baseType = 2; break;
+                        case TypeInfo::Kind::Float: d.baseType = 0; break;
+                        default: d.baseType = 0; break;
+                    }
+                }
+            }
+        }
+        if (dIt != mod.decorations.end() && dIt->second.hasLocation) {
+            d.location = dIt->second.location;
+            if (dIt->second.isFlat) d.interp = 1;
+            else if (dIt->second.isNoPerspective) d.interp = 2;
+            else if (dIt->second.isCentroid) d.interp = 3;
+            out.push_back(std::move(d));
+        } else {
+            // Implicit location; record a tracking id in `location`
+            // temporarily — we overwrite below after we know how many
+            // explicitly-located slots are claimed.
+            d.location = varId;   // will be replaced
+            if (dIt != mod.decorations.end()) {
+                if (dIt->second.isFlat) d.interp = 1;
+                else if (dIt->second.isNoPerspective) d.interp = 2;
+                else if (dIt->second.isCentroid) d.interp = 3;
+            }
+            implicits.push_back(std::move(d));
+        }
+    }
+    // Resolve implicit locations: sort by SPIR-V id (stable) and
+    // assign the lowest non-occupied location ≥ 0.
+    if (!implicits.empty()) {
+        std::sort(implicits.begin(), implicits.end(), [](const auto& a, const auto& b) {
+            return a.location < b.location;   // id-sorted
+        });
+        std::uint32_t nextLoc = 0;
+        auto locTaken = [&](std::uint32_t loc) {
+            for (const auto& v : out) if (v.location == loc) return true;
+            return false;
+        };
+        for (auto& v : implicits) {
+            while (locTaken(nextLoc)) ++nextLoc;
+            v.location = nextLoc;
+            out.push_back(std::move(v));
+            ++nextLoc;
+        }
     }
     std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
         return a.location < b.location;
@@ -1605,13 +1705,19 @@ EmulatedDraw emulateGeometryDraw(
     std::vector<std::string>   outNames;
     std::vector<std::uint32_t> outWidths;
     std::vector<std::uint32_t> outLocations;
+    std::vector<std::uint8_t>  outInterp;
+    std::vector<std::uint8_t>  outBaseType;
     outNames.reserve(outVaryings.size());
     outWidths.reserve(outVaryings.size());
     outLocations.reserve(outVaryings.size());
+    outInterp.reserve(outVaryings.size());
+    outBaseType.reserve(outVaryings.size());
     for (const auto& v : outVaryings) {
         outNames.push_back(v.name);
         outWidths.push_back(v.width);
         outLocations.push_back(v.location);
+        outInterp.push_back(v.interp);
+        outBaseType.push_back(v.baseType);
     }
 
     // Run the interpreter once per primitive. We pass zero-initialised
@@ -1663,6 +1769,8 @@ EmulatedDraw emulateGeometryDraw(
     d.varyingWidths     = outWidths;
     d.varyingNames      = std::move(outNames);
     d.varyingLocations  = std::move(outLocations);
+    d.varyingInterp     = std::move(outInterp);
+    d.varyingBaseType   = std::move(outBaseType);
     d.expandedVertexData.resize(emittedAll.size() * fpv, 0.0f);
 
     for (std::size_t v = 0; v < emittedAll.size(); ++v) {
@@ -1699,13 +1807,15 @@ EmulatedDraw emulateGeometryDraw(
 // side. Matching on both sides is what makes the stage link work.
 
 std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
-    auto mslTypeForWidth = [](std::uint32_t w) -> const char* {
-        switch (w) {
-            case 1: return "float";
-            case 2: return "float2";
-            case 3: return "float3";
-            case 4: return "float4";
-            default: return "float";   // wider varyings not exercised by MVP
+    auto mslTypeFor = [](std::uint32_t width, std::uint8_t baseType) -> const char* {
+        const char* floatNames[] = { "float", "float2", "float3", "float4" };
+        const char* intNames[]   = { "int",   "int2",   "int3",   "int4"   };
+        const char* uintNames[]  = { "uint",  "uint2",  "uint3",  "uint4"  };
+        const unsigned idx = (width >= 1 && width <= 4) ? (width - 1) : 0;
+        switch (baseType) {
+            case 1:  return intNames[idx];
+            case 2:  return uintNames[idx];
+            default: return floatNames[idx];
         }
     };
 
@@ -1718,8 +1828,9 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
     src += "struct VsIn {\n";
     src += "    float4 vsin_position [[attribute(0)]];\n";
     for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
+        const std::uint8_t bt = (i < draw.varyingBaseType.size()) ? draw.varyingBaseType[i] : 0;
         src += "    ";
-        src += mslTypeForWidth(draw.varyingWidths[i]);
+        src += mslTypeFor(draw.varyingWidths[i], bt);
         src += " vsin_v";
         src += std::to_string(i);
         src += " [[attribute(";
@@ -1729,18 +1840,36 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
     src += "};\n\n";
 
     // ─ Vertex output struct.
+    auto interpTag = [](std::uint8_t interp) -> const char* {
+        switch (interp) {
+            case 1: return ", flat";
+            case 2: return ", center_no_perspective";
+            case 3: return ", centroid_perspective";
+            default: return "";
+        }
+    };
     src += "struct VsOut {\n";
     src += "    float4 gl_Position [[position]];\n";
     for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
         const std::uint32_t loc = (i < draw.varyingLocations.size())
             ? draw.varyingLocations[i] : static_cast<std::uint32_t>(i);
+        const std::uint8_t interp = (i < draw.varyingInterp.size())
+            ? draw.varyingInterp[i] : 0;
+        const std::uint8_t bt = (i < draw.varyingBaseType.size())
+            ? draw.varyingBaseType[i] : 0;
+        // Integer varyings MUST be flat — Metal spec and MSL compiler
+        // both enforce this. If we got here with smooth on an int
+        // varying, force flat.
+        const std::uint8_t effInterp = (bt != 0 && interp == 0) ? 1 : interp;
         src += "    ";
-        src += mslTypeForWidth(draw.varyingWidths[i]);
+        src += mslTypeFor(draw.varyingWidths[i], bt);
         src += " vsout_v";
         src += std::to_string(i);
         src += " [[user(locn";
         src += std::to_string(loc);
-        src += ")]];\n";
+        src += ")";
+        src += interpTag(effInterp);
+        src += "]];\n";
     }
     src += "};\n\n";
 

@@ -14026,12 +14026,33 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     for (std::size_t i = 0; i < ed.varyingWidths.size(); ++i) {
                         ShaderReflection::VertexInput vi;
                         vi.location = static_cast<GLuint>(i + 1);
-                        switch (ed.varyingWidths[i]) {
-                            case 1: vi.type = GL_FLOAT;      break;
-                            case 2: vi.type = GL_FLOAT_VEC2; break;
-                            case 3: vi.type = GL_FLOAT_VEC3; break;
-                            case 4: vi.type = GL_FLOAT_VEC4; break;
-                            default: vi.type = GL_FLOAT;     break;
+                        const std::uint8_t bt = (i < ed.varyingBaseType.size())
+                            ? ed.varyingBaseType[i] : 0;
+                        const std::uint32_t w = ed.varyingWidths[i];
+                        if (bt == 1) {   // int
+                            switch (w) {
+                                case 1: vi.type = GL_INT;      break;
+                                case 2: vi.type = GL_INT_VEC2; break;
+                                case 3: vi.type = GL_INT_VEC3; break;
+                                case 4: vi.type = GL_INT_VEC4; break;
+                                default: vi.type = GL_INT;     break;
+                            }
+                        } else if (bt == 2) {   // uint
+                            switch (w) {
+                                case 1: vi.type = GL_UNSIGNED_INT;      break;
+                                case 2: vi.type = GL_UNSIGNED_INT_VEC2; break;
+                                case 3: vi.type = GL_UNSIGNED_INT_VEC3; break;
+                                case 4: vi.type = GL_UNSIGNED_INT_VEC4; break;
+                                default: vi.type = GL_UNSIGNED_INT;     break;
+                            }
+                        } else {   // float
+                            switch (w) {
+                                case 1: vi.type = GL_FLOAT;      break;
+                                case 2: vi.type = GL_FLOAT_VEC2; break;
+                                case 3: vi.type = GL_FLOAT_VEC3; break;
+                                case 4: vi.type = GL_FLOAT_VEC4; break;
+                                default: vi.type = GL_FLOAT;     break;
+                            }
                         }
                         vi.name = "vsin_v" + std::to_string(i);
                         program->gsPassThroughReflection.vertexInputs.push_back(vi);
@@ -14066,10 +14087,20 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                         TranslatedDrawInfo::VertexAttributeLayout la;
                         la.location = static_cast<GLuint>(i + 1);
                         la.offset = offset;
-                        la.glType = GL_FLOAT;
+                        const std::uint8_t bt = (i < ed.varyingBaseType.size())
+                            ? ed.varyingBaseType[i] : 0;
+                        if (bt == 1) {
+                            la.glType = GL_INT;
+                            la.glIsInteger = true;
+                        } else if (bt == 2) {
+                            la.glType = GL_UNSIGNED_INT;
+                            la.glIsInteger = true;
+                        } else {
+                            la.glType = GL_FLOAT;
+                        }
                         la.glComponentCount = static_cast<GLint>(ed.varyingWidths[i]);
                         tdi.vertexAttributeLayouts.push_back(la);
-                        offset += ed.varyingWidths[i] * sizeof(float);
+                        offset += ed.varyingWidths[i] * sizeof(float);   // storage width is always 4 bytes/scalar
                     }
                 }
 
