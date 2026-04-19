@@ -1400,11 +1400,14 @@ EmulatedDraw emulateGeometryDraw(
     const std::vector<OutputVaryingDesc> outVaryings = gatherOutputVaryings(mod);
     std::vector<std::string>   outNames;
     std::vector<std::uint32_t> outWidths;
+    std::vector<std::uint32_t> outLocations;
     outNames.reserve(outVaryings.size());
     outWidths.reserve(outVaryings.size());
+    outLocations.reserve(outVaryings.size());
     for (const auto& v : outVaryings) {
         outNames.push_back(v.name);
         outWidths.push_back(v.width);
+        outLocations.push_back(v.location);
     }
 
     // Run the interpreter once per primitive. We pass zero-initialised
@@ -1455,6 +1458,7 @@ EmulatedDraw emulateGeometryDraw(
     d.floatsPerVertex   = fpv;
     d.varyingWidths     = outWidths;
     d.varyingNames      = std::move(outNames);
+    d.varyingLocations  = std::move(outLocations);
     d.expandedVertexData.resize(emittedAll.size() * fpv, 0.0f);
 
     for (std::size_t v = 0; v < emittedAll.size(); ++v) {
@@ -1467,6 +1471,93 @@ EmulatedDraw emulateGeometryDraw(
 
     d.ok = true;
     return d;
+}
+
+// ─── MSL synthesis ───────────────────────────────────────────────────
+//
+// The synthesised VS reads a packed buffer (slot 0) whose per-vertex
+// stride is `floatsPerVertex`:
+//   bytes 0..15 : gl_Position (float4)
+//   bytes 16..  : varyings, laid out in widthi × float, sorted by
+//                 Location ascending
+// It emits:
+//   [[position]]    gl_Position  — with the standard GL→Metal depth
+//                                  fixup (z' = (z + w) / 2)
+//   [[user(locn<L>)]] varying    — for each varying, at its original
+//                                  SPIR-V Location
+//
+// The MSL `[[attribute(...)]]` indices are allocated sequentially
+// (0 for position, 1..N for varyings). These are vertex-descriptor
+// attribute indices, not the GLSL `layout(location=...)` qualifiers —
+// those live on the `[[user(locnN)]]` output side. The FS was
+// translated from SPIR-V with the same Location values on its input
+// varyings, so SPIRV-Cross emitted `[[user(locnN)]]` on the FS input
+// side. Matching on both sides is what makes the stage link work.
+
+std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
+    auto mslTypeForWidth = [](std::uint32_t w) -> const char* {
+        switch (w) {
+            case 1: return "float";
+            case 2: return "float2";
+            case 3: return "float3";
+            case 4: return "float4";
+            default: return "float";   // wider varyings not exercised by MVP
+        }
+    };
+
+    std::string src;
+    src.reserve(512);
+    src += "#include <metal_stdlib>\n";
+    src += "using namespace metal;\n\n";
+
+    // ─ Vertex input struct (stage_in).
+    src += "struct VsIn {\n";
+    src += "    float4 vsin_position [[attribute(0)]];\n";
+    for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
+        src += "    ";
+        src += mslTypeForWidth(draw.varyingWidths[i]);
+        src += " vsin_v";
+        src += std::to_string(i);
+        src += " [[attribute(";
+        src += std::to_string(i + 1);   // 0 reserved for position
+        src += ")]];\n";
+    }
+    src += "};\n\n";
+
+    // ─ Vertex output struct.
+    src += "struct VsOut {\n";
+    src += "    float4 gl_Position [[position]];\n";
+    for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
+        const std::uint32_t loc = (i < draw.varyingLocations.size())
+            ? draw.varyingLocations[i] : static_cast<std::uint32_t>(i);
+        src += "    ";
+        src += mslTypeForWidth(draw.varyingWidths[i]);
+        src += " vsout_v";
+        src += std::to_string(i);
+        src += " [[user(locn";
+        src += std::to_string(loc);
+        src += ")]];\n";
+    }
+    src += "};\n\n";
+
+    // ─ Entry.
+    src += "vertex VsOut main0(VsIn in [[stage_in]])\n";
+    src += "{\n";
+    src += "    VsOut out = {};\n";
+    src += "    out.gl_Position = in.vsin_position;\n";
+    // GL→Metal depth fixup. Mirrors what SPIRV-Cross emits for every
+    // non-geometry VS today.
+    src += "    out.gl_Position.z = (out.gl_Position.z + out.gl_Position.w) * 0.5;\n";
+    for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
+        src += "    out.vsout_v";
+        src += std::to_string(i);
+        src += " = in.vsin_v";
+        src += std::to_string(i);
+        src += ";\n";
+    }
+    src += "    return out;\n";
+    src += "}\n";
+    return src;
 }
 
 }  // namespace appgl

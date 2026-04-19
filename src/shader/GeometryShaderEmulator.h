@@ -64,6 +64,12 @@ struct EmulatedDraw {
     // Varying names, parallel to varyingWidths. Used to synthesise the
     // pass-through VS and to map to the FS's input varyings by name.
     std::vector<std::string> varyingNames;
+    // Per-varying SPIR-V Location decoration, parallel to varying-
+    // Widths. The pass-through VS emits `[[user(locn<N>)]]` with these
+    // values so the FS reads the varying at its original layout
+    // qualifier — the FS MSL was translated against that location and
+    // expects it to match.
+    std::vector<std::uint32_t> varyingLocations;
     // True if emulation succeeded. False leaves expandedVertexData empty
     // and the caller should fall back to the existing no-GS path.
     bool ok = false;
@@ -94,6 +100,16 @@ EmulatedDraw emulateGeometryDraw(
     GLint first,
     const void* indices,
     GLenum indexType);
+
+// Synthesise a pass-through vertex-shader MSL source that reads
+// the expanded per-vertex payload (one buffer slot with gl_Position
+// + all user varyings packed sequentially) and writes gl_Position
+// plus `[[user(locn<N>)]]` outputs at the same locations the
+// original GS wrote. Called once per draw after
+// `emulateGeometryDraw` succeeds; the resulting MSL is fed into
+// the normal translated-draw encoder alongside the program's
+// unchanged fragment MSL.
+std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw);
 
 }  // namespace appgl
 

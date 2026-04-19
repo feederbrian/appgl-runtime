@@ -452,6 +452,20 @@ struct GLProgramObject {
     GLenum gsOutputTopology = 0;
     std::uint32_t gsMaxVertices = 0;
 
+    // Cached synthesised pass-through VS for the GS-emulation draw
+    // path. Built lazily on the first emulated draw (the layout is
+    // fixed at link time by the GS output SPIR-V, which doesn't
+    // change between draws). Cleared at program re-link via the
+    // same reset path as the rest of the translated-pipeline cache.
+    std::string gsPassThroughVertexMSL;
+    ShaderReflection gsPassThroughReflection;
+    // Parallel pipeline-state cache so the emulated draw doesn't
+    // pollute the regular hasTranslatedPipeline cache. Same owner-
+    // ship semantics as metalPipelineState* below.
+    void* gsPassThroughPipelineState = nullptr;
+    std::uint32_t gsPassThroughPipelineColorFormat = 0;
+    std::unordered_map<std::uint64_t, void*> gsPassThroughPipelineStateCache;
+
     // Compute shader pipeline state. The MSL and reflection are populated
     // at link time for ProgramKind::Compute; the MTLComputePipelineState
     // is built immediately and cached here because compute pipelines
