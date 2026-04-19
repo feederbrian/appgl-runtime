@@ -79,6 +79,48 @@ const std::unordered_map<std::string, TypeEntry>& typeTable() {
         {"usampler2DMS", {GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE, 1, "usampler2DMS"}},
         {"usampler2DMSArray", {GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY, 1, "usampler2DMSArray"}},
         {"usamplerCubeArray", {GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY, 1, "usamplerCubeArray"}},
+        // Float image types (GL 4.2+ storage images for imageLoad/imageStore).
+        // CTS KHR-GL46.shading_language_420pack expects `glGetUniformLocation`
+        // to find these uniforms — without entries here the scanner treats
+        // `uniform image2D uni_image` as an unknown token and drops it from
+        // the program's uniforms table, so getUniformLocation returns -1.
+        {"image1D",               {GL_IMAGE_1D, 1, "image1D"}},
+        {"image2D",               {GL_IMAGE_2D, 1, "image2D"}},
+        {"image3D",               {GL_IMAGE_3D, 1, "image3D"}},
+        {"imageCube",             {GL_IMAGE_CUBE, 1, "imageCube"}},
+        {"image2DRect",           {GL_IMAGE_2D_RECT, 1, "image2DRect"}},
+        {"image1DArray",          {GL_IMAGE_1D_ARRAY, 1, "image1DArray"}},
+        {"image2DArray",          {GL_IMAGE_2D_ARRAY, 1, "image2DArray"}},
+        {"imageBuffer",           {GL_IMAGE_BUFFER, 1, "imageBuffer"}},
+        {"imageCubeArray",        {GL_IMAGE_CUBE_MAP_ARRAY, 1, "imageCubeArray"}},
+        {"image2DMS",             {GL_IMAGE_2D_MULTISAMPLE, 1, "image2DMS"}},
+        {"image2DMSArray",        {GL_IMAGE_2D_MULTISAMPLE_ARRAY, 1, "image2DMSArray"}},
+        // Integer image types.
+        {"iimage1D",              {GL_INT_IMAGE_1D, 1, "iimage1D"}},
+        {"iimage2D",              {GL_INT_IMAGE_2D, 1, "iimage2D"}},
+        {"iimage3D",              {GL_INT_IMAGE_3D, 1, "iimage3D"}},
+        {"iimageCube",            {GL_INT_IMAGE_CUBE, 1, "iimageCube"}},
+        {"iimage2DRect",          {GL_INT_IMAGE_2D_RECT, 1, "iimage2DRect"}},
+        {"iimage1DArray",         {GL_INT_IMAGE_1D_ARRAY, 1, "iimage1DArray"}},
+        {"iimage2DArray",         {GL_INT_IMAGE_2D_ARRAY, 1, "iimage2DArray"}},
+        {"iimageBuffer",          {GL_INT_IMAGE_BUFFER, 1, "iimageBuffer"}},
+        {"iimageCubeArray",       {GL_INT_IMAGE_CUBE_MAP_ARRAY, 1, "iimageCubeArray"}},
+        {"iimage2DMS",            {GL_INT_IMAGE_2D_MULTISAMPLE, 1, "iimage2DMS"}},
+        {"iimage2DMSArray",       {GL_INT_IMAGE_2D_MULTISAMPLE_ARRAY, 1, "iimage2DMSArray"}},
+        // Unsigned integer image types.
+        {"uimage1D",              {GL_UNSIGNED_INT_IMAGE_1D, 1, "uimage1D"}},
+        {"uimage2D",              {GL_UNSIGNED_INT_IMAGE_2D, 1, "uimage2D"}},
+        {"uimage3D",              {GL_UNSIGNED_INT_IMAGE_3D, 1, "uimage3D"}},
+        {"uimageCube",            {GL_UNSIGNED_INT_IMAGE_CUBE, 1, "uimageCube"}},
+        {"uimage2DRect",          {GL_UNSIGNED_INT_IMAGE_2D_RECT, 1, "uimage2DRect"}},
+        {"uimage1DArray",         {GL_UNSIGNED_INT_IMAGE_1D_ARRAY, 1, "uimage1DArray"}},
+        {"uimage2DArray",         {GL_UNSIGNED_INT_IMAGE_2D_ARRAY, 1, "uimage2DArray"}},
+        {"uimageBuffer",          {GL_UNSIGNED_INT_IMAGE_BUFFER, 1, "uimageBuffer"}},
+        {"uimageCubeArray",       {GL_UNSIGNED_INT_IMAGE_CUBE_MAP_ARRAY, 1, "uimageCubeArray"}},
+        {"uimage2DMS",            {GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE, 1, "uimage2DMS"}},
+        {"uimage2DMSArray",       {GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY, 1, "uimage2DMSArray"}},
+        // Atomic counter type.
+        {"atomic_uint",           {GL_UNSIGNED_INT_ATOMIC_COUNTER, 1, "atomic_uint"}},
     };
     return table;
 }
@@ -412,10 +454,21 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
             return;
         }
         // Drop additional qualifiers like `flat`, `smooth`, `centroid`, `noperspective`,
-        // `invariant`, `precise`.
+        // `invariant`, `precise`, `highp`/`mediump`/`lowp` (precision), and the
+        // GL 4.2+ image-memory qualifiers `readonly`/`writeonly`/`coherent`/
+        // `volatile`/`restrict`. Without the image-memory list, a declaration
+        // like `writeonly uniform image2D uni_image;` leaves `writeonly` at
+        // tokens[0] — the subsequent `uniform` check fails and the scanner
+        // silently drops the image uniform, making glGetUniformLocation
+        // return -1 (CTS shading_language_420pack sees "Uniform not available").
         while (!tokens.empty() && (tokens.front() == "flat" || tokens.front() == "smooth" ||
                                    tokens.front() == "centroid" || tokens.front() == "noperspective" ||
-                                   tokens.front() == "invariant" || tokens.front() == "precise")) {
+                                   tokens.front() == "invariant" || tokens.front() == "precise" ||
+                                   tokens.front() == "highp" || tokens.front() == "mediump" ||
+                                   tokens.front() == "lowp" ||
+                                   tokens.front() == "readonly" || tokens.front() == "writeonly" ||
+                                   tokens.front() == "coherent" || tokens.front() == "volatile" ||
+                                   tokens.front() == "restrict")) {
             tokens.erase(tokens.begin());
         }
         if (tokens.empty()) {
