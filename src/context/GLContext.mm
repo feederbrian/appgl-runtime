@@ -2086,6 +2086,76 @@ struct GLContext::Impl {
         return true;
     }
 
+    // Resolve the `pixels` argument of a glTex[Sub]Image call against
+    // the current `GL_PIXEL_UNPACK_BUFFER` binding.
+    //
+    // GL 4.6 §8.5: when a non-zero buffer is bound to PIXEL_UNPACK_BUFFER,
+    // `pixels` is a BYTE OFFSET into that buffer — NOT a client-memory
+    // pointer. Pre-fix, our upload path just dereferenced whatever was
+    // in the `pixels` argument, which SIGSEGV'd on any CTS test (e.g.
+    // direct_state_access.textures_subimage_errors) that calls the API
+    // with a bound PBO and a small offset. The offset alone is a tiny
+    // integer interpreted as a VM address — every read from there
+    // faulted.
+    //
+    // Returns:
+    //   - (originalPtr, true) when no PBO bound OR pixels is nullptr.
+    //   - (shadowPtr + offset, true) when PBO bound AND the offset+bytes
+    //     fit inside the buffer's CPU-side shadow.
+    //   - (nullptr, false) when validation fails (non-existent buffer,
+    //     mapped buffer, out-of-range offset, non-aligned offset). In
+    //     this case the caller should push the appropriate GL error
+    //     (GL_INVALID_OPERATION) and abort the upload.
+    //
+    // `requiredBytes` is the total byte count the upload needs to
+    // read starting at the offset. Caller computes this from width ×
+    // height × depth × pixelBytes with GL_UNPACK_* row/image padding
+    // applied.
+    //
+    // `typeBytes` is the size of one "datum" (element) — 2 for
+    // GL_UNSIGNED_SHORT, 4 for GL_FLOAT, etc. GL spec requires the
+    // offset to be a multiple of the datum size.
+    std::pair<const void*, bool> resolveUnpackPBO(
+        const void* pixels,
+        std::size_t requiredBytes,
+        std::size_t typeBytes)
+    {
+        const GLuint pboName = state->boundBuffer(GL_PIXEL_UNPACK_BUFFER);
+        if (pboName == 0) {
+            return {pixels, true};
+        }
+        GLBufferObject* buf = objects->buffers().get(pboName);
+        if (buf == nullptr) {
+            // PBO referenced but doesn't resolve — spec-ambiguous but
+            // clearly can't dereference: reject.
+            return {nullptr, false};
+        }
+        // Mapped PBO: GL 4.6 §8.5 forbids using the data store while
+        // mapped. Return validation failure so the caller pushes the
+        // spec-mandated INVALID_OPERATION.
+        if (buf->mapPointer != nullptr) {
+            return {nullptr, false};
+        }
+        const std::uintptr_t offsetRaw = reinterpret_cast<std::uintptr_t>(pixels);
+        const std::size_t offset = static_cast<std::size_t>(offsetRaw);
+        // Datum-alignment check per GL 4.6 §8.5.
+        if (typeBytes > 1 && (offset % typeBytes) != 0) {
+            return {nullptr, false};
+        }
+        const std::size_t bufSize = static_cast<std::size_t>(
+            std::max<GLsizeiptr>(buf->size, 0));
+        // Overflow-safe range check.
+        if (offset > bufSize || requiredBytes > bufSize - offset) {
+            return {nullptr, false};
+        }
+        if (buf->shadowBytes.size() < offset + requiredBytes) {
+            // Shadow is smaller than the declared buffer size. Treat as
+            // out-of-range to avoid reading past the end of our CPU mirror.
+            return {nullptr, false};
+        }
+        return {buf->shadowBytes.data() + offset, true};
+    }
+
     // Phase 8X Group 4d follow-up¹⁰ — `texName` is diagnostic-only and
     // defaults to 0 (no log). The four user-facing upload call sites
     // (`texImage` / `texSubImage` / `texStorage` / `texStorageMultisample`)
@@ -7565,7 +7635,25 @@ bool GLContext::texImage(
                         || target == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
     image.desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
     image.defined = true;
-    if (!impl_->buildRGBA8Upload(image.desc.width, image.desc.height, image.desc.depth, format, type, pixels, image.rgba8)) {
+    // Resolve pixels against GL_PIXEL_UNPACK_BUFFER if one is bound.
+    // Without this, passing an offset (as CTS does after binding a PBO)
+    // would SIGSEGV when we treat the offset as a raw pointer. See
+    // Impl::resolveUnpackPBO — returns (nullptr, false) for any PBO
+    // validation failure (range / alignment / mapped), and the caller
+    // pushes GL_INVALID_OPERATION per GL 4.6 §8.5.
+    const std::size_t pxBytes = bytesPerPixel(format, type);
+    const std::size_t typeBytes = isPackedPixelType(type)
+        ? pxBytes : bytesPerComponent(type);
+    const std::size_t requiredBytes = static_cast<std::size_t>(
+        image.desc.width) * static_cast<std::size_t>(image.desc.height)
+        * static_cast<std::size_t>(image.desc.depth) * pxBytes;
+    auto [resolvedPixels, pboOk] = impl_->resolveUnpackPBO(
+        pixels, requiredBytes, typeBytes > 0 ? typeBytes : 1);
+    if (!pboOk) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!impl_->buildRGBA8Upload(image.desc.width, image.desc.height, image.desc.depth, format, type, resolvedPixels, image.rgba8)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -7573,7 +7661,7 @@ bool GLContext::texImage(
     impl_->buildNativeUpload(
         static_cast<GLenum>(internalformat),
         image.desc.width, image.desc.height, image.desc.depth,
-        format, type, pixels, image.nativeData, image.nativeBpp);
+        format, type, resolvedPixels, image.nativeData, image.nativeBpp);
 
     if (level == 0 || !object->levels.contains(0)) {
         object->desc = image.desc;
@@ -7622,8 +7710,21 @@ bool GLContext::texSubImage(
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (width > 0 && height > 0 && depth > 0 && pixels == nullptr) {
-        pushError(GL_INVALID_VALUE);
+    // Type validation — unknown / unsupported type enums must produce
+    // GL_INVALID_ENUM (GL 4.6 §8.4.4 / §8.5, Table 8.7). Without this,
+    // the test's m_type_invalid case saw GL_INVALID_OPERATION from
+    // the downstream buildRGBA8Upload failure.
+    if (!isPackedPixelType(type) && bytesPerComponent(type) == 0) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    // Format / type compatibility (GL 4.6 Table 8.7). Packed types
+    // constrain the format they can appear with. A format like GL_RG
+    // with type GL_UNSIGNED_BYTE_3_3_2 should produce
+    // GL_INVALID_OPERATION per spec — our impl previously silently
+    // accepted the combination and proceeded to upload junk.
+    if (!isFormatTypeCompatible_extern(format, type)) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
 
@@ -7631,6 +7732,23 @@ bool GLContext::texSubImage(
     if (object == nullptr || !object->instantiated) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    // Level bounds vs MAX_TEXTURE_SIZE must yield INVALID_VALUE, not
+    // INVALID_OPERATION (GL 4.6 §8.5: "level is greater than log2 max,
+    // where max is MAX_TEXTURE_SIZE"). Distinct from "level defined?"
+    // which we check below — an out-of-range level index is invalid
+    // before we even look at the map.
+    if (impl_->capabilities != nullptr) {
+        GLint maxTex = 0;
+        impl_->capabilities->queryInteger(GL_MAX_TEXTURE_SIZE, &maxTex);
+        if (maxTex > 0) {
+            int maxLevel = 0;
+            for (GLint dim = maxTex; dim > 1; dim >>= 1) ++maxLevel;
+            if (level > maxLevel) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+        }
     }
     auto levelIt = object->levels.find(level);
     if (levelIt == object->levels.end() || !levelIt->second.defined) {
@@ -7645,8 +7763,37 @@ bool GLContext::texSubImage(
         return false;
     }
 
+    // Resolve pixels against GL_PIXEL_UNPACK_BUFFER if bound (see
+    // texImage for rationale). CTS DSA textures_subimage_errors SIGSEGV
+    // was rooted here — the test binds a PBO, passes a byte-offset as
+    // the `pixels` argument, and expects GL_INVALID_OPERATION for
+    // out-of-range / mapped / unaligned conditions. Without PBO
+    // resolution we dereferenced the offset as a raw pointer and
+    // crashed.
+    //
+    // The null-pixels check is DEFERRED until after PBO resolution —
+    // with a PBO bound, pixels==nullptr is the offset 0, which is
+    // valid (and even expected for "read from start of buffer").
+    // Without a PBO, nullptr with non-zero dimensions is INVALID_VALUE.
+    const std::size_t pxBytes = bytesPerPixel(format, type);
+    const std::size_t typeBytes = isPackedPixelType(type)
+        ? pxBytes : bytesPerComponent(type);
+    const std::size_t requiredBytes = static_cast<std::size_t>(width)
+        * static_cast<std::size_t>(height) * static_cast<std::size_t>(depth)
+        * pxBytes;
+    auto [resolvedPixels, pboOk] = impl_->resolveUnpackPBO(
+        pixels, requiredBytes, typeBytes > 0 ? typeBytes : 1);
+    if (!pboOk) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const bool pboBound = impl_->state->boundBuffer(GL_PIXEL_UNPACK_BUFFER) != 0;
+    if (!pboBound && width > 0 && height > 0 && depth > 0 && resolvedPixels == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     std::vector<std::uint8_t> upload;
-    if (!impl_->buildRGBA8Upload(width, height, depth, format, type, pixels, upload)) {
+    if (!impl_->buildRGBA8Upload(width, height, depth, format, type, resolvedPixels, upload)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -7674,7 +7821,7 @@ bool GLContext::texSubImage(
         std::vector<std::uint8_t> nativeUpload;
         std::size_t nativeBpp = 0;
         if (impl_->buildNativeUpload(image.desc.internalFormat,
-                width, height, depth, format, type, pixels,
+                width, height, depth, format, type, resolvedPixels,
                 nativeUpload, nativeBpp) && nativeBpp == image.nativeBpp) {
             for (GLsizei z = 0; z < depth; ++z) {
                 for (GLsizei y = 0; y < height; ++y) {
