@@ -1508,7 +1508,18 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 break;
             }
             case spv::OpCompositeConstruct: {
-                // w[0]=type, w[1]=resultId, w[2..]=component ids
+                // w[0]=type, w[1]=resultId, w[2..]=component-or-vector ids
+                //
+                // SPIR-V 1.0 §3.32.12: operands can be either scalars
+                // (contributing one component each) or vectors (in
+                // which case ALL of the vector's components are
+                // flattened into the result). GLSL `vec4(vec2, 0, 1)`
+                // emits `OpCompositeConstruct %v4 %vec2val %const0
+                // %const1` — three operands producing four
+                // components. The naive "one operand per result
+                // component" loop drops the vec2's second element,
+                // which broke `gl_Position = vec4(position_data, 0, 1)`
+                // in every rendering GS test.
                 auto typeIt = module_.types.find(w[0]);
                 Value r;
                 if (typeIt != module_.types.end()) {
@@ -1517,9 +1528,23 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         t.kind == TypeInfo::Kind::Vec4) {
                         r.kind = (t.count == 2) ? Value::Kind::Float2 :
                                  (t.count == 3) ? Value::Kind::Float3 : Value::Kind::Float4;
-                        for (std::uint32_t k = 0; k < t.count && (2 + k) < wc; ++k) {
+                        std::uint32_t dstIdx = 0;
+                        const std::uint32_t nOperands = (wc > 2) ? (wc - 2) : 0;
+                        for (std::uint32_t k = 0; k < nOperands && dstIdx < t.count; ++k) {
                             Value cv;
-                            if (tryGetValue(w[2 + k], cv)) r.f[k] = cv.f[0];
+                            if (!tryGetValue(w[2 + k], cv)) continue;
+                            const int cc = cv.componentCount();
+                            for (int c = 0; c < cc && dstIdx < t.count; ++c) {
+                                // Use the source's "native" kind —
+                                // int operands populate r.i, float
+                                // operands populate r.f. For mixed-
+                                // type ops (rare) the SPIR-V should
+                                // always have a common scalar base
+                                // per the spec §3.32.12.
+                                r.f[dstIdx] = cv.f[c];
+                                r.i[dstIdx] = cv.i[c];
+                                ++dstIdx;
+                            }
                         }
                     }
                 }
@@ -2085,6 +2110,7 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     program.gsMaxVertices = 0;
     program.gsInvocations = 1;
 
+    const bool trace = std::getenv("APPGL_TRACE_GS_EMUL") != nullptr;
     if (program.geometrySpirv.empty()) return false;
 
     SpirvModule mod;
@@ -2134,6 +2160,7 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     // never uses GL_ARB_gpu_shader5 invocation counts). Multi-
     // invocation lands in a follow-up.
     if (invocations != 1) return false;
+    (void)trace;   // still used in the body walker below
 
     // Walk the function body and reject on any unsupported opcode.
     // On rejection, log the opcode + GS source hash so that sweep
@@ -2382,7 +2409,7 @@ EmulatedDraw emulateGeometryDraw(
     GLObjectStore& objects,
     const GLStateTracker& /*state*/,
     GLenum drawMode, GLsizei count, GLint first,
-    const void* /*indices*/, GLenum /*indexType*/)
+    const std::uint32_t* elementIndices)
 {
     EmulatedDraw d;
 
@@ -2401,21 +2428,101 @@ EmulatedDraw emulateGeometryDraw(
     }
 
     // Primitive accounting. The draw's `mode` must be compatible with
-    // the GS input topology (GL 4.6 §11.3.2). We ignore the variant
-    // mismatches for MVP — CTS submits the right topology.
+    // the GS input topology (GL 4.6 §11.3.2). The GS SPIR-V declares
+    // the input topology (points / lines / triangles / adjacency
+    // variants) — but the DRAW mode may be a strip / loop / fan /
+    // strip-adjacency variant that adjusts how vertices are chunked
+    // into per-primitive groups.
+    //
+    // Discrete modes (GL_POINTS, GL_LINES, GL_LINES_ADJACENCY,
+    // GL_TRIANGLES, GL_TRIANGLES_ADJACENCY): vertex count / vpp.
+    // Strip / loop / fan / strip-adjacency modes: sliding window,
+    // resulting in `count - (vpp - step)` primitives where step is
+    // how many vertices the window advances per primitive.
+    //
+    // GL 4.6 §10.1 table 10.2:
+    //   GL_LINE_STRIP            : step=1 (N-1 prims of 2 verts each)
+    //   GL_LINE_LOOP             : step=1 (N prims of 2 verts, last wraps)
+    //   GL_TRIANGLE_STRIP        : step=1 (N-2 prims of 3 verts)
+    //   GL_TRIANGLE_FAN          : step=1 with shared first vertex (N-2 prims)
+    //   GL_LINE_STRIP_ADJACENCY  : step=1 (N-3 prims of 4 verts)
+    //   GL_TRIANGLE_STRIP_ADJ.   : step=2 (N-4)/2 prims of 6 verts
     const std::uint32_t vpp = vertsPerInputPrim(program.gsInputTopology);
     if (vpp == 0) {
         d.ok = false;
         d.diagnostic = "unknown GS input topology";
         return d;
     }
-    (void)drawMode;  // caller guarantees compatibility for now
-    const std::size_t primCount = (count > 0) ? (static_cast<std::size_t>(count) / vpp) : 0;
+
+    enum class PrimIndexing { Discrete, Strip, StripAdjacency, Loop, Fan };
+    PrimIndexing indexing = PrimIndexing::Discrete;
+    switch (drawMode) {
+        case GL_LINE_STRIP:
+        case GL_TRIANGLE_STRIP:
+        case GL_LINE_STRIP_ADJACENCY:
+            indexing = PrimIndexing::Strip;
+            break;
+        case GL_TRIANGLE_STRIP_ADJACENCY:
+            indexing = PrimIndexing::StripAdjacency;
+            break;
+        case GL_LINE_LOOP:
+            indexing = PrimIndexing::Loop;
+            break;
+        case GL_TRIANGLE_FAN:
+            indexing = PrimIndexing::Fan;
+            break;
+        default:
+            indexing = PrimIndexing::Discrete;
+            break;
+    }
+
+    std::size_t primCount = 0;
+    switch (indexing) {
+        case PrimIndexing::Discrete:
+            primCount = (count > 0) ? (static_cast<std::size_t>(count) / vpp) : 0;
+            break;
+        case PrimIndexing::Strip:
+            primCount = (count >= static_cast<GLsizei>(vpp))
+                ? (static_cast<std::size_t>(count) - vpp + 1) : 0;
+            break;
+        case PrimIndexing::StripAdjacency:
+            // Each primitive consumes 6 vertices but advances by 2.
+            primCount = (count >= static_cast<GLsizei>(vpp))
+                ? ((static_cast<std::size_t>(count) - vpp) / 2 + 1) : 0;
+            break;
+        case PrimIndexing::Loop:
+            // LINE_LOOP: N prims (last wraps around).
+            primCount = (count >= 2) ? static_cast<std::size_t>(count) : 0;
+            break;
+        case PrimIndexing::Fan:
+            // TRIANGLE_FAN: N-2 prims, each sharing vertex 0.
+            primCount = (count >= 3) ? (static_cast<std::size_t>(count) - 2) : 0;
+            break;
+    }
     if (primCount == 0) {
         d.ok = false;
         d.diagnostic = "vertex count produced zero primitives";
         return d;
     }
+
+    // Helper: per-primitive vertex indexing. Returns the global
+    // draw-position index (0..count-1) that should feed gl_in[v] of
+    // primitive `p`.
+    auto vertexForPrim = [&](std::size_t p, std::uint32_t v) -> std::size_t {
+        switch (indexing) {
+            case PrimIndexing::Discrete:
+                return p * vpp + v;
+            case PrimIndexing::Strip:
+                return p + v;
+            case PrimIndexing::StripAdjacency:
+                return p * 2 + v;
+            case PrimIndexing::Loop:
+                return (p + v) % static_cast<std::size_t>(count);
+            case PrimIndexing::Fan:
+                return (v == 0) ? 0 : (p + v);
+        }
+        return p * vpp + v;
+    };
 
     // Output varying layout from the GS SPIR-V, ordered by Location.
     const std::vector<OutputVaryingDesc> outVaryings = gatherOutputVaryings(mod);
@@ -2492,11 +2599,18 @@ EmulatedDraw emulateGeometryDraw(
         // vsAttribs map per-vertex by walking vao.attributes and
         // using the array index as the Location key.
         for (GLsizei vi = 0; vi < count; ++vi) {
+            // Resolve the VBO slot for this draw position. drawArrays
+            // → `first + vi`. drawElements → `elementIndices[vi]`,
+            // already index-offset-adjusted and uint32-promoted by
+            // the GLContext drawElements hook (GL_UNSIGNED_BYTE /
+            // _SHORT expansion happens there, not here).
+            const std::size_t vboSlot = (elementIndices != nullptr)
+                ? static_cast<std::size_t>(elementIndices[vi])
+                : static_cast<std::size_t>(first + vi);
             vsAttribs.clear();
             for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
                 if (!vao.attributes[ai].enabled) continue;
-                Value v = readVertexAttribFromVAO(vao, objects, ai,
-                    static_cast<std::size_t>(first + vi));
+                Value v = readVertexAttribFromVAO(vao, objects, ai, vboSlot);
                 if (v.kind != Value::Kind::Invalid) {
                     vsAttribs[static_cast<std::uint32_t>(ai)] = v;
                 }
@@ -2504,7 +2618,8 @@ EmulatedDraw emulateGeometryDraw(
             Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
                                  vsOutNames, vsOutWidths);
             vsInterp.setUniforms(&uniforms);
-            vsInterp.setVsInputs(&vsAttribs, first + vi, 0 /*instanceID*/);
+            vsInterp.setVsInputs(&vsAttribs,
+                static_cast<std::int32_t>(vboSlot), 0 /*instanceID*/);
             EmulatedVertex vsOut;
             vsOut.position[0] = vsOut.position[1] = vsOut.position[2] = 0.0f;
             vsOut.position[3] = 1.0f;
@@ -2541,7 +2656,7 @@ EmulatedDraw emulateGeometryDraw(
     for (std::size_t p = 0; p < primCount; ++p) {
         std::vector<Interpreter::PerVertexInput> inputs(vpp);
         for (std::uint32_t v = 0; v < vpp; ++v) {
-            const std::size_t globalIdx = p * vpp + v;
+            const std::size_t globalIdx = vertexForPrim(p, v);
             if (globalIdx < allVertexInputs.size()) {
                 inputs[v] = allVertexInputs[globalIdx];
             }

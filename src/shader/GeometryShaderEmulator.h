@@ -108,6 +108,13 @@ bool detectGeometryEmulatable(GLProgramObject& program);
 // buffer. On `ok == false`, the caller should record the diagnostic
 // and fall back to the VS+FS-only path (same behaviour as before this
 // emulator existed).
+// drawArrays call-site: pass `elementIndices = nullptr`. The emulator
+// reads VBO slot `(first + i)` for the i-th vertex.
+// drawElements call-site: pass a pre-resolved uint32 index array
+// (already indexOffset-resolved and promoted to uint32 — the caller
+// handles GL_UNSIGNED_BYTE / _SHORT promotion, which the runtime
+// index-expansion cache already does for Metal). The emulator reads
+// VBO slot `elementIndices[i]` for the i-th vertex.
 EmulatedDraw emulateGeometryDraw(
     GLProgramObject& program,
     const GLVertexArrayObject& vao,
@@ -116,8 +123,7 @@ EmulatedDraw emulateGeometryDraw(
     GLenum drawMode,
     GLsizei count,
     GLint first,
-    const void* indices,
-    GLenum indexType);
+    const std::uint32_t* elementIndices);
 
 // Synthesise a pass-through vertex-shader MSL source that reads
 // the expanded per-vertex payload (one buffer slot with gl_Position

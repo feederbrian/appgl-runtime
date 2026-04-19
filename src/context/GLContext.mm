@@ -5353,6 +5353,14 @@ struct GLContext::Impl {
         return true;
     }
 
+    // CPU GS emulation — write TF varyings into bound TF buffers
+    // when transform feedback is active. Returns true iff the
+    // current draw should be skipped (rasterizer discard was on).
+    // Used by both drawArrays and drawElements after
+    // `emulateGeometryDraw` succeeds.
+    bool writeGsXfbAndCheckDiscard(GLProgramObject& program,
+                                   const appgl::EmulatedDraw& ed);
+
     void encodePendingWork() {
         if (!pendingClear || frameGraph == nullptr) {
             return;
@@ -10126,6 +10134,105 @@ bool GLContext::isTransformFeedbackActive() const {
     return impl_->transformFeedbackActive;
 }
 
+bool GLContext::Impl::writeGsXfbAndCheckDiscard(
+    GLProgramObject& program, const appgl::EmulatedDraw& ed)
+{
+    // When transform feedback is active and the program has TF
+    // varyings configured, the emulator's expanded vertex data is
+    // the canonical source of truth for what the GS emitted. Write
+    // those values into the bound TF buffers before any Metal
+    // encode — Metal has no native GS and would capture garbage
+    // otherwise.
+    //
+    // GL_SEPARATE_ATTRIBS (default for CTS adjacency +
+    // primitive_counter tests): each TF varying goes to its own
+    // indexed TF binding (buffer 0, 1, …).
+    // GL_INTERLEAVED_ATTRIBS: all TF varyings concatenated per
+    // vertex into a single buffer at index 0.
+    // Built-in `gl_Position` captures from the EmulatedVertex
+    // position field.
+    if (transformFeedbackActive && !program.transformFeedbackVaryingNames.empty()) {
+        const std::size_t fpv = ed.floatsPerVertex;
+        const std::size_t vCount = ed.vertexCount;
+        const auto& tfNames = program.transformFeedbackVaryingNames;
+        const bool interleaved =
+            (program.transformFeedbackBufferMode == GL_INTERLEAVED_ATTRIBS);
+
+        struct TfSource { std::size_t offset = 0; std::size_t count = 0; };
+        std::vector<TfSource> sources(tfNames.size());
+        for (std::size_t i = 0; i < tfNames.size(); ++i) {
+            const std::string& name = tfNames[i];
+            if (name == "gl_Position") {
+                sources[i] = {0, 4};
+                continue;
+            }
+            std::size_t off = 4;   // skip position
+            for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
+                if (ed.varyingNames[k] == name) {
+                    sources[i] = {off, ed.varyingWidths[k]};
+                    break;
+                }
+                off += ed.varyingWidths[k];
+            }
+        }
+
+        auto writeToBuffer = [this](GLuint bufferName, std::size_t bufOffset,
+                                    const float* src, std::size_t count) {
+            if (bufferName == 0 || count == 0) return;
+            GLBufferObject* buf = objects->buffers().get(bufferName);
+            if (buf == nullptr) return;
+            const std::size_t bytes = count * sizeof(float);
+            if (bufOffset + bytes > buf->shadowBytes.size()) return;
+            // Update both the shadow bytes AND the Metal buffer
+            // contents. `mutableBufferContents` (the backing for
+            // `glMapBufferRange`) prefers the Metal buffer when one
+            // is allocated; writing only to `shadowBytes` leaves
+            // the readback staring at uninitialised Metal memory.
+            std::memcpy(buf->shadowBytes.data() + bufOffset, src, bytes);
+            if (buf->metalBuffer != nullptr) {
+                id<MTLBuffer> mb = (__bridge id<MTLBuffer>)buf->metalBuffer;
+                std::uint8_t* mc = static_cast<std::uint8_t*>([mb contents]);
+                if (mc != nullptr) {
+                    std::memcpy(mc + bufOffset, src, bytes);
+                }
+            }
+        };
+
+        if (interleaved) {
+            auto binding = state->indexedBufferBinding(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+            std::size_t cursor = static_cast<std::size_t>(binding.offset);
+            for (std::size_t v = 0; v < vCount; ++v) {
+                const float* vertexBase = ed.expandedVertexData.data() + v * fpv;
+                for (const auto& s : sources) {
+                    writeToBuffer(binding.buffer, cursor,
+                                  vertexBase + s.offset, s.count);
+                    cursor += s.count * sizeof(float);
+                }
+            }
+        } else {
+            for (std::size_t i = 0; i < sources.size(); ++i) {
+                auto binding = state->indexedBufferBinding(
+                    GL_TRANSFORM_FEEDBACK_BUFFER, static_cast<GLuint>(i));
+                std::size_t cursor = static_cast<std::size_t>(binding.offset);
+                const std::size_t stride = sources[i].count * sizeof(float);
+                for (std::size_t v = 0; v < vCount; ++v) {
+                    const float* vertexBase = ed.expandedVertexData.data() + v * fpv;
+                    writeToBuffer(binding.buffer, cursor,
+                                  vertexBase + sources[i].offset,
+                                  sources[i].count);
+                    cursor += stride;
+                }
+            }
+        }
+    }
+
+    // Rasterizer-discard early-out. With GL_RASTERIZER_DISCARD
+    // enabled the Metal draw would fail ("RasterizationEnabled is
+    // false but the vertex shader's return type is not void") and
+    // produce no output anyway — skip the encode entirely.
+    return state->isEnabled(GL_RASTERIZER_DISCARD);
+}
+
 void GLContext::setTransformFeedbackActive(bool active) {
     impl_->transformFeedbackActive = active;
 }
@@ -14114,8 +14221,13 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         if (vao != nullptr) {
             appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
                 *program, *vao, *impl_->objects, *impl_->state,
-                mode, count, first, /*indices=*/nullptr, /*indexType=*/0);
+                mode, count, first, /*elementIndices=*/nullptr);
             if (ed.ok) {
+                // XFB capture + rasterDiscard early-out lives in a
+                // shared helper so drawElements can run the same path.
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                    return true;
+                }
                 // Synthesise a pass-through VS that reads the expanded
                 // buffer and forwards gl_Position + `[[user(locn<L>)]]`
                 // varyings to the original FS. Cache keyed on program
@@ -15034,6 +15146,48 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // Try the translated shader pipeline first (GPU-side vertex processing).
     const GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+
+    // CPU GS emulation hook — mirrors drawArrays, but resolves
+    // indices through the element buffer so vertex `i` reads VBO
+    // slot `elementIndices[i]` instead of `first + i`. Scoped to
+    // the TF-capture / rasterizer-discard case for now (that's
+    // what KHR-GL46.geometry_shader.adjacency.*_indiced and the
+    // primitive_counter tests exercise); a drawElements GS-emul
+    // encode path with synthesised pass-through VS is a follow-up.
+    if (program != nullptr && program->geometryEmulated && count > 0) {
+        // Resolve effectivePtr (uint16 / uint32) into a uint32 vector
+        // scoped to this draw. Small allocation cost — CTS draws
+        // never exceed a few hundred indices.
+        std::vector<std::uint32_t> idx32(static_cast<std::size_t>(count));
+        if (effectiveType == GL_UNSIGNED_INT) {
+            const std::uint32_t* src32 = static_cast<const std::uint32_t*>(effectivePtr);
+            std::memcpy(idx32.data(), src32, count * sizeof(std::uint32_t));
+        } else if (effectiveType == GL_UNSIGNED_SHORT) {
+            const std::uint16_t* src16 = static_cast<const std::uint16_t*>(effectivePtr);
+            for (GLsizei i = 0; i < count; ++i) idx32[i] = src16[i];
+        } else {
+            // GL_UNSIGNED_BYTE never reaches here — elementIndex-
+            // TypeNeedsExpansion promotes it to uint16 above.
+            // Any other type falls through to the legacy draw path.
+            idx32.clear();
+        }
+
+        if (!idx32.empty()) {
+            appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, /*first=*/0, idx32.data());
+            if (ed.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                    return true;
+                }
+                // Non-discard path (pixel rasterization through a
+                // synthesised VS) is a follow-up — the adjacency
+                // tests use rasterizerDiscard so this falls through
+                // to the legacy indexed-draw path for now.
+            }
+        }
+    }
+
     if (program != nullptr && program->hasTranslatedPipeline) {
         // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
         if (vao->attributes.empty()) {
