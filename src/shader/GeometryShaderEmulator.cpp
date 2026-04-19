@@ -2432,7 +2432,9 @@ EmulatedDraw emulateGeometryDraw(
     GLObjectStore& objects,
     const GLStateTracker& /*state*/,
     GLenum drawMode, GLsizei count, GLint first,
-    const std::uint32_t* elementIndices)
+    const std::uint32_t* elementIndices,
+    GLsizei instanceCount,
+    GLuint baseInstance)
 {
     EmulatedDraw d;
 
@@ -2603,101 +2605,93 @@ EmulatedDraw emulateGeometryDraw(
         }
     }
 
-    // Run VS for every input vertex (count vertices total) up front,
-    // then slice into per-primitive inputs. Avoids re-running VS on
-    // shared vertices (line strip / triangle strip / indexed draws
-    // would otherwise re-execute); not the cleanest for GL_POINTS
-    // where every vertex is its own primitive, but cheap enough for
-    // CTS sizes.
-    std::vector<Interpreter::PerVertexInput> allVertexInputs(count);
-    if (haveVs) {
-        // Pre-compute (location → attrIdx) map from the VAO so the VS
-        // interpreter can look up by SPIR-V Location.
-        Interpreter::VertexAttribs vsAttribs;
-
-        // Find the entry-point interface variables' Locations; the
-        // caller maps VAO attribute index → GL attribute location.
-        // For the non-separated-format VAO path used by these tests,
-        // VAO attribute index == GL location, so we build the
-        // vsAttribs map per-vertex by walking vao.attributes and
-        // using the array index as the Location key.
-        for (GLsizei vi = 0; vi < count; ++vi) {
-            // Resolve the VBO slot for this draw position. drawArrays
-            // → `first + vi`. drawElements → `elementIndices[vi]`,
-            // already index-offset-adjusted and uint32-promoted by
-            // the GLContext drawElements hook (GL_UNSIGNED_BYTE /
-            // _SHORT expansion happens there, not here).
-            const std::size_t vboSlot = (elementIndices != nullptr)
-                ? static_cast<std::size_t>(elementIndices[vi])
-                : static_cast<std::size_t>(first + vi);
-            vsAttribs.clear();
-            for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
-                if (!vao.attributes[ai].enabled) continue;
-                Value v = readVertexAttribFromVAO(vao, objects, ai, vboSlot);
-                if (v.kind != Value::Kind::Invalid) {
-                    vsAttribs[static_cast<std::uint32_t>(ai)] = v;
-                }
-            }
-            Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
-                                 vsOutNames, vsOutWidths);
-            vsInterp.setUniforms(&uniforms);
-            vsInterp.setVsInputs(&vsAttribs,
-                static_cast<std::int32_t>(vboSlot), 0 /*instanceID*/);
-            EmulatedVertex vsOut;
-            vsOut.position[0] = vsOut.position[1] = vsOut.position[2] = 0.0f;
-            vsOut.position[3] = 1.0f;
-            if (!vsInterp.executeVs(vsOut)) {
-                // VS failure — leave the record at default (0,0,0,1)
-                // so the draw at least produces something the log can
-                // grep. Diagnostic propagates via EmulatedDraw.
-                d.diagnostic = "VS pre-pass failed: " + vsInterp.diagnostic();
-            }
-            for (int k = 0; k < 4; ++k) {
-                allVertexInputs[vi].position[k] = vsOut.position[k];
-            }
-            // Slice flat varyings into per-varying vectors matching
-            // `vsOutWidths`.
-            std::size_t cursor = 0;
-            allVertexInputs[vi].varyings.resize(vsOutWidths.size());
-            for (std::size_t k = 0; k < vsOutWidths.size(); ++k) {
-                const std::uint32_t w = vsOutWidths[k];
-                auto& dst = allVertexInputs[vi].varyings[k];
-                dst.assign(w, 0.0f);
-                for (std::uint32_t j = 0; j < w && cursor + j < vsOut.varyings.size(); ++j) {
-                    dst[j] = vsOut.varyings[cursor + j];
-                }
-                cursor += w;
-            }
-        }
-    }
-
-    // Run the GS interpreter once per primitive, slicing the pre-run
-    // VS outputs into per-primitive input groups.
+    // Outer instance loop + VS pre-pass + GS run. For a single-
+    // instance draw (drawArrays / drawElements) instanceCount=1 and
+    // baseInstance=0 — the loop degenerates to one iteration. For
+    // drawArraysInstanced / drawElementsInstanced we run the VS per
+    // vertex per instance with gl_InstanceID plumbed from the loop
+    // index, then GS per primitive per instance. The expanded vertex
+    // payload concatenates each instance's output so the Metal encode
+    // issues ONE flat draw for the whole set.
     std::vector<EmulatedVertex> emittedAll;
-    emittedAll.reserve(primCount * program.gsMaxVertices);
+    emittedAll.reserve(static_cast<std::size_t>(primCount) *
+                       program.gsMaxVertices * std::max<GLsizei>(1, instanceCount));
 
-    for (std::size_t p = 0; p < primCount; ++p) {
-        std::vector<Interpreter::PerVertexInput> inputs(vpp);
-        for (std::uint32_t v = 0; v < vpp; ++v) {
-            const std::size_t globalIdx = vertexForPrim(p, v);
-            if (globalIdx < allVertexInputs.size()) {
-                inputs[v] = allVertexInputs[globalIdx];
+    const GLsizei effectiveInstances = std::max<GLsizei>(1, instanceCount);
+    for (GLsizei instanceIdx = 0; instanceIdx < effectiveInstances; ++instanceIdx) {
+        const std::int32_t glInstanceID = static_cast<std::int32_t>(instanceIdx);
+        const std::int32_t shaderInstanceID = glInstanceID +
+            static_cast<std::int32_t>(baseInstance);
+        (void)shaderInstanceID;   // gl_InstanceID = instanceIdx per spec; baseInstance affects VBO fetch.
+
+        // Per-instance VS pre-pass. Results live in a local vector
+        // and flow into the per-primitive GS run for THIS instance.
+        std::vector<Interpreter::PerVertexInput> allVertexInputs(count);
+        if (haveVs) {
+            Interpreter::VertexAttribs vsAttribs;
+            for (GLsizei vi = 0; vi < count; ++vi) {
+                const std::size_t vboSlot = (elementIndices != nullptr)
+                    ? static_cast<std::size_t>(elementIndices[vi])
+                    : static_cast<std::size_t>(first + vi);
+                vsAttribs.clear();
+                for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
+                    if (!vao.attributes[ai].enabled) continue;
+                    Value v = readVertexAttribFromVAO(vao, objects, ai, vboSlot);
+                    if (v.kind != Value::Kind::Invalid) {
+                        vsAttribs[static_cast<std::uint32_t>(ai)] = v;
+                    }
+                }
+                Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
+                                     vsOutNames, vsOutWidths);
+                vsInterp.setUniforms(&uniforms);
+                vsInterp.setVsInputs(&vsAttribs,
+                    static_cast<std::int32_t>(vboSlot), glInstanceID);
+                EmulatedVertex vsOut;
+                vsOut.position[0] = vsOut.position[1] = vsOut.position[2] = 0.0f;
+                vsOut.position[3] = 1.0f;
+                if (!vsInterp.executeVs(vsOut)) {
+                    d.diagnostic = "VS pre-pass failed: " + vsInterp.diagnostic();
+                }
+                for (int k = 0; k < 4; ++k) {
+                    allVertexInputs[vi].position[k] = vsOut.position[k];
+                }
+                std::size_t cursor = 0;
+                allVertexInputs[vi].varyings.resize(vsOutWidths.size());
+                for (std::size_t k = 0; k < vsOutWidths.size(); ++k) {
+                    const std::uint32_t w = vsOutWidths[k];
+                    auto& dst = allVertexInputs[vi].varyings[k];
+                    dst.assign(w, 0.0f);
+                    for (std::uint32_t j = 0; j < w && cursor + j < vsOut.varyings.size(); ++j) {
+                        dst[j] = vsOut.varyings[cursor + j];
+                    }
+                    cursor += w;
+                }
             }
         }
-        Interpreter interp(mod, vsOutNames, vsOutWidths,
-                           outNames, outWidths);
-        interp.setUniforms(&uniforms);
-        interp.setGsPrimitiveId(static_cast<std::int32_t>(p));
-        std::vector<EmulatedVertex> emitted;
-        if (!interp.execute(inputs, emitted)) {
-            d.ok = false;
-            d.diagnostic = "interpreter failed on primitive " + std::to_string(p)
-                         + ": " + interp.diagnostic();
-            return d;
+
+        for (std::size_t p = 0; p < primCount; ++p) {
+            std::vector<Interpreter::PerVertexInput> inputs(vpp);
+            for (std::uint32_t v = 0; v < vpp; ++v) {
+                const std::size_t globalIdx = vertexForPrim(p, v);
+                if (globalIdx < allVertexInputs.size()) {
+                    inputs[v] = allVertexInputs[globalIdx];
+                }
+            }
+            Interpreter interp(mod, vsOutNames, vsOutWidths,
+                               outNames, outWidths);
+            interp.setUniforms(&uniforms);
+            interp.setGsPrimitiveId(static_cast<std::int32_t>(p));
+            std::vector<EmulatedVertex> emitted;
+            if (!interp.execute(inputs, emitted)) {
+                d.ok = false;
+                d.diagnostic = "interpreter failed on primitive " + std::to_string(p)
+                             + ": " + interp.diagnostic();
+                return d;
+            }
+            emittedAll.insert(emittedAll.end(),
+                std::make_move_iterator(emitted.begin()),
+                std::make_move_iterator(emitted.end()));
         }
-        emittedAll.insert(emittedAll.end(),
-            std::make_move_iterator(emitted.begin()),
-            std::make_move_iterator(emitted.end()));
     }
 
     if (emittedAll.empty()) {

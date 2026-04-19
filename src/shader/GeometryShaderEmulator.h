@@ -35,6 +35,7 @@
 typedef unsigned int GLenum;
 typedef int GLsizei;
 typedef int GLint;
+typedef unsigned int GLuint;
 
 namespace appgl {
 
@@ -123,7 +124,9 @@ EmulatedDraw emulateGeometryDraw(
     GLenum drawMode,
     GLsizei count,
     GLint first,
-    const std::uint32_t* elementIndices);
+    const std::uint32_t* elementIndices,
+    GLsizei instanceCount = 1,
+    GLuint baseInstance = 0);
 
 // Synthesise a pass-through vertex-shader MSL source that reads
 // the expanded per-vertex payload (one buffer slot with gl_Position

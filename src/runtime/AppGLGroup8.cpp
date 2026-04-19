@@ -257,12 +257,14 @@ static void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffs
 }
 
 static void APIENTRY glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices) {
-    (void)mode;
-    (void)start;
-    (void)end;
-    (void)count;
-    (void)type;
-    (void)indices;
+    auto* ctx = currentContextOrNull();
+    if (!ctx) return;
+    // Forward to the base-vertex-less range-elements path. start/end
+    // are range hints only; the impl validates end >= start and
+    // delegates to drawElementsBaseVertex(basevertex=0). Was a no-op
+    // stub before CTS geometry_shader.rendering.* covered it.
+    ctx->drawRangeElementsBaseVertex(mode, start, end, count, type,
+                                     indices, /*basevertex=*/0);
 }
 
 static void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
@@ -1185,11 +1187,15 @@ static void APIENTRY glDrawArraysInstanced(GLenum mode, GLint first, GLsizei cou
 }
 
 static void APIENTRY glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount) {
-    (void)mode;
-    (void)count;
-    (void)type;
-    (void)indices;
-    (void)instancecount;
+    auto* ctx = currentContextOrNull();
+    if (!ctx) return;
+    // Forward to the base-vertex path with basevertex=0. Per GL 4.6
+    // §10.4, glDrawElementsInstanced is just the _BaseVertex variant
+    // with basevertex pinned to 0 — the runtime's dispatch was a
+    // no-op stub before CTS geometry_shader.rendering.* exercised
+    // the path.
+    ctx->drawElementsInstancedBaseVertex(mode, count, type, indices,
+                                         instancecount, /*basevertex=*/0);
 }
 
 static void APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {

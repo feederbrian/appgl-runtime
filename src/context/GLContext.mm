@@ -5360,6 +5360,15 @@ struct GLContext::Impl {
     // `emulateGeometryDraw` succeeds.
     bool writeGsXfbAndCheckDiscard(GLProgramObject& program,
                                    const appgl::EmulatedDraw& ed);
+    // Synthesise a pass-through VS and encode the expanded vertex
+    // buffer through the normal translated-draw encoder. Shared by
+    // drawArrays and drawElements — the expanded buffer is already
+    // flat (no indexing), so the encode is identical regardless of
+    // which draw call invoked the emulator. Returns true on
+    // successful encode; false lets the caller fall back to the
+    // legacy no-GS path.
+    bool encodeEmulatedGsDraw(GLProgramObject& program, GLuint programName,
+                              const appgl::EmulatedDraw& ed);
 
     void encodePendingWork() {
         if (!pendingClear || frameGraph == nullptr) {
@@ -14126,6 +14135,154 @@ bool isDrawModeCompatibleWithGs(GLenum drawMode, GLenum gsInputTopo) {
 }
 }  // namespace
 
+// Defined after the anonymous namespace with populateTranslatedDraw-
+// FixedFunctionState / computeStageUniformLayout / buildStageUniform-
+// Buffer so those helpers are visible.
+bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
+                                           GLuint programName,
+                                           const appgl::EmulatedDraw& ed)
+{
+    // Synthesise the pass-through VS once per program (cache on
+    // the program object — the layout/widths/locations are fixed
+    // at link time by the GS SPIR-V, which doesn't change draw-to-
+    // draw). Matching reflection + attribute layout built from the
+    // same `ed` so Metal's vertex descriptor picks the right formats.
+    if (program.gsPassThroughVertexMSL.empty()) {
+        program.gsPassThroughVertexMSL = appgl::synthesisePassThroughVertexMSL(ed);
+        program.gsPassThroughReflection = ShaderReflection{};
+        {
+            ShaderReflection::VertexInput pos;
+            pos.location = 0;
+            pos.type = GL_FLOAT_VEC4;
+            pos.name = "vsin_position";
+            program.gsPassThroughReflection.vertexInputs.push_back(pos);
+        }
+        for (std::size_t i = 0; i < ed.varyingWidths.size(); ++i) {
+            ShaderReflection::VertexInput vi;
+            vi.location = static_cast<GLuint>(i + 1);
+            const std::uint8_t bt = (i < ed.varyingBaseType.size())
+                ? ed.varyingBaseType[i] : 0;
+            const std::uint32_t w = ed.varyingWidths[i];
+            if (bt == 1) {
+                switch (w) {
+                    case 1: vi.type = GL_INT;      break;
+                    case 2: vi.type = GL_INT_VEC2; break;
+                    case 3: vi.type = GL_INT_VEC3; break;
+                    case 4: vi.type = GL_INT_VEC4; break;
+                    default: vi.type = GL_INT;     break;
+                }
+            } else if (bt == 2) {
+                switch (w) {
+                    case 1: vi.type = GL_UNSIGNED_INT;      break;
+                    case 2: vi.type = GL_UNSIGNED_INT_VEC2; break;
+                    case 3: vi.type = GL_UNSIGNED_INT_VEC3; break;
+                    case 4: vi.type = GL_UNSIGNED_INT_VEC4; break;
+                    default: vi.type = GL_UNSIGNED_INT;     break;
+                }
+            } else {
+                switch (w) {
+                    case 1: vi.type = GL_FLOAT;      break;
+                    case 2: vi.type = GL_FLOAT_VEC2; break;
+                    case 3: vi.type = GL_FLOAT_VEC3; break;
+                    case 4: vi.type = GL_FLOAT_VEC4; break;
+                    default: vi.type = GL_FLOAT;     break;
+                }
+            }
+            vi.name = "vsin_v" + std::to_string(i);
+            program.gsPassThroughReflection.vertexInputs.push_back(vi);
+        }
+    }
+
+    TranslatedDrawInfo tdi;
+    tdi.mode = ed.topology;
+    tdi.vertexCount = static_cast<GLsizei>(ed.vertexCount);
+    tdi.vertexData = ed.expandedVertexData.data();
+    tdi.vertexDataByteCount = ed.expandedVertexData.size() * sizeof(float);
+    tdi.vertexStride = ed.floatsPerVertex * sizeof(float);
+
+    {
+        std::size_t offset = 0;
+        {
+            TranslatedDrawInfo::VertexAttributeLayout la;
+            la.location = 0;
+            la.offset = offset;
+            la.glType = GL_FLOAT;
+            la.glComponentCount = 4;
+            tdi.vertexAttributeLayouts.push_back(la);
+            offset += 4 * sizeof(float);
+        }
+        for (std::size_t i = 0; i < ed.varyingWidths.size(); ++i) {
+            TranslatedDrawInfo::VertexAttributeLayout la;
+            la.location = static_cast<GLuint>(i + 1);
+            la.offset = offset;
+            const std::uint8_t bt = (i < ed.varyingBaseType.size())
+                ? ed.varyingBaseType[i] : 0;
+            if (bt == 1) {
+                la.glType = GL_INT;
+                la.glIsInteger = true;
+            } else if (bt == 2) {
+                la.glType = GL_UNSIGNED_INT;
+                la.glIsInteger = true;
+            } else {
+                la.glType = GL_FLOAT;
+            }
+            la.glComponentCount = static_cast<GLint>(ed.varyingWidths[i]);
+            tdi.vertexAttributeLayouts.push_back(la);
+            offset += ed.varyingWidths[i] * sizeof(float);
+        }
+    }
+
+    populateTranslatedDrawFixedFunctionState(tdi, *state);
+    tdi.vertexMSL = &program.gsPassThroughVertexMSL;
+    tdi.fragmentMSL = &program.fragmentMSL;
+    tdi.vertexReflection = &program.gsPassThroughReflection;
+    tdi.fragmentReflection = &program.fragmentReflection;
+    tdi.pipelineStateOut = &program.gsPassThroughPipelineState;
+    tdi.pipelineColorFormatOut = &program.gsPassThroughPipelineColorFormat;
+    tdi.pipelineStateCacheOut = &program.gsPassThroughPipelineStateCache;
+    tdi.program = programName;
+
+    if (!program.uniformLayoutComputed) {
+        computeStageUniformLayout(program.vertexUniformLayout,
+            program.vertexReflection, program.uniforms);
+        computeStageUniformLayout(program.fragmentUniformLayout,
+            program.fragmentReflection, program.uniforms);
+        program.uniformLayoutComputed = true;
+    }
+    thread_local std::vector<std::uint8_t> gsFragUniformScratch;
+    buildStageUniformBuffer(gsFragUniformScratch,
+        program.fragmentReflection, program.uniformValues,
+        program.fragmentUniformLayout);
+    tdi.vertexUniformData = nullptr;
+    tdi.vertexUniformSize = 0;
+    tdi.fragmentUniformData = gsFragUniformScratch.data();
+    tdi.fragmentUniformSize = gsFragUniformScratch.size();
+
+    resolveSamplerBindings(program, tdi);
+    resolveUBOBindings(program, tdi);
+    resolveSSBOBindings(program, tdi);
+    resolveImageBindings(program, tdi);
+
+    {
+        GLsizei fboW = 0, fboH = 0;
+        void* fboDSTex = nullptr;
+        void* fboColTex = resolveFBOColorTarget(fboW, fboH, fboDSTex);
+        if (fboColTex != nullptr) {
+            tdi.fboColorTexture = fboColTex;
+            tdi.fboDepthStencilTexture = fboDSTex;
+            tdi.fboWidth = fboW;
+            tdi.fboHeight = fboH;
+        }
+    }
+
+    thread_local std::string gsPipelineBuildError;
+    gsPipelineBuildError.clear();
+    tdi.pipelineBuildErrorOut = &gsPipelineBuildError;
+
+    const bool ok = frameGraph->encodeTranslatedDraw(tdi);
+    return ok;
+}
+
 bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
@@ -14228,172 +14385,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
                     return true;
                 }
-                // Synthesise a pass-through VS that reads the expanded
-                // buffer and forwards gl_Position + `[[user(locn<L>)]]`
-                // varyings to the original FS. Cache keyed on program
-                // so we only synthesise once per link — the layout
-                // (widths + locations) is fixed at link time by the
-                // GS SPIR-V, which doesn't change between draws.
-                if (program->gsPassThroughVertexMSL.empty()) {
-                    program->gsPassThroughVertexMSL =
-                        appgl::synthesisePassThroughVertexMSL(ed);
-                    // Matching VS reflection — one vertex input per
-                    // expanded-buffer attribute, at sequential
-                    // attribute-descriptor indices (0=position,
-                    // 1..N=varyings). Types derived from widths.
-                    program->gsPassThroughReflection = ShaderReflection{};
-                    {
-                        ShaderReflection::VertexInput pos;
-                        pos.location = 0;
-                        pos.type = GL_FLOAT_VEC4;
-                        pos.name = "vsin_position";
-                        program->gsPassThroughReflection.vertexInputs.push_back(pos);
-                    }
-                    for (std::size_t i = 0; i < ed.varyingWidths.size(); ++i) {
-                        ShaderReflection::VertexInput vi;
-                        vi.location = static_cast<GLuint>(i + 1);
-                        const std::uint8_t bt = (i < ed.varyingBaseType.size())
-                            ? ed.varyingBaseType[i] : 0;
-                        const std::uint32_t w = ed.varyingWidths[i];
-                        if (bt == 1) {   // int
-                            switch (w) {
-                                case 1: vi.type = GL_INT;      break;
-                                case 2: vi.type = GL_INT_VEC2; break;
-                                case 3: vi.type = GL_INT_VEC3; break;
-                                case 4: vi.type = GL_INT_VEC4; break;
-                                default: vi.type = GL_INT;     break;
-                            }
-                        } else if (bt == 2) {   // uint
-                            switch (w) {
-                                case 1: vi.type = GL_UNSIGNED_INT;      break;
-                                case 2: vi.type = GL_UNSIGNED_INT_VEC2; break;
-                                case 3: vi.type = GL_UNSIGNED_INT_VEC3; break;
-                                case 4: vi.type = GL_UNSIGNED_INT_VEC4; break;
-                                default: vi.type = GL_UNSIGNED_INT;     break;
-                            }
-                        } else {   // float
-                            switch (w) {
-                                case 1: vi.type = GL_FLOAT;      break;
-                                case 2: vi.type = GL_FLOAT_VEC2; break;
-                                case 3: vi.type = GL_FLOAT_VEC3; break;
-                                case 4: vi.type = GL_FLOAT_VEC4; break;
-                                default: vi.type = GL_FLOAT;     break;
-                            }
-                        }
-                        vi.name = "vsin_v" + std::to_string(i);
-                        program->gsPassThroughReflection.vertexInputs.push_back(vi);
-                    }
-                }
-
-                TranslatedDrawInfo tdi;
-                tdi.mode = ed.topology;
-                tdi.vertexCount = static_cast<GLsizei>(ed.vertexCount);
-
-                // Expanded buffer (CPU-side). The encoder will copy
-                // it into a ring slot; that's fine for the small
-                // vertex counts constant_expressions submits.
-                tdi.vertexData = ed.expandedVertexData.data();
-                tdi.vertexDataByteCount = ed.expandedVertexData.size() * sizeof(float);
-                tdi.vertexStride = ed.floatsPerVertex * sizeof(float);
-
-                // Vertex attribute layout: position at offset 0,
-                // then each varying at its width × 4 stride offset.
-                {
-                    std::size_t offset = 0;
-                    {
-                        TranslatedDrawInfo::VertexAttributeLayout la;
-                        la.location = 0;
-                        la.offset = offset;
-                        la.glType = GL_FLOAT;
-                        la.glComponentCount = 4;
-                        tdi.vertexAttributeLayouts.push_back(la);
-                        offset += 4 * sizeof(float);
-                    }
-                    for (std::size_t i = 0; i < ed.varyingWidths.size(); ++i) {
-                        TranslatedDrawInfo::VertexAttributeLayout la;
-                        la.location = static_cast<GLuint>(i + 1);
-                        la.offset = offset;
-                        const std::uint8_t bt = (i < ed.varyingBaseType.size())
-                            ? ed.varyingBaseType[i] : 0;
-                        if (bt == 1) {
-                            la.glType = GL_INT;
-                            la.glIsInteger = true;
-                        } else if (bt == 2) {
-                            la.glType = GL_UNSIGNED_INT;
-                            la.glIsInteger = true;
-                        } else {
-                            la.glType = GL_FLOAT;
-                        }
-                        la.glComponentCount = static_cast<GLint>(ed.varyingWidths[i]);
-                        tdi.vertexAttributeLayouts.push_back(la);
-                        offset += ed.varyingWidths[i] * sizeof(float);   // storage width is always 4 bytes/scalar
-                    }
-                }
-
-                populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
-                tdi.vertexMSL = &program->gsPassThroughVertexMSL;
-                tdi.fragmentMSL = &program->fragmentMSL;
-                tdi.vertexReflection = &program->gsPassThroughReflection;
-                tdi.fragmentReflection = &program->fragmentReflection;
-                // Separate pipeline-state cache so we don't collide
-                // with the non-emulated pipeline cache. The cache is
-                // still owned by the program and freed on link /
-                // delete like the normal pipelineStateCache.
-                tdi.pipelineStateOut = &program->gsPassThroughPipelineState;
-                tdi.pipelineColorFormatOut = &program->gsPassThroughPipelineColorFormat;
-                tdi.pipelineStateCacheOut = &program->gsPassThroughPipelineStateCache;
-                tdi.program = programName;
-
-                // Fragment uniforms from the program (the FS may
-                // still read uniforms — colour lookups, texture-unit
-                // arrays, etc.). Vertex uniforms aren't needed: the
-                // synthesised VS declares no uniforms.
-                if (!program->uniformLayoutComputed) {
-                    computeStageUniformLayout(program->vertexUniformLayout,
-                        program->vertexReflection, program->uniforms);
-                    computeStageUniformLayout(program->fragmentUniformLayout,
-                        program->fragmentReflection, program->uniforms);
-                    program->uniformLayoutComputed = true;
-                }
-                thread_local std::vector<std::uint8_t> gsFragUniformScratch;
-                buildStageUniformBuffer(gsFragUniformScratch,
-                    program->fragmentReflection, program->uniformValues,
-                    program->fragmentUniformLayout);
-                tdi.vertexUniformData = nullptr;
-                tdi.vertexUniformSize = 0;
-                tdi.fragmentUniformData = gsFragUniformScratch.data();
-                tdi.fragmentUniformSize = gsFragUniformScratch.size();
-
-                impl_->resolveSamplerBindings(*program, tdi);
-                impl_->resolveUBOBindings(*program, tdi);
-                impl_->resolveSSBOBindings(*program, tdi);
-                impl_->resolveImageBindings(*program, tdi);
-
-                // Resolve FBO target (matches the non-emulated path).
-                {
-                    GLsizei fboW = 0, fboH = 0;
-                    void* fboDSTex = nullptr;
-                    void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
-                    if (fboColTex != nullptr) {
-                        tdi.fboColorTexture = fboColTex;
-                        tdi.fboDepthStencilTexture = fboDSTex;
-                        tdi.fboWidth = fboW;
-                        tdi.fboHeight = fboH;
-                    }
-                }
-
-                thread_local std::string gsPipelineBuildError;
-                gsPipelineBuildError.clear();
-                tdi.pipelineBuildErrorOut = &gsPipelineBuildError;
-
-                const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
-                if (ok) {
+                if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) {
                     APPGL_LOG(DRAW, @"drawArrays GS-emul ok: verts=%zu topo=0x%X",
                               ed.vertexCount, ed.topology);
                     return true;
                 }
-                APPGL_LOG(SHADER, @"drawArrays GS-emul encode failed: %s",
-                          gsPipelineBuildError.c_str());
+                APPGL_LOG(SHADER, @"drawArrays GS-emul encode failed");
                 // Fall through to the legacy path if encode fails —
                 // better to render without the GS effect than to
                 // drop the draw entirely.
@@ -14769,6 +14766,23 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
     // Translated shader pipeline with instancing.
     const GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+
+    // GS emul hook for instanced draws.
+    if (program != nullptr && program->geometryEmulated && count > 0 && instancecount > 0) {
+        const GLuint vaoName = impl_->state->boundVertexArray();
+        GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        if (vao != nullptr) {
+            appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, first, /*elementIndices=*/nullptr,
+                instancecount, /*baseInstance=*/0);
+            if (ed.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
+                if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
+            }
+        }
+    }
+
     if (program != nullptr && program->hasTranslatedPipeline) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
@@ -15180,10 +15194,13 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
                     return true;
                 }
-                // Non-discard path (pixel rasterization through a
-                // synthesised VS) is a follow-up — the adjacency
-                // tests use rasterizerDiscard so this falls through
-                // to the legacy indexed-draw path for now.
+                // Non-discard path — the expanded vertex buffer is
+                // already flat, so the encode is identical to
+                // drawArrays. This covers CTS rendering tests that
+                // use DRAW_ELEMENTS* variants.
+                if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) {
+                    return true;
+                }
             }
         }
     }
@@ -15491,6 +15508,35 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     // Try translated shader pipeline first.
     const GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+
+    // GS emul hook for base-vertex indexed draws (drawRangeElements
+    // funnels here too).
+    if (program != nullptr && program->geometryEmulated && count > 0) {
+        std::vector<std::uint32_t> idx32(static_cast<std::size_t>(count));
+        if (effectiveType == GL_UNSIGNED_INT) {
+            const std::uint32_t* src32 = static_cast<const std::uint32_t*>(effectivePtr);
+            std::memcpy(idx32.data(), src32, count * sizeof(std::uint32_t));
+        } else if (effectiveType == GL_UNSIGNED_SHORT) {
+            const std::uint16_t* src16 = static_cast<const std::uint16_t*>(effectivePtr);
+            for (GLsizei i = 0; i < count; ++i) idx32[i] = src16[i];
+        } else {
+            idx32.clear();
+        }
+        if (!idx32.empty()) {
+            if (basevertex != 0) {
+                for (auto& v : idx32) v = static_cast<std::uint32_t>(
+                    static_cast<std::int32_t>(v) + basevertex);
+            }
+            appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, /*first=*/0, idx32.data());
+            if (ed.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
+                if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
+            }
+        }
+    }
+
     if (program != nullptr && program->hasTranslatedPipeline) {
         if (vao->attributes.empty()) {
             reportTranslatedFallbackOnce(program, programName,
@@ -15738,6 +15784,38 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     // Try translated shader pipeline first.
     const GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+
+    // GS emul hook for instanced indexed draws. See drawElements
+    // and drawArraysInstanced for the sibling paths.
+    if (program != nullptr && program->geometryEmulated && count > 0 && instancecount > 0) {
+        std::vector<std::uint32_t> idx32(static_cast<std::size_t>(count));
+        if (effectiveType == GL_UNSIGNED_INT) {
+            const std::uint32_t* src32 = static_cast<const std::uint32_t*>(effectivePtr);
+            std::memcpy(idx32.data(), src32, count * sizeof(std::uint32_t));
+        } else if (effectiveType == GL_UNSIGNED_SHORT) {
+            const std::uint16_t* src16 = static_cast<const std::uint16_t*>(effectivePtr);
+            for (GLsizei i = 0; i < count; ++i) idx32[i] = src16[i];
+        } else {
+            idx32.clear();
+        }
+        if (!idx32.empty()) {
+            // basevertex applied per GL 4.6 §10.6.3: each element
+            // index gets `basevertex` added before VBO fetch.
+            if (basevertex != 0) {
+                for (auto& v : idx32) v = static_cast<std::uint32_t>(
+                    static_cast<std::int32_t>(v) + basevertex);
+            }
+            appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, /*first=*/0, idx32.data(),
+                instancecount, /*baseInstance=*/0);
+            if (ed.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
+                if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
+            }
+        }
+    }
+
     if (program != nullptr && program->hasTranslatedPipeline) {
         if (vao->attributes.empty()) {
             reportTranslatedFallbackOnce(program, programName,
