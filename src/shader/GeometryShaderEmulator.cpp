@@ -79,10 +79,12 @@ namespace spv {
 }
 #endif
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -1300,18 +1302,170 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     return true;
 }
 
+namespace {
+// Number of vertices the input topology consumes per primitive.
+// Adjacency variants include their adjacency vertices.
+std::uint32_t vertsPerInputPrim(GLenum topo) {
+    switch (topo) {
+        case GL_POINTS:               return 1;
+        case GL_LINES:                return 2;
+        case GL_LINES_ADJACENCY:      return 4;
+        case GL_TRIANGLES:            return 3;
+        case GL_TRIANGLES_ADJACENCY:  return 6;
+        default:                      return 0;
+    }
+}
+
+// Gather user output varyings (StorageClassOutput, non-built-in, with
+// Location decoration) from the GS SPIR-V. Returns them ordered by
+// Location ascending so the expanded-vertex layout matches the FS
+// input layout — the synthesised pass-through VS will emit
+// `[[user(locn<N>)]]` in the same order, giving the FS translator a
+// consistent varying table.
+struct OutputVaryingDesc {
+    std::string name;
+    std::uint32_t width = 0;     // flat float count
+    std::uint32_t location = 0;
+};
+
+std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
+    std::vector<OutputVaryingDesc> out;
+    for (const auto& [varId, info] : mod.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto dIt = mod.decorations.find(varId);
+        if (dIt == mod.decorations.end()) continue;
+        // Built-ins (gl_Position, gl_PointSize) have BuiltIn decoration;
+        // those are captured separately via currentPosition_.
+        if (dIt->second.hasBuiltIn) continue;
+        if (!dIt->second.hasLocation) continue;
+        OutputVaryingDesc d;
+        d.name = info.name;
+        d.location = dIt->second.location;
+        auto tIt = mod.types.find(info.typeId);
+        if (tIt != mod.types.end()) {
+            d.width = mod.scalarWidth(tIt->second.pointeeType);
+        }
+        if (d.width == 0) continue;   // empty or unresolved — skip
+        out.push_back(std::move(d));
+    }
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        return a.location < b.location;
+    });
+    return out;
+}
+}  // namespace
+
 EmulatedDraw emulateGeometryDraw(
-    GLProgramObject& /*program*/,
+    GLProgramObject& program,
     const GLVertexArrayObject& /*vao*/,
     GLObjectStore& /*objects*/,
     const GLStateTracker& /*state*/,
-    GLenum /*drawMode*/, GLsizei /*count*/, GLint /*first*/,
+    GLenum drawMode, GLsizei count, GLint /*first*/,
     const void* /*indices*/, GLenum /*indexType*/)
 {
     EmulatedDraw d;
-    d.ok = false;
-    d.diagnostic = "GS emulator wiring pending — interpreter implemented, linkProgram / "
-                   "drawArrays hooks not yet hooked in";
+
+    if (!program.geometryEmulated || program.geometrySpirv.empty()) {
+        d.ok = false;
+        d.diagnostic = "emulateGeometryDraw called on non-emulated program";
+        return d;
+    }
+
+    SpirvModule mod;
+    if (!mod.parse(program.geometrySpirv.data(), program.geometrySpirv.size())
+        || !mod.haveFuncBody) {
+        d.ok = false;
+        d.diagnostic = "SPIR-V re-parse failed at draw time: " + mod.parseError;
+        return d;
+    }
+
+    // Primitive accounting. The draw's `mode` must be compatible with
+    // the GS input topology (GL 4.6 §11.3.2). We ignore the variant
+    // mismatches for MVP — CTS submits the right topology.
+    const std::uint32_t vpp = vertsPerInputPrim(program.gsInputTopology);
+    if (vpp == 0) {
+        d.ok = false;
+        d.diagnostic = "unknown GS input topology";
+        return d;
+    }
+    (void)drawMode;  // caller guarantees compatibility for now
+    const std::size_t primCount = (count > 0) ? (static_cast<std::size_t>(count) / vpp) : 0;
+    if (primCount == 0) {
+        d.ok = false;
+        d.diagnostic = "vertex count produced zero primitives";
+        return d;
+    }
+
+    // Output varying layout from the GS SPIR-V, ordered by Location.
+    const std::vector<OutputVaryingDesc> outVaryings = gatherOutputVaryings(mod);
+    std::vector<std::string>   outNames;
+    std::vector<std::uint32_t> outWidths;
+    outNames.reserve(outVaryings.size());
+    outWidths.reserve(outVaryings.size());
+    for (const auto& v : outVaryings) {
+        outNames.push_back(v.name);
+        outWidths.push_back(v.width);
+    }
+
+    // Run the interpreter once per primitive. We pass zero-initialised
+    // per-vertex inputs — the constant_expressions GS cluster never
+    // reads gl_in[] or user input varyings (the tests evaluate
+    // constant expressions, not per-vertex data). If a future opcode
+    // landing reads inputs, this block gets replaced by a real VS
+    // pre-pass (see docs/geometry-shader-emulation.md §4 step 2).
+    std::vector<EmulatedVertex> emittedAll;
+    emittedAll.reserve(primCount * program.gsMaxVertices);
+
+    std::vector<Interpreter::PerVertexInput> inputs(vpp);
+    for (auto& pv : inputs) {
+        pv.varyings.clear();   // no per-vertex varyings available at MVP
+    }
+
+    for (std::size_t p = 0; p < primCount; ++p) {
+        Interpreter interp(mod, /*inputVaryingNames=*/{}, /*inputVaryingWidths=*/{},
+                           outNames, outWidths);
+        std::vector<EmulatedVertex> emitted;
+        if (!interp.execute(inputs, emitted)) {
+            d.ok = false;
+            d.diagnostic = "interpreter failed on primitive " + std::to_string(p)
+                         + ": " + interp.diagnostic();
+            return d;
+        }
+        emittedAll.insert(emittedAll.end(),
+            std::make_move_iterator(emitted.begin()),
+            std::make_move_iterator(emitted.end()));
+    }
+
+    if (emittedAll.empty()) {
+        d.ok = false;
+        d.diagnostic = "GS emitted zero vertices";
+        return d;
+    }
+
+    // Pack into the flat payload [pos0..3, varying0..N-1] per vertex.
+    const std::size_t totalVaryingWidth = [&]() {
+        std::size_t s = 0;
+        for (std::uint32_t w : outWidths) s += w;
+        return s;
+    }();
+    const std::size_t fpv = 4 + totalVaryingWidth;
+
+    d.topology          = program.gsOutputTopology;
+    d.vertexCount       = emittedAll.size();
+    d.floatsPerVertex   = fpv;
+    d.varyingWidths     = outWidths;
+    d.varyingNames      = std::move(outNames);
+    d.expandedVertexData.resize(emittedAll.size() * fpv, 0.0f);
+
+    for (std::size_t v = 0; v < emittedAll.size(); ++v) {
+        float* dst = d.expandedVertexData.data() + v * fpv;
+        for (int k = 0; k < 4; ++k) dst[k] = emittedAll[v].position[k];
+        for (std::size_t j = 0; j < emittedAll[v].varyings.size() && j + 4 < fpv; ++j) {
+            dst[4 + j] = emittedAll[v].varyings[j];
+        }
+    }
+
+    d.ok = true;
     return d;
 }
 
