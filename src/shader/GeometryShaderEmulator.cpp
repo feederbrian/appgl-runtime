@@ -33,17 +33,29 @@ namespace spv {
         OpConstantComposite = 44,
         OpFunction = 54, OpFunctionEnd = 56,
         OpVariable = 59, OpLoad = 61, OpStore = 62, OpAccessChain = 65,
+        OpArrayLength = 68,
         OpCompositeExtract = 81, OpCompositeConstruct = 80,
         OpVectorShuffle = 79,
         OpVectorTimesScalar = 142, OpDot = 148,
         OpFNegate = 127,
-        OpFAdd = 129, OpFSub = 131, OpFMul = 133, OpFDiv = 136,
-        OpIAdd = 128,  OpIMul = 132,
-        OpConvertFToS = 110, OpConvertSToF = 111,
-        OpSLessThan = 177,
+        OpFAdd = 129, OpFSub = 131, OpFMul = 133, OpFDiv = 136, OpFMod = 141,
+        OpIAdd = 128, OpISub = 130, OpIMul = 132,
+        OpSDiv = 135, OpSRem = 138, OpUMod = 137, OpSNegate = 126,
+        OpConvertFToS = 110, OpConvertFToU = 109,
+        OpConvertSToF = 111, OpConvertUToF = 112,
+        OpBitcast = 124,
+        OpBitwiseAnd = 199, OpShiftLeftLogical = 196,
+        OpIEqual = 170, OpINotEqual = 171,
+        OpSLessThan = 177, OpSGreaterThan = 173,
+        OpSLessThanEqual = 179, OpSGreaterThanEqual = 175,
+        OpULessThan = 176, OpULessThanEqual = 178,
+        OpFOrdEqual = 180, OpFOrdNotEqual = 182,
+        OpFOrdLessThan = 184, OpFOrdGreaterThan = 186,
+        OpFOrdLessThanEqual = 188, OpFOrdGreaterThanEqual = 190,
         OpLogicalAnd = 167, OpLogicalOr = 166, OpLogicalNot = 168,
+        OpLogicalNotEqual = 165, OpSelect = 169, OpAny = 154, OpAll = 155,
         OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247,
-        OpLabel = 248, OpBranch = 249, OpBranchConditional = 250,
+        OpLabel = 248, OpBranch = 249, OpBranchConditional = 250, OpSwitch = 251,
         OpReturn = 253,
         OpEmitVertex = 218, OpEndPrimitive = 219,
     };
@@ -1346,6 +1358,248 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            // ─ Integer arithmetic / bitcast / conversions ─
+            case spv::OpIAdd: case spv::OpISub: case spv::OpIMul:
+            case spv::OpSDiv: case spv::OpSRem: case spv::OpUMod: {
+                Value a, b;
+                if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("int-arith: unknown operand"); break; }
+                Value r = a;
+                const int n = a.componentCount();
+                for (int k = 0; k < n; ++k) {
+                    switch (opcode) {
+                        case spv::OpIAdd: r.i[k] = a.i[k] + b.i[k]; break;
+                        case spv::OpISub: r.i[k] = a.i[k] - b.i[k]; break;
+                        case spv::OpIMul: r.i[k] = a.i[k] * b.i[k]; break;
+                        case spv::OpSDiv: r.i[k] = b.i[k] != 0 ? a.i[k] / b.i[k] : 0; break;
+                        case spv::OpSRem: r.i[k] = b.i[k] != 0 ? a.i[k] % b.i[k] : 0; break;
+                        case spv::OpUMod: {
+                            const std::uint32_t au = static_cast<std::uint32_t>(a.i[k]);
+                            const std::uint32_t bu = static_cast<std::uint32_t>(b.i[k]);
+                            r.i[k] = bu != 0 ? static_cast<std::int32_t>(au % bu) : 0;
+                            break;
+                        }
+                    }
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpSNegate: {
+                Value a;
+                if (!tryGetValue(w[2], a)) { bail("OpSNegate: unknown operand"); break; }
+                Value r = a;
+                for (int k = 0; k < a.componentCount(); ++k) r.i[k] = -a.i[k];
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpFMod: {
+                Value a, b;
+                if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("OpFMod: unknown operand"); break; }
+                Value r = a;
+                for (int k = 0; k < a.componentCount(); ++k) {
+                    // GL 4.6 §5.9 mod(): x - y * floor(x/y).
+                    r.f[k] = a.f[k] - b.f[k] * std::floor(a.f[k] / b.f[k]);
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpBitwiseAnd: {
+                Value a, b;
+                if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("OpBitwiseAnd: unknown operand"); break; }
+                Value r = a;
+                for (int k = 0; k < a.componentCount(); ++k) r.i[k] = a.i[k] & b.i[k];
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpShiftLeftLogical: {
+                Value a, b;
+                if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("OpShiftLeftLogical: unknown operand"); break; }
+                Value r = a;
+                for (int k = 0; k < a.componentCount(); ++k) {
+                    r.i[k] = a.i[k] << (b.i[k] & 31);
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpBitcast: {
+                // Reinterpret bits. For our float/int unified storage
+                // the representation is the same — we just copy across
+                // with the target kind.
+                Value a;
+                if (!tryGetValue(w[2], a)) { bail("OpBitcast: unknown operand"); break; }
+                // Determine target kind from the result type.
+                auto tIt = module_.types.find(w[0]);
+                Value r = a;
+                if (tIt != module_.types.end()) {
+                    switch (tIt->second.kind) {
+                        case TypeInfo::Kind::Int:
+                            r.kind = Value::Kind::Int;
+                            // If source was float, bit-copy.
+                            for (int k = 0; k < a.componentCount(); ++k) {
+                                std::memcpy(&r.i[k], &a.f[k], 4);
+                            }
+                            break;
+                        case TypeInfo::Kind::UInt:
+                            r.kind = Value::Kind::UInt;
+                            for (int k = 0; k < a.componentCount(); ++k) {
+                                std::memcpy(&r.i[k], &a.f[k], 4);
+                            }
+                            break;
+                        case TypeInfo::Kind::Float:
+                            r.kind = Value::Kind::Float;
+                            for (int k = 0; k < a.componentCount(); ++k) {
+                                std::memcpy(&r.f[k], &a.i[k], 4);
+                            }
+                            break;
+                        default: break;
+                    }
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpConvertSToF: case spv::OpConvertUToF: {
+                Value a;
+                if (!tryGetValue(w[2], a)) { bail("OpConvertSToF/UToF: unknown operand"); break; }
+                Value r;
+                const int n = a.componentCount();
+                r.kind = (n == 2) ? Value::Kind::Float2 :
+                         (n == 3) ? Value::Kind::Float3 :
+                         (n == 4) ? Value::Kind::Float4 : Value::Kind::Float;
+                if (opcode == spv::OpConvertSToF) {
+                    for (int k = 0; k < n; ++k) r.f[k] = static_cast<float>(a.i[k]);
+                } else {
+                    for (int k = 0; k < n; ++k)
+                        r.f[k] = static_cast<float>(static_cast<std::uint32_t>(a.i[k]));
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpConvertFToS: case spv::OpConvertFToU: {
+                Value a;
+                if (!tryGetValue(w[2], a)) { bail("OpConvertFToS/FToU: unknown operand"); break; }
+                Value r;
+                const int n = a.componentCount();
+                if (opcode == spv::OpConvertFToS) {
+                    r.kind = (n == 2) ? Value::Kind::Int2 :
+                             (n == 3) ? Value::Kind::Int3 :
+                             (n == 4) ? Value::Kind::Int4 : Value::Kind::Int;
+                    for (int k = 0; k < n; ++k) r.i[k] = static_cast<std::int32_t>(a.f[k]);
+                } else {
+                    r.kind = (n == 2) ? Value::Kind::UInt2 :
+                             (n == 3) ? Value::Kind::UInt3 :
+                             (n == 4) ? Value::Kind::UInt4 : Value::Kind::UInt;
+                    for (int k = 0; k < n; ++k)
+                        r.i[k] = static_cast<std::int32_t>(static_cast<std::uint32_t>(a.f[k]));
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            // ─ Comparisons ─
+            case spv::OpIEqual: case spv::OpINotEqual:
+            case spv::OpSLessThan: case spv::OpSGreaterThan:
+            case spv::OpSLessThanEqual: case spv::OpSGreaterThanEqual:
+            case spv::OpULessThan: case spv::OpULessThanEqual: {
+                Value a, b;
+                if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("int-cmp: unknown operand"); break; }
+                // For scalar comparisons the result is a scalar bool;
+                // we materialize it into bval for consumption by
+                // OpBranchConditional / OpSelect.
+                Value r;
+                r.kind = Value::Kind::Bool;
+                bool b0 = false;
+                const std::int32_t ai = a.i[0], bi = b.i[0];
+                const std::uint32_t au = static_cast<std::uint32_t>(ai);
+                const std::uint32_t bu = static_cast<std::uint32_t>(bi);
+                switch (opcode) {
+                    case spv::OpIEqual:             b0 = (ai == bi); break;
+                    case spv::OpINotEqual:          b0 = (ai != bi); break;
+                    case spv::OpSLessThan:          b0 = (ai <  bi); break;
+                    case spv::OpSGreaterThan:       b0 = (ai >  bi); break;
+                    case spv::OpSLessThanEqual:     b0 = (ai <= bi); break;
+                    case spv::OpSGreaterThanEqual:  b0 = (ai >= bi); break;
+                    case spv::OpULessThan:          b0 = (au <  bu); break;
+                    case spv::OpULessThanEqual:     b0 = (au <= bu); break;
+                }
+                r.bval = b0;
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpFOrdEqual: case spv::OpFOrdNotEqual:
+            case spv::OpFOrdLessThan: case spv::OpFOrdGreaterThan:
+            case spv::OpFOrdLessThanEqual: case spv::OpFOrdGreaterThanEqual: {
+                Value a, b;
+                if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("flt-cmp: unknown operand"); break; }
+                Value r;
+                r.kind = Value::Kind::Bool;
+                bool b0 = false;
+                const float af = a.f[0], bf = b.f[0];
+                switch (opcode) {
+                    case spv::OpFOrdEqual:            b0 = (af == bf); break;
+                    case spv::OpFOrdNotEqual:         b0 = (af != bf); break;
+                    case spv::OpFOrdLessThan:         b0 = (af <  bf); break;
+                    case spv::OpFOrdGreaterThan:      b0 = (af >  bf); break;
+                    case spv::OpFOrdLessThanEqual:    b0 = (af <= bf); break;
+                    case spv::OpFOrdGreaterThanEqual: b0 = (af >= bf); break;
+                }
+                r.bval = b0;
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpLogicalNot: {
+                Value a;
+                if (!tryGetValue(w[2], a)) { bail("OpLogicalNot: unknown operand"); break; }
+                Value r; r.kind = Value::Kind::Bool; r.bval = !a.bval;
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpLogicalAnd: case spv::OpLogicalOr:
+            case spv::OpLogicalNotEqual: {
+                Value a, b;
+                if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("bool-op: unknown operand"); break; }
+                Value r; r.kind = Value::Kind::Bool;
+                switch (opcode) {
+                    case spv::OpLogicalAnd:       r.bval = a.bval && b.bval; break;
+                    case spv::OpLogicalOr:        r.bval = a.bval || b.bval; break;
+                    case spv::OpLogicalNotEqual:  r.bval = a.bval != b.bval; break;
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpSelect: {
+                // w[2]=cond, w[3]=trueVal, w[4]=falseVal
+                Value c, t, f;
+                if (!tryGetValue(w[2], c) || !tryGetValue(w[3], t) || !tryGetValue(w[4], f)) {
+                    bail("OpSelect: unknown operand"); break;
+                }
+                valueStore_[w[1]] = c.bval ? t : f;
+                pc += wc;
+                break;
+            }
+            case spv::OpAny: case spv::OpAll: {
+                Value a;
+                if (!tryGetValue(w[2], a)) { bail("OpAny/All: unknown operand"); break; }
+                Value r; r.kind = Value::Kind::Bool;
+                bool any = false, all = true;
+                for (int k = 0; k < a.componentCount(); ++k) {
+                    if (a.f[k] != 0.0f || a.i[k] != 0) any = true;
+                    else all = false;
+                }
+                r.bval = (opcode == spv::OpAny) ? any : all;
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
             case spv::OpBranch: {
                 auto it = labelMap.find(w[0]);
                 if (it == labelMap.end()) { bail("OpBranch: unknown label"); break; }
@@ -1363,6 +1617,53 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 previousLabel = currentLabel;
                 currentLabel = target;
                 pc = it->second;
+                break;
+            }
+            case spv::OpSwitch: {
+                // w[0]=selector, w[1]=default, then (caseLiteral, label) pairs.
+                Value sel;
+                if (!tryGetValue(w[0], sel)) { bail("OpSwitch: unknown selector"); break; }
+                std::uint32_t target = w[1];   // default
+                const std::uint32_t nPairs = (wc - 3) / 2;
+                for (std::uint32_t k = 0; k < nPairs; ++k) {
+                    const std::uint32_t literal = w[2 + k * 2];
+                    const std::uint32_t label   = w[2 + k * 2 + 1];
+                    if (static_cast<std::int32_t>(literal) == sel.i[0]) {
+                        target = label;
+                        break;
+                    }
+                }
+                auto it = labelMap.find(target);
+                if (it == labelMap.end()) { bail("OpSwitch: unknown label"); break; }
+                previousLabel = currentLabel;
+                currentLabel = target;
+                pc = it->second;
+                break;
+            }
+            case spv::OpPhi: {
+                // w[0]=type, w[1]=resultId, then pairs of (value, parentLabel).
+                // Pick the value whose parent matches previousLabel.
+                const std::uint32_t nPairs = (wc - 3) / 2;
+                Value r;
+                bool picked = false;
+                for (std::uint32_t k = 0; k < nPairs; ++k) {
+                    const std::uint32_t valId  = w[2 + k * 2];
+                    const std::uint32_t fromId = w[2 + k * 2 + 1];
+                    if (fromId == previousLabel) {
+                        Value v;
+                        if (tryGetValue(valId, v)) { r = v; picked = true; }
+                        break;
+                    }
+                }
+                if (!picked && nPairs > 0) {
+                    // Fallback: use the first value. Matches trivial
+                    // cases where previousLabel wasn't tracked cleanly
+                    // (e.g. loop entry before first iteration).
+                    Value v;
+                    if (tryGetValue(w[2], v)) { r = v; picked = true; }
+                }
+                if (picked) valueStore_[w[1]] = r;
+                pc += wc;
                 break;
             }
             case spv::OpLoopMerge:
@@ -1414,6 +1715,7 @@ namespace {
 // so we don't silently half-run a shader that uses a missing feature.
 bool isSupportedGsOpcode(std::uint32_t op) {
     switch (op) {
+        // ─ Structural / data movement ─
         case spv::OpLabel:
         case spv::OpVariable:
         case spv::OpLoad:
@@ -1422,20 +1724,70 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpCompositeExtract:
         case spv::OpCompositeConstruct:
         case spv::OpVectorShuffle:
-        case spv::OpVectorTimesScalar:
-        case spv::OpDot:
+        case spv::OpArrayLength:
+        case spv::OpBitcast:
+        // ─ Float arith ─
         case spv::OpFAdd:
         case spv::OpFSub:
         case spv::OpFMul:
         case spv::OpFDiv:
+        case spv::OpFMod:
         case spv::OpFNegate:
+        case spv::OpVectorTimesScalar:
+        case spv::OpDot:
+        // ─ Int arith ─
+        case spv::OpIAdd:
+        case spv::OpISub:
+        case spv::OpIMul:
+        case spv::OpSDiv:
+        case spv::OpSRem:
+        case spv::OpUMod:
+        case spv::OpSNegate:
+        // ─ Bit ops ─
+        case spv::OpBitwiseAnd:
+        case spv::OpShiftLeftLogical:
+        // ─ Conversions ─
+        case spv::OpConvertFToS:
+        case spv::OpConvertFToU:
+        case spv::OpConvertSToF:
+        case spv::OpConvertUToF:
+        // ─ Int comparisons ─
+        case spv::OpIEqual:
+        case spv::OpINotEqual:
+        case spv::OpSLessThan:
+        case spv::OpSGreaterThan:
+        case spv::OpSLessThanEqual:
+        case spv::OpSGreaterThanEqual:
+        case spv::OpULessThan:
+        case spv::OpULessThanEqual:
+        // ─ Float comparisons ─
+        case spv::OpFOrdEqual:
+        case spv::OpFOrdNotEqual:
+        case spv::OpFOrdLessThan:
+        case spv::OpFOrdGreaterThan:
+        case spv::OpFOrdLessThanEqual:
+        case spv::OpFOrdGreaterThanEqual:
+        // ─ Logical / selection ─
+        case spv::OpLogicalNot:
+        case spv::OpLogicalAnd:
+        case spv::OpLogicalOr:
+        case spv::OpLogicalNotEqual:
+        case spv::OpSelect:
+        case spv::OpAny:
+        case spv::OpAll:
+        // ─ Ext-inst ─
         case spv::OpExtInst:
+        // ─ Control flow ─
         case spv::OpBranch:
         case spv::OpBranchConditional:
+        case spv::OpSwitch:
+        case spv::OpPhi:
         case spv::OpLoopMerge:
         case spv::OpSelectionMerge:
+        // ─ GS-specific ─
         case spv::OpEmitVertex:
         case spv::OpEndPrimitive:
+        // ─ Function ─
         case spv::OpReturn:
         case spv::OpFunction:
         case spv::OpFunctionEnd:
@@ -1516,13 +1868,23 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     if (invocations != 1) return false;
 
     // Walk the function body and reject on any unsupported opcode.
+    // On rejection, log the opcode + GS source hash so that sweep
+    // diagnostics can grep for "[GS-emul] reject" and enumerate which
+    // opcodes are still missing. Gated behind APPGL_TRACE_GS_EMUL so
+    // production runs stay quiet.
     std::size_t pc = mod.funcBodyStart;
     while (pc < mod.funcBodyEnd) {
         const std::uint32_t inst = mod.words[pc];
         const std::uint16_t opcode = static_cast<std::uint16_t>(inst & 0xFFFF);
         const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
         if (wc == 0) return false;   // malformed
-        if (!isSupportedGsOpcode(opcode)) return false;
+        if (!isSupportedGsOpcode(opcode)) {
+            if (std::getenv("APPGL_TRACE_GS_EMUL") != nullptr) {
+                std::fprintf(stderr, "[GS-emul] reject: unsupported opcode %u at pc=%zu\n",
+                             opcode, pc);
+            }
+            return false;
+        }
         pc += wc;
     }
 

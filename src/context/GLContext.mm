@@ -11718,6 +11718,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->gsPassThroughReflection = ShaderReflection{};
     programObject->geometryEmulated = false;
     programObject->geometrySpirv.clear();
+    programObject->vertexSpirv.clear();
     programObject->gsInputTopology = 0;
     programObject->gsOutputTopology = 0;
     programObject->gsMaxVertices = 0;
@@ -12092,6 +12093,12 @@ bool GLContext::linkProgram(GLuint program) {
             // docs/geometry-shader-emulation.md §4.2.
             if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
                 programObject->geometrySpirv = geometryShader->spirv;
+                // Stash the VS SPIR-V too so the emulator's VS pre-pass
+                // (runs on every draw) has a stable copy independent
+                // of the shader's lifetime.
+                if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                    programObject->vertexSpirv = vertexShader->spirv;
+                }
                 (void)appgl::detectGeometryEmulatable(*programObject);
             }
             // Record the emulation outcome after the per-stage records

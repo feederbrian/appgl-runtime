@@ -445,6 +445,13 @@ struct GLProgramObject {
     // pipeline path. See docs/geometry-shader-emulation.md.
     bool geometryEmulated = false;
     std::vector<std::uint32_t> geometrySpirv;
+    // The VS SPIR-V is stashed alongside `geometrySpirv` so the CPU
+    // GS emulator can run a VS pre-pass on each drawArrays call —
+    // producing real gl_in[] data (VS outputs) to feed into the GS
+    // interpreter. Copied from the vertex shader object at link time
+    // so detach/delete of the shader doesn't pull the blob out from
+    // under a subsequent draw.
+    std::vector<std::uint32_t> vertexSpirv;
     // GS input / output topology from the SPIR-V execution modes —
     // OutputPoints / OutputLineStrip / OutputTriangleStrip, and
     // InputPoints / InputLines / InputTrianglesAdjacency etc.
