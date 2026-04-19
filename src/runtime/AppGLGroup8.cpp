@@ -168,6 +168,22 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
             }
             break;
         }
+        case GL_TEXTURE_DEPTH_TYPE: {
+            // GL 4.6 §8.11 Table 8.23: component type for the depth
+            // channel. Float depth formats → GL_FLOAT; fixed-point
+            // depth → GL_UNSIGNED_NORMALIZED; non-depth formats → GL_NONE.
+            GLenum fmt = desc.internalFormat;
+            if (fmt == GL_DEPTH_COMPONENT32F || fmt == GL_DEPTH32F_STENCIL8) {
+                *params = GL_FLOAT;
+            } else if (fmt == GL_DEPTH_COMPONENT16 || fmt == GL_DEPTH_COMPONENT24
+                       || fmt == GL_DEPTH_COMPONENT32 || fmt == GL_DEPTH_COMPONENT
+                       || fmt == GL_DEPTH24_STENCIL8 || fmt == GL_DEPTH_STENCIL) {
+                *params = GL_UNSIGNED_NORMALIZED;
+            } else {
+                *params = GL_NONE;
+            }
+            break;
+        }
         case GL_TEXTURE_SAMPLES:
             *params = desc.samples;
             break;

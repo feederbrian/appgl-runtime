@@ -102,6 +102,13 @@ struct GLTextureParameters {
     std::array<GLfloat, 4> borderColor = {0.0f, 0.0f, 0.0f, 0.0f};
     std::array<GLint, 4> swizzle = {GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA};
     GLint depthStencilTextureMode = GL_DEPTH_COMPONENT;
+    // GL 4.6 §8.10 / GL_ARB_texture_filter_anisotropic defaults. Stored
+    // on the object so glGetSamplerParameter / glGetTextureParameter can
+    // round-trip the value — the Metal sampler builder currently ignores
+    // both knobs but CTS samplers_defaults / textures_defaults still
+    // query them for a full default round-trip.
+    GLfloat lodBias = 0.0f;
+    GLfloat maxAnisotropy = 1.0f;
 };
 
 struct GLTextureObject {

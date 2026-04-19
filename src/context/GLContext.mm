@@ -1191,13 +1191,10 @@ bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const
             params.maxLod = static_cast<GLfloat>(values[0]);
             return true;
         case GL_TEXTURE_LOD_BIAS:
+            params.lodBias = static_cast<GLfloat>(values[0]);
+            return true;
         case GL_TEXTURE_MAX_ANISOTROPY:
-            // GLTextureParameters has no storage for these; the float
-            // setter also silently accepts (via its default cast-to-int
-            // recursion path). No-op store, return true so the call
-            // doesn't push GL_INVALID_ENUM. Real sampler-state plumbing
-            // is a follow-up.
-            (void)values;
+            params.maxAnisotropy = static_cast<GLfloat>(values[0]);
             return true;
         default:
             return false;
@@ -1214,6 +1211,12 @@ bool setTextureParameterFloat(GLTextureParameters& params, GLenum pname, const G
             return true;
         case GL_TEXTURE_MAX_LOD:
             params.maxLod = values[0];
+            return true;
+        case GL_TEXTURE_LOD_BIAS:
+            params.lodBias = values[0];
+            return true;
+        case GL_TEXTURE_MAX_ANISOTROPY:
+            params.maxAnisotropy = values[0];
             return true;
         case GL_TEXTURE_BORDER_COLOR:
             params.borderColor = {values[0], values[1], values[2], values[3]};
@@ -1326,6 +1329,14 @@ bool getTextureParameterFloat(const GLTextureParameters& params, GLenum pname, G
     }
     if (pname == GL_TEXTURE_MAX_LOD) {
         values[0] = params.maxLod;
+        return true;
+    }
+    if (pname == GL_TEXTURE_LOD_BIAS) {
+        values[0] = params.lodBias;
+        return true;
+    }
+    if (pname == GL_TEXTURE_MAX_ANISOTROPY) {
+        values[0] = params.maxAnisotropy;
         return true;
     }
     GLint integerValue[4] = {};
@@ -6846,7 +6857,18 @@ bool GLContext::copyBufferSubData(
     GLBufferObject* readObject = impl_->objects->buffers().get(readName);
     GLBufferObject* writeObject = impl_->objects->buffers().get(writeName);
     if (readName == 0 || writeName == 0 || readObject == nullptr || writeObject == nullptr
-        || !readObject->instantiated || !writeObject->instantiated || readObject->mapped || writeObject->mapped) {
+        || !readObject->instantiated || !writeObject->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.6 §6.3: mapped source or destination raises INVALID_OPERATION
+    // *unless* the buffer was mapped with GL_MAP_PERSISTENT_BIT. Persistent
+    // mapping keeps the memory addressable across draws, so copyBufferSubData
+    // is allowed to proceed.
+    const auto isNonPersistentMapped = [](const GLBufferObject* obj) {
+        return obj->mapped && (obj->mapAccessFlags & GL_MAP_PERSISTENT_BIT) == 0;
+    };
+    if (isNonPersistentMapped(readObject) || isNonPersistentMapped(writeObject)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -9132,6 +9154,42 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
             params[0] = attachmentInfo.complete && isStencilFormat(attachmentInfo.internalFormat) ? 8 : 0;
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+            // GL 4.6 §9.2.3: the component type of the color/depth data.
+            // For UNORM color formats and fixed-point depth the answer is
+            // GL_UNSIGNED_NORMALIZED; stencil is GL_UNSIGNED_INT. CTS
+            // framebuffers_get_attachment_parameters cross-checks legacy
+            // vs DSA and expects matching values on user FBOs.
+            if (!attachmentInfo.complete) {
+                params[0] = GL_NONE;
+            } else if (isStencilFormat(attachmentInfo.internalFormat)
+                       && !isDepthFormat(attachmentInfo.internalFormat)
+                       && !isColorFormat(attachmentInfo.internalFormat)) {
+                params[0] = GL_UNSIGNED_INT;
+            } else {
+                params[0] = GL_UNSIGNED_NORMALIZED;
+            }
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+            // Only meaningful for color attachments; GL_LINEAR for plain
+            // RGBA8 / RGBA16 / …, GL_SRGB for *_SRGB_* formats, GL_NONE
+            // otherwise.
+            if (!attachmentInfo.complete || !isColorFormat(attachmentInfo.internalFormat)) {
+                params[0] = GL_NONE;
+            } else {
+                const GLenum fmt = attachmentInfo.internalFormat;
+                params[0] = (fmt == GL_SRGB || fmt == GL_SRGB8
+                             || fmt == GL_SRGB_ALPHA || fmt == GL_SRGB8_ALPHA8
+                             || fmt == GL_COMPRESSED_SRGB || fmt == GL_COMPRESSED_SRGB_ALPHA)
+                             ? GL_SRGB : GL_LINEAR;
+            }
+            return true;
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+            // Not tracked on the attachment state yet. Default to 0 so
+            // the query doesn't raise INVALID_ENUM for implementations
+            // that attached a non-cube texture (spec allows 0 there).
+            params[0] = 0;
             return true;
         default:
             const_cast<GLContext*>(this)->pushError(GL_INVALID_ENUM);
@@ -17527,8 +17585,15 @@ bool GLContext::createTextures(GLenum target, GLsizei n, GLuint* textures) {
 
 bool GLContext::createSamplers(GLsizei n, GLuint* samplers) {
     if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
+    // DSA createSamplers immediately allocates an object — `instantiated`
+    // must be true so glSamplerParameter / glGetSamplerParameter don't
+    // raise GL_INVALID_OPERATION (unlike glGenSamplers which only reserves
+    // the name and requires a subsequent glBindSampler to materialise).
     for (GLsizei i = 0; i < n; ++i) {
         samplers[i] = impl_->objects->samplers().reserveName();
+        if (auto* obj = impl_->objects->samplers().get(samplers[i])) {
+            obj->instantiated = true;
+        }
     }
     return true;
 }
@@ -17557,6 +17622,9 @@ bool GLContext::createVertexArrays(GLsizei n, GLuint* arrays) {
     if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
     for (GLsizei i = 0; i < n; ++i) {
         arrays[i] = impl_->objects->vertexArrays().reserveName();
+        if (auto* obj = impl_->objects->vertexArrays().get(arrays[i])) {
+            obj->instantiated = true;
+        }
     }
     return true;
 }
@@ -17998,27 +18066,92 @@ bool GLContext::getTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* pa
     })
 }
 
-bool GLContext::getTextureLevelParameterfv(GLuint texture, GLint level, GLenum pname, GLfloat* params) {
-    auto* obj = impl_->objects->textures().get(texture);
-    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
-    // Level parameter queries — return sensible defaults from shadow state.
-    (void)level; (void)pname;
-    if (params) *params = 0.0f;
-    return true;
-}
-
 bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
     if (!params) return true;
+
+    // GL 4.6 §8.11 Table 8.23 — mirror the legacy glGetTexLevelParameteriv
+    // handler in AppGLGroup8.cpp so the DSA path returns the same values
+    // for width/height/depth/internalformat/*SIZE/*TYPE/samples/compressed.
+    // CTS textures_get_level_parameter cross-checks legacy vs DSA and
+    // fails unless both paths agree.
     auto it = obj->levels.find(level);
+    const bool hasMip = (it != obj->levels.end() && it->second.defined);
+    const auto& desc = hasMip ? it->second.desc : obj->desc;
+
+    const auto componentType = [](GLenum fmt) -> GLint {
+        if (fmt == GL_R32F || fmt == GL_RG32F || fmt == GL_RGB32F || fmt == GL_RGBA32F
+            || fmt == GL_R16F || fmt == GL_RG16F || fmt == GL_RGB16F || fmt == GL_RGBA16F
+            || fmt == GL_R11F_G11F_B10F || fmt == GL_RGB9_E5) {
+            return GL_FLOAT;
+        }
+        if (fmt == GL_R8I || fmt == GL_RG8I || fmt == GL_RGB8I || fmt == GL_RGBA8I
+            || fmt == GL_R16I || fmt == GL_RG16I || fmt == GL_RGB16I || fmt == GL_RGBA16I
+            || fmt == GL_R32I || fmt == GL_RG32I || fmt == GL_RGB32I || fmt == GL_RGBA32I) {
+            return GL_INT;
+        }
+        if (fmt == GL_R8UI || fmt == GL_RG8UI || fmt == GL_RGB8UI || fmt == GL_RGBA8UI
+            || fmt == GL_R16UI || fmt == GL_RG16UI || fmt == GL_RGB16UI || fmt == GL_RGBA16UI
+            || fmt == GL_R32UI || fmt == GL_RG32UI || fmt == GL_RGB32UI || fmt == GL_RGBA32UI
+            || fmt == GL_RGB10_A2UI) {
+            return GL_UNSIGNED_INT;
+        }
+        if (fmt == GL_R8_SNORM || fmt == GL_RG8_SNORM || fmt == GL_RGB8_SNORM || fmt == GL_RGBA8_SNORM
+            || fmt == GL_R16_SNORM || fmt == GL_RG16_SNORM || fmt == GL_RGB16_SNORM || fmt == GL_RGBA16_SNORM) {
+            return GL_SIGNED_NORMALIZED;
+        }
+        return GL_UNSIGNED_NORMALIZED;
+    };
+
     switch (pname) {
-        case GL_TEXTURE_WIDTH: *params = (it != obj->levels.end()) ? it->second.desc.width : 0; break;
-        case GL_TEXTURE_HEIGHT: *params = (it != obj->levels.end()) ? it->second.desc.height : 0; break;
-        case GL_TEXTURE_DEPTH: *params = (it != obj->levels.end()) ? it->second.desc.depth : 0; break;
-        case GL_TEXTURE_INTERNAL_FORMAT: *params = static_cast<GLint>(obj->desc.internalFormat); break;
-        default: *params = 0; break;
+        case GL_TEXTURE_WIDTH:           *params = hasMip ? desc.width  : 0; return true;
+        case GL_TEXTURE_HEIGHT:          *params = hasMip ? desc.height : 0; return true;
+        case GL_TEXTURE_DEPTH:           *params = hasMip ? desc.depth  : 0; return true;
+        case GL_TEXTURE_INTERNAL_FORMAT: *params = hasMip ? static_cast<GLint>(desc.internalFormat) : static_cast<GLint>(GL_RGBA8); return true;
+        case GL_TEXTURE_RED_SIZE:
+        case GL_TEXTURE_GREEN_SIZE:
+        case GL_TEXTURE_BLUE_SIZE:
+        case GL_TEXTURE_ALPHA_SIZE:      *params = 8; return true;
+        case GL_TEXTURE_DEPTH_SIZE:      *params = 0; return true;
+        case GL_TEXTURE_STENCIL_SIZE:    *params = 0; return true;
+        case GL_TEXTURE_RED_TYPE:
+        case GL_TEXTURE_GREEN_TYPE:
+        case GL_TEXTURE_BLUE_TYPE:
+        case GL_TEXTURE_ALPHA_TYPE:      *params = componentType(desc.internalFormat); return true;
+        case GL_TEXTURE_DEPTH_TYPE: {
+            GLenum fmt = desc.internalFormat;
+            if (fmt == GL_DEPTH_COMPONENT32F || fmt == GL_DEPTH32F_STENCIL8) {
+                *params = GL_FLOAT;
+            } else if (fmt == GL_DEPTH_COMPONENT16 || fmt == GL_DEPTH_COMPONENT24
+                       || fmt == GL_DEPTH_COMPONENT32 || fmt == GL_DEPTH_COMPONENT
+                       || fmt == GL_DEPTH24_STENCIL8 || fmt == GL_DEPTH_STENCIL) {
+                *params = GL_UNSIGNED_NORMALIZED;
+            } else {
+                *params = GL_NONE;
+            }
+            return true;
+        }
+        case GL_TEXTURE_SAMPLES:                 *params = desc.samples; return true;
+        case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:  *params = GL_TRUE; return true;
+        case GL_TEXTURE_COMPRESSED:              *params = GL_FALSE; return true;
+        case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:   *params = 0; return true;
+        case GL_TEXTURE_BUFFER_DATA_STORE_BINDING: *params = 0; return true;
+        case GL_TEXTURE_BUFFER_OFFSET:           *params = 0; return true;
+        case GL_TEXTURE_BUFFER_SIZE:             *params = 0; return true;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
     }
+}
+
+bool GLContext::getTextureLevelParameterfv(GLuint texture, GLint level, GLenum pname, GLfloat* params) {
+    if (!params) { pushError(GL_INVALID_VALUE); return false; }
+    GLint intVal = 0;
+    if (!getTextureLevelParameteriv(texture, level, pname, &intVal)) {
+        return false;
+    }
+    *params = static_cast<GLfloat>(intVal);
     return true;
 }
 

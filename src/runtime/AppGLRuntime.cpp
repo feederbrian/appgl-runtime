@@ -1085,9 +1085,11 @@ bool isValidSamplerParameterPname(GLenum pname) {
         case GL_TEXTURE_WRAP_R:
         case GL_TEXTURE_MIN_LOD:
         case GL_TEXTURE_MAX_LOD:
+        case GL_TEXTURE_LOD_BIAS:
         case GL_TEXTURE_COMPARE_MODE:
         case GL_TEXTURE_COMPARE_FUNC:
         case GL_TEXTURE_BORDER_COLOR:
+        case GL_TEXTURE_MAX_ANISOTROPY:
             return true;
         default:
             return false;
@@ -1327,10 +1329,23 @@ bool isValidRenderbufferParameterPname(GLenum pname) {
 }
 
 bool isValidFramebufferAttachment(GLenum attachment) {
+    // GL 4.6 §9.2.3 glGetFramebufferAttachmentParameteriv accepts attachment
+    // in the set {COLOR_ATTACHMENTi, DEPTH_ATTACHMENT, STENCIL_ATTACHMENT,
+    // DEPTH_STENCIL_ATTACHMENT} on user FBOs; on the default framebuffer
+    // (name 0) it additionally accepts the window-system names
+    // FRONT_{LEFT,RIGHT}, BACK_{LEFT,RIGHT}, DEPTH and STENCIL. CTS
+    // framebuffers_get_attachment_parameters iterates all six on the
+    // default FB and expects GL_NO_ERROR.
     return (attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + kPhaseAMaxDrawBuffers)
         || attachment == GL_DEPTH_ATTACHMENT
         || attachment == GL_STENCIL_ATTACHMENT
-        || attachment == GL_DEPTH_STENCIL_ATTACHMENT;
+        || attachment == GL_DEPTH_STENCIL_ATTACHMENT
+        || attachment == GL_FRONT_LEFT
+        || attachment == GL_FRONT_RIGHT
+        || attachment == GL_BACK_LEFT
+        || attachment == GL_BACK_RIGHT
+        || attachment == GL_DEPTH
+        || attachment == GL_STENCIL;
 }
 
 bool isValidFramebufferAttachmentPname(GLenum pname) {
@@ -1339,6 +1354,7 @@ bool isValidFramebufferAttachmentPname(GLenum pname) {
         case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
         case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
         case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
         case GL_FRAMEBUFFER_ATTACHMENT_LAYERED:
         case GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE:
         case GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
@@ -1346,6 +1362,8 @@ bool isValidFramebufferAttachmentPname(GLenum pname) {
         case GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
         case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
         case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+        case GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+        case GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
             return true;
         default:
             return false;
