@@ -510,6 +510,69 @@ rebuild catches the drift at compile time.
   synthesis currently assumes `float`-widthed output
   varyings, so an `ivec4` output would need a type-aware
   branch in `synthesisePassThroughVertexMSL`.
+- **2026-04-19** — **geometry_shader.* scale-out (phase 1)**:
+  Major infrastructure push toward the `KHR-GL46.geometry_shader.*`
+  section (baseline 29/136 Pass, target ~100+ additional).
+  Landed commits `50a879b`, `0ddc757`, `4a76d62`:
+    - **Opcode expansion.** `isSupportedGsOpcode` + dispatch
+      now cover integer arithmetic (`OpIAdd` / `OpISub` /
+      `OpIMul` / `OpSDiv` / `OpSRem` / `OpUMod` / `OpSNegate`),
+      conversions (`OpConvertSToF` / `OpConvertFToS` /
+      `OpConvertUToF` / `OpConvertFToU` / `OpBitcast`), bitwise
+      (`OpBitwiseAnd` / `OpShiftLeftLogical`), integer and
+      float comparisons (`OpIEqual` / `OpSLessThan` / etc.,
+      `OpFOrdEqual` / `OpFOrdLessThan` / etc.), logical
+      (`OpLogicalNot` / `OpLogicalAnd` / `OpLogicalOr` /
+      `OpLogicalNotEqual` / `OpSelect` / `OpAny` / `OpAll`),
+      and control flow (`OpSwitch`, `OpPhi`, `OpFMod`).
+    - **VS pre-pass.** `program.vertexSpirv` is stashed at
+      link time. `emulateGeometryDraw` parses it, extracts
+      VBO attribute bytes via a new
+      `readVertexAttribFromVAO` helper (honoring GL 4.6
+      §10.2.1 attribute defaults: missing z → 0, missing
+      w → 1), runs the VS interpreter once per vertex with
+      `gl_VertexID` / `gl_InstanceID` and Location-keyed
+      attribute values, and hands the resulting
+      `PerVertexInput`s to the GS interpreter in place of
+      the prior zero-initialised placeholders.
+    - **Uniform plumbing.** `GLProgramUniformValue` entries
+      are flattened to `name → vector<float>` (with int/uint
+      bit-cast) and seeded into `Uniform` /
+      `UniformConstant` variable storage at interpreter
+      init time, via the struct's `OpMemberName` table.
+      Both VS and GS interpreters consume the same map.
+    - **SPIR-V decoration parsing.** `DecorationBlock` /
+      `BufferBlock` / `Offset` added for struct-layout
+      resolution; `DecorationNoPerspective` / `Centroid`
+      parse into the same path as `Flat` (all three flow
+      through `varyingInterp` into the synthesised MSL).
+      Per-member `OpMemberName` capture (was member 0 only).
+    - **Implicit input Locations.** glslang doesn't emit
+      `DecorationLocation` on VS inputs without an explicit
+      `layout(location=N)` qualifier. `initVariables` now
+      runs a one-time pass that sorts the remaining VS
+      Input variables by SPIR-V id and assigns sequential
+      locations after any explicit ones — same pattern as
+      `gatherOutputVaryings` uses on the output side.
+    - **Point rasterization.** The synthesised pass-through
+      VS now emits `[[point_size]] = 1.0` when the GS's
+      output topology is `GL_POINTS`; without it Metal
+      Apple-GPU pipelines render 0-sized points.
+  Sweep delta: `constant_expressions.*_geometry` holds
+  at 232/232 (no regressions from the refactor).
+  `geometry_shader.*` still at 29/136 — the 33
+  `rendering.rendering.*` tests and ~30 more do pixel-exact
+  framebuffer readback that requires matching Metal's
+  raster behaviour against the GL expected output; the
+  infrastructure lands but the pixel-perfect match is a
+  follow-up class of work. The remaining ~30 tests need
+  either XFB + primitive-query plumbing
+  (`primitive_counter.*`, `primitive_queries.*`,
+  19 + 3 tests), API-level validation changes
+  (`api.getProgramiv*` returning `GL_INVALID_OPERATION`
+  for GS pnames, `api.*` ~10 tests), or adjacency-topology
+  support in the GS input slicer (`adjacency.*`, 8 tests).
+
 - **2026-04-19** — **Sweep acceptance** (commit `514be72`):
   first run surfaced three compounding bugs, all fixed in the
   same commit:
