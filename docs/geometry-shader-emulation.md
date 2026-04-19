@@ -510,3 +510,35 @@ rebuild catches the drift at compile time.
   synthesis currently assumes `float`-widthed output
   varyings, so an `ivec4` output would need a type-aware
   branch in `synthesisePassThroughVertexMSL`.
+- **2026-04-19** — **Sweep acceptance** (commit `514be72`):
+  first run surfaced three compounding bugs, all fixed in the
+  same commit:
+    1. **GL_POINTS is literally `0x0`.** `detectGeometry-
+       Emulatable` used the GL enum itself as the "unset"
+       sentinel, so every GS with `layout(points) in/out` was
+       silently rejected. Replaced with `haveInputTopo` /
+       `haveOutputTopo` flags.
+    2. **Implicit-Location outputs.** glslang doesn't emit
+       `DecorationLocation` when GLSL omits
+       `layout(location=N)`. `gatherOutputVaryings` now
+       collects those separately, sorts by SPIR-V id, and
+       assigns sequential locations starting after any
+       explicitly-located ones (matches GL 4.6 §4.4.2 linker
+       rules).
+    3. **Integer varyings + interpolation qualifiers.**
+       `synthesisePassThroughVertexMSL` always emitted `float`;
+       Metal pipeline validation rejects `fragment input
+       user(locn0) mismatching vertex shader output` when the
+       FS expects `int`. Also, `flat` / `noperspective` /
+       `centroid` decorations weren't propagated. Added
+       parsing for all three decorations + a `varyingBaseType`
+       table (`float`/`int`/`uint`) and type-aware MSL
+       emission; integer varyings are force-flat even if the
+       GS source omits the qualifier.
+  **Sweep results** (M1 Max, KHR-GL46):
+  `constant_expressions.*_geometry` — **232 / 232 Pass
+  (100 %, +224 vs baseline 8)**. Full `constant_expressions.*`
+  — 944/1392 Pass; remaining 448 split cleanly into 224
+  `_tess_control` + 224 `_tess_eval`, both out of scope for
+  this rollout (tessellation emulation is a separate
+  sibling stage).
