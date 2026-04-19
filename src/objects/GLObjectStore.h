@@ -436,6 +436,22 @@ struct GLProgramObject {
     ShaderReflection fragmentReflection;
     bool hasTranslatedPipeline = false;
 
+    // CPU GS emulation. Set at link time by
+    // `detectGeometryEmulatable` when the program has a GS stage
+    // whose SPIR-V the interpreter can handle. `geometrySpirv` is
+    // copied from the GS shader object so it survives even if the
+    // shader is detached + deleted before draw time. drawArrays
+    // branches on `geometryEmulated` before the normal translated-
+    // pipeline path. See docs/geometry-shader-emulation.md.
+    bool geometryEmulated = false;
+    std::vector<std::uint32_t> geometrySpirv;
+    // GS input / output topology from the SPIR-V execution modes —
+    // OutputPoints / OutputLineStrip / OutputTriangleStrip, and
+    // InputPoints / InputLines / InputTrianglesAdjacency etc.
+    GLenum gsInputTopology = 0;
+    GLenum gsOutputTopology = 0;
+    std::uint32_t gsMaxVertices = 0;
+
     // Compute shader pipeline state. The MSL and reflection are populated
     // at link time for ProgramKind::Compute; the MTLComputePipelineState
     // is built immediately and cached here because compute pipelines

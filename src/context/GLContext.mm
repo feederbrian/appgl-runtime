@@ -5,6 +5,7 @@
 #include "../objects/GLObjectStore.h"
 #include "../runtime/AppGLRuntime.h"
 #include "../shader/CompatShaderRewrite.h"
+#include "../shader/GeometryShaderEmulator.h"
 #include "../shader/GLSLReflection.h"
 #include "../shader/ShaderTranslator.h"
 #include "../state/GLStateTracker.h"
@@ -12061,16 +12062,40 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->fragmentMSL, fsRefl);
             std::string unusedGsMSL;
             (void)translateCachedStage("geometry", geometryShader, unusedGsMSL, gsRefl);
-            // Always append the emulation-gap record after the per-stage
-            // records so BAR sees: [vertex:ok][fragment:ok][geometry:ok][gap].
-            Runtime::shared().recordShaderTranslation({
-                programTag + "-geometry-emulation", "geometry",
-                quickHash(geometryShader->source),
-                linkVertexHash, linkFragmentHash,
-                "geometry shader emulation not yet available on Metal; "
-                "program translated VS+FS only, falls back to raster-without-GS",
-                "", false
-            });
+            // CPU GS emulation — step 2 hook. Copy the GS SPIR-V onto
+            // the program so it survives shader detach/delete, then ask
+            // the emulator whether it can handle this shader. Detection
+            // only toggles the flag + topology/max_verts state; no
+            // emulation runs here. drawArrays (step 3) branches on
+            // programObject->geometryEmulated. See
+            // docs/geometry-shader-emulation.md §4.2.
+            if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+                programObject->geometrySpirv = geometryShader->spirv;
+                (void)appgl::detectGeometryEmulatable(*programObject);
+            }
+            // Record the emulation outcome after the per-stage records
+            // so BAR / trace logs see: [vertex:ok][fragment:ok][geometry:ok][gap-or-cpu-emulation].
+            if (programObject->geometryEmulated) {
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-geometry-cpu-emulation", "geometry",
+                    quickHash(geometryShader->source),
+                    linkVertexHash, linkFragmentHash,
+                    "geometry shader will run on the CPU emulator "
+                    "(constant_expressions GS subset); drawArrays routes "
+                    "expanded vertices through a synthesised pass-through VS",
+                    "", true
+                });
+            } else {
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-geometry-emulation", "geometry",
+                    quickHash(geometryShader->source),
+                    linkVertexHash, linkFragmentHash,
+                    "geometry shader outside the CPU-emulator's supported "
+                    "SPIR-V subset (unsupported opcode or topology); program "
+                    "falls back to VS+FS-only raster without GS",
+                    "", false
+                });
+            }
             if (vsOk && fsOk) {
                 programObject->vertexReflection = std::move(vsRefl);
                 programObject->fragmentReflection = std::move(fsRefl);

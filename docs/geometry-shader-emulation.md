@@ -417,3 +417,21 @@ rebuild catches the drift at compile time.
 - **2026-04-19** — scaffolding landed (commit `0f1ba0e`); interpreter
   skeleton with stubbed dispatch; whitepaper written; SPIR-V
   version pin + stability check recorded in §12.
+- **2026-04-19** — **Step 1** (interpreter opcodes, commit `c37b045`):
+  ~30 SPIR-V opcodes (OpLoad, OpStore, OpAccessChain,
+  OpCompositeExtract/Construct, OpFAdd/Sub/Mul/Div, OpExtInst for
+  GLSL.std.450 transcendentals, structured control flow, OpEmit-
+  Vertex, OpEndPrimitive). Interpreter class wired to `SpirvModule`
+  parser + access-chain walker; still gated behind a stub
+  `detectGeometryEmulatable` returning false.
+- **2026-04-19** — **Step 2** (linkProgram hook):
+  `detectGeometryEmulatable` now real — parses GS SPIR-V, walks
+  `OpExecutionMode` for input/output topology + `OutputVertices`,
+  scans the entry-function body for unsupported opcodes,
+  flips `GLProgramObject::geometryEmulated = true` when the
+  shader is fully handled. The VGF link branch in
+  `GLContext.mm::linkProgram` copies `GLShaderObject::spirv` onto
+  the program (so it survives detach + delete per GL 4.6 §7.3) and
+  records either a `-geometry-cpu-emulation` or the legacy
+  `-geometry-emulation` gap trace depending on the outcome.
+  No draw-time effect yet — step 3 lands drawArrays routing.

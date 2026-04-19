@@ -22,6 +22,7 @@ namespace spv {
     constexpr std::uint32_t MagicNumber = 0x07230203;
     enum Op : std::uint32_t {
         OpExtInstImport = 11, OpExtInst = 12, OpEntryPoint = 15,
+        OpExecutionMode = 16,
         OpName = 5, OpMemberName = 6,
         OpDecorate = 71, OpMemberDecorate = 72,
         OpTypeVoid = 19, OpTypeBool = 20, OpTypeInt = 21,
@@ -42,6 +43,18 @@ namespace spv {
         OpLabel = 248, OpBranch = 249, OpBranchConditional = 250,
         OpReturn = 253,
         OpEmitVertex = 218, OpEndPrimitive = 219,
+    };
+    enum ExecutionMode : std::uint32_t {
+        ExecutionModeInvocations = 0,
+        ExecutionModeInputPoints = 19,
+        ExecutionModeInputLines = 20,
+        ExecutionModeInputLinesAdjacency = 21,
+        ExecutionModeTriangles = 22,
+        ExecutionModeInputTrianglesAdjacency = 23,
+        ExecutionModeOutputVertices = 26,
+        ExecutionModeOutputPoints = 27,
+        ExecutionModeOutputLineStrip = 28,
+        ExecutionModeOutputTriangleStrip = 29,
     };
     enum Decoration : std::uint32_t { DecorationLocation = 30, DecorationBuiltIn = 11 };
     enum StorageClass : std::uint32_t {
@@ -79,11 +92,23 @@ namespace spv {
 #ifndef GL_POINTS
 #define GL_POINTS 0x0000
 #endif
+#ifndef GL_LINES
+#define GL_LINES 0x0001
+#endif
 #ifndef GL_LINE_STRIP
 #define GL_LINE_STRIP 0x0003
 #endif
+#ifndef GL_TRIANGLES
+#define GL_TRIANGLES 0x0004
+#endif
 #ifndef GL_TRIANGLE_STRIP
 #define GL_TRIANGLE_STRIP 0x0005
+#endif
+#ifndef GL_LINES_ADJACENCY
+#define GL_LINES_ADJACENCY 0x000A
+#endif
+#ifndef GL_TRIANGLES_ADJACENCY
+#define GL_TRIANGLES_ADJACENCY 0x000C
 #endif
 #ifndef GL_VERTEX_SHADER
 #define GL_VERTEX_SHADER 0x8B31
@@ -196,6 +221,16 @@ struct SpirvModule {
     std::uint32_t entryPoint = 0;
     std::vector<std::uint32_t> entryInterface;
 
+    // OpExecutionMode records keyed by mode value (SPIR-V enum), value
+    // is the list of literal operands. For GS we care about:
+    //   InputPoints/InputLines/InputLinesAdjacency/Triangles/
+    //   InputTrianglesAdjacency — input topology (no operands).
+    //   OutputPoints/OutputLineStrip/OutputTriangleStrip — output
+    //   topology (no operands).
+    //   OutputVertices — single uint operand = max_vertices.
+    //   Invocations — single uint operand, currently required to be 1.
+    std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> executionModes;
+
     // Offsets of function-body instructions. We stash the main entry
     // function's instruction range at parse time for fast walk.
     std::size_t funcBodyStart = 0;
@@ -297,6 +332,18 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                     (void)readLiteralString(data, j, count);   // skip name
                     // interface ids follow, one per word.
                     while (j < i + wc) entryInterface.push_back(data[j++]);
+                }
+                break;
+            }
+            case spv::OpExecutionMode: {
+                // w[0]=entryPointId, w[1]=Mode, w[2..]=operands
+                if (wc >= 3) {
+                    const std::uint32_t mode = w[1];
+                    std::vector<std::uint32_t> operands;
+                    for (std::uint32_t k = 2; k < static_cast<std::uint32_t>(wc - 1); ++k) {
+                        operands.push_back(w[k]);
+                    }
+                    executionModes[mode] = std::move(operands);
                 }
                 break;
             }
@@ -1130,10 +1177,127 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
 
 }  // namespace
 
-// ─── Public API — still stubbed for gradual rollout ─────────────────
+// ─── Public API — step 2 wiring ─────────────────────────────────────
+//
+// `detectGeometryEmulatable` is called once at link time. It parses the
+// GS SPIR-V copied onto `program.geometrySpirv`, pulls the input/output
+// topology + max_vertices out of OpExecutionMode, and walks the entry-
+// function body to confirm every opcode is one the interpreter switch
+// below handles. Anything unsupported leaves `geometryEmulated = false`
+// and the driver takes the existing VS+FS-only fallback.
 
-bool detectGeometryEmulatable(GLProgramObject& /*program*/) {
-    return false;   // opcode coverage still lands in follow-ups; keep fallback
+namespace {
+// Opcodes handled by `Interpreter::execute` (plus the structural
+// Phi/Label etc. that appear in any reducible CFG). Kept in sync with
+// the switch in execute(); anything outside this set fails detection
+// so we don't silently half-run a shader that uses a missing feature.
+bool isSupportedGsOpcode(std::uint32_t op) {
+    switch (op) {
+        case spv::OpLabel:
+        case spv::OpVariable:
+        case spv::OpLoad:
+        case spv::OpStore:
+        case spv::OpAccessChain:
+        case spv::OpCompositeExtract:
+        case spv::OpCompositeConstruct:
+        case spv::OpFAdd:
+        case spv::OpFSub:
+        case spv::OpFMul:
+        case spv::OpFDiv:
+        case spv::OpExtInst:
+        case spv::OpBranch:
+        case spv::OpBranchConditional:
+        case spv::OpLoopMerge:
+        case spv::OpSelectionMerge:
+        case spv::OpEmitVertex:
+        case spv::OpEndPrimitive:
+        case spv::OpReturn:
+        case spv::OpFunction:
+        case spv::OpFunctionEnd:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Translate an ExecutionMode value to the corresponding GL input
+// topology enum. Returns 0 if the mode isn't an input-topology mode.
+GLenum inputModeToGL(std::uint32_t mode) {
+    switch (mode) {
+        case spv::ExecutionModeInputPoints:             return GL_POINTS;
+        case spv::ExecutionModeInputLines:              return GL_LINES;
+        case spv::ExecutionModeInputLinesAdjacency:     return GL_LINES_ADJACENCY;
+        case spv::ExecutionModeTriangles:               return GL_TRIANGLES;
+        case spv::ExecutionModeInputTrianglesAdjacency: return GL_TRIANGLES_ADJACENCY;
+        default: return 0;
+    }
+}
+
+// Translate an ExecutionMode value to the corresponding GL output
+// topology enum. Returns 0 if the mode isn't an output-topology mode.
+GLenum outputModeToGL(std::uint32_t mode) {
+    switch (mode) {
+        case spv::ExecutionModeOutputPoints:        return GL_POINTS;
+        case spv::ExecutionModeOutputLineStrip:     return GL_LINE_STRIP;
+        case spv::ExecutionModeOutputTriangleStrip: return GL_TRIANGLE_STRIP;
+        default: return 0;
+    }
+}
+}  // namespace
+
+bool detectGeometryEmulatable(GLProgramObject& program) {
+    program.geometryEmulated = false;
+    program.gsInputTopology = 0;
+    program.gsOutputTopology = 0;
+    program.gsMaxVertices = 0;
+
+    if (program.geometrySpirv.empty()) return false;
+
+    SpirvModule mod;
+    if (!mod.parse(program.geometrySpirv.data(), program.geometrySpirv.size())) {
+        return false;
+    }
+    if (!mod.haveFuncBody) return false;
+
+    // Topology + max_vertices. All three must be present; otherwise the
+    // shader is malformed and we let the normal path complain.
+    GLenum inputTopo = 0;
+    GLenum outputTopo = 0;
+    std::uint32_t maxVertices = 0;
+    std::uint32_t invocations = 1;   // default if ExecutionModeInvocations absent
+    for (const auto& [mode, operands] : mod.executionModes) {
+        if (GLenum g = inputModeToGL(mode); g != 0) {
+            inputTopo = g;
+        } else if (GLenum g2 = outputModeToGL(mode); g2 != 0) {
+            outputTopo = g2;
+        } else if (mode == spv::ExecutionModeOutputVertices && !operands.empty()) {
+            maxVertices = operands[0];
+        } else if (mode == spv::ExecutionModeInvocations && !operands.empty()) {
+            invocations = operands[0];
+        }
+    }
+    if (inputTopo == 0 || outputTopo == 0 || maxVertices == 0) return false;
+    // MVP supports only single-invocation GS (CTS constant_expressions
+    // never uses GL_ARB_gpu_shader5 invocation counts). Multi-
+    // invocation lands in a follow-up.
+    if (invocations != 1) return false;
+
+    // Walk the function body and reject on any unsupported opcode.
+    std::size_t pc = mod.funcBodyStart;
+    while (pc < mod.funcBodyEnd) {
+        const std::uint32_t inst = mod.words[pc];
+        const std::uint16_t opcode = static_cast<std::uint16_t>(inst & 0xFFFF);
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0) return false;   // malformed
+        if (!isSupportedGsOpcode(opcode)) return false;
+        pc += wc;
+    }
+
+    program.geometryEmulated = true;
+    program.gsInputTopology = inputTopo;
+    program.gsOutputTopology = outputTopo;
+    program.gsMaxVertices = maxVertices;
+    return true;
 }
 
 EmulatedDraw emulateGeometryDraw(
