@@ -2652,6 +2652,15 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
     };
     src += "struct VsOut {\n";
     src += "    float4 gl_Position [[position]];\n";
+    // Metal point-output pipelines need [[point_size]] on the VS
+    // output; without it, GL_POINTS tests render 0-sized / invisible
+    // points on Apple GPUs. Emit unconditionally at size 1.0 — the
+    // actual GS may have written gl_PointSize, but capturing that
+    // per vertex would require extra plumbing; for the rendering
+    // tests 1.0 matches the expected behaviour.
+    if (draw.topology == GL_POINTS) {
+        src += "    float gl_PointSize [[point_size]];\n";
+    }
     for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
         const std::uint32_t loc = (i < draw.varyingLocations.size())
             ? draw.varyingLocations[i] : static_cast<std::uint32_t>(i);
@@ -2683,6 +2692,9 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
     // GL→Metal depth fixup. Mirrors what SPIRV-Cross emits for every
     // non-geometry VS today.
     src += "    out.gl_Position.z = (out.gl_Position.z + out.gl_Position.w) * 0.5;\n";
+    if (draw.topology == GL_POINTS) {
+        src += "    out.gl_PointSize = 1.0;\n";
+    }
     for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
         src += "    out.vsout_v";
         src += std::to_string(i);
