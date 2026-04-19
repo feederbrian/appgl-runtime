@@ -52,6 +52,9 @@ namespace spv {
         OpFOrdEqual = 180, OpFOrdNotEqual = 182,
         OpFOrdLessThan = 184, OpFOrdGreaterThan = 186,
         OpFOrdLessThanEqual = 188, OpFOrdGreaterThanEqual = 190,
+        OpFUnordEqual = 181, OpFUnordNotEqual = 183,
+        OpFUnordLessThan = 185, OpFUnordGreaterThan = 187,
+        OpFUnordLessThanEqual = 189, OpFUnordGreaterThanEqual = 191,
         OpLogicalAnd = 167, OpLogicalOr = 166, OpLogicalNot = 168,
         OpLogicalNotEqual = 165, OpSelect = 169, OpAny = 154, OpAll = 155,
         OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247,
@@ -115,6 +118,7 @@ enum GLSLstd450 : std::uint32_t {
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <string>
@@ -685,11 +689,22 @@ public:
 
     // Run the entry-point function once, given `inputs` as gl_in[].
     // Appends emitted vertices to `emitted`. Primitive boundaries are
-    // recorded as indices into `emitted` where EndPrimitive was called
-    // (so a vertex at index `emitted.size() - 1` gets a boundary mark
-    // if EndPrimitive immediately follows).
+    // pushed into `primEnds` — each entry is `emitted.size()` after a
+    // strip ended (either via OpEndPrimitive inside the body or the
+    // implicit end on OpReturn). Callers use the boundaries to expand
+    // line_strip / triangle_strip output into independent list
+    // topologies for Metal.
     bool execute(const std::vector<PerVertexInput>& inputs,
-                 std::vector<EmulatedVertex>& emitted);
+                 std::vector<EmulatedVertex>& emitted,
+                 std::vector<std::size_t>& primEnds);
+
+    // Thin back-compat overload for code paths that don't care about
+    // strip boundaries (the VS pre-pass emits no GS primitives).
+    bool execute(const std::vector<PerVertexInput>& inputs,
+                 std::vector<EmulatedVertex>& emitted) {
+        std::vector<std::size_t> ignored;
+        return execute(inputs, emitted, ignored);
+    }
 
     // VS entry point. Runs the body once, captures gl_Position +
     // user output varyings into the supplied record. Returns false
@@ -855,22 +870,64 @@ Value Interpreter::loadFromVar(std::uint32_t varId, std::uint32_t off,
     const TypeInfo& t = tIt->second;
     if (off >= storage.size()) { bail("load: offset OOB"); return v; }
 
+    // Helper: the vector Kind in TypeInfo doesn't remember its
+    // component base type — a glslang-produced ivec2 and a vec2 both
+    // come through as Kind::Vec2 but differ in componentType. Peek
+    // at the component type to decide whether to return Float* or
+    // Int*/UInt* flavoured Values. Matters for `uniform ivec2
+    // renderingTargetSize.y == 45` (used by every rendering-section
+    // test's VS) — the int comparison must see int bits, not floats.
+    auto componentIsInt  = [&](std::uint32_t compTypeId) -> bool {
+        auto cIt = module_.types.find(compTypeId);
+        if (cIt == module_.types.end()) return false;
+        return cIt->second.kind == TypeInfo::Kind::Int;
+    };
+    auto componentIsUInt = [&](std::uint32_t compTypeId) -> bool {
+        auto cIt = module_.types.find(compTypeId);
+        if (cIt == module_.types.end()) return false;
+        return cIt->second.kind == TypeInfo::Kind::UInt;
+    };
+
     switch (t.kind) {
         case TypeInfo::Kind::Float:
             v.kind = Value::Kind::Float;
             v.f[0] = storage[off];
             break;
         case TypeInfo::Kind::Vec2:
-            v.kind = Value::Kind::Float2;
-            for (int k = 0; k < 2; ++k) v.f[k] = storage[off + k];
+            if (componentIsInt(t.componentType)) {
+                v.kind = Value::Kind::Int2;
+                for (int k = 0; k < 2; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
+            } else if (componentIsUInt(t.componentType)) {
+                v.kind = Value::Kind::UInt2;
+                for (int k = 0; k < 2; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
+            } else {
+                v.kind = Value::Kind::Float2;
+                for (int k = 0; k < 2; ++k) v.f[k] = storage[off + k];
+            }
             break;
         case TypeInfo::Kind::Vec3:
-            v.kind = Value::Kind::Float3;
-            for (int k = 0; k < 3; ++k) v.f[k] = storage[off + k];
+            if (componentIsInt(t.componentType)) {
+                v.kind = Value::Kind::Int3;
+                for (int k = 0; k < 3; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
+            } else if (componentIsUInt(t.componentType)) {
+                v.kind = Value::Kind::UInt3;
+                for (int k = 0; k < 3; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
+            } else {
+                v.kind = Value::Kind::Float3;
+                for (int k = 0; k < 3; ++k) v.f[k] = storage[off + k];
+            }
             break;
         case TypeInfo::Kind::Vec4:
-            v.kind = Value::Kind::Float4;
-            for (int k = 0; k < 4; ++k) v.f[k] = storage[off + k];
+            if (componentIsInt(t.componentType)) {
+                v.kind = Value::Kind::Int4;
+                for (int k = 0; k < 4; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
+            } else if (componentIsUInt(t.componentType)) {
+                v.kind = Value::Kind::UInt4;
+                for (int k = 0; k < 4; ++k) std::memcpy(&v.i[k], &storage[off + k], 4);
+            } else {
+                v.kind = Value::Kind::Float4;
+                for (int k = 0; k < 4; ++k) v.f[k] = storage[off + k];
+            }
             break;
         case TypeInfo::Kind::Int: {
             v.kind = Value::Kind::Int;
@@ -884,6 +941,19 @@ Value Interpreter::loadFromVar(std::uint32_t varId, std::uint32_t off,
             std::uint32_t uv = 0;
             std::memcpy(&uv, &storage[off], 4);
             v.i[0] = static_cast<std::int32_t>(uv);
+            break;
+        }
+        case TypeInfo::Kind::Bool: {
+            // SPIR-V disallows Bool in Uniform storage; glslang
+            // lowers `uniform bool` to uint32 (0/1). But Private /
+            // Function-local bool is perfectly legal, and shows up
+            // whenever a boolean expression feeds an OpStore (e.g.
+            // `bool is_top = (position.z == 0.0);`). Storage here
+            // is a single scalar; non-zero → true.
+            v.kind = Value::Kind::Bool;
+            std::int32_t iv = 0;
+            std::memcpy(&iv, &storage[off], 4);
+            v.bval = (iv != 0);
             break;
         }
         default:
@@ -1112,7 +1182,23 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                     }
                     if (varyingIdx >= 0) {
                         const std::uint32_t w = inputVaryingWidths_[varyingIdx];
-                        for (std::size_t vi = 0; vi < inputs.size() && vi < inputs[vi].varyings.size(); ++vi) {
+                        // Bug: the original loop bounded vi by
+                        // inputs[vi].varyings.size() — a typo that
+                        // reduced the loop to "vi < 1" whenever each
+                        // vertex carries a single varying, populating
+                        // only vertex 0's slot and leaving vertices
+                        // 1..N-1 zero. With `lines`-input GS reading
+                        // vs_gs_color[0] + vs_gs_color[1], that made
+                        // end_col stay zero and turned every
+                        // interpolation test's pixel into 6/7 * start
+                        // (or zero when lines rasterisation missed the
+                        // sample). Bound is the vertex count; we
+                        // separately guard each vertex against a
+                        // missing varying-slot.
+                        for (std::size_t vi = 0; vi < inputs.size(); ++vi) {
+                            if (static_cast<std::size_t>(varyingIdx) >= inputs[vi].varyings.size()) {
+                                continue;
+                            }
                             const auto& src = inputs[vi].varyings[varyingIdx];
                             const std::uint32_t base = static_cast<std::uint32_t>(vi) * w;
                             for (std::uint32_t k = 0; k < w && base + k < storage.size(); ++k) {
@@ -1358,11 +1444,16 @@ bool Interpreter::executeVs(EmulatedVertex& out) {
 }
 
 bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
-                          std::vector<EmulatedVertex>& emitted) {
+                          std::vector<EmulatedVertex>& emitted,
+                          std::vector<std::size_t>& primEnds) {
     if (!module_.haveFuncBody) {
         diagnostic_ = "SPIR-V module has no function body";
         return false;
     }
+    // Snapshot starting emit index — on implicit EndPrimitive at
+    // OpReturn we emit a final boundary iff any vertices appeared
+    // since the last explicit EndPrimitive.
+    const std::size_t primEndsStart = emitted.size();
     // VS's `executeVs` already called initVariables+currentOutVaryings
     // setup before forwarding here — skip them in that case. The dummy
     // emitted buffer won't receive any vertices for VS (no OpEmitVertex
@@ -1837,7 +1928,19 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpFOrdEqual: case spv::OpFOrdNotEqual:
             case spv::OpFOrdLessThan: case spv::OpFOrdGreaterThan:
-            case spv::OpFOrdLessThanEqual: case spv::OpFOrdGreaterThanEqual: {
+            case spv::OpFOrdLessThanEqual: case spv::OpFOrdGreaterThanEqual:
+            // OpFUnord* are the "unordered" variants — they return
+            // true when either operand is NaN, whereas OpFOrd*
+            // returns false in that case. glslang emits OpFUnord*
+            // for GLSL `!=` / `<` / `>` / `<=` / `>=` by default
+            // (scalar comparisons between floats); the ordered
+            // forms come from GLSL.std.450 builtins or explicit
+            // isnan handling. We don't distinguish NaN semantics
+            // in the interpreter — all our tests use finite
+            // values — so both variants share the same impl.
+            case spv::OpFUnordEqual: case spv::OpFUnordNotEqual:
+            case spv::OpFUnordLessThan: case spv::OpFUnordGreaterThan:
+            case spv::OpFUnordLessThanEqual: case spv::OpFUnordGreaterThanEqual: {
                 Value a, b;
                 if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("flt-cmp: unknown operand"); break; }
                 Value r;
@@ -1845,12 +1948,18 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 bool b0 = false;
                 const float af = a.f[0], bf = b.f[0];
                 switch (opcode) {
-                    case spv::OpFOrdEqual:            b0 = (af == bf); break;
-                    case spv::OpFOrdNotEqual:         b0 = (af != bf); break;
-                    case spv::OpFOrdLessThan:         b0 = (af <  bf); break;
-                    case spv::OpFOrdGreaterThan:      b0 = (af >  bf); break;
-                    case spv::OpFOrdLessThanEqual:    b0 = (af <= bf); break;
-                    case spv::OpFOrdGreaterThanEqual: b0 = (af >= bf); break;
+                    case spv::OpFOrdEqual:
+                    case spv::OpFUnordEqual:            b0 = (af == bf); break;
+                    case spv::OpFOrdNotEqual:
+                    case spv::OpFUnordNotEqual:         b0 = (af != bf); break;
+                    case spv::OpFOrdLessThan:
+                    case spv::OpFUnordLessThan:         b0 = (af <  bf); break;
+                    case spv::OpFOrdGreaterThan:
+                    case spv::OpFUnordGreaterThan:      b0 = (af >  bf); break;
+                    case spv::OpFOrdLessThanEqual:
+                    case spv::OpFUnordLessThanEqual:    b0 = (af <= bf); break;
+                    case spv::OpFOrdGreaterThanEqual:
+                    case spv::OpFUnordGreaterThanEqual: b0 = (af >= bf); break;
                 }
                 r.bval = b0;
                 valueStore_[w[1]] = r;
@@ -1977,16 +2086,30 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 emitVertex(emitted);
                 pc += wc;
                 break;
-            case spv::OpEndPrimitive:
-                // Mark primitive boundary on the most recently emitted
-                // vertex. Stored as a sentinel in EmulatedVertex.varyings
-                // is not ideal — revisit when we handle multi-primitive
-                // outputs; for the MVP (1 vertex out, points) the count
-                // is always 1 and boundary info is implicit.
+            case spv::OpEndPrimitive: {
+                // Push the current emitted count as a primitive end —
+                // callers iterate primEnds pair-wise (prev_end ..
+                // next_end) to slice each emitted strip into a
+                // standalone primitive.
+                const std::size_t sz = emitted.size();
+                if (primEnds.empty() || primEnds.back() != sz) {
+                    primEnds.push_back(sz);
+                }
                 pc += wc;
                 break;
-            case spv::OpReturn:
+            }
+            case spv::OpReturn: {
+                // Implicit EndPrimitive at function exit — GL 4.6 §11.3.4
+                // says the current strip (if any) ends when the shader
+                // returns. Record the boundary iff any vertex was
+                // emitted since the last one.
+                const std::size_t sz = emitted.size();
+                const std::size_t prev = primEnds.empty() ? primEndsStart : primEnds.back();
+                if (sz > prev) {
+                    primEnds.push_back(sz);
+                }
                 return true;
+            }
             case spv::OpFunction:
             case spv::OpFunctionEnd:
                 pc += wc;
@@ -2070,6 +2193,12 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpFOrdGreaterThan:
         case spv::OpFOrdLessThanEqual:
         case spv::OpFOrdGreaterThanEqual:
+        case spv::OpFUnordEqual:
+        case spv::OpFUnordNotEqual:
+        case spv::OpFUnordLessThan:
+        case spv::OpFUnordGreaterThan:
+        case spv::OpFUnordLessThanEqual:
+        case spv::OpFUnordGreaterThanEqual:
         // ─ Logical / selection ─
         case spv::OpLogicalNot:
         case spv::OpLogicalAnd:
@@ -2616,6 +2745,14 @@ EmulatedDraw emulateGeometryDraw(
     std::vector<EmulatedVertex> emittedAll;
     emittedAll.reserve(static_cast<std::size_t>(primCount) *
                        program.gsMaxVertices * std::max<GLsizei>(1, instanceCount));
+    // Primitive boundaries in `emittedAll` — each entry is `emittedAll
+    // .size()` right after a strip ended. Boundaries within a GS
+    // invocation come from OpEndPrimitive; the implicit boundary at
+    // function return is also pushed. Used below to expand line_strip
+    // / triangle_strip output into line_list / triangle_list so Metal
+    // doesn't draw spurious connections between independent strips or
+    // between per-primitive GS invocations.
+    std::vector<std::size_t> primEndsAll;
 
     const GLsizei effectiveInstances = std::max<GLsizei>(1, instanceCount);
     for (GLsizei instanceIdx = 0; instanceIdx < effectiveInstances; ++instanceIdx) {
@@ -2682,11 +2819,28 @@ EmulatedDraw emulateGeometryDraw(
             interp.setUniforms(&uniforms);
             interp.setGsPrimitiveId(static_cast<std::int32_t>(p));
             std::vector<EmulatedVertex> emitted;
-            if (!interp.execute(inputs, emitted)) {
+            std::vector<std::size_t> primEnds;
+            if (!interp.execute(inputs, emitted, primEnds)) {
                 d.ok = false;
                 d.diagnostic = "interpreter failed on primitive " + std::to_string(p)
                              + ": " + interp.diagnostic();
                 return d;
+            }
+            // Shift the per-invocation primEnds by the current
+            // emittedAll size so they remain valid indices into the
+            // global buffer after insert.
+            const std::size_t baseIdx = emittedAll.size();
+            for (std::size_t endIdx : primEnds) {
+                primEndsAll.push_back(baseIdx + endIdx);
+            }
+            // Defensive: ensure a boundary exists at the end of this
+            // invocation — an empty GS body that emitted nothing will
+            // not have pushed anything, and (if the next invocation
+            // adds vertices) we'd otherwise glue them onto the tail
+            // of the previous invocation's last strip.
+            if (!emitted.empty() &&
+                (primEndsAll.empty() || primEndsAll.back() != baseIdx + emitted.size())) {
+                primEndsAll.push_back(baseIdx + emitted.size());
             }
             emittedAll.insert(emittedAll.end(),
                 std::make_move_iterator(emitted.begin()),
@@ -2700,6 +2854,82 @@ EmulatedDraw emulateGeometryDraw(
         return d;
     }
 
+    // Strip → list expansion. `layout(line_strip)` + `layout(triangle
+    // _strip)` GS outputs imply connectivity within each strip —
+    // per-primitive in the GS (separated by OpEndPrimitive) and
+    // per-invocation (implicit at function return). Metal has no
+    // cross-primitive primitive-restart semantics for a non-indexed
+    // draw; rendering N concatenated strips as a single MTL strip
+    // would stitch spurious line segments between them. Convert the
+    // strip to an explicit list topology (GL_LINES / GL_TRIANGLES):
+    //  - line_strip of N vertices → N-1 segments × 2 vertices each
+    //  - triangle_strip of N vertices → N-2 triangles; winding
+    //    alternates per GL 4.6 §10.1.13 / §13.6 (odd-indexed
+    //    triangles have a flipped order to keep consistent
+    //    winding after strip decomposition).
+    GLenum expandedTopo = program.gsOutputTopology;
+    std::vector<EmulatedVertex> expanded;
+    if (program.gsOutputTopology == GL_LINE_STRIP ||
+        program.gsOutputTopology == GL_TRIANGLE_STRIP) {
+        // Ensure primEndsAll has at least the final boundary — some
+        // GS shaders may have omitted an explicit EndPrimitive at
+        // the end of the last invocation and the implicit OpReturn
+        // path above should have covered it, but defend against
+        // future changes.
+        if (primEndsAll.empty() || primEndsAll.back() != emittedAll.size()) {
+            primEndsAll.push_back(emittedAll.size());
+        }
+
+        expanded.reserve(emittedAll.size() * 2);   // worst-case for triangle_strip
+        std::size_t prev = 0;
+        if (program.gsOutputTopology == GL_LINE_STRIP) {
+            for (std::size_t endIdx : primEndsAll) {
+                if (endIdx <= prev) continue;
+                // Each strip of N verts → (N-1) line segments.
+                for (std::size_t i = prev; i + 1 < endIdx; ++i) {
+                    expanded.push_back(emittedAll[i]);
+                    expanded.push_back(emittedAll[i + 1]);
+                }
+                prev = endIdx;
+            }
+            expandedTopo = GL_LINES;
+        } else {
+            for (std::size_t endIdx : primEndsAll) {
+                if (endIdx <= prev) continue;
+                // Each strip of N verts → (N-2) triangles with
+                // alternating winding.
+                for (std::size_t i = prev; i + 2 < endIdx; ++i) {
+                    const std::size_t offset = i - prev;
+                    // Odd offset flips winding — this preserves the
+                    // GL-spec front-facing order of every triangle
+                    // once decomposed into a list.
+                    if ((offset & 1u) == 0u) {
+                        expanded.push_back(emittedAll[i]);
+                        expanded.push_back(emittedAll[i + 1]);
+                        expanded.push_back(emittedAll[i + 2]);
+                    } else {
+                        expanded.push_back(emittedAll[i + 1]);
+                        expanded.push_back(emittedAll[i]);
+                        expanded.push_back(emittedAll[i + 2]);
+                    }
+                }
+                prev = endIdx;
+            }
+            expandedTopo = GL_TRIANGLES;
+        }
+        emittedAll = std::move(expanded);
+    }
+
+    if (emittedAll.empty()) {
+        // A single-vertex or two-vertex strip decomposes to zero
+        // segments — rare but possible with a malformed GS. Report
+        // cleanly so the caller falls back to the no-GS path.
+        d.ok = false;
+        d.diagnostic = "GS strip decomposition produced zero primitives";
+        return d;
+    }
+
+
     // Pack into the flat payload [pos0..3, varying0..N-1] per vertex.
     const std::size_t totalVaryingWidth = [&]() {
         std::size_t s = 0;
@@ -2708,7 +2938,7 @@ EmulatedDraw emulateGeometryDraw(
     }();
     const std::size_t fpv = 4 + totalVaryingWidth;
 
-    d.topology          = program.gsOutputTopology;
+    d.topology          = expandedTopo;
     d.vertexCount       = emittedAll.size();
     d.floatsPerVertex   = fpv;
     d.varyingWidths     = outWidths;
