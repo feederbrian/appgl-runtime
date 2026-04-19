@@ -53,6 +53,7 @@ set(APPGL_SOURCES
   src/loader/DispatchInstall.cpp
   src/objects/GLObjectStore.cpp
   src/shader/CompatShaderRewrite.cpp
+  src/shader/GeometryShaderEmulator.cpp
   src/shader/GLSLReflection.cpp
   src/shader/PipelineCache.cpp
   src/shader/ShaderTranslator.cpp
