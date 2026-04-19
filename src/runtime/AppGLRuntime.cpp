@@ -5407,6 +5407,20 @@ bool isDrawModeCompatibleWithXfb(GLenum drawMode, GLenum xfbMode) {
     }
 }
 
+// GL 4.6 §13.3: When a GS is active, the XFB primitive mode must match
+// the GS's output primitive type, not the draw mode. Returns true when
+// the XFB mode is compatible with the GS output, false otherwise.
+// GS output topologies are GL_POINTS / GL_LINE_STRIP / GL_TRIANGLE_STRIP;
+// the XFB enum for line/triangle strips is GL_LINES / GL_TRIANGLES.
+bool isXfbModeCompatibleWithGsOutput(GLenum xfbMode, GLenum gsOutputTopology) {
+    switch (gsOutputTopology) {
+        case GL_POINTS:         return xfbMode == GL_POINTS;
+        case GL_LINE_STRIP:     return xfbMode == GL_LINES;
+        case GL_TRIANGLE_STRIP: return xfbMode == GL_TRIANGLES;
+        default:                return true;
+    }
+}
+
 }  // namespace
 
 void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {
@@ -5422,12 +5436,27 @@ void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {
         recordValidationError(context, "glDrawArrays", GL_INVALID_VALUE, "first and count must be non-negative");
         return;
     }
-    // GL 4.6 §13.3: draw mode must match XFB primitive mode when active and not paused.
-    if (context->isTransformFeedbackActive() && !context->isTransformFeedbackPaused() &&
-        !isDrawModeCompatibleWithXfb(mode, context->transformFeedbackPrimitiveMode())) {
-        recordValidationError(context, "glDrawArrays", GL_INVALID_OPERATION,
-                              "draw mode incompatible with transform feedback primitive mode");
-        return;
+    // GL 4.6 §13.3: draw mode must match XFB primitive mode when
+    // active and not paused — EXCEPT when a geometry shader is in
+    // the pipeline, in which case the XFB mode is matched against
+    // the GS's OUTPUT primitive type (the draw mode is whatever
+    // feeds the GS's input, which can differ). CTS primitive_counter
+    // tests rely on this exception (points_to_line_strip draws with
+    // GL_POINTS and captures with GL_LINES).
+    if (context->isTransformFeedbackActive() && !context->isTransformFeedbackPaused()) {
+        const GLuint progName = context->state().currentProgram();
+        const GLProgramObject* prog = (progName != 0)
+            ? context->objects().programs().get(progName) : nullptr;
+        const bool compatible = (prog && prog->gsPresent)
+            ? isXfbModeCompatibleWithGsOutput(
+                  context->transformFeedbackPrimitiveMode(), prog->gsOutputTopology)
+            : isDrawModeCompatibleWithXfb(
+                  mode, context->transformFeedbackPrimitiveMode());
+        if (!compatible) {
+            recordValidationError(context, "glDrawArrays", GL_INVALID_OPERATION,
+                                  "draw mode incompatible with transform feedback primitive mode");
+            return;
+        }
     }
     context->drawArrays(mode, first, count);
     markDrawFunction(
