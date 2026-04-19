@@ -2079,9 +2079,11 @@ GLenum outputModeToGL(std::uint32_t mode) {
 
 bool detectGeometryEmulatable(GLProgramObject& program) {
     program.geometryEmulated = false;
+    program.gsPresent = false;
     program.gsInputTopology = 0;
     program.gsOutputTopology = 0;
     program.gsMaxVertices = 0;
+    program.gsInvocations = 1;
 
     if (program.geometrySpirv.empty()) return false;
 
@@ -2116,6 +2118,17 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
             invocations = operands[0];
         }
     }
+
+    // Metadata population. Happens even if the body is outside the
+    // emulator's opcode subset — `glGetProgramiv(GL_GEOMETRY_*)` has
+    // to answer correctly for every GS-containing program, not just
+    // the ones we can run.
+    program.gsPresent = true;
+    if (haveInputTopo)  program.gsInputTopology = inputTopo;
+    if (haveOutputTopo) program.gsOutputTopology = outputTopo;
+    program.gsMaxVertices = maxVertices;
+    program.gsInvocations = invocations;
+
     if (!haveInputTopo || !haveOutputTopo || maxVertices == 0) return false;
     // MVP supports only single-invocation GS (CTS constant_expressions
     // never uses GL_ARB_gpu_shader5 invocation counts). Multi-
@@ -2144,9 +2157,6 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     }
 
     program.geometryEmulated = true;
-    program.gsInputTopology = inputTopo;
-    program.gsOutputTopology = outputTopo;
-    program.gsMaxVertices = maxVertices;
     return true;
 }
 

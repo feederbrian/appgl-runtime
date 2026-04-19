@@ -1486,6 +1486,15 @@ GLuint GLStateTracker::currentProgram() const {
     return currentProgram_;
 }
 
+void GLStateTracker::setCurrentProgramPipeline(GLuint pipeline) {
+    currentProgramPipeline_ = pipeline;
+    markDirty(DirtyBit::Program);
+}
+
+GLuint GLStateTracker::currentProgramPipeline() const {
+    return currentProgramPipeline_;
+}
+
 void GLStateTracker::markDirty(DirtyBit bit) {
     dirtyMask_ |= static_cast<std::uint32_t>(bit);
 }

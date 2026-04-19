@@ -94,7 +94,12 @@ struct EmulatedDraw {
 // Detect whether a program's GS stage can be emulated. Called once
 // at link time. The decision is stored on the GLProgramObject
 // (`program.geometryEmulation.*`) so drawArrays can branch without
-// re-parsing the SPIR-V.
+// re-parsing the SPIR-V. Also populates the program's GS metadata
+// fields (`gsPresent`, `gsInputTopology`, `gsOutputTopology`,
+// `gsMaxVertices`, `gsInvocations`) whenever the SPIR-V parses,
+// regardless of whether the emulator can handle the body — those
+// fields back the `glGetProgramiv(GL_GEOMETRY_*)` queries, which
+// have to answer correctly even for programs we can't emulate.
 bool detectGeometryEmulatable(GLProgramObject& program);
 
 // Emulate a single drawArrays/drawElements call for a program that

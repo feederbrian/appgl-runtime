@@ -253,6 +253,14 @@ public:
     GLenum readBuffer() const;
     void useProgram(GLuint program);
     GLuint currentProgram() const;
+    // GL 4.1 separable program pipelines (glBindProgramPipeline).
+    // Stored here rather than in glBindProgramPipeline's entry-point
+    // impl so drawArrays / drawElements can consult it when
+    // `currentProgram() == 0` (a program pipeline supplies the
+    // program stages instead of a single linked program). Returns
+    // 0 when no pipeline is bound.
+    void setCurrentProgramPipeline(GLuint pipeline);
+    GLuint currentProgramPipeline() const;
 
     // GL 4.5 ClipControl state.
     void setClipOrigin(GLenum origin);
@@ -304,6 +312,7 @@ private:
     std::array<GLenum, kMaxDrawBuffers> drawBuffers_;
     GLenum readBuffer_ = GL_BACK;
     GLuint currentProgram_ = 0;
+    GLuint currentProgramPipeline_ = 0;
     GLuint currentVertexArray_ = 0;
     GLuint drawFramebuffer_ = 0;
     GLuint readFramebuffer_ = 0;

@@ -6126,7 +6126,12 @@ void APIENTRY glBindProgramPipeline(GLuint pipeline) {
         recordValidationError(ctx, "glBindProgramPipeline", GL_INVALID_OPERATION, "pipeline does not exist");
         return;
     }
-    // State-tracked binding (no Metal effect — separable programs not wired to Metal pipeline yet).
+    // State-tracked binding (no Metal effect yet — separable programs
+    // still aren't wired to Metal pipeline-state), but the state-
+    // tracker record lets drawArrays / drawElements see which pipeline
+    // is current so they can look up pipeline stages and reject draws
+    // with no VS (CTS geometry_shader.api.fs_gs_draw_call etc.).
+    ctx->state().setCurrentProgramPipeline(pipeline);
     markProgramFunction(FunctionId::glBindProgramPipeline, "Program pipeline binding (state-tracked).");
     Runtime::shared().recordBootstrapTrace("glBindProgramPipeline(pipeline=" + std::to_string(pipeline) + ")");
 }

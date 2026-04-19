@@ -11719,9 +11719,11 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->geometryEmulated = false;
     programObject->geometrySpirv.clear();
     programObject->vertexSpirv.clear();
+    programObject->gsPresent = false;
     programObject->gsInputTopology = 0;
     programObject->gsOutputTopology = 0;
     programObject->gsMaxVertices = 0;
+    programObject->gsInvocations = 1;
 
     ShaderTranslator translator;
     BindingMap bindings;
@@ -12206,6 +12208,14 @@ bool GLContext::linkProgram(GLuint program) {
             ShaderReflection gsRefl;
             (void)translateCachedStage("geometry", geometryShader,
                                        unusedGsMSL, gsRefl);
+            // Populate GS metadata so glGetProgramiv(GL_GEOMETRY_*)
+            // queries answer correctly on separable programs.
+            // detectGeometryEmulatable handles the parse + mode walk
+            // even when the body is outside the emulator's subset.
+            if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+                programObject->geometrySpirv = geometryShader->spirv;
+                (void)appgl::detectGeometryEmulatable(*programObject);
+            }
             rasterTranslationOk = true;
             break;
         }
@@ -12725,15 +12735,40 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = static_cast<GLint>(maxLen);
             return true;
         }
-        // Geometry shader queries (GL 3.2+)
+        // Geometry shader queries (GL 3.2+). GL 4.6 §7.13 "Program
+        // Queries": GL_GEOMETRY_* pnames generate GL_INVALID_OPERATION
+        // when the program has not been successfully linked with a
+        // geometry shader stage. `gsPresent` is populated at link
+        // time by `detectGeometryEmulatable` — it's true whenever the
+        // linked program contains a GS, independent of whether the
+        // CPU emulator can handle the shader body.
         case GL_GEOMETRY_VERTICES_OUT:
-            *params = 0;
+            if (!object->linked || !object->gsPresent) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            *params = static_cast<GLint>(object->gsMaxVertices);
             return true;
         case GL_GEOMETRY_INPUT_TYPE:
-            *params = GL_TRIANGLES;
+            if (!object->linked || !object->gsPresent) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            *params = static_cast<GLint>(object->gsInputTopology);
             return true;
         case GL_GEOMETRY_OUTPUT_TYPE:
-            *params = GL_TRIANGLE_STRIP;
+            if (!object->linked || !object->gsPresent) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            *params = static_cast<GLint>(object->gsOutputTopology);
+            return true;
+        case GL_GEOMETRY_SHADER_INVOCATIONS:
+            if (!object->linked || !object->gsPresent) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            *params = static_cast<GLint>(object->gsInvocations);
             return true;
         // Program binary / separable (GL 4.1+)
         case GL_PROGRAM_BINARY_LENGTH:
@@ -13956,6 +13991,34 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStor
 
 }  // namespace
 
+namespace {
+// GL 4.6 §11.3.1: when the program has a geometry shader, the draw
+// call's primitive mode must match the GS's input primitive type.
+// Returns false + GL_INVALID_OPERATION pushed by the caller when the
+// mode is incompatible. Programs without a GS always return true
+// (mode validation for those lives in the standard draw-mode check).
+bool isDrawModeCompatibleWithGs(GLenum drawMode, GLenum gsInputTopo) {
+    switch (gsInputTopo) {
+        case GL_POINTS:
+            return drawMode == GL_POINTS;
+        case GL_LINES:
+            return drawMode == GL_LINES || drawMode == GL_LINE_STRIP ||
+                   drawMode == GL_LINE_LOOP;
+        case GL_LINES_ADJACENCY:
+            return drawMode == GL_LINES_ADJACENCY ||
+                   drawMode == GL_LINE_STRIP_ADJACENCY;
+        case GL_TRIANGLES:
+            return drawMode == GL_TRIANGLES || drawMode == GL_TRIANGLE_STRIP ||
+                   drawMode == GL_TRIANGLE_FAN;
+        case GL_TRIANGLES_ADJACENCY:
+            return drawMode == GL_TRIANGLES_ADJACENCY ||
+                   drawMode == GL_TRIANGLE_STRIP_ADJACENCY;
+        default:
+            return true;   // unknown GS topology: don't reject
+    }
+}
+}  // namespace
+
 bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
@@ -13967,6 +14030,50 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     if (!impl_->state->validateForDraw()) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+
+    // GL 4.6 §11.3.1 — GS input topology / draw mode compatibility.
+    // When the linked program has a GS, rejecting mismatched draw
+    // modes with GL_INVALID_OPERATION is required by the CTS
+    // `geometry_shader.api.incompatible_draw_call_mode` test.
+    {
+        const GLuint progName = impl_->state->currentProgram();
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        const GLProgramObject* p = nullptr;
+        if (progName != 0) {
+            p = impl_->objects->programs().get(progName);
+        }
+        if (p != nullptr && p->gsPresent &&
+            !isDrawModeCompatibleWithGs(mode, p->gsInputTopology)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // GL 4.6 §7.3 & §11 — when no program is currently in use,
+        // drawing requires a program pipeline whose vertex stage is
+        // non-zero and linked. CTS
+        // geometry_shader.api.{fs_gs_draw_call,
+        // pipeline_program_without_active_vs} exercises this.
+        if (progName == 0) {
+            const GLProgramPipelineObject* ppo = (pipelineName != 0)
+                ? impl_->objects->programPipelines().get(pipelineName)
+                : nullptr;
+            const GLuint vsProg = ppo ? ppo->vertexProgram : 0;
+            if (vsProg == 0) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            // Check GS stage topology compatibility too — a pipeline
+            // with a GS program follows the same §11.3.1 rule.
+            const GLuint gsProg = ppo ? ppo->geometryProgram : 0;
+            if (gsProg != 0) {
+                const GLProgramObject* gsP = impl_->objects->programs().get(gsProg);
+                if (gsP != nullptr && gsP->gsPresent &&
+                    !isDrawModeCompatibleWithGs(mode, gsP->gsInputTopology)) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+            }
+        }
     }
 
     if (impl_->frameGraph == nullptr) {

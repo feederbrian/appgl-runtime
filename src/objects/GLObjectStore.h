@@ -455,9 +455,16 @@ struct GLProgramObject {
     // GS input / output topology from the SPIR-V execution modes —
     // OutputPoints / OutputLineStrip / OutputTriangleStrip, and
     // InputPoints / InputLines / InputTrianglesAdjacency etc.
+    // GS metadata, populated at link time (independent of whether
+    // the CPU emulator can handle the shader). Used by
+    // glGetProgramiv(GL_GEOMETRY_*) queries and other GS-aware APIs.
+    // `gsPresent` is set iff the linked program contains a GS stage;
+    // queries against non-GS programs return GL_INVALID_OPERATION.
+    bool gsPresent = false;
     GLenum gsInputTopology = 0;
     GLenum gsOutputTopology = 0;
     std::uint32_t gsMaxVertices = 0;
+    std::uint32_t gsInvocations = 1;
 
     // Cached synthesised pass-through VS for the GS-emulation draw
     // path. Built lazily on the first emulated draw (the layout is
