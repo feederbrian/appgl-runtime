@@ -988,23 +988,20 @@ struct MetalFrameGraph::Impl {
             desc.colorAttachments[0].pixelFormat = colorFormat;
             desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
-            // Set input primitive topology class. Metal requires this to
-            // match the primitive topology for point rendering to emit
-            // [[point_size]] correctly; leaving it at Unspecified
-            // silently breaks point rasterisation on some Apple GPU
-            // generations even when the VS writes [[point_size]].
-            switch (info.mode) {
-                case GL_POINTS:
-                    desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
-                    break;
-                case GL_LINES:
-                case GL_LINE_STRIP:
-                case GL_LINE_LOOP:
-                    desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassLine;
-                    break;
-                default:
-                    desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
-                    break;
+            // Set inputPrimitiveTopology = Point for GL_POINTS ONLY.
+            // Metal uses this flag to enable point-size rasterisation
+            // (default point_size = 1.0 if the VS doesn't write it,
+            // which our shaders typically don't). Leaving it at the
+            // Unspecified default for Triangle / Line draws matters:
+            // Metal rejects pipelines that write [[point_size]] with
+            // an explicit Triangle or Line topology class, and some
+            // GLSL shaders (including ones SPIRV-Cross auto-enhances)
+            // carry a gl_PointSize write even when the draw is
+            // triangles. Prior iteration set Triangle unconditionally
+            // and broke ~4k triangle-rendering tests on that
+            // combination (see 15a368e for the post-mortem).
+            if (info.mode == GL_POINTS) {
+                desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
             }
             // GL_RASTERIZER_DISCARD → Metal rasterization disabled.
             // The VS still runs (and can write SSBOs / transform feedback)
