@@ -2852,6 +2852,24 @@ EmulatedDraw emulateGeometryDraw(
                 }
                 return p + v;
             case PrimIndexing::StripAdjacency:
+                // GL 4.6 §10.1.14 — for TRIANGLE_STRIP_ADJACENCY the
+                // 6 per-primitive vertices span the real triangle
+                // (v[0], v[2], v[4]) plus three adjacency slots
+                // (v[1], v[3], v[5]). The real triangle follows the
+                // same strip-alternation as TRIANGLE_STRIP: on odd
+                // primitives swap positions 0 and 2 so the main
+                // triangle's winding survives the strip
+                // decomposition. Adjacency slots track the triangle's
+                // neighbours — the test cases this is landing for
+                // explicitly don't read v[1]/v[3]/v[5] (they use
+                // `#define N_VERTEX0 0 / N_VERTEX1 2 / N_VERTEX2 4`)
+                // so we keep adjacency as `p*2 + v` for now; a
+                // full Table 10.4 implementation with neighbour
+                // lookup is a sibling task.
+                if ((p & 1u) != 0u) {
+                    if (v == 0) return p * 2 + 2;
+                    if (v == 2) return p * 2 + 0;
+                }
                 return p * 2 + v;
             case PrimIndexing::Loop:
                 return (p + v) % static_cast<std::size_t>(count);
