@@ -435,3 +435,50 @@ rebuild catches the drift at compile time.
   records either a `-geometry-cpu-emulation` or the legacy
   `-geometry-emulation` gap trace depending on the outcome.
   No draw-time effect yet — step 3 lands drawArrays routing.
+- **2026-04-19** — **Step 3** (drawArrays hook, commit `b0ee5ef`):
+  `drawArrays` gains a pre-branch that, when
+  `program->geometryEmulated` is true, calls
+  `emulateGeometryDraw` and logs the outcome. The call still
+  falls through to the legacy path because the expanded-vertex
+  draw encoder lands in step 4b.
+- **2026-04-19** — **Step 4a** (emulateGeometryDraw real,
+  commit `f31c66f`): re-parses `program.geometrySpirv` at draw
+  time, gathers user output varyings sorted by Location, runs
+  the interpreter once per input primitive with zeroed per-
+  vertex inputs (the `constant_expressions` cluster doesn't
+  read `gl_in[]`), and packs the emitted vertices into a flat
+  `[pos0..3, varying0..N-1]` payload. `EmulatedDraw` now
+  carries `ok = true`, `expandedVertexData`, `vertexCount`,
+  `topology`, and parallel `varyingNames` / `varyingWidths` /
+  `varyingLocations`. No rendering yet — step 4b consumes this.
+- **2026-04-19** — **Step 4b** (synthesised pass-through VS +
+  Metal encode, commit `f850b5c`): closes the draw path.
+  `synthesisePassThroughVertexMSL` builds a minimal MSL VS
+  whose `[[stage_in]]` reads the expanded buffer (one
+  `[[attribute(N)]]` per packed element) and whose output
+  emits `[[position]]` + `[[user(locn<L>)]]` with the
+  original GS `Location` decorations — so the FS's already-
+  translated MSL (same `[[user(locn<L>)]]` on its inputs) links
+  with the synthesised VS automatically. `drawArrays` populates
+  a `TranslatedDrawInfo` with the synthesised VS + the
+  program's unchanged fragment stage + the expanded buffer +
+  a parallel pipeline-state cache and calls
+  `encodeTranslatedDraw`. Encode failure falls back to the
+  legacy no-GS path.
+- **2026-04-19** — **Step 5** (MVP acceptance gate): with
+  steps 1–4b landed, the CPU GS emulator is feature-complete
+  for the `constant_expressions.*_geometry` subset. Acceptance
+  confirmation happens in the external CTS sweep runner
+  (outside this repo). Trace signals to grep for:
+    - `[GL] drawArrays GS-emul ok: verts=…` — emulator ran and
+      Metal encode succeeded (expected pass).
+    - `[GL] drawArrays GS-emul encode failed: …` — emulator
+      produced a buffer but Metal rejected the pipeline (MSL
+      bug, FS linkage mismatch, etc.).
+    - `[GL] drawArrays GS-emul: …` — interpreter bailed; the
+      diagnostic names the opcode / reason.
+  The link-time gap record remains in Runtime::recordShader-
+  Translation for programs the emulator can't handle, so BAR /
+  shader-diagnostic tooling can still distinguish "program
+  has a GS the emulator rejects" from "program runs on the
+  emulator".
