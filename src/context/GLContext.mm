@@ -283,6 +283,15 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         case GL_RGB8:
         case GL_RGBA8:
             return MTLPixelFormatRGBA8Unorm;
+        // Generic "compressed" internal formats — resolve to the
+        // uncompressed base type on Metal. GL 4.6 §8.5.3 allows the
+        // driver to choose compression or keep the texture uncompressed.
+        case GL_COMPRESSED_RED:          return MTLPixelFormatR8Unorm;
+        case GL_COMPRESSED_RG:           return MTLPixelFormatRG8Unorm;
+        case GL_COMPRESSED_RGB:          return MTLPixelFormatRGBA8Unorm;
+        case GL_COMPRESSED_RGBA:         return MTLPixelFormatRGBA8Unorm;
+        case GL_COMPRESSED_SRGB:         return MTLPixelFormatRGBA8Unorm_sRGB;
+        case GL_COMPRESSED_SRGB_ALPHA:   return MTLPixelFormatRGBA8Unorm_sRGB;
         case GL_DEPTH_COMPONENT:
         case GL_DEPTH_COMPONENT16:
         case GL_DEPTH_COMPONENT24:
@@ -482,6 +491,22 @@ bool isSupportedInternalTextureFormat(const GLCapabilities& caps, GLenum interna
         case GL_RG:
         case GL_RGB:
         case GL_RGBA:
+            return true;
+        // Generic "please compress this however you like" formats: GL 4.6
+        // §8.5.3 permits the driver to choose any compression scheme *or
+        // to keep the texture uncompressed*. On Metal we accept the data
+        // as if the internal format were the uncompressed base (RED→R8,
+        // RG→RG8, RGB→RGBA8, RGBA→RGBA8, SRGB→sRGB). The texture ends up
+        // in whatever native Metal format `metalRenderbufferFormat` maps
+        // these to; the CTS packed_pixels.compressed_* subsuite only
+        // verifies that the upload/readback round-trips, not that the
+        // texture actually goes through a compression codec.
+        case GL_COMPRESSED_RED:
+        case GL_COMPRESSED_RG:
+        case GL_COMPRESSED_RGB:
+        case GL_COMPRESSED_RGBA:
+        case GL_COMPRESSED_SRGB:
+        case GL_COMPRESSED_SRGB_ALPHA:
             return true;
         default:
             break;

@@ -795,6 +795,16 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
         case GL_LUMINANCE8_ALPHA8:
         case GL_INTENSITY:
         case GL_INTENSITY8:
+        // Generic "compressed" internal formats — GL 4.6 §8.5.3 allows
+        // the driver to keep uncompressed, so treat them as aliases to
+        // the uncompressed base format. `metalRenderbufferFormat` maps
+        // each to the corresponding Metal uncompressed pixel format.
+        case GL_COMPRESSED_RED:
+        case GL_COMPRESSED_RG:
+        case GL_COMPRESSED_RGB:
+        case GL_COMPRESSED_RGBA:
+        case GL_COMPRESSED_SRGB:
+        case GL_COMPRESSED_SRGB_ALPHA:
             return true;
         default:
             return false;
