@@ -120,6 +120,7 @@ enum GLSLstd450 : std::uint32_t {
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <unordered_set>
 #include <iterator>
 #include <string>
 #include <unordered_map>
@@ -2313,6 +2314,140 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     // invocation lands in a follow-up.
     if (invocations != 1) return false;
     (void)trace;   // still used in the body walker below
+
+    // Reject emulation when the VS writes gl_ClipDistance /
+    // gl_CullDistance and the GS doesn't re-declare / re-emit them.
+    // A passthrough GS in CTS is intentionally transparent — at
+    // link time we can't yet match the VS's per-vertex clip/cull
+    // outputs onto the synthesised pass-through VS, so the emulated
+    // pipeline silently loses those builtins and draws the full
+    // quad unclipped. The s19 (no-emulator) path let these tests
+    // pass because SPIRV-Cross emitted un-compilable GS MSL →
+    // Metal pipeline failed to build → the draw no-op'd, which
+    // matched the test's "vertex is correctly clipped" expectation.
+    // Detect via the VS SPIR-V: if any Output variable carries
+    // BuiltIn ClipDistance or CullDistance (either directly or on
+    // a gl_PerVertex member), refuse to emulate so the legacy
+    // no-GS path is used instead. Narrow enough not to lose the
+    // constant_expressions / geometry_shader.rendering.* wins that
+    // don't touch clip/cull builtins.
+    // Does the given SPIR-V actually *store* to gl_ClipDistance /
+    // gl_CullDistance at runtime? The presence of a gl_PerVertex
+    // output block alone isn't enough — glslang declares the
+    // block on every VS regardless of whether the source touches
+    // the clip/cull arrays. We scan the function body for OpStore
+    // whose pointer resolves via OpAccessChain into a member
+    // decorated BuiltIn ClipDistance / CullDistance, which is the
+    // only way GLSL lowers `gl_ClipDistance[i] = ...`.
+    auto programStoresClipOrCull = [&](const std::vector<std::uint32_t>& spirv) -> bool {
+        if (spirv.empty()) return false;
+        SpirvModule m;
+        if (!m.parse(spirv.data(), spirv.size())) return false;
+        if (!m.haveFuncBody) return false;
+        // Collect struct-member indices that are ClipDistance /
+        // CullDistance per gl_PerVertex-ish output blocks.
+        // Map: struct type id → { member indices that are clip/cull }.
+        std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> clipCullMembers;
+        for (const auto& [structId, mdSet] : m.memberDecorations) {
+            for (const auto& [memberIdx, memberDeco] : mdSet.perMember) {
+                if (memberDeco.hasBuiltIn &&
+                    (memberDeco.builtIn == spv::BuiltInClipDistance ||
+                     memberDeco.builtIn == spv::BuiltInCullDistance)) {
+                    clipCullMembers[structId].push_back(memberIdx);
+                }
+            }
+        }
+        // Also collect Output variables whose own decoration marks
+        // them ClipDistance / CullDistance (the "redeclared as a
+        // free-standing array" pattern, rare but legal).
+        std::unordered_set<std::uint32_t> clipCullVars;
+        for (const auto& [varId, info] : m.variables) {
+            if (info.storageClass != spv::StorageClassOutput) continue;
+            auto dIt = m.decorations.find(varId);
+            if (dIt != m.decorations.end() && dIt->second.hasBuiltIn &&
+                (dIt->second.builtIn == spv::BuiltInClipDistance ||
+                 dIt->second.builtIn == spv::BuiltInCullDistance)) {
+                clipCullVars.insert(varId);
+            }
+        }
+        // Map OpAccessChain result-id → true iff the walk reaches
+        // a clip/cull slot. We only need a shallow walk — one
+        // struct-member level.
+        std::unordered_set<std::uint32_t> clipCullAccessChains;
+        std::size_t pc = m.funcBodyStart;
+        while (pc < m.funcBodyEnd) {
+            const std::uint32_t inst = m.words[pc];
+            const std::uint16_t opcode = static_cast<std::uint16_t>(inst & 0xFFFF);
+            const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+            if (wc == 0) return false;
+            if (opcode == spv::OpAccessChain && wc >= 4) {
+                const std::uint32_t resultId = m.words[pc + 2];
+                const std::uint32_t base = m.words[pc + 3];
+                // If the base is a var known to be clip/cull, chain
+                // is clip/cull regardless of indices.
+                if (clipCullVars.count(base) != 0) {
+                    clipCullAccessChains.insert(resultId);
+                } else {
+                    // Check if base var's pointee struct has a clip/
+                    // cull member, and the first index picks that
+                    // member. Operands[3..] are indices.
+                    auto vIt = m.variables.find(base);
+                    if (vIt != m.variables.end() && wc >= 5) {
+                        const std::uint32_t firstIdxId = m.words[pc + 4];
+                        auto cIt = m.constants.find(firstIdxId);
+                        if (cIt != m.constants.end()) {
+                            const std::int32_t idx = cIt->second.i[0];
+                            auto tIt = m.types.find(vIt->second.typeId);
+                            if (tIt != m.types.end()) {
+                                const std::uint32_t pointeeType = tIt->second.pointeeType;
+                                auto cm = clipCullMembers.find(pointeeType);
+                                if (cm != clipCullMembers.end()) {
+                                    for (std::uint32_t mi : cm->second) {
+                                        if (static_cast<std::uint32_t>(idx) == mi) {
+                                            clipCullAccessChains.insert(resultId);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (opcode == spv::OpStore && wc >= 3) {
+                const std::uint32_t ptr = m.words[pc + 1];
+                // Direct store to a clip/cull variable, or to an
+                // access-chain result that resolves to clip/cull.
+                if (clipCullVars.count(ptr) != 0 ||
+                    clipCullAccessChains.count(ptr) != 0) {
+                    return true;
+                }
+            }
+            pc += wc;
+        }
+        return false;
+    };
+    // Our synthesised pass-through VS doesn't carry
+    // gl_ClipDistance / gl_CullDistance through the expanded-vertex
+    // buffer — the GS interpreter zeros those builtins on emission,
+    // so running the emulator turns an otherwise-cullable primitive
+    // into one that renders every fragment. That regression bit
+    // `cull_distance.functional_test_item_5` (passthrough-GS cases)
+    // which the s19 baseline got right purely because SPIRV-Cross's
+    // GS MSL failed to compile → the draw no-op'd → clipped pixels
+    // stayed cleared. Reject emulation whenever the VS actually
+    // stores to gl_ClipDistance / gl_CullDistance so the legacy
+    // no-GS path preserves those builtins straight to the FS.
+    // Declaration-only presence (gl_PerVertex in glslang's implicit
+    // output block, even with zero writes) is ignored — otherwise
+    // we'd reject every rendering-section program whose glslang
+    // preamble redundantly declares the builtin it never uses.
+    if (programStoresClipOrCull(program.vertexSpirv)) {
+        if (std::getenv("APPGL_TRACE_GS_EMUL") != nullptr) {
+            std::fprintf(stderr, "[GS-emul] reject: VS stores gl_Clip/CullDistance — "
+                         "emulator does not yet propagate through synth VS\n");
+        }
+        return false;
+    }
 
     // Walk the function body and reject on any unsupported opcode.
     // On rejection, log the opcode + GS source hash so that sweep
