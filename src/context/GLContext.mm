@@ -2351,7 +2351,19 @@ struct GLContext::Impl {
         // layer doesn't need them — keep level 0 only for this target.
         const NSUInteger requestedLevels = static_cast<NSUInteger>(highestDefinedLevel + 1);
         descriptor.mipmapLevelCount = (object.target == GL_TEXTURE_1D) ? 1u : requestedLevels;
-        descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        // Include MTLTextureUsageShaderWrite for non-MSAA textures so
+        // imageStore in compute / graphics shaders actually lands.
+        // GL has no separate "this texture will be used as storage image"
+        // declaration; any texture can be bound via glBindImageTexture,
+        // and Metal silently drops writes if ShaderWrite usage is missing.
+        // MSAA textures reject ShaderWrite (Metal validation).
+        MTLTextureUsage usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        const bool isMSAA = (object.target == GL_TEXTURE_2D_MULTISAMPLE
+                             || object.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+        if (!isMSAA) {
+            usage |= MTLTextureUsageShaderWrite;
+        }
+        descriptor.usage = usage;
         descriptor.storageMode = MTLStorageModeShared;
 
         id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
@@ -2621,7 +2633,14 @@ struct GLContext::Impl {
             // [MTLTexture getBytes:].  On Apple Silicon the unified memory
             // architecture makes Shared equivalent to Private in performance.
             descriptor.storageMode = MTLStorageModeShared;
-            descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            // Enable ShaderWrite for non-MSAA renderbuffers as well so the
+            // renderbuffer can back a storage image binding through a
+            // framebuffer view later (imageStore from fragment stages).
+            MTLTextureUsage rbUsage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            if (samples <= 1) {
+                rbUsage |= MTLTextureUsageShaderWrite;
+            }
+            descriptor.usage = rbUsage;
             if (samples > 1) {
                 descriptor.textureType = MTLTextureType2DMultisample;
                 descriptor.sampleCount = static_cast<NSUInteger>(samples);
@@ -3766,13 +3785,29 @@ struct GLContext::Impl {
         GLProgramObject& program,
         TranslatedDrawInfo& info)
     {
-        (void)program;
         auto resolveStage = [&](const ShaderReflection* reflection,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outList) {
             if (reflection == nullptr) return;
             for (const auto& img : reflection->storageImages) {
-                if (img.glBinding >= Impl::kMaxImageUnits) continue;
-                const auto& ib = imageBindings[img.glBinding];
+                // GL 4.6 §7.6: the effective image unit is the value the
+                // app has set via glUniform1i(loc, K) — the layout
+                // binding is just the initial default. CTS
+                // shading_language_420pack.binding_image_single_stage_*
+                // relies on this: `uni_image` has no layout binding and
+                // only picks up unit 0 via glUniform1i.
+                GLuint effectiveUnit = img.glBinding;
+                for (const auto& u : program.uniforms) {
+                    if (u.name == img.name) {
+                        auto uvIt = program.uniformValues.find(u.location);
+                        if (uvIt != program.uniformValues.end()
+                            && !uvIt->second.ints.empty()) {
+                            effectiveUnit = static_cast<GLuint>(uvIt->second.ints[0]);
+                        }
+                        break;
+                    }
+                }
+                if (effectiveUnit >= Impl::kMaxImageUnits) continue;
+                const auto& ib = imageBindings[effectiveUnit];
                 if (ib.texture == 0) continue;
                 GLTextureObject* texObj = objects->textures().get(ib.texture);
                 if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
@@ -15563,11 +15598,28 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
 
     // Storage images (imageLoad/imageStore). Bound via
     // glBindImageTexture(unit, …) rather than a sampler uniform. The
-    // shader's `layout(binding=N)` selects imageBindings[N] directly.
-    // KHR-GL46.compute_shader.copy-image exercises this.
+    // shader's `layout(binding=N)` is the DEFAULT image unit; GL 4.6
+    // §7.6 allows glUniform1i(loc, K) to change the effective image
+    // unit to K at runtime (same mechanism as sampler uniforms). CTS
+    // shading_language_420pack.binding_images_* relies on this — only
+    // one of the three images has an explicit layout binding, and the
+    // others rely on glUniform1i to set the unit.
     for (const auto& img : programObject->computeReflection.storageImages) {
-        if (img.glBinding >= Impl::kMaxImageUnits) continue;
-        const auto& ib = impl_->imageBindings[img.glBinding];
+        GLuint effectiveUnit = img.glBinding;
+        // Look up the named uniform. If the app has called
+        // glUniform1i(loc, K) for this image uniform, prefer K.
+        for (const auto& u : programObject->uniforms) {
+            if (u.name == img.name) {
+                auto uvIt = programObject->uniformValues.find(u.location);
+                if (uvIt != programObject->uniformValues.end()
+                    && !uvIt->second.ints.empty()) {
+                    effectiveUnit = static_cast<GLuint>(uvIt->second.ints[0]);
+                }
+                break;
+            }
+        }
+        if (effectiveUnit >= Impl::kMaxImageUnits) continue;
+        const auto& ib = impl_->imageBindings[effectiveUnit];
         if (ib.texture == 0) continue;
         GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
         if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
