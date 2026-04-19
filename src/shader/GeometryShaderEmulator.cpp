@@ -40,7 +40,7 @@ namespace spv {
         OpFNegate = 127,
         OpFAdd = 129, OpFSub = 131, OpFMul = 133, OpFDiv = 136, OpFMod = 141,
         OpIAdd = 128, OpISub = 130, OpIMul = 132,
-        OpSDiv = 135, OpSRem = 138, OpUMod = 137, OpSNegate = 126,
+        OpSDiv = 135, OpSRem = 138, OpSMod = 139, OpUMod = 137, OpSNegate = 126,
         OpConvertFToS = 110, OpConvertFToU = 109,
         OpConvertSToF = 111, OpConvertUToF = 112,
         OpBitcast = 124,
@@ -1745,17 +1745,29 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpExtInst: {
                 // w[0]=type, w[1]=resultId, w[2]=setId, w[3]=glslOp, w[4..]=operands
+                // Word count excludes the header word (which we skipped
+                // via `w = words + pc + 1`). From `w[]` the instruction
+                // uses 4 slots (type, result, set, glslOp) before the
+                // operands start at w[4], so operand count is
+                // `wc - 1 - 4 = wc - 5`. The old `wc - 4` reached one
+                // word past the last real operand — for 2-operand
+                // FMin / FMax this pointed into the next instruction's
+                // header, which `tryGetValue` rejected as unknown and
+                // `evalExtInst` bailed on. Exposed when triangles-
+                // input GS bodies started running through the
+                // interpreter (gs_lines_code / gs_triangles_code use
+                // `min(a.x, b.x)` to compute an AABB).
                 if (module_.extInstImports.count(w[2]) == 0) {
                     bail("OpExtInst: unsupported instruction set");
                     break;
                 }
-                valueStore_[w[1]] = evalExtInst(w[3], &w[4], wc - 4);
+                valueStore_[w[1]] = evalExtInst(w[3], &w[4], wc - 5);
                 pc += wc;
                 break;
             }
             // ─ Integer arithmetic / bitcast / conversions ─
             case spv::OpIAdd: case spv::OpISub: case spv::OpIMul:
-            case spv::OpSDiv: case spv::OpSRem: case spv::OpUMod: {
+            case spv::OpSDiv: case spv::OpSRem: case spv::OpSMod: case spv::OpUMod: {
                 Value a, b;
                 if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("int-arith: unknown operand"); break; }
                 Value r = a;
@@ -1767,6 +1779,25 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         case spv::OpIMul: r.i[k] = a.i[k] * b.i[k]; break;
                         case spv::OpSDiv: r.i[k] = b.i[k] != 0 ? a.i[k] / b.i[k] : 0; break;
                         case spv::OpSRem: r.i[k] = b.i[k] != 0 ? a.i[k] % b.i[k] : 0; break;
+                        case spv::OpSMod: {
+                            // SPIR-V §3.32.13: OpSMod result has sign
+                            // of operand 2 (the divisor), unlike
+                            // OpSRem whose sign follows operand 1.
+                            // Computed as `a - b * floor(a / b)` with
+                            // floor rounding for negative quotients.
+                            if (b.i[k] == 0) { r.i[k] = 0; break; }
+                            const std::int32_t ai = a.i[k], bi = b.i[k];
+                            std::int32_t q = ai / bi;
+                            // Adjust quotient toward floor when the
+                            // signed division truncation differs from
+                            // floor (mixed-sign operands with a
+                            // non-zero remainder).
+                            if ((ai % bi != 0) && ((ai < 0) != (bi < 0))) {
+                                q -= 1;
+                            }
+                            r.i[k] = ai - bi * q;
+                            break;
+                        }
                         case spv::OpUMod: {
                             const std::uint32_t au = static_cast<std::uint32_t>(a.i[k]);
                             const std::uint32_t bu = static_cast<std::uint32_t>(b.i[k]);
@@ -2168,6 +2199,7 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpIMul:
         case spv::OpSDiv:
         case spv::OpSRem:
+        case spv::OpSMod:
         case spv::OpUMod:
         case spv::OpSNegate:
         // ─ Bit ops ─
@@ -2797,11 +2829,27 @@ EmulatedDraw emulateGeometryDraw(
     // Helper: per-primitive vertex indexing. Returns the global
     // draw-position index (0..count-1) that should feed gl_in[v] of
     // primitive `p`.
+    //
+    // GL 4.6 §10.1.12 — triangle strip alternation: even triangles
+    // see vertices (p, p+1, p+2); odd triangles see (p+1, p, p+2)
+    // so consistent winding survives the strip decomposition. Only
+    // applies when the GS input is `triangles` (vpp == 3) on a
+    // TRIANGLE_STRIP draw — the line-strip case doesn't care
+    // because lines are order-agnostic for rasterisation, and the
+    // triangles_adjacency strip variant is handled separately in
+    // StripAdjacency.
     auto vertexForPrim = [&](std::size_t p, std::uint32_t v) -> std::size_t {
         switch (indexing) {
             case PrimIndexing::Discrete:
                 return p * vpp + v;
             case PrimIndexing::Strip:
+                if (vpp == 3 && (p & 1u) != 0u) {
+                    // Odd triangle: swap vertex 0 and vertex 1 so the
+                    // GS sees the strip-reordered triangle.
+                    if (v == 0) return p + 1;
+                    if (v == 1) return p;
+                    return p + 2;
+                }
                 return p + v;
             case PrimIndexing::StripAdjacency:
                 return p * 2 + v;
