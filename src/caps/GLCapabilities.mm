@@ -844,6 +844,12 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // Texture / sampler.
     integerLimits_[GL_MAX_TEXTURE_BUFFER_SIZE] = std::min<GLint64>(
         maxBufferLength / 4, 134217728);  // cap at 128M texels
+    // Metal requires buffer textures to start at a pixel-format-aligned
+    // offset; 16 is the conservative value every known Apple GPU accepts.
+    // CTS `direct_state_access.textures_buffer_*` queries this enum before
+    // allocating the buffer-backed texture; without an answer the test
+    // throws `glGetIntegerv has failed` and raises an InternalError.
+    integerLimits_[GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT] = 16;
     integerLimits_[GL_MAX_RECTANGLE_TEXTURE_SIZE] = maxTextureSize;
     integerLimits_[GL_MIN_PROGRAM_TEXTURE_GATHER_OFFSET] = -8;
     integerLimits_[GL_MAX_PROGRAM_TEXTURE_GATHER_OFFSET] = 7;

@@ -6225,6 +6225,79 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         *data = static_cast<GLint>(impl_->boundTransformFeedbackId);
         return true;
     }
+    // GL 4.6 §18.3: GL_IMPLEMENTATION_COLOR_READ_{TYPE,FORMAT} report
+    // the implementation-preferred format/type pair for glReadPixels
+    // on the current read framebuffer. Resolve from the bound read
+    // FBO's color attachment; default framebuffer yields RGBA +
+    // UNSIGNED_BYTE. Several CTS paths (notably the DSA
+    // textures_buffer_* fuzz tests) drain these queries as part of
+    // glReadPixels error-reporting, and a bare GL_INVALID_ENUM here
+    // poisons the test's subsequent `gl.getError()` check.
+    if (pname == GL_IMPLEMENTATION_COLOR_READ_TYPE
+        || pname == GL_IMPLEMENTATION_COLOR_READ_FORMAT) {
+        GLenum fmt = GL_RGBA;
+        GLenum type = GL_UNSIGNED_BYTE;
+        const GLuint fbName = impl_->state->boundReadFramebuffer();
+        if (fbName != 0) {
+            if (const GLFramebufferObject* fb = impl_->objects->framebuffers().get(fbName)) {
+                const GLFramebufferAttachment* att = impl_->framebufferAttachment(*fb, fb->readBuffer);
+                GLenum ifmt = 0;
+                if (att != nullptr) {
+                    if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                        if (auto* rb = impl_->objects->renderbuffers().get(att->object)) {
+                            ifmt = rb->internalFormat;
+                        }
+                    } else if (att->kind == GLFramebufferAttachment::Kind::Texture) {
+                        if (auto* tex = impl_->objects->textures().get(att->object)) {
+                            ifmt = tex->desc.internalFormat;
+                        }
+                    }
+                }
+                // Map internal format → (preferred read format, type).
+                // Follows GL 4.6 Table 18.2's "valid combinations"
+                // diagonal: integer formats yield *_INTEGER / matching
+                // integer type; snorm/unorm yield base + BYTE/UBYTE;
+                // float yields base + FLOAT.
+                switch (ifmt) {
+                    case GL_R8I:      fmt = GL_RED_INTEGER;  type = GL_BYTE;          break;
+                    case GL_R8UI:     fmt = GL_RED_INTEGER;  type = GL_UNSIGNED_BYTE; break;
+                    case GL_R16I:     fmt = GL_RED_INTEGER;  type = GL_SHORT;         break;
+                    case GL_R16UI:    fmt = GL_RED_INTEGER;  type = GL_UNSIGNED_SHORT;break;
+                    case GL_R32I:     fmt = GL_RED_INTEGER;  type = GL_INT;           break;
+                    case GL_R32UI:    fmt = GL_RED_INTEGER;  type = GL_UNSIGNED_INT;  break;
+                    case GL_RG8I:     fmt = GL_RG_INTEGER;   type = GL_BYTE;          break;
+                    case GL_RG8UI:    fmt = GL_RG_INTEGER;   type = GL_UNSIGNED_BYTE; break;
+                    case GL_RG16I:    fmt = GL_RG_INTEGER;   type = GL_SHORT;         break;
+                    case GL_RG16UI:   fmt = GL_RG_INTEGER;   type = GL_UNSIGNED_SHORT;break;
+                    case GL_RG32I:    fmt = GL_RG_INTEGER;   type = GL_INT;           break;
+                    case GL_RG32UI:   fmt = GL_RG_INTEGER;   type = GL_UNSIGNED_INT;  break;
+                    case GL_RGB8I:    fmt = GL_RGB_INTEGER;  type = GL_BYTE;          break;
+                    case GL_RGB8UI:   fmt = GL_RGB_INTEGER;  type = GL_UNSIGNED_BYTE; break;
+                    case GL_RGB16I:   fmt = GL_RGB_INTEGER;  type = GL_SHORT;         break;
+                    case GL_RGB16UI:  fmt = GL_RGB_INTEGER;  type = GL_UNSIGNED_SHORT;break;
+                    case GL_RGB32I:   fmt = GL_RGB_INTEGER;  type = GL_INT;           break;
+                    case GL_RGB32UI:  fmt = GL_RGB_INTEGER;  type = GL_UNSIGNED_INT;  break;
+                    case GL_RGBA8I:   fmt = GL_RGBA_INTEGER; type = GL_BYTE;          break;
+                    case GL_RGBA8UI:  fmt = GL_RGBA_INTEGER; type = GL_UNSIGNED_BYTE; break;
+                    case GL_RGBA16I:  fmt = GL_RGBA_INTEGER; type = GL_SHORT;         break;
+                    case GL_RGBA16UI: fmt = GL_RGBA_INTEGER; type = GL_UNSIGNED_SHORT;break;
+                    case GL_RGBA32I:  fmt = GL_RGBA_INTEGER; type = GL_INT;           break;
+                    case GL_RGBA32UI: fmt = GL_RGBA_INTEGER; type = GL_UNSIGNED_INT;  break;
+                    case GL_RGB10_A2UI: fmt = GL_RGBA_INTEGER; type = GL_UNSIGNED_INT_2_10_10_10_REV; break;
+                    case GL_R16F: case GL_RG16F: case GL_RGB16F: case GL_RGBA16F:
+                    case GL_R32F: case GL_RG32F: case GL_RGB32F: case GL_RGBA32F:
+                        fmt = GL_RGBA; type = GL_FLOAT; break;
+                    case GL_R8: case GL_R16: case GL_RG8: case GL_RG16:
+                    case GL_RGB8: case GL_RGB16: case GL_RGBA8: case GL_RGBA16:
+                    case GL_SRGB8: case GL_SRGB8_ALPHA8:
+                    default:
+                        fmt = GL_RGBA; type = GL_UNSIGNED_BYTE; break;
+                }
+            }
+        }
+        *data = static_cast<GLint>(pname == GL_IMPLEMENTATION_COLOR_READ_TYPE ? type : fmt);
+        return true;
+    }
     if (impl_->state->queryInteger(pname, data)) {
         return true;
     }
@@ -7974,6 +8047,15 @@ bool GLContext::texStorage(
     object->desc.depth = (target == GL_TEXTURE_3D
                           || target == GL_TEXTURE_2D_ARRAY
                           || target == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
+    // Mirror depth into `layers` for the array targets — framebuffer-
+    // texture-layer validation consults this field when deciding
+    // whether an attach-layer is in range. Without it, attaching a
+    // layer of a glTexStorage3D-allocated GL_TEXTURE_2D_ARRAY raised
+    // GL_INVALID_VALUE on every layer > 0 (the default value of 1).
+    object->desc.layers = (target == GL_TEXTURE_2D_ARRAY
+                          || target == GL_TEXTURE_1D_ARRAY
+                          || target == GL_TEXTURE_CUBE_MAP_ARRAY)
+        ? depth : 1;
     object->desc.levels = levels;
     object->desc.immutable = true;
     object->target = target;
@@ -8074,6 +8156,13 @@ bool GLContext::texStorageMultisample(
     object->desc.width = width;
     object->desc.height = height;
     object->desc.depth = (target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) ? depth : 1;
+    // framebufferTextureLayer consults desc.layers (not desc.depth) when
+    // validating the layer argument — mirror depth into layers for the
+    // multisample-array target. Without this, CTS DSA
+    // `textures_storage_multisample_3d_*` fails framebufferTextureLayer
+    // with INVALID_VALUE and raises IE via its outer catch().
+    object->desc.layers = (target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY)
+        ? depth : 1;
     object->desc.levels = 1;
     object->desc.samples = clampedSamples;
     object->desc.immutable = true;
@@ -8129,8 +8218,59 @@ bool GLContext::texBufferRange(
     object->desc.immutable = true;
     object->target = target;
 
-    // Metal texture-buffer creation would go here; for now we record the state
-    // so higher-level code can query and create the MTLTextureBuffer view later.
+    // Create the Metal MTLTexture view over the source MTLBuffer using
+    // `MTLTextureType::textureBuffer` (Metal 2.1+). This gives
+    // `texture_buffer<T>` samplerBuffer access in MSL, which CTS
+    // `direct_state_access.textures_buffer_*` uses via isamplerBuffer /
+    // usamplerBuffer / samplerBuffer. Without this, the texture slot
+    // was nil at draw time, the fragment shader sampled zero, and the
+    // test threw an InternalError when `glGetProgramInfoLog` emitted
+    // and the surrounding `catch(...)` converted the throw into IE.
+    GLBufferObject* bufObj = impl_->objects->buffers().get(buffer);
+    if (bufObj != nullptr && bufObj->metalBuffer != nullptr) {
+        id<MTLBuffer> mtlBuffer = (__bridge id<MTLBuffer>)bufObj->metalBuffer;
+        MTLPixelFormat pf = metalRenderbufferFormat(internalformat);
+        if (pf != MTLPixelFormatInvalid) {
+            MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+            desc.textureType = MTLTextureTypeTextureBuffer;
+            desc.pixelFormat = pf;
+            // Metal texture-buffer width counts TEXELS, not bytes.
+            const NSUInteger bpp = [&](MTLPixelFormat p) -> NSUInteger {
+                auto info = Impl::nativeFormatInfo(p);
+                return static_cast<NSUInteger>(info.bytesPerPixel);
+            }(pf);
+            if (bpp > 0) {
+                const NSUInteger byteLen = static_cast<NSUInteger>(size);
+                const NSUInteger texelCount = byteLen / bpp;
+                // Metal asserts on width=0 or when offset+byteLen exceeds
+                // the buffer length. Skip Metal-side creation under those
+                // degenerate conditions — CTS `textures_buffer_range_errors`
+                // deliberately passes them and only reads the pushed GL
+                // error afterwards.
+                if (texelCount > 0 &&
+                    static_cast<NSUInteger>(offset) + byteLen <= mtlBuffer.length) {
+                    desc.width = texelCount;
+                    desc.height = 1;
+                    desc.depth = 1;
+                    desc.mipmapLevelCount = 1;
+                    desc.arrayLength = 1;
+                    desc.resourceOptions = mtlBuffer.resourceOptions;
+                    desc.usage = MTLTextureUsageShaderRead;
+                    id<MTLTexture> tex = [mtlBuffer newTextureWithDescriptor:desc
+                                                                      offset:static_cast<NSUInteger>(offset)
+                                                                 bytesPerRow:byteLen];
+                    // Release any prior metalTexture before retaining the new one.
+                    if (object->metalTexture != nullptr) {
+                        releaseRetainedMetalObject(object->metalTexture);
+                        object->metalTexture = nullptr;
+                    }
+                    if (tex != nil) {
+                        object->metalTexture = transferRetainedMetalObject(tex);
+                    }
+                }
+            }
+        }
+    }
     return true;
 }
 
@@ -17700,9 +17840,22 @@ bool GLContext::textureSubImage3D(GLuint texture, GLint level, GLint xoffset, GL
 
 bool GLContext::textureBuffer(GLuint texture, GLenum internalformat, GLuint buffer) {
     DSA_TEX_WRAP(texture, {
-        // texBuffer is equivalent to texBufferRange with full buffer size.
+        // GL 4.6 §8.9: if `buffer` is non-zero and doesn't name an
+        // existing buffer, raise GL_INVALID_OPERATION. Catch this
+        // here — texBufferRange would otherwise interpret the
+        // missing-buffer case as `size=0` and push INVALID_VALUE,
+        // which CTS `textures_buffer_errors` flags as the wrong code.
         auto* bufObj = impl_->objects->buffers().get(buffer);
+        if (buffer != 0 && bufObj == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         GLsizeiptr bufSize = bufObj ? bufObj->size : 0;
+        // Also: "if buffer is zero, detach any existing buffer" — accept
+        // with bufSize=0 only in that case (no texBufferRange call then).
+        if (buffer == 0) {
+            return true;
+        }
         bool ok = texBufferRange(GL_TEXTURE_BUFFER, internalformat, buffer, 0, bufSize);
         return ok;
     })
@@ -17710,6 +17863,14 @@ bool GLContext::textureBuffer(GLuint texture, GLenum internalformat, GLuint buff
 
 bool GLContext::textureBufferRange(GLuint texture, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size) {
     DSA_TEX_WRAP(texture, {
+        auto* bufObj = impl_->objects->buffers().get(buffer);
+        if (buffer != 0 && bufObj == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (buffer == 0) {
+            return true;
+        }
         bool ok = texBufferRange(GL_TEXTURE_BUFFER, internalformat, buffer, offset, size);
         return ok;
     })
