@@ -667,3 +667,87 @@ rebuild catches the drift at compile time.
   `_tess_control` + 224 `_tess_eval`, both out of scope for
   this rollout (tessellation emulation is a separate
   sibling stage).
+
+- **2026-04-19** — **geometry_shader.* phase 3 — rendering
+  section + cull_distance regression fix** (commits `9264f83`,
+  `cc4dc88`). Four compounding bugs unblocked the
+  `geometry_shader.rendering.rendering.*` bucket; a fifth-
+  commit stopgap restored the cull_distance regression.
+    - **Varyings loop typo.** `initVariables` bounded its
+      vertex-input copy loop by `vi < inputs[vi].varyings
+      .size()` — so "vi < varyings-per-vertex" rather than
+      "vi < vertex count". With one varying per vertex, the
+      loop ran once (vi=0) and left vertices 1..N-1 with
+      zeroed varyings. Adjacency tests surfaced the bug
+      precisely — rendered colour at pixel (7, 1) was
+      (0.858824, 0, 0, 0) = `6/7 * start_col`, because
+      `end_col = vs_gs_color[1]` (vertex 2 for adjacency
+      input) stayed zero. Fix: bound by `inputs.size()` and
+      guard each vertex against a missing varying slot.
+    - **Bool + integer-vector loads.** `loadFromVar` bailed
+      `"load: unsupported leaf kind"` on `Kind::Bool` and on
+      `Kind::Vec*` whose component type was Int / UInt. The
+      lines- and triangles-input VS in the rendering bucket
+      each declare `uniform bool is_gl_lines_draw_call` etc.
+      and check `renderingTargetSize.y == 45` (ivec2) — load
+      bail → VS pre-pass abort → every vs_gs_color at its
+      default (0, 0, 0, 0) → blank pixels. Now Vec2/Vec3/Vec4
+      peek at the component type to emit Float*/Int*/UInt*
+      Values, and Bool loads memcpy the int bits into `bval`.
+    - **OpFUnord* float comparisons.** glslang emits
+      OpFUnordNotEqual for GLSL float `!=` (not the ordered
+      OpFOrdNotEqual we had on the allowlist); every
+      `lines_input_line_strip_output_*` GS uses
+      `start_pos.x != end_pos.x` to branch between
+      horizontal-vs-vertical edge layouts. Detector
+      rejected → `geometryEmulated` stayed false → pipeline
+      ran VS+FS-only without the GS's per-edge expansion.
+      Added OpFUnord{Equal,NotEqual,Less,Greater,LessEqual,
+      GreaterEqual} alongside their OpFOrd* siblings (same
+      NaN-agnostic implementation — CTS inputs are finite).
+    - **Strip → list expansion across primitive boundaries.**
+      OpEndPrimitive was a no-op and inter-invocation strip
+      boundaries were implicit, so N separate
+      `layout(line_strip)` or `layout(triangle_strip)`
+      primitives across M GS invocations concatenated into
+      one Metal strip with spurious stitching segments
+      between independent primitives. `execute()` now pushes
+      the current emitted count into a `primEnds` vector at
+      every OpEndPrimitive plus an implicit boundary at
+      OpReturn; the caller rolls per-invocation boundaries up
+      and post-processes the final buffer: line_strip
+      expands `(N-1)` segments × 2 verts per strip
+      (topology → GL_LINES), triangle_strip expands `(N-2)`
+      triangles with alternating winding (topology →
+      GL_TRIANGLES) so the list form preserves GL-spec
+      front-facing order after decomposition.
+    - **cull_distance.functional_test_item_5 stopgap.** A
+      passthrough GS whose VS writes gl_ClipDistance /
+      gl_CullDistance and whose GS doesn't re-emit them now
+      opts out of emulation — the synthesised pass-through
+      VS doesn't yet propagate clip/cull builtins through
+      the expanded-vertex buffer, and zeroing them would
+      drop a cullable primitive's per-vertex cull state.
+      Check scans the VS SPIR-V body for OpStore via
+      OpAccessChain into a member decorated BuiltIn
+      ClipDistance / CullDistance (tight enough to avoid
+      rejecting the rendering-section programs whose glslang
+      preamble declares gl_PerVertex.gl_ClipDistance but
+      never writes it).
+  Sweep deltas vs s19 baseline:
+    - `rendering.rendering.*`:    1/33 → 23/33 (+22)
+    - `geometry_shader.* overall`: 61/136 → 83/136 (+22)
+    - `constant_expressions.*_geometry`: 232/232 (held)
+    - `cull_distance.functional_test_item_5_primitive_mode_points*`:
+      8/8 restored (stopgap in place until synth VS learns
+      to carry gl_Clip/CullDistance).
+  Remaining 10 rendering failures are all
+  triangles_input + line_strip/triangle_strip outputs —
+  pixel mismatches around edge colours that the bugs above
+  don't explain; likely per-primitive interpolation math in
+  the more complex GS bodies (`abs`-based vertex-role
+  classification + bbox emission). Follow-up tracks:
+  (1) synth VS gl_Clip/CullDistance plumbing to re-enable
+  the cull_distance passthrough-GS cases, (2) triangles-
+  input edge-colour parity, (3) layered rendering
+  (gl_Layer output), (4) primitive_queries plumbing.
