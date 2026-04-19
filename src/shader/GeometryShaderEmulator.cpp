@@ -677,6 +677,11 @@ public:
         vsVertexID_ = vertexID;
         vsInstanceID_ = instanceID;
     }
+    // GS-stage gl_PrimitiveIDIn (BuiltInPrimitiveId = 7). Populated
+    // per GS invocation by the caller; the emulator's initVariables
+    // seeds the GS Input variable with this value when the variable
+    // carries DecorationBuiltIn=7.
+    void setGsPrimitiveId(std::int32_t primId) { gsPrimitiveId_ = primId; }
 
     // Run the entry-point function once, given `inputs` as gl_in[].
     // Appends emitted vertices to `emitted`. Primitive boundaries are
@@ -708,6 +713,7 @@ private:
     const VertexAttribs* vsAttribs_ = nullptr;
     std::int32_t vsVertexID_ = 0;
     std::int32_t vsInstanceID_ = 0;
+    std::int32_t gsPrimitiveId_ = 0;
 
     // Per-id SSA values for loads/arithmetic results.
     std::unordered_map<std::uint32_t, Value> valueStore_;
@@ -1017,6 +1023,23 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                     std::memcpy(&storage[0], &vsInstanceID_, 4);
                     continue;
                 }
+            }
+        }
+        // ── GS-stage built-ins: gl_PrimitiveIDIn (BuiltInPrimitiveId
+        // = 7). `glGetBuiltInDecorations` returns the same decoration
+        // value for both `gl_PrimitiveIDIn` in the GS and the FS's
+        // `gl_PrimitiveID` input; here we're scoped to the GS stage
+        // so the interpretation is unambiguous.
+        if (stage_ == Stage::Geometry && info.storageClass == spv::StorageClassInput) {
+            auto dIt = module_.decorations.find(varId);
+            if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn) {
+                if (dIt->second.builtIn == 7 /*BuiltInPrimitiveId*/ && width >= 1) {
+                    std::memcpy(&storage[0], &gsPrimitiveId_, 4);
+                    continue;
+                }
+                // gl_InvocationID is 8 — always 0 for single-invocation
+                // GS (which is all we support right now), so leaving
+                // storage zero-initialised is correct.
             }
         }
 
@@ -2664,6 +2687,7 @@ EmulatedDraw emulateGeometryDraw(
         Interpreter interp(mod, vsOutNames, vsOutWidths,
                            outNames, outWidths);
         interp.setUniforms(&uniforms);
+        interp.setGsPrimitiveId(static_cast<std::int32_t>(p));
         std::vector<EmulatedVertex> emitted;
         if (!interp.execute(inputs, emitted)) {
             d.ok = false;
