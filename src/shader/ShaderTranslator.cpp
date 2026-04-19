@@ -583,56 +583,17 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             // (~400 tests) all reporting "vertex unexpectedly clipped".
         }
 
-        // Default [[point_size]] for vertex shaders that don't write
-        // gl_PointSize. Metal rasterises points with zero-size when
-        // the vertex function doesn't emit a [[point_size]] output —
-        // the point covers no pixels and appears invisible. GL's
-        // default gl_PointSize is 1.0; SPIRV-Cross only emits the
-        // [[point_size]] attribute when the shader explicitly writes
-        // gl_PointSize, so we need to inject a default here for the
-        // common case of shaders that render points but don't touch
-        // the size. This patches shaders of the shape:
-        //   struct main0_out {
-        //       float4 gl_Position [[position]];
-        //       ...
-        //   };
-        //   vertex main0_out main0(...) {
-        //       main0_out out = {};
-        //       ...
-        //       return out;
-        //   }
-        // → inserts `float gl_PointSize [[point_size]];` into main0_out,
-        //   and `out.gl_PointSize = 1.0;` before the return statement.
-        if (msl.find("vertex ") != std::string::npos
-            && msl.find("[[point_size]]") == std::string::npos
-            && msl.find("float4 gl_Position [[position]]") != std::string::npos) {
-            // Inject the declaration immediately after the position line.
-            const std::string positionLine = "float4 gl_Position [[position]];";
-            std::size_t posDeclPos = msl.find(positionLine);
-            if (posDeclPos != std::string::npos) {
-                std::size_t insertAt = posDeclPos + positionLine.size();
-                std::size_t lineStart = msl.rfind('\n', posDeclPos);
-                lineStart = (lineStart == std::string::npos) ? 0 : lineStart + 1;
-                std::string indent(msl.data() + lineStart, posDeclPos - lineStart);
-                std::string decl = "\n" + indent + "float gl_PointSize [[point_size]];";
-                msl.insert(insertAt, decl);
-            }
-            // Inject default write just before every `return out;` in
-            // vertex main0. Leaves fragment / compute shaders untouched
-            // because they don't declare gl_Position with [[position]]
-            // and never take this branch.
-            std::size_t pos = 0;
-            while (true) {
-                std::size_t retPos = msl.find("return out;", pos);
-                if (retPos == std::string::npos) break;
-                std::size_t lineStart = msl.rfind('\n', retPos);
-                lineStart = (lineStart == std::string::npos) ? 0 : lineStart + 1;
-                std::string indent(msl.data() + lineStart, retPos - lineStart);
-                std::string assign = indent + "out.gl_PointSize = 1.0;\n";
-                msl.insert(retPos, assign);
-                pos = retPos + assign.size() + std::strlen("return out;");
-            }
-        }
+        // [[point_size]] for point primitives is handled purely through
+        // `MTLRenderPipelineDescriptor.inputPrimitiveTopology = Point`
+        // — Metal defaults point_size to 1.0 in that mode when the VS
+        // doesn't write it. A prior iteration of this file injected
+        // `out.gl_PointSize = 1.0;` into every VS MSL body, but that
+        // caused `AGXMetalG13X Error Domain Code=3: "Vertex shader
+        // writes point size but inputPrimitiveTopology is
+        // MTLPrimitiveTopologyClassTriangle"` for every triangle /
+        // line draw in the suite (all `shaders.arrays.*`, many of
+        // `pixelstoragemodes.*`, etc. — 4k+ regressions on sweep s17).
+        // Removed unconditionally.
 
         // gl_CullDistance → [[clip_distance]] routing (vertex stages only).
         //
