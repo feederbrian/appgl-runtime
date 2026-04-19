@@ -510,6 +510,68 @@ rebuild catches the drift at compile time.
   synthesis currently assumes `float`-widthed output
   varyings, so an `ivec4` output would need a type-aware
   branch in `synthesisePassThroughVertexMSL`.
+- **2026-04-19** — **geometry_shader.* scale-out (phase 2)**:
+  Big sweep gain from api + adjacency + primitives work.
+  Sweep delta: **29/136 → 60/136 Pass (+31)** on
+  `KHR-GL46.geometry_shader.*`; constant_expressions.*_geometry
+  holds at 232/232.
+    - **api.*** (+6: getProgramiv/2/3, fs_gs_draw_call,
+      pipeline_program_without_active_vs, incompatible_
+      draw_call_mode). See commits `0144e1f`.
+    - **adjacency.*** (+6: non-indiced + indiced × lines /
+      line_strip / triangles, plus strip/loop/fan primitive
+      indexing and the drawElements GS-emul hook). See commit
+      `a20fa70`.
+    - **primitive_counter.*** (+18: `gl_PrimitiveIDIn`
+      built-in + XFB-vs-GS-output-type compatibility check).
+      Commits `414ace7`, `cd8b02c`.
+  Key infrastructure additions this chapter:
+    - `GLProgramObject.{gsPresent, gsInvocations}` —
+      `detectGeometryEmulatable` now always populates GS
+      metadata (topology + invocations), independent of
+      whether the emulator can handle the body.
+    - `Impl::writeGsXfbAndCheckDiscard` — walks TF varying
+      names, resolves each against the EmulatedDraw varying
+      table, writes per-vertex floats to both `shadowBytes`
+      AND the Metal buffer `[contents]` (mapBufferRange
+      reads the Metal buffer when one is allocated).
+      Supports GL_SEPARATE_ATTRIBS + GL_INTERLEAVED_ATTRIBS;
+      built-in `gl_Position` is a valid TF target. Returns
+      true when GL_RASTERIZER_DISCARD is enabled so the
+      caller can skip the Metal encode.
+    - drawElements GS-emul hook — mirrors drawArrays, with
+      index-expanded uint32 slot resolution passed into
+      `emulateGeometryDraw` via `elementIndices`.
+    - `emulateGeometryDraw` strip / fan / loop / strip-
+      adjacency primitive indexing via `vertexForPrim(p, v)`
+      helper. Discrete modes stay at `p * vpp + v`; strip
+      modes slide by 1; strip-adjacency slides by 2; fan
+      shares vertex 0; loop wraps at `count`.
+    - `OpCompositeConstruct` fix: operands can be vectors
+      (SPIR-V 1.0 §3.32.12 "each Constituent must be a
+      scalar or vector of the same component type; vectors
+      contribute ALL their components"). Prior impl dropped
+      the vec2's second element for `vec4(position_data, 0,
+      1)`, breaking every rendering / adjacency GS.
+    - Pipeline state tracking — `GLStateTracker.current-
+      ProgramPipeline_` + `glBindProgramPipeline`. Used by
+      the pipeline-without-VS validation in drawArrays.
+    - `gl_PrimitiveIDIn` (SPIR-V BuiltInPrimitiveId = 7)
+      populated per GS invocation via `setGsPrimitiveId`.
+    - Runtime's `glDrawArrays` XFB-mode check split:
+      programs with a GS compare the XFB mode against the
+      GS's OUTPUT primitive type (GL_POINTS / GL_LINE_STRIP
+      → GL_LINES / GL_TRIANGLE_STRIP → GL_TRIANGLES), not
+      against the draw mode.
+  Remaining geometry_shader.* (68 fail): 33 rendering.*,
+  9 layered.*, 4 linking, 4 limits, 4 api (rendering/SSBO/
+  image deps), 3 primitive_queries, 2 adjacency_triangle_
+  strip_adjacency (even/odd adjacency mapping per GL
+  §10.1), 1 primitive_id_from_fragment (FS primitive-id
+  plumbing), and 8 small misc. Rendering parity work is
+  the next big bucket — pixel-exact framebuffer readback
+  against the Metal raster output.
+
 - **2026-04-19** — **geometry_shader.* scale-out (phase 1)**:
   Major infrastructure push toward the `KHR-GL46.geometry_shader.*`
   section (baseline 29/136 Pass, target ~100+ additional).
