@@ -72,8 +72,10 @@ namespace spv {
         ExecutionModeOutputTriangleStrip = 29,
     };
     enum Decoration : std::uint32_t {
+        DecorationBlock = 2, DecorationBufferBlock = 3,
         DecorationLocation = 30, DecorationBuiltIn = 11,
         DecorationNoPerspective = 13, DecorationFlat = 14, DecorationCentroid = 16,
+        DecorationOffset = 35,
     };
     enum StorageClass : std::uint32_t {
         StorageClassUniformConstant = 0, StorageClassInput = 1,
@@ -239,6 +241,16 @@ struct DecorationSet {
     bool isFlat = false;
     bool isNoPerspective = false;
     bool isCentroid = false;
+    // OpMemberDecorate Offset — byte offset within a Block / Buffer-
+    // Block struct. Needed to resolve uniform access chains in the
+    // interpreter when we seed Uniform storage from the program's
+    // uniformValues table.
+    bool hasOffset = false;
+    std::uint32_t offset = 0;
+    // Block / BufferBlock decoration on the struct type — marks it
+    // as a uniform block (std140 / std430) rather than a plain
+    // aggregate struct used in function scope.
+    bool isBlock = false;
 };
 
 struct MemberDecorations {
@@ -258,6 +270,11 @@ struct SpirvModule {
     std::unordered_map<std::uint32_t, MemberDecorations> memberDecorations;
     std::unordered_map<std::uint32_t, std::string> names;
     std::unordered_map<std::uint32_t, std::string> memberNames0;
+    // Full per-member name map: structId → member index → name.
+    // Used by the uniform-seeding path to match a struct member (e.g.
+    // `renderingTargetSize` at member 0 of a $Globals block) to the
+    // program's uniformValues table by name.
+    std::unordered_map<std::uint32_t, std::unordered_map<std::uint32_t, std::string>> memberNames;
     std::unordered_map<std::uint32_t, std::uint32_t> extInstImports;   // id → "GLSL.std.450" hash
 
     std::uint32_t entryPoint = 0;
@@ -397,9 +414,13 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 break;
             }
             case spv::OpMemberName: {
-                if (wc >= 4 && w[1] == 0) {   // only stash member-0 name for now
+                if (wc >= 4) {
+                    const std::uint32_t structId = w[0];
+                    const std::uint32_t memberIdx = w[1];
                     std::size_t j = i + 3;
-                    memberNames0[w[0]] = readLiteralString(data, j, count);
+                    std::string mname = readLiteralString(data, j, count);
+                    if (memberIdx == 0) memberNames0[structId] = mname;
+                    memberNames[structId][memberIdx] = std::move(mname);
                 }
                 break;
             }
@@ -419,6 +440,8 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                     decorations[target].isNoPerspective = true;
                 } else if (deco == spv::DecorationCentroid) {
                     decorations[target].isCentroid = true;
+                } else if (deco == spv::DecorationBlock || deco == spv::DecorationBufferBlock) {
+                    decorations[target].isBlock = true;
                 }
                 break;
             }
@@ -433,6 +456,9 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 } else if (deco == spv::DecorationLocation && wc >= 5) {
                     memberDecorations[target].perMember[member].hasLocation = true;
                     memberDecorations[target].perMember[member].location = w[3];
+                } else if (deco == spv::DecorationOffset && wc >= 5) {
+                    memberDecorations[target].perMember[member].hasOffset = true;
+                    memberDecorations[target].perMember[member].offset = w[3];
                 }
                 break;
             }
@@ -595,6 +621,8 @@ struct AccessChainResult {
 
 class Interpreter {
 public:
+    enum class Stage { Vertex, Geometry };
+
     struct PerVertexInput {
         std::array<float, 4> position{0, 0, 0, 1};
         // Per-varying payload. Parallel to `inputVaryingNames` below.
@@ -602,6 +630,21 @@ public:
         std::vector<std::vector<float>> varyings;
     };
 
+    // Uniform plumbing — keyed by variable name (top-level uniform
+    // variable) or struct-member name (for Block-decorated uniform
+    // structs). Values are already flattened to scalar-per-element
+    // in the caller; the interpreter just memcpys into varStorage.
+    // Kept as float vectors but re-interpreted as int/uint via bit-
+    // cast when the destination type requires it (the storage bytes
+    // are the same in either case — GL uniforms are 32-bit scalars).
+    using UniformValues = std::unordered_map<std::string, std::vector<float>>;
+
+    // VS-only. Vertex attribute values keyed by SPIR-V Location
+    // decoration value. Populated by the caller from the VAO +
+    // VBO shadow bytes, one entry per enabled attribute.
+    using VertexAttribs = std::unordered_map<std::uint32_t, Value>;
+
+    // GS constructor (existing signature preserved).
     Interpreter(const SpirvModule& mod,
                 std::vector<std::string> inputVaryingNames,
                 std::vector<std::uint32_t> inputVaryingWidths,
@@ -611,7 +654,29 @@ public:
           inputVaryingNames_(std::move(inputVaryingNames)),
           inputVaryingWidths_(std::move(inputVaryingWidths)),
           outputVaryingNames_(std::move(outputVaryingNames)),
-          outputVaryingWidths_(std::move(outputVaryingWidths)) {}
+          outputVaryingWidths_(std::move(outputVaryingWidths)),
+          stage_(Stage::Geometry) {}
+
+    // VS constructor. `outputVaryingNames_/Widths_` mirror the VS
+    // stage-out varyings the GS will consume — the caller computes
+    // them by walking the VS output variables before constructing
+    // the interpreter, so the VS's gather-output step lines up with
+    // what the GS expects in its input varying table.
+    Interpreter(const SpirvModule& mod,
+                Stage stage,
+                std::vector<std::string> outputVaryingNames,
+                std::vector<std::uint32_t> outputVaryingWidths)
+        : module_(mod),
+          outputVaryingNames_(std::move(outputVaryingNames)),
+          outputVaryingWidths_(std::move(outputVaryingWidths)),
+          stage_(stage) {}
+
+    void setUniforms(const UniformValues* u) { uniforms_ = u; }
+    void setVsInputs(const VertexAttribs* a, std::int32_t vertexID, std::int32_t instanceID) {
+        vsAttribs_ = a;
+        vsVertexID_ = vertexID;
+        vsInstanceID_ = instanceID;
+    }
 
     // Run the entry-point function once, given `inputs` as gl_in[].
     // Appends emitted vertices to `emitted`. Primitive boundaries are
@@ -621,6 +686,11 @@ public:
     bool execute(const std::vector<PerVertexInput>& inputs,
                  std::vector<EmulatedVertex>& emitted);
 
+    // VS entry point. Runs the body once, captures gl_Position +
+    // user output varyings into the supplied record. Returns false
+    // on any interpreter bail.
+    bool executeVs(EmulatedVertex& out);
+
     const std::string& diagnostic() const { return diagnostic_; }
 
 private:
@@ -629,6 +699,15 @@ private:
     std::vector<std::uint32_t> inputVaryingWidths_;
     std::vector<std::string> outputVaryingNames_;
     std::vector<std::uint32_t> outputVaryingWidths_;
+
+    Stage stage_;
+
+    // Uniform / VS attribute plumbing (non-owning pointers to caller
+    // storage).
+    const UniformValues* uniforms_ = nullptr;
+    const VertexAttribs* vsAttribs_ = nullptr;
+    std::int32_t vsVertexID_ = 0;
+    std::int32_t vsInstanceID_ = 0;
 
     // Per-id SSA values for loads/arithmetic results.
     std::unordered_map<std::uint32_t, Value> valueStore_;
@@ -829,10 +908,46 @@ void Interpreter::storeToVar(std::uint32_t varId, std::uint32_t off,
 }
 
 void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
+    // Resolve input locations once up front — glslang doesn't emit
+    // DecorationLocation when the GLSL omits `layout(location=N)`,
+    // so the VS pre-pass needs to assign implicit locations just
+    // like the GS side does for outputs (see gatherOutputVaryings).
+    // Locations are assigned in ascending SPIR-V id order, starting
+    // above any explicit-location slots.
+    std::unordered_map<std::uint32_t, std::uint32_t> inputLocationByVarId;
+    if (stage_ == Stage::Vertex) {
+        std::vector<std::uint32_t> explicitLocs;
+        std::vector<std::uint32_t> implicitIds;
+        for (const auto& [varId, info] : module_.variables) {
+            if (info.storageClass != spv::StorageClassInput) continue;
+            auto dIt = module_.decorations.find(varId);
+            // Built-in inputs (gl_VertexIndex etc.) are not user attribs.
+            if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn) continue;
+            if (dIt != module_.decorations.end() && dIt->second.hasLocation) {
+                inputLocationByVarId[varId] = dIt->second.location;
+                explicitLocs.push_back(dIt->second.location);
+            } else {
+                implicitIds.push_back(varId);
+            }
+        }
+        std::sort(implicitIds.begin(), implicitIds.end());
+        std::uint32_t nextLoc = 0;
+        auto taken = [&](std::uint32_t loc) {
+            for (auto x : explicitLocs) if (x == loc) return true;
+            return false;
+        };
+        for (auto id : implicitIds) {
+            while (taken(nextLoc)) ++nextLoc;
+            inputLocationByVarId[id] = nextLoc++;
+        }
+    }
+
     // Walk every declared variable. For Output/Private/Function storage,
     // reserve a zero-initialised flat buffer of the right size. For
     // Input storage, populate from driver-supplied per-vertex data
-    // (gl_in[].gl_Position + named input varyings).
+    // (gl_in[].gl_Position + named input varyings). For Uniform /
+    // UniformConstant storage, seed from the caller-supplied uniform
+    // name → value map via OpMemberName / OpName lookups.
     for (const auto& [varId, info] : module_.variables) {
         auto tIt = module_.types.find(info.typeId);
         if (tIt == module_.types.end()) continue;
@@ -840,7 +955,101 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
         auto& storage = varStorage_[varId];
         storage.assign(width, 0.0f);
 
-        if (info.storageClass == spv::StorageClassInput) {
+        // ── Uniform / UniformConstant — seed from caller's map.
+        if ((info.storageClass == spv::StorageClassUniform ||
+             info.storageClass == spv::StorageClassUniformConstant) &&
+            uniforms_ != nullptr) {
+            const std::uint32_t pointeeType = tIt->second.pointeeType;
+            const auto& pT = module_.types.at(pointeeType);
+            if (pT.kind == TypeInfo::Kind::Struct) {
+                // Block-decorated struct. Walk each member, find its
+                // name via OpMemberName + offset via DecorationOffset,
+                // look up the value in the uniform map and splat into
+                // storage at the member's flat-scalar offset.
+                auto mnIt = module_.memberNames.find(pointeeType);
+                auto mdIt = module_.memberDecorations.find(pointeeType);
+                std::uint32_t runningScalarOffset = 0;
+                for (std::size_t m = 0; m < pT.memberTypes.size(); ++m) {
+                    const std::uint32_t memberW = module_.scalarWidth(pT.memberTypes[m]);
+                    // Member name.
+                    std::string mname;
+                    if (mnIt != module_.memberNames.end()) {
+                        auto it2 = mnIt->second.find(static_cast<std::uint32_t>(m));
+                        if (it2 != mnIt->second.end()) mname = it2->second;
+                    }
+                    if (!mname.empty()) {
+                        auto uIt = uniforms_->find(mname);
+                        if (uIt != uniforms_->end()) {
+                            const auto& src = uIt->second;
+                            for (std::size_t k = 0; k < src.size() && runningScalarOffset + k < storage.size(); ++k) {
+                                storage[runningScalarOffset + k] = src[k];
+                            }
+                        }
+                    }
+                    (void)mdIt;   // DecorationOffset isn't needed for our flat layout
+                    runningScalarOffset += memberW;
+                }
+            } else {
+                // Top-level scalar / vector uniform. Look up by the
+                // variable's own OpName.
+                auto uIt = uniforms_->find(info.name);
+                if (uIt != uniforms_->end()) {
+                    const auto& src = uIt->second;
+                    for (std::size_t k = 0; k < src.size() && k < storage.size(); ++k) {
+                        storage[k] = src[k];
+                    }
+                }
+            }
+            continue;
+        }
+
+        // ── VS-stage built-ins: gl_VertexID / gl_InstanceID.
+        if (stage_ == Stage::Vertex && info.storageClass == spv::StorageClassInput) {
+            auto dIt = module_.decorations.find(varId);
+            if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn) {
+                const std::uint32_t bi = dIt->second.builtIn;
+                // BuiltInVertexIndex = 42, BuiltInInstanceIndex = 43
+                if (bi == 42 && width >= 1) {
+                    std::memcpy(&storage[0], &vsVertexID_, 4);
+                    continue;
+                }
+                if (bi == 43 && width >= 1) {
+                    std::memcpy(&storage[0], &vsInstanceID_, 4);
+                    continue;
+                }
+            }
+        }
+
+        // ── VS-stage vertex attribute. Look up by Location, using
+        // the explicit-or-implicit mapping we resolved at function
+        // entry.
+        if (stage_ == Stage::Vertex && info.storageClass == spv::StorageClassInput) {
+            if (vsAttribs_ != nullptr) {
+                auto locIt = inputLocationByVarId.find(varId);
+                if (locIt != inputLocationByVarId.end()) {
+                    auto aIt = vsAttribs_->find(locIt->second);
+                    if (aIt != vsAttribs_->end()) {
+                        const Value& v = aIt->second;
+                        const int n = v.componentCount();
+                        if (v.isFloatKind()) {
+                            for (int k = 0; k < n && static_cast<std::uint32_t>(k) < width; ++k) {
+                                storage[k] = v.f[k];
+                            }
+                        } else {
+                            for (int k = 0; k < n && static_cast<std::uint32_t>(k) < width; ++k) {
+                                std::memcpy(&storage[k], &v.i[k], 4);
+                            }
+                        }
+                    }
+                }
+            }
+            // VS Input handling is complete regardless of whether
+            // we matched — the fall-through GS gl_in[] path isn't
+            // applicable to this stage.
+            continue;
+        }
+
+        if (stage_ == Stage::Geometry && info.storageClass == spv::StorageClassInput) {
             // Identify the variable:
             //  - gl_PerVertex block input (contains gl_Position) —
             //    member 0 is BuiltInPosition. The SPIR-V pointee type
@@ -1085,15 +1294,61 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
     }
 }
 
+bool Interpreter::executeVs(EmulatedVertex& out) {
+    if (!module_.haveFuncBody) {
+        diagnostic_ = "SPIR-V module has no function body";
+        return false;
+    }
+    std::vector<PerVertexInput> emptyInputs;
+    initVariables(emptyInputs);
+    currentOutVaryings_.clear();
+    currentOutVaryings_.resize(outputVaryingNames_.size());
+    std::vector<EmulatedVertex> dummy;   // VS doesn't emit anything
+    if (!execute(emptyInputs, dummy)) return false;
+
+    // After VS main() completes, capture gl_Position + output varyings
+    // from their module-scope storage into `out`. Same shape as GS's
+    // emitVertex().
+    out.position[0] = currentPosition_[0];
+    out.position[1] = currentPosition_[1];
+    out.position[2] = currentPosition_[2];
+    out.position[3] = currentPosition_[3];
+    out.varyings.clear();
+    for (std::size_t k = 0; k < outputVaryingNames_.size(); ++k) {
+        std::vector<float> v;
+        v.assign(outputVaryingWidths_[k], 0.0f);
+        for (const auto& [varId, info] : module_.variables) {
+            if (info.storageClass == spv::StorageClassOutput &&
+                info.name == outputVaryingNames_[k]) {
+                auto sIt = varStorage_.find(varId);
+                if (sIt != varStorage_.end()) {
+                    for (std::size_t j = 0; j < v.size() && j < sIt->second.size(); ++j) {
+                        v[j] = sIt->second[j];
+                    }
+                }
+                break;
+            }
+        }
+        out.varyings.insert(out.varyings.end(), v.begin(), v.end());
+    }
+    return !errored_;
+}
+
 bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                           std::vector<EmulatedVertex>& emitted) {
     if (!module_.haveFuncBody) {
         diagnostic_ = "SPIR-V module has no function body";
         return false;
     }
-    initVariables(inputs);
-    currentOutVaryings_.clear();
-    currentOutVaryings_.resize(outputVaryingNames_.size());
+    // VS's `executeVs` already called initVariables+currentOutVaryings
+    // setup before forwarding here — skip them in that case. The dummy
+    // emitted buffer won't receive any vertices for VS (no OpEmitVertex
+    // in VS GLSL), but we keep the check generic.
+    if (stage_ == Stage::Geometry) {
+        initVariables(inputs);
+        currentOutVaryings_.clear();
+        currentOutVaryings_.resize(outputVaryingNames_.size());
+    }
 
     // Build label → instruction offset map.
     std::unordered_map<std::uint32_t, std::size_t> labelMap;
@@ -2021,12 +2276,102 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
 }
 }  // namespace
 
+namespace {
+// Build a uniform-name → flat float value map from the program's
+// link-time uniform table + draw-time uniformValues. Works for
+// scalars, vectors, and matrices (laid out as flat float sequence —
+// the interpreter treats ints as bit-cast floats so the same storage
+// serves both types).
+Interpreter::UniformValues buildUniformMap(const GLProgramObject& program) {
+    Interpreter::UniformValues out;
+    for (const auto& u : program.uniforms) {
+        auto vIt = program.uniformValues.find(u.location);
+        if (vIt == program.uniformValues.end()) continue;
+        const auto& v = vIt->second;
+        std::vector<float> flat;
+        if (!v.floats.empty()) {
+            flat = v.floats;
+        } else if (!v.ints.empty()) {
+            flat.resize(v.ints.size());
+            std::memcpy(flat.data(), v.ints.data(), flat.size() * sizeof(float));
+        } else if (!v.uints.empty()) {
+            flat.resize(v.uints.size());
+            std::memcpy(flat.data(), v.uints.data(), flat.size() * sizeof(float));
+        }
+        if (!flat.empty()) out[u.name] = std::move(flat);
+    }
+    return out;
+}
+
+// Extract a single vertex's attribute value from a VAO + VBO shadow.
+// `attrIdx` is the GLVertexAttributeState array index (== Location
+// for the default non-separated-format path). `vertexIdx` is absolute
+// (first + relativeVertex).
+Value readVertexAttribFromVAO(
+    const GLVertexArrayObject& vao,
+    GLObjectStore& objects,
+    std::size_t attrIdx,
+    std::size_t vertexIdx)
+{
+    Value v;
+    if (attrIdx >= vao.attributes.size()) return v;
+    const auto& attr = vao.attributes[attrIdx];
+    if (!attr.enabled) return v;
+    // Resolve buffer. Separated-format bindings aren't handled yet —
+    // MVP uses the classic glVertexAttribPointer path.
+    GLuint bufferName = attr.buffer;
+    std::size_t relativeOffset = 0;
+    std::size_t stride = attr.stride > 0 ? static_cast<std::size_t>(attr.stride)
+                                         : static_cast<std::size_t>(attr.size * 4);
+    std::size_t baseOffset = attr.pointer;
+    if (bufferName == 0) return v;
+    GLBufferObject* buf = objects.buffers().get(bufferName);
+    if (buf == nullptr || buf->shadowBytes.empty()) return v;
+    const std::size_t byteOffset = baseOffset + relativeOffset + stride * vertexIdx;
+    if (byteOffset + static_cast<std::size_t>(attr.size * 4) > buf->shadowBytes.size()) {
+        return v;
+    }
+    const std::uint8_t* src = buf->shadowBytes.data() + byteOffset;
+    // GL 4.6 §10.2 (Vertex Arrays) table 10.8: when a vertex
+    // attribute declared as vec4 in the shader receives a
+    // narrower stream, missing components are filled with
+    // (0, 0, 0, 1). We always return a 4-component Value so the
+    // VS-init path can copy however many components the SPIR-V
+    // variable actually declares.
+    const bool isInt  = (attr.type == 0x1404 /* GL_INT */);
+    const bool isUInt = (attr.type == 0x1405 /* GL_UNSIGNED_INT */);
+    v.kind = isInt  ? Value::Kind::Int4
+           : isUInt ? Value::Kind::UInt4
+                    : Value::Kind::Float4;
+    // Init w component to spec default of 1 / unit, then overwrite
+    // from source. x/y/z init to 0 (spec default).
+    if (isInt || isUInt) {
+        v.i[0] = v.i[1] = v.i[2] = 0;
+        v.i[3] = 1;
+        if (isInt || isUInt || attr.type == 0x1406 /* GL_FLOAT */) {
+            for (int k = 0; k < attr.size && k < 4; ++k) {
+                std::memcpy(&v.i[k], src + k * 4, 4);
+            }
+        }
+    } else {
+        v.f[0] = v.f[1] = v.f[2] = 0.0f;
+        v.f[3] = 1.0f;
+        if (attr.type == 0x1406 /* GL_FLOAT */) {
+            for (int k = 0; k < attr.size && k < 4; ++k) {
+                std::memcpy(&v.f[k], src + k * 4, 4);
+            }
+        }
+    }
+    return v;
+}
+}  // namespace
+
 EmulatedDraw emulateGeometryDraw(
     GLProgramObject& program,
-    const GLVertexArrayObject& /*vao*/,
-    GLObjectStore& /*objects*/,
+    const GLVertexArrayObject& vao,
+    GLObjectStore& objects,
     const GLStateTracker& /*state*/,
-    GLenum drawMode, GLsizei count, GLint /*first*/,
+    GLenum drawMode, GLsizei count, GLint first,
     const void* /*indices*/, GLenum /*indexType*/)
 {
     EmulatedDraw d;
@@ -2082,23 +2427,118 @@ EmulatedDraw emulateGeometryDraw(
         outBaseType.push_back(v.baseType);
     }
 
-    // Run the interpreter once per primitive. We pass zero-initialised
-    // per-vertex inputs — the constant_expressions GS cluster never
-    // reads gl_in[] or user input varyings (the tests evaluate
-    // constant expressions, not per-vertex data). If a future opcode
-    // landing reads inputs, this block gets replaced by a real VS
-    // pre-pass (see docs/geometry-shader-emulation.md §4 step 2).
+    // ─── VS pre-pass ────────────────────────────────────────────
+    //
+    // For each input vertex, run the VS interpreter on CPU so gl_in[]
+    // sees the right per-vertex data. Skipped when the program lacks
+    // VS SPIR-V (shouldn't happen for VGF programs, but the
+    // constant_expressions path used to work without it because the
+    // GS didn't read gl_in[]). In that case we fall back to zero-
+    // initialised inputs.
+    const Interpreter::UniformValues uniforms = buildUniformMap(program);
+
+    // Parse VS SPIR-V (shared across every vertex of this draw). The
+    // VS module is small — re-parsing per draw is fine; caching it on
+    // the program object only matters if CTS workloads show draw-call
+    // hot spots, which they don't at this scale.
+    SpirvModule vsMod;
+    const bool haveVs = !program.vertexSpirv.empty() &&
+                        vsMod.parse(program.vertexSpirv.data(), program.vertexSpirv.size()) &&
+                        vsMod.haveFuncBody;
+
+    // VS output varyings (ordered by Location) — the caller's per-
+    // vertex-input varying table must match the GS's input-side view.
+    std::vector<std::string>   vsOutNames;
+    std::vector<std::uint32_t> vsOutWidths;
+    std::vector<std::uint32_t> vsOutLocations;
+    if (haveVs) {
+        const auto vsOuts = gatherOutputVaryings(vsMod);
+        vsOutNames.reserve(vsOuts.size());
+        vsOutWidths.reserve(vsOuts.size());
+        vsOutLocations.reserve(vsOuts.size());
+        for (const auto& v : vsOuts) {
+            vsOutNames.push_back(v.name);
+            vsOutWidths.push_back(v.width);
+            vsOutLocations.push_back(v.location);
+        }
+    }
+
+    // Run VS for every input vertex (count vertices total) up front,
+    // then slice into per-primitive inputs. Avoids re-running VS on
+    // shared vertices (line strip / triangle strip / indexed draws
+    // would otherwise re-execute); not the cleanest for GL_POINTS
+    // where every vertex is its own primitive, but cheap enough for
+    // CTS sizes.
+    std::vector<Interpreter::PerVertexInput> allVertexInputs(count);
+    if (haveVs) {
+        // Pre-compute (location → attrIdx) map from the VAO so the VS
+        // interpreter can look up by SPIR-V Location.
+        Interpreter::VertexAttribs vsAttribs;
+
+        // Find the entry-point interface variables' Locations; the
+        // caller maps VAO attribute index → GL attribute location.
+        // For the non-separated-format VAO path used by these tests,
+        // VAO attribute index == GL location, so we build the
+        // vsAttribs map per-vertex by walking vao.attributes and
+        // using the array index as the Location key.
+        for (GLsizei vi = 0; vi < count; ++vi) {
+            vsAttribs.clear();
+            for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
+                if (!vao.attributes[ai].enabled) continue;
+                Value v = readVertexAttribFromVAO(vao, objects, ai,
+                    static_cast<std::size_t>(first + vi));
+                if (v.kind != Value::Kind::Invalid) {
+                    vsAttribs[static_cast<std::uint32_t>(ai)] = v;
+                }
+            }
+            Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
+                                 vsOutNames, vsOutWidths);
+            vsInterp.setUniforms(&uniforms);
+            vsInterp.setVsInputs(&vsAttribs, first + vi, 0 /*instanceID*/);
+            EmulatedVertex vsOut;
+            vsOut.position[0] = vsOut.position[1] = vsOut.position[2] = 0.0f;
+            vsOut.position[3] = 1.0f;
+            if (!vsInterp.executeVs(vsOut)) {
+                // VS failure — leave the record at default (0,0,0,1)
+                // so the draw at least produces something the log can
+                // grep. Diagnostic propagates via EmulatedDraw.
+                d.diagnostic = "VS pre-pass failed: " + vsInterp.diagnostic();
+            }
+            for (int k = 0; k < 4; ++k) {
+                allVertexInputs[vi].position[k] = vsOut.position[k];
+            }
+            // Slice flat varyings into per-varying vectors matching
+            // `vsOutWidths`.
+            std::size_t cursor = 0;
+            allVertexInputs[vi].varyings.resize(vsOutWidths.size());
+            for (std::size_t k = 0; k < vsOutWidths.size(); ++k) {
+                const std::uint32_t w = vsOutWidths[k];
+                auto& dst = allVertexInputs[vi].varyings[k];
+                dst.assign(w, 0.0f);
+                for (std::uint32_t j = 0; j < w && cursor + j < vsOut.varyings.size(); ++j) {
+                    dst[j] = vsOut.varyings[cursor + j];
+                }
+                cursor += w;
+            }
+        }
+    }
+
+    // Run the GS interpreter once per primitive, slicing the pre-run
+    // VS outputs into per-primitive input groups.
     std::vector<EmulatedVertex> emittedAll;
     emittedAll.reserve(primCount * program.gsMaxVertices);
 
-    std::vector<Interpreter::PerVertexInput> inputs(vpp);
-    for (auto& pv : inputs) {
-        pv.varyings.clear();   // no per-vertex varyings available at MVP
-    }
-
     for (std::size_t p = 0; p < primCount; ++p) {
-        Interpreter interp(mod, /*inputVaryingNames=*/{}, /*inputVaryingWidths=*/{},
+        std::vector<Interpreter::PerVertexInput> inputs(vpp);
+        for (std::uint32_t v = 0; v < vpp; ++v) {
+            const std::size_t globalIdx = p * vpp + v;
+            if (globalIdx < allVertexInputs.size()) {
+                inputs[v] = allVertexInputs[globalIdx];
+            }
+        }
+        Interpreter interp(mod, vsOutNames, vsOutWidths,
                            outNames, outWidths);
+        interp.setUniforms(&uniforms);
         std::vector<EmulatedVertex> emitted;
         if (!interp.execute(inputs, emitted)) {
             d.ok = false;
