@@ -12558,6 +12558,12 @@ bool GLContext::linkProgram(GLuint program) {
                     location = nextOutputLoc;
                 }
                 entry.location = location;
+                // Dual-source-blend index set by
+                // glBindFragDataLocationIndexed; default 0.
+                auto idxIt = programObject->requestedFragDataLocationIndices.find(output.name);
+                if (idxIt != programObject->requestedFragDataLocationIndices.end()) {
+                    entry.locationIndex = static_cast<GLint>(idxIt->second);
+                }
                 entry.referencedBy = 0x02; // fragment
                 // GL 4.6 §15.2: array outputs consume `arraySize`
                 // consecutive locations.
@@ -17850,6 +17856,9 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
         case GL_ATOMIC_COUNTER_BUFFER_INDEX: return -1;
         case GL_TOP_LEVEL_ARRAY_SIZE:   return 1;
         case GL_TOP_LEVEL_ARRAY_STRIDE: return 0;
+        case GL_LOCATION_INDEX:         return entry.locationIndex;
+        case GL_IS_PER_PATCH:           return GL_FALSE;
+        case GL_LOCATION_COMPONENT:     return 0;
         default: return 0;
     }
 }
@@ -18401,21 +18410,22 @@ GLint GLContext::getProgramResourceLocationIndex(GLuint program, GLenum programI
         pushError(GL_INVALID_OPERATION);
         return -1;
     }
-    // Fragment output location index (dual-source blending). Since we don't
-    // track dual-source indices yet, return 0 if the name is found.
-    // Array outputs are stored canonically as "<name>[0]" per GL 4.6
+    // Fragment output location index (dual-source blending) —
+    // comes from `glBindFragDataLocationIndexed`'s `index` arg
+    // (0 = primary, 1 = second source). Stored on the entry.
+    // Array outputs canonicalised to "<name>[0]" per GL 4.6
     // §7.3.1 — match both bare and suffixed query shapes.
     const std::string query = name;
     for (const auto& entry : prog->resourceOutputs) {
-        if (entry.name == query) return 0;
+        if (entry.name == query) return entry.locationIndex;
     }
     for (const auto& entry : prog->resourceOutputs) {
-        if (entry.name == query + "[0]") return 0;
+        if (entry.name == query + "[0]") return entry.locationIndex;
     }
     if (query.size() >= 3 && query.compare(query.size() - 3, 3, "[0]") == 0) {
         const std::string baseOnly = query.substr(0, query.size() - 3);
         for (const auto& entry : prog->resourceOutputs) {
-            if (entry.name == baseOnly) return 0;
+            if (entry.name == baseOnly) return entry.locationIndex;
         }
     }
     return -1;

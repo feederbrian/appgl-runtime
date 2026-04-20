@@ -1684,16 +1684,43 @@ static void APIENTRY glSampleMaski(GLuint maskNumber, GLbitfield mask) {
 }
 
 static void APIENTRY glBindFragDataLocationIndexed(GLuint program, GLuint colorNumber, GLuint index, const GLchar *name) {
-    (void)program;
-    (void)colorNumber;
-    (void)index;
-    (void)name;
+    // GL 4.6 §15.2 extends glBindFragDataLocation with a
+    // dual-source blend index (0 = primary color, 1 = second
+    // color). Record both the primary location AND the index on
+    // the program so link-time output-table assembly can apply
+    // them. INVALID_VALUE if index > 1 or colorNumber >=
+    // MAX_DRAW_BUFFERS — not enforced here yet.
+    auto* ctx = appgl::Runtime::shared().currentContext();
+    if (ctx == nullptr || name == nullptr) return;
+    auto* prog = ctx->objects().programs().get(program);
+    if (prog == nullptr) return;
+    prog->requestedFragDataLocations[name] = colorNumber;
+    prog->requestedFragDataLocationIndices[name] = index;
 }
 
 static GLint APIENTRY glGetFragDataIndex(GLuint program, const GLchar *name) {
-    (void)program;
-    (void)name;
-    return 0;
+    // GL 4.6 §15.2: returns the index of a fragment output
+    // (0 for first-source, 1 for second-source in dual-source
+    // blending), or -1 if `name` is not an active output.
+    auto* ctx = appgl::Runtime::shared().currentContext();
+    if (ctx == nullptr || name == nullptr) return -1;
+    auto* prog = ctx->objects().programs().get(program);
+    if (prog == nullptr || !prog->linked) return -1;
+    const std::string query = name;
+    for (const auto& entry : prog->resourceOutputs) {
+        if (entry.name == query) return entry.locationIndex;
+    }
+    // "[0]"-suffix tolerance for array outputs.
+    for (const auto& entry : prog->resourceOutputs) {
+        if (entry.name == query + "[0]") return entry.locationIndex;
+    }
+    if (query.size() >= 3 && query.compare(query.size() - 3, 3, "[0]") == 0) {
+        const std::string baseOnly = query.substr(0, query.size() - 3);
+        for (const auto& entry : prog->resourceOutputs) {
+            if (entry.name == baseOnly) return entry.locationIndex;
+        }
+    }
+    return -1;
 }
 
 static void APIENTRY glVertexAttribP1ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {

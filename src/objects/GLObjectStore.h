@@ -409,6 +409,10 @@ struct GLProgramResourceEntry {
     bool isRowMajor = false;  // GL_UNIFORM_IS_ROW_MAJOR for matrix block members
     GLint arrayStride = -1;   // byte stride between array elements, -1 for non-block
     GLint matrixStride = -1;  // byte stride between matrix columns/rows, -1 for non-block
+    // Dual-source blending index (0 or 1) for fragment outputs.
+    // Set by glBindFragDataLocationIndexed per GL 4.6 §15.2.
+    // Non-output resources keep the default 0.
+    GLint locationIndex = 0;
     // Only populated for block entries (UNIFORM_BLOCK,
     // SHADER_STORAGE_BLOCK, ATOMIC_COUNTER_BUFFER,
     // TRANSFORM_FEEDBACK_BUFFER). Indices of the block's
@@ -475,6 +479,13 @@ struct GLProgramObject {
     // `layout(location=N)` qualifier. Array outputs consume
     // `arraySize` consecutive locations starting at the bound color.
     std::unordered_map<std::string, GLuint> requestedFragDataLocations;
+    // Parallel map for the dual-source-blend index (0 or 1) set
+    // by `glBindFragDataLocationIndexed`. Default 0 for any
+    // output bound via plain `glBindFragDataLocation` or
+    // `layout(location=N)`; only named outputs bound with
+    // `glBindFragDataLocationIndexed(program, color, 1, name)`
+    // get the index-1 slot for dual-source blending.
+    std::unordered_map<std::string, GLuint> requestedFragDataLocationIndices;
     GLSynthesizedMatrixSlots synthesizedMatrixSlots;
 
     // Tessellation program properties (extracted from SPIR-V at link time).
