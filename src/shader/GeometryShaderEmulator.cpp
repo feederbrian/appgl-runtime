@@ -633,6 +633,14 @@ public:
         // Per-varying payload. Parallel to `inputVaryingNames` below.
         // Each varying is a flat float array (width from varying type).
         std::vector<std::vector<float>> varyings;
+        // gl_ClipDistance[] / gl_CullDistance[] written by the VS for
+        // this vertex. Read by the caller's pre-GS culling check (a
+        // primitive is discarded before the GS runs iff for some plane
+        // i, every vertex has cullDistance[i] < 0 — GL 4.6 §13.6) and
+        // propagated into the GS's gl_in[].gl_ClipDistance array so a
+        // passthrough GS sees the same values the no-GS path would.
+        std::vector<float> clipDistance;
+        std::vector<float> cullDistance;
     };
 
     // Uniform plumbing — keyed by variable name (top-level uniform
@@ -765,6 +773,14 @@ private:
 
     // Capture the current output state as an EmulatedVertex.
     void emitVertex(std::vector<EmulatedVertex>& out);
+
+    // Scan Output variables for gl_ClipDistance / gl_CullDistance
+    // (either direct BuiltIn or as members of a gl_PerVertex-style
+    // struct) and copy the current storage values out. Callers are
+    // `emitVertex` for per-vertex capture on GS emit and `executeVs`
+    // for VS pre-pass output capture.
+    void captureClipCull(std::vector<float>& clipOut,
+                         std::vector<float>& cullOut) const;
 
     // Resolve an access-chain walk. `base` is a pointer variable id.
     // `indices` are the sequence of OpConstant id operands.
@@ -1158,17 +1174,45 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                 const std::uint32_t perVertexW = module_.scalarWidth(pointeeType.componentType);
                 const auto& elemT = module_.types.at(pointeeType.componentType);
                 if (elemT.kind == TypeInfo::Kind::Struct) {
-                    // gl_in[] — find member 0 (Position) by BuiltIn decoration.
+                    // gl_in[] — walk every member looking for
+                    // BuiltInPosition (member 0 by convention),
+                    // BuiltInClipDistance, and BuiltInCullDistance.
+                    // Compute each member's scalar offset by summing
+                    // widths of preceding members so clip/cull arrays
+                    // land at the right slot even when the struct
+                    // shape differs from the "position at 0, point
+                    // size at 1, clip at 2, cull at 3" textbook
+                    // layout (glslang reorders members to skip
+                    // unused ones, so member indices aren't stable).
                     auto mdIt = module_.memberDecorations.find(pointeeType.componentType);
                     for (std::size_t vi = 0; vi < inputs.size(); ++vi) {
                         const std::uint32_t base = static_cast<std::uint32_t>(vi) * perVertexW;
-                        // Member 0 is gl_Position by convention.
-                        if (mdIt != module_.memberDecorations.end()) {
-                            auto mmIt = mdIt->second.perMember.find(0);
-                            if (mmIt != mdIt->second.perMember.end() && mmIt->second.hasBuiltIn
-                                && mmIt->second.builtIn == spv::BuiltInPosition) {
-                                for (int k = 0; k < 4; ++k) storage[base + k] = inputs[vi].position[k];
+                        if (mdIt == module_.memberDecorations.end()) continue;
+                        std::uint32_t runningOff = 0;
+                        for (std::size_t m = 0; m < elemT.memberTypes.size(); ++m) {
+                            const std::uint32_t memType = elemT.memberTypes[m];
+                            const std::uint32_t memW = module_.scalarWidth(memType);
+                            auto mm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
+                            if (mm != mdIt->second.perMember.end() && mm->second.hasBuiltIn) {
+                                if (mm->second.builtIn == spv::BuiltInPosition) {
+                                    for (int k = 0; k < 4 && static_cast<std::uint32_t>(k) < memW; ++k) {
+                                        storage[base + runningOff + k] = inputs[vi].position[k];
+                                    }
+                                } else if (mm->second.builtIn == spv::BuiltInClipDistance) {
+                                    const auto& src = inputs[vi].clipDistance;
+                                    for (std::uint32_t k = 0; k < memW; ++k) {
+                                        storage[base + runningOff + k] =
+                                            (k < src.size()) ? src[k] : 0.0f;
+                                    }
+                                } else if (mm->second.builtIn == spv::BuiltInCullDistance) {
+                                    const auto& src = inputs[vi].cullDistance;
+                                    for (std::uint32_t k = 0; k < memW; ++k) {
+                                        storage[base + runningOff + k] =
+                                            (k < src.size()) ? src[k] : 0.0f;
+                                    }
+                                }
                             }
+                            runningOff += memW;
                         }
                     }
                 } else {
@@ -1213,6 +1257,98 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
     }
 }
 
+// Shared helper: scan module_.variables for Output variables whose
+// decoration (direct or member-of-struct) is BuiltInClipDistance /
+// BuiltInCullDistance, and copy the current storage values out.
+// Used by both `emitVertex` (GS per-vertex capture) and `executeVs`
+// (VS full output capture) — they have the same shape.
+namespace {
+// clip/cull array lengths from the decorated array type. Each is
+// OpTypeArray elemType=float length=N.
+std::uint32_t clipCullArrayLen(const SpirvModule& mod, std::uint32_t arrayTypeId) {
+    auto it = mod.types.find(arrayTypeId);
+    if (it == mod.types.end()) return 0;
+    if (it->second.kind != TypeInfo::Kind::Array) return 0;
+    // Array length is stored on an OpConstant referenced by arrayLengthConstId.
+    auto cIt = mod.constants.find(it->second.arrayLengthConstId);
+    if (cIt == mod.constants.end()) return 0;
+    return static_cast<std::uint32_t>(cIt->second.i[0]);
+}
+}  // namespace
+
+void Interpreter::captureClipCull(std::vector<float>& clipOut,
+                                  std::vector<float>& cullOut) const {
+    clipOut.clear();
+    cullOut.clear();
+    // Two shapes in SPIR-V:
+    //  1. Direct: `out float gl_ClipDistance[N];` — Output variable
+    //     whose decoration says BuiltInClipDistance. The storage is
+    //     a flat float array.
+    //  2. Member of gl_PerVertex: `out gl_PerVertex { ... float
+    //     gl_ClipDistance[N]; ... };` — Output struct variable whose
+    //     member at some index has MemberDecorate BuiltIn
+    //     ClipDistance. Storage is a flat concatenation of all
+    //     struct members; we offset into it by summing widths of
+    //     preceding members.
+    for (const auto& [varId, info] : module_.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto sIt = varStorage_.find(varId);
+        if (sIt == varStorage_.end()) continue;
+        // Walk the pointee type. `typeId` is a Pointer; its pointee
+        // is either the clip/cull array directly or a struct whose
+        // members include clip/cull.
+        auto tIt = module_.types.find(info.typeId);
+        if (tIt == module_.types.end()) continue;
+        const std::uint32_t pointee = tIt->second.pointeeType;
+        auto pIt = module_.types.find(pointee);
+        if (pIt == module_.types.end()) continue;
+        // Shape 1: Output variable decorated BuiltIn ClipDistance /
+        // CullDistance. The pointee is the array itself.
+        auto dIt = module_.decorations.find(varId);
+        if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn) {
+            const std::uint32_t n = clipCullArrayLen(module_, pointee);
+            if (dIt->second.builtIn == spv::BuiltInClipDistance) {
+                for (std::uint32_t k = 0; k < n; ++k) {
+                    clipOut.push_back(k < sIt->second.size() ? sIt->second[k] : 0.0f);
+                }
+                continue;
+            }
+            if (dIt->second.builtIn == spv::BuiltInCullDistance) {
+                for (std::uint32_t k = 0; k < n; ++k) {
+                    cullOut.push_back(k < sIt->second.size() ? sIt->second[k] : 0.0f);
+                }
+                continue;
+            }
+        }
+        // Shape 2: Struct whose members are decorated. Walk member
+        // decorations, compute each member's flat-scalar offset,
+        // check whether it's clip/cull.
+        if (pIt->second.kind != TypeInfo::Kind::Struct) continue;
+        auto mdIt = module_.memberDecorations.find(pointee);
+        if (mdIt == module_.memberDecorations.end()) continue;
+        std::uint32_t runningOff = 0;
+        for (std::size_t m = 0; m < pIt->second.memberTypes.size(); ++m) {
+            const std::uint32_t memberType = pIt->second.memberTypes[m];
+            const std::uint32_t memberWidth = module_.scalarWidth(memberType);
+            auto mdm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
+            if (mdm != mdIt->second.perMember.end() && mdm->second.hasBuiltIn) {
+                if (mdm->second.builtIn == spv::BuiltInClipDistance) {
+                    for (std::uint32_t k = 0; k < memberWidth; ++k) {
+                        const std::uint32_t idx = runningOff + k;
+                        clipOut.push_back(idx < sIt->second.size() ? sIt->second[idx] : 0.0f);
+                    }
+                } else if (mdm->second.builtIn == spv::BuiltInCullDistance) {
+                    for (std::uint32_t k = 0; k < memberWidth; ++k) {
+                        const std::uint32_t idx = runningOff + k;
+                        cullOut.push_back(idx < sIt->second.size() ? sIt->second[idx] : 0.0f);
+                    }
+                }
+            }
+            runningOff += memberWidth;
+        }
+    }
+}
+
 void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
     // Capture gl_Position and named output varyings from their
     // respective output variables' storage.
@@ -1240,6 +1376,13 @@ void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
         }
         ev.varyings.insert(ev.varyings.end(), v.begin(), v.end());
     }
+    // Capture gl_ClipDistance / gl_CullDistance current storage.
+    // A GS that doesn't write these arrays will leave the storage
+    // zero-initialised (from initVariables), which preserves the VS-
+    // supplied values iff we seeded gl_in[].gl_ClipDistance[] into
+    // the gl_PerVertex output block — we don't, so zero is the
+    // semantic "GS didn't touch these".
+    captureClipCull(ev.clipDistance, ev.cullDistance);
     out.push_back(std::move(ev));
 }
 
@@ -1441,6 +1584,11 @@ bool Interpreter::executeVs(EmulatedVertex& out) {
         }
         out.varyings.insert(out.varyings.end(), v.begin(), v.end());
     }
+    // Propagate the VS's gl_ClipDistance[] / gl_CullDistance[] so the
+    // emulator's caller can feed them into the GS's gl_in[] and use
+    // cull-distance values for the pre-GS primitive cull check
+    // (GL 4.6 §13.6).
+    captureClipCull(out.clipDistance, out.cullDistance);
     return !errored_;
 }
 
@@ -2348,37 +2496,23 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     (void)trace;   // still used in the body walker below
 
     // Reject emulation when the VS writes gl_ClipDistance /
-    // gl_CullDistance and the GS doesn't re-declare / re-emit them.
-    // A passthrough GS in CTS is intentionally transparent — at
-    // link time we can't yet match the VS's per-vertex clip/cull
-    // outputs onto the synthesised pass-through VS, so the emulated
-    // pipeline silently loses those builtins and draws the full
-    // quad unclipped. The s19 (no-emulator) path let these tests
-    // pass because SPIRV-Cross emitted un-compilable GS MSL →
-    // Metal pipeline failed to build → the draw no-op'd, which
-    // matched the test's "vertex is correctly clipped" expectation.
-    // Detect via the VS SPIR-V: if any Output variable carries
-    // BuiltIn ClipDistance or CullDistance (either directly or on
-    // a gl_PerVertex member), refuse to emulate so the legacy
-    // no-GS path is used instead. Narrow enough not to lose the
-    // constant_expressions / geometry_shader.rendering.* wins that
-    // don't touch clip/cull builtins.
-    // Does the given SPIR-V actually *store* to gl_ClipDistance /
-    // gl_CullDistance at runtime? The presence of a gl_PerVertex
-    // output block alone isn't enough — glslang declares the
-    // block on every VS regardless of whether the source touches
-    // the clip/cull arrays. We scan the function body for OpStore
-    // whose pointer resolves via OpAccessChain into a member
-    // decorated BuiltIn ClipDistance / CullDistance, which is the
-    // only way GLSL lowers `gl_ClipDistance[i] = ...`.
+    // gl_CullDistance. Infrastructure for propagating these through
+    // the synth pass-through VS landed in round 1a (captureClipCull
+    // + pre-GS cull check + [[clip_distance]] emission), but the
+    // synthesized path still delivers wrong pixel coverage for the
+    // CTS `cull_distance.functional_test_item_5` lines + triangles
+    // variants (8 points variants were regressing too before the
+    // re-enabled stopgap — my per-primitive cull check + clip
+    // emission gives correct behaviour for the simple passthrough
+    // case but not the grid-of-subgrids cases the CTS uses). Kept
+    // the scaffolding for later — `cull_distance.functional_test
+    // _item_5_primitive_mode_*` remains a targeted follow-up when
+    // the rendering semantics land.
     auto programStoresClipOrCull = [&](const std::vector<std::uint32_t>& spirv) -> bool {
         if (spirv.empty()) return false;
         SpirvModule m;
         if (!m.parse(spirv.data(), spirv.size())) return false;
         if (!m.haveFuncBody) return false;
-        // Collect struct-member indices that are ClipDistance /
-        // CullDistance per gl_PerVertex-ish output blocks.
-        // Map: struct type id → { member indices that are clip/cull }.
         std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> clipCullMembers;
         for (const auto& [structId, mdSet] : m.memberDecorations) {
             for (const auto& [memberIdx, memberDeco] : mdSet.perMember) {
@@ -2389,9 +2523,6 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
                 }
             }
         }
-        // Also collect Output variables whose own decoration marks
-        // them ClipDistance / CullDistance (the "redeclared as a
-        // free-standing array" pattern, rare but legal).
         std::unordered_set<std::uint32_t> clipCullVars;
         for (const auto& [varId, info] : m.variables) {
             if (info.storageClass != spv::StorageClassOutput) continue;
@@ -2402,9 +2533,6 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
                 clipCullVars.insert(varId);
             }
         }
-        // Map OpAccessChain result-id → true iff the walk reaches
-        // a clip/cull slot. We only need a shallow walk — one
-        // struct-member level.
         std::unordered_set<std::uint32_t> clipCullAccessChains;
         std::size_t pc = m.funcBodyStart;
         while (pc < m.funcBodyEnd) {
@@ -2415,14 +2543,9 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
             if (opcode == spv::OpAccessChain && wc >= 4) {
                 const std::uint32_t resultId = m.words[pc + 2];
                 const std::uint32_t base = m.words[pc + 3];
-                // If the base is a var known to be clip/cull, chain
-                // is clip/cull regardless of indices.
                 if (clipCullVars.count(base) != 0) {
                     clipCullAccessChains.insert(resultId);
                 } else {
-                    // Check if base var's pointee struct has a clip/
-                    // cull member, and the first index picks that
-                    // member. Operands[3..] are indices.
                     auto vIt = m.variables.find(base);
                     if (vIt != m.variables.end() && wc >= 5) {
                         const std::uint32_t firstIdxId = m.words[pc + 4];
@@ -2447,8 +2570,6 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
                 }
             } else if (opcode == spv::OpStore && wc >= 3) {
                 const std::uint32_t ptr = m.words[pc + 1];
-                // Direct store to a clip/cull variable, or to an
-                // access-chain result that resolves to clip/cull.
                 if (clipCullVars.count(ptr) != 0 ||
                     clipCullAccessChains.count(ptr) != 0) {
                     return true;
@@ -2458,25 +2579,10 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
         }
         return false;
     };
-    // Our synthesised pass-through VS doesn't carry
-    // gl_ClipDistance / gl_CullDistance through the expanded-vertex
-    // buffer — the GS interpreter zeros those builtins on emission,
-    // so running the emulator turns an otherwise-cullable primitive
-    // into one that renders every fragment. That regression bit
-    // `cull_distance.functional_test_item_5` (passthrough-GS cases)
-    // which the s19 baseline got right purely because SPIRV-Cross's
-    // GS MSL failed to compile → the draw no-op'd → clipped pixels
-    // stayed cleared. Reject emulation whenever the VS actually
-    // stores to gl_ClipDistance / gl_CullDistance so the legacy
-    // no-GS path preserves those builtins straight to the FS.
-    // Declaration-only presence (gl_PerVertex in glslang's implicit
-    // output block, even with zero writes) is ignored — otherwise
-    // we'd reject every rendering-section program whose glslang
-    // preamble redundantly declares the builtin it never uses.
     if (programStoresClipOrCull(program.vertexSpirv)) {
         if (std::getenv("APPGL_TRACE_GS_EMUL") != nullptr) {
             std::fprintf(stderr, "[GS-emul] reject: VS stores gl_Clip/CullDistance — "
-                         "emulator does not yet propagate through synth VS\n");
+                         "emulator path still has pixel-coverage gaps for CTS cull_distance.*\n");
         }
         return false;
     }
@@ -3004,6 +3110,13 @@ EmulatedDraw emulateGeometryDraw(
                     }
                     cursor += w;
                 }
+                // Propagate gl_ClipDistance[] / gl_CullDistance[] the
+                // VS captured into the per-vertex input record. These
+                // drive the pre-GS primitive cull check below and
+                // seed the GS's gl_in[].gl_{Clip,Cull}Distance[]
+                // arrays so a passthrough GS can copy them through.
+                allVertexInputs[vi].clipDistance = std::move(vsOut.clipDistance);
+                allVertexInputs[vi].cullDistance = std::move(vsOut.cullDistance);
             }
         }
 
@@ -3014,6 +3127,31 @@ EmulatedDraw emulateGeometryDraw(
                 if (globalIdx < allVertexInputs.size()) {
                     inputs[v] = allVertexInputs[globalIdx];
                 }
+            }
+            // GL 4.6 §13.6: before the geometry shader runs, discard
+            // any primitive whose vertices all have gl_CullDistance
+            // [i] < 0 for some i. The emulator's VS pre-pass captured
+            // these per vertex; skip the GS invocation entirely when
+            // the primitive is culled so the full-screen quad the
+            // GS would generate doesn't leak onto a framebuffer the
+            // test expected to stay cleared (CTS cull_distance.
+            // functional_test_item_5 tests each of the 8 cull planes).
+            {
+                std::size_t maxCullLen = 0;
+                for (const auto& vi : inputs) {
+                    maxCullLen = std::max(maxCullLen, vi.cullDistance.size());
+                }
+                bool culled = false;
+                for (std::size_t plane = 0; plane < maxCullLen && !culled; ++plane) {
+                    bool allNeg = true;
+                    for (const auto& vi : inputs) {
+                        const float c = (plane < vi.cullDistance.size())
+                            ? vi.cullDistance[plane] : 0.0f;
+                        if (c >= 0.0f) { allNeg = false; break; }
+                    }
+                    if (allNeg) culled = true;
+                }
+                if (culled) continue;
             }
             Interpreter interp(mod, vsOutNames, vsOutWidths,
                                outNames, outWidths);
@@ -3153,7 +3291,18 @@ EmulatedDraw emulateGeometryDraw(
         for (std::uint32_t w : outWidths) s += w;
         return s;
     }();
-    const std::size_t fpv = 4 + totalVaryingWidth;
+    // Max clip / cull distance across every emitted vertex. If the
+    // GS writes neither, both stay 0 and the expanded buffer /
+    // synth VS skip their slots. If the GS writes one vertex's
+    // clipDistance but not another's, we pad with zero (Metal
+    // requires all vertices of a primitive to have matching array
+    // length).
+    std::uint32_t clipLen = 0, cullLen = 0;
+    for (const auto& e : emittedAll) {
+        clipLen = std::max(clipLen, static_cast<std::uint32_t>(e.clipDistance.size()));
+        cullLen = std::max(cullLen, static_cast<std::uint32_t>(e.cullDistance.size()));
+    }
+    const std::size_t fpv = 4 + totalVaryingWidth + clipLen + cullLen;
 
     d.topology          = expandedTopo;
     d.vertexCount       = emittedAll.size();
@@ -3163,6 +3312,8 @@ EmulatedDraw emulateGeometryDraw(
     d.varyingLocations  = std::move(outLocations);
     d.varyingInterp     = std::move(outInterp);
     d.varyingBaseType   = std::move(outBaseType);
+    d.clipDistanceLen   = clipLen;
+    d.cullDistanceLen   = cullLen;
     d.expandedVertexData.resize(emittedAll.size() * fpv, 0.0f);
 
     for (std::size_t v = 0; v < emittedAll.size(); ++v) {
@@ -3170,6 +3321,15 @@ EmulatedDraw emulateGeometryDraw(
         for (int k = 0; k < 4; ++k) dst[k] = emittedAll[v].position[k];
         for (std::size_t j = 0; j < emittedAll[v].varyings.size() && j + 4 < fpv; ++j) {
             dst[4 + j] = emittedAll[v].varyings[j];
+        }
+        // Append clip then cull after the user varyings.
+        const std::size_t clipBase = 4 + totalVaryingWidth;
+        for (std::size_t j = 0; j < emittedAll[v].clipDistance.size() && j < clipLen; ++j) {
+            dst[clipBase + j] = emittedAll[v].clipDistance[j];
+        }
+        const std::size_t cullBase = clipBase + clipLen;
+        for (std::size_t j = 0; j < emittedAll[v].cullDistance.size() && j < cullLen; ++j) {
+            dst[cullBase + j] = emittedAll[v].cullDistance[j];
         }
     }
 
@@ -3229,6 +3389,28 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
         src += std::to_string(i + 1);   // 0 reserved for position
         src += ")]];\n";
     }
+    // Clip + cull distance input slots. Packed one float-per-slot
+    // starting immediately after the last user varying's attribute
+    // index. Clip first, then cull. The encoder's vertex-descriptor
+    // builder emits matching per-scalar attributes so Metal's vertex
+    // fetcher pulls one float from the packed expanded buffer.
+    const std::uint32_t clipBaseAttrib =
+        static_cast<std::uint32_t>(draw.varyingWidths.size() + 1);
+    for (std::uint32_t i = 0; i < draw.clipDistanceLen; ++i) {
+        src += "    float vsin_clip";
+        src += std::to_string(i);
+        src += " [[attribute(";
+        src += std::to_string(clipBaseAttrib + i);
+        src += ")]];\n";
+    }
+    const std::uint32_t cullBaseAttrib = clipBaseAttrib + draw.clipDistanceLen;
+    for (std::uint32_t i = 0; i < draw.cullDistanceLen; ++i) {
+        src += "    float vsin_cull";
+        src += std::to_string(i);
+        src += " [[attribute(";
+        src += std::to_string(cullBaseAttrib + i);
+        src += ")]];\n";
+    }
     src += "};\n\n";
 
     // ─ Vertex output struct.
@@ -3242,6 +3424,24 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
     };
     src += "struct VsOut {\n";
     src += "    float4 gl_Position [[position]];\n";
+    // Metal has no [[cull_distance]] qualifier — cull is expressed by
+    // the per-vertex primitive cull check we did before the GS ran
+    // (see §13.6 in the spec-quote above the pre-GS loop). That
+    // means by the time we get here, the cull_distance values only
+    // need to propagate so a downstream stage (if any) can observe
+    // them, not to drive the Metal rasterizer. We still emit them as
+    // a separate `[[clip_distance]]` slice after the clip array so
+    // primitives whose cull distances cause no-op fragments still
+    // get clipped per-pixel (matches how drivers emulate cull_distance
+    // on APIs that don't natively support it). The combined array
+    // size is clip + cull, and the write loop below feeds clip first
+    // then cull into it.
+    const std::uint32_t totalClipN = draw.clipDistanceLen + draw.cullDistanceLen;
+    if (totalClipN > 0) {
+        src += "    float gl_ClipDistance [[clip_distance]] [";
+        src += std::to_string(totalClipN);
+        src += "];\n";
+    }
     // Metal point-output pipelines need [[point_size]] on the VS
     // output; without it, GL_POINTS tests render 0-sized / invisible
     // points on Apple GPUs. Emit unconditionally at size 1.0 — the
@@ -3289,6 +3489,23 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
         src += "    out.vsout_v";
         src += std::to_string(i);
         src += " = in.vsin_v";
+        src += std::to_string(i);
+        src += ";\n";
+    }
+    // Fill gl_ClipDistance with clip values then cull values. MSL
+    // requires constant-index array writes, which is fine at the
+    // synthesis level because we know the length.
+    for (std::uint32_t i = 0; i < draw.clipDistanceLen; ++i) {
+        src += "    out.gl_ClipDistance[";
+        src += std::to_string(i);
+        src += "] = in.vsin_clip";
+        src += std::to_string(i);
+        src += ";\n";
+    }
+    for (std::uint32_t i = 0; i < draw.cullDistanceLen; ++i) {
+        src += "    out.gl_ClipDistance[";
+        src += std::to_string(draw.clipDistanceLen + i);
+        src += "] = in.vsin_cull";
         src += std::to_string(i);
         src += ";\n";
     }

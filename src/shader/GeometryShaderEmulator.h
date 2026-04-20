@@ -46,10 +46,17 @@ class GLStateTracker;
 
 // One interpreted vertex output: gl_Position + concatenated user
 // varyings, stored as a flat float32 payload. Layout is described by
-// the companion `VaryingLayout`.
+// the companion `VaryingLayout`. `clipDistance` / `cullDistance`
+// capture the gl_ClipDistance[] / gl_CullDistance[] arrays at the
+// moment of OpEmitVertex so the synth pass-through VS can emit them
+// as `[[clip_distance]]` outputs and Metal performs per-vertex
+// clipping / culling the same way the legacy no-GS pipeline would.
+// Sized dynamically — empty when the GS writes neither.
 struct EmulatedVertex {
     float position[4] = {0, 0, 0, 1};
-    std::vector<float> varyings;   // concatenated user varying values
+    std::vector<float> varyings;       // concatenated user varying values
+    std::vector<float> clipDistance;   // gl_ClipDistance[] at EmitVertex
+    std::vector<float> cullDistance;   // gl_CullDistance[] at EmitVertex
 };
 
 // Post-GS output topology + vertex buffer ready for GPU raster.
@@ -84,6 +91,21 @@ struct EmulatedDraw {
     // `flat out int geom_out_out0;` — that fail Metal pipeline-state
     // validation if the synthesised VS emits `float` on them.
     std::vector<std::uint8_t> varyingBaseType;
+    // gl_ClipDistance / gl_CullDistance array sizes captured on the
+    // last EmitVertex. Per GL 4.6 §7.1 these are per-vertex float
+    // arrays with implementation-defined max length (we advertise 8).
+    // When non-zero, the synth pass-through VS emits them as
+    // `[[clip_distance]] [N]` outputs so Metal's rasteriser performs
+    // the clip/cull stage — an emulated GS that doesn't touch the
+    // builtins still propagates them from the VS pre-pass (each
+    // emitted vertex is the snapshot of the GS interpreter's
+    // current clip/cull state, which defaults to the input vertex's
+    // values when the GS declares an `out gl_PerVertex { ... }`
+    // passthrough). Both arrays share a single Metal
+    // `[[clip_distance]] float[N]` slot; total N = clipDistanceLen +
+    // cullDistanceLen with cull coming after clip.
+    std::uint32_t clipDistanceLen = 0;
+    std::uint32_t cullDistanceLen = 0;
     // True if emulation succeeded. False leaves expandedVertexData empty
     // and the caller should fall back to the existing no-GS path.
     bool ok = false;

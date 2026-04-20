@@ -14707,6 +14707,28 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             vi.name = "vsin_v" + std::to_string(i);
             program.gsPassThroughReflection.vertexInputs.push_back(vi);
         }
+        // Clip + cull distance input attributes, one float per slot.
+        // Stored immediately after the last user varying in the same
+        // packed vertex buffer. Location indices (for reflection)
+        // follow the varying block; Metal attribute indices are
+        // allocated the same way in the synth VS MSL so these match.
+        const GLuint clipBaseLoc =
+            static_cast<GLuint>(ed.varyingWidths.size() + 1);
+        for (std::uint32_t i = 0; i < ed.clipDistanceLen; ++i) {
+            ShaderReflection::VertexInput vi;
+            vi.location = clipBaseLoc + i;
+            vi.type = GL_FLOAT;
+            vi.name = "vsin_clip" + std::to_string(i);
+            program.gsPassThroughReflection.vertexInputs.push_back(vi);
+        }
+        const GLuint cullBaseLoc = clipBaseLoc + ed.clipDistanceLen;
+        for (std::uint32_t i = 0; i < ed.cullDistanceLen; ++i) {
+            ShaderReflection::VertexInput vi;
+            vi.location = cullBaseLoc + i;
+            vi.type = GL_FLOAT;
+            vi.name = "vsin_cull" + std::to_string(i);
+            program.gsPassThroughReflection.vertexInputs.push_back(vi);
+        }
     }
 
     TranslatedDrawInfo tdi;
@@ -14745,6 +14767,32 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             la.glComponentCount = static_cast<GLint>(ed.varyingWidths[i]);
             tdi.vertexAttributeLayouts.push_back(la);
             offset += ed.varyingWidths[i] * sizeof(float);
+        }
+        // Clip / cull distance attribute layouts, in order, one float
+        // per slot. They share the same packed buffer with the other
+        // attributes; the encoder's vertex-descriptor builder reads
+        // TranslatedDrawInfo::vertexAttributeLayouts to set up
+        // MTLVertexDescriptor's per-attribute format + offset.
+        const GLuint clipBaseLoc =
+            static_cast<GLuint>(ed.varyingWidths.size() + 1);
+        for (std::uint32_t i = 0; i < ed.clipDistanceLen; ++i) {
+            TranslatedDrawInfo::VertexAttributeLayout la;
+            la.location = clipBaseLoc + i;
+            la.offset = offset;
+            la.glType = GL_FLOAT;
+            la.glComponentCount = 1;
+            tdi.vertexAttributeLayouts.push_back(la);
+            offset += sizeof(float);
+        }
+        const GLuint cullBaseLoc = clipBaseLoc + ed.clipDistanceLen;
+        for (std::uint32_t i = 0; i < ed.cullDistanceLen; ++i) {
+            TranslatedDrawInfo::VertexAttributeLayout la;
+            la.location = cullBaseLoc + i;
+            la.offset = offset;
+            la.glType = GL_FLOAT;
+            la.glComponentCount = 1;
+            tdi.vertexAttributeLayouts.push_back(la);
+            offset += sizeof(float);
         }
     }
 
