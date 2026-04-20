@@ -1223,41 +1223,71 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                 const std::uint32_t perVertexW = module_.scalarWidth(pointeeType.componentType);
                 const auto& elemT = module_.types.at(pointeeType.componentType);
                 if (elemT.kind == TypeInfo::Kind::Struct) {
-                    // gl_in[] — walk every member looking for
-                    // BuiltInPosition (member 0 by convention),
-                    // BuiltInClipDistance, and BuiltInCullDistance.
-                    // Compute each member's scalar offset by summing
-                    // widths of preceding members so clip/cull arrays
-                    // land at the right slot even when the struct
-                    // shape differs from the "position at 0, point
-                    // size at 1, clip at 2, cull at 3" textbook
-                    // layout (glslang reorders members to skip
-                    // unused ones, so member indices aren't stable).
+                    // Two struct shapes to handle:
+                    // 1. gl_PerVertex: members decorated BuiltIn
+                    //    (Position / PointSize / ClipDistance /
+                    //    CullDistance). Populate from inputs[vi]
+                    //    fields at the member's scalar offset.
+                    // 2. User interface block: members are user
+                    //    varyings with plain names; look them up
+                    //    by member NAME in inputVaryingNames_ so
+                    //    CTS `limits.max_input_components`'s
+                    //    `in Vertex { ivec4 vs_gs_out[N]; } vertex
+                    //    [1]` block picks up its per-vertex array
+                    //    data. Previously this branch only scanned
+                    //    for BuiltIns and left user-block storage
+                    //    zero-initialised.
                     auto mdIt = module_.memberDecorations.find(pointeeType.componentType);
+                    auto mnIt = module_.memberNames.find(pointeeType.componentType);
                     for (std::size_t vi = 0; vi < inputs.size(); ++vi) {
                         const std::uint32_t base = static_cast<std::uint32_t>(vi) * perVertexW;
-                        if (mdIt == module_.memberDecorations.end()) continue;
                         std::uint32_t runningOff = 0;
                         for (std::size_t m = 0; m < elemT.memberTypes.size(); ++m) {
                             const std::uint32_t memType = elemT.memberTypes[m];
                             const std::uint32_t memW = module_.scalarWidth(memType);
-                            auto mm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
-                            if (mm != mdIt->second.perMember.end() && mm->second.hasBuiltIn) {
-                                if (mm->second.builtIn == spv::BuiltInPosition) {
-                                    for (int k = 0; k < 4 && static_cast<std::uint32_t>(k) < memW; ++k) {
-                                        storage[base + runningOff + k] = inputs[vi].position[k];
+                            bool handledBuiltIn = false;
+                            if (mdIt != module_.memberDecorations.end()) {
+                                auto mm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
+                                if (mm != mdIt->second.perMember.end() && mm->second.hasBuiltIn) {
+                                    if (mm->second.builtIn == spv::BuiltInPosition) {
+                                        for (int k = 0; k < 4 && static_cast<std::uint32_t>(k) < memW; ++k) {
+                                            storage[base + runningOff + k] = inputs[vi].position[k];
+                                        }
+                                    } else if (mm->second.builtIn == spv::BuiltInClipDistance) {
+                                        const auto& src = inputs[vi].clipDistance;
+                                        for (std::uint32_t k = 0; k < memW; ++k) {
+                                            storage[base + runningOff + k] =
+                                                (k < src.size()) ? src[k] : 0.0f;
+                                        }
+                                    } else if (mm->second.builtIn == spv::BuiltInCullDistance) {
+                                        const auto& src = inputs[vi].cullDistance;
+                                        for (std::uint32_t k = 0; k < memW; ++k) {
+                                            storage[base + runningOff + k] =
+                                                (k < src.size()) ? src[k] : 0.0f;
+                                        }
                                     }
-                                } else if (mm->second.builtIn == spv::BuiltInClipDistance) {
-                                    const auto& src = inputs[vi].clipDistance;
-                                    for (std::uint32_t k = 0; k < memW; ++k) {
-                                        storage[base + runningOff + k] =
-                                            (k < src.size()) ? src[k] : 0.0f;
+                                    handledBuiltIn = true;
+                                }
+                            }
+                            if (!handledBuiltIn && mnIt != module_.memberNames.end()) {
+                                // User block member. Look up by name.
+                                auto mnm = mnIt->second.find(static_cast<std::uint32_t>(m));
+                                if (mnm != mnIt->second.end()) {
+                                    const std::string& memberName = mnm->second;
+                                    int varyingIdx = -1;
+                                    for (std::size_t j = 0; j < inputVaryingNames_.size(); ++j) {
+                                        if (inputVaryingNames_[j] == memberName) {
+                                            varyingIdx = static_cast<int>(j);
+                                            break;
+                                        }
                                     }
-                                } else if (mm->second.builtIn == spv::BuiltInCullDistance) {
-                                    const auto& src = inputs[vi].cullDistance;
-                                    for (std::uint32_t k = 0; k < memW; ++k) {
-                                        storage[base + runningOff + k] =
-                                            (k < src.size()) ? src[k] : 0.0f;
+                                    if (varyingIdx >= 0 &&
+                                        static_cast<std::size_t>(varyingIdx) < inputs[vi].varyings.size()) {
+                                        const auto& src = inputs[vi].varyings[varyingIdx];
+                                        for (std::uint32_t k = 0; k < memW && k < src.size()
+                                             && base + runningOff + k < storage.size(); ++k) {
+                                            storage[base + runningOff + k] = src[k];
+                                        }
                                     }
                                 }
                             }
@@ -1735,17 +1765,52 @@ bool Interpreter::executeVs(EmulatedVertex& out) {
     for (std::size_t k = 0; k < outputVaryingNames_.size(); ++k) {
         std::vector<float> v;
         v.assign(outputVaryingWidths_[k], 0.0f);
+        const std::string& wantName = outputVaryingNames_[k];
+        bool matched = false;
         for (const auto& [varId, info] : module_.variables) {
-            if (info.storageClass == spv::StorageClassOutput &&
-                info.name == outputVaryingNames_[k]) {
+            if (info.storageClass != spv::StorageClassOutput) continue;
+            // Shape 1: top-level varying variable with matching name.
+            if (info.name == wantName) {
                 auto sIt = varStorage_.find(varId);
                 if (sIt != varStorage_.end()) {
                     for (std::size_t j = 0; j < v.size() && j < sIt->second.size(); ++j) {
                         v[j] = sIt->second[j];
                     }
                 }
+                matched = true;
                 break;
             }
+            // Shape 2: user output interface block. The SPIR-V
+            // variable has the BLOCK name (or empty), not the
+            // member name. Walk its Struct pointee and find the
+            // member whose OpMemberName matches wantName; copy
+            // its slice of the block's varStorage. CTS
+            // `limits.max_input_components` uses this shape via
+            // `out Vertex { flat out ivec4 vs_gs_out[16]; };`.
+            auto tIt = module_.types.find(info.typeId);
+            if (tIt == module_.types.end()) continue;
+            const std::uint32_t pointeeId = tIt->second.pointeeType;
+            auto pIt = module_.types.find(pointeeId);
+            if (pIt == module_.types.end() || pIt->second.kind != TypeInfo::Kind::Struct) continue;
+            auto mnIt = module_.memberNames.find(pointeeId);
+            if (mnIt == module_.memberNames.end()) continue;
+            std::uint32_t runningOff = 0;
+            for (std::size_t m = 0; m < pIt->second.memberTypes.size(); ++m) {
+                const std::uint32_t memW = module_.scalarWidth(pIt->second.memberTypes[m]);
+                auto nameIt = mnIt->second.find(static_cast<std::uint32_t>(m));
+                if (nameIt != mnIt->second.end() && nameIt->second == wantName) {
+                    auto sIt = varStorage_.find(varId);
+                    if (sIt != varStorage_.end()) {
+                        for (std::size_t j = 0; j < v.size() && runningOff + j < sIt->second.size(); ++j) {
+                            v[j] = sIt->second[runningOff + j];
+                        }
+                    }
+                    matched = true;
+                    break;
+                }
+                runningOff += memW;
+            }
+            if (matched) break;
         }
         out.varyings.insert(out.varyings.end(), v.begin(), v.end());
     }
@@ -1948,29 +2013,64 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 // component" loop drops the vec2's second element,
                 // which broke `gl_Position = vec4(position_data, 0, 1)`
                 // in every rendering GS test.
+                //
+                // Result kind MUST reflect the declared vector
+                // scalar base — previously hardcoded to Float*, which
+                // broke `ivec4(int, int, int, int)` because
+                // `cv.f[c]` is zero-initialised when the source
+                // operand is an Int Value. Fix: inspect the vector's
+                // componentType to pick Float/Int/UInt flavour, and
+                // read the operands' native slot matching that base.
                 auto typeIt = module_.types.find(w[0]);
                 Value r;
                 if (typeIt != module_.types.end()) {
                     const auto& t = typeIt->second;
                     if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
                         t.kind == TypeInfo::Kind::Vec4) {
-                        r.kind = (t.count == 2) ? Value::Kind::Float2 :
-                                 (t.count == 3) ? Value::Kind::Float3 : Value::Kind::Float4;
+                        // Pick result kind based on component scalar type.
+                        bool isInt = false, isUInt = false;
+                        auto ctIt = module_.types.find(t.componentType);
+                        if (ctIt != module_.types.end()) {
+                            if (ctIt->second.kind == TypeInfo::Kind::Int) isInt = true;
+                            else if (ctIt->second.kind == TypeInfo::Kind::UInt) isUInt = true;
+                        }
+                        if (isInt) {
+                            r.kind = (t.count == 2) ? Value::Kind::Int2 :
+                                     (t.count == 3) ? Value::Kind::Int3 : Value::Kind::Int4;
+                        } else if (isUInt) {
+                            r.kind = (t.count == 2) ? Value::Kind::UInt2 :
+                                     (t.count == 3) ? Value::Kind::UInt3 : Value::Kind::UInt4;
+                        } else {
+                            r.kind = (t.count == 2) ? Value::Kind::Float2 :
+                                     (t.count == 3) ? Value::Kind::Float3 : Value::Kind::Float4;
+                        }
                         std::uint32_t dstIdx = 0;
                         const std::uint32_t nOperands = (wc > 2) ? (wc - 2) : 0;
                         for (std::uint32_t k = 0; k < nOperands && dstIdx < t.count; ++k) {
                             Value cv;
                             if (!tryGetValue(w[2 + k], cv)) continue;
                             const int cc = cv.componentCount();
+                            const bool srcIsFloat = cv.isFloatKind();
                             for (int c = 0; c < cc && dstIdx < t.count; ++c) {
-                                // Use the source's "native" kind —
-                                // int operands populate r.i, float
-                                // operands populate r.f. For mixed-
-                                // type ops (rare) the SPIR-V should
-                                // always have a common scalar base
-                                // per the spec §3.32.12.
-                                r.f[dstIdx] = cv.f[c];
-                                r.i[dstIdx] = cv.i[c];
+                                // Pull from the source's native slot,
+                                // write to the result's native slot.
+                                // Mixed float↔int composites are not
+                                // valid SPIR-V (§3.32.12), but
+                                // defensive copy handles both sides
+                                // of the union.
+                                if (isInt || isUInt) {
+                                    if (srcIsFloat) {
+                                        std::memcpy(&r.i[dstIdx], &cv.f[c], 4);
+                                    } else {
+                                        r.i[dstIdx] = cv.i[c];
+                                    }
+                                } else {
+                                    if (srcIsFloat) {
+                                        r.f[dstIdx] = cv.f[c];
+                                    } else {
+                                        std::memcpy(&r.f[dstIdx], &cv.i[c], 4);
+                                    }
+                                }
                                 ++dstIdx;
                             }
                         }
