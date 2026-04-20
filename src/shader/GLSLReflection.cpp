@@ -495,7 +495,22 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
             if (keyword == "uniform") {
                 result.uniforms.push_back(std::move(d));
             } else if (keyword == "in" || keyword == "attribute") {
-                if (stage == GL_VERTEX_SHADER) {
+                // GL 4.6 §4.3.4: `in` is valid in every stage. The
+                // VS reads external vertex attributes; every later
+                // stage reads outputs from the stage ahead of it.
+                // We record all of them so the link-time varying-
+                // type check (GLContext.mm) can compare producer
+                // outputs to consumer inputs. Previous behaviour
+                // recorded only VS inputs and silently dropped GS /
+                // TCS / TES / FS input declarations — that made
+                // `linking.vs_gs_variable_type_mismatch` and its
+                // cousins unable to find the consumer-side
+                // declaration and skipped the mismatch check.
+                if (stage == GL_VERTEX_SHADER ||
+                    stage == GL_FRAGMENT_SHADER ||
+                    stage == GL_GEOMETRY_SHADER ||
+                    stage == GL_TESS_CONTROL_SHADER ||
+                    stage == GL_TESS_EVALUATION_SHADER) {
                     result.inputs.push_back(std::move(d));
                 }
             } else if (keyword == "out" || keyword == "varying") {

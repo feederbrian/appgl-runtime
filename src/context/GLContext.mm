@@ -11878,6 +11878,98 @@ bool GLContext::linkProgram(GLuint program) {
     }
     // ─── End transform feedback link-time validation ─────────────────
 
+    // ─── Stage-to-stage varying type match (GL 4.6 §7.4.1) ────────────
+    //
+    // Each `out` variable in one stage must be consumed by an `in`
+    // variable of the same name, type, and qualifiers in the next
+    // vertex-processing stage (or in the fragment stage). glslang
+    // catches in-stage mismatches during compilation, but it doesn't
+    // see the cross-stage picture — two separately-compiled
+    // shaders can disagree on the type of a shared varying and
+    // glslang happily produces a SPIR-V for each. The spec
+    // requires the link to fail in that case (`linking.vs_gs_
+    // variable_type_mismatch` asserts the failure path).
+    //
+    // Walks each consecutive stage pair and compares by name. Built-
+    // ins (`gl_Position` etc.) and transform-feedback-only names
+    // (`gl_NextBuffer`, `gl_SkipComponents*`) are skipped; glslang
+    // already enforces their types. Unmatched-name inputs are
+    // treated as "only declared in the consumer" and ignored —
+    // trying to catch "sink with no source" here would false-
+    // positive against legitimate patterns where a VS output is
+    // unused in the next stage.
+    {
+        struct StagePair {
+            const GLShaderObject* producer = nullptr;
+            const char*           producerName = "";
+            const GLShaderObject* consumer = nullptr;
+            const char*           consumerName = "";
+        };
+        std::vector<StagePair> pairs;
+        if (vertexShader != nullptr) {
+            const GLShaderObject* next = tessControlShader
+                ? tessControlShader
+                : (tessEvalShader ? tessEvalShader
+                                  : (geometryShader ? geometryShader
+                                                    : fragmentShader));
+            const char* nextName = tessControlShader ? "tess-control"
+                : (tessEvalShader ? "tess-eval"
+                : (geometryShader ? "geometry" : "fragment"));
+            if (next != nullptr) {
+                pairs.push_back({vertexShader, "vertex", next, nextName});
+            }
+        }
+        if (tessControlShader != nullptr && tessEvalShader != nullptr) {
+            pairs.push_back({tessControlShader, "tess-control", tessEvalShader, "tess-eval"});
+        }
+        if (tessEvalShader != nullptr) {
+            const GLShaderObject* next = geometryShader ? geometryShader : fragmentShader;
+            const char* nextName = geometryShader ? "geometry" : "fragment";
+            if (next != nullptr) {
+                pairs.push_back({tessEvalShader, "tess-eval", next, nextName});
+            }
+        }
+        if (geometryShader != nullptr && fragmentShader != nullptr) {
+            pairs.push_back({geometryShader, "geometry", fragmentShader, "fragment"});
+        }
+
+        bool varyingMismatch = false;
+        std::string mismatchMsg;
+        for (const auto& pair : pairs) {
+            std::unordered_map<std::string, GLenum> producerOut;
+            for (const auto& decl : pair.producer->declaredOutputs) {
+                producerOut[decl.name] = decl.type;
+            }
+            for (const auto& decl : pair.consumer->declaredInputs) {
+                // Skip built-ins / gl_in gl_out blocks — glslang
+                // handles those. User varyings never start with
+                // "gl_".
+                if (decl.name.compare(0, 3, "gl_") == 0) continue;
+                auto it = producerOut.find(decl.name);
+                if (it == producerOut.end()) continue;   // unmatched; not our check
+                if (it->second != decl.type) {
+                    varyingMismatch = true;
+                    mismatchMsg = std::string("varying '") + decl.name + "' type mismatch: "
+                        + std::string(pair.producerName) + " stage outputs type 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", it->second); return std::string(b); }()
+                        + ", " + std::string(pair.consumerName) + " stage inputs type 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", decl.type); return std::string(b); }();
+                    break;
+                }
+            }
+            if (varyingMismatch) break;
+        }
+        if (varyingMismatch) {
+            programObject->linkLog = mismatchMsg;
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+    // ─── End stage-to-stage varying type check ───────────────────────
+
     programObject->linked = true;
     programObject->linkLog = "ok";
 
