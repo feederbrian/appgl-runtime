@@ -440,6 +440,13 @@ struct GLProgramObject {
     std::vector<GLProgramAttributeInfo> attributes;
     std::unordered_map<GLint, GLProgramUniformValue> uniformValues;
     std::unordered_map<std::string, GLuint> requestedAttribLocations;
+    // Pre-link mapping set by `glBindFragDataLocation(program, color,
+    // name)`. GL 4.6 §15.2 — these bindings take effect on the next
+    // link. The linker consults this map to assign
+    // GL_PROGRAM_OUTPUT locations, overriding any GLSL
+    // `layout(location=N)` qualifier. Array outputs consume
+    // `arraySize` consecutive locations starting at the bound color.
+    std::unordered_map<std::string, GLuint> requestedFragDataLocations;
     GLSynthesizedMatrixSlots synthesizedMatrixSlots;
 
     // Tessellation program properties (extracted from SPIR-V at link time).

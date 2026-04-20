@@ -12525,13 +12525,35 @@ bool GLContext::linkProgram(GLuint program) {
             GLint nextOutputLoc = 0;
             for (const auto& output : shaderObject->declaredOutputs) {
                 GLProgramResourceEntry entry;
-                entry.name = output.name;
+                // GL 4.6 §7.3.1: array outputs report their name with
+                // the "[0]" suffix (same convention as inputs). CTS
+                // `program_interface_query.output-types` expects
+                // "a[0]" / "c[0]" / "d[0]" instead of "a" / "c" / "d".
+                entry.name = (output.arraySize >= 2)
+                    ? (output.name + "[0]") : output.name;
                 entry.type = output.type;
-                entry.location = (output.explicitLocation >= 0) ? output.explicitLocation : nextOutputLoc;
                 entry.arraySize = output.arraySize;
+                // Resolve location: per-name bind via
+                // glBindFragDataLocation wins over the GLSL
+                // `layout(location=…)` qualifier per GL 4.6 §15.2.
+                // Only applied pre-link; the map is authoritative at
+                // this point.
+                GLint location = -1;
+                auto bindIt = programObject->requestedFragDataLocations.find(output.name);
+                if (bindIt != programObject->requestedFragDataLocations.end()) {
+                    location = static_cast<GLint>(bindIt->second);
+                } else if (output.explicitLocation >= 0) {
+                    location = output.explicitLocation;
+                } else {
+                    location = nextOutputLoc;
+                }
+                entry.location = location;
                 entry.referencedBy = 0x02; // fragment
-                if (entry.location >= nextOutputLoc) {
-                    nextOutputLoc = entry.location + 1;
+                // GL 4.6 §15.2: array outputs consume `arraySize`
+                // consecutive locations.
+                const GLint consumed = std::max<GLint>(1, output.arraySize);
+                if (location + consumed > nextOutputLoc) {
+                    nextOutputLoc = location + consumed;
                 }
                 programObject->resourceOutputs.push_back(std::move(entry));
             }
@@ -18072,9 +18094,19 @@ GLint GLContext::getProgramResourceLocationIndex(GLuint program, GLenum programI
     }
     // Fragment output location index (dual-source blending). Since we don't
     // track dual-source indices yet, return 0 if the name is found.
+    // Array outputs are stored canonically as "<name>[0]" per GL 4.6
+    // §7.3.1 — match both bare and suffixed query shapes.
+    const std::string query = name;
     for (const auto& entry : prog->resourceOutputs) {
-        if (entry.name == name) {
-            return 0;
+        if (entry.name == query) return 0;
+    }
+    for (const auto& entry : prog->resourceOutputs) {
+        if (entry.name == query + "[0]") return 0;
+    }
+    if (query.size() >= 3 && query.compare(query.size() - 3, 3, "[0]") == 0) {
+        const std::string baseOnly = query.substr(0, query.size() - 3);
+        for (const auto& entry : prog->resourceOutputs) {
+            if (entry.name == baseOnly) return 0;
         }
     }
     return -1;

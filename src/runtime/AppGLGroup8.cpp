@@ -1050,15 +1050,69 @@ static void APIENTRY glVertexAttribI4usv(GLuint index, const GLushort *v) {
 }
 
 static void APIENTRY glBindFragDataLocation(GLuint program, GLuint color, const GLchar *name) {
-    (void)program;
-    (void)color;
-    (void)name;
+    // GL 4.6 §15.2: record the requested name→color mapping. Takes
+    // effect on the next glLinkProgram for this program (existing
+    // resource-output entries are rebuilt from this map when link
+    // assembles the output table). INVALID_OPERATION if `program` is
+    // unknown; INVALID_VALUE if the name starts with "gl_" or color
+    // exceeds MAX_DRAW_BUFFERS — we don't enforce those here yet.
+    auto* ctx = appgl::Runtime::shared().currentContext();
+    if (ctx == nullptr || name == nullptr) return;
+    auto* prog = ctx->objects().programs().get(program);
+    if (prog == nullptr) return;
+    prog->requestedFragDataLocations[name] = color;
 }
 
 static GLint APIENTRY glGetFragDataLocation(GLuint program, const GLchar *name) {
-    (void)program;
-    (void)name;
-    return 0;
+    // GL 4.6 §15.2: returns the location of the fragment output with
+    // `name`, or -1 if `name` is not an active output. Per the
+    // §7.3.1 resource-interface conventions, array outputs are
+    // stored with the "[0]" suffix — accept both bare and
+    // subscripted queries here so
+    // `glGetFragDataLocation(prog, "c")` and `"c[0]"` both hit.
+    auto* ctx = appgl::Runtime::shared().currentContext();
+    if (ctx == nullptr || name == nullptr) return -1;
+    auto* prog = ctx->objects().programs().get(program);
+    if (prog == nullptr || !prog->linked) return -1;
+    const std::string query = name;
+    // Exact name match.
+    for (const auto& entry : prog->resourceOutputs) {
+        if (entry.name == query) return entry.location;
+    }
+    // Bare query → "<q>[0]" entry.
+    for (const auto& entry : prog->resourceOutputs) {
+        if (entry.name == query + "[0]") return entry.location;
+    }
+    // "<base>[0]" query → bare entry.
+    if (query.size() >= 3 && query.compare(query.size() - 3, 3, "[0]") == 0) {
+        const std::string baseOnly = query.substr(0, query.size() - 3);
+        for (const auto& entry : prog->resourceOutputs) {
+            if (entry.name == baseOnly) return entry.location;
+        }
+    }
+    // "<base>[K]" query → stride into an array output.
+    const auto open = query.find('[');
+    if (open != std::string::npos && !query.empty() && query.back() == ']') {
+        const std::string base = query.substr(0, open);
+        const std::string idxStr = query.substr(open + 1, query.size() - open - 2);
+        if (!base.empty() && !idxStr.empty()) {
+            char* ep = nullptr;
+            const long idx = std::strtol(idxStr.c_str(), &ep, 10);
+            if (ep && *ep == '\0' && idx >= 0) {
+                for (const auto& entry : prog->resourceOutputs) {
+                    const std::string bareEntry =
+                        (entry.name.size() >= 3 &&
+                         entry.name.compare(entry.name.size() - 3, 3, "[0]") == 0)
+                        ? entry.name.substr(0, entry.name.size() - 3) : entry.name;
+                    if (bareEntry == base && entry.arraySize >= 1
+                        && idx < entry.arraySize && entry.location >= 0) {
+                        return entry.location + static_cast<GLint>(idx);
+                    }
+                }
+            }
+        }
+    }
+    return -1;
 }
 
 static void APIENTRY glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint *value) {
