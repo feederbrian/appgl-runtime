@@ -2865,13 +2865,46 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
             d.width = mod.scalarWidth(tIt->second.pointeeType);
         }
         if (d.width == 0) continue;   // empty or unresolved — skip
-        // If the type pointee is a struct (e.g. the gl_PerVertex
-        // output block), skip — our gl_Position / built-in handling
-        // owns that and we only want standalone user varyings.
+        // If the type pointee is the gl_PerVertex output block
+        // (struct with BuiltIn-decorated members), skip — our
+        // gl_Position / gl_PointSize / gl_Clip/Cull handling owns
+        // that. User interface blocks (e.g. `out Vertex { ivec4
+        // vs_gs_out[N]; };`) are structs too but carry no BuiltIn
+        // decorations — we want to flow their members through as
+        // varyings. CTS `limits.max_input_components` declares a
+        // 16-ivec4 user output block and was silently dropped by
+        // the old unconditional struct-skip.
         if (tIt != mod.types.end()) {
             const auto pIt = mod.types.find(tIt->second.pointeeType);
             if (pIt != mod.types.end() && pIt->second.kind == TypeInfo::Kind::Struct) {
-                continue;
+                const std::uint32_t pointeeId = tIt->second.pointeeType;
+                auto mdIt = mod.memberDecorations.find(pointeeId);
+                bool hasBuiltInMember = false;
+                if (mdIt != mod.memberDecorations.end()) {
+                    for (const auto& [midx, mdeco] : mdIt->second.perMember) {
+                        if (mdeco.hasBuiltIn) { hasBuiltInMember = true; break; }
+                    }
+                }
+                if (hasBuiltInMember) continue;
+                // Fall through: user interface block — continue
+                // processing but synthesise the name + width from
+                // the FIRST member (a common glslang pattern has
+                // single-member user blocks). Multi-member blocks
+                // need per-member unrolling which is a separate
+                // follow-up.
+                const auto& st = pIt->second;
+                if (st.memberTypes.size() == 1) {
+                    std::string mname;
+                    auto mnIt = mod.memberNames.find(pointeeId);
+                    if (mnIt != mod.memberNames.end()) {
+                        auto nameIt = mnIt->second.find(0);
+                        if (nameIt != mnIt->second.end()) mname = nameIt->second;
+                    }
+                    if (!mname.empty()) d.name = mname;
+                    d.width = mod.scalarWidth(st.memberTypes[0]);
+                } else {
+                    continue;   // multi-member block not yet supported
+                }
             }
             // Determine scalar base type by walking vec → scalar.
             if (pIt != mod.types.end()) {
