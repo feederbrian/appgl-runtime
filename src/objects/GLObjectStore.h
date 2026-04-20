@@ -488,7 +488,14 @@ struct GLProgramObject {
     // fixed at link time by the GS output SPIR-V, which doesn't
     // change between draws). Cleared at program re-link via the
     // same reset path as the rest of the translated-pipeline cache.
+    // `gsPassThroughVertexMSLLayered` is set to true when the cached
+    // MSL was built with gl_Layer routing to
+    // `[[render_target_array_index]]`. When the next emulated draw
+    // uses an FBO of different layered-ness, the cache is
+    // invalidated and re-synthesised — the MSL declarations differ
+    // (layered vs. non-layered) and Metal won't accept swapping.
     std::string gsPassThroughVertexMSL;
+    bool gsPassThroughVertexMSLLayered = false;
     ShaderReflection gsPassThroughReflection;
     // Parallel pipeline-state cache so the emulated draw doesn't
     // pollute the regular hasTranslatedPipeline cache. Same owner-

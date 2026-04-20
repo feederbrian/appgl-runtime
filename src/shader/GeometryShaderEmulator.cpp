@@ -13,6 +13,8 @@
 #include "../objects/GLObjectStore.h"
 #include "../state/GLStateTracker.h"
 
+#include <optional>
+
 #ifdef APPGL_HAS_SHADER_COMPILER
 #include "spirv.hpp"
 #include "GLSL.std.450.h"   // free enum GLSLstd450 (not in a namespace)
@@ -760,6 +762,18 @@ private:
     std::string diagnostic_;
     bool errored_ = false;
 
+    // Set to true once any OpEmitVertex captures a non-nullopt
+    // gl_Layer value. Read by `emulateGeometryDraw` after the
+    // interpreter run to decide whether to flip
+    // `EmulatedDraw::hasLayer`. A GS that never writes BuiltInLayer
+    // leaves this false and the synth VS skips the
+    // `[[render_target_array_index]]` output slot entirely.
+    bool didWriteLayer_ = false;
+
+public:
+    bool didWriteLayer() const { return didWriteLayer_; }
+private:
+
     // Diagnostic + bail.
     void bail(std::string msg) {
         if (errored_) return;
@@ -781,6 +795,19 @@ private:
     // for VS pre-pass output capture.
     void captureClipCull(std::vector<float>& clipOut,
                          std::vector<float>& cullOut) const;
+
+    // Scan Output variables for gl_Layer (BuiltIn::Layer) and return
+    // the current scalar value, or `std::nullopt` if the GS never
+    // wrote it. Same two-shape walk as captureClipCull:
+    //  1. Direct `out int gl_Layer;` — Output variable decorated
+    //     BuiltInLayer, storage is a single scalar.
+    //  2. Member of gl_PerVertex-style struct — MemberDecorate at
+    //     some index has BuiltInLayer; we offset into the flat
+    //     storage by the member's position.
+    // Called from emitVertex to snapshot the per-vertex layer value
+    // so the synth pass-through VS can emit
+    // `[[render_target_array_index]]`.
+    std::optional<std::int32_t> captureLayer() const;
 
     // Resolve an access-chain walk. `base` is a pointer variable id.
     // `indices` are the sequence of OpConstant id operands.
@@ -1349,6 +1376,54 @@ void Interpreter::captureClipCull(std::vector<float>& clipOut,
     }
 }
 
+std::optional<std::int32_t> Interpreter::captureLayer() const {
+    // Same two-shape walk as captureClipCull, but gl_Layer is a
+    // scalar int Output, not an array.
+    for (const auto& [varId, info] : module_.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto sIt = varStorage_.find(varId);
+        if (sIt == varStorage_.end()) continue;
+        auto tIt = module_.types.find(info.typeId);
+        if (tIt == module_.types.end()) continue;
+        const std::uint32_t pointee = tIt->second.pointeeType;
+        auto pIt = module_.types.find(pointee);
+        if (pIt == module_.types.end()) continue;
+        // Shape 1: direct Output int decorated BuiltInLayer.
+        auto dIt = module_.decorations.find(varId);
+        if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn &&
+            dIt->second.builtIn == spv::BuiltInLayer) {
+            if (!sIt->second.empty()) {
+                // varStorage is float-typed; reinterpret to int32.
+                std::int32_t v = 0;
+                std::memcpy(&v, &sIt->second[0], sizeof(std::int32_t));
+                return v;
+            }
+            return 0;
+        }
+        // Shape 2: member of a gl_PerVertex-style struct.
+        if (pIt->second.kind != TypeInfo::Kind::Struct) continue;
+        auto mdIt = module_.memberDecorations.find(pointee);
+        if (mdIt == module_.memberDecorations.end()) continue;
+        std::uint32_t runningOff = 0;
+        for (std::size_t m = 0; m < pIt->second.memberTypes.size(); ++m) {
+            const std::uint32_t memberType = pIt->second.memberTypes[m];
+            const std::uint32_t memberWidth = module_.scalarWidth(memberType);
+            auto mdm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
+            if (mdm != mdIt->second.perMember.end() && mdm->second.hasBuiltIn
+                && mdm->second.builtIn == spv::BuiltInLayer) {
+                if (runningOff < sIt->second.size()) {
+                    std::int32_t v = 0;
+                    std::memcpy(&v, &sIt->second[runningOff], sizeof(std::int32_t));
+                    return v;
+                }
+                return 0;
+            }
+            runningOff += memberWidth;
+        }
+    }
+    return std::nullopt;
+}
+
 void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
     // Capture gl_Position and named output varyings from their
     // respective output variables' storage.
@@ -1383,6 +1458,15 @@ void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
     // the gl_PerVertex output block — we don't, so zero is the
     // semantic "GS didn't touch these".
     captureClipCull(ev.clipDistance, ev.cullDistance);
+    // Capture gl_Layer. `std::nullopt` means the GS didn't write
+    // BuiltInLayer — the caller (`emulateGeometryDraw`) leaves
+    // ev.layer at its default 0 and won't set EmulatedDraw::
+    // hasLayer. If any single vertex wrote it, hasLayer flips on
+    // for the whole draw (the synth VS emits the output slot).
+    if (auto layerValue = captureLayer(); layerValue.has_value()) {
+        ev.layer = *layerValue;
+        didWriteLayer_ = true;
+    }
     out.push_back(std::move(ev));
 }
 
@@ -3165,6 +3249,12 @@ EmulatedDraw emulateGeometryDraw(
                              + ": " + interp.diagnostic();
                 return d;
             }
+            // If any primitive's GS wrote gl_Layer, the whole draw
+            // needs the synth-VS `[[render_target_array_index]]`
+            // output slot. Accumulate across primitives/instances.
+            if (interp.didWriteLayer()) {
+                d.hasLayer = true;
+            }
             // Shift the per-invocation primEnds by the current
             // emittedAll size so they remain valid indices into the
             // global buffer after insert.
@@ -3302,7 +3392,10 @@ EmulatedDraw emulateGeometryDraw(
         clipLen = std::max(clipLen, static_cast<std::uint32_t>(e.clipDistance.size()));
         cullLen = std::max(cullLen, static_cast<std::uint32_t>(e.cullDistance.size()));
     }
-    const std::size_t fpv = 4 + totalVaryingWidth + clipLen + cullLen;
+    // Layered-output slot: one int32 per vertex at the tail of
+    // the packed payload, only when the GS wrote gl_Layer at all.
+    const std::size_t layerSlot = d.hasLayer ? 1 : 0;
+    const std::size_t fpv = 4 + totalVaryingWidth + clipLen + cullLen + layerSlot;
 
     d.topology          = expandedTopo;
     d.vertexCount       = emittedAll.size();
@@ -3331,6 +3424,13 @@ EmulatedDraw emulateGeometryDraw(
         for (std::size_t j = 0; j < emittedAll[v].cullDistance.size() && j < cullLen; ++j) {
             dst[cullBase + j] = emittedAll[v].cullDistance[j];
         }
+        // Append gl_Layer int32 (bit-cast into float32 slot) at the
+        // very tail when d.hasLayer — read back by the synth VS and
+        // emitted as `[[render_target_array_index]]`.
+        if (d.hasLayer) {
+            const std::size_t layerOff = cullBase + cullLen;
+            std::memcpy(&dst[layerOff], &emittedAll[v].layer, sizeof(std::int32_t));
+        }
     }
 
     d.ok = true;
@@ -3358,7 +3458,17 @@ EmulatedDraw emulateGeometryDraw(
 // varyings, so SPIRV-Cross emitted `[[user(locnN)]]` on the FS input
 // side. Matching on both sides is what makes the stage link work.
 
-std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
+std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
+                                           bool layeredFbo) {
+    // Emit render_target_array_index only when both the GS wrote
+    // gl_Layer AND the bound FBO is a layered attachment. On a
+    // non-layered FBO, writing [[render_target_array_index]] with
+    // renderTargetArrayLength=0 is undefined behaviour under Metal
+    // — in practice the driver drops the fragment — so we decline
+    // to emit the slot. The vsin_layer input attribute is still
+    // declared to keep the vertex-descriptor stride in sync with
+    // the packed buffer produced by emulateGeometryDraw.
+    const bool emitRenderTargetArrayIndex = draw.hasLayer && layeredFbo;
     auto mslTypeFor = [](std::uint32_t width, std::uint8_t baseType) -> const char* {
         const char* floatNames[] = { "float", "float2", "float3", "float4" };
         const char* intNames[]   = { "int",   "int2",   "int3",   "int4"   };
@@ -3411,6 +3521,18 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
         src += std::to_string(cullBaseAttrib + i);
         src += ")]];\n";
     }
+    // Layer-index input slot. One int per vertex at the tail of
+    // the packed payload, only when the GS wrote gl_Layer. MSL
+    // `[[attribute]]` has no signed-int scalar form for stage_in
+    // from a packed float buffer, so we read as `int` — the
+    // vertex descriptor builder declares the matching attribute
+    // format `MTLVertexFormatInt`.
+    const std::uint32_t layerAttrib = cullBaseAttrib + draw.cullDistanceLen;
+    if (draw.hasLayer) {
+        src += "    int vsin_layer [[attribute(";
+        src += std::to_string(layerAttrib);
+        src += ")]];\n";
+    }
     src += "};\n\n";
 
     // ─ Vertex output struct.
@@ -3450,6 +3572,17 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
     // tests 1.0 matches the expected behaviour.
     if (draw.topology == GL_POINTS) {
         src += "    float gl_PointSize [[point_size]];\n";
+    }
+    // Layered output. The GS wrote gl_Layer per vertex; we forward
+    // it to Metal's render-target array index so the rasteriser
+    // routes each primitive to the correct slice of a layered FBO
+    // attachment (MTLRenderPassDescriptor.renderTargetArrayLength
+    // must also be set on the encoder side). Per GL 4.6 §11.2.1
+    // and Metal spec, the value used for the whole primitive comes
+    // from the provoking vertex, but MSL handles that routing — we
+    // emit the per-vertex value.
+    if (emitRenderTargetArrayIndex) {
+        src += "    uint gl_Layer [[render_target_array_index]];\n";
     }
     for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
         const std::uint32_t loc = (i < draw.varyingLocations.size())
@@ -3508,6 +3641,16 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw) {
         src += "] = in.vsin_cull";
         src += std::to_string(i);
         src += ";\n";
+    }
+    // Route layer index to render_target_array_index. Cast to uint
+    // because MSL spec requires the attribute type to be uint; we
+    // read it as `int` (signed) from the packed buffer to preserve
+    // negative values during transport (which would be a spec
+    // violation on the GS side anyway — GL clamps gl_Layer at 0).
+    // Only when the FBO is layered — otherwise we'd write a slot
+    // Metal doesn't accept given renderTargetArrayLength=0.
+    if (emitRenderTargetArrayIndex) {
+        src += "    out.gl_Layer = uint(max(in.vsin_layer, 0));\n";
     }
     src += "    return out;\n";
     src += "}\n";

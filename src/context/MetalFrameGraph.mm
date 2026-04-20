@@ -1388,6 +1388,16 @@ struct MetalFrameGraph::Impl {
             } else {
                 pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
             }
+            // Layered rendering — GS-emul path only. When the
+            // emulated GS wrote gl_Layer, the VS routes the per-
+            // primitive layer to `[[render_target_array_index]]`.
+            // Metal requires renderTargetArrayLength on the pass
+            // descriptor to match the attachment's slice count.
+            // Non-layered draws leave this at 0 (Metal's default
+            // non-layered behaviour).
+            if (info.fboColorArrayLength > 0) {
+                pass.renderTargetArrayLength = info.fboColorArrayLength;
+            }
             if (passDepthStencil != nil) {
                 pass.depthAttachment.texture = passDepthStencil;
                 pass.depthAttachment.storeAction = MTLStoreActionStore;

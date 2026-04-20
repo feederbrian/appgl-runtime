@@ -57,6 +57,14 @@ struct EmulatedVertex {
     std::vector<float> varyings;       // concatenated user varying values
     std::vector<float> clipDistance;   // gl_ClipDistance[] at EmitVertex
     std::vector<float> cullDistance;   // gl_CullDistance[] at EmitVertex
+    // gl_Layer value at EmitVertex (GL 4.6 §11.2.1 /
+    // BuiltInLayer). Routed through the synth pass-through VS as
+    // `[[render_target_array_index]]` to send each primitive to the
+    // correct layer of a layered framebuffer attachment. The GS sets
+    // gl_Layer per-vertex; per spec the value from the provoking
+    // vertex is used for the whole primitive, but the per-vertex
+    // snapshot lets us pick the right one on the MSL side.
+    std::int32_t layer = 0;
 };
 
 // Post-GS output topology + vertex buffer ready for GPU raster.
@@ -106,6 +114,15 @@ struct EmulatedDraw {
     // cullDistanceLen with cull coming after clip.
     std::uint32_t clipDistanceLen = 0;
     std::uint32_t cullDistanceLen = 0;
+    // True if any emitted vertex wrote gl_Layer. The synth pass-
+    // through VS only emits the `[[render_target_array_index]]`
+    // slot when this is set — emitting on every GS-emulated draw
+    // would force Metal to treat every FBO as layered, which it
+    // isn't. When false, the packed buffer omits the layer slot
+    // entirely so existing (non-layered) pipelines remain binary-
+    // compatible. When true, each vertex in expandedVertexData
+    // carries an `int32` layer value appended after clip/cull.
+    bool hasLayer = false;
     // True if emulation succeeded. False leaves expandedVertexData empty
     // and the caller should fall back to the existing no-GS path.
     bool ok = false;
@@ -158,7 +175,16 @@ EmulatedDraw emulateGeometryDraw(
 // `emulateGeometryDraw` succeeds; the resulting MSL is fed into
 // the normal translated-draw encoder alongside the program's
 // unchanged fragment MSL.
-std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw);
+// When `layeredFbo` is true and `draw.hasLayer` is true, the synth
+// VS emits `[[render_target_array_index]]` as the final output and
+// reads `vsin_layer` from the packed buffer. When either is false,
+// the attribute slot is still declared (so the vertex descriptor
+// and packed-buffer stride match between the MSL and the encoder),
+// but `gl_Layer` isn't wired to the render-target array index —
+// non-layered attachments route all writes to slice 0 per
+// GL 4.6 §9.4.1.
+std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
+                                           bool layeredFbo = true);
 
 }  // namespace appgl
 

@@ -339,6 +339,15 @@ struct TranslatedDrawInfo {
     void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nil
     GLsizei fboWidth = 0;
     GLsizei fboHeight = 0;
+    // Layered rendering: when non-zero, the color attachment is a
+    // layered texture (2D_ARRAY / 2D_MS_ARRAY / 3D / CUBE / CUBE_
+    // ARRAY) and `renderTargetArrayLength` on the MTLRenderPass
+    // descriptor should be set to this value so the raster
+    // routes primitives to the slice named by
+    // `[[render_target_array_index]]`. When 0, the attachment is
+    // either non-layered or attached as a single slice via
+    // framebufferTextureLayer, and layered output is disabled.
+    std::uint32_t fboColorArrayLength = 0;
 };
 
 // Phase 8X Group 4d follow-up¹⁷ — describes a single immediate-mode

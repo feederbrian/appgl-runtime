@@ -4171,7 +4171,9 @@ struct GLContext::Impl {
     // the default framebuffer is bound (FBO 0) or when the attachment
     // has no Metal texture.  Also populates width/height/depthStencil.
     void* resolveFBOColorTarget(GLsizei& outWidth, GLsizei& outHeight,
-                                void*& outDepthStencil) const {
+                                void*& outDepthStencil,
+                                std::uint32_t* outColorArrayLength = nullptr) const {
+        if (outColorArrayLength != nullptr) *outColorArrayLength = 0;
         const GLuint fboName = state->boundDrawFramebuffer();
         if (fboName == 0) {
             return nullptr;
@@ -4195,6 +4197,20 @@ struct GLContext::Impl {
                     if (lvl != tex->levels.end()) {
                         outWidth = lvl->second.desc.width;
                         outHeight = lvl->second.desc.height;
+                    }
+                    // Layered attachment routing: FramebufferTexture
+                    // on a layered texture target exposes all layers
+                    // for gl_Layer-driven per-primitive routing.
+                    // FramebufferTextureLayer attaches a single slice
+                    // (att->layered == false) — the whole-texture slice
+                    // count doesn't apply there.
+                    if (outColorArrayLength != nullptr && att->layered) {
+                        const GLsizei layers = (tex->target == GL_TEXTURE_3D)
+                            ? std::max<GLsizei>(tex->desc.depth, 1)
+                            : std::max<GLsizei>(tex->desc.layers, 1);
+                        if (layers > 1) {
+                            *outColorArrayLength = static_cast<std::uint32_t>(layers);
+                        }
                     }
                 }
             } else if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
@@ -14783,13 +14799,40 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                                            GLuint programName,
                                            const appgl::EmulatedDraw& ed)
 {
+    // Resolve the FBO's layered-attachment state before we decide
+    // whether the synth VS should emit `[[render_target_array_index]]`.
+    // A GS that writes gl_Layer but targets a non-layered FBO
+    // must NOT emit the render-target-array-index slot — Metal
+    // rejects the combination of MSL writing that slot while
+    // renderTargetArrayLength=0 and drops every fragment.
+    GLsizei preFboW = 0, preFboH = 0;
+    void* preFboDSTex = nullptr;
+    std::uint32_t preFboArrayLen = 0;
+    void* preFboColTex = resolveFBOColorTarget(preFboW, preFboH, preFboDSTex, &preFboArrayLen);
+    const bool fboIsLayered = (preFboColTex != nullptr && preFboArrayLen > 0);
+    const bool routeLayer = ed.hasLayer && fboIsLayered;
+
+    // Invalidate the cached synth VS when its layered-ness doesn't
+    // match the current draw. Metal won't accept swapping the
+    // `[[render_target_array_index]]` declaration on an existing
+    // pipeline, so we rebuild from scratch. The pipeline cache
+    // flushed too (same rebuild-on-next-draw path).
+    if (!program.gsPassThroughVertexMSL.empty() &&
+        program.gsPassThroughVertexMSLLayered != routeLayer) {
+        program.gsPassThroughVertexMSL.clear();
+        program.gsPassThroughPipelineStateCache.clear();
+        program.gsPassThroughPipelineState = nullptr;
+        program.gsPassThroughPipelineColorFormat = 0;
+    }
+
     // Synthesise the pass-through VS once per program (cache on
     // the program object — the layout/widths/locations are fixed
     // at link time by the GS SPIR-V, which doesn't change draw-to-
     // draw). Matching reflection + attribute layout built from the
     // same `ed` so Metal's vertex descriptor picks the right formats.
     if (program.gsPassThroughVertexMSL.empty()) {
-        program.gsPassThroughVertexMSL = appgl::synthesisePassThroughVertexMSL(ed);
+        program.gsPassThroughVertexMSL = appgl::synthesisePassThroughVertexMSL(ed, routeLayer);
+        program.gsPassThroughVertexMSLLayered = routeLayer;
         program.gsPassThroughReflection = ShaderReflection{};
         {
             ShaderReflection::VertexInput pos;
@@ -14852,6 +14895,19 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             vi.location = cullBaseLoc + i;
             vi.type = GL_FLOAT;
             vi.name = "vsin_cull" + std::to_string(i);
+            program.gsPassThroughReflection.vertexInputs.push_back(vi);
+        }
+        // Layered output: one int per vertex at the tail of the
+        // packed buffer. The synth VS reads this and emits it as
+        // `[[render_target_array_index]]`. Matches the packing in
+        // emulateGeometryDraw and the MSL synthesised by
+        // synthesisePassThroughVertexMSL.
+        if (ed.hasLayer) {
+            const GLuint layerLoc = cullBaseLoc + ed.cullDistanceLen;
+            ShaderReflection::VertexInput vi;
+            vi.location = layerLoc;
+            vi.type = GL_INT;
+            vi.name = "vsin_layer";
             program.gsPassThroughReflection.vertexInputs.push_back(vi);
         }
     }
@@ -14919,6 +14975,22 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             tdi.vertexAttributeLayouts.push_back(la);
             offset += sizeof(float);
         }
+        // gl_Layer attribute layout — one int per vertex at the
+        // tail when the GS wrote BuiltInLayer. Metal's vertex
+        // fetcher decodes the raw 32 bits as int per the attribute
+        // format; we set glType=GL_INT + glIsInteger=true so the
+        // vertex descriptor builder picks MTLVertexFormatInt.
+        if (ed.hasLayer) {
+            const GLuint layerLoc = cullBaseLoc + ed.cullDistanceLen;
+            TranslatedDrawInfo::VertexAttributeLayout la;
+            la.location = layerLoc;
+            la.offset = offset;
+            la.glType = GL_INT;
+            la.glComponentCount = 1;
+            la.glIsInteger = true;
+            tdi.vertexAttributeLayouts.push_back(la);
+            offset += sizeof(std::int32_t);
+        }
     }
 
     populateTranslatedDrawFixedFunctionState(tdi, *state);
@@ -14952,15 +15024,19 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     resolveSSBOBindings(program, tdi);
     resolveImageBindings(program, tdi);
 
-    {
-        GLsizei fboW = 0, fboH = 0;
-        void* fboDSTex = nullptr;
-        void* fboColTex = resolveFBOColorTarget(fboW, fboH, fboDSTex);
-        if (fboColTex != nullptr) {
-            tdi.fboColorTexture = fboColTex;
-            tdi.fboDepthStencilTexture = fboDSTex;
-            tdi.fboWidth = fboW;
-            tdi.fboHeight = fboH;
+    if (preFboColTex != nullptr) {
+        tdi.fboColorTexture = preFboColTex;
+        tdi.fboDepthStencilTexture = preFboDSTex;
+        tdi.fboWidth = preFboW;
+        tdi.fboHeight = preFboH;
+        // Only honour layered-attachment routing when the emulated
+        // GS actually wrote gl_Layer AND the FBO is layered. In
+        // the GS-wrote but non-layered case the synth VS didn't
+        // emit [[render_target_array_index]] (see routeLayer
+        // branch at function entry), so we must leave
+        // renderTargetArrayLength at 0 to match.
+        if (routeLayer) {
+            tdi.fboColorArrayLength = preFboArrayLen;
         }
     }
 
