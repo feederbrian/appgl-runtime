@@ -10724,6 +10724,9 @@ void appendDeclarationsAsUniforms(
             if (existing->explicitBinding < 0 && decl.explicitBinding >= 0) {
                 existing->explicitBinding = decl.explicitBinding;
             }
+            if (existing->explicitOffset < 0 && decl.explicitOffset >= 0) {
+                existing->explicitOffset = decl.explicitOffset;
+            }
             continue;
         }
         GLProgramUniformInfo info;
@@ -10734,6 +10737,7 @@ void appendDeclarationsAsUniforms(
         info.location = -1;  // assigned below in link-time location pass
         info.explicitLocation = decl.explicitLocation;
         info.explicitBinding = decl.explicitBinding;
+        info.explicitOffset = decl.explicitOffset;
         info.defaultFloats = decl.defaultFloats;
         info.defaultInts = decl.defaultInts;
         info.defaultUints = decl.defaultUints;
@@ -11835,7 +11839,13 @@ bool GLContext::linkProgram(GLuint program) {
     };
 
     for (auto& uniform : programObject->uniforms) {
-        if (uniform.explicitLocation >= 0) {
+        // GL 4.6 §7.6.1: atomic counter uniforms have no uniform
+        // location and cannot be used with any glUniform* function.
+        // CTS `program_interface_query.atomic-counters` asserts
+        // `glGetProgramResourceLocation(GL_UNIFORM, "a")` returns -1.
+        if (uniform.type == GL_UNSIGNED_INT_ATOMIC_COUNTER) {
+            uniform.location = -1;
+        } else if (uniform.explicitLocation >= 0) {
             uniform.location = uniform.explicitLocation;
         } else {
             advancePastReserved();
@@ -11919,11 +11929,18 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 break;
         }
-        programObject->uniformValues[uniform.location] = std::move(value);
-        // Only advance the auto-location counter for non-explicit uniforms.
-        // Explicit-location uniforms occupy their declared slots (already
-        // recorded in reservedLocations) and must not shift the counter.
-        if (uniform.explicitLocation < 0) {
+        // Atomic-counter uniforms have no uniform location and no
+        // entry in the `glUniform*`-addressable uniformValues map.
+        if (uniform.location >= 0) {
+            programObject->uniformValues[uniform.location] = std::move(value);
+        }
+        // Only advance the auto-location counter for non-explicit uniforms
+        // that actually took a location. Explicit-location uniforms occupy
+        // their declared slots (already recorded in reservedLocations) and
+        // must not shift the counter, and atomic_uint uniforms never take
+        // a slot at all.
+        if (uniform.explicitLocation < 0 &&
+            uniform.type != GL_UNSIGNED_INT_ATOMIC_COUNTER) {
             nextLocation += std::max<GLint>(uniform.arraySize, 1);
         }
     }
@@ -12530,8 +12547,75 @@ bool GLContext::linkProgram(GLuint program) {
         entry.binding = u.explicitBinding;  // RC-D08
         entry.arraySize = u.arraySize;
         entry.referencedBy = computeStageMask(u.name);
+        if (u.type == GL_UNSIGNED_INT_ATOMIC_COUNTER) {
+            // Offset defaults to 0 when the GLSL didn't carry
+            // `layout(offset = N)` on the first counter of a binding
+            // — this is close enough for CTS
+            // `program_interface_query.atomic-counters` which always
+            // supplies an explicit offset. atomicCounterBufferIndex
+            // is filled in below after the ACB table is built.
+            entry.atomicCounterOffset = u.explicitOffset >= 0 ? u.explicitOffset : 0;
+        }
         programObject->resourceUniforms.push_back(std::move(entry));
     }
+
+    // ─── Build GL_ATOMIC_COUNTER_BUFFER resource entries ────────────────
+    // GL 4.6 §7.3.1 Table 7.12: the ATOMIC_COUNTER_BUFFER interface
+    // exposes one resource per distinct `binding` index that any
+    // atomic_uint uniform targets. For each buffer:
+    //   BUFFER_BINDING      = binding index
+    //   BUFFER_DATA_SIZE    = max(offset + sizeof(uint) * N) across
+    //                          the counters in that binding
+    //   NUM_ACTIVE_VARIABLES= number of atomic_uint uniforms that
+    //                          target the binding
+    //   ACTIVE_VARIABLES    = their indices into resourceUniforms
+    //   REFERENCED_BY_*     = union of referencedBy bitmasks
+    //                          of the participating uniforms
+    // CTS `program_interface_query.atomic-counters` exercises this
+    // interface end-to-end.
+    {
+        struct AcbAccumulator {
+            GLint binding = 0;
+            GLint dataSize = 0;                 // BUFFER_DATA_SIZE
+            std::vector<GLint> activeVariables; // indices into resourceUniforms
+            GLbitfield referencedBy = 0;
+        };
+        std::vector<AcbAccumulator> acbs;
+        // Walk resourceUniforms (post-build) so we record the
+        // post-"[0]"-suffix index of each atomic uniform.
+        for (std::size_t i = 0; i < programObject->resourceUniforms.size(); ++i) {
+            auto& ue = programObject->resourceUniforms[i];
+            if (ue.type != GL_UNSIGNED_INT_ATOMIC_COUNTER) continue;
+            const GLint bind = ue.binding < 0 ? 0 : ue.binding;
+            const GLint off = ue.atomicCounterOffset >= 0 ? ue.atomicCounterOffset : 0;
+            const GLint count = ue.arraySize > 0 ? ue.arraySize : 1;
+            const GLint endByte = off + 4 * count;
+            std::size_t bucket = acbs.size();
+            for (std::size_t j = 0; j < acbs.size(); ++j) {
+                if (acbs[j].binding == bind) { bucket = j; break; }
+            }
+            if (bucket == acbs.size()) {
+                acbs.push_back(AcbAccumulator{});
+                acbs.back().binding = bind;
+            }
+            auto& acb = acbs[bucket];
+            if (endByte > acb.dataSize) acb.dataSize = endByte;
+            acb.activeVariables.push_back(static_cast<GLint>(i));
+            acb.referencedBy |= ue.referencedBy;
+            ue.atomicCounterBufferIndex = static_cast<GLint>(bucket);
+        }
+        for (const auto& acb : acbs) {
+            GLProgramResourceEntry be;
+            // ATOMIC_COUNTER_BUFFER resources have no name; leave empty.
+            be.name = "";
+            be.binding = acb.binding;
+            be.offset = acb.dataSize;          // reuse offset slot as BUFFER_DATA_SIZE
+            be.activeVariables = acb.activeVariables;
+            be.referencedBy = acb.referencedBy;
+            programObject->resourceAtomicCounterBuffers.push_back(std::move(be));
+        }
+    }
+    // ─── End ATOMIC_COUNTER_BUFFER build ────────────────────────────────
     for (const auto& a : programObject->attributes) {
         GLProgramResourceEntry entry;
         // GL 4.6 §7.3.1: for array inputs, the resource name ends
@@ -17978,7 +18062,11 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
             return entry.blockIndex >= 0 ? entry.matrixStride : -1;
         case GL_ARRAY_STRIDE:
             return entry.blockIndex >= 0 ? entry.arrayStride : -1;
-        case GL_ATOMIC_COUNTER_BUFFER_INDEX: return -1;
+        case GL_ATOMIC_COUNTER_BUFFER_INDEX:
+            // Set on uniform entries whose type is
+            // GL_UNSIGNED_INT_ATOMIC_COUNTER at link time;
+            // -1 on any non-atomic uniform.
+            return entry.atomicCounterBufferIndex;
         case GL_TOP_LEVEL_ARRAY_SIZE:   return 1;
         case GL_TOP_LEVEL_ARRAY_STRIDE: return 0;
         case GL_LOCATION_INDEX:
@@ -18297,6 +18385,23 @@ bool GLContext::getProgramResourceiv(GLuint program, GLenum programInterface, GL
     GLsizei written = 0;
     if (params != nullptr) {
         for (GLsizei i = 0; i < propCount && written < count; ++i) {
+            // GL 4.6 §7.3.1: GL_ACTIVE_VARIABLES and
+            // GL_COMPATIBLE_SUBROUTINES both write an ARRAY of
+            // integers — the next NUM_ACTIVE_VARIABLES (or
+            // NUM_COMPATIBLE_SUBROUTINES) slots, one per active
+            // member. Every other prop writes a single integer.
+            // CTS `program_interface_query.atomic-counters` reads
+            // NUM_ACTIVE_VARIABLES via a separate call, then
+            // reads the full ACTIVE_VARIABLES list with bufSize
+            // large enough to hold all N entries; we must write
+            // them all, not just the first.
+            if (props[i] == GL_ACTIVE_VARIABLES) {
+                for (GLint idx : entry.activeVariables) {
+                    if (written >= count) break;
+                    params[written++] = idx;
+                }
+                continue;
+            }
             params[written++] = getResourceProperty(entry, props[i]);
         }
     }

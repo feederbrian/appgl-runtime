@@ -298,6 +298,12 @@ struct GLShaderDeclaration {
     // `appendDeclarationsAsUniforms` into `GLProgramUniformInfo` and from
     // there into the GL 4.3 program-resource introspection table.
     GLint explicitBinding = -1;
+    // Byte offset from `layout(offset = N)` on an `atomic_uint`
+    // uniform. Required for GL_ATOMIC_COUNTER_BUFFER introspection
+    // (BUFFER_DATA_SIZE covers the full offset range of active
+    // counters in a binding). -1 = unspecified (GLSL treats that
+    // as "append", we default to 0 when first counter of a binding).
+    GLint explicitOffset = -1;
     // Phase 8X Group 4d follow-up¹⁵ — GLSL 4.20 / ARB_shading_language_420pack
     // lets uniform declarations carry a default-value initializer, e.g.
     //   uniform vec4 ucolor   = vec4(1.0);
@@ -362,6 +368,9 @@ struct GLProgramUniformInfo {
     // RC-D08: explicit binding from GLSL `layout(binding=N)`.  -1 means
     // unspecified.  Propagated into the GL 4.3 resource introspection table.
     GLint explicitBinding = -1;
+    // Byte offset from `layout(offset=N)` on an `atomic_uint`
+    // uniform (parallel to GLShaderDeclaration::explicitOffset).
+    GLint explicitOffset = -1;
     // Phase 8X Group 4d follow-up¹⁵ — parallel to GLShaderDeclaration.
     // linkProgram (appendDeclarationsAsUniforms) forwards these from the
     // shader-stage declarations into the program-level uniform table so
@@ -424,6 +433,17 @@ struct GLProgramResourceEntry {
     // for SSBOs). Drives GL_NUM_ACTIVE_VARIABLES /
     // GL_ACTIVE_VARIABLES queries.
     std::vector<GLint> activeVariables;
+    // GL 4.6 §7.3.1 `GL_ATOMIC_COUNTER_BUFFER_INDEX`: for a uniform
+    // whose type is `atomic_uint`, index of the owning
+    // ATOMIC_COUNTER_BUFFER in the program's
+    // resourceAtomicCounterBuffers table; -1 for any non-atomic
+    // uniform. Populated at link time after the ATOMIC_COUNTER_BUFFER
+    // entries are built.
+    GLint atomicCounterBufferIndex = -1;
+    // GL 4.6 §7.6.3 the byte offset of an atomic_uint counter inside
+    // its ATOMIC_COUNTER_BUFFER binding (from
+    // `layout(offset=N)`). -1 for non-atomic uniforms.
+    GLint atomicCounterOffset = -1;
 };
 
 // Cached uniform locations for the synthesized `appgl_*` fixed-function

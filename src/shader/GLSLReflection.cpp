@@ -220,6 +220,13 @@ struct LayoutQualifiers {
     // color (default), 1 = second color for dual-source blending.
     // -1 = unspecified.
     GLint index    = -1;
+    // Byte offset inside the atomic-counter buffer from
+    // `layout(offset = N)` on an `atomic_uint` uniform. Required
+    // for GL_ATOMIC_COUNTER_BUFFER introspection
+    // (BUFFER_DATA_SIZE, ACTIVE_VARIABLES). -1 = unspecified
+    // (GLSL treats that as "append after previous counter in the
+    // same binding"; we default to 0 when first-seen in a binding).
+    GLint offset   = -1;
 };
 
 // Parse `layout(location = N, binding = M)` and similar.  Returns the
@@ -257,6 +264,8 @@ LayoutQualifiers extractLayoutQualifiers(std::vector<std::string>& tokens) {
                 result.binding = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 0));
             } else if (tokens[i] == "index") {
                 result.index = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 0));
+            } else if (tokens[i] == "offset") {
+                result.offset = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 0));
             }
         }
         ++i;
@@ -631,6 +640,7 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         decl.explicitLocation = layoutQ.location;
         decl.explicitBinding  = layoutQ.binding;
         decl.explicitIndex    = layoutQ.index;
+        decl.explicitOffset   = layoutQ.offset;
 
         // Save the GL type for any additional comma-separated declarations.
         const GLenum declaredType = decl.type;
