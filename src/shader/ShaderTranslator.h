@@ -65,6 +65,14 @@ struct ShaderReflection {
         std::string name;               // block type name (always)
         bool hasInstanceName = false;    // true if GLSL had an instance name
         std::uint32_t blockArraySize = 0; // >0 for `uniform B { ... } b[N]` arrays
+        // True when SPIRV-Cross's `get_active_interface_variables()`
+        // identifies this block's variable as live in the shader body
+        // (an OpAccessChain / OpLoad reaches it). False for declared-
+        // but-unused blocks — used by
+        // `glGetProgramResourceiv(…REFERENCED_BY_*_SHADER)` to gate
+        // the per-stage referenced bit so unused blocks don't look
+        // used.
+        bool active = true;
         std::vector<UniformMember> members;
     };
 

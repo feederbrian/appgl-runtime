@@ -451,6 +451,16 @@ struct GLProgramObject {
     std::string fragmentMSL;
     ShaderReflection vertexReflection;
     ShaderReflection fragmentReflection;
+    // Reflection for the geometry stage, harvested from SPIRV-Cross
+    // even though the GS is CPU-emulated and the MSL output isn't
+    // used for a Metal pipeline. The reflection is usage-based —
+    // it lists only the UBOs, SSBOs, and default-uniform-block
+    // members the GS actually accesses (via OpAccessChain). Used
+    // by `GL_REFERENCED_BY_GEOMETRY_SHADER` queries on
+    // glGetProgramResourceiv so CTS
+    // `program_resource.program_resource` gets correct per-resource
+    // answers.
+    ShaderReflection geometryReflection;
     bool hasTranslatedPipeline = false;
 
     // CPU GS emulation. Set at link time by

@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 typedef unsigned int GLenum;
@@ -262,6 +263,31 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
 // `[[primitive_id]]` reference.
 std::string rewriteFragmentMSLForPrimitiveID(const std::string& fsMsl,
                                               const EmulatedDraw& draw);
+
+// Walk a SPIR-V module's entry-point function body for
+// OpAccessChain instructions that reach any Uniform-storage
+// variable, and return a set of "stage-referenced uniform names"
+// covering:
+//   - Plain uniforms (default-block members): the member's GLSL
+//     name (e.g. "uni_colors_white").
+//   - UBO block members: "BlockName.memberName".
+//   - SSBO block members: "BlockName.memberName".
+// The returned names match what `glGetProgramResource*` would
+// return for GL_UNIFORM / GL_BUFFER_VARIABLE queries. Callers
+// narrow the `GL_REFERENCED_BY_<stage>_SHADER` bitmask so
+// declared-but-unused uniforms don't get the stage's bit. Used
+// by `glGetProgramResourceiv` for the GS side — VS/FS stages
+// get the equivalent via SPIRV-Cross `get_active_interface_
+// variables()`, but the GS is CPU-emulated and we keep all
+// uniform-related reflection at block-level (active) granularity
+// only for its own translation path; per-member usage here
+// closes the gap for CTS
+// `program_resource.program_resource`.
+//
+// Returns an empty set when the SPIR-V doesn't parse or has no
+// function body. Safe no-op on programs without a GS stage.
+std::unordered_set<std::string> scanStageReferencedUniforms(
+    const std::vector<std::uint32_t>& spirv);
 
 }  // namespace appgl
 

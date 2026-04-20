@@ -4646,4 +4646,120 @@ std::string rewriteFragmentMSLForPrimitiveID(const std::string& fsMsl,
     return out;
 }
 
+std::unordered_set<std::string> scanStageReferencedUniforms(
+    const std::vector<std::uint32_t>& spirv)
+{
+    std::unordered_set<std::string> out;
+    if (spirv.empty()) return out;
+    SpirvModule mod;
+    if (!mod.parse(spirv.data(), spirv.size())) return out;
+    if (!mod.haveFuncBody) return out;
+
+    // Classify each uniform variable's struct type and its block
+    // name (from OpName on the struct) + whether it's an
+    // instanced block (variable name != struct type name). We use
+    // the variable id as the key for access-chain base matching.
+    struct UniformVarInfo {
+        std::uint32_t structTypeId = 0;
+        std::string varName;      // OpName on the variable
+        std::string blockName;    // OpName on the struct type
+        bool isStorageBuffer = false;
+        bool isBlockInstanced = false;
+    };
+    std::unordered_map<std::uint32_t, UniformVarInfo> uniformVars;
+    for (const auto& [varId, vinfo] : mod.variables) {
+        if (vinfo.storageClass != spv::StorageClassUniform &&
+            vinfo.storageClass != spv::StorageClassUniformConstant) {
+            continue;
+        }
+        auto tIt = mod.types.find(vinfo.typeId);
+        if (tIt == mod.types.end()) continue;
+        std::uint32_t pointeeId = tIt->second.pointeeType;
+        auto pIt = mod.types.find(pointeeId);
+        if (pIt == mod.types.end()) continue;
+        // Unwrap array-of-struct (UBO array) — we record the
+        // element struct since access chains index into it.
+        if (pIt->second.kind == TypeInfo::Kind::Array) {
+            pointeeId = pIt->second.componentType;
+            pIt = mod.types.find(pointeeId);
+            if (pIt == mod.types.end()) continue;
+        }
+        if (pIt->second.kind != TypeInfo::Kind::Struct) continue;
+        // Only Block / BufferBlock-decorated structs count here —
+        // non-block Uniform-storage structs are function-scope
+        // locals we don't care about.
+        auto sd = mod.decorations.find(pointeeId);
+        if (sd == mod.decorations.end() || !sd->second.isBlock) continue;
+        UniformVarInfo uvi;
+        uvi.structTypeId = pointeeId;
+        uvi.varName = vinfo.name;
+        auto structNameIt = mod.names.find(pointeeId);
+        uvi.blockName = (structNameIt != mod.names.end())
+            ? structNameIt->second : "";
+        // Instanced iff the GLSL provided an instance name AND it
+        // differs from the struct type name. SPIR-V keeps the
+        // struct name (e.g. "Colors") as the OpName on the type
+        // while the variable carries either the type name (no
+        // instance) or the instance name. Matching what
+        // SPIRV-Cross's reflection exposes.
+        uvi.isBlockInstanced = (!uvi.varName.empty() && uvi.varName != uvi.blockName);
+        // Storage class tells us UBO vs SSBO when BufferBlock
+        // wasn't used — newer SPIR-V marks SSBOs via
+        // StorageClassStorageBuffer (12) but older glslang still
+        // uses Uniform + BufferBlock decoration.
+        if (vinfo.storageClass == 12 /*StorageClassStorageBuffer*/) {
+            uvi.isStorageBuffer = true;
+        }
+        uniformVars[varId] = std::move(uvi);
+    }
+
+    // Walk function body; for each OpAccessChain whose base is a
+    // uniform variable, pick out the first-index constant to
+    // identify which member was accessed and record
+    // "BlockName.memberName" (or just "memberName" for non-
+    // instanced default blocks — matching GL_UNIFORM naming).
+    std::size_t pc = mod.funcBodyStart;
+    while (pc < mod.funcBodyEnd) {
+        const std::uint32_t inst = mod.words[pc];
+        const std::uint16_t opcode = static_cast<std::uint16_t>(inst & 0xFFFF);
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0) break;
+        if (opcode == spv::OpAccessChain && wc >= 5) {
+            const std::uint32_t base = mod.words[pc + 3];
+            auto uvIt = uniformVars.find(base);
+            if (uvIt != uniformVars.end()) {
+                const std::uint32_t firstIdxId = mod.words[pc + 4];
+                auto cIt = mod.constants.find(firstIdxId);
+                if (cIt != mod.constants.end()) {
+                    const std::uint32_t memberIdx =
+                        static_cast<std::uint32_t>(cIt->second.i[0]);
+                    auto mnIt = mod.memberNames.find(uvIt->second.structTypeId);
+                    if (mnIt != mod.memberNames.end()) {
+                        auto mNameIt = mnIt->second.find(memberIdx);
+                        if (mNameIt != mnIt->second.end()) {
+                            // Record both the bare member name
+                            // (GL_UNIFORM name for non-instanced
+                            // default block) and the qualified
+                            // "Block.member" form (for instanced
+                            // blocks / SSBOs / GL_BUFFER_VARIABLE).
+                            out.insert(mNameIt->second);
+                            if (!uvIt->second.blockName.empty()) {
+                                out.insert(uvIt->second.blockName + "." + mNameIt->second);
+                            }
+                            // Also record the block name itself so
+                            // callers can test whether the block
+                            // is referenced at all.
+                            if (!uvIt->second.blockName.empty()) {
+                                out.insert(uvIt->second.blockName);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pc += wc;
+    }
+    return out;
+}
+
 }  // namespace appgl

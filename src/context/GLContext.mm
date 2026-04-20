@@ -12439,6 +12439,20 @@ bool GLContext::linkProgram(GLuint program) {
             default:                        return 0;
         }
     };
+    // Build a GS-side "actually referenced" uniform-name set by
+    // walking the GS SPIR-V at link time. Needed because our
+    // per-stage scanner records DECLARATIONS, not USAGE — shared
+    // common headers that declare a uniform in every stage would
+    // spuriously set the stage bit for every stage even when the
+    // GLSL body never uses the uniform. For VS/FS we get usage
+    // via SPIRV-Cross's `get_active_interface_variables()` at
+    // block granularity; for plain uniforms (default block) and
+    // per-member accuracy we fall back to this raw walk.
+    std::unordered_set<std::string> gsRefSet;
+    if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+        gsRefSet = appgl::scanStageReferencedUniforms(geometryShader->spirv);
+    }
+
     auto computeStageMask = [&](const std::string& name) -> GLbitfield {
         GLbitfield mask = 0;
         for (GLuint shaderId : programObject->attachedShaders) {
@@ -12447,7 +12461,24 @@ bool GLContext::linkProgram(GLuint program) {
             const GLbitfield bit = stageBitFor(shaderObject->stage);
             if (bit == 0) continue;
             for (const auto& decl : shaderObject->declaredUniforms) {
-                if (decl.name == name) { mask |= bit; break; }
+                if (decl.name == name) {
+                    // For the GS stage, narrow by actual usage —
+                    // the scanner reports declarations (shared
+                    // common headers), SPIR-V tells us what's
+                    // used. Without this, CTS
+                    // `program_resource.program_resource` saw
+                    // `uni_model_view_projection` (declared in
+                    // both VS and GS via common header, used only
+                    // by VS) as GS-referenced.
+                    if (shaderObject->stage == GL_GEOMETRY_SHADER) {
+                        if (gsRefSet.empty() || gsRefSet.count(name) != 0) {
+                            mask |= bit;
+                        }
+                    } else {
+                        mask |= bit;
+                    }
+                    break;
+                }
             }
         }
         // If the uniform wasn't declared anywhere (shouldn't
@@ -12916,6 +12947,12 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->fragmentMSL, fsRefl);
             std::string unusedGsMSL;
             (void)translateCachedStage("geometry", geometryShader, unusedGsMSL, gsRefl);
+            // Keep the GS reflection so `GL_REFERENCED_BY_GEOMETRY_SHADER`
+            // queries on block-scoped resources (uniform blocks, SSBOs,
+            // buffer variables) can consult it for usage analysis.
+            // SPIRV-Cross's reflection `active` field tells us whether
+            // the block is live in the GS body.
+            programObject->geometryReflection = gsRefl;
             // CPU GS emulation — step 2 hook. Copy the GS SPIR-V onto
             // the program so it survives shader detach/delete, then ask
             // the emulator whether it can handle this shader. Detection
@@ -13220,6 +13257,12 @@ bool GLContext::linkProgram(GLuint program) {
                                GLbitfield stageBit,
                                const std::string& glslSource) {
             for (const auto& block : blocks) {
+                // Only contribute this stage's REFERENCED_BY_*_SHADER
+                // bit when the block is live in the stage's SPIR-V.
+                // Declared-but-unused blocks still get an entry so
+                // introspection lists them, but without the stage
+                // bit. Same logic as mergeStorageBlocks below.
+                const GLbitfield effStageBit = block.active ? stageBit : 0;
                 // SPIRV-Cross loses instance name info (varName == typeName
                 // for both instanced and non-instanced blocks). Parse the
                 // original GLSL source to recover it.
@@ -13246,7 +13289,7 @@ bool GLContext::linkProgram(GLuint program) {
                         programObject->resourceUniformBlocks.end(),
                         [&](const GLProgramResourceEntry& e) { return e.name == entryName; });
                     if (existing != programObject->resourceUniformBlocks.end()) {
-                        existing->referencedBy |= stageBit;
+                        existing->referencedBy |= effStageBit;
                         if (inst == 0) {
                             firstBlockIndex = static_cast<GLint>(
                                 existing - programObject->resourceUniformBlocks.begin());
@@ -13260,7 +13303,7 @@ bool GLContext::linkProgram(GLuint program) {
                     blockEntry.location = static_cast<GLint>(block.glBinding);
                     blockEntry.offset = static_cast<GLint>(block.byteSize); // GL_UNIFORM_BLOCK_DATA_SIZE
                     blockEntry.arraySize = 1;
-                    blockEntry.referencedBy = stageBit;
+                    blockEntry.referencedBy = effStageBit;
                     programObject->resourceUniformBlocks.push_back(std::move(blockEntry));
                     if (inst == 0) {
                         firstBlockIndex = static_cast<GLint>(
@@ -13311,19 +13354,27 @@ bool GLContext::linkProgram(GLuint program) {
                     // checks arraySize > 0 to decide whether to compute a stride.
                     memberEntry.arraySize = static_cast<GLint>(member.arraySize);
                     memberEntry.blockIndex = firstBlockIndex;
-                    memberEntry.referencedBy = stageBit;
+                    memberEntry.referencedBy = effStageBit;
                     memberEntry.isRowMajor = member.isRowMajor;
                     programObject->resourceUniforms.push_back(std::move(memberEntry));
 
                     // Also push into resourceBufferVariables for
                     // glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...).
+                    // NOTE: This is from a UBO merge — UBO members
+                    // are technically not "buffer variables" (that's
+                    // the SSBO-only interface per GL 4.6 §7.3.1.1).
+                    // The push is preserved for backward compat with
+                    // any caller that queries UBO members via the
+                    // buffer-variable interface, but the GL spec
+                    // separates them. When we see a real regression
+                    // because of this overlap, drop it.
                     GLProgramResourceEntry bvEntry;
                     bvEntry.name = block.name + "." + member.name;
                     bvEntry.type = member.type;
                     bvEntry.location = -1;
                     bvEntry.offset = static_cast<GLint>(member.offset);
                     bvEntry.blockIndex = firstBlockIndex;
-                    bvEntry.referencedBy = stageBit;
+                    bvEntry.referencedBy = effStageBit;
                     programObject->resourceBufferVariables.push_back(std::move(bvEntry));
                 }
             }
@@ -13331,8 +13382,17 @@ bool GLContext::linkProgram(GLuint program) {
         static const std::string emptySource;
         const std::string& vsSrc = vertexShader ? vertexShader->source : emptySource;
         const std::string& fsSrc = fragmentShader ? fragmentShader->source : emptySource;
+        const std::string& gsSrc = geometryShader ? geometryShader->source : emptySource;
         mergeBlocks(programObject->vertexReflection.uniformBlocks, 0x01, vsSrc);    // vertex
         mergeBlocks(programObject->fragmentReflection.uniformBlocks, 0x02, fsSrc);  // fragment
+        // GS uniform blocks — SPIRV-Cross reflection captured from
+        // translateCachedStage("geometry") above. Usage-based, so a
+        // block declared in the GS source but never accessed in the
+        // GS body won't appear and won't set the 0x04 bit. CTS
+        // `program_resource.program_resource` needs this for
+        // `uni_colors` (expected TRUE: GS reads uni_colors.red) vs
+        // `uni_matrices` (expected FALSE: declared but unused).
+        mergeBlocks(programObject->geometryReflection.uniformBlocks, 0x04, gsSrc);  // geometry
 
         // Build resourceStorageBlocks from each stage's SSBO reflection so
         // glShaderStorageBlockBinding can look up a block by index and
@@ -13348,26 +13408,68 @@ bool GLContext::linkProgram(GLuint program) {
         auto mergeStorageBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
                                        GLbitfield stageBit) {
             for (const auto& block : blocks) {
+                // Track the per-stage referenced bit ONLY when the
+                // block is live in this stage's SPIR-V — a declared-
+                // but-unused SSBO still appears as a resource but
+                // mustn't contribute the stage's bit. CTS
+                // `program_resource.program_resource` expects
+                // `Ids` (GS-declared, GS-unused) to have
+                // GL_REFERENCED_BY_GEOMETRY_SHADER = FALSE.
+                const GLbitfield effStageBit = block.active ? stageBit : 0;
                 auto existing = std::find_if(
                     programObject->resourceStorageBlocks.begin(),
                     programObject->resourceStorageBlocks.end(),
                     [&](const GLProgramResourceEntry& e) { return e.name == block.name; });
+                GLint blockIdx = -1;
                 if (existing != programObject->resourceStorageBlocks.end()) {
-                    existing->referencedBy |= stageBit;
-                    continue;
+                    existing->referencedBy |= effStageBit;
+                    blockIdx = static_cast<GLint>(existing - programObject->resourceStorageBlocks.begin());
+                } else {
+                    GLProgramResourceEntry entry;
+                    entry.name = block.name;
+                    entry.type = 0;
+                    entry.location = static_cast<GLint>(block.glBinding);
+                    entry.offset = static_cast<GLint>(block.byteSize);
+                    entry.arraySize = 1;
+                    entry.referencedBy = effStageBit;
+                    programObject->resourceStorageBlocks.push_back(std::move(entry));
+                    blockIdx = static_cast<GLint>(programObject->resourceStorageBlocks.size() - 1);
                 }
-                GLProgramResourceEntry entry;
-                entry.name = block.name;
-                entry.type = 0;
-                entry.location = static_cast<GLint>(block.glBinding);
-                entry.offset = static_cast<GLint>(block.byteSize);
-                entry.arraySize = 1;
-                entry.referencedBy = stageBit;
-                programObject->resourceStorageBlocks.push_back(std::move(entry));
+                // Populate buffer-variable entries for each SSBO member
+                // so glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...) can
+                // find "BlockName.memberName" — per GL 4.6 §7.3.1.1 the
+                // buffer-variable interface enumerates active SSBO
+                // members. Dedup by name (OR stage bits on re-entry)
+                // so a block declared in multiple stages collapses to
+                // one entry per member. CTS
+                // `program_resource.program_resource` expects
+                // "Positions.position" (GS-referenced) to be queryable.
+                for (const auto& member : block.members) {
+                    std::string bvName = block.name + "." + member.name;
+                    if (member.arraySize > 0) bvName += "[0]";
+                    auto bvIt = std::find_if(
+                        programObject->resourceBufferVariables.begin(),
+                        programObject->resourceBufferVariables.end(),
+                        [&](const GLProgramResourceEntry& e) { return e.name == bvName; });
+                    if (bvIt != programObject->resourceBufferVariables.end()) {
+                        bvIt->referencedBy |= effStageBit;
+                        continue;
+                    }
+                    GLProgramResourceEntry bv;
+                    bv.name = std::move(bvName);
+                    bv.type = member.type;
+                    bv.location = -1;
+                    bv.offset = static_cast<GLint>(member.offset);
+                    bv.arraySize = static_cast<GLint>(member.arraySize);
+                    bv.blockIndex = blockIdx;
+                    bv.referencedBy = effStageBit;
+                    programObject->resourceBufferVariables.push_back(std::move(bv));
+                }
             }
         };
         mergeStorageBlocks(programObject->vertexReflection.storageBuffers, 0x01);
         mergeStorageBlocks(programObject->fragmentReflection.storageBuffers, 0x02);
+        mergeStorageBlocks(programObject->geometryReflection.storageBuffers, 0x04);
         mergeStorageBlocks(programObject->computeReflection.storageBuffers, 0x20);
 
         // GS reflection: the geometry shader is CPU-emulated — we

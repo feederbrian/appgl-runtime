@@ -910,6 +910,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 auto& ubo = *entry.res;
             ShaderReflection::ResourceBinding rb;
             rb.glBinding = entry.glBinding;
+            rb.active = entry.active;
             if (entry.active) {
                 rb.metalBinding = nextSlot;
                 nextSlot += entry.arraySize;
@@ -1112,6 +1113,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         //
         // First: collect and sort SSBOs by glBinding to match spirvToMSL.
         std::vector<std::pair<std::uint32_t, spirv_cross::Resource*>> sortedSSBOs;
+        auto ssboActive = compiler.get_active_interface_variables();
         for (auto& ssbo : resources.storage_buffers) {
             sortedSSBOs.emplace_back(
                 compiler.get_decoration(ssbo.id, spv::DecorationBinding), &ssbo);
@@ -1124,6 +1126,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             ShaderReflection::ResourceBinding rb;
             rb.glBinding = ssboEntry.first;
             rb.metalBinding = nextSSBOSlot++;
+            rb.active = (ssboActive.find(ssbo.id) != ssboActive.end());
             const auto& ssboType = compiler.get_type(ssbo.base_type_id);
             const std::string typeName = compiler.get_name(ssboType.self);
             rb.name = typeName.empty() ? ssbo.name : typeName;
