@@ -14900,6 +14900,12 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         program.gsPassThroughPipelineStateCache.clear();
         program.gsPassThroughPipelineState = nullptr;
         program.gsPassThroughPipelineColorFormat = 0;
+        // Also invalidate the FS rewrite: its primitive-id input
+        // location is derived from the synth-VS output layout; if
+        // the VS rebuilds, the FS has to follow so MSL's
+        // user(locnN) linkage stays in sync.
+        program.gsPassThroughFragmentMSL.clear();
+        program.gsPassThroughFragmentMSLActive = false;
     }
 
     // Synthesise the pass-through VS once per program (cache on
@@ -15002,6 +15008,19 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             vi.name = "vsin_pointsize";
             program.gsPassThroughReflection.vertexInputs.push_back(vi);
         }
+        // gl_PrimitiveID slot: one int per vertex after the layer +
+        // point-size slots. The synth VS pipes this into the flat
+        // `int vsout_prim_id` user varying at draw.primitiveIDLocation.
+        if (ed.hasPrimitiveID) {
+            const GLuint pidLoc = layerLoc
+                + (ed.hasLayer ? 1u : 0u)
+                + (ed.hasPointSize ? 1u : 0u);
+            ShaderReflection::VertexInput vi;
+            vi.location = pidLoc;
+            vi.type = GL_INT;
+            vi.name = "vsin_prim_id";
+            program.gsPassThroughReflection.vertexInputs.push_back(vi);
+        }
     }
 
     TranslatedDrawInfo tdi;
@@ -15097,11 +15116,52 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             tdi.vertexAttributeLayouts.push_back(la);
             offset += sizeof(float);
         }
+        // gl_PrimitiveID attribute layout — one int per vertex
+        // after any layer + pointSize slots, when the GS wrote
+        // BuiltInPrimitiveId on an OUTPUT. Same `glIsInteger =
+        // true` treatment as the layer int.
+        if (ed.hasPrimitiveID) {
+            const GLuint pidLoc = layerLoc2
+                + (ed.hasLayer ? 1u : 0u)
+                + (ed.hasPointSize ? 1u : 0u);
+            TranslatedDrawInfo::VertexAttributeLayout la;
+            la.location = pidLoc;
+            la.offset = offset;
+            la.glType = GL_INT;
+            la.glComponentCount = 1;
+            la.glIsInteger = true;
+            tdi.vertexAttributeLayouts.push_back(la);
+            offset += sizeof(std::int32_t);
+        }
     }
 
     populateTranslatedDrawFixedFunctionState(tdi, *state);
     tdi.vertexMSL = &program.gsPassThroughVertexMSL;
-    tdi.fragmentMSL = &program.fragmentMSL;
+    // Post-process the FS MSL to redirect `gl_PrimitiveID` reads
+    // to a user varying when the GS wrote BuiltInPrimitiveId.
+    // Rebuild when the primitive-id location changed (e.g. if
+    // the user varying layout shifted between draws — currently
+    // impossible for a linked program but guard for safety).
+    if (ed.hasPrimitiveID) {
+        if (program.gsPassThroughFragmentMSL.empty()
+            || program.gsPassThroughFragmentMSLPrimIdLoc != ed.primitiveIDLocation) {
+            program.gsPassThroughFragmentMSL =
+                appgl::rewriteFragmentMSLForPrimitiveID(program.fragmentMSL, ed);
+            program.gsPassThroughFragmentMSLPrimIdLoc = ed.primitiveIDLocation;
+            program.gsPassThroughFragmentMSLActive = true;
+            // Rebuilding FS invalidates any cached pipeline state.
+            program.gsPassThroughPipelineStateCache.clear();
+            program.gsPassThroughPipelineState = nullptr;
+            program.gsPassThroughPipelineColorFormat = 0;
+            if (std::getenv("APPGL_GS_DUMP_MSL") != nullptr) {
+                std::fprintf(stderr, "\n[GS] rewritten FS MSL (primIdLoc=%u, %zu bytes)\n",
+                    ed.primitiveIDLocation, program.gsPassThroughFragmentMSL.size());
+            }
+        }
+        tdi.fragmentMSL = &program.gsPassThroughFragmentMSL;
+    } else {
+        tdi.fragmentMSL = &program.fragmentMSL;
+    }
     tdi.vertexReflection = &program.gsPassThroughReflection;
     tdi.fragmentReflection = &program.fragmentReflection;
     tdi.pipelineStateOut = &program.gsPassThroughPipelineState;

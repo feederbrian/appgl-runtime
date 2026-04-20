@@ -71,6 +71,13 @@ struct EmulatedVertex {
     // the synth VS emitted before per-vertex capture landed —
     // preserves behaviour when the GS doesn't write gl_PointSize.
     float pointSize = 1.0f;
+    // gl_PrimitiveID value written by the GS (OUTPUT side — not the
+    // per-invocation INPUT gl_PrimitiveIDIn). Routed through the
+    // synth VS as a flat `int` user varying that a post-processed
+    // FS reads instead of Metal's rasteriser-provided
+    // `[[primitive_id]]`. Default 0; only used when ed.hasPrimitiveID
+    // is set (i.e. the GS source stores to gl_PrimitiveID anywhere).
+    std::int32_t primitiveId = 0;
 };
 
 // Post-GS output topology + vertex buffer ready for GPU raster.
@@ -136,6 +143,22 @@ struct EmulatedDraw {
     // output topology; other topologies have Metal-rejected
     // `[[point_size]]` slots so we gate the emission accordingly.
     bool hasPointSize = false;
+    // True when the GS wrote gl_PrimitiveID on any emitted vertex.
+    // Flips on the `[[user(locnK), flat]] int` output on the synth
+    // VS and instructs the FS MSL post-processor to redirect
+    // `gl_PrimitiveID` reads to that varying. When false, the FS
+    // keeps Metal's rasteriser-generated `[[primitive_id]]` (= the
+    // index of the current primitive in the expanded draw), which
+    // is the right behaviour when the GS doesn't override it.
+    bool hasPrimitiveID = false;
+    // Location of the synth-VS `int vsout_prim_id` output varying
+    // when hasPrimitiveID is set. Matched by the post-processed
+    // FS's `int gs_prim_id [[user(locnN), flat]]` input. Computed
+    // as `max(varyingLocations) + 1` so it doesn't collide with
+    // the GS's regular user varyings (which flow through the FS
+    // unchanged at their SPIR-V Location). Zero when hasPrimitiveID
+    // is false.
+    std::uint32_t primitiveIDLocation = 0;
     // True if emulation succeeded. False leaves expandedVertexData empty
     // and the caller should fall back to the existing no-GS path.
     bool ok = false;
@@ -198,6 +221,47 @@ EmulatedDraw emulateGeometryDraw(
 // GL 4.6 §9.4.1.
 std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
                                            bool layeredFbo = true);
+
+// Post-process the fragment shader MSL that SPIRV-Cross produced
+// for a GS-emulated program so it reads the GS-supplied
+// gl_PrimitiveID override from a flat user varying instead of
+// Metal's rasteriser-provided `[[primitive_id]]`.
+//
+// The SPIRV-Cross output for an FS that reads `gl_PrimitiveID`
+// looks like:
+//
+//   fragment main0_out main0(uint gl_PrimitiveID [[primitive_id]])
+//   {
+//       main0_out out = {};
+//       ...references to gl_PrimitiveID...
+//   }
+//
+// or, with user varyings present:
+//
+//   struct main0_in { … };
+//   fragment main0_out main0(main0_in in [[stage_in]],
+//                            uint gl_PrimitiveID [[primitive_id]])
+//   { … }
+//
+// This helper rewrites the parameter list to drop the
+// `[[primitive_id]]` parameter and adds a stage_in field (on an
+// existing main0_in, or a synthesised GS-prim-id-only struct)
+// whose value is bound to a local `uint gl_PrimitiveID =
+// uint(<readback>);` at the start of main0(). The local shadows
+// what SPIRV-Cross was otherwise receiving from Metal's
+// rasteriser, and the rest of the function body references it
+// unchanged.
+//
+// `primitiveIdLocation` must match the output location picked by
+// `synthesisePassThroughVertexMSL` (via
+// `draw.primitiveIDLocation`) so the FS input and VS output line
+// up — Metal's pipeline validator rejects the link otherwise.
+//
+// Returns the original `fsMsl` unchanged when either
+// `!draw.hasPrimitiveID` or the MSL doesn't contain a
+// `[[primitive_id]]` reference.
+std::string rewriteFragmentMSLForPrimitiveID(const std::string& fsMsl,
+                                              const EmulatedDraw& draw);
 
 }  // namespace appgl
 

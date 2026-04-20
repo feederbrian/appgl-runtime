@@ -497,6 +497,19 @@ struct GLProgramObject {
     std::string gsPassThroughVertexMSL;
     bool gsPassThroughVertexMSLLayered = false;
     ShaderReflection gsPassThroughReflection;
+    // Rewritten FS MSL for GS-emulated draws that require routing a
+    // GS-supplied gl_PrimitiveID override through a flat user varying
+    // instead of Metal's rasteriser-provided `[[primitive_id]]`.
+    // Populated by `rewriteFragmentMSLForPrimitiveID` on the first
+    // such draw; points back to the original `fragmentMSL` via the
+    // `gsPassThroughFragmentMSLActive` flag when no rewrite is
+    // needed. `gsPassThroughFragmentMSLPrimIdLoc` is kept so a
+    // draw that flips to a different primitive-id location (e.g.
+    // when varyingLocations change between pipelines — shouldn't
+    // happen for a linked program but guard anyway) can rebuild.
+    std::string gsPassThroughFragmentMSL;
+    bool gsPassThroughFragmentMSLActive = false;
+    std::uint32_t gsPassThroughFragmentMSLPrimIdLoc = 0;
     // Parallel pipeline-state cache so the emulated draw doesn't
     // pollute the regular hasTranslatedPipeline cache. Same owner-
     // ship semantics as metalPipelineState* below.

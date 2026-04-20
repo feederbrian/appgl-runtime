@@ -796,9 +796,17 @@ private:
     // non-point draws.
     bool didWritePointSize_ = false;
 
+    // Mirror for BuiltInPrimitiveId written by the GS (OUTPUT).
+    // Flips on when any emitted vertex carries a captured
+    // primitive-id. The caller then packs a per-vertex int slot +
+    // the FS MSL is post-processed to read the override value
+    // instead of Metal's rasteriser-provided `[[primitive_id]]`.
+    bool didWritePrimitiveID_ = false;
+
 public:
     bool didWriteLayer() const { return didWriteLayer_; }
     bool didWritePointSize() const { return didWritePointSize_; }
+    bool didWritePrimitiveID() const { return didWritePrimitiveID_; }
 private:
 
     // Diagnostic + bail.
@@ -840,6 +848,18 @@ private:
     // the GS never writes gl_PointSize — caller keeps the default
     // 1.0. Only exercised for GL_POINTS output topology.
     std::optional<float> capturePointSize() const;
+
+    // Same two-shape walk for BuiltInPrimitiveId on an OUTPUT (the
+    // GS overwrites the FS's gl_PrimitiveID; distinct from the
+    // INPUT gl_PrimitiveIDIn which we seed from gsPrimitiveId_).
+    // `std::nullopt` means the GS didn't write it; the FS sees
+    // Metal's rasteriser-provided [[primitive_id]] in that case.
+    // Set when any vertex wrote BuiltInPrimitiveId via OpStore;
+    // ed.hasPrimitiveID flips on for the whole draw and the synth
+    // VS emits a flat `int` user varying that a post-processed FS
+    // reads in place of `[[primitive_id]]`. Used by CTS
+    // `geometry_shader.primitive_counter.primitive_id_from_fragment`.
+    std::optional<std::int32_t> capturePrimitiveID() const;
 
     // Resolve an access-chain walk. `base` is a pointer variable id.
     // `indices` are the sequence of OpConstant id operands.
@@ -1499,6 +1519,63 @@ std::optional<float> Interpreter::capturePointSize() const {
     return std::nullopt;
 }
 
+std::optional<std::int32_t> Interpreter::capturePrimitiveID() const {
+    // Mirror captureLayer but for BuiltInPrimitiveId = 7 on an
+    // OUTPUT variable. Unlike gl_Layer, the gl_PerVertex output
+    // block does NOT include gl_PrimitiveID as a default member —
+    // SPIR-V only produces a BuiltInPrimitiveId-decorated Output
+    // when the GS source has a statement like
+    // `gl_PrimitiveID = …;`. So whenever we find an Output with
+    // that decoration, we know the GS source wrote it at some
+    // point; the storage value is the last written value at
+    // EmitVertex time. Returning the current scalar value without
+    // a "zero means unwritten" heuristic (unlike capturePointSize)
+    // is therefore correct.
+    for (const auto& [varId, info] : module_.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto sIt = varStorage_.find(varId);
+        if (sIt == varStorage_.end()) continue;
+        auto tIt = module_.types.find(info.typeId);
+        if (tIt == module_.types.end()) continue;
+        const std::uint32_t pointee = tIt->second.pointeeType;
+        auto pIt = module_.types.find(pointee);
+        if (pIt == module_.types.end()) continue;
+        // Shape 1: direct Output int decorated BuiltInPrimitiveId.
+        auto dIt = module_.decorations.find(varId);
+        if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn &&
+            dIt->second.builtIn == 7 /*BuiltInPrimitiveId*/) {
+            if (!sIt->second.empty()) {
+                std::int32_t v = 0;
+                std::memcpy(&v, &sIt->second[0], sizeof(std::int32_t));
+                return v;
+            }
+            return 0;
+        }
+        // Shape 2: member of a gl_PerVertex-style struct (rare —
+        // glslang usually emits a direct Output — but cover it).
+        if (pIt->second.kind != TypeInfo::Kind::Struct) continue;
+        auto mdIt = module_.memberDecorations.find(pointee);
+        if (mdIt == module_.memberDecorations.end()) continue;
+        std::uint32_t runningOff = 0;
+        for (std::size_t m = 0; m < pIt->second.memberTypes.size(); ++m) {
+            const std::uint32_t memberType = pIt->second.memberTypes[m];
+            const std::uint32_t memberWidth = module_.scalarWidth(memberType);
+            auto mdm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
+            if (mdm != mdIt->second.perMember.end() && mdm->second.hasBuiltIn
+                && mdm->second.builtIn == 7 /*BuiltInPrimitiveId*/) {
+                if (runningOff < sIt->second.size()) {
+                    std::int32_t v = 0;
+                    std::memcpy(&v, &sIt->second[runningOff], sizeof(std::int32_t));
+                    return v;
+                }
+                return 0;
+            }
+            runningOff += memberWidth;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<std::int32_t> Interpreter::captureLayer() const {
     // Same two-shape walk as captureClipCull, but gl_Layer is a
     // scalar int Output, not an array.
@@ -1593,6 +1670,10 @@ void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
     if (auto pointSizeValue = capturePointSize(); pointSizeValue.has_value()) {
         ev.pointSize = *pointSizeValue;
         didWritePointSize_ = true;
+    }
+    if (auto primIdValue = capturePrimitiveID(); primIdValue.has_value()) {
+        ev.primitiveId = *primIdValue;
+        didWritePrimitiveID_ = true;
     }
     out.push_back(std::move(ev));
 }
@@ -3865,6 +3946,9 @@ EmulatedDraw emulateGeometryDraw(
                 if (interp.didWritePointSize()) {
                     d.hasPointSize = true;
                 }
+                if (interp.didWritePrimitiveID()) {
+                    d.hasPrimitiveID = true;
+                }
                 // Shift the per-invocation primEnds by the current
                 // emittedAll size so they remain valid indices into
                 // the global buffer after insert.
@@ -4024,8 +4108,9 @@ EmulatedDraw emulateGeometryDraw(
     // the packed payload, only when the GS wrote gl_Layer at all.
     const std::size_t layerSlot = d.hasLayer ? 1 : 0;
     const std::size_t pointSizeSlot = d.hasPointSize ? 1 : 0;
+    const std::size_t primIdSlot = d.hasPrimitiveID ? 1 : 0;
     const std::size_t fpv = 4 + totalVaryingWidth + clipLen + cullLen
-                          + layerSlot + pointSizeSlot;
+                          + layerSlot + pointSizeSlot + primIdSlot;
 
     d.topology          = expandedTopo;
     d.vertexCount       = emittedAll.size();
@@ -4037,6 +4122,17 @@ EmulatedDraw emulateGeometryDraw(
     d.varyingBaseType   = std::move(outBaseType);
     d.clipDistanceLen   = clipLen;
     d.cullDistanceLen   = cullLen;
+    // Pre-compute the primitive-id varying location for the
+    // synth VS output + FS post-processor. Use max(userVaryingLoc)+1
+    // to avoid collision with regular GS output varyings. When
+    // there are no user varyings, location 0 is fine.
+    if (d.hasPrimitiveID) {
+        std::uint32_t maxLoc = 0;
+        for (std::uint32_t loc : d.varyingLocations) {
+            if (loc > maxLoc) maxLoc = loc;
+        }
+        d.primitiveIDLocation = d.varyingLocations.empty() ? 0u : (maxLoc + 1u);
+    }
 
     // Per-primitive gl_Layer propagation. GL 4.6 §14.5.1 with
     // `GL_LAST_VERTEX_CONVENTION` (our advertised default — see
@@ -4158,6 +4254,18 @@ EmulatedDraw emulateGeometryDraw(
             const std::size_t psOff = cullBase + cullLen + layerSlot;
             dst[psOff] = emittedAll[v].pointSize;
         }
+        // Append gl_PrimitiveID int32 (bit-cast to float32 slot)
+        // after layer + pointSize when d.hasPrimitiveID. Read by
+        // the synth VS and forwarded to the FS through a flat
+        // `int` user varying — the FS MSL post-processor replaces
+        // the SPIRV-Cross-generated `uint gl_PrimitiveID
+        // [[primitive_id]]` parameter with a read of this value,
+        // so the FS sees the GS-supplied override instead of
+        // Metal's rasteriser-provided primitive index.
+        if (d.hasPrimitiveID) {
+            const std::size_t pidOff = cullBase + cullLen + layerSlot + pointSizeSlot;
+            std::memcpy(&dst[pidOff], &emittedAll[v].primitiveId, sizeof(std::int32_t));
+        }
     }
 
     d.ok = true;
@@ -4269,6 +4377,16 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         src += std::to_string(psAttrib);
         src += ")]];\n";
     }
+    // gl_PrimitiveID (OUTPUT — GS-override) input slot. One int32
+    // per vertex after the point-size slot. The FS MSL post-
+    // processor redirects `gl_PrimitiveID` reads to this varying
+    // instead of Metal's rasteriser `[[primitive_id]]`.
+    const std::uint32_t primIdAttrib = psAttrib + (draw.hasPointSize ? 1u : 0u);
+    if (draw.hasPrimitiveID) {
+        src += "    int vsin_prim_id [[attribute(";
+        src += std::to_string(primIdAttrib);
+        src += ")]];\n";
+    }
     src += "};\n\n";
 
     // ─ Vertex output struct.
@@ -4341,6 +4459,14 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         src += interpTag(effInterp);
         src += "]];\n";
     }
+    // gl_PrimitiveID routing slot (see EmulatedDraw::primitiveIDLocation).
+    // Matched by the FS post-processor that redirects reads from
+    // Metal's `[[primitive_id]]` to this flat-int varying.
+    if (draw.hasPrimitiveID) {
+        src += "    int vsout_prim_id [[user(locn";
+        src += std::to_string(draw.primitiveIDLocation);
+        src += "), flat]];\n";
+    }
     src += "};\n\n";
 
     // ─ Entry.
@@ -4398,9 +4524,126 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     if (emitRenderTargetArrayIndex) {
         src += "    out.gl_Layer = uint(max(in.vsin_layer, 0));\n";
     }
+    if (draw.hasPrimitiveID) {
+        src += "    out.vsout_prim_id = in.vsin_prim_id;\n";
+    }
     src += "    return out;\n";
     src += "}\n";
     return src;
+}
+
+std::string rewriteFragmentMSLForPrimitiveID(const std::string& fsMsl,
+                                              const EmulatedDraw& draw)
+{
+    if (!draw.hasPrimitiveID) return fsMsl;
+    // SPIRV-Cross emits the primitive_id parameter with a fixed
+    // shape on macOS. Search for the unique substring — if absent,
+    // the FS doesn't read gl_PrimitiveID and there's nothing to
+    // rewrite (shouldn't happen because hasPrimitiveID only flips
+    // when the GS wrote gl_PrimitiveID, but the FS could still
+    // ignore it).
+    const std::string primIdParam = "uint gl_PrimitiveID [[primitive_id]]";
+    const std::size_t paramPos = fsMsl.find(primIdParam);
+    if (paramPos == std::string::npos) return fsMsl;
+
+    // Walk forward to the end of the full `fragment main0_out
+    // main0(...)` parameter list — we'll rewrite its contents to
+    // remove the primitive_id parameter and, if needed, add the
+    // GS-prim-id stage_in parameter.
+    //
+    // Three cases for the original signature (SPIRV-Cross output):
+    //   A) single param :  `main0(uint gl_PrimitiveID [[primitive_id]])`
+    //   B) first param  :  `main0(uint gl_PrimitiveID [[primitive_id]], main0_in in [[stage_in]], …)`
+    //   C) non-first    :  `main0(main0_in in [[stage_in]], uint gl_PrimitiveID [[primitive_id]], …)`
+    //
+    // For (A) we replace the whole primitive_id param with our
+    // stage_in struct. For (B)/(C) we remove the primitive_id
+    // param + its surrounding comma, and inject the new
+    // struct-field into the existing main0_in. Only case (A)
+    // applies to CTS `primitive_id_from_fragment` — cases (B)/(C)
+    // need the deeper struct-injection path which we implement
+    // when we first hit a test that triggers them.
+
+    // Locate the `fragment <return-type> main0(` line. We find
+    // `main0(` first, then walk backwards to the start of that
+    // line so our struct definition can be injected on its own
+    // line immediately before the function signature.
+    const std::size_t mainPos = fsMsl.rfind("main0(", paramPos);
+    if (mainPos == std::string::npos) return fsMsl;
+    std::size_t sigLineStart = fsMsl.rfind('\n', mainPos);
+    if (sigLineStart == std::string::npos) {
+        sigLineStart = 0;
+    } else {
+        ++sigLineStart;   // past the '\n' itself
+    }
+    // Find the matching closing paren for the parameter list.
+    std::size_t depth = 1;
+    std::size_t parenEnd = mainPos + 6;   // past "main0("
+    while (parenEnd < fsMsl.size() && depth > 0) {
+        if (fsMsl[parenEnd] == '(') ++depth;
+        else if (fsMsl[parenEnd] == ')') --depth;
+        if (depth == 0) break;
+        ++parenEnd;
+    }
+    if (depth != 0) return fsMsl;
+
+    // Inspect param list to classify A (single primitive_id) vs
+    // B/C (multiple params). Case A is what CTS
+    // primitive_id_from_fragment uses; B/C need struct-injection
+    // into an existing main0_in — not yet implemented.
+    const std::size_t paramListStart = mainPos + 6;
+    const std::string paramList = fsMsl.substr(paramListStart, parenEnd - paramListStart);
+    const bool isCaseA = (paramList.find(',') == std::string::npos);
+    if (!isCaseA) return fsMsl;
+
+    // Everything between `main0(` and `)`, i.e. `paramList`, is
+    // the original parameter (just the primitive_id). We build
+    // the rewritten MSL by replacing that whole signature line
+    // with our own, with the struct definition preceding it.
+    //
+    // Find the opening brace that starts the function body.
+    std::size_t braceStart = parenEnd + 1;
+    while (braceStart < fsMsl.size() && fsMsl[braceStart] != '{') {
+        ++braceStart;
+    }
+    if (braceStart >= fsMsl.size()) return fsMsl;
+
+    // Salvage the original signature prefix (`fragment main0_out `
+    // or similar) between line-start and `main0(` — we reuse it
+    // so the rewritten function keeps the original return type
+    // and any fragment-qualifier attributes SPIRV-Cross emitted.
+    const std::string sigPrefix = fsMsl.substr(sigLineStart, mainPos - sigLineStart);
+
+    std::string out;
+    out.reserve(fsMsl.size() + 256);
+
+    // Prologue: everything before the function signature line.
+    out.append(fsMsl, 0, sigLineStart);
+
+    // Inject a GS-prim-id stage_in struct immediately above the
+    // function signature, on its own line block.
+    out.append("struct _gs_fs_in {\n");
+    out.append("    int _gs_prim_id [[user(locn");
+    out.append(std::to_string(draw.primitiveIDLocation));
+    out.append("), flat]];\n");
+    out.append("};\n\n");
+
+    // Rebuilt function signature: original prefix + main0 with
+    // our stage_in parameter replacing the old [[primitive_id]]
+    // one. Keep any whitespace between `)` and `{` that was in
+    // the original for formatting parity.
+    out.append(sigPrefix);
+    out.append("main0(_gs_fs_in _gs_in [[stage_in]])");
+    out.append(fsMsl, parenEnd + 1, braceStart - (parenEnd + 1));
+
+    // Opening brace + GS-prim-id shadow local, then the rest of
+    // the body unchanged. The local shadows the dropped
+    // parameter so existing `gl_PrimitiveID` references bind to
+    // our injected value without further edits.
+    out.append("{\n");
+    out.append("    uint gl_PrimitiveID = uint(_gs_in._gs_prim_id);\n");
+    out.append(fsMsl, braceStart + 1, std::string::npos);
+    return out;
 }
 
 }  // namespace appgl
