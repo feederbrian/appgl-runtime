@@ -999,3 +999,63 @@ rebuild catches the drift at compile time.
     - `geometry_shader.linking.*`: 13/13 held
     - `cull_distance.*`: 41/218 held (stopgap active)
     - `constant_expressions.*_geometry`: 232/232 held
+- **2026-04-20** — **Phase 6b** (round 2 continuation: close
+  `layered_fbo.*` + caps-only scaffolding for
+  `layered_framebuffer.*`). User follow-up "Let's complete
+  round 2 next" after the session-16 caps fixes landed.
+    - **`17d4e51`** GL 4.6 §9.4.1 + §9.4.2 completeness gaps
+      surfaced by the `layered_fbo` cluster.
+      (a) `framebufferTexture` now stores `layered &&
+      targetIsLayered` — a plain TEXTURE_2D attached via the
+      layered entry point reports
+      `FRAMEBUFFER_ATTACHMENT_LAYERED = FALSE` per spec because
+      the attachment has a single layer.
+      (b) `framebufferStatus` walks the attachment table for a
+      layered/non-layered mix and raises
+      `GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS` per §9.4.2 —
+      color attachments from textures of different targets
+      (e.g. 2D_ARRAY + CUBE) also trip this. CTS
+      `layered_fbo.layered_fbo` builds four FBOs that
+      intentionally hit these combinations. Layered_fbo
+      6/8 → 8/8. No regressions in DSA framebuffers,
+      copy_image, dsa.textures.
+    - **`3affb79`** `GLFramebufferObject` persists the
+      `FRAMEBUFFER_DEFAULT_{WIDTH,HEIGHT,LAYERS,SAMPLES,
+      FIXED_SAMPLE_LOCATIONS}` fields set via
+      `framebufferParameteri`. Previously accepted as a hint
+      and read back as 0. Default FB rejected with
+      INVALID_OPERATION per GL 4.6 §9.2.1. Range-check against
+      `GL_MAX_FRAMEBUFFER_*` limits; negatives raise
+      INVALID_VALUE. Moves
+      `layered_rendering_fbo_no_attachment` past its caps
+      precondition into the rendered-data comparison (which
+      still needs full gl_Layer routing to close).
+    - **`b871acc`** Two spec-correctness fixes together
+      advance `layered_framebuffer.{stencil,depth}_support`
+      past their API gates.
+      (a) `texImage3D` mirrors `depth` into `desc.layers` for
+      array targets — parallel to the existing texStorage3D
+      path. Without this, a 2D_ARRAY created via texImage3D
+      with depth=N had `desc.layers = 1` (field default) so
+      `framebufferTextureLayer(layer=M)` returned INVALID_VALUE
+      for every M ≥ 1. Fixes the INVALID_VALUE
+      `stencil_support` hit at
+      esextcGeometryShaderLayeredFramebuffer.cpp:1364.
+      (b) `clearDepthAttachment` / `clearStencilAttachment`
+      accept texture-backed attachments, returning success
+      when the texture's internal format is depth- /
+      stencil-capable. Metal's next render-pass loadAction
+      performs the actual clear; we don't yet stamp a CPU
+      depth/stencil shadow for layered texture attachments.
+      Fixes the INVALID_FRAMEBUFFER_OPERATION
+      `depth_support` hit at line 1030.
+  The remaining layered_framebuffer + layered_rendering tests
+  all need full gl_Layer routing (GS `BuiltInLayer` capture
+  + synth VS `[[render_target_array_index]]` + Metal
+  `renderTargetArrayLength` + per-primitive layer routing).
+  2–3 days of infrastructure work, unchanged from phase 6
+  backlog.
+  Sweep delta vs phase 6:
+    - `geometry_shader.layered_fbo.*`: 6/8 → **8/8** (+2)
+    - `geometry_shader.*` overall: 104/136 → **106/136** (+2)
+    - Everything else held.
