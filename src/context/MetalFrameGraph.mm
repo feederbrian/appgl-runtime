@@ -1461,7 +1461,24 @@ struct MetalFrameGraph::Impl {
             cachedPipelineState = pipelineState;
         }
 
-        if (depthStencilTexture != nil) {
+        // Depth-stencil state is driven by whether any depth
+        // attachment exists — the default framebuffer's
+        // `depthStencilTexture` OR the bound FBO's
+        // `info.fboDepthStencilTexture`. Previously this gate only
+        // checked the default-FB slot, which meant every FBO draw
+        // ran with Metal's implicit "always pass, no write"
+        // depth/stencil state regardless of GL's depth test +
+        // depth-func + depth-write-mask. CTS
+        // `geometry_shader.layered_framebuffer.depth_support`
+        // clears depth to 0.5, draws with GL_LESS, and expects
+        // layers 2/3 (depths 0, 0.5) to be rejected — but with no
+        // state set, every fragment passed, producing the
+        // observed "all-white" on all layers. Extending the gate
+        // to the FBO case makes GL's depth state actually apply.
+        const bool havePassDepthStencil =
+            depthStencilTexture != nil ||
+            info.fboDepthStencilTexture != nullptr;
+        if (havePassDepthStencil) {
             MetalDrawInfo fakeInfo;
             fakeInfo.depthTestEnabled = info.depthTestEnabled;
             fakeInfo.depthFunc = info.depthFunc;
