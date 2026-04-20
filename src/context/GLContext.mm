@@ -13401,6 +13401,8 @@ bool GLContext::linkProgram(GLuint program) {
                     memberEntry.blockIndex = firstBlockIndex;
                     memberEntry.referencedBy = effStageBit;
                     memberEntry.isRowMajor = member.isRowMajor;
+                    memberEntry.arrayStride = member.arrayStride;
+                    memberEntry.matrixStride = member.matrixStride;
                     programObject->resourceUniforms.push_back(std::move(memberEntry));
 
                     // Also push into resourceBufferVariables for
@@ -13514,6 +13516,9 @@ bool GLContext::linkProgram(GLuint program) {
                         bv.arraySize = static_cast<GLint>(member.arraySize);
                         bv.blockIndex = blockIdx;
                         bv.referencedBy = effStageBit;
+                        bv.isRowMajor = member.isRowMajor;
+                        bv.arrayStride = member.arrayStride;
+                        bv.matrixStride = member.matrixStride;
                         programObject->resourceBufferVariables.push_back(std::move(bv));
                         bvIndex = static_cast<GLint>(programObject->resourceBufferVariables.size() - 1);
                     }
@@ -17831,24 +17836,17 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
             // NUM_ACTIVE_VARIABLES and the first entry.
             return entry.activeVariables.empty()
                 ? 0 : entry.activeVariables.front();
-        case GL_IS_ROW_MAJOR:      return GL_FALSE;
-        // GL 4.6 §7.3.1: GL_MATRIX_STRIDE returns the matrix-
-        // column/row byte stride for block members, or -1 when
-        // the variable is not the member of a buffer-backed
-        // block. Plain uniforms (scalar/vector/matrix not in a
-        // UBO/SSBO) therefore report -1. Block members with
-        // matrix type should report their std140-rounded stride
-        // (we don't track this yet — return 0 for now, a
-        // follow-up can wire up block-member strides if a CTS
-        // test surfaces it).
+        case GL_IS_ROW_MAJOR:      return entry.isRowMajor ? GL_TRUE : GL_FALSE;
+        // GL 4.6 §7.3.1: GL_MATRIX_STRIDE / GL_ARRAY_STRIDE
+        // return the byte stride between matrix columns/rows
+        // and between array elements respectively, for block
+        // members. -1 when the variable isn't a member of a
+        // buffer-backed block. The reflection-captured stride
+        // propagates via `entry.matrixStride` / `entry.arrayStride`.
         case GL_MATRIX_STRIDE:
-            return entry.blockIndex >= 0 ? 0 : -1;
-        // GL 4.6 §7.3.1: GL_ARRAY_STRIDE returns the byte
-        // stride between consecutive array elements for block
-        // members, or -1 when the variable is not the member of
-        // a buffer-backed block. Same treatment as MATRIX_STRIDE.
+            return entry.blockIndex >= 0 ? entry.matrixStride : -1;
         case GL_ARRAY_STRIDE:
-            return entry.blockIndex >= 0 ? 0 : -1;
+            return entry.blockIndex >= 0 ? entry.arrayStride : -1;
         case GL_ATOMIC_COUNTER_BUFFER_INDEX: return -1;
         case GL_TOP_LEVEL_ARRAY_SIZE:   return 1;
         case GL_TOP_LEVEL_ARRAY_STRIDE: return 0;

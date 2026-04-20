@@ -63,6 +63,14 @@ struct ShaderReflection {
         // we need this flag to distinguish them from non-array
         // members. Sized arrays have arraySize > 0 AND isArray.
         bool isArray = false;
+        // Byte stride between consecutive array elements
+        // (`GL_ARRAY_STRIDE`). For non-array members, 0. SPIR-V's
+        // DecorationArrayStride on the member slot maps 1:1.
+        GLint arrayStride = 0;
+        // Byte stride between matrix columns (row_major) or rows
+        // (column_major) (`GL_MATRIX_STRIDE`). For non-matrix
+        // members, 0.
+        GLint matrixStride = 0;
     };
 
     struct ResourceBinding {

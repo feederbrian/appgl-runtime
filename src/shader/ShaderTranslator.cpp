@@ -979,6 +979,10 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     member.size = compiler.get_declared_struct_member_size(parentType, mi);
                     member.type = spirvBaseTypeToGL(memberType);
                     // Detect row_major decoration on matrix members.
+                    // A block-level `layout(row_major)` causes SPIRV-Cross
+                    // to decorate each matrix member via
+                    // DecorationColMajor=false, so only DecorationRowMajor
+                    // reliably signals row_major on the member.
                     if (memberType.columns > 1) {
                         member.isRowMajor = compiler.has_member_decoration(
                             parentType.self, mi, spv::DecorationRowMajor);
@@ -989,6 +993,19 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         if (memberType.array[0] > 0) {
                             member.arraySize = memberType.array[0];
                         }
+                    }
+                    // Block-member strides.
+                    if (compiler.has_member_decoration(parentType.self, mi,
+                            spv::DecorationArrayStride)) {
+                        member.arrayStride = static_cast<GLint>(
+                            compiler.get_member_decoration(parentType.self, mi,
+                                spv::DecorationArrayStride));
+                    }
+                    if (compiler.has_member_decoration(parentType.self, mi,
+                            spv::DecorationMatrixStride)) {
+                        member.matrixStride = static_cast<GLint>(
+                            compiler.get_member_decoration(parentType.self, mi,
+                                spv::DecorationMatrixStride));
                     }
                     rb.members.push_back(std::move(member));
                 }

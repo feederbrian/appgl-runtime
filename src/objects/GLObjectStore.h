@@ -407,6 +407,8 @@ struct GLProgramResourceEntry {
     GLint blockIndex = -1;    // parent block index (-1 = not in a block)
     GLbitfield referencedBy = 0; // bitmask: 1=vertex, 2=fragment, 4=compute, etc.
     bool isRowMajor = false;  // GL_UNIFORM_IS_ROW_MAJOR for matrix block members
+    GLint arrayStride = -1;   // byte stride between array elements, -1 for non-block
+    GLint matrixStride = -1;  // byte stride between matrix columns/rows, -1 for non-block
     // Only populated for block entries (UNIFORM_BLOCK,
     // SHADER_STORAGE_BLOCK, ATOMIC_COUNTER_BUFFER,
     // TRANSFORM_FEEDBACK_BUFFER). Indices of the block's
