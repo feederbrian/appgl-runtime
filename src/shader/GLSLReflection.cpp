@@ -416,6 +416,7 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
     out.type = entry->type;
     out.name = tokens[1];
     out.arraySize = 1;
+    out.isArray = false;
     // Strip trailing `[N]` baked into the name token (rare) or the next tokens.
     // `postNameIdx` is the first token after the name (and its optional [N]
     // suffix) — the default-initializer scan below picks up from here.
@@ -430,10 +431,12 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
             }
         }
         out.name.erase(bracket);
+        out.isArray = true;
     } else if (tokens.size() >= 5 && tokens[2] == "[") {
         out.arraySize = static_cast<GLint>(std::strtol(tokens[3].c_str(), nullptr, 10));
         // Advance past `[ N ]` (three tokens).
         postNameIdx = 5;
+        out.isArray = true;
     }
     if (out.name.empty()) {
         return false;

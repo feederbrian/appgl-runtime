@@ -10730,6 +10730,7 @@ void appendDeclarationsAsUniforms(
         info.name = decl.name;
         info.type = decl.type;
         info.arraySize = decl.arraySize > 0 ? decl.arraySize : 1;
+        info.isArray = decl.isArray;
         info.location = -1;  // assigned below in link-time location pass
         info.explicitLocation = decl.explicitLocation;
         info.explicitBinding = decl.explicitBinding;
@@ -11630,6 +11631,7 @@ bool GLContext::linkProgram(GLuint program) {
             attrib.name = input.name;
             attrib.type = input.type;
             attrib.arraySize = input.arraySize;
+            attrib.isArray = input.isArray;
             if (input.explicitLocation >= 0) {
                 attrib.location = input.explicitLocation;
             } else {
@@ -12492,13 +12494,16 @@ bool GLContext::linkProgram(GLuint program) {
     for (const auto& u : programObject->uniforms) {
         GLProgramResourceEntry entry;
         // GL 4.6 §7.3.1: array uniforms report their name with the
-        // "[0]" suffix in the resource interface. CTS
-        // `program_interface_query.uniform-types` declares
-        // `uniform uvec2 c[3];` / `uniform mat2 g[8];` and expects
-        // `glGetProgramResourceName(GL_UNIFORM, …)` to return
-        // "c[0]" / "g[0]". Mirrors the fix applied to inputs +
-        // outputs in earlier iterations.
-        entry.name = (u.arraySize >= 2) ? (u.name + "[0]") : u.name;
+        // "[0]" suffix in the resource interface — EVEN for
+        // 1-element arrays. CTS `program_interface_query.uniform-
+        // types` declares `uniform uvec2 c[3];` / `uniform mat2
+        // g[8];` and CTS `no-locations` declares `in vec4 c[1];`
+        // — both expect `glGetProgramResourceName(GL_UNIFORM, …)`
+        // to return "c[0]" / "g[0]". The `isArray` flag
+        // distinguishes array declarations from plain scalars
+        // (`arraySize` alone can't, since both non-arrays and
+        // 1-element arrays have arraySize==1).
+        entry.name = u.isArray ? (u.name + "[0]") : u.name;
         entry.type = u.type;
         entry.location = u.location;
         entry.binding = u.explicitBinding;  // RC-D08
@@ -12509,15 +12514,11 @@ bool GLContext::linkProgram(GLuint program) {
     for (const auto& a : programObject->attributes) {
         GLProgramResourceEntry entry;
         // GL 4.6 §7.3.1: for array inputs, the resource name ends
-        // with "[0]". CTS `program_interface_query.input-types`
-        // declares `in float c[2]` and expects
-        // `glGetProgramResourceName(GL_PROGRAM_INPUT, …)` to
-        // return "c[0]"; plain scalars/vectors/matrices keep
-        // their bare name. Arrays also have
-        // `GL_ARRAY_SIZE > 1`, which
-        // `glGetProgramResourceiv(GL_PROGRAM_INPUT, …, GL_ARRAY_SIZE)`
-        // reads out of `entry.arraySize`.
-        entry.name = (a.arraySize >= 2) ? (a.name + "[0]") : a.name;
+        // with "[0]" — even for 1-element arrays like `in vec4
+        // c[1]`. `a.isArray` is the authoritative "declared with
+        // array syntax" flag (`a.arraySize==1` alone can't
+        // distinguish non-arrays from 1-element arrays).
+        entry.name = a.isArray ? (a.name + "[0]") : a.name;
         entry.type = a.type;
         entry.location = a.location;
         entry.arraySize = a.arraySize;
@@ -12534,9 +12535,11 @@ bool GLContext::linkProgram(GLuint program) {
                 GLProgramResourceEntry entry;
                 // GL 4.6 §7.3.1: array outputs report their name with
                 // the "[0]" suffix (same convention as inputs). CTS
-                // `program_interface_query.output-types` expects
-                // "a[0]" / "c[0]" / "d[0]" instead of "a" / "c" / "d".
-                entry.name = (output.arraySize >= 2)
+                // `output-types` expects "a[0]" / "c[0]" / "d[0]"
+                // and `no-locations` has `out vec4 d[1]` which must
+                // also report "d[0]" despite arraySize==1 — use
+                // `isArray` to distinguish.
+                entry.name = output.isArray
                     ? (output.name + "[0]") : output.name;
                 entry.type = output.type;
                 entry.arraySize = output.arraySize;
@@ -17950,7 +17953,13 @@ bool GLContext::getProgramResourceiv(GLuint program, GLenum programInterface, GL
     if (length != nullptr) {
         *length = 0;
     }
-    if (propCount <= 0 || props == nullptr || count <= 0 || params == nullptr) {
+    // GL 4.6 §7.3.1: propCount > 0 is required; propCount <= 0 is
+    // INVALID_VALUE. But `count` (bufSize) of 0 or a NULL `params`
+    // is valid — "no data is written." CTS
+    // `program_interface_query.buff-length` calls with count=0 and
+    // expects no error + no writes (we'd previously push
+    // INVALID_VALUE and scribble `length` = 0 which is itself fine).
+    if (propCount <= 0 || props == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -18094,8 +18103,10 @@ bool GLContext::getProgramResourceiv(GLuint program, GLenum programInterface, GL
     }
     const auto& entry = (*table)[index];
     GLsizei written = 0;
-    for (GLsizei i = 0; i < propCount && written < count; ++i) {
-        params[written++] = getResourceProperty(entry, props[i]);
+    if (params != nullptr) {
+        for (GLsizei i = 0; i < propCount && written < count; ++i) {
+            params[written++] = getResourceProperty(entry, props[i]);
+        }
     }
     if (length != nullptr) {
         *length = written;
@@ -18277,20 +18288,36 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
         }
         return n;
     };
+    // GL 4.6 §7.3.1 (spec for array-subscript names in uniform /
+    // resource lookups): only strictly-formatted decimal integers
+    // are accepted. Rejected forms: leading/trailing whitespace
+    // (`"a[ 0]"`, `"a[0 ]"`), embedded whitespace or arithmetic
+    // (`"a[0 + 0]"`, `"a[0+0]"`), alternate whitespace
+    // (`"a[\t0]"`, `"a[\n0]"`), leading zero (`"a[01]"`,
+    // `"a[00]"`). strtol alone accepts all of these; we pre-validate
+    // by scanning the index substring.
+    auto isStrictNonNegIndex = [](const std::string& s, long& out) {
+        if (s.empty()) return false;
+        if (s[0] == '0' && s.size() > 1) return false;   // leading zero
+        for (char c : s) {
+            if (c < '0' || c > '9') return false;
+        }
+        // strtol is safe now — string is non-empty digits only.
+        char* endp = nullptr;
+        out = std::strtol(s.c_str(), &endp, 10);
+        return out >= 0;
+    };
     const auto openBracket = lookup.find('[');
     if (openBracket != std::string::npos && !lookup.empty() && lookup.back() == ']') {
         const std::string baseName = lookup.substr(0, openBracket);
         const std::string indexStr = lookup.substr(openBracket + 1, lookup.size() - openBracket - 2);
-        if (!baseName.empty() && !indexStr.empty()) {
-            char* endp = nullptr;
-            const long idx = std::strtol(indexStr.c_str(), &endp, 10);
-            if (endp && *endp == '\0' && idx >= 0) {
-                for (const auto& entry : *table) {
-                    if (stripBracketZero(entry.name) == baseName && entry.arraySize >= 1
-                        && idx < static_cast<long>(entry.arraySize)
-                        && entry.location >= 0) {
-                        return entry.location + static_cast<GLint>(idx);
-                    }
+        long idx = 0;
+        if (!baseName.empty() && isStrictNonNegIndex(indexStr, idx)) {
+            for (const auto& entry : *table) {
+                if (stripBracketZero(entry.name) == baseName && entry.arraySize >= 1
+                    && idx < static_cast<long>(entry.arraySize)
+                    && entry.location >= 0) {
+                    return entry.location + static_cast<GLint>(idx);
                 }
             }
         }

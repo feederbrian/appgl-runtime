@@ -279,6 +279,14 @@ struct GLShaderDeclaration {
     std::string name;
     GLenum type = 0;
     GLint arraySize = 1;
+    // True if the GLSL source declared this with array syntax —
+    // `in float a[1]` (isArray=true, arraySize=1) vs `in float a`
+    // (isArray=false, arraySize=1). Needed because GL 4.6 §7.3.1
+    // says array variables report their resource name with a "[0]"
+    // suffix even when they have a single element. `arraySize`
+    // alone can't distinguish the two cases because the
+    // GL_ARRAY_SIZE query returns 1 for both.
+    bool isArray = false;
     GLint explicitLocation = -1;
     // RC-D08: explicit `layout(binding=N)` qualifier from the GLSL source.
     // -1 means no explicit binding was specified.  The GLSL scanner
@@ -336,6 +344,11 @@ struct GLProgramUniformInfo {
     std::string name;
     GLenum type = 0;
     GLint arraySize = 1;
+    // True iff the GLSL source used array syntax (see
+    // GLShaderDeclaration::isArray). Propagated so
+    // resource-interface queries can append the "[0]" suffix even
+    // for 1-element arrays.
+    bool isArray = false;
     GLint location = -1;
     // RC-D06: explicit location from GLSL `layout(location=N)`.  -1 means
     // the author did not specify one and linkProgram assigns a dense
@@ -366,6 +379,11 @@ struct GLProgramAttributeInfo {
     // …)` can append the "[0]" suffix that GL 4.6 §7.3.1 mandates
     // for array inputs (CTS `program_interface_query.input-types`).
     GLint arraySize = 1;
+    // True iff the GLSL source used array syntax (`in float c[1]`).
+    // GL 4.6 §7.3.1 says every array variable reports its name
+    // with "[0]" suffix, even when arraySize==1, so we can't
+    // derive this from arraySize alone.
+    bool isArray = false;
 };
 
 struct GLProgramUniformValue {
