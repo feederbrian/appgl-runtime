@@ -215,6 +215,11 @@ std::vector<std::string> tokenize(std::string_view stmt) {
 struct LayoutQualifiers {
     GLint location = -1;  // layout(location = N), -1 = unspecified
     GLint binding  = -1;  // layout(binding  = N), -1 = unspecified
+    // Dual-source-blend color-index from `layout(index = N)`.
+    // Valid on fragment outputs per GL 4.6 §15.2; 0 = primary
+    // color (default), 1 = second color for dual-source blending.
+    // -1 = unspecified.
+    GLint index    = -1;
 };
 
 // Parse `layout(location = N, binding = M)` and similar.  Returns the
@@ -250,6 +255,8 @@ LayoutQualifiers extractLayoutQualifiers(std::vector<std::string>& tokens) {
                 result.location = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 0));
             } else if (tokens[i] == "binding") {
                 result.binding = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 0));
+            } else if (tokens[i] == "index") {
+                result.index = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 0));
             }
         }
         ++i;
@@ -623,6 +630,7 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         }
         decl.explicitLocation = layoutQ.location;
         decl.explicitBinding  = layoutQ.binding;
+        decl.explicitIndex    = layoutQ.index;
 
         // Save the GL type for any additional comma-separated declarations.
         const GLenum declaredType = decl.type;

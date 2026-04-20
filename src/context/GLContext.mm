@@ -12559,10 +12559,14 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 entry.location = location;
                 // Dual-source-blend index set by
-                // glBindFragDataLocationIndexed; default 0.
+                // glBindFragDataLocationIndexed OR the GLSL-side
+                // `layout(index=N)` qualifier (GL 4.6 §15.2). API
+                // binding wins when both are present pre-link.
                 auto idxIt = programObject->requestedFragDataLocationIndices.find(output.name);
                 if (idxIt != programObject->requestedFragDataLocationIndices.end()) {
                     entry.locationIndex = static_cast<GLint>(idxIt->second);
+                } else if (output.explicitIndex >= 0) {
+                    entry.locationIndex = output.explicitIndex;
                 }
                 entry.referencedBy = 0x02; // fragment
                 // GL 4.6 §15.2: array outputs consume `arraySize`

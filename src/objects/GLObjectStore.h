@@ -288,6 +288,9 @@ struct GLShaderDeclaration {
     // GL_ARRAY_SIZE query returns 1 for both.
     bool isArray = false;
     GLint explicitLocation = -1;
+    // `layout(index=N)` on a fragment output — dual-source-blend
+    // color index per GL 4.6 §15.2. -1 = unspecified.
+    GLint explicitIndex = -1;
     // RC-D08: explicit `layout(binding=N)` qualifier from the GLSL source.
     // -1 means no explicit binding was specified.  The GLSL scanner
     // (`extractLayoutQualifiers`) populates this when it finds a
