@@ -2692,7 +2692,22 @@ struct GLContext::Impl {
             object.target == GL_TEXTURE_1D ? 1 : baseLevel.desc.height,
             object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1
         );
-        const GLint finalLevel = std::min(baseLevelIndex + tailOffset, object.params.maxLevel);
+        GLint finalLevel = std::min(baseLevelIndex + tailOffset, object.params.maxLevel);
+        // For immutable textures (texStorage*), the level count was
+        // fixed at allocation time — generateMipmap must fill only
+        // levels [base+1 .. desc.levels-1] (GL 4.6 §8.14.4 + §8.19).
+        // Previously we let finalLevel reach the log2(size) tail and
+        // then bumped desc.levels up to match, which changed the
+        // texture's reported level count from the immutable storage
+        // size. That tripped
+        // `geometry_shader.layered_fbo.fb_texture_invalid_level_
+        // number` — the test texStorage3Ds a 2-level texture,
+        // generateMipmaps, then asserts that
+        // `glFramebufferTexture(level=2)` returns INVALID_VALUE;
+        // our bumped desc.levels=3 made level=2 look valid.
+        if (object.desc.immutable && object.desc.levels > 0) {
+            finalLevel = std::min(finalLevel, object.desc.levels - 1);
+        }
 
         // Resolve the native downsample format once: it's shared across
         // every generated mip level (we only downsample within one

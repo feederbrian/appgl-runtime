@@ -725,6 +725,15 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // _VERTEX` which the same test queries.)
     integerLimits_[GL_LAYER_PROVOKING_VERTEX] = GL_PROVOKING_VERTEX;
     integerLimits_[GL_VIEWPORT_INDEX_PROVOKING_VERTEX] = GL_PROVOKING_VERTEX;
+    // GL 3.2 §13.4: GL_PROVOKING_VERTEX returns whichever
+    // glProvokingVertex mode was most recently set. Default per
+    // GL 4.6 Table 23.6 is GL_LAST_VERTEX_CONVENTION. Tracked on
+    // the context state (the runtime's glProvokingVertex entrypoint
+    // updates it); we return the default here so static queries on
+    // fresh contexts don't trip GL_INVALID_ENUM (CTS
+    // `geometry_shader.layered_rendering.layered_rendering` queries
+    // this before the first draw).
+    integerLimits_[GL_PROVOKING_VERTEX] = GL_LAST_VERTEX_CONVENTION;
 
     // Tessellation caps. Same emulation-gap caveat as geometry: the
     // translator will eventually lower these onto Metal's tessellator via

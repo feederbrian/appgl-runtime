@@ -1329,14 +1329,22 @@ bool isValidRenderbufferParameterPname(GLenum pname) {
 }
 
 bool isValidFramebufferAttachment(GLenum attachment) {
-    // GL 4.6 §9.2.3 glGetFramebufferAttachmentParameteriv accepts attachment
-    // in the set {COLOR_ATTACHMENTi, DEPTH_ATTACHMENT, STENCIL_ATTACHMENT,
-    // DEPTH_STENCIL_ATTACHMENT} on user FBOs; on the default framebuffer
-    // (name 0) it additionally accepts the window-system names
-    // FRONT_{LEFT,RIGHT}, BACK_{LEFT,RIGHT}, DEPTH and STENCIL. CTS
-    // framebuffers_get_attachment_parameters iterates all six on the
-    // default FB and expects GL_NO_ERROR.
-    return (attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + kPhaseAMaxDrawBuffers)
+    // GL 4.6 §9.2.8 distinguishes two classes of enum:
+    //  • Recognised attachment name (color-attachment-shaped in the
+    //    0..31 range, or depth/stencil variants) — this function
+    //    returns true so the dispatch layer hands control off to
+    //    `framebufferTexture` which can then distinguish
+    //    "out-of-MAX-range" (INVALID_OPERATION) from "truly
+    //    unrecognised enum" (INVALID_ENUM).
+    //  • Unrecognised shape — return false so dispatch emits
+    //    INVALID_ENUM directly.
+    //
+    // CTS `geometry_shader.layered_fbo.fb_texture_invalid_attachment`
+    // uses `COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS` which is a
+    // valid shape but exceeds MAX — it expects INVALID_OPERATION
+    // from the entry point, which requires the dispatch-level gate
+    // to accept the enum and defer to the context-level check.
+    return (attachment >= GL_COLOR_ATTACHMENT0 && attachment <= GL_COLOR_ATTACHMENT0 + 31)
         || attachment == GL_DEPTH_ATTACHMENT
         || attachment == GL_STENCIL_ATTACHMENT
         || attachment == GL_DEPTH_STENCIL_ATTACHMENT
