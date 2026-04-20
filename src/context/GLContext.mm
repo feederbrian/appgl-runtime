@@ -5539,6 +5539,24 @@ struct GLContext::Impl {
     bool encodeEmulatedGsDraw(GLProgramObject& program, GLuint programName,
                               const appgl::EmulatedDraw& ed);
 
+    // Resolve the program the GS emulator should read from, handling
+    // the separable-pipeline case. When `currentProgramName` is
+    // non-zero (user called glUseProgram), returns that program
+    // unchanged. When it's zero but a pipeline is bound AND the
+    // pipeline's geometry stage has `geometryEmulated == true`, this
+    // synthesises a merged view by copying the pipeline's VS
+    // program's vertexSpirv + FS program's fragmentMSL onto the GS
+    // program so emulateGeometryDraw / encodeEmulatedGsDraw can read
+    // them through the usual GLProgramObject API. `outProgramName`
+    // receives the GS program name on the pipeline path. Returns
+    // nullptr when no emulation program is available.
+    // Used by CTS `geometry_shader.api.createShaderProgramv` which
+    // builds VS+GS+FS as three separable programs joined via a
+    // pipeline — the GS program has a link-time-detected emulation-
+    // subset body but no sibling VS/FS SPIR-V of its own.
+    GLProgramObject* resolvePipelineEmulationProgram(
+        GLuint currentProgramName, GLuint& outProgramName);
+
     void encodePendingWork() {
         if (!pendingClear || frameGraph == nullptr) {
             return;
@@ -14872,6 +14890,57 @@ bool isDrawModeCompatibleWithGs(GLenum drawMode, GLenum gsInputTopo) {
 // Defined after the anonymous namespace with populateTranslatedDraw-
 // FixedFunctionState / computeStageUniformLayout / buildStageUniform-
 // Buffer so those helpers are visible.
+GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
+    GLuint currentProgramName, GLuint& outProgramName)
+{
+    // Fast path: a current program is bound (glUseProgram), use it
+    // directly. Don't touch pipeline state even if a pipeline is
+    // also bound — GL 4.6 §7.3 says the current program shadows
+    // any pipeline binding.
+    if (currentProgramName != 0) {
+        outProgramName = currentProgramName;
+        return objects->programs().get(currentProgramName);
+    }
+    // No current program; check the pipeline for a GS program.
+    const GLuint pipelineName = state->currentProgramPipeline();
+    if (pipelineName == 0) return nullptr;
+    GLProgramPipelineObject* ppo = objects->programPipelines().get(pipelineName);
+    if (ppo == nullptr || ppo->geometryProgram == 0) return nullptr;
+    GLProgramObject* gsProg = objects->programs().get(ppo->geometryProgram);
+    if (gsProg == nullptr || !gsProg->geometryEmulated) return nullptr;
+    // Copy the VS program's vertexSpirv onto the GS program so
+    // emulateGeometryDraw's pre-pass runs against the pipeline's
+    // actual VS. Idempotent when the same pipeline draws multiple
+    // times — we overwrite to stay in sync even if the pipeline's
+    // stages were swapped via useProgramStages between draws.
+    if (ppo->vertexProgram != 0) {
+        GLProgramObject* vsProg = objects->programs().get(ppo->vertexProgram);
+        if (vsProg != nullptr) {
+            gsProg->vertexSpirv = vsProg->vertexSpirv;
+            // Carry the VS uniform layout too so indirect uniform-
+            // buffer lookups (not used by createShaderProgramv,
+            // but needed by more complex tests) see the right
+            // binding slots.
+            // Leaving vertexReflection/vertexMSL alone — the GS
+            // emulator builds a synth VS from the EmulatedDraw,
+            // not the VS's own MSL.
+        }
+    }
+    // Copy the FS program's fragmentMSL + reflection for the
+    // encoder's pipeline build. When absent (FS program missing
+    // or not linked), encodeEmulatedGsDraw will fail and the draw
+    // falls back — same behaviour as before this patch.
+    if (ppo->fragmentProgram != 0) {
+        GLProgramObject* fsProg = objects->programs().get(ppo->fragmentProgram);
+        if (fsProg != nullptr) {
+            gsProg->fragmentMSL = fsProg->fragmentMSL;
+            gsProg->fragmentReflection = fsProg->fragmentReflection;
+        }
+    }
+    outProgramName = ppo->geometryProgram;
+    return gsProg;
+}
+
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                                            GLuint programName,
                                            const appgl::EmulatedDraw& ed)
@@ -15303,17 +15372,25 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // produce the expanded vertex buffer; .ok == false still falls
     // through so a runtime diagnostic on any single vertex doesn't
     // abort the frame.
-    if (program != nullptr && program->geometryEmulated) {
+    // Handle separable-pipeline GS emulation too. When no current
+    // program is bound (glUseProgram(0) or never called), but a
+    // pipeline object has a GS program marked emulable, the helper
+    // merges the pipeline's VS vertexSpirv + FS fragmentMSL onto
+    // the GS program and returns it as the emulation target.
+    GLuint emulProgramName = programName;
+    GLProgramObject* emulProgram = impl_->resolvePipelineEmulationProgram(
+        programName, emulProgramName);
+    if (emulProgram != nullptr && emulProgram->geometryEmulated) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         if (vao != nullptr) {
             appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
-                *program, *vao, *impl_->objects, *impl_->state,
+                *emulProgram, *vao, *impl_->objects, *impl_->state,
                 mode, count, first, /*elementIndices=*/nullptr);
             if (ed.ok) {
                 // XFB capture + rasterDiscard early-out lives in a
                 // shared helper so drawElements can run the same path.
-                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                if (impl_->writeGsXfbAndCheckDiscard(*emulProgram, ed)) {
                     return true;
                 }
                 // GS ran successfully but emitted zero output
@@ -15327,7 +15404,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     APPGL_LOG(DRAW, @"drawArrays GS-emul: zero primitives");
                     return true;
                 }
-                if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) {
+                if (impl_->encodeEmulatedGsDraw(*emulProgram, emulProgramName, ed)) {
                     APPGL_LOG(DRAW, @"drawArrays GS-emul ok: verts=%zu topo=0x%X",
                               ed.vertexCount, ed.topology);
                     return true;
