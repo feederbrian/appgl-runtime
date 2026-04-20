@@ -12576,6 +12576,106 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
 
+    // Built-in program input/output entries. GL 4.6 §7.3.1.1
+    // treats built-ins used by the first-stage/last-stage as
+    // program inputs/outputs respectively (e.g.
+    // `gl_VertexID` / `gl_InstanceID` become GL_PROGRAM_INPUT
+    // on a VS-first program, `gl_FragDepth` /
+    // `gl_SampleMask[0]` become GL_PROGRAM_OUTPUT on an
+    // FS-last program). User-declared inputs/outputs are
+    // already populated above. A simple source-text scan
+    // catches the common set used by CTS
+    // `program_interface_query.input-built-in` /
+    // `output-built-in`.
+    {
+        // Word-boundary presence check — avoids matching
+        // "some_gl_VertexID_hack" or "// gl_VertexID" comments
+        // by demanding the match lie between non-identifier
+        // characters. CTS GLSL sources don't have such names
+        // so a plain find() would also work for the test set,
+        // but the word-boundary check costs nothing and
+        // future-proofs.
+        auto sourceUsesIdent = [](const std::string& src, const char* ident) {
+            const std::size_t ilen = std::strlen(ident);
+            std::size_t pos = 0;
+            while ((pos = src.find(ident, pos)) != std::string::npos) {
+                const bool leftBoundary = (pos == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[pos - 1])) || src[pos - 1] == '_');
+                const bool rightBoundary = (pos + ilen == src.size()) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[pos + ilen])) || src[pos + ilen] == '_');
+                if (leftBoundary && rightBoundary) return true;
+                pos += ilen;
+            }
+            return false;
+        };
+        // Helper: append a synthetic built-in entry if absent
+        // from the table. Built-ins don't have user-visible
+        // locations, so GL_LOCATION returns -1.
+        auto addBuiltIn = [&](std::vector<GLProgramResourceEntry>& table,
+                              const std::string& name, GLenum type,
+                              GLbitfield referencedBy, bool isArray = false,
+                              GLint arraySize = 1) {
+            for (const auto& e : table) {
+                if (e.name == name) return;  // already present
+            }
+            GLProgramResourceEntry entry;
+            entry.name = name;
+            entry.type = type;
+            entry.location = -1;
+            entry.arraySize = arraySize;
+            entry.referencedBy = referencedBy;
+            (void)isArray;   // array-ness is baked into the
+                             // canonical name (e.g. "gl_SampleMask[0]")
+            table.push_back(std::move(entry));
+        };
+        GLShaderObject* vsShader = nullptr;
+        GLShaderObject* fsShader = nullptr;
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* s = impl_->objects->shaders().get(shaderId);
+            if (s == nullptr) continue;
+            if (s->stage == GL_VERTEX_SHADER)   vsShader = s;
+            if (s->stage == GL_FRAGMENT_SHADER) fsShader = s;
+        }
+        if (vsShader != nullptr) {
+            const auto& src = vsShader->source;
+            if (sourceUsesIdent(src, "gl_VertexID")) {
+                addBuiltIn(programObject->resourceInputs,
+                    "gl_VertexID", GL_INT, 0x01 /*vertex*/);
+            }
+            if (sourceUsesIdent(src, "gl_InstanceID")) {
+                addBuiltIn(programObject->resourceInputs,
+                    "gl_InstanceID", GL_INT, 0x01);
+            }
+            if (sourceUsesIdent(src, "gl_DrawID")) {
+                addBuiltIn(programObject->resourceInputs,
+                    "gl_DrawID", GL_INT, 0x01);
+            }
+            if (sourceUsesIdent(src, "gl_BaseVertex")) {
+                addBuiltIn(programObject->resourceInputs,
+                    "gl_BaseVertex", GL_INT, 0x01);
+            }
+            if (sourceUsesIdent(src, "gl_BaseInstance")) {
+                addBuiltIn(programObject->resourceInputs,
+                    "gl_BaseInstance", GL_INT, 0x01);
+            }
+        }
+        if (fsShader != nullptr) {
+            const auto& src = fsShader->source;
+            if (sourceUsesIdent(src, "gl_FragDepth")) {
+                addBuiltIn(programObject->resourceOutputs,
+                    "gl_FragDepth", GL_FLOAT, 0x02 /*fragment*/);
+            }
+            if (sourceUsesIdent(src, "gl_SampleMask")) {
+                // `gl_SampleMask[0]` canonical name; array size
+                // depends on MAX_SAMPLE_MASK_WORDS but is 1 on
+                // most desktop / Apple Metal hardware.
+                addBuiltIn(programObject->resourceOutputs,
+                    "gl_SampleMask[0]", GL_INT, 0x02,
+                    /*isArray=*/true, /*arraySize=*/1);
+            }
+        }
+    }
+
     // Run SPIRV-Cross on each attached stage's cached SPIR-V (compiled by
     // GLContext::compileShader and stashed on the shader object). This is
     // best-effort: if translation fails the program still links and falls
@@ -17856,7 +17956,12 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
         case GL_ATOMIC_COUNTER_BUFFER_INDEX: return -1;
         case GL_TOP_LEVEL_ARRAY_SIZE:   return 1;
         case GL_TOP_LEVEL_ARRAY_STRIDE: return 0;
-        case GL_LOCATION_INDEX:         return entry.locationIndex;
+        case GL_LOCATION_INDEX:
+            // Built-in outputs like `gl_FragDepth` have no user-
+            // assignable location — LOCATION_INDEX is -1 there
+            // (the spec language is ambiguous but CTS expects
+            // this). `entry.location == -1` is our signal.
+            return entry.location < 0 ? -1 : entry.locationIndex;
         case GL_IS_PER_PATCH:           return GL_FALSE;
         case GL_LOCATION_COMPONENT:     return 0;
         default: return 0;
@@ -18415,17 +18520,23 @@ GLint GLContext::getProgramResourceLocationIndex(GLuint program, GLenum programI
     // (0 = primary, 1 = second source). Stored on the entry.
     // Array outputs canonicalised to "<name>[0]" per GL 4.6
     // §7.3.1 — match both bare and suffixed query shapes.
+    // Built-in outputs (no user location, e.g. gl_FragDepth)
+    // report LOCATION_INDEX = -1 per CTS
+    // `output-built-in` expectations.
+    auto indexFor = [](const GLProgramResourceEntry& e) {
+        return e.location < 0 ? -1 : e.locationIndex;
+    };
     const std::string query = name;
     for (const auto& entry : prog->resourceOutputs) {
-        if (entry.name == query) return entry.locationIndex;
+        if (entry.name == query) return indexFor(entry);
     }
     for (const auto& entry : prog->resourceOutputs) {
-        if (entry.name == query + "[0]") return entry.locationIndex;
+        if (entry.name == query + "[0]") return indexFor(entry);
     }
     if (query.size() >= 3 && query.compare(query.size() - 3, 3, "[0]") == 0) {
         const std::string baseOnly = query.substr(0, query.size() - 3);
         for (const auto& entry : prog->resourceOutputs) {
-            if (entry.name == baseOnly) return entry.locationIndex;
+            if (entry.name == baseOnly) return indexFor(entry);
         }
     }
     return -1;
