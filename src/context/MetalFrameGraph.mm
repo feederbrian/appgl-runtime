@@ -1488,6 +1488,15 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder setDepthStencilState:dsState];
                 cachedDepthStencilState = dsState;
             }
+            if (std::getenv("APPGL_GS_DUMP_FBODEPTH") != nullptr) {
+                std::fprintf(stderr,
+                    "[GS] FBO draw depth state: test=%d writeMask=%d func=0x%x "
+                    "fboDepth=%p arrayLen=%u\n",
+                    (int)info.depthTestEnabled, (int)info.depthWriteMask,
+                    (unsigned)info.depthFunc, info.fboDepthStencilTexture,
+                    info.fboColorArrayLength);
+                std::fflush(stderr);
+            }
         }
 
         const MTLCullMode desiredCull = info.cullFaceEnabled
