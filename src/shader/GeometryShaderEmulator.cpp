@@ -81,6 +81,7 @@ namespace spv {
         DecorationLocation = 30, DecorationBuiltIn = 11,
         DecorationNoPerspective = 13, DecorationFlat = 14, DecorationCentroid = 16,
         DecorationOffset = 35,
+        DecorationDescriptorSet = 34, DecorationBinding = 33,
     };
     enum StorageClass : std::uint32_t {
         StorageClassUniformConstant = 0, StorageClassInput = 1,
@@ -258,6 +259,15 @@ struct DecorationSet {
     // as a uniform block (std140 / std430) rather than a plain
     // aggregate struct used in function scope.
     bool isBlock = false;
+    // DecorationBinding on a Uniform-storage variable — carries the
+    // `layout(binding=N)` from the GLSL. For a block-array this is
+    // the base binding; element `i` lives at binding `N + i`. The
+    // descriptor-set decoration is recorded for symmetry but GL
+    // itself doesn't expose descriptor sets — we ignore the value.
+    bool hasBinding = false;
+    std::uint32_t binding = 0;
+    bool hasDescriptorSet = false;
+    std::uint32_t descriptorSet = 0;
 };
 
 struct MemberDecorations {
@@ -449,6 +459,12 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                     decorations[target].isCentroid = true;
                 } else if (deco == spv::DecorationBlock || deco == spv::DecorationBufferBlock) {
                     decorations[target].isBlock = true;
+                } else if (deco == spv::DecorationBinding && wc >= 4) {
+                    decorations[target].hasBinding = true;
+                    decorations[target].binding = w[2];
+                } else if (deco == spv::DecorationDescriptorSet && wc >= 4) {
+                    decorations[target].hasDescriptorSet = true;
+                    decorations[target].descriptorSet = w[2];
                 }
                 break;
             }
@@ -3098,6 +3114,79 @@ Interpreter::UniformValues buildUniformMap(const GLProgramObject& program) {
     return out;
 }
 
+// Augment a uniform map with UBO-block-array data by walking the
+// SPIR-V module, finding top-level Uniform variables whose pointee
+// is an Array of Block-decorated Struct (or a single Block-
+// decorated Struct), looking up their base binding from the
+// DescriptorSet/Binding decorations, and copying bytes from the
+// GL_UNIFORM_BUFFER binding points `baseBinding + i` into a flat
+// float buffer at stride `scalarWidth(struct)`.
+// CTS `geometry_shader.limits.max_uniform_blocks` uses a single
+// block-array `uni_block_array[14]` bound at binding 0..13; the
+// GS reads `uni_block_array[i].entry` and sums all 14 ints.
+void augmentUniformMapWithUBOBlocks(
+    Interpreter::UniformValues& uniforms,
+    const SpirvModule& mod,
+    const GLStateTracker& state,
+    GLObjectStore& objects)
+{
+    for (const auto& [varId, info] : mod.variables) {
+        if (info.storageClass != spv::StorageClassUniform) continue;
+        auto tIt = mod.types.find(info.typeId);
+        if (tIt == mod.types.end()) continue;
+        const std::uint32_t pointeeId = tIt->second.pointeeType;
+        auto pIt = mod.types.find(pointeeId);
+        if (pIt == mod.types.end()) continue;
+        // Determine element struct + array count.
+        std::uint32_t structTypeId = 0;
+        std::uint32_t arrayCount = 1;
+        if (pIt->second.kind == TypeInfo::Kind::Struct) {
+            structTypeId = pointeeId;
+            arrayCount = 1;
+        } else if (pIt->second.kind == TypeInfo::Kind::Array) {
+            auto aIt = mod.types.find(pIt->second.componentType);
+            if (aIt == mod.types.end() || aIt->second.kind != TypeInfo::Kind::Struct) continue;
+            structTypeId = pIt->second.componentType;
+            auto cIt = mod.constants.find(pIt->second.arrayLengthConstId);
+            if (cIt == mod.constants.end()) continue;
+            arrayCount = static_cast<std::uint32_t>(cIt->second.i[0]);
+        } else {
+            continue;
+        }
+        // Struct must be Block-decorated to be a UBO (as opposed
+        // to the default-uniform-block aggregate which our other
+        // path already handles).
+        auto dStructIt = mod.decorations.find(structTypeId);
+        if (dStructIt == mod.decorations.end() || !dStructIt->second.isBlock) continue;
+        // Binding base comes from the variable's DecorationBinding.
+        auto dVarIt = mod.decorations.find(varId);
+        if (dVarIt == mod.decorations.end() || !dVarIt->second.hasBinding) continue;
+        const GLuint baseBinding = dVarIt->second.binding;
+        const std::uint32_t perStructW = mod.scalarWidth(structTypeId);
+        if (perStructW == 0) continue;
+        // Build flat storage [arrayCount * perStructW] and fill
+        // from each bound UBO buffer.
+        std::vector<float> flat(static_cast<std::size_t>(arrayCount) * perStructW, 0.0f);
+        for (std::uint32_t i = 0; i < arrayCount; ++i) {
+            auto binding = state.indexedBufferBinding(GL_UNIFORM_BUFFER, baseBinding + i);
+            if (binding.buffer == 0) continue;
+            GLBufferObject* buf = objects.buffers().get(binding.buffer);
+            if (buf == nullptr || buf->shadowBytes.empty()) continue;
+            const std::size_t bufOffset = static_cast<std::size_t>(binding.offset);
+            const std::size_t needBytes = perStructW * sizeof(float);
+            if (bufOffset + needBytes > buf->shadowBytes.size()) continue;
+            // Copy raw bytes — the interpreter's load path bit-casts
+            // between float/int/uint so the scalar-kind-agnostic
+            // memcpy preserves whatever pattern the GL test wrote.
+            const std::size_t dstOff = static_cast<std::size_t>(i) * perStructW;
+            std::memcpy(flat.data() + dstOff,
+                        buf->shadowBytes.data() + bufOffset,
+                        needBytes);
+        }
+        uniforms[info.name] = std::move(flat);
+    }
+}
+
 // Extract a single vertex's attribute value from a VAO + VBO shadow.
 // `attrIdx` is the GLVertexAttributeState array index (== Location
 // for the default non-separated-format path). `vertexIdx` is absolute
@@ -3165,7 +3254,7 @@ EmulatedDraw emulateGeometryDraw(
     GLProgramObject& program,
     const GLVertexArrayObject& vao,
     GLObjectStore& objects,
-    const GLStateTracker& /*state*/,
+    const GLStateTracker& state,
     GLenum drawMode, GLsizei count, GLint first,
     const std::uint32_t* elementIndices,
     GLsizei instanceCount,
@@ -3414,7 +3503,19 @@ EmulatedDraw emulateGeometryDraw(
     // constant_expressions path used to work without it because the
     // GS didn't read gl_in[]). In that case we fall back to zero-
     // initialised inputs.
-    const Interpreter::UniformValues uniforms = buildUniformMap(program);
+    Interpreter::UniformValues uniforms = buildUniformMap(program);
+    // UBO-block-array path: `layout(binding=N) uniform Block { … }
+    // arr[K];` values live in GL buffers bound with
+    // `glBindBufferBase(GL_UNIFORM_BUFFER, N+i, …)` rather than in
+    // the program's own uniformValues table. Seed them into the
+    // uniform map under the variable name so the GS interpreter's
+    // OpAccessChain path finds them when it resolves
+    // `arr[i].entry`. GL 4.6 §7.6 specifies that plain GLSL
+    // `layout(binding=N)` establishes the initial mapping, and the
+    // runtime may re-bind via glUniformBlockBinding — we honour
+    // only the layout-specified binding for now (the common case
+    // for limits tests).
+    augmentUniformMapWithUBOBlocks(uniforms, mod, state, objects);
 
     // Parse VS SPIR-V (shared across every vertex of this draw). The
     // VS module is small — re-parsing per draw is fine; caching it on
