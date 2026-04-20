@@ -972,6 +972,66 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         continue;
                     }
 
+                    // Multi-dim array of non-struct: expand outer dims,
+                    // keep innermost as arraySize. GL 4.6 §7.3.1.1 —
+                    // parallel to the SSBO path's flattenSSBO. CTS
+                    // `program_interface_query.arrays-of-arrays` declares
+                    // `uniform vec4 a[3][4][5]` and expects 12 entries
+                    // (3*4) with arraySize=5 each.
+                    if (!memberType.array.empty() && memberType.array.size() > 1 &&
+                        memberType.basetype != spirv_cross::SPIRType::Struct) {
+                        // SPIRV-Cross order is innermost-first: for GLSL
+                        // `vec4 a[3][4][5]` array = [5, 4, 3].
+                        const std::uint32_t innermostDim = memberType.array[0];
+                        GLint baseArrayStride = 0;
+                        if (compiler.has_member_decoration(parentType.self, mi,
+                                spv::DecorationArrayStride)) {
+                            baseArrayStride = static_cast<GLint>(
+                                compiler.get_member_decoration(parentType.self, mi,
+                                    spv::DecorationArrayStride));
+                        }
+                        std::uint32_t totalCombos = 1;
+                        for (std::size_t d = 1; d < memberType.array.size(); ++d) {
+                            totalCombos *= (memberType.array[d] > 0 ? memberType.array[d] : 1);
+                        }
+                        const GLint perEntryStride = baseArrayStride;
+                        for (std::uint32_t combo = 0; combo < totalCombos; ++combo) {
+                            std::string subscript;
+                            std::uint32_t remain = combo;
+                            std::vector<std::uint32_t> indices;
+                            for (std::size_t d = 1; d < memberType.array.size(); ++d) {
+                                const std::uint32_t dimSize =
+                                    memberType.array[d] > 0 ? memberType.array[d] : 1;
+                                indices.push_back(remain % dimSize);
+                                remain /= dimSize;
+                            }
+                            for (auto it = indices.rbegin(); it != indices.rend(); ++it) {
+                                subscript += "[" + std::to_string(*it) + "]";
+                            }
+                            ShaderReflection::UniformMember member;
+                            member.name = (prefix.empty()
+                                ? memberName : (prefix + "." + memberName)) + subscript;
+                            member.offset = memberOffset + combo * perEntryStride;
+                            member.size = static_cast<std::size_t>(perEntryStride * innermostDim);
+                            member.type = spirvBaseTypeToGL(memberType);
+                            member.isArray = true;
+                            member.arraySize = innermostDim;
+                            member.arrayStride = baseArrayStride;
+                            if (memberType.columns > 1) {
+                                member.isRowMajor = compiler.has_member_decoration(
+                                    parentType.self, mi, spv::DecorationRowMajor);
+                            }
+                            if (compiler.has_member_decoration(parentType.self, mi,
+                                    spv::DecorationMatrixStride)) {
+                                member.matrixStride = static_cast<GLint>(
+                                    compiler.get_member_decoration(parentType.self, mi,
+                                        spv::DecorationMatrixStride));
+                            }
+                            rb.members.push_back(std::move(member));
+                        }
+                        continue;
+                    }
+
                     ShaderReflection::UniformMember member;
                     member.name = prefix.empty()
                         ? memberName : (prefix + "." + memberName);
