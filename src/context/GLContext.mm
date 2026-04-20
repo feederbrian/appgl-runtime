@@ -12078,8 +12078,29 @@ bool GLContext::linkProgram(GLuint program) {
 
         for (const auto& varyName : programObject->transformFeedbackVaryingNames) {
             if (isSpecialName(varyName)) {
-                // Special names are valid in interleaved mode; skip for
-                // duplicate/component checks.
+                // GL 4.6 §7.3.1.1: `gl_NextBuffer` / `gl_SkipComponentsN`
+                // still count as active resources in the
+                // TRANSFORM_FEEDBACK_VARYING interface — name preserved,
+                // TYPE = GL_NONE (0), ARRAY_SIZE = 0 for gl_NextBuffer and
+                // N for gl_SkipComponentsN. CTS
+                // `program_interface_query.transform-feedback-built-in`
+                // queries NAME/TYPE/ARRAY_SIZE against exactly these
+                // markers. They are excluded from `glGetProgramResourceIndex`
+                // lookups (handled at query time) and from duplicate /
+                // component-count checks here.
+                GLint skipSize = 0;
+                // "gl_SkipComponents1".."4" are all 18 chars long.
+                if (varyName.size() == 18 && varyName.compare(0, 17, "gl_SkipComponents") == 0) {
+                    char last = varyName.back();
+                    if (last >= '1' && last <= '4') {
+                        skipSize = last - '0';
+                    }
+                }
+                GLProgramResourceEntry entry;
+                entry.name = varyName;
+                entry.type = GL_NONE;
+                entry.arraySize = skipSize;
+                programObject->resourceTransformFeedbackVaryings.push_back(std::move(entry));
                 continue;
             }
 
@@ -18381,6 +18402,20 @@ GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterfac
     if (table == nullptr) {
         pushError(GL_INVALID_ENUM);
         return GL_INVALID_INDEX;
+    }
+    // GL 4.6 §7.3.1.1: `glGetProgramResourceIndex` cannot be used to
+    // retrieve the index of the built-in transform-feedback markers
+    // (`gl_NextBuffer` / `gl_SkipComponentsN`). They still appear in
+    // the resource table and can be walked by index via
+    // `glGetProgramResourceName`, but lookup-by-name returns
+    // INVALID_INDEX. CTS
+    // `program_interface_query.transform-feedback-built-in` verifies.
+    if (programInterface == GL_TRANSFORM_FEEDBACK_VARYING) {
+        const std::string q = name;
+        if (q == "gl_NextBuffer" ||
+            (q.size() == 18 && q.compare(0, 17, "gl_SkipComponents") == 0)) {
+            return GL_INVALID_INDEX;
+        }
     }
     for (std::size_t i = 0; i < table->size(); ++i) {
         if ((*table)[i].name == name) {
