@@ -207,6 +207,29 @@ bool GLCapabilities::queryFloat(GLenum pname, GLfloat* out) const {
     const auto floatIt = floatLimits_.find(pname);
     if (floatIt != floatLimits_.end()) {
         out[0] = floatIt->second;
+        // Range pair pnames return a {min, max} pair. The first
+        // element is the "min" value (what we store in floatLimits_);
+        // the second is the "max". Metal on Apple Silicon supports
+        // point sizes up to 511 and line widths up to 4 — advertise
+        // conservative but spec-compliant maxes here so CTS's
+        // point/line-size probes don't hit the "not supported" gate
+        // (esextcGeometryShaderInput.cpp:929 requires point-size
+        // max ≥ 8, limits tests require ≥ 1).
+        // GL_POINT_SIZE_RANGE == GL_SMOOTH_POINT_SIZE_RANGE (0x0B12)
+        // and GL_LINE_WIDTH_RANGE == GL_SMOOTH_LINE_WIDTH_RANGE
+        // (0x0B22) share the same enum value, so list each only
+        // once in the switch.
+        switch (pname) {
+            case GL_POINT_SIZE_RANGE:          // == GL_SMOOTH_POINT_SIZE_RANGE (0x0B12)
+                out[1] = 256.0f;
+                break;
+            case GL_LINE_WIDTH_RANGE:          // == GL_SMOOTH_LINE_WIDTH_RANGE (0x0B22)
+            case GL_ALIASED_LINE_WIDTH_RANGE:
+                out[1] = 1.0f;   // Metal rasterizer only supports line-width 1
+                break;
+            default:
+                break;
+        }
         return true;
     }
     // Fall through to integer path (cast to float).
