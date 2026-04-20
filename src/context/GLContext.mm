@@ -4069,6 +4069,39 @@ struct GLContext::Impl {
             }
         }
 
+        // GL 4.6 §9.4.2 — whole-framebuffer layered completeness.
+        // `GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS` fires when
+        //  (a) any populated attachment is layered AND any other
+        //      populated attachment is not layered, OR
+        //  (b) all populated color attachments come from textures of
+        //      different targets (e.g. a mix of 2D_ARRAY + CUBE).
+        // CTS `geometry_shader.layered_fbo.layered_fbo` builds four
+        // FBOs with intentional mixes and expects INCOMPLETE_LAYER
+        // _TARGETS from every one. Previously every attachment
+        // returned COMPLETE because we didn't check at all.
+        {
+            bool haveLayered = false;
+            bool haveNonLayered = false;
+            GLenum firstColorTarget = 0;
+            bool mixedColorTargets = false;
+            for (const auto& [pt, atch] : framebuffer.attachments) {
+                if (framebufferAttachmentInfo(atch).present) {
+                    if (atch.layered) haveLayered = true;
+                    else haveNonLayered = true;
+                    if (isColorAttachment(pt) &&
+                        atch.kind == GLFramebufferAttachment::Kind::Texture) {
+                        const GLenum t = atch.textureTarget;
+                        if (firstColorTarget == 0) firstColorTarget = t;
+                        else if (t != firstColorTarget) mixedColorTargets = true;
+                    }
+                }
+            }
+            if ((haveLayered && haveNonLayered) ||
+                (haveLayered && mixedColorTargets)) {
+                return GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
+            }
+        }
+
         // Per GL 4.6 §9.4.1 the DRAW_BUFFER / READ_BUFFER incomplete
         // classifications are interpreted leniently by real drivers:
         // writes to a draw buffer that references an unattached point
@@ -8974,7 +9007,27 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
     stored.level = level;
     stored.layer = layer;
     stored.textureTarget = textarget == 0 ? textureObject->target : textarget;
-    stored.layered = layered;
+    // GL 4.6 §9.4.1 defines GL_FRAMEBUFFER_ATTACHMENT_LAYERED as
+    // true only when the attachment was made with FramebufferTexture
+    // *and* the texture target is one of the layered kinds
+    // (2D_ARRAY / 3D / CUBE_MAP / CUBE_MAP_ARRAY / 2D_MULTISAMPLE_
+    // ARRAY / 1D_ARRAY). A FramebufferTexture on a plain 2D texture
+    // still attaches the whole texture, but per spec the query
+    // returns FALSE because the attachment has a single layer.
+    // Previously we stored the raw `layered` flag from the caller
+    // (true for FramebufferTexture, false for FramebufferTextureLayer)
+    // without consulting the target, so
+    // `geometry_shader.layered_fbo.layered_fbo_attachments` saw
+    // TRUE for the 2D / MS / depth attachments where the spec says
+    // FALSE.
+    const bool targetIsLayered =
+        textureObject->target == GL_TEXTURE_1D_ARRAY ||
+        textureObject->target == GL_TEXTURE_2D_ARRAY ||
+        textureObject->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+        textureObject->target == GL_TEXTURE_3D ||
+        textureObject->target == GL_TEXTURE_CUBE_MAP ||
+        textureObject->target == GL_TEXTURE_CUBE_MAP_ARRAY;
+    stored.layered = layered && targetIsLayered;
     framebuffer->attachments[attachment] = stored;
     return true;
 }
