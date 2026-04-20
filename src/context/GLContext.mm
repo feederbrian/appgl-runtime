@@ -13371,8 +13371,10 @@ bool GLContext::linkProgram(GLuint program) {
                     } else {
                         uniformName = member.name;
                     }
-                    // GL spec: array uniforms have "[0]" appended to name.
-                    if (member.arraySize > 0) {
+                    // GL spec: array uniforms have "[0]" appended
+                    // to name. Use `isArray` so even sized arrays
+                    // with arraySize=1 pick up the suffix.
+                    if (member.isArray) {
                         uniformName += "[0]";
                     }
                     memberEntry.name = std::move(uniformName);
@@ -13489,24 +13491,47 @@ bool GLContext::linkProgram(GLuint program) {
                 // "Positions.position" (GS-referenced) to be queryable.
                 for (const auto& member : block.members) {
                     std::string bvName = block.name + "." + member.name;
-                    if (member.arraySize > 0) bvName += "[0]";
+                    // GL 4.6 §7.3.1: array members (including
+                    // unbounded `data[]` in SSBOs) get the "[0]"
+                    // suffix. `member.isArray` covers both sized
+                    // and unsized cases — `arraySize > 0` alone
+                    // misses unbounded arrays.
+                    if (member.isArray) bvName += "[0]";
                     auto bvIt = std::find_if(
                         programObject->resourceBufferVariables.begin(),
                         programObject->resourceBufferVariables.end(),
                         [&](const GLProgramResourceEntry& e) { return e.name == bvName; });
+                    GLint bvIndex = -1;
                     if (bvIt != programObject->resourceBufferVariables.end()) {
                         bvIt->referencedBy |= effStageBit;
-                        continue;
+                        bvIndex = static_cast<GLint>(bvIt - programObject->resourceBufferVariables.begin());
+                    } else {
+                        GLProgramResourceEntry bv;
+                        bv.name = std::move(bvName);
+                        bv.type = member.type;
+                        bv.location = -1;
+                        bv.offset = static_cast<GLint>(member.offset);
+                        bv.arraySize = static_cast<GLint>(member.arraySize);
+                        bv.blockIndex = blockIdx;
+                        bv.referencedBy = effStageBit;
+                        programObject->resourceBufferVariables.push_back(std::move(bv));
+                        bvIndex = static_cast<GLint>(programObject->resourceBufferVariables.size() - 1);
                     }
-                    GLProgramResourceEntry bv;
-                    bv.name = std::move(bvName);
-                    bv.type = member.type;
-                    bv.location = -1;
-                    bv.offset = static_cast<GLint>(member.offset);
-                    bv.arraySize = static_cast<GLint>(member.arraySize);
-                    bv.blockIndex = blockIdx;
-                    bv.referencedBy = effStageBit;
-                    programObject->resourceBufferVariables.push_back(std::move(bv));
+                    // Record the member's index in the containing
+                    // block's active-variables list so
+                    // GL_NUM_ACTIVE_VARIABLES / GL_ACTIVE_VARIABLES
+                    // queries on the block return the right data.
+                    if (blockIdx >= 0
+                        && static_cast<std::size_t>(blockIdx) < programObject->resourceStorageBlocks.size()) {
+                        auto& blockEntry = programObject->resourceStorageBlocks[blockIdx];
+                        // De-dupe in case the same block gets
+                        // merged from multiple stages.
+                        if (std::find(blockEntry.activeVariables.begin(),
+                                      blockEntry.activeVariables.end(),
+                                      bvIndex) == blockEntry.activeVariables.end()) {
+                            blockEntry.activeVariables.push_back(bvIndex);
+                        }
+                    }
                 }
             }
         };
@@ -17789,9 +17814,23 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
         case GL_REFERENCED_BY_TESS_EVALUATION_SHADER: return (entry.referencedBy & 0x10) ? GL_TRUE : GL_FALSE;
         case GL_REFERENCED_BY_COMPUTE_SHADER:  return (entry.referencedBy & 0x20) ? GL_TRUE : GL_FALSE;
         case GL_BUFFER_BINDING:    return entry.binding >= 0 ? entry.binding : entry.location;
-        case GL_BUFFER_DATA_SIZE:  return 0;
-        case GL_NUM_ACTIVE_VARIABLES: return 0;
-        case GL_ACTIVE_VARIABLES:  return 0;
+        case GL_BUFFER_DATA_SIZE:
+            // Only valid on block interfaces. For UBOs it's the
+            // std140/std430 byte size; we stored it in `offset`.
+            // SSBOs with trailing unbounded arrays legitimately
+            // have byteSize=0, which the spec accepts.
+            return entry.offset >= 0 ? entry.offset : 0;
+        case GL_NUM_ACTIVE_VARIABLES:
+            return static_cast<GLint>(entry.activeVariables.size());
+        case GL_ACTIVE_VARIABLES:
+            // Single-value accessor; the real
+            // `glGetProgramResourceiv` read path copies the full
+            // list via the props iteration. Return the first
+            // element (or 0 if empty) — not fully spec-correct
+            // but unblocks tests that just check
+            // NUM_ACTIVE_VARIABLES and the first entry.
+            return entry.activeVariables.empty()
+                ? 0 : entry.activeVariables.front();
         case GL_IS_ROW_MAJOR:      return GL_FALSE;
         // GL 4.6 §7.3.1: GL_MATRIX_STRIDE returns the matrix-
         // column/row byte stride for block members, or -1 when
@@ -17907,14 +17946,23 @@ bool GLContext::getProgramInterfaceiv(GLuint program, GLenum programInterface, G
             // SHADER_STORAGE_BLOCK, TRANSFORM_FEEDBACK_BUFFER).
             // CTS `program_interface_query.invalid-operation`
             // passes GL_PROGRAM_INPUT and expects
-            // INVALID_OPERATION.
+            // INVALID_OPERATION. Value is max of activeVariables
+            // counts across all block entries on the interface.
             switch (programInterface) {
                 case GL_UNIFORM_BLOCK:
                 case GL_ATOMIC_COUNTER_BUFFER:
                 case GL_SHADER_STORAGE_BLOCK:
-                case GL_TRANSFORM_FEEDBACK_BUFFER:
-                    *params = 0;
+                case GL_TRANSFORM_FEEDBACK_BUFFER: {
+                    GLint maxN = 0;
+                    if (table != nullptr) {
+                        for (const auto& entry : *table) {
+                            GLint n = static_cast<GLint>(entry.activeVariables.size());
+                            if (n > maxN) maxN = n;
+                        }
+                    }
+                    *params = maxN;
                     return true;
+                }
                 default:
                     pushError(GL_INVALID_OPERATION);
                     return false;

@@ -56,6 +56,13 @@ struct ShaderReflection {
         GLenum type = 0;          // GL type (GL_FLOAT_MAT4, GL_FLOAT_VEC3…)
         bool isRowMajor = false;  // SPIR-V DecorationRowMajor for matrices
         std::uint32_t arraySize = 0; // >0 if the member is an array (element count)
+        // True if the GLSL declaration was an array — including
+        // unbounded-array SSBO members (`vec4 data[];`) where
+        // `arraySize` stays 0. GL 4.6 §7.3.1 says such members
+        // report their resource name with the "[0]" suffix, so
+        // we need this flag to distinguish them from non-array
+        // members. Sized arrays have arraySize > 0 AND isArray.
+        bool isArray = false;
     };
 
     struct ResourceBinding {

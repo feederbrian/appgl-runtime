@@ -407,6 +407,14 @@ struct GLProgramResourceEntry {
     GLint blockIndex = -1;    // parent block index (-1 = not in a block)
     GLbitfield referencedBy = 0; // bitmask: 1=vertex, 2=fragment, 4=compute, etc.
     bool isRowMajor = false;  // GL_UNIFORM_IS_ROW_MAJOR for matrix block members
+    // Only populated for block entries (UNIFORM_BLOCK,
+    // SHADER_STORAGE_BLOCK, ATOMIC_COUNTER_BUFFER,
+    // TRANSFORM_FEEDBACK_BUFFER). Indices of the block's
+    // members into the corresponding member-level resource
+    // table (resourceUniforms for UBOs, resourceBufferVariables
+    // for SSBOs). Drives GL_NUM_ACTIVE_VARIABLES /
+    // GL_ACTIVE_VARIABLES queries.
+    std::vector<GLint> activeVariables;
 };
 
 // Cached uniform locations for the synthesized `appgl_*` fixed-function

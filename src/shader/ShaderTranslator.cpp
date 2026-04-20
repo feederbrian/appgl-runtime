@@ -984,8 +984,11 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                             parentType.self, mi, spv::DecorationRowMajor);
                     }
                     // Detect array members.
-                    if (!memberType.array.empty() && memberType.array[0] > 0) {
-                        member.arraySize = memberType.array[0];
+                    if (!memberType.array.empty()) {
+                        member.isArray = true;
+                        if (memberType.array[0] > 0) {
+                            member.arraySize = memberType.array[0];
+                        }
                     }
                     rb.members.push_back(std::move(member));
                 }
@@ -1158,6 +1161,14 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 }
                 const auto& memberType = compiler.get_type(ssboType.member_types[mi]);
                 member.type = spirvBaseTypeToGL(memberType);
+                // Array info: sized → arraySize = dim[0],
+                // unbounded (`vec4 data[]`) → arraySize = 0 but
+                // isArray = true. Non-array members leave both
+                // at the default zero / false.
+                if (!memberType.array.empty()) {
+                    member.isArray = true;
+                    member.arraySize = memberType.array[0];  // 0 for unbounded
+                }
                 rb.members.push_back(std::move(member));
             }
             result.storageBuffers.push_back(std::move(rb));
