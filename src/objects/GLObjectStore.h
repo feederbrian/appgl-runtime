@@ -412,6 +412,13 @@ struct GLProgramObject {
     std::string validateLog;
     bool linked = false;
     bool validated = false;
+    // GL 4.1 (ARB_separate_shader_objects) — GL_PROGRAM_SEPARABLE
+    // flag set via `glProgramParameteri`. When true, glLinkProgram
+    // accepts incomplete stage combinations (e.g. a GS-only or a
+    // GS+FS program) because the pipeline object supplies the
+    // missing stages at draw time. `glGetProgramiv(GL_PROGRAM_
+    // SEPARABLE)` reads this back.
+    bool separable = false;
     bool deleteRequested = false;
     std::vector<GLProgramUniformInfo> uniforms;
     std::vector<GLProgramAttributeInfo> attributes;

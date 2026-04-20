@@ -5981,9 +5981,20 @@ void APIENTRY glProgramBinary(GLuint program, GLenum binaryFormat, const void* b
 
 void APIENTRY glProgramParameteri(GLuint program, GLenum pname, GLint value) {
     auto* ctx = requireCurrentContext("glProgramParameteri"); if (!ctx) return;
-    (void)program; (void)pname; (void)value;
-    // Accept GL_PROGRAM_BINARY_RETRIEVABLE_HINT and GL_PROGRAM_SEPARABLE silently.
-    markProgramFunction(FunctionId::glProgramParameteri, "ProgramParameteri accepts hint without effect.");
+    // GL 4.1 §7.3 / ARB_separate_shader_objects — GL_PROGRAM_
+    // SEPARABLE actually has linker-visible semantics: once set,
+    // the next `glLinkProgram` accepts incomplete stage
+    // combinations (the missing stages are filled in by the
+    // pipeline object the program is later bound into). Store
+    // the flag on the program so the linker can read it.
+    if (pname == GL_PROGRAM_SEPARABLE) {
+        if (auto* obj = ctx->objects().programs().get(program)) {
+            obj->separable = (value == GL_TRUE);
+        }
+    }
+    // GL_PROGRAM_BINARY_RETRIEVABLE_HINT is still a no-op — we
+    // don't support program binaries.
+    markProgramFunction(FunctionId::glProgramParameteri, "ProgramParameteri GL_PROGRAM_SEPARABLE recorded.");
     Runtime::shared().recordBootstrapTrace("glProgramParameteri(program=" + std::to_string(program) + ", pname=" + std::to_string(pname) + ")");
 }
 

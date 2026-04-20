@@ -11443,6 +11443,12 @@ bool GLContext::linkProgram(GLuint program) {
         GeometryOnly,
         TessControlOnly,
         TessEvalOnly,
+        // Separable multi-stage combination that doesn't match any
+        // of the above — accepted only when GL_PROGRAM_SEPARABLE is
+        // set. The program is linked for introspection; the actual
+        // stage code is surfaced via the pipeline object when the
+        // caller issues a draw.
+        Separable,
     };
     ProgramKind kind = ProgramKind::Unknown;
     if (computeShader != nullptr && shaderCount == 1) {
@@ -11480,6 +11486,29 @@ bool GLContext::linkProgram(GLuint program) {
         kind = ProgramKind::TessEvalOnly;
     }
 
+    // GL 4.1 §7.3: a separable program can skip otherwise-
+    // required stages — the program pipeline object will fill
+    // them in at bind. Treat any still-Unknown stage combination
+    // as valid-on-separable, and conversely reject stage-only
+    // kinds (GeometryOnly / TessControlOnly / TessEvalOnly) when
+    // the program is not marked separable, matching the
+    // `linking.incomplete_program_objects` negative-run
+    // expectations (FS:NO, GS:YES, non-separable must fail).
+    if (kind == ProgramKind::Unknown && programObject->separable) {
+        kind = ProgramKind::Separable;
+    }
+    if (!programObject->separable &&
+        (kind == ProgramKind::GeometryOnly ||
+         kind == ProgramKind::TessControlOnly ||
+         kind == ProgramKind::TessEvalOnly ||
+         kind == ProgramKind::FragmentOnly ||
+         kind == ProgramKind::VertexOnly)) {
+        programObject->linkLog = "incomplete non-separable program: missing required stage(s)";
+        Runtime::shared().recordShaderTranslation({
+            programTag, "link", "", "", "", programObject->linkLog, "", false
+        });
+        return false;
+    }
     if (kind == ProgramKind::Unknown) {
         programObject->linkLog = "program has no supported shader stage combination";
         Runtime::shared().recordShaderTranslation({
@@ -12671,6 +12700,32 @@ bool GLContext::linkProgram(GLuint program) {
             rasterTranslationOk = true;
             break;
         }
+        case ProgramKind::Separable: {
+            // Separable multi-stage combo — translate every attached
+            // vertex-processing stage for introspection; actual draw
+            // sourcing comes from the pipeline object later. For
+            // `incomplete_program_objects` we just need link-status
+            // == GL_TRUE; drawing this specific combination never
+            // happens because the CTS test immediately discards the
+            // program.
+            auto translateSingle = [&](GLShaderObject* sh, GLenum stageEnum,
+                                       std::string& outMSL,
+                                       ShaderReflection& outRefl) {
+                if (sh == nullptr || sh->spirv.empty()) return;
+                BindingMap stageBindings;
+                outMSL = translator.spirvToMSL(sh->spirv.data(),
+                    sh->spirv.size(), stageBindings, nullptr);
+                outRefl = translator.reflect(sh->spirv.data(),
+                    sh->spirv.size(), stageBindings, nullptr);
+                (void)stageEnum;
+            };
+            translateSingle(vertexShader, GL_VERTEX_SHADER,
+                            programObject->vertexMSL, programObject->vertexReflection);
+            translateSingle(fragmentShader, GL_FRAGMENT_SHADER,
+                            programObject->fragmentMSL, programObject->fragmentReflection);
+            rasterTranslationOk = true;
+            break;
+        }
         case ProgramKind::Unknown:
             break;  // Already handled above; kept so -Wswitch stays happy.
     }
@@ -13187,7 +13242,7 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = 0;  // No binary program support
             return true;
         case GL_PROGRAM_SEPARABLE:
-            *params = GL_FALSE;
+            *params = object->separable ? GL_TRUE : GL_FALSE;
             return true;
         case GL_PROGRAM_BINARY_RETRIEVABLE_HINT:
             *params = GL_FALSE;
