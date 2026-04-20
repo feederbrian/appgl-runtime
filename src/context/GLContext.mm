@@ -17919,15 +17919,49 @@ bool GLContext::framebufferParameteri(GLenum target, GLenum pname, GLint param) 
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    // Accept parameter hints for attachment-less framebuffers. These are stored
-    // on the framebuffer object but don't affect Metal rendering yet.
+    // GL 4.6 §9.2.1: FramebufferParameteri operates on the user FBO
+    // currently bound at `target`. The default FB (name = 0) rejects
+    // every FRAMEBUFFER_DEFAULT_* pname with INVALID_OPERATION because
+    // its defaults are fixed by the window system.
+    const GLuint fbName = target == GL_READ_FRAMEBUFFER
+        ? impl_->state->boundReadFramebuffer()
+        : impl_->state->boundDrawFramebuffer();
+    if (fbName == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLFramebufferObject* fb = impl_->objects->framebuffers().get(fbName);
+    if (fb == nullptr || !fb->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // Per-pname value-range guards. GL 4.6 §9.2.1 table 9.1: negative
+    // widths/heights/layers/samples are INVALID_VALUE; upper bounds
+    // match the matching implementation limits reported by caps.
+    const auto rangeCheckCap = [&](GLenum capPname, GLint& storage) -> bool {
+        GLint maxVal = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(capPname, &maxVal);
+        }
+        if (param < 0 || (maxVal > 0 && param > maxVal)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        storage = param;
+        return true;
+    };
     switch (pname) {
         case GL_FRAMEBUFFER_DEFAULT_WIDTH:
+            return rangeCheckCap(GL_MAX_FRAMEBUFFER_WIDTH, fb->defaultWidth);
         case GL_FRAMEBUFFER_DEFAULT_HEIGHT:
+            return rangeCheckCap(GL_MAX_FRAMEBUFFER_HEIGHT, fb->defaultHeight);
         case GL_FRAMEBUFFER_DEFAULT_LAYERS:
+            return rangeCheckCap(GL_MAX_FRAMEBUFFER_LAYERS, fb->defaultLayers);
         case GL_FRAMEBUFFER_DEFAULT_SAMPLES:
+            return rangeCheckCap(GL_MAX_FRAMEBUFFER_SAMPLES, fb->defaultSamples);
         case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS:
-            return true; // accepted, state-tracked as hint
+            fb->defaultFixedSampleLocations = param != 0 ? GL_TRUE : GL_FALSE;
+            return true;
         default:
             pushError(GL_INVALID_ENUM);
             return false;
@@ -17973,12 +18007,23 @@ bool GLContext::getFramebufferParameteriv(GLenum target, GLenum pname, GLint* pa
     // SAMPLE_BUFFERS/STEREO) which framebuffers_get_parameters expects
     // to cross-validate against the non-DSA query. Only default FB
     // rejects the user-FB-only FRAMEBUFFER_DEFAULT_* pnames.
+    const GLFramebufferObject* fb = impl_->objects->framebuffers().get(fbName);
     switch (pname) {
-        case GL_FRAMEBUFFER_DEFAULT_WIDTH:       *params = 0; return true;
-        case GL_FRAMEBUFFER_DEFAULT_HEIGHT:      *params = 0; return true;
-        case GL_FRAMEBUFFER_DEFAULT_LAYERS:      *params = 0; return true;
-        case GL_FRAMEBUFFER_DEFAULT_SAMPLES:     *params = 0; return true;
-        case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS: *params = GL_TRUE; return true;
+        case GL_FRAMEBUFFER_DEFAULT_WIDTH:
+            *params = (fb != nullptr) ? fb->defaultWidth : 0;
+            return true;
+        case GL_FRAMEBUFFER_DEFAULT_HEIGHT:
+            *params = (fb != nullptr) ? fb->defaultHeight : 0;
+            return true;
+        case GL_FRAMEBUFFER_DEFAULT_LAYERS:
+            *params = (fb != nullptr) ? fb->defaultLayers : 0;
+            return true;
+        case GL_FRAMEBUFFER_DEFAULT_SAMPLES:
+            *params = (fb != nullptr) ? fb->defaultSamples : 0;
+            return true;
+        case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLE_LOCATIONS:
+            *params = (fb != nullptr) ? (GLint)fb->defaultFixedSampleLocations : GL_TRUE;
+            return true;
         case GL_DOUBLEBUFFER:                    *params = GL_TRUE;  return true;
         case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *params = GL_RGBA;         return true;
         case GL_IMPLEMENTATION_COLOR_READ_TYPE:   *params = GL_UNSIGNED_BYTE; return true;

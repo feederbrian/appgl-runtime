@@ -215,6 +215,16 @@ struct GLFramebufferObject {
     std::array<GLenum, 8> drawBuffers = {GL_COLOR_ATTACHMENT0, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE};
     GLenum readBuffer = GL_COLOR_ATTACHMENT0;
     bool instantiated = false;
+    // GL 4.3 §9.2.1 — attachment-less (no-attachment) framebuffer
+    // defaults. These are set via glFramebufferParameteri and form
+    // the effective viewport/layer/sample state when the FBO has no
+    // attachments. CTS geometry_shader.layered_rendering_fbo_no_
+    // attachment exercises the round-trip.
+    GLint defaultWidth = 0;
+    GLint defaultHeight = 0;
+    GLint defaultLayers = 0;
+    GLint defaultSamples = 0;
+    GLboolean defaultFixedSampleLocations = GL_FALSE;
 };
 
 struct GLVertexAttributeState {
