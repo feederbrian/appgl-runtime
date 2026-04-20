@@ -821,3 +821,90 @@ rebuild catches the drift at compile time.
   gl_PrimitiveID plumbing), + 12 singletons / input /
   nonarray_input / constant_variables / program_resource /
   layered_{fbo,framebuffer,rendering_*}.
+
+- **2026-04-19** — **geometry_shader.* phase 5 — link-time
+  validation + small wins** (commits `ea1c63d`, `2c29c30`,
+  `1509960`, `ec5ed83`, `bc3014d`, `cceafd5`, `04b3638`).
+  Seven small commits aimed at the remaining non-layered GS
+  tail. +6 overall.
+    - **`ea1c63d`** — `output.vertex_emit_at_end`: when the GS
+      emits fewer than the minimum vertices for its output
+      topology (2-vertex triangle_strip, 1-vertex line_strip)
+      the emulator's strip decomposition resolves to zero
+      primitives. The dispatch previously set `d.ok = false`
+      and fell through to the VS+FS legacy pipeline, which
+      rendered the VS's raw gl_Position as a single point
+      and scribbled a white pixel into the all-clear
+      framebuffer the test verifies. Mark zero-primitive
+      emissions as `ok = true; vertexCount = 0` and short-
+      circuit every dispatch site on that case so the draw
+      is consumed without Metal encode.
+    - **`2c29c30`** — `linking.vs_gs_variable_type_mismatch`:
+      glslang compiles each stage in isolation; the cross-
+      stage varying interface is unchecked. linkProgram now
+      walks each consecutive stage pair and compares
+      producer outputs to consumer inputs by name; mismatched
+      types trigger link failure with a diagnostic. Also
+      extended the GLSL scanner to record `in` declarations
+      for every stage (was VS-only), so the consumer side
+      has data to compare against.
+    - **`1509960`** — `linking.more_ACs_in_GS_than_supported`
+      + `linking.more_ACBs_in_GS_than_supported`: count GS
+      atomic-counter uniforms (including array sizes) and
+      distinct `binding=N` indices; reject link if either
+      exceeds the advertised cap (currently 0 for both, so
+      any AC in the GS source trips the check).
+    - **`ec5ed83`** + **`bc3014d`** — `linking.incomplete_
+      program_objects`: GL_PROGRAM_SEPARABLE now stored on
+      the program object (was a pure no-op) and honored by
+      the stage-completeness check. Non-separable programs
+      that resolve to single-stage ProgramKinds (Vertex /
+      Fragment / Geometry / TessControl / TessEvalOnly) now
+      fail link with "incomplete non-separable program";
+      separable ones accept any stage combination via a
+      new `ProgramKind::Separable` bucket. Second commit
+      sets the flag on programs returned by
+      `glCreateShaderProgramv` (the convenience entry
+      produces separable programs by spec).
+    - **`cceafd5`** — `constant_variables.constant_variables`:
+      MAX_COMBINED_<stage>_UNIFORM_COMPONENTS formula used
+      the unmaxed `uniformBindings` while the per-stage
+      block count was `max(uniformBindings, 14)`; caps
+      sometimes reported a combined value below the spec-
+      formula floor. Recomputed using the effective block
+      count so the combined always satisfies the formula.
+      Also added `GL_LAYER_PROVOKING_VERTEX` and
+      `GL_VIEWPORT_INDEX_PROVOKING_VERTEX` queries returning
+      `GL_PROVOKING_VERTEX`.
+    - **`04b3638`** — Correctness bug in
+      `getResourceProperty`: the stage-bit table mapped
+      `0x04` to COMPUTE_SHADER (should be GEOMETRY) and
+      returned unconditional `GL_FALSE` for GS / TCS / TES.
+      Also replaced the hard-coded `referencedBy = 0x03`
+      default on scalar uniforms with a per-stage derivation
+      from each attached shader's declared-uniforms. Block-
+      scoped resources (uniform blocks / SSBOs / buffer
+      variables) still carry only VS / FS / compute bits
+      from SPIRV-Cross reflection — GS introspection of
+      those needs translator work that belongs with the
+      full `program_resource.program_resource` fix.
+  Sweep delta vs phase 4:
+    - `output.*`:            3/5 → 4/5 (+1)
+    - `linking.*`:           9/13 → 13/13 (+4, full section)
+    - `constant_variables.*`: 0/1 → 1/1 (+1)
+    - `geometry_shader.*` overall: 96/136 → **102/136** (+6)
+    - `api.*`: 10/16 held (transient regression via
+      `glCreateShaderProgramv` not setting separable caught
+      + fixed in-session by `bc3014d`)
+    - `rendering.*`, `primitive_queries.*`, `primitive_
+      counter.*`: all held
+    - `constant_expressions.*_geometry`: 232/232 held
+  Remaining 34 F: layered_* (11), limits.* (8 — most need
+  complex GS uniform plumbing), api.* (4 — SSBO/image/
+  pipeline deps), output.* (1 — `primite_end_done_for_single
+  _primitive` point-size verifier), adjacency (2 — strip
+  adjacency Table 10.4 neighbour lookup), primitive_counter
+  (1 — FS gl_PrimitiveID), program_resource (1 — GS block
+  introspection via SPIRV-Cross), nonarray_input (1), input
+  (2 — including the gl_in_array_length cleanup SIGSEGV),
+  layered singletons (3).
