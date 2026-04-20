@@ -424,6 +424,112 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
 GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
     GLSLReflectionResult result;
     std::string cleaned = stripComments(source);
+    // First pass: capture `#define NAME INTEGER_LITERAL[u]` so we can
+    // substitute NAME into the rest of the source before dropping
+    // preprocessor lines. CTS `limits.max_uniform_components` builds
+    // the GS via string concatenation:
+    //   "${VERSION}...#define NUMBER_OF_UNIFORMS "  (preamble)
+    // + "256u"                                       (runtime value)
+    // + "uniform ivec4 uni_array[NUMBER_OF_UNIFORMS];"  (body)
+    // Our old scanner dropped the `#define` unconditionally and left
+    // `uni_array[NUMBER_OF_UNIFORMS]` unsubstituted, so
+    // `parseDeclTail` read arraySize as 1 (strtol("NUMBER_OF_UNIFORMS")
+    // = 0 → max(0, 1)). Then `glUniform4iv(loc, 256, data)` clamped
+    // effCount to remaining = ref.arraySize = 1 and stored only 4
+    // ints instead of 1024. Capture macros first, then substitute.
+    std::unordered_map<std::string, std::string> defines;
+    {
+        std::size_t i = 0;
+        while (i < cleaned.size()) {
+            if (cleaned[i] == '#') {
+                // Skip any whitespace between '#' and the directive name.
+                std::size_t hashEnd = i + 1;
+                while (hashEnd < cleaned.size() &&
+                       (cleaned[hashEnd] == ' ' || cleaned[hashEnd] == '\t')) {
+                    ++hashEnd;
+                }
+                const bool isDefine = (hashEnd + 7 <= cleaned.size() &&
+                                       cleaned.compare(hashEnd, 7, "define ") == 0);
+                if (isDefine) {
+                    // Parse `#define NAME VALUE` on this line. Accept
+                    // only identifier + integer-literal (optionally with
+                    // trailing 'u' for unsigned). Reject function-like
+                    // macros (` NAME(`) and multi-token values.
+                    std::size_t p = hashEnd + 7;
+                    while (p < cleaned.size() && (cleaned[p] == ' ' || cleaned[p] == '\t')) ++p;
+                    std::size_t nameStart = p;
+                    while (p < cleaned.size() &&
+                           ((cleaned[p] >= 'A' && cleaned[p] <= 'Z') ||
+                            (cleaned[p] >= 'a' && cleaned[p] <= 'z') ||
+                            (cleaned[p] >= '0' && cleaned[p] <= '9') ||
+                            cleaned[p] == '_')) ++p;
+                    const std::string name = cleaned.substr(nameStart, p - nameStart);
+                    if (p < cleaned.size() && cleaned[p] == '(') {
+                        // Function-like macro — skip.
+                    } else if (!name.empty()) {
+                        while (p < cleaned.size() && (cleaned[p] == ' ' || cleaned[p] == '\t')) ++p;
+                        std::size_t valStart = p;
+                        while (p < cleaned.size() && cleaned[p] != '\n') ++p;
+                        std::string value(cleaned.data() + valStart, p - valStart);
+                        // Strip trailing whitespace.
+                        while (!value.empty() &&
+                               (value.back() == ' ' || value.back() == '\t' || value.back() == '\r')) {
+                            value.pop_back();
+                        }
+                        // Strip trailing 'u'/'U' suffix on integer literals.
+                        if (!value.empty() && (value.back() == 'u' || value.back() == 'U')) {
+                            value.pop_back();
+                        }
+                        // Only accept pure integer-literal values — other
+                        // macro shapes (expressions, strings) aren't used
+                        // by any CTS shader we care about.
+                        bool allDigit = !value.empty();
+                        for (char c : value) {
+                            if (!(c >= '0' && c <= '9')) { allDigit = false; break; }
+                        }
+                        if (allDigit) {
+                            defines[name] = value;
+                        }
+                    }
+                }
+                while (i < cleaned.size() && cleaned[i] != '\n') ++i;
+            } else {
+                ++i;
+            }
+        }
+    }
+    // Substitute macros. Walk the cleaned source, replace identifiers
+    // that match a define with the value. Bounded to identifier-boundary
+    // tokens so we don't accidentally rewrite a partial match inside a
+    // longer name.
+    if (!defines.empty()) {
+        std::string rewritten;
+        rewritten.reserve(cleaned.size());
+        std::size_t i = 0;
+        auto isIdStart = [](char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+        };
+        auto isIdCont = [](char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9') || c == '_';
+        };
+        while (i < cleaned.size()) {
+            if (isIdStart(cleaned[i])) {
+                std::size_t start = i;
+                while (i < cleaned.size() && isIdCont(cleaned[i])) ++i;
+                std::string tok(cleaned.data() + start, i - start);
+                auto it = defines.find(tok);
+                if (it != defines.end()) {
+                    rewritten += it->second;
+                } else {
+                    rewritten += tok;
+                }
+            } else {
+                rewritten.push_back(cleaned[i++]);
+            }
+        }
+        cleaned = std::move(rewritten);
+    }
     // Drop preprocessor lines we don't act on.
     {
         std::string filtered;
