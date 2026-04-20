@@ -14534,6 +14534,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
                     return true;
                 }
+                // GS ran successfully but emitted zero output
+                // primitives (e.g. a triangle_strip body with
+                // fewer than 3 EmitVertex calls). Consume the draw
+                // here instead of falling through to the legacy
+                // VS+FS pipeline — that path would render the VS's
+                // raw gl_Position as a point and scribble fragments
+                // the test explicitly expects to stay cleared.
+                if (ed.vertexCount == 0) {
+                    APPGL_LOG(DRAW, @"drawArrays GS-emul: zero primitives");
+                    return true;
+                }
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) {
                     APPGL_LOG(DRAW, @"drawArrays GS-emul ok: verts=%zu topo=0x%X",
                               ed.vertexCount, ed.topology);
@@ -14927,6 +14938,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 instancecount, /*baseInstance=*/0);
             if (ed.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
+                if (ed.vertexCount == 0) return true;
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
             }
         }
@@ -15343,6 +15355,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
                     return true;
                 }
+                if (ed.vertexCount == 0) return true;
                 // Non-discard path — the expanded vertex buffer is
                 // already flat, so the encode is identical to
                 // drawArrays. This covers CTS rendering tests that
@@ -15681,6 +15694,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                 mode, count, /*first=*/0, idx32.data());
             if (ed.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
+                if (ed.vertexCount == 0) return true;
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
             }
         }
@@ -15960,6 +15974,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                 instancecount, /*baseInstance=*/0);
             if (ed.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
+                if (ed.vertexCount == 0) return true;
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
             }
         }

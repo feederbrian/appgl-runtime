@@ -3050,8 +3050,17 @@ EmulatedDraw emulateGeometryDraw(
     }
 
     if (emittedAll.empty()) {
-        d.ok = false;
-        d.diagnostic = "GS emitted zero vertices";
+        // Emulator ran to completion but the GS body never called
+        // EmitVertex — a valid scenario (e.g. `output.vertex_emit_
+        // at_end` emits gl_Position writes without matching
+        // EmitVertex calls, and expects zero fragments touched).
+        // Mark the draw as successfully consumed (`ok = true`) with
+        // an empty payload so the caller skips the Metal encode
+        // cleanly; a `d.ok = false` fall-through would hand the
+        // draw to the legacy VS+FS pipeline, which renders a
+        // spurious point at the VS output and fails the test.
+        d.ok = true;
+        d.vertexCount = 0;
         return d;
     }
 
@@ -3123,10 +3132,17 @@ EmulatedDraw emulateGeometryDraw(
 
     if (emittedAll.empty()) {
         // A single-vertex or two-vertex strip decomposes to zero
-        // segments — rare but possible with a malformed GS. Report
-        // cleanly so the caller falls back to the no-GS path.
-        d.ok = false;
-        d.diagnostic = "GS strip decomposition produced zero primitives";
+        // line segments / triangles — the GS ran correctly but
+        // didn't emit enough vertices to form any output
+        // primitives. `output.vertex_emit_at_end` hits this via a
+        // triangle_strip body that emits 2 verts + EndPrimitive +
+        // one unmatched gl_Position set — the expected framebuffer
+        // is all-clear. Mark the draw successfully consumed so
+        // the caller skips the Metal encode without falling back
+        // to the VS+FS path (which would render spurious fragments
+        // from the VS's gl_Position).
+        d.ok = true;
+        d.vertexCount = 0;
         return d;
     }
 
