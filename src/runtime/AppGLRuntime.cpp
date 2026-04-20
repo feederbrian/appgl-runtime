@@ -6360,9 +6360,26 @@ GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadertype,
 GLuint APIENTRY glGetSubroutineIndex(GLuint program, GLenum shadertype, const GLchar* name) {
     auto* ctx = requireCurrentContext("glGetSubroutineIndex");
     if (!ctx) return GL_INVALID_INDEX;
-    (void)program; (void)shadertype; (void)name;
-    markProgramFunction(FunctionId::glGetSubroutineIndex, "Subroutine index stub (always GL_INVALID_INDEX).");
-    Runtime::shared().recordBootstrapTrace("glGetSubroutineIndex(program=" + std::to_string(program) + ", name=" + std::string(name ? name : "(null)") + ") -> GL_INVALID_INDEX");
+    if (name == nullptr) return GL_INVALID_INDEX;
+    auto* prog = ctx->objects().programs().get(program);
+    if (prog == nullptr || !prog->linked) return GL_INVALID_INDEX;
+    int si = -1;
+    switch (shadertype) {
+        case GL_VERTEX_SHADER:          si = 0; break;
+        case GL_TESS_CONTROL_SHADER:    si = 1; break;
+        case GL_TESS_EVALUATION_SHADER: si = 2; break;
+        case GL_GEOMETRY_SHADER:        si = 3; break;
+        case GL_FRAGMENT_SHADER:        si = 4; break;
+        case GL_COMPUTE_SHADER:         si = 5; break;
+        default: return GL_INVALID_INDEX;
+    }
+    const std::string lookup = name;
+    const auto& subs = prog->resourceSubroutines[si];
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+        if (subs[i].name == lookup) return static_cast<GLuint>(i);
+    }
+    markProgramFunction(FunctionId::glGetSubroutineIndex, "Subroutine index via GL 4.0 program-resource tables.");
+    Runtime::shared().recordBootstrapTrace("glGetSubroutineIndex(program=" + std::to_string(program) + ", name=" + std::string(name) + ") -> GL_INVALID_INDEX (not found)");
     return GL_INVALID_INDEX;
 }
 

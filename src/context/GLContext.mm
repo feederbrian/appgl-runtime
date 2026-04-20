@@ -11689,6 +11689,54 @@ static void scanSubroutineDeclarations(
             pos += kw.size();
             continue;
         }
+        // Check for a preceding `layout(location = N)` qualifier on
+        // the subroutine-uniform declaration. GL 4.2
+        // `layout(location=N) subroutine uniform ...` lets the app
+        // pin the subroutine-uniform location. Walk backwards from
+        // `pos` past whitespace and inspect the balanced
+        // `layout(...)` block if present.
+        GLint explicitLocation = -1;
+        {
+            std::size_t back = pos;
+            while (back > 0 && std::isspace(static_cast<unsigned char>(src[back - 1]))) --back;
+            if (back > 0 && src[back - 1] == ')') {
+                // Find matching '('.
+                int pd = 1;
+                std::size_t bp = back - 1;
+                while (bp > 0 && pd > 0) {
+                    --bp;
+                    if (src[bp] == ')') ++pd;
+                    else if (src[bp] == '(') --pd;
+                }
+                if (pd == 0 && bp >= 6) {
+                    std::size_t lp = bp;
+                    while (lp > 0 && std::isspace(static_cast<unsigned char>(src[lp - 1]))) --lp;
+                    if (lp >= 6 && src.compare(lp - 6, 6, "layout") == 0) {
+                        // Parse "location = N" inside the parens.
+                        std::size_t inner = bp + 1;
+                        std::size_t innerEnd = back - 1;
+                        std::string content = src.substr(inner, innerEnd - inner);
+                        std::size_t loc = content.find("location");
+                        if (loc != std::string::npos) {
+                            std::size_t eq = content.find('=', loc);
+                            if (eq != std::string::npos) {
+                                std::size_t nb = eq + 1;
+                                while (nb < content.size() &&
+                                       std::isspace(static_cast<unsigned char>(content[nb]))) ++nb;
+                                std::size_t ne = nb;
+                                while (ne < content.size() &&
+                                       (std::isdigit(static_cast<unsigned char>(content[ne])) ||
+                                        content[ne] == 'x' || content[ne] == 'X')) ++ne;
+                                if (ne > nb) {
+                                    explicitLocation = static_cast<GLint>(
+                                        std::strtol(content.substr(nb, ne - nb).c_str(), nullptr, 0));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         std::size_t p = pos + kw.size();
         skipWs(p);
 
@@ -11765,7 +11813,12 @@ static void scanSubroutineDeclarations(
             // array uniforms) report the canonical "[0]" suffix.
             entry.name = isArray ? (uniName + "[0]") : uniName;
             entry.type = 0;  // subroutine uniforms have no scalar type
-            entry.location = static_cast<GLint>(outUniforms.size());  // sequential
+            // GL 4.2 `layout(location=N) subroutine uniform …` pins
+            // the uniform's location. Fall back to sequential
+            // assignment when no explicit location is given.
+            entry.location = explicitLocation >= 0
+                ? explicitLocation
+                : static_cast<GLint>(outUniforms.size());
             entry.arraySize = arraySize;
             entry.isArray = isArray;
             outUniforms.push_back(std::move(entry));
@@ -14822,6 +14875,7 @@ bool GLContext::linkProgram(GLuint program) {
         const std::string& vsSrc = vertexShader ? vertexShader->source : emptySource;
         const std::string& fsSrc = fragmentShader ? fragmentShader->source : emptySource;
         const std::string& gsSrc = geometryShader ? geometryShader->source : emptySource;
+        const std::string& csSrc = computeShader ? computeShader->source : emptySource;
         mergeBlocks(programObject->vertexReflection.uniformBlocks, 0x01, vsSrc);    // vertex
         mergeBlocks(programObject->fragmentReflection.uniformBlocks, 0x02, fsSrc);  // fragment
         // GS uniform blocks — SPIRV-Cross reflection captured from
@@ -14832,6 +14886,11 @@ bool GLContext::linkProgram(GLuint program) {
         // `uni_colors` (expected TRUE: GS reads uni_colors.red) vs
         // `uni_matrices` (expected FALSE: declared but unused).
         mergeBlocks(programObject->geometryReflection.uniformBlocks, 0x04, gsSrc);  // geometry
+        // Compute UBOs — CTS `compute_shader.resource-ubo` declares
+        // `uniform InputBuffer { … } g_in_buffer[12];` and queries
+        // `glGetUniformBlockIndex("InputBuffer[0]")` + expects
+        // `GL_UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER = TRUE`.
+        mergeBlocks(programObject->computeReflection.uniformBlocks, 0x20, csSrc);   // compute
 
         // Build resourceStorageBlocks from each stage's SSBO reflection so
         // glShaderStorageBlockBinding can look up a block by index and
