@@ -376,7 +376,20 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         spirv_cross::CompilerMSL::Options mslOpts;
         mslOpts.platform = spirv_cross::CompilerMSL::Options::macOS;
-        mslOpts.set_msl_version(2, 1);
+        // MSL 2.2 (macOS 10.15+, 2019) required for:
+        //   - `[[primitive_id]]` in fragment shaders on macOS — without it
+        //     SPIRV-Cross throws `PrimitiveId on macOS requires MSL 2.2`
+        //     and the FS translation returns empty. That made
+        //     `geometry_shader.primitive_counter.primitive_id_from_fragment`
+        //     render the clear color because the pipeline had no FS.
+        //   - `[[barycentric]]` inputs (relevant for future GLSL_EXT_
+        //     fragment_shader_barycentric support).
+        // We're safe to bump: 10.15 is below every macOS version we
+        // support as a host (12.0+), so every target platform has a
+        // Metal driver ≥ MSL 2.2. Keep an eye on Apple-platform
+        // regressions via the CTS sweep if we ever go back to 10.14
+        // testing.
+        mslOpts.set_msl_version(2, 2);
         mslOpts.enable_decoration_binding = true;
         // Pad fragment outputs to vec4 so Metal doesn't reject pipelines
         // where the shader outputs fewer components than the render target
