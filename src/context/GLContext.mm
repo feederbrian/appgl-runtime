@@ -6113,7 +6113,26 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
              || format == GL_RG_INTEGER || format == GL_RGB_INTEGER
              || format == GL_RGBA_INTEGER
              || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
-        const bool isDepthReadback = (format == GL_DEPTH_COMPONENT && type == GL_FLOAT);
+        // GL 4.6 Table 18.2 — GL_DEPTH_COMPONENT readback accepts any
+        // scalar type (byte/short/int/half/float and unsigned variants)
+        // plus the packed GL_UNSIGNED_INT_24_8 / GL_FLOAT_32_UNSIGNED
+        // _INT_24_8_REV. Previous impl hardcoded GL_FLOAT only — CTS
+        // `texture_cube_map_array.color_depth_attachments` queries
+        // depth data with GL_UNSIGNED_SHORT / GL_UNSIGNED_INT per the
+        // texture's bit depth, and saw INVALID_ENUM. Same liberal
+        // per-format acceptance as the stencil branch below.
+        const bool isDepthReadback = (format == GL_DEPTH_COMPONENT
+            && (type == GL_UNSIGNED_BYTE || type == GL_BYTE
+                || type == GL_UNSIGNED_SHORT || type == GL_SHORT
+                || type == GL_UNSIGNED_INT || type == GL_INT
+                || type == GL_FLOAT || type == GL_HALF_FLOAT
+                || type == GL_UNSIGNED_INT_24_8
+                || type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV));
+        // GL_DEPTH_STENCIL readback is also accepted by the spec with
+        // the two depth-stencil packed types.
+        const bool isDepthStencilReadback = (format == GL_DEPTH_STENCIL
+            && (type == GL_UNSIGNED_INT_24_8
+                || type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV));
         // GL 4.6 Table 8.3: GL_STENCIL_INDEX accepts any scalar type
         // (byte/short/int/float and their variants). Narrowing to only
         // GL_UNSIGNED_BYTE fails CTS framebuffers_clear which reads
@@ -6123,7 +6142,8 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                 || type == GL_UNSIGNED_SHORT || type == GL_SHORT
                 || type == GL_UNSIGNED_INT || type == GL_INT
                 || type == GL_FLOAT || type == GL_HALF_FLOAT));
-        if (!isColorReadback && !isDepthReadback && !isStencilReadback) {
+        if (!isColorReadback && !isDepthReadback && !isStencilReadback
+            && !isDepthStencilReadback) {
             pushError(GL_INVALID_ENUM);
             return false;
         }
