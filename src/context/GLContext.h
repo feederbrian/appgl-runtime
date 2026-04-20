@@ -568,6 +568,12 @@ public:
     GLuint boundTransformFeedback() const;
     void setBoundTransformFeedback(GLuint id);
 
+    // Currently bound draw framebuffer (0 = default). Exposed so
+    // legacy non-DSA entry points (e.g. glClearBufferfv) can route
+    // to the DSA equivalents (e.g. clearNamedFramebufferfv) by
+    // passing this as the named-framebuffer argument.
+    GLuint boundDrawFramebuffer() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

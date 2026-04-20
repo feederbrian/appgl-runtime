@@ -1115,29 +1115,35 @@ static GLint APIENTRY glGetFragDataLocation(GLuint program, const GLchar *name) 
     return -1;
 }
 
+// GL 3.0 §17.4.3.1 glClearBuffer*v — per-attachment clears against the
+// currently-bound draw framebuffer. Route to the DSA equivalents on the
+// bound framebuffer so the layered-clear path (clearColorAttachment)
+// fires. Previously these were no-op stubs, so a `glClearBufferiv`
+// followed by a readPixels saw the stale layer data — failing
+// `geometry_shader.layered_framebuffer.clear_call_support`'s
+// CLEAR_BUFFERIV / CLEAR_BUFFERUIV / CLEAR_BUFFERFV subcases.
 static void APIENTRY glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint *value) {
-    (void)buffer;
-    (void)drawbuffer;
-    (void)value;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->clearNamedFramebufferiv(context->boundDrawFramebuffer(), buffer, drawbuffer, value);
 }
 
 static void APIENTRY glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint *value) {
-    (void)buffer;
-    (void)drawbuffer;
-    (void)value;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->clearNamedFramebufferuiv(context->boundDrawFramebuffer(), buffer, drawbuffer, value);
 }
 
 static void APIENTRY glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat *value) {
-    (void)buffer;
-    (void)drawbuffer;
-    (void)value;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->clearNamedFramebufferfv(context->boundDrawFramebuffer(), buffer, drawbuffer, value);
 }
 
 static void APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
-    (void)buffer;
-    (void)drawbuffer;
-    (void)depth;
-    (void)stencil;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->clearNamedFramebufferfi(context->boundDrawFramebuffer(), buffer, drawbuffer, depth, stencil);
 }
 
 // AppGL extension surface as exposed to host loaders. GL 3.0+ replaced the

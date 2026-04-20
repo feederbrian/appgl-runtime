@@ -4640,6 +4640,11 @@ struct GLContext::Impl {
         NSUInteger metalMipLevel = 0;
         NSUInteger metalSlice = 0;
 
+        // For 3D textures, `attachment.layer` is a Z coordinate into
+        // the texture region, not a Metal slice index. Track separately
+        // so the Metal-read path below can use MTLRegionMake3D.
+        bool is3DTexture = false;
+        NSUInteger depthSlice = 0;
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
             const GLTextureObject* texture = objects->textures().get(attachment.object);
             if (texture == nullptr) return false;
@@ -4648,7 +4653,15 @@ struct GLContext::Impl {
             sourceWidth = std::max<GLsizei>(level->second.desc.width, 1);
             sourceHeight = texture->target == GL_TEXTURE_1D ? 1 : std::max<GLsizei>(level->second.desc.height, 1);
             metalMipLevel = static_cast<NSUInteger>(attachment.level);
-            metalSlice = static_cast<NSUInteger>(attachment.layer);
+            if (texture->target == GL_TEXTURE_3D) {
+                // 3D texture: Metal has a single slice; depth-layer
+                // goes into the region's Z coordinate.
+                is3DTexture = true;
+                depthSlice = static_cast<NSUInteger>(std::max<GLint>(attachment.layer, 0));
+                metalSlice = 0;
+            } else {
+                metalSlice = static_cast<NSUInteger>(attachment.layer);
+            }
             if (texture->metalTexture != nullptr) {
                 metalTex = (__bridge id<MTLTexture>)texture->metalTexture;
             }
@@ -4722,9 +4735,13 @@ struct GLContext::Impl {
         // Read the entire mip level into a temporary buffer, then extract
         // the requested rectangle.
         std::vector<std::uint8_t> fullLevel(static_cast<std::size_t>(sourceWidth) * static_cast<std::size_t>(sourceHeight) * 4u);
-        MTLRegion fullRegion = MTLRegionMake2D(0, 0,
-            static_cast<NSUInteger>(sourceWidth),
-            static_cast<NSUInteger>(sourceHeight));
+        MTLRegion fullRegion = is3DTexture
+            ? MTLRegionMake3D(0, 0, depthSlice,
+                static_cast<NSUInteger>(sourceWidth),
+                static_cast<NSUInteger>(sourceHeight), 1)
+            : MTLRegionMake2D(0, 0,
+                static_cast<NSUInteger>(sourceWidth),
+                static_cast<NSUInteger>(sourceHeight));
         [metalTex getBytes:fullLevel.data()
                bytesPerRow:bytesPerRow
             bytesPerImage:0
@@ -5072,6 +5089,11 @@ struct GLContext::Impl {
         GLsizei sourceWidth = 0, sourceHeight = 0;
         NSUInteger metalMipLevel = 0;
         NSUInteger metalSlice = 0;
+        // For 3D textures, `attachment.layer` is a Z coordinate into the
+        // region, not a Metal slice. Track separately so the
+        // getBytes: call below can use MTLRegionMake3D with Z.
+        bool is3DTextureSrc = false;
+        NSUInteger depthSlice3D = 0;
 
         if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
@@ -5084,7 +5106,13 @@ struct GLContext::Impl {
             if (!tex || tex->metalTexture == nullptr) return false;
             metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
             metalMipLevel = static_cast<NSUInteger>(att->level);
-            metalSlice = static_cast<NSUInteger>(att->layer);
+            if (tex->target == GL_TEXTURE_3D) {
+                is3DTextureSrc = true;
+                depthSlice3D = static_cast<NSUInteger>(std::max<GLint>(att->layer, 0));
+                metalSlice = 0;
+            } else {
+                metalSlice = static_cast<NSUInteger>(att->layer);
+            }
             sourceWidth = static_cast<GLsizei>(metalTex.width >> metalMipLevel);
             sourceHeight = static_cast<GLsizei>(metalTex.height >> metalMipLevel);
             if (sourceWidth < 1) sourceWidth = 1;
@@ -5148,9 +5176,13 @@ struct GLContext::Impl {
         const NSUInteger bytesPerRow = static_cast<NSUInteger>(sourceWidth) * srcBpp;
         const std::size_t totalBytes = static_cast<std::size_t>(sourceWidth) * static_cast<std::size_t>(sourceHeight) * srcBpp;
         std::vector<std::uint8_t> raw(totalBytes);
-        MTLRegion region = MTLRegionMake2D(0, 0,
-            static_cast<NSUInteger>(sourceWidth),
-            static_cast<NSUInteger>(sourceHeight));
+        MTLRegion region = is3DTextureSrc
+            ? MTLRegionMake3D(0, 0, depthSlice3D,
+                static_cast<NSUInteger>(sourceWidth),
+                static_cast<NSUInteger>(sourceHeight), 1)
+            : MTLRegionMake2D(0, 0,
+                static_cast<NSUInteger>(sourceWidth),
+                static_cast<NSUInteger>(sourceHeight));
         [metalTex getBytes:raw.data()
                bytesPerRow:bytesPerRow
              bytesPerImage:0
@@ -10655,6 +10687,10 @@ GLuint GLContext::boundTransformFeedback() const {
 
 void GLContext::setBoundTransformFeedback(GLuint id) {
     impl_->boundTransformFeedbackId = id;
+}
+
+GLuint GLContext::boundDrawFramebuffer() const {
+    return impl_->state->boundDrawFramebuffer();
 }
 
 // ============================================================================
