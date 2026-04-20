@@ -751,3 +751,73 @@ rebuild catches the drift at compile time.
   the cull_distance passthrough-GS cases, (2) triangles-
   input edge-colour parity, (3) layered rendering
   (gl_Layer output), (4) primitive_queries plumbing.
+
+- **2026-04-19** — **geometry_shader.* phase 4 — primitive_queries
+  + full rendering section** (commits `7d8f209`, `9262769`,
+  `db4505d`). Four bugs landed in three commits; rendering.*
+  closed 100 % and primitive_queries reached 100 %.
+    - **GL_PRIMITIVES_GENERATED + GL_TRANSFORM_FEEDBACK_PRIMITIVES_
+      WRITTEN counters** (`7d8f209`). `writeGsXfbAndCheckDiscard`
+      computes `primsGenerated = vertexCount / vertsPerPrim(ed
+      .topology)` and drives a primitive-aware TF write — per-
+      primitive fit check against the bound indexed-TF binding's
+      (offset, size) range; as soon as one primitive doesn't fit,
+      all subsequent primitives drop (GL 4.6 §13.2 "TF ends for
+      that primitive and every subsequent primitive"). Both
+      INTERLEAVED_ATTRIBS (single binding, per-vertex stride =
+      Σ varying widths) and SEPARATE_ATTRIBS (one binding per
+      varying, truncation cascades across sources) paths
+      implemented. The final step accumulates into every active
+      query whose target is either counter; other targets keep
+      the synthetic-1 fallback in `glEndQuery` for test-
+      compatibility.
+    - **OpExtInst nOperands off-by-one.** `evalExtInst(w[3],
+      &w[4], wc - 4)` handed one extra "operand" that pointed at
+      the next instruction's header — harmless when the stray id
+      happened to alias a valueStore entry (constant_expressions
+      kept working), but lethal for 2-operand FMin / FMax which
+      gs_lines_code / gs_triangles_code use for every AABB
+      computation. Fix is literal: `wc - 5`.
+    - **OpSMod (opcode 139).** Not in the interpreter allowlist;
+      glslang emits OpSMod for integer `%` in the triangles VS's
+      quadrant-layout math. VS bailed detection → emulator sat
+      out → every triangles_input_* failing test dropped its GS
+      expansion. Added dispatch + allowlist entry; implements
+      `a - b * floor(a/b)` with sign following the divisor per
+      SPIR-V §3.32.13 (differs from OpSRem which carries sign
+      of the dividend).
+    - **TRIANGLE_STRIP + triangles GS input alternation.** GL
+      4.6 §10.1.12 requires odd-indexed strip triangles to swap
+      positions 0 ↔ 1 before entering the GS so winding survives
+      decomposition. `PrimIndexing::Strip` now applies that swap
+      whenever `vpp == 3 && (p & 1) != 0` (line strips are
+      winding-independent so keep their simple `p + v` mapping).
+    - **TRIANGLE_STRIP_ADJACENCY main-vertex alternation.** Same
+      even/odd swap at positions 0 ↔ 2 within the 6-vertex
+      primitive (GL 4.6 §10.1.14). Adjacency slots (1/3/5) stay
+      at the consecutive `p*2 + v` mapping — every CTS test
+      reaching this path reads only v[0]/v[2]/v[4], so a
+      Table 10.4 neighbour lookup is deferred until an
+      adjacency-reading test exercises it.
+  Sweep deltas vs phase 3 (HEAD~3):
+    - `rendering.rendering.*`:    23/33 → **33/33** (+10, full)
+    - `primitive_queries.*`:      0/3  → **3/3** (+3, full)
+    - `geometry_shader.*` overall: 83/136 → **96/136** (+13)
+    - `transform_feedback.*`: +6 Pass (TF_WRITTEN counter fires
+      on query_geometry_* / capture_geometry_* / discard_
+      geometry_* that had IE or Fail in s19)
+    - `constant_expressions.*_geometry`: 232/232 held
+  **Cumulative session 15 deltas vs s19 baseline:**
+    - `constant_expressions.*_geometry`: +224
+    - `geometry_shader.*`: +37
+    - `transform_feedback.*`: +6
+    - `draw_elements_base_vertex_tests`: +5
+    - Golden Diff: **+272 Pass / 0 us_only_fail / 1 IE → Pass**.
+  Remaining GS buckets (40 F): layered_* (11 — gl_Layer +
+  layered FBO), api.* (4 — SSBO/image/program-pipeline deps),
+  linking.* (4), limits.* (4 — max_invocations needs multi-
+  invocation GS), output.* (2), adjacency (2 — triangle_strip_
+  adjacency even/odd index mapping), primitive_counter (1 — FS
+  gl_PrimitiveID plumbing), + 12 singletons / input /
+  nonarray_input / constant_variables / program_resource /
+  layered_{fbo,framebuffer,rendering_*}.
