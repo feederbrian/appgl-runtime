@@ -12068,6 +12068,53 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->resourceBufferVariables.clear();
     programObject->ssboBindingRemap.clear();
 
+    // Per-stage "referenced by" bitmask for program-resource
+    // introspection. GL 4.6 Table 23.40 defines
+    // GL_REFERENCED_BY_<stage>_SHADER as a query property;
+    // glGetProgramResourceiv returns 1 iff the resource is
+    // referenced by the named stage. Previously we hard-coded
+    // VS+FS (0x03) on every uniform, which tripped CTS
+    // `geometry_shader.program_resource.program_resource`
+    // whenever a GS-attached program queried the
+    // GEOMETRY_SHADER bit. Derive the bitmask from each
+    // attached stage's declaredUniforms so every stage the
+    // scanner saw contributes a bit, and we pick up GS / TCS /
+    // TES / compute automatically.
+    const GLbitfield kBitVertex   = 0x01;
+    const GLbitfield kBitFragment = 0x02;
+    const GLbitfield kBitGeometry = 0x04;
+    const GLbitfield kBitTessCtrl = 0x08;
+    const GLbitfield kBitTessEval = 0x10;
+    const GLbitfield kBitCompute  = 0x20;
+    auto stageBitFor = [&](GLenum stage) -> GLbitfield {
+        switch (stage) {
+            case GL_VERTEX_SHADER:          return kBitVertex;
+            case GL_FRAGMENT_SHADER:        return kBitFragment;
+            case GL_GEOMETRY_SHADER:        return kBitGeometry;
+            case GL_TESS_CONTROL_SHADER:    return kBitTessCtrl;
+            case GL_TESS_EVALUATION_SHADER: return kBitTessEval;
+            case GL_COMPUTE_SHADER:         return kBitCompute;
+            default:                        return 0;
+        }
+    };
+    auto computeStageMask = [&](const std::string& name) -> GLbitfield {
+        GLbitfield mask = 0;
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* shaderObject = impl_->objects->shaders().get(shaderId);
+            if (shaderObject == nullptr) continue;
+            const GLbitfield bit = stageBitFor(shaderObject->stage);
+            if (bit == 0) continue;
+            for (const auto& decl : shaderObject->declaredUniforms) {
+                if (decl.name == name) { mask |= bit; break; }
+            }
+        }
+        // If the uniform wasn't declared anywhere (shouldn't
+        // happen — it's in the linked program's uniform table)
+        // fall back to the old conservative VS+FS default.
+        if (mask == 0) mask = kBitVertex | kBitFragment;
+        return mask;
+    };
+
     for (const auto& u : programObject->uniforms) {
         GLProgramResourceEntry entry;
         entry.name = u.name;
@@ -12075,7 +12122,7 @@ bool GLContext::linkProgram(GLuint program) {
         entry.location = u.location;
         entry.binding = u.explicitBinding;  // RC-D08
         entry.arraySize = u.arraySize;
-        entry.referencedBy = 0x03; // vertex + fragment (conservative)
+        entry.referencedBy = computeStageMask(u.name);
         programObject->resourceUniforms.push_back(std::move(entry));
     }
     for (const auto& a : programObject->attributes) {
@@ -12980,6 +13027,18 @@ bool GLContext::linkProgram(GLuint program) {
         mergeStorageBlocks(programObject->vertexReflection.storageBuffers, 0x01);
         mergeStorageBlocks(programObject->fragmentReflection.storageBuffers, 0x02);
         mergeStorageBlocks(programObject->computeReflection.storageBuffers, 0x20);
+
+        // GS reflection: the geometry shader is CPU-emulated — we
+        // don't yet run SPIRV-Cross on it to produce a MSL
+        // reflection struct, so block-scoped resources (uniform
+        // blocks, SSBOs, buffer variables) can't yet tell us
+        // "does the GS use this block". Scalar uniforms are
+        // already handled via the per-stage scanner's
+        // `declaredUniforms` (see computeStageMask above), which
+        // gives us an accurate GEOMETRY_SHADER bit for those.
+        // Block-scoped REFERENCED_BY_GEOMETRY_SHADER queries stay
+        // conservative until GS reflection lands — the CTS
+        // program_resource test carries that on the backlog.
 
         // Post-pass: fix any remaining uint→bool member types that weren't
         // detected during the stage that first created the members. This
@@ -16974,12 +17033,18 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
         case GL_OFFSET:            return entry.offset;
         case GL_BLOCK_INDEX:       return entry.blockIndex;
         case GL_LOCATION:          return entry.location;
-        case GL_REFERENCED_BY_VERTEX_SHADER:   return (entry.referencedBy & 1) ? GL_TRUE : GL_FALSE;
-        case GL_REFERENCED_BY_FRAGMENT_SHADER: return (entry.referencedBy & 2) ? GL_TRUE : GL_FALSE;
-        case GL_REFERENCED_BY_COMPUTE_SHADER:  return (entry.referencedBy & 4) ? GL_TRUE : GL_FALSE;
-        case GL_REFERENCED_BY_GEOMETRY_SHADER: return GL_FALSE;
-        case GL_REFERENCED_BY_TESS_CONTROL_SHADER: return GL_FALSE;
-        case GL_REFERENCED_BY_TESS_EVALUATION_SHADER: return GL_FALSE;
+        // `referencedBy` is a bitmask: 0x01 VS / 0x02 FS /
+        // 0x04 GS / 0x08 TCS / 0x10 TES / 0x20 CS. Prior code
+        // read GS / TCS / TES as always-FALSE and incorrectly
+        // mapped the 0x04 bit to COMPUTE, so GS-stage queries
+        // all reported zero even after the per-resource
+        // referencedBy derivation started setting them.
+        case GL_REFERENCED_BY_VERTEX_SHADER:   return (entry.referencedBy & 0x01) ? GL_TRUE : GL_FALSE;
+        case GL_REFERENCED_BY_FRAGMENT_SHADER: return (entry.referencedBy & 0x02) ? GL_TRUE : GL_FALSE;
+        case GL_REFERENCED_BY_GEOMETRY_SHADER: return (entry.referencedBy & 0x04) ? GL_TRUE : GL_FALSE;
+        case GL_REFERENCED_BY_TESS_CONTROL_SHADER: return (entry.referencedBy & 0x08) ? GL_TRUE : GL_FALSE;
+        case GL_REFERENCED_BY_TESS_EVALUATION_SHADER: return (entry.referencedBy & 0x10) ? GL_TRUE : GL_FALSE;
+        case GL_REFERENCED_BY_COMPUTE_SHADER:  return (entry.referencedBy & 0x20) ? GL_TRUE : GL_FALSE;
         case GL_BUFFER_BINDING:    return entry.binding >= 0 ? entry.binding : entry.location;
         case GL_BUFFER_DATA_SIZE:  return 0;
         case GL_NUM_ACTIVE_VARIABLES: return 0;
