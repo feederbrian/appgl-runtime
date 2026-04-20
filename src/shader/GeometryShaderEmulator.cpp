@@ -2165,33 +2165,53 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 break;
             }
             case spv::OpBitcast: {
-                // Reinterpret bits. For our float/int unified storage
-                // the representation is the same — we just copy across
-                // with the target kind.
+                // Reinterpret bits. Source can be int/uint/float; target
+                // is int/uint/float. Read from the operand's native slot
+                // (float source → a.f[], int/uint source → a.i[]) and
+                // write to the target's native slot. Previous impl
+                // unconditionally read from `a.f[]` which broke every
+                // int→uint / uint→int / int→int cast — the operand's
+                // float slot is zero-initialised when the source is an
+                // integer Value, so the cast produced 0. Observable on
+                // CTS `limits.max_uniform_components` which compiles
+                // `uint(uni_array[i].x)` to OpBitcast int→uint — each
+                // iteration's accumulator addend was 0, so the sum
+                // stayed at 0 instead of reaching 524800.
                 Value a;
                 if (!tryGetValue(w[2], a)) { bail("OpBitcast: unknown operand"); break; }
-                // Determine target kind from the result type.
+                const bool srcIsFloat = a.isFloatKind();
                 auto tIt = module_.types.find(w[0]);
                 Value r = a;
                 if (tIt != module_.types.end()) {
                     switch (tIt->second.kind) {
                         case TypeInfo::Kind::Int:
                             r.kind = Value::Kind::Int;
-                            // If source was float, bit-copy.
                             for (int k = 0; k < a.componentCount(); ++k) {
-                                std::memcpy(&r.i[k], &a.f[k], 4);
+                                if (srcIsFloat) {
+                                    std::memcpy(&r.i[k], &a.f[k], 4);
+                                } else {
+                                    r.i[k] = a.i[k];
+                                }
                             }
                             break;
                         case TypeInfo::Kind::UInt:
                             r.kind = Value::Kind::UInt;
                             for (int k = 0; k < a.componentCount(); ++k) {
-                                std::memcpy(&r.i[k], &a.f[k], 4);
+                                if (srcIsFloat) {
+                                    std::memcpy(&r.i[k], &a.f[k], 4);
+                                } else {
+                                    r.i[k] = a.i[k];
+                                }
                             }
                             break;
                         case TypeInfo::Kind::Float:
                             r.kind = Value::Kind::Float;
                             for (int k = 0; k < a.componentCount(); ++k) {
-                                std::memcpy(&r.f[k], &a.i[k], 4);
+                                if (srcIsFloat) {
+                                    r.f[k] = a.f[k];
+                                } else {
+                                    std::memcpy(&r.f[k], &a.i[k], 4);
+                                }
                             }
                             break;
                         default: break;
