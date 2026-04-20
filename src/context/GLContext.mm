@@ -2363,11 +2363,24 @@ struct GLContext::Impl {
         MTLTextureUsage usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         const bool isMSAA = (object.target == GL_TEXTURE_2D_MULTISAMPLE
                              || object.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
-        if (!isMSAA) {
+        // Depth / stencil textures on Apple Silicon REQUIRE
+        // MTLStorageModePrivate — Shared storage is rejected at
+        // attachment time (Metal silently fails the draw, producing
+        // zero fragment output). Pixel-format-based gate.
+        const bool isDepthStencilFormat =
+            chosenFormat == MTLPixelFormatDepth32Float ||
+            chosenFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+            chosenFormat == MTLPixelFormatDepth16Unorm ||
+            chosenFormat == MTLPixelFormatStencil8 ||
+            chosenFormat == MTLPixelFormatX32_Stencil8 ||
+            chosenFormat == MTLPixelFormatX24_Stencil8;
+        if (!isMSAA && !isDepthStencilFormat) {
             usage |= MTLTextureUsageShaderWrite;
         }
         descriptor.usage = usage;
-        descriptor.storageMode = MTLStorageModeShared;
+        descriptor.storageMode = isDepthStencilFormat
+            ? MTLStorageModePrivate
+            : MTLStorageModeShared;
 
         id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
         if (texture == nil) {
