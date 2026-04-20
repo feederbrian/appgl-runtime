@@ -4270,6 +4270,97 @@ struct GLContext::Impl {
         return colorTex;
     }
 
+    // GL 4.6 §17.4.3.1 integer clear path. For integer-formatted
+    // texture attachments (RGBA{8,16,32}{I,UI}, etc.) the
+    // per-pixel clear value is the raw integer — no normalization.
+    // Called by clearNamedFramebufferiv / -uiv when the
+    // attachment's internalFormat is an integer format. Writes
+    // directly to `image.nativeData` (layout: native bytes-per-
+    // pixel × W × H × depth) so replaceMetalTexture uploads the
+    // raw int pattern to the Metal texture.
+    template <typename IntT>
+    bool clearColorAttachmentIntImpl(const GLFramebufferAttachment& attachment,
+                                      const IntT value[4]) {
+        if (attachment.kind != GLFramebufferAttachment::Kind::Texture) {
+            return false;
+        }
+        GLTextureObject* texture = objects->textures().get(attachment.object);
+        if (texture == nullptr) return false;
+        auto levelIt = texture->levels.find(attachment.level);
+        if (levelIt == texture->levels.end() || !levelIt->second.defined) return false;
+        GLTextureImageLevel& image = levelIt->second;
+        if (image.nativeBpp == 0 || image.nativeData.empty()) {
+            // No native layout established — caller will fall back
+            // to the float path.
+            return false;
+        }
+        const GLsizei sourceWidth = std::max<GLsizei>(image.desc.width, 1);
+        const GLsizei sourceHeight = texture->target == GL_TEXTURE_1D
+            ? 1 : std::max<GLsizei>(image.desc.height, 1);
+        const GLsizei sourceDepth = texture->target == GL_TEXTURE_3D
+            ? std::max<GLsizei>(image.desc.depth, 1) : 1;
+        const GLsizei firstLayer = attachment.layered ? 0 : attachment.layer;
+        const GLsizei lastLayer = attachment.layered ? sourceDepth : firstLayer + 1;
+        if (firstLayer < 0 || firstLayer >= sourceDepth || lastLayer > sourceDepth) {
+            return false;
+        }
+        // Determine component count / per-component width from nativeBpp.
+        // Integer formats are tightly packed: 4B (R8I), 8B (RG8I/R16I/R32I_single),
+        // 16B (RGBA32I). Per-component bytes derive from nativeBpp /
+        // components. We can infer components from the internal format.
+        std::size_t components = 4;
+        switch (image.desc.internalFormat) {
+            case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI:
+            case GL_R32I: case GL_R32UI:
+                components = 1; break;
+            case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI:
+            case GL_RG32I: case GL_RG32UI:
+                components = 2; break;
+            case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI:
+            case GL_RGB32I: case GL_RGB32UI:
+                components = 3; break;
+            default:
+                components = 4; break;  // RGBA*I, etc.
+        }
+        const std::size_t bytesPerComponent = image.nativeBpp / components;
+        if (bytesPerComponent == 0 || bytesPerComponent > 4) return false;
+        // Build the per-pixel pattern at the native bit-width.
+        std::vector<std::uint8_t> pattern(image.nativeBpp);
+        for (std::size_t c = 0; c < components; ++c) {
+            std::uint64_t v = static_cast<std::uint64_t>(value[c]);
+            for (std::size_t b = 0; b < bytesPerComponent; ++b) {
+                pattern[c * bytesPerComponent + b] =
+                    static_cast<std::uint8_t>((v >> (b * 8)) & 0xFF);
+            }
+        }
+        // Stamp across every pixel of every selected layer.
+        const std::size_t pixelsPerLayer =
+            static_cast<std::size_t>(sourceWidth) *
+            static_cast<std::size_t>(sourceHeight);
+        const std::size_t layerStrideBytes = pixelsPerLayer * image.nativeBpp;
+        if (image.nativeData.size() <
+            static_cast<std::size_t>(sourceDepth) * layerStrideBytes) {
+            image.nativeData.resize(
+                static_cast<std::size_t>(sourceDepth) * layerStrideBytes, 0);
+        }
+        for (GLsizei z = firstLayer; z < lastLayer; ++z) {
+            std::uint8_t* layerStart = image.nativeData.data() + z * layerStrideBytes;
+            for (std::size_t p = 0; p < pixelsPerLayer; ++p) {
+                std::memcpy(layerStart + p * image.nativeBpp,
+                            pattern.data(), image.nativeBpp);
+            }
+        }
+        return replaceMetalTexture(*texture);
+    }
+    bool clearColorAttachmentInt(const GLFramebufferAttachment& attachment,
+                                  const GLint value[4]) {
+        return clearColorAttachmentIntImpl<GLint>(attachment, value);
+    }
+    bool clearColorAttachmentUInt(const GLFramebufferAttachment& attachment,
+                                   const GLuint value[4]) {
+        return clearColorAttachmentIntImpl<GLuint>(attachment, value);
+    }
+
     bool clearColorAttachment(const GLFramebufferAttachment& attachment, const GLfloat color[4]) {
         const std::uint8_t rgba[4] = {
             normalizedByte(color[0]),
@@ -22893,10 +22984,16 @@ bool GLContext::clearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint
         if (attachmentEnum == GL_NONE) return true;
         GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, attachmentEnum);
         if (att == nullptr) return true;
-        // For signed-integer attachments, bit-pattern the int into the
-        // Metal texture's encoding. The float passthrough
-        // (clearColorAttachment) would truncate the value on norm formats;
-        // for SInt textures we want the raw bit width preserved.
+        // Integer-attachment fast path: raw-int write into nativeData
+        // (no normalizedByte truncation). Falls back to the float
+        // passthrough when the texture has no nativeData (RGBA8,
+        // float-internal formats, etc.). CTS
+        // `geometry_shader.layered_framebuffer.clear_call_support`
+        // CLEAR_BUFFERIV subcase targets RGBA32I where the raw
+        // int must survive.
+        if (impl_->clearColorAttachmentInt(*att, value)) {
+            return true;
+        }
         float fv[4] = {
             static_cast<float>(value[0]),
             static_cast<float>(value[1]),
@@ -22938,6 +23035,10 @@ bool GLContext::clearNamedFramebufferuiv(GLuint framebuffer, GLenum buffer, GLin
     if (attachmentEnum == GL_NONE) return true;
     GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, attachmentEnum);
     if (att == nullptr) return true;
+    // Unsigned-integer fast path — raw uint into nativeData.
+    if (impl_->clearColorAttachmentUInt(*att, value)) {
+        return true;
+    }
     float fv[4] = {
         static_cast<float>(value[0]),
         static_cast<float>(value[1]),
