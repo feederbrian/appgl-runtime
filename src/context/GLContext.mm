@@ -11353,6 +11353,83 @@ static bool glslBlockHasInstanceName(const std::string& source,
     return cur < source.size() && (std::isalpha(source[cur]) || source[cur] == '_');
 }
 
+// If an interface block `layout(...) uniform <blockName> { ... } <inst>[N];`
+// is declared with an instance name, return the instance name; otherwise
+// return an empty string. Used by the PIQ reflection path to gate the
+// per-instance active flag on whether the stage's source actually
+// references a specific `<inst>[i]` element.
+static std::string glslBlockInstanceName(const std::string& source,
+                                          const std::string& blockName) {
+    auto [bodyStart, bodyEnd] = findBlockBody(source, blockName);
+    if (bodyStart == std::string::npos) return {};
+    std::size_t cur = bodyEnd + 1;
+    while (cur < source.size() &&
+           (source[cur] == ' ' || source[cur] == '\t' ||
+            source[cur] == '\n' || source[cur] == '\r')) {
+        ++cur;
+    }
+    if (cur >= source.size() ||
+        !(std::isalpha(static_cast<unsigned char>(source[cur])) || source[cur] == '_')) {
+        return {};
+    }
+    std::size_t identStart = cur;
+    while (cur < source.size() &&
+           (std::isalnum(static_cast<unsigned char>(source[cur])) || source[cur] == '_')) {
+        ++cur;
+    }
+    return source.substr(identStart, cur - identStart);
+}
+
+// Walk the source for `<instance>[N]` tokens (word-bounded on the left
+// side so we don't match inside longer identifiers). Returns the set of
+// integer indices used — for a block declared as `} e[4];`, an FS body
+// that reads `e[0]` and `e[2]` returns `{0, 2}`. Block elements at
+// indices not in this set are spec-correctly "inactive" with respect to
+// that stage.
+static std::set<int> glslActiveInstanceIndices(const std::string& source,
+                                                const std::string& instanceName) {
+    std::set<int> used;
+    if (instanceName.empty()) return used;
+    const std::size_t ilen = instanceName.size();
+    std::size_t pos = 0;
+    while ((pos = source.find(instanceName, pos)) != std::string::npos) {
+        const bool leftBoundary = (pos == 0) ||
+            !(std::isalnum(static_cast<unsigned char>(source[pos - 1])) || source[pos - 1] == '_');
+        const std::size_t after = pos + ilen;
+        const bool openBracket = after < source.size() && source[after] == '[';
+        if (leftBoundary && openBracket) {
+            // Walk to matching ']' capturing a pure-digit index.
+            std::size_t idxStart = after + 1;
+            // Skip leading whitespace inside the brackets.
+            while (idxStart < source.size() &&
+                   (source[idxStart] == ' ' || source[idxStart] == '\t')) {
+                ++idxStart;
+            }
+            std::size_t idxEnd = idxStart;
+            while (idxEnd < source.size() &&
+                   std::isdigit(static_cast<unsigned char>(source[idxEnd]))) {
+                ++idxEnd;
+            }
+            if (idxEnd > idxStart) {
+                // Following character must close the bracket (allow
+                // trailing whitespace before `]`).
+                std::size_t tail = idxEnd;
+                while (tail < source.size() &&
+                       (source[tail] == ' ' || source[tail] == '\t')) {
+                    ++tail;
+                }
+                if (tail < source.size() && source[tail] == ']') {
+                    int value = static_cast<int>(std::stoi(
+                        source.substr(idxStart, idxEnd - idxStart)));
+                    used.insert(value);
+                }
+            }
+        }
+        pos += ilen;
+    }
+    return used;
+}
+
 // Search a code region for "boolType name" where boolType is bool/bvec2/3/4.
 // Returns the GL_BOOL* enum, or 0 if not found.
 static GLenum searchForBoolType(std::string_view body, std::string_view name) {
@@ -12117,6 +12194,10 @@ bool GLContext::linkProgram(GLuint program) {
                 entry.name = varyName;
                 entry.type = GL_NONE;
                 entry.arraySize = skipSize;
+                // Mark as an array so GL_ARRAY_SIZE returns the raw
+                // marker-count (0 for gl_NextBuffer, N for
+                // gl_SkipComponentsN) instead of clamping to 1.
+                entry.isArray = true;
                 programObject->resourceTransformFeedbackVaryings.push_back(std::move(entry));
                 continue;
             }
@@ -12546,6 +12627,7 @@ bool GLContext::linkProgram(GLuint program) {
         entry.location = u.location;
         entry.binding = u.explicitBinding;  // RC-D08
         entry.arraySize = u.arraySize;
+        entry.isArray = u.isArray;
         entry.referencedBy = computeStageMask(u.name);
         if (u.type == GL_UNSIGNED_INT_ATOMIC_COUNTER) {
             // Offset defaults to 0 when the GLSL didn't carry
@@ -12627,6 +12709,7 @@ bool GLContext::linkProgram(GLuint program) {
         entry.type = a.type;
         entry.location = a.location;
         entry.arraySize = a.arraySize;
+        entry.isArray = a.isArray;
         entry.referencedBy = 0x01; // vertex
         programObject->resourceInputs.push_back(std::move(entry));
     }
@@ -12648,6 +12731,7 @@ bool GLContext::linkProgram(GLuint program) {
                     ? (output.name + "[0]") : output.name;
                 entry.type = output.type;
                 entry.arraySize = output.arraySize;
+                entry.isArray = output.isArray;
                 // Resolve location: per-name bind via
                 // glBindFragDataLocation wins over the GLSL
                 // `layout(location=…)` qualifier per GL 4.6 §15.2.
@@ -13608,6 +13692,7 @@ bool GLContext::linkProgram(GLuint program) {
                 entry.location = info.location;
                 entry.binding = -1;
                 entry.arraySize = info.arraySize;
+                entry.isArray = info.isArray;
                 entry.referencedBy = effStageBit;
                 // Default-block uniforms: leave offset / blockIndex
                 // / arrayStride / matrixStride at their default -1
@@ -13660,12 +13745,30 @@ bool GLContext::linkProgram(GLuint program) {
                 // Declared-but-unused blocks still get an entry so
                 // introspection lists them, but without the stage
                 // bit. Same logic as mergeStorageBlocks below.
-                const GLbitfield effStageBit = block.active ? stageBit : 0;
+                const GLbitfield blockStageBit = block.active ? stageBit : 0;
                 // SPIRV-Cross loses instance name info (varName == typeName
                 // for both instanced and non-instanced blocks). Parse the
                 // original GLSL source to recover it.
                 const bool hasInstance =
                     glslBlockHasInstanceName(glslSource, block.name);
+                // For an INSTANCED ARRAY block (`} e[2];`), narrow the
+                // per-instance stage bit: only the elements actually
+                // indexed in the stage's body are active in that stage.
+                // CTS `program_interface_query.uniform-block-types`
+                // declares `TrickyBlock e[2]` but only reads `e[0].…`,
+                // so e[1] must report REFERENCED_BY_FRAGMENT_SHADER=0.
+                const std::string instanceName = hasInstance
+                    ? glslBlockInstanceName(glslSource, block.name)
+                    : std::string();
+                const std::set<int> usedInstanceIndices =
+                    !instanceName.empty()
+                        ? glslActiveInstanceIndices(glslSource, instanceName)
+                        : std::set<int>();
+                // If no `inst[N]` usage was found in the source (e.g.
+                // the whole block is inactive, OR the instance is not
+                // array-indexed), fall back to the block-level active
+                // bit for all instances.
+                const bool useInstanceNarrowing = !usedInstanceIndices.empty();
 
                 // For array blocks (`uniform B { ... } b[N]`), create one
                 // block entry per array element: "BlockName[0]", "BlockName[1]", ...
@@ -13677,7 +13780,14 @@ bool GLContext::linkProgram(GLuint program) {
                 // Create block entries for each instance.
                 GLint firstBlockIndex = -1;
                 bool anyNewBlocks = false;
+                GLbitfield firstInstStageBit = blockStageBit;  // used for member bit
                 for (int inst = 0; inst < numInstances; ++inst) {
+                    GLbitfield effStageBit = blockStageBit;
+                    if (useInstanceNarrowing &&
+                        usedInstanceIndices.count(inst) == 0) {
+                        effStageBit = 0;
+                    }
+                    if (inst == 0) firstInstStageBit = effStageBit;
                     std::string entryName = block.name;
                     if (isArray) {
                         entryName += "[" + std::to_string(inst) + "]";
@@ -13748,17 +13858,43 @@ bool GLContext::linkProgram(GLuint program) {
                     }
                     memberEntry.location = -1;  // not queryable via glGetUniformLocation
                     memberEntry.offset = static_cast<GLint>(member.offset);
-                    // Store 0 for non-arrays, N for N-element arrays.
-                    // GL_UNIFORM_SIZE queries return max(arraySize, 1) so
-                    // non-arrays still report size 1.  GL_UNIFORM_ARRAY_STRIDE
-                    // checks arraySize > 0 to decide whether to compute a stride.
+                    // Keep SPIRV-Cross's raw arraySize (0 for
+                    // non-arrays AND for unbounded arrays) and use
+                    // the new `isArray` flag to distinguish them.
+                    // getResourceProperty(GL_ARRAY_SIZE) reports 1
+                    // for non-arrays, arraySize (maybe 0) for arrays.
                     memberEntry.arraySize = static_cast<GLint>(member.arraySize);
+                    memberEntry.isArray = member.isArray;
                     memberEntry.blockIndex = firstBlockIndex;
-                    memberEntry.referencedBy = effStageBit;
+                    // Members are indexed off the FIRST instance of a
+                    // block array, so use that instance's effective
+                    // stage bit (narrowed per-instance above).
+                    memberEntry.referencedBy = firstInstStageBit;
                     memberEntry.isRowMajor = member.isRowMajor;
                     memberEntry.arrayStride = member.arrayStride;
                     memberEntry.matrixStride = member.matrixStride;
+                    const GLint newUniformIndex =
+                        static_cast<GLint>(programObject->resourceUniforms.size());
                     programObject->resourceUniforms.push_back(std::move(memberEntry));
+
+                    // Record the member's index on the first-instance
+                    // block entry so GL_NUM_ACTIVE_VARIABLES and
+                    // GL_ACTIVE_VARIABLES queries on the UBO return
+                    // this member list. SSBO path already does this
+                    // (mergeStorageBlocks below); UBO path was missing it.
+                    // CTS `program_interface_query.uniform-block-types`
+                    // queries ACTIVE_VARIABLES on every UB entry.
+                    if (firstBlockIndex >= 0 &&
+                        static_cast<std::size_t>(firstBlockIndex) <
+                            programObject->resourceUniformBlocks.size()) {
+                        auto& blockEntry =
+                            programObject->resourceUniformBlocks[firstBlockIndex];
+                        if (std::find(blockEntry.activeVariables.begin(),
+                                      blockEntry.activeVariables.end(),
+                                      newUniformIndex) == blockEntry.activeVariables.end()) {
+                            blockEntry.activeVariables.push_back(newUniformIndex);
+                        }
+                    }
 
                     // Also push into resourceBufferVariables for
                     // glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...).
@@ -13776,7 +13912,7 @@ bool GLContext::linkProgram(GLuint program) {
                     bvEntry.location = -1;
                     bvEntry.offset = static_cast<GLint>(member.offset);
                     bvEntry.blockIndex = firstBlockIndex;
-                    bvEntry.referencedBy = effStageBit;
+                    bvEntry.referencedBy = firstInstStageBit;
                     programObject->resourceBufferVariables.push_back(std::move(bvEntry));
                 }
             }
@@ -13869,6 +14005,7 @@ bool GLContext::linkProgram(GLuint program) {
                         bv.location = -1;
                         bv.offset = static_cast<GLint>(member.offset);
                         bv.arraySize = static_cast<GLint>(member.arraySize);
+                        bv.isArray = member.isArray;
                         bv.blockIndex = blockIdx;
                         bv.referencedBy = effStageBit;
                         bv.isRowMajor = member.isRowMajor;
@@ -18165,7 +18302,14 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
     switch (prop) {
         case GL_NAME_LENGTH:       return static_cast<GLint>(entry.name.size() + 1);
         case GL_TYPE:              return static_cast<GLint>(entry.type);
-        case GL_ARRAY_SIZE:        return entry.arraySize;
+        case GL_ARRAY_SIZE:
+            // GL 4.6 §7.3.1: scalar/vector uniforms report 1, N-
+            // element arrays report N, unbounded arrays report 0.
+            // Scanner uniforms set arraySize=1 for scalars directly;
+            // block-member reflection keeps SPIRV-Cross's raw
+            // arraySize (0 for both scalars and unbounded) and sets
+            // isArray. Use isArray to split the 0-case.
+            return entry.isArray ? entry.arraySize : std::max<GLint>(entry.arraySize, 1);
         case GL_OFFSET:            return entry.offset;
         case GL_BLOCK_INDEX:       return entry.blockIndex;
         case GL_LOCATION:          return entry.location;

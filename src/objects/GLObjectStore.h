@@ -415,6 +415,13 @@ struct GLProgramResourceEntry {
     GLint location = -1;      // uniform location (glGetUniformLocation)
     GLint binding = -1;       // RC-D08: explicit layout(binding=N), -1 = unspecified
     GLint arraySize = 1;
+    // GL 4.6 §7.3.1 distinguishes "scalar/vector uniform with
+    // arraySize=1" (reports GL_ARRAY_SIZE=1) from "unbounded array
+    // uniform with arraySize=0" (reports GL_ARRAY_SIZE=0). Both end
+    // up with arraySize=0 in SPIRV-Cross's raw reflection, so we
+    // need an explicit flag. Also drives the "compute array stride
+    // only for array members" branch in glGetActiveUniformsiv.
+    bool isArray = false;
     GLint offset = -1;        // byte offset within block (-1 = N/A)
     GLint blockIndex = -1;    // parent block index (-1 = not in a block)
     GLbitfield referencedBy = 0; // bitmask: 1=vertex, 2=fragment, 4=compute, etc.
