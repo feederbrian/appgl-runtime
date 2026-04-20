@@ -18127,6 +18127,13 @@ bool GLContext::getProgramResourceiv(GLuint program, GLenum programInterface, GL
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // `count` < 0 is explicitly invalid per §7.3.1. CTS
+    // `program_interface_query.invalid-value` passes -100 and expects
+    // INVALID_VALUE.
+    if (count < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     GLProgramObject* prog = impl_->objects->programs().get(program);
     if (prog == nullptr) {
         // Shader-name-vs-unknown-name: same rule as
@@ -18282,6 +18289,13 @@ bool GLContext::getProgramResourceName(GLuint program, GLenum programInterface, 
     // Defensively zero length first (see getProgramResourceiv for rationale).
     if (length != nullptr) {
         *length = 0;
+    }
+    // GL 4.6 §7.3.1: `bufSize` < 0 is invalid. CTS
+    // `program_interface_query.invalid-value` passes -100 and expects
+    // INVALID_VALUE.
+    if (bufSize < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
     }
     // GL 4.6 §7.3.1: `GL_ATOMIC_COUNTER_BUFFER` /
     // `GL_TRANSFORM_FEEDBACK_BUFFER` buffers carry no names; queries
