@@ -461,6 +461,9 @@ struct GLProgramResourceEntry {
     // consecutive top-level array elements. 0 for non-array
     // top-level members.
     GLint topLevelArrayStride = 0;
+    // GL 4.6 §7.3.1 `GL_IS_PER_PATCH`: true when a TCS output or
+    // TES input was declared with the `patch` storage qualifier.
+    bool isPerPatch = false;
 };
 
 // Cached uniform locations for the synthesized `appgl_*` fixed-function

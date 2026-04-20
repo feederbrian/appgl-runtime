@@ -621,7 +621,8 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
                                    tokens.front() == "lowp" ||
                                    tokens.front() == "readonly" || tokens.front() == "writeonly" ||
                                    tokens.front() == "coherent" || tokens.front() == "volatile" ||
-                                   tokens.front() == "restrict")) {
+                                   tokens.front() == "restrict" ||
+                                   tokens.front() == "patch" || tokens.front() == "sample")) {
             tokens.erase(tokens.begin());
         }
         if (tokens.empty()) {
