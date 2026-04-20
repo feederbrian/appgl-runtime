@@ -11157,12 +11157,14 @@ bool GLContext::detachShader(GLuint program, GLuint shader) {
 // (npos, npos) if not found.
 static std::pair<std::size_t, std::size_t>
 findBlockBody(const std::string& source, const std::string& blockName) {
-    // Try both "uniform <block>" (UBO) and "buffer <block>" (SSBO).
-    // A block type name is scoped per-kind, so the first match of
-    // either keyword+name combo is the right one.
-    const std::array<std::string, 2> tokens = {
+    // Try `uniform <block>` (UBO), `buffer <block>` (SSBO), and
+    // `out <block>` (interface-block varyings like
+    // `out Color { ... } vs_color;`). A block type name is scoped
+    // per-keyword so the first match of any combination is correct.
+    const std::array<std::string, 3> tokens = {
         std::string("uniform ") + blockName,
         std::string("buffer ") + blockName,
+        std::string("out ") + blockName,
     };
     for (const auto& token : tokens) {
         std::size_t pos = 0;
@@ -12911,6 +12913,206 @@ bool GLContext::linkProgram(GLuint program) {
                 addBuiltIn(programObject->resourceOutputs,
                     "gl_SampleMask[0]", GL_INT, 0x02,
                     /*isArray=*/true, /*arraySize=*/1);
+            }
+        }
+        // Separable FS: its `in` varyings become the program's
+        // GL_PROGRAM_INPUT. For regular linked programs the FS
+        // inputs are cross-stage varyings (consumed by linker, not
+        // exposed as program inputs). But for a separable FS there's
+        // no preceding-stage program, so the FS inputs ARE the
+        // program inputs per GL 4.6 §7.3.1.1. CTS
+        // `separate-programs-fragment` declares `in vec4 vs_color;`
+        // and expects ACTIVE_RESOURCES=1 on GL_PROGRAM_INPUT.
+        if (programObject->separable && vsShader == nullptr && fsShader != nullptr) {
+            GLint nextInputLoc = 0;
+            for (const auto& input : fsShader->declaredInputs) {
+                GLProgramResourceEntry entry;
+                entry.name = input.isArray
+                    ? (input.name + "[0]") : input.name;
+                entry.type = input.type;
+                entry.arraySize = input.arraySize;
+                entry.isArray = input.isArray;
+                entry.location = input.explicitLocation >= 0
+                    ? input.explicitLocation : nextInputLoc;
+                entry.referencedBy = 0x02;  // fragment
+                const GLint consumed = std::max<GLint>(1, input.arraySize);
+                nextInputLoc = entry.location + consumed;
+                programObject->resourceInputs.push_back(std::move(entry));
+            }
+        }
+        // Separable programs: the last vertex-processing stage's
+        // outputs become the program's `GL_PROGRAM_OUTPUT`. For a
+        // separable VS / GS / TES-only program those stages' built-in
+        // `gl_Position` (and user-declared varyings / output blocks)
+        // are the program outputs. CTS
+        // `program_interface_query.separate-programs-vertex` declares
+        // `out Color { float r, g, b; vec4 iLikePie; } vs_color;` and
+        // `out gl_PerVertex { vec4 gl_Position; };` in the VS and
+        // expects ACTIVE_RESOURCES=5 on GL_PROGRAM_OUTPUT.
+        if (programObject->separable && fsShader == nullptr) {
+            GLShaderObject* lastVsStage = nullptr;
+            for (GLuint shaderId : programObject->attachedShaders) {
+                GLShaderObject* s = impl_->objects->shaders().get(shaderId);
+                if (s == nullptr) continue;
+                if (s->stage == GL_VERTEX_SHADER ||
+                    s->stage == GL_TESS_EVALUATION_SHADER ||
+                    s->stage == GL_GEOMETRY_SHADER) {
+                    lastVsStage = s;
+                }
+            }
+            if (lastVsStage != nullptr) {
+                // `gl_Position` is always an output of the last vertex-
+                // processing stage (GL 4.6 §11.1). Canonical name +
+                // type, no location.
+                const GLbitfield stageBit =
+                    (lastVsStage->stage == GL_VERTEX_SHADER) ? 0x01 :
+                    (lastVsStage->stage == GL_TESS_EVALUATION_SHADER) ? 0x10 :
+                    (lastVsStage->stage == GL_GEOMETRY_SHADER) ? 0x04 : 0;
+                addBuiltIn(programObject->resourceOutputs,
+                           "gl_Position", GL_FLOAT_VEC4, stageBit);
+                // User varyings declared as simple `out TYPE name;` in
+                // VS are already picked up by the scanner's
+                // declaredOutputs. We'd push them into resourceOutputs
+                // below; but the existing FS loop skips non-FS stages.
+                // Mirror it here for the VS-only separable case.
+                GLint nextVaryingLoc = 0;
+                for (const auto& output : lastVsStage->declaredOutputs) {
+                    GLProgramResourceEntry entry;
+                    entry.name = output.isArray
+                        ? (output.name + "[0]") : output.name;
+                    entry.type = output.type;
+                    entry.arraySize = output.arraySize;
+                    entry.isArray = output.isArray;
+                    entry.location = output.explicitLocation >= 0
+                        ? output.explicitLocation : nextVaryingLoc;
+                    entry.referencedBy = stageBit;
+                    // GL 4.6 §7.3.1: GL_LOCATION_INDEX is meaningful
+                    // only for fragment shader outputs (dual-source
+                    // blend index). VS / GS / TES outputs report -1.
+                    entry.locationIndex = -1;
+                    const GLint consumed = std::max<GLint>(1, output.arraySize);
+                    nextVaryingLoc = entry.location + consumed;
+                    programObject->resourceOutputs.push_back(std::move(entry));
+                }
+                // Output interface blocks — the scanner can't see
+                // them through its brace-depth bug, so do a focused
+                // source-text scan for `out BlockName { members } inst;`.
+                // Per GL 4.6 §7.3.1.1, members of a block WITH an
+                // instance name are named "BlockTypeName.member".
+                const std::string& vsSrc = lastVsStage->source;
+                const std::string outKw = "out ";
+                std::size_t scanPos = 0;
+                while ((scanPos = vsSrc.find(outKw, scanPos)) != std::string::npos) {
+                    const bool leftBoundary = (scanPos == 0) ||
+                        !(std::isalnum(static_cast<unsigned char>(vsSrc[scanPos - 1])) ||
+                          vsSrc[scanPos - 1] == '_');
+                    if (!leftBoundary) { scanPos += outKw.size(); continue; }
+                    // Parse the next identifier (block type name).
+                    std::size_t p = scanPos + outKw.size();
+                    while (p < vsSrc.size() &&
+                           (vsSrc[p] == ' ' || vsSrc[p] == '\t')) { ++p; }
+                    const std::size_t nameStart = p;
+                    while (p < vsSrc.size() &&
+                           (std::isalnum(static_cast<unsigned char>(vsSrc[p])) || vsSrc[p] == '_')) { ++p; }
+                    const std::string blockName = vsSrc.substr(nameStart, p - nameStart);
+                    if (blockName.empty()) { scanPos += outKw.size(); continue; }
+                    // Expect '{' (possibly after whitespace).
+                    while (p < vsSrc.size() &&
+                           (vsSrc[p] == ' ' || vsSrc[p] == '\t' ||
+                            vsSrc[p] == '\n' || vsSrc[p] == '\r')) { ++p; }
+                    if (p >= vsSrc.size() || vsSrc[p] != '{') {
+                        scanPos += outKw.size();
+                        continue;
+                    }
+                    // Skip `out gl_PerVertex { ... };` — gl_Position is
+                    // already handled via the built-in add above.
+                    if (blockName == "gl_PerVertex") {
+                        scanPos = p + 1;
+                        continue;
+                    }
+                    const std::size_t bodyStart = p + 1;
+                    int depth = 1;
+                    std::size_t q = bodyStart;
+                    while (q < vsSrc.size() && depth > 0) {
+                        if (vsSrc[q] == '{') ++depth;
+                        else if (vsSrc[q] == '}') --depth;
+                        ++q;
+                    }
+                    if (depth != 0) { scanPos = p + 1; continue; }
+                    // Body is vsSrc[bodyStart, q-1). Split on ';'.
+                    const std::string body = vsSrc.substr(bodyStart, q - 1 - bodyStart);
+                    std::size_t stmtStart = 0;
+                    while (stmtStart < body.size()) {
+                        const std::size_t semi = body.find(';', stmtStart);
+                        if (semi == std::string::npos) break;
+                        std::string stmt = body.substr(stmtStart, semi - stmtStart);
+                        stmtStart = semi + 1;
+                        // Tokenize: strip leading/trailing ws.
+                        auto lstrip = [](std::string& s) {
+                            std::size_t i = 0;
+                            while (i < s.size() &&
+                                   (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) ++i;
+                            s.erase(0, i);
+                        };
+                        auto rstrip = [](std::string& s) {
+                            while (!s.empty() &&
+                                   (s.back() == ' ' || s.back() == '\t' ||
+                                    s.back() == '\n' || s.back() == '\r')) s.pop_back();
+                        };
+                        lstrip(stmt); rstrip(stmt);
+                        if (stmt.empty()) continue;
+                        // Parse "TYPE name1[, name2, ...]".
+                        std::size_t sp = 0;
+                        while (sp < stmt.size() &&
+                               !(stmt[sp] == ' ' || stmt[sp] == '\t')) ++sp;
+                        const std::string typeWord = stmt.substr(0, sp);
+                        std::string rest = stmt.substr(sp);
+                        lstrip(rest);
+                        GLenum memberType = GL_FLOAT;
+                        if (typeWord == "float")      memberType = GL_FLOAT;
+                        else if (typeWord == "vec2")  memberType = GL_FLOAT_VEC2;
+                        else if (typeWord == "vec3")  memberType = GL_FLOAT_VEC3;
+                        else if (typeWord == "vec4")  memberType = GL_FLOAT_VEC4;
+                        else if (typeWord == "int")   memberType = GL_INT;
+                        else if (typeWord == "ivec2") memberType = GL_INT_VEC2;
+                        else if (typeWord == "ivec3") memberType = GL_INT_VEC3;
+                        else if (typeWord == "ivec4") memberType = GL_INT_VEC4;
+                        else if (typeWord == "uint")  memberType = GL_UNSIGNED_INT;
+                        else if (typeWord == "uvec2") memberType = GL_UNSIGNED_INT_VEC2;
+                        else if (typeWord == "uvec3") memberType = GL_UNSIGNED_INT_VEC3;
+                        else if (typeWord == "uvec4") memberType = GL_UNSIGNED_INT_VEC4;
+                        else if (typeWord == "mat2")  memberType = GL_FLOAT_MAT2;
+                        else if (typeWord == "mat3")  memberType = GL_FLOAT_MAT3;
+                        else if (typeWord == "mat4")  memberType = GL_FLOAT_MAT4;
+                        // Multiple comma-separated names.
+                        std::size_t namePos = 0;
+                        while (namePos < rest.size()) {
+                            std::size_t nameEnd = namePos;
+                            while (nameEnd < rest.size() &&
+                                   (std::isalnum(static_cast<unsigned char>(rest[nameEnd])) ||
+                                    rest[nameEnd] == '_')) ++nameEnd;
+                            if (nameEnd == namePos) break;
+                            const std::string memberName =
+                                rest.substr(namePos, nameEnd - namePos);
+                            GLProgramResourceEntry entry;
+                            entry.name = blockName + "." + memberName;
+                            entry.type = memberType;
+                            entry.arraySize = 1;
+                            entry.location = nextVaryingLoc++;
+                            entry.referencedBy = stageBit;
+                            // VS varying block members: LOCATION_INDEX
+                            // is only meaningful for FS outputs.
+                            entry.locationIndex = -1;
+                            programObject->resourceOutputs.push_back(std::move(entry));
+                            namePos = nameEnd;
+                            // Skip whitespace + optional ',' or trailing.
+                            while (namePos < rest.size() &&
+                                   (rest[namePos] == ' ' || rest[namePos] == ',' ||
+                                    rest[namePos] == '\t' || rest[namePos] == '\n')) ++namePos;
+                        }
+                    }
+                    scanPos = q;
+                }
             }
         }
     }
