@@ -2129,6 +2129,75 @@ fragment float4 appgl_immediate_textured_fs(
         return immediateModeSamplerState;
     }
 
+    // Clear a (possibly layered) MTLTexture via an empty render pass
+    // with MTLLoadActionClear. `arrayLength` > 0 enables layered mode
+    // and clears all slices in a single pass (Metal's native path).
+    // `isColor` / `isDepth` / `isStencil` are mutually exclusive and
+    // drive which attachment slot is populated on the pass
+    // descriptor. Used by `clearDepthAttachment`, `clearStencilAttach
+    // ment`, and (future) `clearColorAttachment` to make glClear on
+    // texture-backed FBO attachments actually land on the Metal
+    // side — without this, the Metal texture stays at whatever
+    // contents it had at creation (zeros for a newly-created
+    // texture) and the next draw's depth/stencil test reads that
+    // junk value instead of the cleared one.
+    bool clearLayeredTextureImpl(void* texVoid, std::uint32_t arrayLength,
+                                 bool isColor, bool isDepth, bool isStencil,
+                                 const float rgba[4], float depth, std::uint32_t stencil) {
+        if (texVoid == nullptr || device == nil || commandQueue == nil) return false;
+        id<MTLTexture> tex = (__bridge id<MTLTexture>)texVoid;
+        // Close any in-flight encoder. Metal disallows two render
+        // encoders open on the same command buffer.
+        if (currentRenderEncoder != nil) {
+            [currentRenderEncoder endEncoding];
+            currentRenderEncoder = nil;
+            resetCachedEncoderState();
+        }
+        if (currentCommandBuffer == nil) {
+            currentCommandBuffer = [commandQueue commandBuffer];
+            attachErrorHandler(currentCommandBuffer, @"layeredClear");
+            if (currentCommandBuffer == nil) return false;
+        }
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        if (isColor) {
+            pass.colorAttachments[0].texture = tex;
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(rgba[0], rgba[1], rgba[2], rgba[3]);
+        }
+        if (isDepth) {
+            pass.depthAttachment.texture = tex;
+            pass.depthAttachment.loadAction = MTLLoadActionClear;
+            pass.depthAttachment.storeAction = MTLStoreActionStore;
+            pass.depthAttachment.clearDepth = depth;
+        }
+        if (isStencil) {
+            pass.stencilAttachment.texture = tex;
+            pass.stencilAttachment.loadAction = MTLLoadActionClear;
+            pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            pass.stencilAttachment.clearStencil = stencil & 0xFF;
+        }
+        if (arrayLength > 0) {
+            pass.renderTargetArrayLength = arrayLength;
+        }
+        id<MTLRenderCommandEncoder> enc = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (enc == nil) return false;
+        [enc endEncoding];
+        return true;
+    }
+    bool clearLayeredTextureDepth(void* tex, std::uint32_t arrayLength, float depth) {
+        return clearLayeredTextureImpl(tex, arrayLength, false, true, false,
+            nullptr, depth, 0);
+    }
+    bool clearLayeredTextureStencil(void* tex, std::uint32_t arrayLength, std::uint32_t stencil) {
+        return clearLayeredTextureImpl(tex, arrayLength, false, false, true,
+            nullptr, 0.0f, stencil);
+    }
+    bool clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4]) {
+        return clearLayeredTextureImpl(tex, arrayLength, true, false, false,
+            rgba, 0.0f, 0);
+    }
+
     bool encodeImmediateModeDraw(const ImmediateDrawInfo& info) {
         FG_TRACE(@"encodeImmediateModeDraw: enter mode=0x%X verts=%zu tex=%p",
                  info.mode, info.vertexCount, info.metalTexture);
@@ -3267,6 +3336,18 @@ bool MetalFrameGraph::encodeTranslatedDraw(TranslatedDrawInfo& info) {
 
 bool MetalFrameGraph::encodeImmediateModeDraw(const ImmediateDrawInfo& info) {
     return impl_->encodeImmediateModeDraw(info);
+}
+
+bool MetalFrameGraph::clearLayeredTextureDepth(void* tex, std::uint32_t arrayLength, float depth) {
+    return impl_->clearLayeredTextureDepth(tex, arrayLength, depth);
+}
+
+bool MetalFrameGraph::clearLayeredTextureStencil(void* tex, std::uint32_t arrayLength, std::uint32_t stencil) {
+    return impl_->clearLayeredTextureStencil(tex, arrayLength, stencil);
+}
+
+bool MetalFrameGraph::clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4]) {
+    return impl_->clearLayeredTextureColor(tex, arrayLength, rgba);
 }
 
 void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::string* outError) {

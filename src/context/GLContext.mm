@@ -4490,17 +4490,15 @@ struct GLContext::Impl {
     bool clearDepthAttachment(const GLFramebufferAttachment& attachment, GLdouble value) {
         const auto depth = static_cast<GLfloat>(std::clamp(value, 0.0, 1.0));
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
-            // GL 4.6 §17.4.3: clear on a texture-backed depth attachment
-            // is no different at the API level from clearing a renderbuffer.
-            // Return true when the attachment is dimensionally valid and the
-            // storage format is a depth format — the actual depth write
-            // happens on the Metal side via the next render-pass
-            // loadAction (we do not yet stamp the CPU depth shadow for
-            // layered texture attachments). Without this path, `glClear
-            // (GL_DEPTH_BUFFER_BIT)` on a 2D_ARRAY depth texture returned
-            // INVALID_FRAMEBUFFER_OPERATION even though the FBO is
-            // complete, blocking `geometry_shader.layered_framebuffer.
-            // depth_support` before the draw call.
+            // GL 4.6 §17.4.3: clear on a texture-backed depth attachment.
+            // Dispatch to the frame graph's layered-clear helper which
+            // issues an empty render pass with MTLLoadActionClear, so
+            // the Metal texture actually gets stamped with the clear
+            // value. Without this, the Metal texture stays at its
+            // initial (zero) contents; subsequent draws see zeros as
+            // depth, and `GL_LESS` discards every fragment, producing
+            // the all-black output we saw on `layered_framebuffer.
+            // depth_support`.
             GLTextureObject* texture = objects->textures().get(attachment.object);
             if (texture == nullptr) {
                 return false;
@@ -4512,7 +4510,23 @@ struct GLContext::Impl {
             if (!isDepthFormat(level->second.desc.internalFormat)) {
                 return false;
             }
-            (void)depth; // Metal handles the actual clear via loadAction.
+            // Determine the slice count. For layered FramebufferTexture
+            // attachments we pass the full layer count so Metal clears
+            // every slice in a single pass. For FramebufferTextureLayer
+            // we'd only clear the attached slice; but the render pass
+            // has to reference the exact slice via the texture view or
+            // the attachment's `slice` property — a future refinement.
+            std::uint32_t arrayLen = 0;
+            if (attachment.layered) {
+                const GLsizei layers = (texture->target == GL_TEXTURE_3D)
+                    ? std::max<GLsizei>(texture->desc.depth, 1)
+                    : std::max<GLsizei>(texture->desc.layers, 1);
+                if (layers > 1) arrayLen = static_cast<std::uint32_t>(layers);
+            }
+            if (frameGraph != nullptr && texture->metalTexture != nullptr) {
+                return frameGraph->clearLayeredTextureDepth(
+                    texture->metalTexture, arrayLen, depth);
+            }
             return true;
         }
         if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
@@ -4528,11 +4542,10 @@ struct GLContext::Impl {
 
     bool clearStencilAttachment(const GLFramebufferAttachment& attachment, GLint value) {
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
-            // Matching the clearDepthAttachment rationale — accept a
-            // stencil clear on a texture-backed attachment without
-            // raising INVALID_FRAMEBUFFER_OPERATION. DEPTH_STENCIL
-            // formats (e.g. DEPTH32F_STENCIL8) are valid for both depth
-            // and stencil attachments.
+            // Stencil clear on a texture-backed attachment — same
+            // MTLLoadActionClear dispatch as clearDepthAttachment.
+            // DEPTH_STENCIL formats (e.g. DEPTH32F_STENCIL8) are valid
+            // for both depth and stencil attachments.
             GLTextureObject* texture = objects->textures().get(attachment.object);
             if (texture == nullptr) {
                 return false;
@@ -4544,7 +4557,18 @@ struct GLContext::Impl {
             if (!isStencilFormat(level->second.desc.internalFormat)) {
                 return false;
             }
-            (void)value;
+            std::uint32_t arrayLen = 0;
+            if (attachment.layered) {
+                const GLsizei layers = (texture->target == GL_TEXTURE_3D)
+                    ? std::max<GLsizei>(texture->desc.depth, 1)
+                    : std::max<GLsizei>(texture->desc.layers, 1);
+                if (layers > 1) arrayLen = static_cast<std::uint32_t>(layers);
+            }
+            if (frameGraph != nullptr && texture->metalTexture != nullptr) {
+                return frameGraph->clearLayeredTextureStencil(
+                    texture->metalTexture, arrayLen,
+                    static_cast<std::uint32_t>(value));
+            }
             return true;
         }
         if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
@@ -14853,6 +14877,11 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     if (program.gsPassThroughVertexMSL.empty()) {
         program.gsPassThroughVertexMSL = appgl::synthesisePassThroughVertexMSL(ed, routeLayer);
         program.gsPassThroughVertexMSLLayered = routeLayer;
+        if (std::getenv("APPGL_GS_DUMP_MSL") != nullptr) {
+            std::fprintf(stderr, "\n[GS] synth VS MSL (routeLayer=%d hasLayer=%d clipLen=%u cullLen=%u):\n%s\n",
+                (int)routeLayer, (int)ed.hasLayer, ed.clipDistanceLen, ed.cullDistanceLen,
+                program.gsPassThroughVertexMSL.c_str());
+        }
         program.gsPassThroughReflection = ShaderReflection{};
         {
             ShaderReflection::VertexInput pos;

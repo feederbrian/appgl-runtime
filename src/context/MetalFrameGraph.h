@@ -459,6 +459,26 @@ public:
     // or false if the pipeline state could not be built.
     bool encodeImmediateModeDraw(const ImmediateDrawInfo& info);
 
+    // Layered-texture clear helpers. Issue an empty render pass with
+    // `MTLLoadActionClear` on the supplied MTLTexture, using
+    // `arrayLength > 0` to target all slices of a layered attachment.
+    // Used by clearDepthAttachment / clearStencilAttachment / the
+    // color path to make `glClear` on a texture-backed FBO
+    // attachment actually land on the Metal side. Without this
+    // path the Metal texture keeps its previous contents (typically
+    // zeros from creation) and the subsequent draw's depth test
+    // compares against junk.
+    // `tex`           — id<MTLTexture> as void* (CFBridgingRetain not
+    //                   required; we just use it for the pass).
+    // `arrayLength`   — 0 for non-layered, >0 for layered (matches
+    //                   the attachment's MTLRenderPassDescriptor
+    //                   renderTargetArrayLength).
+    // Color clears carry the full RGBA; depth uses `depth` (0-1);
+    // stencil uses the low byte of `stencil`.
+    bool clearLayeredTextureDepth(void* tex, std::uint32_t arrayLength, float depth);
+    bool clearLayeredTextureStencil(void* tex, std::uint32_t arrayLength, std::uint32_t stencil);
+    bool clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4]);
+
     // Compile a compute shader's MSL source into a retained
     // MTLComputePipelineState and return it as a type-erased void*
     // (callers CFBridgingRelease via releaseRetainedMetalObject at
