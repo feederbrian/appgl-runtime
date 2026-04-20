@@ -19,11 +19,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -11497,12 +11499,24 @@ bool GLContext::linkProgram(GLuint program) {
     if (kind == ProgramKind::Unknown && programObject->separable) {
         kind = ProgramKind::Separable;
     }
+    // Non-separable programs with *only* a GS / TCS / TES stage
+    // are invalid for rendering — the driver has nothing to feed
+    // the missing stages at draw time. VS-only and FS-only stay
+    // valid even without separable: VS-only is the canonical
+    // transform-feedback-only program (CTS
+    // `shader_storage_buffer_object.basic-*-vs` tests build one
+    // and read back via glMapBuffer without ever rasterising),
+    // and FS-only is accepted by GL implementations for
+    // pipeline-composition flows we don't need to block here.
+    // `linking.incomplete_program_objects` only tests GS ±
+    // FS / VS combinations, so narrowing to the middle-stage
+    // kinds keeps that test passing while un-regressing the
+    // SSBO-VS and pipeline-statistics-VS tests that my prior
+    // broader rejection caught.
     if (!programObject->separable &&
         (kind == ProgramKind::GeometryOnly ||
          kind == ProgramKind::TessControlOnly ||
-         kind == ProgramKind::TessEvalOnly ||
-         kind == ProgramKind::FragmentOnly ||
-         kind == ProgramKind::VertexOnly)) {
+         kind == ProgramKind::TessEvalOnly)) {
         programObject->linkLog = "incomplete non-separable program: missing required stage(s)";
         Runtime::shared().recordShaderTranslation({
             programTag, "link", "", "", "", programObject->linkLog, "", false
@@ -11998,6 +12012,98 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
     // ─── End stage-to-stage varying type check ───────────────────────
+
+    // ─── gl_PerVertex block re-declaration consistency (GL 4.6 §7.4.1)
+    //
+    // When two or more stages redeclare the built-in `gl_PerVertex`
+    // interface block, the redeclarations must agree on their
+    // member list. CTS `CommonBugs.CommonBug_PerVertexValidation`
+    // builds separable programs where VS/GS/TCS/TES declare
+    // mismatching `gl_PerVertex { ... }` blocks (e.g. VS with
+    // `gl_Position + gl_PointSize`, GS with just `gl_Position`)
+    // and asserts the link fails.
+    //
+    // We don't fully parse the GLSL; the check is a coarse
+    // member-name scan of each stage's source looking for a
+    // top-level `out gl_PerVertex { ... };` block. If at least
+    // two stages redeclare the block, the sorted member-name
+    // sets must match exactly.
+    {
+        auto extractPerVertexMembers = [](const std::string& src) -> std::set<std::string> {
+            std::set<std::string> members;
+            // Find `out gl_PerVertex` or `in gl_PerVertex`
+            // followed by `{` — whichever comes first.
+            static const char* kTokens[] = { "out gl_PerVertex", "in gl_PerVertex" };
+            std::size_t pos = std::string::npos;
+            for (const char* tok : kTokens) {
+                std::size_t p = src.find(tok);
+                if (p != std::string::npos && (pos == std::string::npos || p < pos)) {
+                    pos = p;
+                }
+            }
+            if (pos == std::string::npos) return members;
+            std::size_t open = src.find('{', pos);
+            if (open == std::string::npos) return members;
+            std::size_t close = src.find('}', open);
+            if (close == std::string::npos) return members;
+            // Scan the body for member declarations. Each is
+            // `<qualifiers?> <type> <name> [array]?;`. We strip
+            // qualifiers and array suffixes and keep the
+            // `<name>` token immediately before `;`.
+            std::string body = src.substr(open + 1, close - open - 1);
+            std::size_t p = 0;
+            while (p < body.size()) {
+                std::size_t semi = body.find(';', p);
+                if (semi == std::string::npos) break;
+                std::string stmt = body.substr(p, semi - p);
+                p = semi + 1;
+                // Strip whitespace + everything inside `[`.
+                auto lb = stmt.find('[');
+                if (lb != std::string::npos) stmt.resize(lb);
+                // Right-most token of what's left is the name.
+                std::size_t rend = stmt.size();
+                while (rend > 0 && std::isspace(static_cast<unsigned char>(stmt[rend - 1]))) --rend;
+                std::size_t rstart = rend;
+                while (rstart > 0) {
+                    const char c = stmt[rstart - 1];
+                    if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
+                        --rstart;
+                    } else {
+                        break;
+                    }
+                }
+                if (rstart < rend) {
+                    members.insert(stmt.substr(rstart, rend - rstart));
+                }
+            }
+            return members;
+        };
+        struct StageSource { const std::string* src; const char* name; };
+        std::vector<StageSource> stages;
+        if (vertexShader      != nullptr) stages.push_back({&vertexShader->source,      "vertex"});
+        if (tessControlShader != nullptr) stages.push_back({&tessControlShader->source, "tess-control"});
+        if (tessEvalShader    != nullptr) stages.push_back({&tessEvalShader->source,    "tess-eval"});
+        if (geometryShader    != nullptr) stages.push_back({&geometryShader->source,    "geometry"});
+        std::vector<std::pair<const char*, std::set<std::string>>> redeclarations;
+        for (const auto& s : stages) {
+            auto members = extractPerVertexMembers(*s.src);
+            if (!members.empty()) redeclarations.emplace_back(s.name, std::move(members));
+        }
+        if (redeclarations.size() >= 2) {
+            for (std::size_t i = 1; i < redeclarations.size(); ++i) {
+                if (redeclarations[i].second != redeclarations[0].second) {
+                    programObject->linkLog = std::string("gl_PerVertex block redeclaration mismatch between ")
+                        + redeclarations[0].first + " and " + redeclarations[i].first + " stages";
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+            }
+        }
+    }
+    // ─── End gl_PerVertex consistency check ─────────────────────────
 
     // ─── Per-stage atomic-counter / atomic-counter-buffer limits ────
     //
