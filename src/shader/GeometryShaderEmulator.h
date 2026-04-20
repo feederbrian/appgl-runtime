@@ -65,6 +65,12 @@ struct EmulatedVertex {
     // vertex is used for the whole primitive, but the per-vertex
     // snapshot lets us pick the right one on the MSL side.
     std::int32_t layer = 0;
+    // gl_PointSize value at EmitVertex (BuiltInPointSize). Routed
+    // through the synth pass-through VS as `[[point_size]]` on
+    // GL_POINTS output topologies. Default 1.0 matches the value
+    // the synth VS emitted before per-vertex capture landed —
+    // preserves behaviour when the GS doesn't write gl_PointSize.
+    float pointSize = 1.0f;
 };
 
 // Post-GS output topology + vertex buffer ready for GPU raster.
@@ -123,6 +129,13 @@ struct EmulatedDraw {
     // compatible. When true, each vertex in expandedVertexData
     // carries an `int32` layer value appended after clip/cull.
     bool hasLayer = false;
+    // True when the GS wrote gl_PointSize on any primitive. Drives
+    // whether the packed buffer carries a per-vertex point-size
+    // slot + whether the synth VS emits `[[point_size]]` with that
+    // value vs. its old hardcoded 1.0. Only relevant for GL_POINTS
+    // output topology; other topologies have Metal-rejected
+    // `[[point_size]]` slots so we gate the emission accordingly.
+    bool hasPointSize = false;
     // True if emulation succeeded. False leaves expandedVertexData empty
     // and the caller should fall back to the existing no-GS path.
     bool ok = false;

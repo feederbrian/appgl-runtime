@@ -770,8 +770,17 @@ private:
     // `[[render_target_array_index]]` output slot entirely.
     bool didWriteLayer_ = false;
 
+    // Mirror for BuiltInPointSize — flips on if any primitive's
+    // emitVertex captured a non-nullopt value. Tells the draw
+    // encoder whether to slot a per-vertex pointSize into the
+    // packed buffer + synth VS. Not flipping preserves the
+    // default-1.0 behaviour and keeps buffer stride stable for
+    // non-point draws.
+    bool didWritePointSize_ = false;
+
 public:
     bool didWriteLayer() const { return didWriteLayer_; }
+    bool didWritePointSize() const { return didWritePointSize_; }
 private:
 
     // Diagnostic + bail.
@@ -808,6 +817,11 @@ private:
     // so the synth pass-through VS can emit
     // `[[render_target_array_index]]`.
     std::optional<std::int32_t> captureLayer() const;
+
+    // Same two-shape walk for BuiltInPointSize. `std::nullopt` when
+    // the GS never writes gl_PointSize — caller keeps the default
+    // 1.0. Only exercised for GL_POINTS output topology.
+    std::optional<float> capturePointSize() const;
 
     // Resolve an access-chain walk. `base` is a pointer variable id.
     // `indices` are the sequence of OpConstant id operands.
@@ -1376,6 +1390,61 @@ void Interpreter::captureClipCull(std::vector<float>& clipOut,
     }
 }
 
+std::optional<float> Interpreter::capturePointSize() const {
+    // Mirror captureLayer, but for BuiltInPointSize (float). Used by
+    // the synth VS to emit `[[point_size]]` on GL_POINTS output.
+    //
+    // The gl_PerVertex output block declares gl_PointSize as a
+    // member even when the GS doesn't write it — the struct just
+    // exists at SPIR-V level. So the member "existing" doesn't
+    // imply the GS wrote to it. Treat a stored value of exactly
+    // 0.0 as "not written" — gl_PointSize = 0 is undefined
+    // behaviour in GL 4.6 §11.2.1 anyway, and the Metal-side
+    // zero-sized point would make the primitive vanish. Returning
+    // std::nullopt here lets the caller fall back to the
+    // historical default 1.0 emit.
+    auto checkStoredValue = [](float v) -> std::optional<float> {
+        if (v == 0.0f) return std::nullopt;
+        return v;
+    };
+    for (const auto& [varId, info] : module_.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto sIt = varStorage_.find(varId);
+        if (sIt == varStorage_.end()) continue;
+        auto tIt = module_.types.find(info.typeId);
+        if (tIt == module_.types.end()) continue;
+        const std::uint32_t pointee = tIt->second.pointeeType;
+        auto pIt = module_.types.find(pointee);
+        if (pIt == module_.types.end()) continue;
+        // Shape 1: direct Output float decorated BuiltInPointSize.
+        auto dIt = module_.decorations.find(varId);
+        if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn &&
+            dIt->second.builtIn == spv::BuiltInPointSize) {
+            if (!sIt->second.empty()) return checkStoredValue(sIt->second[0]);
+            return std::nullopt;
+        }
+        // Shape 2: member of a gl_PerVertex-style struct.
+        if (pIt->second.kind != TypeInfo::Kind::Struct) continue;
+        auto mdIt = module_.memberDecorations.find(pointee);
+        if (mdIt == module_.memberDecorations.end()) continue;
+        std::uint32_t runningOff = 0;
+        for (std::size_t m = 0; m < pIt->second.memberTypes.size(); ++m) {
+            const std::uint32_t memberType = pIt->second.memberTypes[m];
+            const std::uint32_t memberWidth = module_.scalarWidth(memberType);
+            auto mdm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
+            if (mdm != mdIt->second.perMember.end() && mdm->second.hasBuiltIn
+                && mdm->second.builtIn == spv::BuiltInPointSize) {
+                if (runningOff < sIt->second.size()) {
+                    return checkStoredValue(sIt->second[runningOff]);
+                }
+                return std::nullopt;
+            }
+            runningOff += memberWidth;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<std::int32_t> Interpreter::captureLayer() const {
     // Same two-shape walk as captureClipCull, but gl_Layer is a
     // scalar int Output, not an array.
@@ -1466,6 +1535,10 @@ void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
     if (auto layerValue = captureLayer(); layerValue.has_value()) {
         ev.layer = *layerValue;
         didWriteLayer_ = true;
+    }
+    if (auto pointSizeValue = capturePointSize(); pointSizeValue.has_value()) {
+        ev.pointSize = *pointSizeValue;
+        didWritePointSize_ = true;
     }
     out.push_back(std::move(ev));
 }
@@ -3335,6 +3408,9 @@ EmulatedDraw emulateGeometryDraw(
             if (interp.didWriteLayer()) {
                 d.hasLayer = true;
             }
+            if (interp.didWritePointSize()) {
+                d.hasPointSize = true;
+            }
             // Shift the per-invocation primEnds by the current
             // emittedAll size so they remain valid indices into the
             // global buffer after insert.
@@ -3475,7 +3551,9 @@ EmulatedDraw emulateGeometryDraw(
     // Layered-output slot: one int32 per vertex at the tail of
     // the packed payload, only when the GS wrote gl_Layer at all.
     const std::size_t layerSlot = d.hasLayer ? 1 : 0;
-    const std::size_t fpv = 4 + totalVaryingWidth + clipLen + cullLen + layerSlot;
+    const std::size_t pointSizeSlot = d.hasPointSize ? 1 : 0;
+    const std::size_t fpv = 4 + totalVaryingWidth + clipLen + cullLen
+                          + layerSlot + pointSizeSlot;
 
     d.topology          = expandedTopo;
     d.vertexCount       = emittedAll.size();
@@ -3599,6 +3677,15 @@ EmulatedDraw emulateGeometryDraw(
             const std::size_t layerOff = cullBase + cullLen;
             std::memcpy(&dst[layerOff], &emittedAll[v].layer, sizeof(std::int32_t));
         }
+        // Append gl_PointSize float at the very tail when
+        // d.hasPointSize — read by the synth VS and emitted as
+        // `[[point_size]]`. Sits after the layer slot if both are
+        // present (matching VsIn attribute ordering in the MSL
+        // generator).
+        if (d.hasPointSize) {
+            const std::size_t psOff = cullBase + cullLen + layerSlot;
+            dst[psOff] = emittedAll[v].pointSize;
+        }
     }
 
     d.ok = true;
@@ -3701,6 +3788,15 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         src += std::to_string(layerAttrib);
         src += ")]];\n";
     }
+    // gl_PointSize input slot. One float per vertex, only when the
+    // GS wrote gl_PointSize. Matches the trailing slot in the
+    // packed buffer (after layer if both are present).
+    const std::uint32_t psAttrib = layerAttrib + (draw.hasLayer ? 1u : 0u);
+    if (draw.hasPointSize) {
+        src += "    float vsin_pointsize [[attribute(";
+        src += std::to_string(psAttrib);
+        src += ")]];\n";
+    }
     src += "};\n\n";
 
     // ─ Vertex output struct.
@@ -3784,7 +3880,17 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     // non-geometry VS today.
     src += "    out.gl_Position.z = (out.gl_Position.z + out.gl_Position.w) * 0.5;\n";
     if (draw.topology == GL_POINTS) {
-        src += "    out.gl_PointSize = 1.0;\n";
+        // If the GS captured a per-vertex gl_PointSize, feed it
+        // through; otherwise keep the historical default 1.0.
+        // CTS `output.primite_end_done_for_single_primitive` writes
+        // gl_PointSize = 2.0 from the GS and expects a 2×2-pixel
+        // point at NDC (-1,-1) — the fixed 1.0 previously made the
+        // test fail on the bottom-left verifyPixel check.
+        if (draw.hasPointSize) {
+            src += "    out.gl_PointSize = in.vsin_pointsize;\n";
+        } else {
+            src += "    out.gl_PointSize = 1.0;\n";
+        }
     }
     for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
         src += "    out.vsout_v";

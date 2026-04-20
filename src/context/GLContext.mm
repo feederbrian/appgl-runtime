@@ -14964,12 +14964,22 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // `[[render_target_array_index]]`. Matches the packing in
         // emulateGeometryDraw and the MSL synthesised by
         // synthesisePassThroughVertexMSL.
+        const GLuint layerLoc = cullBaseLoc + ed.cullDistanceLen;
         if (ed.hasLayer) {
-            const GLuint layerLoc = cullBaseLoc + ed.cullDistanceLen;
             ShaderReflection::VertexInput vi;
             vi.location = layerLoc;
             vi.type = GL_INT;
             vi.name = "vsin_layer";
+            program.gsPassThroughReflection.vertexInputs.push_back(vi);
+        }
+        // gl_PointSize slot: one float per vertex after the layer
+        // (if any), only when the GS wrote gl_PointSize.
+        if (ed.hasPointSize) {
+            const GLuint psLoc = layerLoc + (ed.hasLayer ? 1u : 0u);
+            ShaderReflection::VertexInput vi;
+            vi.location = psLoc;
+            vi.type = GL_FLOAT;
+            vi.name = "vsin_pointsize";
             program.gsPassThroughReflection.vertexInputs.push_back(vi);
         }
     }
@@ -15042,16 +15052,30 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // fetcher decodes the raw 32 bits as int per the attribute
         // format; we set glType=GL_INT + glIsInteger=true so the
         // vertex descriptor builder picks MTLVertexFormatInt.
+        const GLuint layerLoc2 = cullBaseLoc + ed.cullDistanceLen;
         if (ed.hasLayer) {
-            const GLuint layerLoc = cullBaseLoc + ed.cullDistanceLen;
             TranslatedDrawInfo::VertexAttributeLayout la;
-            la.location = layerLoc;
+            la.location = layerLoc2;
             la.offset = offset;
             la.glType = GL_INT;
             la.glComponentCount = 1;
             la.glIsInteger = true;
             tdi.vertexAttributeLayouts.push_back(la);
             offset += sizeof(std::int32_t);
+        }
+        // gl_PointSize attribute layout — one float per vertex at
+        // the tail (after the layer int if present). Only emitted
+        // for GS-written gl_PointSize; the synth VS's `[[point_
+        // size]]` wiring reads this when draw.hasPointSize.
+        if (ed.hasPointSize) {
+            const GLuint psLoc = layerLoc2 + (ed.hasLayer ? 1u : 0u);
+            TranslatedDrawInfo::VertexAttributeLayout la;
+            la.location = psLoc;
+            la.offset = offset;
+            la.glType = GL_FLOAT;
+            la.glComponentCount = 1;
+            tdi.vertexAttributeLayouts.push_back(la);
+            offset += sizeof(float);
         }
     }
 
