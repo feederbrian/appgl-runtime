@@ -10905,6 +10905,11 @@ bool GLContext::compileShader(GLuint shader) {
         std::unordered_map<std::string, std::string> uniformToImpl;
         std::unordered_map<std::string, std::vector<std::string>> typeToImpls;
         std::unordered_map<std::string, std::string> uniformToType;
+        // Subroutine type-prototype names (e.g. the `T` in
+        // `subroutine void T();`) — emit a dummy `int T;` after
+        // stripping so glslang's reserved-identifier validator
+        // catches `subroutine void namespace(…);` style tests.
+        std::vector<std::string> subTypeNames;
         // First pass: scan for subroutine type + impl + uniform.
         std::size_t p = 0;
         auto isIdent = [](unsigned char c) {
@@ -10958,6 +10963,15 @@ bool GLContext::compileShader(GLuint shader) {
                 p = q;
                 continue;
             }
+            // Subroutine type prototype: `subroutine RETTYPE NAME (…);`.
+            // `next` was the return type; the next word is the type
+            // name (the subroutine-type identifier). Collect it so
+            // the rewritten source preserves the reserved-keyword
+            // check on the type name too.
+            std::string typeProtoName = readWord(q);
+            if (!typeProtoName.empty()) {
+                subTypeNames.push_back(typeProtoName);
+            }
             p = q;
         }
         // Resolve each uniform to its first compatible impl.
@@ -10965,6 +10979,25 @@ bool GLContext::compileShader(GLuint shader) {
             auto it = typeToImpls.find(kv.second);
             if (it != typeToImpls.end() && !it->second.empty()) {
                 uniformToImpl[kv.first] = it->second.front();
+            }
+        }
+        // Collect unique subroutine-uniform names so we can append a
+        // dummy `int <NAME>;` declaration for each, preserving the
+        // GLSL reserved-identifier check. CTS
+        // `CommonBugs.CommonBug_ReservedNames` expects compile to
+        // fail when a subroutine uniform name is a reserved
+        // keyword (`namespace`, `using`, …).  If we simply comment
+        // out the subroutine line, glslang never sees the reserved
+        // name and accepts the program — regression. The dummy
+        // declaration pushes the name through glslang's identifier
+        // validator.
+        std::vector<std::string> subUniNames;
+        {
+            std::unordered_set<std::string> seenNames;
+            for (const auto& kv : uniformToType) {
+                if (seenNames.insert(kv.first).second) {
+                    subUniNames.push_back(kv.first);
+                }
             }
         }
 
@@ -11045,6 +11078,30 @@ bool GLContext::compileShader(GLuint shader) {
             }
             out.push_back(in[i]);
             ++i;
+        }
+        // Append a plain `int <NAME>;` declaration for each
+        // stripped subroutine uniform so glslang's reserved-
+        // identifier validator still sees the name verbatim.
+        // Otherwise `subroutine uniform T namespace;` would slip
+        // through silently (keyword-level stripped), regressing
+        // CTS `CommonBugs.CommonBug_ReservedNames` which checks
+        // that each reserved word triggers a compile error.
+        if (!subUniNames.empty() || !subTypeNames.empty()) {
+            out.append("\n// appgl: reserved-name validation stubs\n");
+            for (const auto& n : subUniNames) {
+                out.append("int ");
+                out.append(n);
+                out.append(";\n");
+            }
+            std::unordered_set<std::string> seenTypes;
+            for (const auto& n : subTypeNames) {
+                if (!seenTypes.insert(n).second) continue;
+                // Don't re-emit if it's also a uniform name.
+                if (std::find(subUniNames.begin(), subUniNames.end(), n) != subUniNames.end()) continue;
+                out.append("int ");
+                out.append(n);
+                out.append(";\n");
+            }
         }
         return out;
     };
