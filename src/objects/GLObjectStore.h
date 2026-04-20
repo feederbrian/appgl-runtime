@@ -457,6 +457,10 @@ struct GLProgramResourceEntry {
     // scalar top-level members, N for `TopType a[N]`, 0 for
     // unbounded. Only meaningful on GL_BUFFER_VARIABLE entries.
     GLint topLevelArraySize = 1;
+    // GL 4.6 §7.3.1 `GL_TOP_LEVEL_ARRAY_STRIDE` byte stride between
+    // consecutive top-level array elements. 0 for non-array
+    // top-level members.
+    GLint topLevelArrayStride = 0;
 };
 
 // Cached uniform locations for the synthesized `appgl_*` fixed-function

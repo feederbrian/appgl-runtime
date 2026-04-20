@@ -14066,6 +14066,7 @@ bool GLContext::linkProgram(GLuint program) {
                         bv.arrayStride = member.arrayStride;
                         bv.matrixStride = member.matrixStride;
                         bv.topLevelArraySize = member.topLevelArraySize;
+                        bv.topLevelArrayStride = member.topLevelArrayStride;
                         programObject->resourceBufferVariables.push_back(std::move(bv));
                         bvIndex = static_cast<GLint>(programObject->resourceBufferVariables.size() - 1);
                     }
@@ -18425,7 +18426,7 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
             // reached since propInterfaceCompatible restricts this
             // prop to GL_BUFFER_VARIABLE).
             return entry.topLevelArraySize;
-        case GL_TOP_LEVEL_ARRAY_STRIDE: return 0;
+        case GL_TOP_LEVEL_ARRAY_STRIDE: return entry.topLevelArrayStride;
         case GL_LOCATION_INDEX:
             // Built-in outputs like `gl_FragDepth` have no user-
             // assignable location — LOCATION_INDEX is -1 there

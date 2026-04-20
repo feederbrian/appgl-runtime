@@ -78,6 +78,11 @@ struct ShaderReflection {
         // `buffer B { mat4 b; }` has b reporting 1.
         // Default 1 (non-array / scalar top).
         GLint topLevelArraySize = 1;
+        // GL 4.6 §7.3.1 `GL_TOP_LEVEL_ARRAY_STRIDE`: byte stride
+        // between consecutive top-level array elements. Non-zero
+        // only when the member is inside a top-level array. CTS
+        // `top-level-array` asserts > 0 for a multi-dim SSBO leaf.
+        GLint topLevelArrayStride = 0;
     };
 
     struct ResourceBinding {
