@@ -11970,6 +11970,61 @@ bool GLContext::linkProgram(GLuint program) {
     }
     // ─── End stage-to-stage varying type check ───────────────────────
 
+    // ─── Per-stage atomic-counter / atomic-counter-buffer limits ────
+    //
+    // GL 4.6 §7.6.3 + Table 23.66: each shader stage has its own cap
+    // on the number of atomic-counter uniforms it may declare
+    // (MAX_{VERTEX,FRAGMENT,GEOMETRY,...}_ATOMIC_COUNTERS) and
+    // on the number of distinct atomic-counter buffers the stage
+    // can bind to (the `*_ATOMIC_COUNTER_BUFFERS` counterpart).
+    // `linking.more_ACs_in_GS_than_supported` +
+    // `linking.more_ACBs_in_GS_than_supported` query the GS caps,
+    // create a GS that overshoots by one, and assert link failure.
+    // We already advertise `MAX_GEOMETRY_ATOMIC_COUNTERS = 0`,
+    // which simplifies the check to "if the GS source declares
+    // any `atomic_uint` uniform, the link must fail" — but
+    // implement the general form for future when the cap lifts.
+    if (geometryShader != nullptr) {
+        std::size_t gsAtomicCounters = 0;
+        std::unordered_set<GLint> gsAtomicBindings;
+        for (const auto& decl : geometryShader->declaredUniforms) {
+            if (decl.type != GL_UNSIGNED_INT_ATOMIC_COUNTER) continue;
+            const std::size_t cnt = (decl.arraySize > 0)
+                ? static_cast<std::size_t>(decl.arraySize) : 1;
+            gsAtomicCounters += cnt;
+            if (decl.explicitBinding >= 0) {
+                gsAtomicBindings.insert(decl.explicitBinding);
+            }
+        }
+        GLint maxAtomic = 0, maxAtomicBufs = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(GL_MAX_GEOMETRY_ATOMIC_COUNTERS, &maxAtomic);
+            impl_->capabilities->queryInteger(GL_MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS, &maxAtomicBufs);
+        }
+        if (static_cast<GLint>(gsAtomicCounters) > maxAtomic) {
+            programObject->linkLog = "geometry shader atomic-counter count "
+                + std::to_string(gsAtomicCounters) + " exceeds MAX_GEOMETRY_ATOMIC_COUNTERS="
+                + std::to_string(maxAtomic);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+        if (static_cast<GLint>(gsAtomicBindings.size()) > maxAtomicBufs) {
+            programObject->linkLog = "geometry shader atomic-counter-buffer count "
+                + std::to_string(gsAtomicBindings.size())
+                + " exceeds MAX_GEOMETRY_ATOMIC_COUNTER_BUFFERS="
+                + std::to_string(maxAtomicBufs);
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+    // ─── End AC / ACB limits check ──────────────────────────────────
+
     programObject->linked = true;
     programObject->linkLog = "ok";
 
