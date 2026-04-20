@@ -712,11 +712,31 @@ static void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
                            "primitiveMode must be POINTS, LINES, or TRIANGLES");
             return;
     }
-    // GL 4.6 §13.3: INVALID_OPERATION if no program is active.
+    // GL 4.6 §13.3: INVALID_OPERATION if no program AND no program
+    // pipeline are active (or the pipeline has no last-vertex-stage
+    // program with TF varyings). Fall back to the bound pipeline
+    // when glUseProgram(0) is in effect — CTS
+    // `api.program_pipeline_vs_gs_capture` uses this path with
+    // separable VS+GS programs joined via glBindProgramPipeline.
     GLuint prog = ctx->state().currentProgram();
     if (prog == 0) {
+        GLuint ppoId = ctx->state().currentProgramPipeline();
+        if (ppoId != 0) {
+            const auto* ppo = ctx->objects().programPipelines().get(ppoId);
+            if (ppo != nullptr) {
+                // Prefer the last-active-vertex-processing stage:
+                // GS first, then (in a future extension) TES, else VS.
+                if (ppo->geometryProgram != 0) {
+                    prog = ppo->geometryProgram;
+                } else if (ppo->vertexProgram != 0) {
+                    prog = ppo->vertexProgram;
+                }
+            }
+        }
+    }
+    if (prog == 0) {
         ctx->pushError(GL_INVALID_OPERATION, "glBeginTransformFeedback",
-                       "no program is active");
+                       "no program or pipeline with a vertex-processing stage is active");
         return;
     }
     // GL 4.6 §13.3: INVALID_OPERATION if no varyings are specified to be captured.
