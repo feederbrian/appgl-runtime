@@ -13449,25 +13449,130 @@ bool GLContext::linkProgram(GLuint program) {
             }
         }
 
+        // "Does this stage's source declare a uniform named
+        // `topName` at the top level?" helper. Only stage-declared
+        // uniforms may carry this stage's REFERENCED_BY bit in the
+        // resource table. A naive word-boundary search of the whole
+        // source produces false positives — a struct field with
+        // the same name as a VS uniform would match (CTS
+        // uniform-types has `struct U { bool a[3]; ... }` in the
+        // FS and `uniform vec4 a;` in the VS). We want only the
+        // `uniform X <topName>[...];` pattern. Walk each `uniform`
+        // token (word-bounded) and inspect the identifier tokens
+        // up to the next `;` or `{` — if `topName` appears as one
+        // of them, treat it as declared.
+        auto stageDeclaresTopUniform = [](const std::string& src, const std::string& topName) {
+            if (topName.empty()) return false;
+            const std::string uniformKw = "uniform";
+            std::size_t pos = 0;
+            while ((pos = src.find(uniformKw, pos)) != std::string::npos) {
+                const bool leftBoundary = (pos == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[pos - 1])) || src[pos - 1] == '_');
+                const bool rightBoundary = (pos + uniformKw.size() < src.size()) &&
+                    !(std::isalnum(static_cast<unsigned char>(src[pos + uniformKw.size()])) || src[pos + uniformKw.size()] == '_');
+                if (!(leftBoundary && rightBoundary)) {
+                    pos += uniformKw.size();
+                    continue;
+                }
+                // Scan identifiers from pos+7 up to first ; or {.
+                std::size_t scan = pos + uniformKw.size();
+                while (scan < src.size() && src[scan] != ';' && src[scan] != '{') {
+                    // Skip non-identifier chars.
+                    while (scan < src.size() &&
+                           !std::isalpha(static_cast<unsigned char>(src[scan])) &&
+                           src[scan] != '_' &&
+                           src[scan] != ';' && src[scan] != '{') {
+                        ++scan;
+                    }
+                    if (scan >= src.size() || src[scan] == ';' || src[scan] == '{') break;
+                    std::size_t identStart = scan;
+                    while (scan < src.size() &&
+                           (std::isalnum(static_cast<unsigned char>(src[scan])) || src[scan] == '_')) {
+                        ++scan;
+                    }
+                    std::string ident = src.substr(identStart, scan - identStart);
+                    if (ident == topName) return true;
+                }
+                pos = scan;
+            }
+            return false;
+        };
+        // Extract the top-level uniform name from a flattened member
+        // name. `j.b` → `j`, `k.a[0].c` → `k`, `l[2].b[1].d[0]` → `l`.
+        auto topLevelName = [](const std::string& flat) -> std::string {
+            std::size_t cut = flat.size();
+            for (std::size_t i = 0; i < flat.size(); ++i) {
+                if (flat[i] == '.' || flat[i] == '[') { cut = i; break; }
+            }
+            return flat.substr(0, cut);
+        };
         // Lambda: scan one stage's reflection for _DefaultUniforms members.
-        auto supplementFromReflection = [&](const ShaderReflection& refl) {
+        // `stageBit` is the referencedBy bit for this stage so struct
+        // members declared by the stage accumulate the right bit in the
+        // resourceUniforms table. `stageSrc` is the stage's GLSL source
+        // (used to gate the stage bit on whether this stage actually
+        // declared the top-level uniform — glslang's cross-stage
+        // linking copies every uniform into every stage's SPIR-V
+        // _DefaultUniforms reflection, so "member is in this stage's
+        // SPIR-V" is NOT a valid signal for "stage references it").
+        // CTS `program_interface_query.uniform-types` declares
+        // `uniform U j;` in the FS and expects
+        // REFERENCED_BY_FRAGMENT_SHADER = 1 on every flattened leaf
+        // (`j.b`, etc.) and REFERENCED_BY_VERTEX_SHADER = 0.
+        auto supplementFromReflection = [&](const ShaderReflection& refl,
+                                            GLbitfield stageBit,
+                                            const std::string& stageSrc) {
             if (refl.uniformBlocks.empty()) return;
             // The _DefaultUniforms block is always at index 0 when present.
             const auto& block = refl.uniformBlocks[0];
             if (block.name != "_DefaultUniforms") return;
             for (const auto& member : block.members) {
-                if (knownUniformNames.count(member.name)) continue;
+                // Gate this stage's referencedBy bit on whether the
+                // stage's source actually declares the top-level
+                // name as a uniform (see lambda comment above).
+                // Without this filter every uniform gets both stages'
+                // bits because glslang's cross-stage linker fills
+                // every stage's _DefaultUniforms with the union.
+                const std::string topName = topLevelName(member.name);
+                const bool stageDeclares = stageDeclaresTopUniform(stageSrc, topName);
+                const GLbitfield effStageBit = stageDeclares ? stageBit : 0;
+                // GL 4.6 §7.3.1 canonical resource name for an array
+                // uniform carries the "[0]" suffix even when the
+                // member's SPIR-V name does not. Compute both forms
+                // so we can match against `knownUniformNames`
+                // (which already stores the canonical shape) and
+                // resourceUniforms (which also stores canonical).
+                const std::string canonicalName = member.isArray
+                    ? (member.name + "[0]") : member.name;
+                if (knownUniformNames.count(canonicalName) ||
+                    knownUniformNames.count(member.name)) {
+                    // Existing uniform (from scanner or previous
+                    // stage) — just OR in this stage's referencedBy
+                    // bit on its resourceUniforms entry.
+                    for (auto& re : programObject->resourceUniforms) {
+                        if (re.name == canonicalName || re.name == member.name) {
+                            re.referencedBy |= effStageBit;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                // Skip members this stage doesn't declare — they'll
+                // be added by the OTHER stage's supplement pass with
+                // the correct referencedBy bit.
+                if (!stageDeclares) continue;
                 // New uniform discovered by SPIR-V but not by the scanner.
                 GLProgramUniformInfo info;
                 info.name = member.name;
                 info.type = member.type;
                 info.arraySize = (member.arraySize > 0)
                     ? static_cast<GLint>(member.arraySize) : 1;
+                info.isArray = member.isArray;
                 info.location = supplementNextLoc;
                 info.explicitLocation = -1;
                 info.explicitBinding = -1;
                 supplementNextLoc += std::max<GLint>(info.arraySize, 1);
-                knownUniformNames.insert(info.name);
+                knownUniformNames.insert(canonicalName);
 
                 // Zero-seed the uniform value.
                 const GLint components = glslComponentCount(info.type)
@@ -13490,12 +13595,34 @@ bool GLContext::linkProgram(GLuint program) {
                         break;
                 }
                 programObject->uniformValues[info.location] = std::move(value);
+
+                // Mirror into resourceUniforms as a default-block
+                // uniform. GL 4.6 §7.3.1: default-block uniforms
+                // have BLOCK_INDEX = OFFSET = ARRAY_STRIDE =
+                // MATRIX_STRIDE = -1, IS_ROW_MAJOR = FALSE,
+                // ATOMIC_COUNTER_BUFFER_INDEX = -1. REFERENCED_BY_*
+                // carries just this stage's bit.
+                GLProgramResourceEntry entry;
+                entry.name = canonicalName;
+                entry.type = info.type;
+                entry.location = info.location;
+                entry.binding = -1;
+                entry.arraySize = info.arraySize;
+                entry.referencedBy = effStageBit;
+                // Default-block uniforms: leave offset / blockIndex
+                // / arrayStride / matrixStride at their default -1
+                // sentinels so getResourceProperty reports -1.
+                programObject->resourceUniforms.push_back(std::move(entry));
+
                 programObject->uniforms.push_back(std::move(info));
             }
         };
 
-        supplementFromReflection(programObject->vertexReflection);
-        supplementFromReflection(programObject->fragmentReflection);
+        static const std::string kEmptySrc;
+        const std::string& vsSrc2 = vertexShader ? vertexShader->source : kEmptySrc;
+        const std::string& fsSrc2 = fragmentShader ? fragmentShader->source : kEmptySrc;
+        supplementFromReflection(programObject->vertexReflection, 0x01, vsSrc2);
+        supplementFromReflection(programObject->fragmentReflection, 0x02, fsSrc2);
     }
 
     // ── Merge SPIRV-Cross uniform block reflection into the program's
@@ -13515,6 +13642,19 @@ bool GLContext::linkProgram(GLuint program) {
                                GLbitfield stageBit,
                                const std::string& glslSource) {
             for (const auto& block : blocks) {
+                // Skip glslang's synthesized default-block wrapper —
+                // it's not a real user-declared UBO. `supplementFromReflection`
+                // above already walked its members and added them as
+                // default-block uniforms (BLOCK_INDEX=-1, OFFSET=-1).
+                // Exposing it as a GL_UNIFORM_BLOCK resource would
+                // inflate GL_ACTIVE_RESOURCES and tag every scalar
+                // uniform with a bogus blockIndex. CTS
+                // `program_interface_query.uniform-types` expects
+                // default-block uniforms to report BLOCK_INDEX=-1
+                // and OFFSET=-1.
+                if (block.name == "_DefaultUniforms") {
+                    continue;
+                }
                 // Only contribute this stage's REFERENCED_BY_*_SHADER
                 // bit when the block is live in the stage's SPIR-V.
                 // Declared-but-unused blocks still get an entry so
@@ -14175,10 +14315,18 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
     // ("u"), so the exact-match loop above misses. Parse the trailing
     // [k] subscript and index into the base.
     //
+    // Use `rfind('[')` not `find('[')` so deeply-nested names like
+    // `l[2].b[1].d[0]` split as base=`l[2].b[1].d`, idx=0 — not
+    // base=`l`, idx=`2].b[1].d[0`. CTS
+    // `program_interface_query.uniform-types` declares
+    // `uniform UU l[3]` where UU contains `U b[2]` containing
+    // `float d[2]`, and asserts
+    // glGetUniformLocation("l[2].b[1].d[0]") finds the terminal leaf.
+    //
     // Covers KHR-GL46.explicit_uniform_location.uniform-loc-arrays-*
     // which exercise `layout(location = N) uniform T arr[M]` and expect
     // u[0]=N, u[1]=N+1, …, u[M-1]=N+M-1.
-    const auto openBracket = lookup.find('[');
+    const auto openBracket = lookup.rfind('[');
     if (openBracket != std::string::npos && lookup.back() == ']') {
         const std::string baseName = lookup.substr(0, openBracket);
         const std::string indexStr = lookup.substr(openBracket + 1, lookup.size() - openBracket - 2);
