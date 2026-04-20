@@ -6232,7 +6232,16 @@ GLuint APIENTRY glCreateShaderProgramv(GLenum type, GLsizei count, const GLchar*
 
     GLuint program = ctx->createProgram();
     if (compiled) {
-        // Mark as separable before linking (hint accepted silently, no Metal effect).
+        // GL 4.1 §7.3 / ARB_separate_shader_objects: the program
+        // returned by glCreateShaderProgramv is always created
+        // with PROGRAM_SEPARABLE = TRUE. Set the flag before
+        // linking so the per-stage-only pipeline kind path
+        // (e.g. VertexOnly) accepts it — otherwise the new
+        // `incomplete_program_objects` stage-completeness check
+        // rejects the link because there's no FS/GS attached.
+        if (auto* obj = ctx->objects().programs().get(program)) {
+            obj->separable = true;
+        }
         ctx->attachShader(program, shader);
         ctx->linkProgram(program);
         ctx->detachShader(program, shader);
