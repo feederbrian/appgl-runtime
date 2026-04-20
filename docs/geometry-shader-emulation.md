@@ -908,3 +908,31 @@ rebuild catches the drift at compile time.
   introspection via SPIRV-Cross), nonarray_input (1), input
   (2 — including the gl_in_array_length cleanup SIGSEGV),
   layered singletons (3).
+
+- **2026-04-19** — **Phase 5 regression fix** (commit `a017ba7`).
+  s22 sweep caught two regressions that phase 5's
+  separable-program support introduced:
+  (1) The "incomplete non-separable program" check in
+  `ec5ed83` rejected `VertexOnly` and `FragmentOnly` outright,
+  but VS-only is a valid non-separable program for transform-
+  feedback-only flows (GL 4.6 §7.3). Narrowed the rejection
+  to `GeometryOnly` / `TessControlOnly` / `TessEvalOnly` —
+  only the middle-stage kinds truly require a full pipeline.
+  Restored 20 `shader_storage_buffer_object.basic-*-vs` tests
+  + 1 `pipeline_statistics_query_tests_ARB.functional_vertex
+  _shader_invocations`.
+  (2) `CommonBugs.CommonBug_PerVertexValidation` regressed
+  because the new `Separable` bucket accepted any stage combo
+  unconditionally. Added a gl_PerVertex block re-declaration
+  match: each stage's GLSL source scanned for `out gl_PerVertex
+  { ... };` / `in gl_PerVertex { ... };`, members collected,
+  and if two or more stages redeclare the block the sorted
+  member-name sets must match — mismatches fail link. Restored
+  the one PerVertexValidation test.
+  Takeaway: separable-program support is a dense web of link-
+  time checks (incomplete stages, varying types, gl_PerVertex,
+  gl_ClipDistance, array sizes, qualifiers). The CTS
+  `linking.*` + `CommonBugs.*` + `separable_programs*` sections
+  exercise different corners; each one needs its own guard or
+  the canonical pipeline checks let spec-invalid programs
+  link successfully.
