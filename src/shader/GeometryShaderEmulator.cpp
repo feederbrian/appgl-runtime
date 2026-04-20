@@ -3002,12 +3002,14 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
                     }
                 }
                 if (hasBuiltInMember) continue;
-                // Fall through: user interface block — continue
-                // processing but synthesise the name + width from
-                // the FIRST member (a common glslang pattern has
-                // single-member user blocks). Multi-member blocks
-                // need per-member unrolling which is a separate
-                // follow-up.
+                // Fall through: user interface block. Single-member
+                // blocks synthesise one varying with the member name
+                // + width. Multi-member blocks unroll each member
+                // into its own varying with sequential locations —
+                // CTS `nonarray_input.nonarray_input` uses a
+                // 4-member `out VS_GS { vec4 v1; vec4 v2; vec4 v3;
+                // vec4 v4; }` block that must expose all four
+                // members to the GS input side.
                 const auto& st = pIt->second;
                 if (st.memberTypes.size() == 1) {
                     std::string mname;
@@ -3019,7 +3021,82 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
                     if (!mname.empty()) d.name = mname;
                     d.width = mod.scalarWidth(st.memberTypes[0]);
                 } else {
-                    continue;   // multi-member block not yet supported
+                    // Multi-member: emit one descriptor per member.
+                    // Locations come from OpMemberDecorate Location
+                    // when present; otherwise they are assigned
+                    // sequentially starting from the block's
+                    // DecorationLocation (if any) or the implicit
+                    // auto-allocator. Base type and interpolation
+                    // also come from per-member decorations.
+                    auto mnIt = mod.memberNames.find(pointeeId);
+                    auto mdIt = mod.memberDecorations.find(pointeeId);
+                    const std::uint32_t blockBaseLoc =
+                        (dIt != mod.decorations.end() && dIt->second.hasLocation)
+                            ? dIt->second.location : 0u;
+                    std::uint32_t nextMemberLoc = blockBaseLoc;
+                    for (std::size_t m = 0; m < st.memberTypes.size(); ++m) {
+                        OutputVaryingDesc md;
+                        // Name — prefer per-member name, fallback to
+                        // "<blockVarName>.<index>".
+                        std::string mname;
+                        if (mnIt != mod.memberNames.end()) {
+                            auto nameIt = mnIt->second.find(static_cast<std::uint32_t>(m));
+                            if (nameIt != mnIt->second.end()) mname = nameIt->second;
+                        }
+                        md.name = mname.empty()
+                            ? (info.name + "." + std::to_string(m)) : mname;
+                        md.width = mod.scalarWidth(st.memberTypes[m]);
+                        if (md.width == 0) continue;
+                        // Base type from the member's leaf scalar.
+                        {
+                            const auto mtIt = mod.types.find(st.memberTypes[m]);
+                            if (mtIt != mod.types.end()) {
+                                std::uint32_t scalarTypeId = 0;
+                                const auto& mt = mtIt->second;
+                                if (mt.kind == TypeInfo::Kind::Vec2 ||
+                                    mt.kind == TypeInfo::Kind::Vec3 ||
+                                    mt.kind == TypeInfo::Kind::Vec4) {
+                                    scalarTypeId = mt.componentType;
+                                } else {
+                                    scalarTypeId = st.memberTypes[m];
+                                }
+                                const auto sIt = mod.types.find(scalarTypeId);
+                                if (sIt != mod.types.end()) {
+                                    switch (sIt->second.kind) {
+                                        case TypeInfo::Kind::Int:   md.baseType = 1; break;
+                                        case TypeInfo::Kind::UInt:  md.baseType = 2; break;
+                                        case TypeInfo::Kind::Float: md.baseType = 0; break;
+                                        default: md.baseType = 0; break;
+                                    }
+                                }
+                            }
+                        }
+                        // Location: per-member Location decoration
+                        // wins; otherwise take the block-level base
+                        // and increment by width per member (vec4 =
+                        // 1 location slot in GL).
+                        bool haveLoc = false;
+                        std::uint8_t memberInterp = 0;
+                        if (mdIt != mod.memberDecorations.end()) {
+                            auto mm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
+                            if (mm != mdIt->second.perMember.end()) {
+                                if (mm->second.hasLocation) {
+                                    md.location = mm->second.location;
+                                    haveLoc = true;
+                                }
+                                if (mm->second.isFlat) memberInterp = 1;
+                                else if (mm->second.isNoPerspective) memberInterp = 2;
+                                else if (mm->second.isCentroid) memberInterp = 3;
+                            }
+                        }
+                        md.interp = memberInterp;
+                        if (!haveLoc) {
+                            md.location = nextMemberLoc;
+                        }
+                        nextMemberLoc = md.location + 1;
+                        out.push_back(std::move(md));
+                    }
+                    continue;   // processed — skip the single-desc path below
                 }
             }
             // Determine scalar base type by walking vec → scalar.
@@ -3112,6 +3189,108 @@ Interpreter::UniformValues buildUniformMap(const GLProgramObject& program) {
         if (!flat.empty()) out[u.name] = std::move(flat);
     }
     return out;
+}
+
+// Scan a SPIR-V module for OpStore instructions whose pointer
+// ultimately reaches a gl_ClipDistance / gl_CullDistance BuiltIn
+// (either a direct Output variable or a member of gl_PerVertex).
+// Returns `{clipWritten, cullWritten}`.
+//
+// Why: glslang always emits the full `gl_PerVertex { …
+// gl_ClipDistance[1]; gl_CullDistance[1]; }` block even when the
+// GS never writes those arrays (it's the SPIR-V binding-point for
+// the built-ins). Our `captureClipCull` blindly walks member
+// decorations and ends up publishing a 1-element clip slot full
+// of zeros. The synth VS then emits
+// `out.gl_ClipDistance[0] = 0.0`, which Metal interprets as "on
+// the clip plane" — and on some drivers floating-point noise
+// flips it to negative and clips the whole triangle. That was
+// the `geometry_shader.nonarray_input.nonarray_input` failure
+// mode. The fix is to suppress the slot entirely unless the GS
+// actually stores to clip / cull.
+std::pair<bool,bool> scanClipCullWrites(const SpirvModule& mod) {
+    bool writeClip = false;
+    bool writeCull = false;
+    // Collect gl_ClipDistance/gl_CullDistance Output variables +
+    // members.
+    std::unordered_set<std::uint32_t> clipVars;
+    std::unordered_set<std::uint32_t> cullVars;
+    for (const auto& [varId, info] : mod.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto dIt = mod.decorations.find(varId);
+        if (dIt != mod.decorations.end() && dIt->second.hasBuiltIn) {
+            if (dIt->second.builtIn == spv::BuiltInClipDistance) clipVars.insert(varId);
+            if (dIt->second.builtIn == spv::BuiltInCullDistance) cullVars.insert(varId);
+        }
+    }
+    // Map structId → list of (memberIdx, which builtin).
+    std::unordered_map<std::uint32_t, std::vector<std::pair<std::uint32_t,std::uint32_t>>>
+        structClipCullMembers;
+    for (const auto& [structId, mdSet] : mod.memberDecorations) {
+        for (const auto& [memberIdx, memberDeco] : mdSet.perMember) {
+            if (memberDeco.hasBuiltIn &&
+                (memberDeco.builtIn == spv::BuiltInClipDistance ||
+                 memberDeco.builtIn == spv::BuiltInCullDistance)) {
+                structClipCullMembers[structId].push_back({memberIdx, memberDeco.builtIn});
+            }
+        }
+    }
+    // Walk function body. Track access-chain result ids that
+    // point into a clip/cull region so subsequent OpStores on
+    // those ids count as a write.
+    std::unordered_map<std::uint32_t, std::uint32_t> chainToBuiltIn;
+    std::size_t pc = mod.funcBodyStart;
+    while (pc < mod.funcBodyEnd) {
+        const std::uint32_t inst = mod.words[pc];
+        const std::uint16_t opcode = static_cast<std::uint16_t>(inst & 0xFFFF);
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0) break;
+        if (opcode == spv::OpAccessChain && wc >= 4) {
+            const std::uint32_t resultId = mod.words[pc + 2];
+            const std::uint32_t base     = mod.words[pc + 3];
+            if (clipVars.count(base) != 0) {
+                chainToBuiltIn[resultId] = spv::BuiltInClipDistance;
+            } else if (cullVars.count(base) != 0) {
+                chainToBuiltIn[resultId] = spv::BuiltInCullDistance;
+            } else {
+                // base may be a struct variable; check its
+                // pointee's member decorations.
+                auto vIt = mod.variables.find(base);
+                if (vIt != mod.variables.end() && wc >= 5) {
+                    const std::uint32_t firstIdxId = mod.words[pc + 4];
+                    auto cIt = mod.constants.find(firstIdxId);
+                    if (cIt != mod.constants.end()) {
+                        const std::int32_t idx = cIt->second.i[0];
+                        auto tIt = mod.types.find(vIt->second.typeId);
+                        if (tIt != mod.types.end()) {
+                            auto sm = structClipCullMembers.find(tIt->second.pointeeType);
+                            if (sm != structClipCullMembers.end()) {
+                                for (const auto& [memberIdx, bi] : sm->second) {
+                                    if (static_cast<std::uint32_t>(idx) == memberIdx) {
+                                        chainToBuiltIn[resultId] = bi;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (opcode == spv::OpStore && wc >= 3) {
+            const std::uint32_t ptr = mod.words[pc + 1];
+            if (clipVars.count(ptr) != 0) writeClip = true;
+            else if (cullVars.count(ptr) != 0) writeCull = true;
+            else {
+                auto ci = chainToBuiltIn.find(ptr);
+                if (ci != chainToBuiltIn.end()) {
+                    if (ci->second == spv::BuiltInClipDistance) writeClip = true;
+                    else if (ci->second == spv::BuiltInCullDistance) writeCull = true;
+                }
+            }
+        }
+        pc += wc;
+    }
+    return {writeClip, writeCull};
 }
 
 // Augment a uniform map with UBO-block-array data by walking the
@@ -3820,6 +3999,22 @@ EmulatedDraw emulateGeometryDraw(
     // clipDistance but not another's, we pad with zero (Metal
     // requires all vertices of a primitive to have matching array
     // length).
+    //
+    // Suppress the slot when the GS source never stores to
+    // gl_ClipDistance / gl_CullDistance. glslang emits the
+    // gl_PerVertex output block including both arrays even when
+    // the GS doesn't touch them, so `captureClipCull` would
+    // publish a 1-element zero-valued slot — which Metal then
+    // interprets as "on the clip plane" and may discard the
+    // whole primitive due to fp noise. Walk the SPIR-V once to
+    // find real writes.
+    const auto [gsWritesClip, gsWritesCull] = scanClipCullWrites(mod);
+    if (!gsWritesClip) {
+        for (auto& e : emittedAll) e.clipDistance.clear();
+    }
+    if (!gsWritesCull) {
+        for (auto& e : emittedAll) e.cullDistance.clear();
+    }
     std::uint32_t clipLen = 0, cullLen = 0;
     for (const auto& e : emittedAll) {
         clipLen = std::max(clipLen, static_cast<std::uint32_t>(e.clipDistance.size()));
