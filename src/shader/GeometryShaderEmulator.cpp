@@ -3407,6 +3407,37 @@ EmulatedDraw emulateGeometryDraw(
     d.varyingBaseType   = std::move(outBaseType);
     d.clipDistanceLen   = clipLen;
     d.cullDistanceLen   = cullLen;
+
+    // Per-primitive gl_Layer propagation. GL 4.6 §14.5.1 with
+    // `GL_LAST_VERTEX_CONVENTION` (our advertised default — see
+    // commit 5588d41) routes the provoking-vertex's gl_Layer to
+    // every primitive, and Metal reads `[[render_target_array_
+    // index]]` from the provoking vertex. Metal's default
+    // provoking-vertex convention for flat varyings + layered
+    // output is FIRST-vertex, so without this propagation the
+    // per-triangle layer is the value of the first vertex —
+    // which on a strip-consumed triangle may be stale (set by a
+    // previous strip's GS iteration). Normalising every vertex
+    // to the primitive's last vertex makes both conventions
+    // agree.
+    if (d.hasLayer && expandedTopo != 0) {
+        std::size_t primSize = 0;
+        switch (expandedTopo) {
+            case GL_POINTS:        primSize = 1; break;
+            case GL_LINES:         primSize = 2; break;
+            case GL_TRIANGLES:     primSize = 3; break;
+            default:               primSize = 0; break;
+        }
+        if (primSize > 0) {
+            for (std::size_t i = 0; i + primSize <= emittedAll.size(); i += primSize) {
+                const std::int32_t lastLayer = emittedAll[i + primSize - 1].layer;
+                for (std::size_t k = 0; k < primSize; ++k) {
+                    emittedAll[i + k].layer = lastLayer;
+                }
+            }
+        }
+    }
+
     d.expandedVertexData.resize(emittedAll.size() * fpv, 0.0f);
 
     for (std::size_t v = 0; v < emittedAll.size(); ++v) {
