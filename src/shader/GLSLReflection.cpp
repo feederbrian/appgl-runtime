@@ -36,6 +36,34 @@ const std::unordered_map<std::string, TypeEntry>& typeTable() {
         {"mat2", {GL_FLOAT_MAT2, 4, "mat2"}},
         {"mat3", {GL_FLOAT_MAT3, 9, "mat3"}},
         {"mat4", {GL_FLOAT_MAT4, 16, "mat4"}},
+        // Non-square matrix types (GL 3.0+). Without entries here
+        // the scanner dropped `mat2x3 d[2]` declarations and CTS
+        // `program_interface_query.input-types` saw 7 active
+        // inputs instead of the expected 8.
+        {"mat2x2", {GL_FLOAT_MAT2, 4, "mat2x2"}},
+        {"mat3x3", {GL_FLOAT_MAT3, 9, "mat3x3"}},
+        {"mat4x4", {GL_FLOAT_MAT4, 16, "mat4x4"}},
+        {"mat2x3", {GL_FLOAT_MAT2x3, 6, "mat2x3"}},
+        {"mat2x4", {GL_FLOAT_MAT2x4, 8, "mat2x4"}},
+        {"mat3x2", {GL_FLOAT_MAT3x2, 6, "mat3x2"}},
+        {"mat3x4", {GL_FLOAT_MAT3x4, 12, "mat3x4"}},
+        {"mat4x2", {GL_FLOAT_MAT4x2, 8, "mat4x2"}},
+        {"mat4x3", {GL_FLOAT_MAT4x3, 12, "mat4x3"}},
+        // Double-precision matrices (GL 4.0+).
+        {"dmat2", {GL_DOUBLE_MAT2, 4, "dmat2"}},
+        {"dmat3", {GL_DOUBLE_MAT3, 9, "dmat3"}},
+        {"dmat4", {GL_DOUBLE_MAT4, 16, "dmat4"}},
+        {"dmat2x3", {GL_DOUBLE_MAT2x3, 6, "dmat2x3"}},
+        {"dmat2x4", {GL_DOUBLE_MAT2x4, 8, "dmat2x4"}},
+        {"dmat3x2", {GL_DOUBLE_MAT3x2, 6, "dmat3x2"}},
+        {"dmat3x4", {GL_DOUBLE_MAT3x4, 12, "dmat3x4"}},
+        {"dmat4x2", {GL_DOUBLE_MAT4x2, 8, "dmat4x2"}},
+        {"dmat4x3", {GL_DOUBLE_MAT4x3, 12, "dmat4x3"}},
+        // Double-precision scalars/vectors (GL 4.0+).
+        {"double", {GL_DOUBLE, 1, "double"}},
+        {"dvec2", {GL_DOUBLE_VEC2, 2, "dvec2"}},
+        {"dvec3", {GL_DOUBLE_VEC3, 3, "dvec3"}},
+        {"dvec4", {GL_DOUBLE_VEC4, 4, "dvec4"}},
         // Float sampler types.
         {"sampler1D", {GL_SAMPLER_1D, 1, "sampler1D"}},
         {"sampler2D", {GL_SAMPLER_2D, 1, "sampler2D"}},

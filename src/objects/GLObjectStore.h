@@ -360,6 +360,12 @@ struct GLProgramAttributeInfo {
     std::string name;
     GLenum type = 0;
     GLint location = -1;
+    // Array dimension from the GLSL declaration. `in float c[2]`
+    // sets arraySize=2, plain `in float c` sets arraySize=1.
+    // Carried through so `glGetProgramResourceName(GL_PROGRAM_INPUT,
+    // …)` can append the "[0]" suffix that GL 4.6 §7.3.1 mandates
+    // for array inputs (CTS `program_interface_query.input-types`).
+    GLint arraySize = 1;
 };
 
 struct GLProgramUniformValue {

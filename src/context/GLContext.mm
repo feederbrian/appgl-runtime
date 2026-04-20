@@ -11629,6 +11629,7 @@ bool GLContext::linkProgram(GLuint program) {
             GLProgramAttributeInfo attrib;
             attrib.name = input.name;
             attrib.type = input.type;
+            attrib.arraySize = input.arraySize;
             if (input.explicitLocation >= 0) {
                 attrib.location = input.explicitLocation;
             } else {
@@ -12500,9 +12501,19 @@ bool GLContext::linkProgram(GLuint program) {
     }
     for (const auto& a : programObject->attributes) {
         GLProgramResourceEntry entry;
-        entry.name = a.name;
+        // GL 4.6 §7.3.1: for array inputs, the resource name ends
+        // with "[0]". CTS `program_interface_query.input-types`
+        // declares `in float c[2]` and expects
+        // `glGetProgramResourceName(GL_PROGRAM_INPUT, …)` to
+        // return "c[0]"; plain scalars/vectors/matrices keep
+        // their bare name. Arrays also have
+        // `GL_ARRAY_SIZE > 1`, which
+        // `glGetProgramResourceiv(GL_PROGRAM_INPUT, …, GL_ARRAY_SIZE)`
+        // reads out of `entry.arraySize`.
+        entry.name = (a.arraySize >= 2) ? (a.name + "[0]") : a.name;
         entry.type = a.type;
         entry.location = a.location;
+        entry.arraySize = a.arraySize;
         entry.referencedBy = 0x01; // vertex
         programObject->resourceInputs.push_back(std::move(entry));
     }
@@ -17945,6 +17956,32 @@ GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterfac
             return static_cast<GLuint>(i);
         }
     }
+    // Array-input lookup tolerance: GL 4.6 §7.3.1 says
+    // getProgramResourceIndex("arr") should find the same entry as
+    // "arr[0]" for an array input, and vice versa. Table entries
+    // follow the "[0]"-suffixed convention for arrays
+    // (`c` → "c[0]"); queries with bare base name should still
+    // match. CTS `program_interface_query.input-types` queries
+    // "d" where the table stores "d[0]".
+    const std::string query = name;
+    // Bare query → find a "<name>[0]" entry.
+    {
+        const std::string suffixed = query + "[0]";
+        for (std::size_t i = 0; i < table->size(); ++i) {
+            if ((*table)[i].name == suffixed) {
+                return static_cast<GLuint>(i);
+            }
+        }
+    }
+    // "<base>[0]"-suffixed query → find a bare "<base>" entry.
+    if (query.size() >= 3 && query.compare(query.size() - 3, 3, "[0]") == 0) {
+        const std::string baseOnly = query.substr(0, query.size() - 3);
+        for (std::size_t i = 0; i < table->size(); ++i) {
+            if ((*table)[i].name == baseOnly) {
+                return static_cast<GLuint>(i);
+            }
+        }
+    }
     return GL_INVALID_INDEX;
 }
 
@@ -17981,6 +18018,15 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
     // resolves to location(u) + k when u is declared as an array of
     // size > k. GL 4.6 §7.3.1 says both entry points return the same
     // thing for the same name — including array subscript syntax.
+    // Entries in the resource table may be stored under either a
+    // bare base name ("u") or a "[0]"-suffixed canonical form ("u[0]"
+    // for arrays — GL 4.6 §7.3.1 mandate). Match both shapes here.
+    auto stripBracketZero = [](const std::string& n) -> std::string {
+        if (n.size() >= 3 && n.compare(n.size() - 3, 3, "[0]") == 0) {
+            return n.substr(0, n.size() - 3);
+        }
+        return n;
+    };
     const auto openBracket = lookup.find('[');
     if (openBracket != std::string::npos && !lookup.empty() && lookup.back() == ']') {
         const std::string baseName = lookup.substr(0, openBracket);
@@ -17990,13 +18036,21 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
             const long idx = std::strtol(indexStr.c_str(), &endp, 10);
             if (endp && *endp == '\0' && idx >= 0) {
                 for (const auto& entry : *table) {
-                    if (entry.name == baseName && entry.arraySize >= 1
+                    if (stripBracketZero(entry.name) == baseName && entry.arraySize >= 1
                         && idx < static_cast<long>(entry.arraySize)
                         && entry.location >= 0) {
                         return entry.location + static_cast<GLint>(idx);
                     }
                 }
             }
+        }
+    }
+    // Bare base-name lookup against a "[0]"-suffixed entry: GL 4.6
+    // §7.3.1 says `getProgramResourceLocation("arr")` equals
+    // `getProgramResourceLocation("arr[0]")` for array inputs.
+    for (const auto& entry : *table) {
+        if (stripBracketZero(entry.name) == lookup && entry.location >= 0) {
+            return entry.location;
         }
     }
     return -1;
