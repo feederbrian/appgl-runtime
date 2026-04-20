@@ -697,6 +697,7 @@ public:
     // seeds the GS Input variable with this value when the variable
     // carries DecorationBuiltIn=7.
     void setGsPrimitiveId(std::int32_t primId) { gsPrimitiveId_ = primId; }
+    void setGsInvocationId(std::int32_t invId) { gsInvocationId_ = invId; }
 
     // Run the entry-point function once, given `inputs` as gl_in[].
     // Appends emitted vertices to `emitted`. Primitive boundaries are
@@ -740,6 +741,7 @@ private:
     std::int32_t vsVertexID_ = 0;
     std::int32_t vsInstanceID_ = 0;
     std::int32_t gsPrimitiveId_ = 0;
+    std::int32_t gsInvocationId_ = 0;
 
     // Per-id SSA values for loads/arithmetic results.
     std::unordered_map<std::uint32_t, Value> valueStore_;
@@ -1165,9 +1167,15 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                     std::memcpy(&storage[0], &gsPrimitiveId_, 4);
                     continue;
                 }
-                // gl_InvocationID is 8 — always 0 for single-invocation
-                // GS (which is all we support right now), so leaving
-                // storage zero-initialised is correct.
+                // gl_InvocationID (BuiltIn=8). Bit-cast the int32
+                // invocation index set by the caller into the
+                // storage slot so OpLoad reads the correct value
+                // per invocation. Single-invocation GS leaves this
+                // at 0 which is still spec-correct.
+                if (dIt->second.builtIn == 8 /*BuiltInInvocationId*/ && width >= 1) {
+                    std::memcpy(&storage[0], &gsInvocationId_, 4);
+                    continue;
+                }
             }
         }
 
@@ -2646,10 +2654,13 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     program.gsInvocations = invocations;
 
     if (!haveInputTopo || !haveOutputTopo || maxVertices == 0) return false;
-    // MVP supports only single-invocation GS (CTS constant_expressions
-    // never uses GL_ARB_gpu_shader5 invocation counts). Multi-
-    // invocation lands in a follow-up.
-    if (invocations != 1) return false;
+    // Multi-invocation GS supported via per-invocation re-run in
+    // `emulateGeometryDraw` (gl_InvocationID fed into the
+    // interpreter via setGsInvocationId). Guard against runaway
+    // invocations counts that would blow up draw time: reject
+    // anything above a sensible advertised upper bound.
+    constexpr std::uint32_t kMaxGsInvocationsEmulated = 32;
+    if (invocations == 0 || invocations > kMaxGsInvocationsEmulated) return false;
     (void)trace;   // still used in the body walker below
 
     // Reject emulation when the VS writes gl_ClipDistance /
@@ -3390,46 +3401,58 @@ EmulatedDraw emulateGeometryDraw(
                 }
                 if (culled) continue;
             }
-            Interpreter interp(mod, vsOutNames, vsOutWidths,
-                               outNames, outWidths);
-            interp.setUniforms(&uniforms);
-            interp.setGsPrimitiveId(static_cast<std::int32_t>(p));
-            std::vector<EmulatedVertex> emitted;
-            std::vector<std::size_t> primEnds;
-            if (!interp.execute(inputs, emitted, primEnds)) {
-                d.ok = false;
-                d.diagnostic = "interpreter failed on primitive " + std::to_string(p)
-                             + ": " + interp.diagnostic();
-                return d;
+            // Multi-invocation GS: when the GS declares
+            // `layout(invocations = N)`, re-run the interpreter
+            // N times per primitive with gl_InvocationID set to
+            // each invocation index. N=1 degenerates to the
+            // original single-run path.
+            const std::uint32_t gsInvocations = std::max<std::uint32_t>(program.gsInvocations, 1);
+            for (std::uint32_t invId = 0; invId < gsInvocations; ++invId) {
+                Interpreter interp(mod, vsOutNames, vsOutWidths,
+                                   outNames, outWidths);
+                interp.setUniforms(&uniforms);
+                interp.setGsPrimitiveId(static_cast<std::int32_t>(p));
+                interp.setGsInvocationId(static_cast<std::int32_t>(invId));
+                std::vector<EmulatedVertex> emitted;
+                std::vector<std::size_t> primEnds;
+                if (!interp.execute(inputs, emitted, primEnds)) {
+                    d.ok = false;
+                    d.diagnostic = "interpreter failed on primitive " + std::to_string(p)
+                                 + " invocation " + std::to_string(invId)
+                                 + ": " + interp.diagnostic();
+                    return d;
+                }
+                // If any primitive's GS wrote gl_Layer, the whole draw
+                // needs the synth-VS `[[render_target_array_index]]`
+                // output slot. Accumulate across primitives/instances
+                // /invocations.
+                if (interp.didWriteLayer()) {
+                    d.hasLayer = true;
+                }
+                if (interp.didWritePointSize()) {
+                    d.hasPointSize = true;
+                }
+                // Shift the per-invocation primEnds by the current
+                // emittedAll size so they remain valid indices into
+                // the global buffer after insert.
+                const std::size_t baseIdx = emittedAll.size();
+                for (std::size_t endIdx : primEnds) {
+                    primEndsAll.push_back(baseIdx + endIdx);
+                }
+                // Defensive: ensure a boundary exists at the end of
+                // this invocation — an empty GS body that emitted
+                // nothing will not have pushed anything, and (if the
+                // next invocation adds vertices) we'd otherwise glue
+                // them onto the tail of the previous invocation's
+                // last strip.
+                if (!emitted.empty() &&
+                    (primEndsAll.empty() || primEndsAll.back() != baseIdx + emitted.size())) {
+                    primEndsAll.push_back(baseIdx + emitted.size());
+                }
+                emittedAll.insert(emittedAll.end(),
+                    std::make_move_iterator(emitted.begin()),
+                    std::make_move_iterator(emitted.end()));
             }
-            // If any primitive's GS wrote gl_Layer, the whole draw
-            // needs the synth-VS `[[render_target_array_index]]`
-            // output slot. Accumulate across primitives/instances.
-            if (interp.didWriteLayer()) {
-                d.hasLayer = true;
-            }
-            if (interp.didWritePointSize()) {
-                d.hasPointSize = true;
-            }
-            // Shift the per-invocation primEnds by the current
-            // emittedAll size so they remain valid indices into the
-            // global buffer after insert.
-            const std::size_t baseIdx = emittedAll.size();
-            for (std::size_t endIdx : primEnds) {
-                primEndsAll.push_back(baseIdx + endIdx);
-            }
-            // Defensive: ensure a boundary exists at the end of this
-            // invocation — an empty GS body that emitted nothing will
-            // not have pushed anything, and (if the next invocation
-            // adds vertices) we'd otherwise glue them onto the tail
-            // of the previous invocation's last strip.
-            if (!emitted.empty() &&
-                (primEndsAll.empty() || primEndsAll.back() != baseIdx + emitted.size())) {
-                primEndsAll.push_back(baseIdx + emitted.size());
-            }
-            emittedAll.insert(emittedAll.end(),
-                std::make_move_iterator(emitted.begin()),
-                std::make_move_iterator(emitted.end()));
         }
     }
 
