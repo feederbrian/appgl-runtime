@@ -141,6 +141,13 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
         case GL_TEXTURE_STENCIL_SIZE:
             *params = 0;
             break;
+        case GL_TEXTURE_SHARED_SIZE:
+            // GL 4.6 Table 8.23: the number of bits used for the
+            // shared exponent in GL_RGB9_E5 formats; 0 for every
+            // other format. CTS texture_cube_map_array.getter_calls
+            // queries this pname and fails on INVALID_ENUM otherwise.
+            *params = (desc.internalFormat == GL_RGB9_E5) ? 5 : 0;
+            break;
         case GL_TEXTURE_RED_TYPE:
         case GL_TEXTURE_GREEN_TYPE:
         case GL_TEXTURE_BLUE_TYPE:

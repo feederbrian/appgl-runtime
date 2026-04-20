@@ -19756,6 +19756,9 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
         case GL_TEXTURE_ALPHA_SIZE:      *params = 8; return true;
         case GL_TEXTURE_DEPTH_SIZE:      *params = 0; return true;
         case GL_TEXTURE_STENCIL_SIZE:    *params = 0; return true;
+        case GL_TEXTURE_SHARED_SIZE:
+            *params = (desc.internalFormat == GL_RGB9_E5) ? 5 : 0;
+            return true;
         case GL_TEXTURE_RED_TYPE:
         case GL_TEXTURE_GREEN_TYPE:
         case GL_TEXTURE_BLUE_TYPE:
