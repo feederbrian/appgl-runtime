@@ -2663,6 +2663,18 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
         }
         return false;
     };
+    // Session 16 stopgap (narrowed in session 16b Phase 6): the
+    // original `programStoresClipOrCull` rejected whenever the VS
+    // wrote gl_ClipDistance OR gl_CullDistance. Full-sweep
+    // comparison (baseline 41 / nostopgap 34 cull_distance
+    // passes) showed removing it regresses 7
+    // `functional_test_item_5_primitive_mode_points_max_culldist_
+    // {1..7}` tests and gains 0 others — the rendering-pipeline
+    // gap the stopgap was papering over is still open. Leaving
+    // the stopgap for now; future work can try alternative
+    // routings (e.g. disabling combined clip/cull slice on the
+    // synth VS when the cull count is ambiguous, or
+    // reflecting the FS input layout).
     if (programStoresClipOrCull(program.vertexSpirv)) {
         if (std::getenv("APPGL_TRACE_GS_EMUL") != nullptr) {
             std::fprintf(stderr, "[GS-emul] reject: VS stores gl_Clip/CullDistance — "
@@ -3041,26 +3053,94 @@ EmulatedDraw emulateGeometryDraw(
                     return p + 2;
                 }
                 return p + v;
-            case PrimIndexing::StripAdjacency:
-                // GL 4.6 §10.1.14 — for TRIANGLE_STRIP_ADJACENCY the
-                // 6 per-primitive vertices span the real triangle
-                // (v[0], v[2], v[4]) plus three adjacency slots
-                // (v[1], v[3], v[5]). The real triangle follows the
-                // same strip-alternation as TRIANGLE_STRIP: on odd
-                // primitives swap positions 0 and 2 so the main
-                // triangle's winding survives the strip
-                // decomposition. Adjacency slots track the triangle's
-                // neighbours — the test cases this is landing for
-                // explicitly don't read v[1]/v[3]/v[5] (they use
-                // `#define N_VERTEX0 0 / N_VERTEX1 2 / N_VERTEX2 4`)
-                // so we keep adjacency as `p*2 + v` for now; a
-                // full Table 10.4 implementation with neighbour
-                // lookup is a sibling task.
-                if ((p & 1u) != 0u) {
-                    if (v == 0) return p * 2 + 2;
-                    if (v == 2) return p * 2 + 0;
+            case PrimIndexing::StripAdjacency: {
+                // GL 4.6 §10.1.14 Table 10.4 — TRIANGLE_STRIP_ADJACENCY
+                // vertex layout per primitive. 4+2N vertices produce
+                // N triangles; per-primitive gl_in[0..5] = main
+                // triangle (v[0], v[2], v[4]) plus adjacency edges
+                // (v[1], v[3], v[5]). Each primitive's vertex-index
+                // mapping depends on whether it's the first / last /
+                // middle-even / middle-odd primitive in the strip —
+                // five cases total. Prior impl only alternated the
+                // main triangle (strip winding) and used the naive
+                // `p*2 + v` for adjacency slots; CTS
+                // `adjacency.adjacency_{non_indiced,indiced}_triangle
+                // _strip` reads gl_in[1/3/5] via `flat out vec4
+                // out_adjacent_geometry = gl_in[1/3/5].gl_Position;`
+                // and compared the TF output against the expected
+                // adjacency-geometry — the naive formula produces
+                // wrong vertex indices for 3/5 of the slots.
+                const std::size_t i = p;
+                const std::size_t N = primCount;
+                const bool isFirst = (i == 0);
+                const bool isLast = (N > 0 && i == N - 1);
+                const bool isOdd = (i & 1u) != 0u;
+                auto pos = [&](std::size_t idx) -> std::size_t { return idx; };
+                if (isFirst && isLast) {
+                    // Only primitive in the strip — use the single-
+                    // primitive layout {0,1,2,5,4,3}. 4+2·1 = 6
+                    // vertices, no "next" to grab v[2i+6] from.
+                    switch (v) {
+                        case 0: return pos(0);
+                        case 1: return pos(1);
+                        case 2: return pos(2);
+                        case 3: return pos(5);
+                        case 4: return pos(4);
+                        case 5: return pos(3);
+                    }
+                } else if (isFirst) {
+                    // First of many: {0,1,2,6,4,3}
+                    switch (v) {
+                        case 0: return pos(0);
+                        case 1: return pos(1);
+                        case 2: return pos(2);
+                        case 3: return pos(6);
+                        case 4: return pos(4);
+                        case 5: return pos(3);
+                    }
+                } else if (isOdd && isLast) {
+                    // Last odd: {2i+2, 2i-2, 2i, 2i+3, 2i+4, 2i+5}
+                    switch (v) {
+                        case 0: return 2*i + 2;
+                        case 1: return (i >= 1) ? 2*i - 2 : 0;
+                        case 2: return 2*i;
+                        case 3: return 2*i + 3;
+                        case 4: return 2*i + 4;
+                        case 5: return 2*i + 5;
+                    }
+                } else if (isOdd) {
+                    // Middle odd: {2i+2, 2i-2, 2i, 2i+3, 2i+4, 2i+6}
+                    switch (v) {
+                        case 0: return 2*i + 2;
+                        case 1: return (i >= 1) ? 2*i - 2 : 0;
+                        case 2: return 2*i;
+                        case 3: return 2*i + 3;
+                        case 4: return 2*i + 4;
+                        case 5: return 2*i + 6;
+                    }
+                } else if (isLast) {
+                    // Last even: {2i, 2i-2, 2i+2, 2i+5, 2i+4, 2i+3}
+                    switch (v) {
+                        case 0: return 2*i;
+                        case 1: return (i >= 1) ? 2*i - 2 : 0;
+                        case 2: return 2*i + 2;
+                        case 3: return 2*i + 5;
+                        case 4: return 2*i + 4;
+                        case 5: return 2*i + 3;
+                    }
+                } else {
+                    // Middle even: {2i, 2i-2, 2i+2, 2i+6, 2i+4, 2i+3}
+                    switch (v) {
+                        case 0: return 2*i;
+                        case 1: return (i >= 1) ? 2*i - 2 : 0;
+                        case 2: return 2*i + 2;
+                        case 3: return 2*i + 6;
+                        case 4: return 2*i + 4;
+                        case 5: return 2*i + 3;
+                    }
                 }
-                return p * 2 + v;
+                return 2*i + v;  // fallback (unreachable)
+            }
             case PrimIndexing::Loop:
                 return (p + v) % static_cast<std::size_t>(count);
             case PrimIndexing::Fan:
