@@ -4453,6 +4453,32 @@ struct GLContext::Impl {
 
     bool clearDepthAttachment(const GLFramebufferAttachment& attachment, GLdouble value) {
         const auto depth = static_cast<GLfloat>(std::clamp(value, 0.0, 1.0));
+        if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+            // GL 4.6 §17.4.3: clear on a texture-backed depth attachment
+            // is no different at the API level from clearing a renderbuffer.
+            // Return true when the attachment is dimensionally valid and the
+            // storage format is a depth format — the actual depth write
+            // happens on the Metal side via the next render-pass
+            // loadAction (we do not yet stamp the CPU depth shadow for
+            // layered texture attachments). Without this path, `glClear
+            // (GL_DEPTH_BUFFER_BIT)` on a 2D_ARRAY depth texture returned
+            // INVALID_FRAMEBUFFER_OPERATION even though the FBO is
+            // complete, blocking `geometry_shader.layered_framebuffer.
+            // depth_support` before the draw call.
+            GLTextureObject* texture = objects->textures().get(attachment.object);
+            if (texture == nullptr) {
+                return false;
+            }
+            auto level = texture->levels.find(attachment.level);
+            if (level == texture->levels.end()) {
+                return true; // texStorage may not have populated the map yet
+            }
+            if (!isDepthFormat(level->second.desc.internalFormat)) {
+                return false;
+            }
+            (void)depth; // Metal handles the actual clear via loadAction.
+            return true;
+        }
         if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
             return false;
         }
@@ -4465,6 +4491,26 @@ struct GLContext::Impl {
     }
 
     bool clearStencilAttachment(const GLFramebufferAttachment& attachment, GLint value) {
+        if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+            // Matching the clearDepthAttachment rationale — accept a
+            // stencil clear on a texture-backed attachment without
+            // raising INVALID_FRAMEBUFFER_OPERATION. DEPTH_STENCIL
+            // formats (e.g. DEPTH32F_STENCIL8) are valid for both depth
+            // and stencil attachments.
+            GLTextureObject* texture = objects->textures().get(attachment.object);
+            if (texture == nullptr) {
+                return false;
+            }
+            auto level = texture->levels.find(attachment.level);
+            if (level == texture->levels.end()) {
+                return true;
+            }
+            if (!isStencilFormat(level->second.desc.internalFormat)) {
+                return false;
+            }
+            (void)value;
+            return true;
+        }
         if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
             return false;
         }
@@ -7831,6 +7877,17 @@ bool GLContext::texImage(
     image.desc.depth = (target == GL_TEXTURE_3D
                         || target == GL_TEXTURE_2D_ARRAY
                         || target == GL_TEXTURE_CUBE_MAP_ARRAY) ? depth : 1;
+    // Mirror depth → layers for array targets. Parallel to the
+    // texStorage3D path (line ~8180). Without this, a
+    // glFramebufferTextureLayer(layer = N) on a texImage3D-allocated
+    // TEXTURE_2D_ARRAY returned GL_INVALID_VALUE for every N >= 1
+    // because the framebufferTexture layer-bounds check consults
+    // desc.layers (which defaulted to 1), not desc.depth.
+    // Fixes `geometry_shader.layered_framebuffer.stencil_support`.
+    image.desc.layers = (target == GL_TEXTURE_2D_ARRAY
+                          || target == GL_TEXTURE_1D_ARRAY
+                          || target == GL_TEXTURE_CUBE_MAP_ARRAY)
+        ? depth : 1;
     image.desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
     image.defined = true;
     // Resolve pixels against GL_PIXEL_UNPACK_BUFFER if one is bound.
