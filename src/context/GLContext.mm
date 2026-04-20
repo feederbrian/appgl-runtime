@@ -4224,14 +4224,34 @@ struct GLContext::Impl {
             if (colorTex != nullptr) break;
         }
 
-        // Depth/stencil
+        // Depth/stencil. Spec allows either Renderbuffer or Texture
+        // attachments for GL_DEPTH_ATTACHMENT / STENCIL_ATTACHMENT /
+        // DEPTH_STENCIL_ATTACHMENT. Metal treats both uniformly as
+        // `MTLTexture` for the pass descriptor. Without honouring
+        // the texture path, layered-FBO depth tests never run (the
+        // attachment is missing from the pass), so every fragment
+        // passes — observable on `geometry_shader.layered_framebuffer
+        // .depth_support` which expects layers 2 / 3 to be discarded.
         outDepthStencil = nullptr;
-        const GLFramebufferAttachment* depthAtt = framebufferAttachment(*fbo, GL_DEPTH_ATTACHMENT);
-        if (depthAtt != nullptr && depthAtt->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
-            const GLRenderbufferObject* rb = objects->renderbuffers().get(depthAtt->object);
-            if (rb != nullptr && rb->metalTexture != nullptr) {
-                outDepthStencil = rb->metalTexture;
+        auto tryResolveDepthStencil = [&](GLenum point) -> void* {
+            const GLFramebufferAttachment* att = framebufferAttachment(*fbo, point);
+            if (att == nullptr) return nullptr;
+            if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
+                return (rb != nullptr) ? rb->metalTexture : nullptr;
             }
+            if (att->kind == GLFramebufferAttachment::Kind::Texture) {
+                const GLTextureObject* tex = objects->textures().get(att->object);
+                return (tex != nullptr) ? tex->metalTexture : nullptr;
+            }
+            return nullptr;
+        };
+        outDepthStencil = tryResolveDepthStencil(GL_DEPTH_ATTACHMENT);
+        if (outDepthStencil == nullptr) {
+            outDepthStencil = tryResolveDepthStencil(GL_DEPTH_STENCIL_ATTACHMENT);
+        }
+        if (outDepthStencil == nullptr) {
+            outDepthStencil = tryResolveDepthStencil(GL_STENCIL_ATTACHMENT);
         }
 
         return colorTex;

@@ -3438,6 +3438,63 @@ EmulatedDraw emulateGeometryDraw(
         }
     }
 
+    // Per-primitive flat-varying propagation. GL 4.6 §14.5.1 with
+    // `GL_LAST_VERTEX_CONVENTION` routes the LAST vertex's value to
+    // the whole primitive for `flat` interpolation — Metal reads
+    // from the FIRST vertex by default (`flatInputProvokingVertex`
+    // isn't exposed in current Metal headers). Rewrite each flat
+    // varying to the provoking vertex's value so both conventions
+    // agree. CTS `layered_rendering.layered_rendering` set
+    // `provoking_vertex_index=2` (LAST), uses `flat out int
+    // layer_id;` and the FS's per-primitive case-match on
+    // layer_id decides the output colour — without this fix, the
+    // FS sees the strip's first-vertex layer_id (stale from the
+    // previous strip iteration) instead of the LAST's.
+    if (!outInterp.empty()) {
+        std::size_t primSize = 0;
+        switch (expandedTopo) {
+            case GL_POINTS:    primSize = 1; break;
+            case GL_LINES:     primSize = 2; break;
+            case GL_TRIANGLES: primSize = 3; break;
+            default:           primSize = 0; break;
+        }
+        if (primSize > 0) {
+            // Pre-compute varying offsets (flat-scalar start per
+            // varying index) so we can copy the last vertex's slice
+            // for any flat varying without re-traversing every loop.
+            std::vector<std::size_t> varyingOffsets(outInterp.size(), 0);
+            {
+                std::size_t off = 0;
+                for (std::size_t vi = 0; vi < outInterp.size(); ++vi) {
+                    varyingOffsets[vi] = off;
+                    if (vi < outWidths.size()) off += outWidths[vi];
+                }
+            }
+            for (std::size_t i = 0; i + primSize <= emittedAll.size(); i += primSize) {
+                const std::size_t last = i + primSize - 1;
+                for (std::size_t vi = 0; vi < outInterp.size(); ++vi) {
+                    // Only flat-qualified outputs carry provoking-
+                    // vertex semantics. Smooth / noperspective
+                    // interpolate across all three vertices and
+                    // don't care about the provoking choice.
+                    if (outInterp[vi] != 1) continue;
+                    const std::size_t varyOff = varyingOffsets[vi];
+                    const std::uint32_t width = (vi < outWidths.size()) ? outWidths[vi] : 0;
+                    if (width == 0) continue;
+                    if (last >= emittedAll.size()) continue;
+                    if (emittedAll[last].varyings.size() < varyOff + width) continue;
+                    for (std::size_t k = 0; k < primSize; ++k) {
+                        auto& dst = emittedAll[i + k].varyings;
+                        if (dst.size() < varyOff + width) continue;
+                        for (std::uint32_t w = 0; w < width; ++w) {
+                            dst[varyOff + w] = emittedAll[last].varyings[varyOff + w];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     d.expandedVertexData.resize(emittedAll.size() * fpv, 0.0f);
 
     for (std::size_t v = 0; v < emittedAll.size(); ++v) {

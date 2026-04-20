@@ -1003,6 +1003,30 @@ struct MetalFrameGraph::Impl {
             if (info.mode == GL_POINTS) {
                 desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
             }
+            // Layered rendering (GS-emul path): when the synth VS
+            // writes `[[render_target_array_index]]`, Metal requires
+            // an explicit `inputPrimitiveTopology` — otherwise
+            // pipeline build fails with "Vertex shader writes
+            // render_target_array_index but inputPrimitiveTopology
+            // is not specified". Map the draw mode to Metal's
+            // topology class; other modes defer to the Point
+            // override above or leave Unspecified for the legacy
+            // path compatibility.
+            if (info.fboColorArrayLength > 0) {
+                switch (info.mode) {
+                    case GL_POINTS:
+                        desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
+                        break;
+                    case GL_LINES:
+                    case GL_LINE_STRIP:
+                    case GL_LINE_LOOP:
+                        desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassLine;
+                        break;
+                    default:
+                        desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+                        break;
+                }
+            }
             // GL_RASTERIZER_DISCARD → Metal rasterization disabled.
             // The VS still runs (and can write SSBOs / transform feedback)
             // but no fragment stage executes, no raster output is produced,
