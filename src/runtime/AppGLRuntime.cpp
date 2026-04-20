@@ -6330,10 +6330,30 @@ void APIENTRY glGetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize, GLsi
 GLint APIENTRY glGetSubroutineUniformLocation(GLuint program, GLenum shadertype, const GLchar* name) {
     auto* ctx = requireCurrentContext("glGetSubroutineUniformLocation");
     if (!ctx) return -1;
-    (void)program; (void)shadertype; (void)name;
-    // No subroutines compiled — always return -1.
-    markProgramFunction(FunctionId::glGetSubroutineUniformLocation, "Subroutine uniform location stub (always -1, no subroutines).");
-    Runtime::shared().recordBootstrapTrace("glGetSubroutineUniformLocation(program=" + std::to_string(program) + ", name=" + std::string(name ? name : "(null)") + ") -> -1");
+    if (name == nullptr) return -1;
+    auto* prog = ctx->objects().programs().get(program);
+    if (prog == nullptr || !prog->linked) return -1;
+    int si = -1;
+    switch (shadertype) {
+        case GL_VERTEX_SHADER:          si = 0; break;
+        case GL_TESS_CONTROL_SHADER:    si = 1; break;
+        case GL_TESS_EVALUATION_SHADER: si = 2; break;
+        case GL_GEOMETRY_SHADER:        si = 3; break;
+        case GL_FRAGMENT_SHADER:        si = 4; break;
+        case GL_COMPUTE_SHADER:         si = 5; break;
+        default: return -1;
+    }
+    const std::string lookup = name;
+    for (const auto& entry : prog->resourceSubroutineUniforms[si]) {
+        if (entry.name == lookup) return entry.location;
+    }
+    // Array subroutine uniforms are stored with a "[0]" suffix. Bare
+    // name → suffixed lookup.
+    for (const auto& entry : prog->resourceSubroutineUniforms[si]) {
+        if (entry.name == lookup + "[0]") return entry.location;
+    }
+    markProgramFunction(FunctionId::glGetSubroutineUniformLocation, "Subroutine uniform location via GL 4.0 program-resource tables.");
+    Runtime::shared().recordBootstrapTrace("glGetSubroutineUniformLocation(program=" + std::to_string(program) + ", name=" + std::string(name) + ") -> -1 (not found)");
     return -1;
 }
 
@@ -6403,19 +6423,63 @@ void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuin
 void APIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pname, GLint* values) {
     auto* ctx = requireCurrentContext("glGetProgramStageiv");
     if (!ctx || !values) return;
-    (void)program; (void)shadertype;
-    // Report 0 for all subroutine-related queries.
+    int si = -1;
+    switch (shadertype) {
+        case GL_VERTEX_SHADER:          si = 0; break;
+        case GL_TESS_CONTROL_SHADER:    si = 1; break;
+        case GL_TESS_EVALUATION_SHADER: si = 2; break;
+        case GL_GEOMETRY_SHADER:        si = 3; break;
+        case GL_FRAGMENT_SHADER:        si = 4; break;
+        case GL_COMPUTE_SHADER:         si = 5; break;
+        default:
+            recordValidationError(ctx, "glGetProgramStageiv", GL_INVALID_ENUM, "invalid shadertype");
+            return;
+    }
+    auto* prog = ctx->objects().programs().get(program);
+    const auto& subs = prog ? prog->resourceSubroutines[si]
+                            : std::vector<appgl::GLProgramResourceEntry>{};
+    const auto& unis = prog ? prog->resourceSubroutineUniforms[si]
+                            : std::vector<appgl::GLProgramResourceEntry>{};
+    auto maxNameLen = [](const std::vector<appgl::GLProgramResourceEntry>& v) -> GLint {
+        GLint m = 0;
+        for (const auto& e : v) {
+            GLint n = static_cast<GLint>(e.name.size() + 1);
+            if (n > m) m = n;
+        }
+        return m;
+    };
+    auto totalLocations = [](const std::vector<appgl::GLProgramResourceEntry>& v) -> GLint {
+        GLint total = 0;
+        for (const auto& e : v) {
+            total += (e.arraySize > 0) ? e.arraySize : 1;
+        }
+        return total;
+    };
     switch (pname) {
-        case GL_ACTIVE_SUBROUTINES:               *values = 0; break;
-        case GL_ACTIVE_SUBROUTINE_UNIFORMS:        *values = 0; break;
-        case GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS: *values = 0; break;
-        case GL_ACTIVE_SUBROUTINE_MAX_LENGTH:      *values = 0; break;
-        case GL_ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH: *values = 0; break;
+        case GL_ACTIVE_SUBROUTINES:
+            *values = static_cast<GLint>(subs.size());
+            break;
+        case GL_ACTIVE_SUBROUTINE_UNIFORMS:
+            *values = static_cast<GLint>(unis.size());
+            break;
+        case GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS:
+            // Array subroutine uniforms each expand to arraySize
+            // locations. CTS `uniformSubroutinesuiv` maxes out at
+            // this count — still > 0 only when the program declared
+            // subroutines. CTS `atomic_counter_buffer` is one caller.
+            *values = totalLocations(unis);
+            break;
+        case GL_ACTIVE_SUBROUTINE_MAX_LENGTH:
+            *values = maxNameLen(subs);
+            break;
+        case GL_ACTIVE_SUBROUTINE_UNIFORM_MAX_LENGTH:
+            *values = maxNameLen(unis);
+            break;
         default:
             recordValidationError(ctx, "glGetProgramStageiv", GL_INVALID_ENUM, "invalid pname");
             return;
     }
-    markProgramFunction(FunctionId::glGetProgramStageiv, "GetProgramStageiv reports 0 subroutines.");
+    markProgramFunction(FunctionId::glGetProgramStageiv, "GetProgramStageiv reads GL 4.0 subroutine program-resource tables.");
     Runtime::shared().recordBootstrapTrace("glGetProgramStageiv(program=" + std::to_string(program) + ", pname=" + std::to_string(pname) + ")");
 }
 

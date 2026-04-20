@@ -693,6 +693,15 @@ struct GLProgramObject {
     std::vector<GLProgramResourceEntry> resourceBufferVariables;
     std::vector<GLProgramResourceEntry> resourceTransformFeedbackVaryings;
     std::vector<GLProgramResourceEntry> resourceTransformFeedbackBuffers;
+    // GL 4.0 subroutine interfaces — per-stage lists of subroutine
+    // implementations and subroutine-uniform bindings. Indexed by
+    // stage (VS=0, TCS=1, TES=2, GS=3, FS=4, CS=5). Populated by
+    // the link-time subroutine scanner (see GLContext.mm). Each
+    // subroutine uniform's `activeVariables` holds the indices of
+    // its compatible subroutines (into resourceSubroutines[stage]),
+    // driving GL_NUM_COMPATIBLE_SUBROUTINES / GL_COMPATIBLE_SUBROUTINES.
+    std::vector<GLProgramResourceEntry> resourceSubroutines[6];
+    std::vector<GLProgramResourceEntry> resourceSubroutineUniforms[6];
 
     // GL 4.3 SSBO binding remapping (block index → user-specified binding).
     std::unordered_map<GLuint, GLuint> ssboBindingRemap;

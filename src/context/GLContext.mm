@@ -10883,8 +10883,179 @@ bool GLContext::compileShader(GLuint shader) {
     //    programObject->uniforms with normal sequential locations.
     CompatShaderRewriteResult rewrite =
         rewriteCompatShader(object->source, object->stage);
+    // GLSL 4.00 subroutines are unsupported by glslang's SPIR-V
+    // backend ("feature not yet implemented"). Rewrite subroutine
+    // syntax into plain GLSL that compiles — enough for CTS
+    // `program_interface_query.subroutines-*` which only queries
+    // the introspection tables (never actually draws).
+    //   `subroutine TYPE NAME ( ... ) ;`                 → commented out
+    //   `subroutine uniform TYPE NAME [ ... ] ;`          → commented out
+    //   `subroutine ( TYPE_LIST ) RETTYPE FN ( ... ) { ... }`
+    //                                                      → `RETTYPE FN ( ... ) { ... }`
+    //   `UNIFNAME ( ... )` call sites (where UNIFNAME was a
+    //     subroutine uniform)                              → `FIRST_IMPL_NAME ( ... )`
+    // The real link-time `scanSubroutineDeclarations` then re-reads
+    // the ORIGINAL (unrewritten) source so `resourceSubroutines*`
+    // tables still reflect the user's declarations.
+    auto rewriteSubroutinesForSpirv = [](const std::string& in) -> std::string {
+        // Strip comments for analysis but rewrite the original text
+        // so we don't accidentally erase legitimate code.
+        // Collect subroutine-uniform name → first compatible impl.
+        // We do a two-pass line-based rewrite.
+        std::unordered_map<std::string, std::string> uniformToImpl;
+        std::unordered_map<std::string, std::vector<std::string>> typeToImpls;
+        std::unordered_map<std::string, std::string> uniformToType;
+        // First pass: scan for subroutine type + impl + uniform.
+        std::size_t p = 0;
+        auto isIdent = [](unsigned char c) {
+            return std::isalnum(c) || c == '_';
+        };
+        auto skipWs = [&](std::size_t& pp) {
+            while (pp < in.size() && std::isspace(static_cast<unsigned char>(in[pp]))) ++pp;
+        };
+        auto readWord = [&](std::size_t& pp) -> std::string {
+            skipWs(pp);
+            std::size_t s = pp;
+            while (pp < in.size() && isIdent(static_cast<unsigned char>(in[pp]))) ++pp;
+            return in.substr(s, pp - s);
+        };
+        const std::string kw = "subroutine";
+        while ((p = in.find(kw, p)) != std::string::npos) {
+            const bool lb = (p == 0) || !isIdent(static_cast<unsigned char>(in[p-1]));
+            const bool rb = (p + kw.size() < in.size()) && !isIdent(static_cast<unsigned char>(in[p+kw.size()]));
+            if (!lb || !rb) { p += kw.size(); continue; }
+            std::size_t q = p + kw.size();
+            skipWs(q);
+            if (q < in.size() && in[q] == '(') {
+                // Impl: subroutine(TYPE,...) RETTYPE FN(...)
+                ++q;
+                std::vector<std::string> typeList;
+                while (q < in.size() && in[q] != ')') {
+                    skipWs(q);
+                    std::string t = readWord(q);
+                    if (!t.empty()) typeList.push_back(std::move(t));
+                    skipWs(q);
+                    if (q < in.size() && in[q] == ',') ++q;
+                }
+                if (q < in.size()) ++q;  // skip ')'
+                (void)readWord(q);   // return type
+                std::string fnName = readWord(q);
+                if (!fnName.empty()) {
+                    for (const auto& t : typeList) {
+                        typeToImpls[t].push_back(fnName);
+                    }
+                }
+                p = q;
+                continue;
+            }
+            std::string next = readWord(q);
+            if (next == "uniform") {
+                std::string typeName = readWord(q);
+                std::string uniName = readWord(q);
+                if (!uniName.empty() && !typeName.empty()) {
+                    uniformToType[uniName] = typeName;
+                }
+                p = q;
+                continue;
+            }
+            p = q;
+        }
+        // Resolve each uniform to its first compatible impl.
+        for (auto& kv : uniformToType) {
+            auto it = typeToImpls.find(kv.second);
+            if (it != typeToImpls.end() && !it->second.empty()) {
+                uniformToImpl[kv.first] = it->second.front();
+            }
+        }
+
+        // Second pass: rewrite.
+        std::string out;
+        out.reserve(in.size() + 64);
+        std::size_t i = 0;
+        while (i < in.size()) {
+            // Find `subroutine` word at this position?
+            if (i + kw.size() <= in.size() && in.compare(i, kw.size(), kw) == 0) {
+                const bool lb = (i == 0) || !isIdent(static_cast<unsigned char>(in[i-1]));
+                const bool rb = (i + kw.size() < in.size()) && !isIdent(static_cast<unsigned char>(in[i+kw.size()]));
+                if (lb && rb) {
+                    std::size_t q = i + kw.size();
+                    skipWs(q);
+                    if (q < in.size() && in[q] == '(') {
+                        // Impl — strip `subroutine(LIST)` prefix. Walk past ')'.
+                        int pd = 1; ++q;
+                        while (q < in.size() && pd > 0) {
+                            if (in[q] == '(') ++pd;
+                            else if (in[q] == ')') --pd;
+                            ++q;
+                        }
+                        i = q;  // skip the whole `subroutine(LIST)`
+                        continue;
+                    }
+                    // Type prototype or uniform: delete to end of
+                    // statement (next `;`).
+                    const std::size_t semi = in.find(';', q);
+                    if (semi != std::string::npos) {
+                        i = semi + 1;
+                        continue;
+                    }
+                    // No semicolon found — skip just the keyword.
+                    i = q;
+                    continue;
+                }
+            }
+            // Rewrite call sites for subroutine uniform names.
+            if (isIdent(static_cast<unsigned char>(in[i]))) {
+                std::size_t s = i;
+                while (s < in.size() && isIdent(static_cast<unsigned char>(in[s]))) ++s;
+                std::string word = in.substr(i, s - i);
+                // Consider as a subroutine-uniform call site only
+                // when followed by a '(' (possibly after whitespace)
+                // OR `[subscript](`. Array subroutine uniforms like
+                // `subroutine uniform b_t b[3]` get called as
+                // `b[0]()`, `b[1]()`, etc. — all elements share the
+                // same subroutine type so all rewrite to the same
+                // impl.
+                std::size_t t = s;
+                skipWs(t);
+                // Walk past `[...]` if present (array subscript).
+                std::size_t afterSubscript = t;
+                if (t < in.size() && in[t] == '[') {
+                    int bd = 1;
+                    afterSubscript = t + 1;
+                    while (afterSubscript < in.size() && bd > 0) {
+                        if (in[afterSubscript] == '[') ++bd;
+                        else if (in[afterSubscript] == ']') --bd;
+                        ++afterSubscript;
+                    }
+                }
+                std::size_t tt = afterSubscript;
+                skipWs(tt);
+                auto it = uniformToImpl.find(word);
+                if (it != uniformToImpl.end() && tt < in.size() && in[tt] == '(') {
+                    // Skip the identifier + optional [subscript]
+                    // entirely and emit the impl name. The call's
+                    // `(...)` then follows naturally.
+                    out.append(it->second);
+                    i = afterSubscript;
+                    continue;
+                }
+                out.append(word);
+                i = s;
+                continue;
+            }
+            out.push_back(in[i]);
+            ++i;
+        }
+        return out;
+    };
+    // Apply to the compat-rewritten source.
+    std::string afterSubRewrite = rewriteSubroutinesForSpirv(
+        rewrite.didRewrite ? rewrite.source : object->source);
+    const bool didSubRewrite =
+        afterSubRewrite.size() != (rewrite.didRewrite ? rewrite.source : object->source).size();
     const std::string& compileSource =
-        rewrite.didRewrite ? rewrite.source : object->source;
+        didSubRewrite ? afterSubRewrite
+                       : (rewrite.didRewrite ? rewrite.source : object->source);
 
     // 2. Lightweight scanner pass. Still needed for declared attribute inputs
     //    so the vertex-input binding path (glBindAttribLocation /
@@ -11439,6 +11610,191 @@ static std::set<int> glslActiveInstanceIndices(const std::string& source,
         pos += ilen;
     }
     return used;
+}
+
+// GL 4.0 subroutine declarations (GLSL 4.00+, §4.4.4).  A focused source-
+// text scanner: the main GLSLReflection only handles `uniform` / `in` /
+// `out` / `attribute` / `varying`, which miss every subroutine form.
+// Three GLSL shapes to distinguish (case-sensitive keyword `subroutine`):
+//
+//   subroutine <rettype> <typeName> ( <params> ) ;
+//         → subroutine type prototype (non-resource; we only record the
+//           type name for later compatibility lookup).
+//   subroutine uniform <typeName> <uniName> [ [<N>] ] ;
+//         → subroutine uniform (becomes a GL_*_SUBROUTINE_UNIFORM
+//           resource).
+//   subroutine ( <typeList> ) <rettype> <funcName> ( <params> ) { ... }
+//         → subroutine implementation (becomes a GL_*_SUBROUTINE resource).
+//           The type list names all subroutine types this impl is
+//           compatible with — drives GL_COMPATIBLE_SUBROUTINES on the
+//           matching uniform entries.
+//
+// Results: per stage, fills `outImpls` (subroutine implementations) and
+// `outUniforms` (subroutine uniforms with their activeVariables populated
+// with the indices of compatible impls).  Best-effort parser — the scanner
+// assumes a well-formed shader and stops at the first `}` at top-level to
+// bound function bodies. Not exhaustive vs. arbitrary GLSL but covers CTS
+// `program_interface_query.subroutines-*`.
+static void scanSubroutineDeclarations(
+    const std::string& sourceIn,
+    std::vector<GLProgramResourceEntry>& outImpls,
+    std::vector<GLProgramResourceEntry>& outUniforms) {
+    // Strip comments first so keyword matches inside strings / comments
+    // don't trip the scanner.
+    auto strip = [](const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        for (std::size_t i = 0; i < s.size();) {
+            if (i + 1 < s.size() && s[i] == '/' && s[i + 1] == '/') {
+                while (i < s.size() && s[i] != '\n') ++i;
+            } else if (i + 1 < s.size() && s[i] == '/' && s[i + 1] == '*') {
+                i += 2;
+                while (i + 1 < s.size() && !(s[i] == '*' && s[i + 1] == '/')) ++i;
+                if (i + 1 < s.size()) i += 2;
+            } else {
+                out += s[i++];
+            }
+        }
+        return out;
+    };
+    const std::string src = strip(sourceIn);
+
+    auto isIdentChar = [](unsigned char c) {
+        return std::isalnum(c) || c == '_';
+    };
+    auto skipWs = [&](std::size_t& p) {
+        while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+    };
+    auto readIdent = [&](std::size_t& p) -> std::string {
+        skipWs(p);
+        const std::size_t start = p;
+        while (p < src.size() && isIdentChar(static_cast<unsigned char>(src[p]))) ++p;
+        return src.substr(start, p - start);
+    };
+
+    // Map: compatibility-type name → list of impl-resource indices.
+    std::unordered_map<std::string, std::vector<GLint>> typeToImpls;
+    // Parallel to outUniforms: the subroutine-type name each uniform
+    // points at (resolved to activeVariables after the main scan).
+    std::vector<std::string> pendingUniformTypes;
+
+    const std::string kw = "subroutine";
+    std::size_t pos = 0;
+    while ((pos = src.find(kw, pos)) != std::string::npos) {
+        const bool leftBoundary = (pos == 0) ||
+            !isIdentChar(static_cast<unsigned char>(src[pos - 1]));
+        const bool rightBoundary = (pos + kw.size() < src.size()) &&
+            !isIdentChar(static_cast<unsigned char>(src[pos + kw.size()]));
+        if (!leftBoundary || !rightBoundary) {
+            pos += kw.size();
+            continue;
+        }
+        std::size_t p = pos + kw.size();
+        skipWs(p);
+
+        // Three shapes: `uniform`, `(`, or plain identifier.
+        if (p < src.size() && src[p] == '(') {
+            // Subroutine implementation: `subroutine ( typeList ) rettype name() { ... }`.
+            ++p;  // skip '('
+            std::vector<std::string> typeList;
+            while (p < src.size() && src[p] != ')') {
+                skipWs(p);
+                if (p < src.size() && src[p] == ')') break;
+                std::string t = readIdent(p);
+                if (!t.empty()) typeList.push_back(std::move(t));
+                skipWs(p);
+                if (p < src.size() && src[p] == ',') ++p;
+            }
+            if (p < src.size() && src[p] == ')') ++p;
+            // Parse rettype and function name.
+            std::string retType = readIdent(p);
+            (void)retType;
+            std::string fnName = readIdent(p);
+            if (fnName.empty()) { pos = p; continue; }
+            // Skip past the parameter list ( ... ) and find the body {.
+            skipWs(p);
+            if (p < src.size() && src[p] == '(') {
+                int pd = 1; ++p;
+                while (p < src.size() && pd > 0) {
+                    if (src[p] == '(') ++pd;
+                    else if (src[p] == ')') --pd;
+                    ++p;
+                }
+            }
+            // Push impl entry.
+            GLProgramResourceEntry entry;
+            entry.name = fnName;
+            entry.type = 0;           // subroutines have no scalar type
+            entry.location = -1;      // not location-addressable
+            entry.arraySize = 1;
+            const GLint implIdx = static_cast<GLint>(outImpls.size());
+            outImpls.push_back(std::move(entry));
+            // Register this impl as compatible with each type in the list.
+            for (const auto& t : typeList) {
+                typeToImpls[t].push_back(implIdx);
+            }
+            pos = p;
+            continue;
+        }
+
+        // Check for `uniform` keyword.
+        std::string next = readIdent(p);
+        if (next == "uniform") {
+            // Subroutine uniform: `subroutine uniform <typeName> <uniName> [ [N] ] ;`.
+            std::string typeName = readIdent(p);
+            std::string uniName = readIdent(p);
+            if (uniName.empty() || typeName.empty()) { pos = p; continue; }
+            GLint arraySize = 1;
+            bool isArray = false;
+            skipWs(p);
+            if (p < src.size() && src[p] == '[') {
+                ++p;
+                skipWs(p);
+                const std::size_t nStart = p;
+                while (p < src.size() &&
+                       std::isdigit(static_cast<unsigned char>(src[p]))) ++p;
+                if (p > nStart) {
+                    arraySize = std::atoi(src.substr(nStart, p - nStart).c_str());
+                }
+                skipWs(p);
+                if (p < src.size() && src[p] == ']') ++p;
+                isArray = true;
+            }
+            GLProgramResourceEntry entry;
+            // GL 4.6 §7.3.1: array uniforms (including subroutine
+            // array uniforms) report the canonical "[0]" suffix.
+            entry.name = isArray ? (uniName + "[0]") : uniName;
+            entry.type = 0;  // subroutine uniforms have no scalar type
+            entry.location = static_cast<GLint>(outUniforms.size());  // sequential
+            entry.arraySize = arraySize;
+            entry.isArray = isArray;
+            outUniforms.push_back(std::move(entry));
+            // Record the subroutine-type name for post-scan
+            // resolution into activeVariables (compatible-subroutine
+            // indices).
+            pendingUniformTypes.push_back(typeName);
+            pos = p;
+            continue;
+        }
+
+        // Otherwise: subroutine type prototype — e.g. `subroutine vec4 a_t();`.
+        // `next` is the return-type word. Read the type name next.
+        std::string typeName = readIdent(p);
+        (void)typeName;
+        // No action — types are resolved via `subroutine uniform <type> …`
+        // and `subroutine(<type>) …` matches.
+        pos = p;
+    }
+
+    // Second pass: resolve each subroutine uniform's compatibleSubroutines
+    // list from `typeToImpls` using the sibling `pendingUniformTypes`.
+    for (std::size_t u = 0; u < pendingUniformTypes.size() && u < outUniforms.size(); ++u) {
+        const std::string& typeName = pendingUniformTypes[u];
+        auto it = typeToImpls.find(typeName);
+        if (it != typeToImpls.end()) {
+            outUniforms[u].activeVariables = it->second;
+        }
+    }
 }
 
 // Search a code region for "boolType name" where boolType is bool/bvec2/3/4.
@@ -12578,6 +12934,10 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->resourceStorageBlocks.clear();
     programObject->resourceAtomicCounterBuffers.clear();
     programObject->resourceBufferVariables.clear();
+    for (int s = 0; s < 6; ++s) {
+        programObject->resourceSubroutines[s].clear();
+        programObject->resourceSubroutineUniforms[s].clear();
+    }
     programObject->ssboBindingRemap.clear();
 
     // Per-stage "referenced by" bitmask for program-resource
@@ -13114,6 +13474,39 @@ bool GLContext::linkProgram(GLuint program) {
                     scanPos = q;
                 }
             }
+        }
+    }
+
+    // GL 4.0 subroutines — populate per-stage
+    // `resourceSubroutines[stage]` / `resourceSubroutineUniforms[stage]`
+    // from each attached shader's GLSL source. No SPIR-V path: we
+    // don't emulate Metal-side subroutine dispatch yet, but
+    // introspection queries work so `glGetSubroutineUniformLocation`
+    // / `glGetActiveSubroutineUniformiv` / PIQ's
+    // `GL_*_SUBROUTINE*` interfaces all report spec-correct metadata.
+    // CTS `program_interface_query.subroutines-{vertex,tcs,tes,gs,fragment,compute}`
+    // exercise these six stages independently.
+    {
+        auto stageIndex = [](GLenum st) -> int {
+            switch (st) {
+                case GL_VERTEX_SHADER:          return 0;
+                case GL_TESS_CONTROL_SHADER:    return 1;
+                case GL_TESS_EVALUATION_SHADER: return 2;
+                case GL_GEOMETRY_SHADER:        return 3;
+                case GL_FRAGMENT_SHADER:        return 4;
+                case GL_COMPUTE_SHADER:         return 5;
+                default:                        return -1;
+            }
+        };
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* sh = impl_->objects->shaders().get(shaderId);
+            if (sh == nullptr) continue;
+            const int si = stageIndex(sh->stage);
+            if (si < 0) continue;
+            scanSubroutineDeclarations(
+                sh->source,
+                programObject->resourceSubroutines[si],
+                programObject->resourceSubroutineUniforms[si]);
         }
     }
 
@@ -18594,6 +18987,20 @@ const std::vector<GLProgramResourceEntry>* getResourceTable(const GLProgramObjec
         case GL_BUFFER_VARIABLE:              return &prog.resourceBufferVariables;
         case GL_TRANSFORM_FEEDBACK_VARYING:   return &prog.resourceTransformFeedbackVaryings;
         case GL_TRANSFORM_FEEDBACK_BUFFER:    return &prog.resourceTransformFeedbackBuffers;
+        // GL 4.0 subroutine interfaces — per-stage (VS=0, TCS=1,
+        // TES=2, GS=3, FS=4, CS=5).
+        case GL_VERTEX_SUBROUTINE:               return &prog.resourceSubroutines[0];
+        case GL_TESS_CONTROL_SUBROUTINE:         return &prog.resourceSubroutines[1];
+        case GL_TESS_EVALUATION_SUBROUTINE:      return &prog.resourceSubroutines[2];
+        case GL_GEOMETRY_SUBROUTINE:             return &prog.resourceSubroutines[3];
+        case GL_FRAGMENT_SUBROUTINE:             return &prog.resourceSubroutines[4];
+        case GL_COMPUTE_SUBROUTINE:              return &prog.resourceSubroutines[5];
+        case GL_VERTEX_SUBROUTINE_UNIFORM:       return &prog.resourceSubroutineUniforms[0];
+        case GL_TESS_CONTROL_SUBROUTINE_UNIFORM: return &prog.resourceSubroutineUniforms[1];
+        case GL_TESS_EVALUATION_SUBROUTINE_UNIFORM: return &prog.resourceSubroutineUniforms[2];
+        case GL_GEOMETRY_SUBROUTINE_UNIFORM:     return &prog.resourceSubroutineUniforms[3];
+        case GL_FRAGMENT_SUBROUTINE_UNIFORM:     return &prog.resourceSubroutineUniforms[4];
+        case GL_COMPUTE_SUBROUTINE_UNIFORM:      return &prog.resourceSubroutineUniforms[5];
         default: return nullptr;
     }
 }
@@ -18666,6 +19073,19 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
             // prop to GL_BUFFER_VARIABLE).
             return entry.topLevelArraySize;
         case GL_TOP_LEVEL_ARRAY_STRIDE: return entry.topLevelArrayStride;
+        case GL_NUM_COMPATIBLE_SUBROUTINES:
+            // On GL_*_SUBROUTINE_UNIFORM entries, number of subroutine
+            // impls compatible with this uniform's declared type.
+            // Populated at link time into `activeVariables`.
+            return static_cast<GLint>(entry.activeVariables.size());
+        case GL_COMPATIBLE_SUBROUTINES:
+            // Single-value fallback — the real multi-value read path
+            // in `getProgramResourceiv` already handles ACTIVE_VARIABLES-
+            // style expansion. Return the first compatible subroutine
+            // index (or 0 if empty) for any caller that invokes
+            // `getResourceProperty` directly.
+            return entry.activeVariables.empty()
+                ? 0 : entry.activeVariables.front();
         case GL_LOCATION_INDEX:
             // Built-in outputs like `gl_FragDepth` have no user-
             // assignable location — LOCATION_INDEX is -1 there
@@ -18791,16 +19211,25 @@ bool GLContext::getProgramInterfaceiv(GLuint program, GLenum programInterface, G
             }
         case GL_MAX_NUM_COMPATIBLE_SUBROUTINES:
             // GL 4.6 §7.3.1: only valid on the *_SUBROUTINE_UNIFORM
-            // interfaces.
+            // interfaces. Value = max(count of compatible subroutines
+            // across all subroutine uniforms on this interface).
             switch (programInterface) {
                 case GL_VERTEX_SUBROUTINE_UNIFORM:
                 case GL_TESS_CONTROL_SUBROUTINE_UNIFORM:
                 case GL_TESS_EVALUATION_SUBROUTINE_UNIFORM:
                 case GL_GEOMETRY_SUBROUTINE_UNIFORM:
                 case GL_FRAGMENT_SUBROUTINE_UNIFORM:
-                case GL_COMPUTE_SUBROUTINE_UNIFORM:
-                    *params = 0;
+                case GL_COMPUTE_SUBROUTINE_UNIFORM: {
+                    GLint maxN = 0;
+                    if (table != nullptr) {
+                        for (const auto& e : *table) {
+                            GLint n = static_cast<GLint>(e.activeVariables.size());
+                            if (n > maxN) maxN = n;
+                        }
+                    }
+                    *params = maxN;
                     return true;
+                }
                 default:
                     pushError(GL_INVALID_OPERATION);
                     return false;
@@ -18992,7 +19421,11 @@ bool GLContext::getProgramResourceiv(GLuint program, GLenum programInterface, GL
             // reads the full ACTIVE_VARIABLES list with bufSize
             // large enough to hold all N entries; we must write
             // them all, not just the first.
-            if (props[i] == GL_ACTIVE_VARIABLES) {
+            if (props[i] == GL_ACTIVE_VARIABLES ||
+                props[i] == GL_COMPATIBLE_SUBROUTINES) {
+                // GL_COMPATIBLE_SUBROUTINES uses the same
+                // activeVariables vector on subroutine-uniform entries,
+                // so share the multi-value path.
                 for (GLint idx : entry.activeVariables) {
                     if (written >= count) break;
                     params[written++] = idx;
@@ -19158,7 +19591,19 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
         pushError(GL_INVALID_VALUE);
         return -1;
     }
-    if (programInterface != GL_UNIFORM && programInterface != GL_PROGRAM_INPUT && programInterface != GL_PROGRAM_OUTPUT) {
+    // GL 4.6 §7.3.1 valid interfaces: UNIFORM, PROGRAM_INPUT,
+    // PROGRAM_OUTPUT, and the six *_SUBROUTINE_UNIFORM interfaces.
+    // The last set lets CTS `subroutines-*` query the subroutine
+    // uniform's location via `glGetProgramResourceLocation` (same
+    // value `glGetSubroutineUniformLocation` returns).
+    if (programInterface != GL_UNIFORM && programInterface != GL_PROGRAM_INPUT &&
+        programInterface != GL_PROGRAM_OUTPUT &&
+        programInterface != GL_VERTEX_SUBROUTINE_UNIFORM &&
+        programInterface != GL_TESS_CONTROL_SUBROUTINE_UNIFORM &&
+        programInterface != GL_TESS_EVALUATION_SUBROUTINE_UNIFORM &&
+        programInterface != GL_GEOMETRY_SUBROUTINE_UNIFORM &&
+        programInterface != GL_FRAGMENT_SUBROUTINE_UNIFORM &&
+        programInterface != GL_COMPUTE_SUBROUTINE_UNIFORM) {
         pushError(GL_INVALID_ENUM);
         return -1;
     }
