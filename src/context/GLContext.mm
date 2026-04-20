@@ -12122,14 +12122,26 @@ bool GLContext::linkProgram(GLuint program) {
         }
 
         // Build lookup of outputs from the last vertex-processing stage.
-        std::unordered_map<std::string, GLenum> outputTypeMap;
+        // Track both type and array-size so TF varyings that capture a
+        // whole array (`out float b[2]` captured by varying name "b")
+        // can report GL_ARRAY_SIZE correctly, and array-element captures
+        // (`b[0]` / `b[1]`) can strip the subscript, validate the index,
+        // and report size 1. CTS
+        // `program_interface_query.transform-feedback-types` asserts
+        // both shapes.
+        struct OutputInfo { GLenum type = 0; GLint arraySize = 1; bool isArray = false; };
+        std::unordered_map<std::string, OutputInfo> outputTypeMap;
         for (const auto& decl : xfbStage->declaredOutputs) {
-            outputTypeMap[decl.name] = decl.type;
+            OutputInfo info;
+            info.type = decl.type;
+            info.arraySize = decl.arraySize > 0 ? decl.arraySize : 1;
+            info.isArray = decl.isArray;
+            outputTypeMap[decl.name] = info;
         }
         // Built-in outputs that are always available for capture.
-        outputTypeMap["gl_Position"] = GL_FLOAT_VEC4;
-        outputTypeMap["gl_PointSize"] = GL_FLOAT;
-        outputTypeMap["gl_ClipDistance"] = GL_FLOAT;
+        outputTypeMap["gl_Position"]     = OutputInfo{GL_FLOAT_VEC4, 1, false};
+        outputTypeMap["gl_PointSize"]    = OutputInfo{GL_FLOAT, 1, false};
+        outputTypeMap["gl_ClipDistance"] = OutputInfo{GL_FLOAT, 1, false};
 
         // Special interleaved-mode names that are NOT real varyings:
         auto isSpecialName = [](const std::string& n) {
@@ -12212,8 +12224,29 @@ bool GLContext::linkProgram(GLuint program) {
             }
 
             GLenum resolvedType = GL_FLOAT; // fallback
+            GLint resolvedArraySize = 1;
+            bool captureIsArrayElement = false;
+            // Array-element capture: `b[0]` / `b[1]` reference a single
+            // element of `out float b[2]`. Strip the trailing `[N]`
+            // subscript and look up the base name; size is 1 per GL 4.6
+            // §11.1.2.1.
+            std::string lookupName = varyName;
+            {
+                const auto bracket = varyName.rfind('[');
+                if (bracket != std::string::npos && !varyName.empty() &&
+                    varyName.back() == ']') {
+                    const std::string idxStr =
+                        varyName.substr(bracket + 1, varyName.size() - bracket - 2);
+                    if (!idxStr.empty() &&
+                        std::all_of(idxStr.begin(), idxStr.end(),
+                                    [](char c) { return std::isdigit(static_cast<unsigned char>(c)); })) {
+                        lookupName = varyName.substr(0, bracket);
+                        captureIsArrayElement = true;
+                    }
+                }
+            }
             if (haveOutputDecls) {
-                auto it = outputTypeMap.find(varyName);
+                auto it = outputTypeMap.find(lookupName);
                 if (it == outputTypeMap.end()) {
                     programObject->linkLog = "transform feedback varying '" + varyName +
                         "' is not an output of the last vertex-processing stage";
@@ -12222,7 +12255,11 @@ bool GLContext::linkProgram(GLuint program) {
                     });
                     return false;
                 }
-                resolvedType = it->second;
+                resolvedType = it->second.type;
+                // Whole-array capture → report the declared array size.
+                // Single-element capture → report 1.
+                resolvedArraySize = (captureIsArrayElement || !it->second.isArray)
+                    ? 1 : it->second.arraySize;
             }
 
             // (3) Duplicate check (applies to both interleaved and separate).
@@ -12235,12 +12272,12 @@ bool GLContext::linkProgram(GLuint program) {
                 return false;
             }
 
-            totalComponents += glTypeComponents(resolvedType);
+            totalComponents += glTypeComponents(resolvedType) * resolvedArraySize;
 
             GLProgramResourceEntry entry;
             entry.name = varyName;
             entry.type = resolvedType;
-            entry.arraySize = 1;
+            entry.arraySize = resolvedArraySize;
             programObject->resourceTransformFeedbackVaryings.push_back(std::move(entry));
         }
 
