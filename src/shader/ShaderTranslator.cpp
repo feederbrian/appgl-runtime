@@ -1151,6 +1151,15 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             const std::string typeName = compiler.get_name(ssboType.self);
             rb.name = typeName.empty() ? ssbo.name : typeName;
             rb.hasInstanceName = (!typeName.empty() && ssbo.name != typeName);
+            // Block-array dimension: `buffer B { ... } e[2];` → 2.
+            // Parallel to the UBO reflection path above. Drives the
+            // per-instance block-entry expansion in mergeStorageBlocks.
+            {
+                const auto& varType = compiler.get_type(ssbo.type_id);
+                if (!varType.array.empty()) {
+                    rb.blockArraySize = varType.array[0];
+                }
+            }
             // byteSize may be zero if the block contains a trailing
             // unbounded array (common for SSBOs) — callers must not
             // rely on it for draw-time binding size.
@@ -1159,35 +1168,112 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             } catch (...) {
                 rb.byteSize = 0;
             }
-            // Enumerate struct members so the runtime can introspect
-            // SSBO layout (needed by glGetProgramResourceiv /
-            // GL_BUFFER_VARIABLE queries and by the CPU-side verify
-            // path for SSBO-heavy tests).
-            for (std::uint32_t mi = 0; mi < ssboType.member_types.size(); ++mi) {
-                ShaderReflection::UniformMember member;
-                member.name = compiler.get_member_name(ssboType.self, mi);
-                try {
-                    member.offset = compiler.type_struct_member_offset(ssboType, mi);
-                    member.size = compiler.get_declared_struct_member_size(ssboType, mi);
-                } catch (...) {
-                    // Trailing unbounded-array member throws — fall back
-                    // to zero-marked offset/size so the entry still
-                    // appears in the resource table.
-                    member.offset = 0;
-                    member.size = 0;
+            // Recursively flatten struct members. GL 4.6 §7.3.1.1:
+            // each scalar/vector/matrix leaf is a separate buffer
+            // variable. For `buffer B { UU a[3]; mat4 b; }`, UU
+            // containing `U a;` containing `vec4 b;`, the flat
+            // output contains "a[0].a.b", "a[0].a.c", etc. alongside
+            // "b". CTS `program_interface_query.ssb-types` exercises
+            // the nested case.
+            // `topLevelArraySize` plumbed through recursion so every
+            // nested leaf reports the GL 4.6 §7.3.1
+            // GL_TOP_LEVEL_ARRAY_SIZE of its outermost block member.
+            // Default 1 (scalar top). Set when we enter an array-of-
+            // struct at the TOP LEVEL only (isTopLevel=true) so that
+            // deeper arrays don't overwrite it.
+            std::function<void(const spirv_cross::SPIRType&, const std::string&, std::size_t, GLint, bool)>
+                flattenSSBO = [&](const spirv_cross::SPIRType& parentType,
+                                   const std::string& prefix,
+                                   std::size_t baseOffset,
+                                   GLint topLevelArraySize,
+                                   bool isTopLevel) {
+                for (std::uint32_t mi = 0; mi < parentType.member_types.size(); ++mi) {
+                    const auto& memberType = compiler.get_type(parentType.member_types[mi]);
+                    std::string memberName = compiler.get_member_name(parentType.self, mi);
+                    std::size_t memberOffset = baseOffset;
+                    try {
+                        memberOffset += compiler.type_struct_member_offset(parentType, mi);
+                    } catch (...) { /* unbounded-tail member — stays at baseOffset */ }
+
+                    // Compute this member's effective top-level size:
+                    // - at the top level, it's the member's own array
+                    //   size (or 1 if not an array).
+                    // - unbounded top-level arrays (`data[]`) report
+                    //   1 per GL 4.6 §7.3.1 ("If the top-level member
+                    //   is an unsized array, the value returned is 1").
+                    // - below the top level, inherit the incoming value.
+                    GLint effTopLevel = topLevelArraySize;
+                    if (isTopLevel) {
+                        if (memberType.array.empty()) {
+                            effTopLevel = 1;
+                        } else if (memberType.array[0] > 0) {
+                            effTopLevel = static_cast<GLint>(memberType.array[0]);
+                        } else {
+                            effTopLevel = 1;  // unbounded top-level array
+                        }
+                    }
+
+                    // Recurse into nested struct members.
+                    if (memberType.basetype == spirv_cross::SPIRType::Struct &&
+                        memberType.columns == 1 && memberType.array.empty()) {
+                        std::string childPrefix = prefix.empty()
+                            ? memberName : (prefix + "." + memberName);
+                        flattenSSBO(memberType, childPrefix, memberOffset, effTopLevel, false);
+                        continue;
+                    }
+                    // Recurse into arrays of structs.
+                    if (memberType.basetype == spirv_cross::SPIRType::Struct &&
+                        !memberType.array.empty() && memberType.array[0] > 0) {
+                        std::size_t elemStride = 0;
+                        try {
+                            elemStride = compiler.get_declared_struct_member_size(parentType, mi)
+                                / memberType.array[0];
+                        } catch (...) {}
+                        for (std::uint32_t ai = 0; ai < memberType.array[0]; ++ai) {
+                            std::string elemPrefix = (prefix.empty() ? memberName : (prefix + "." + memberName))
+                                + "[" + std::to_string(ai) + "]";
+                            flattenSSBO(memberType, elemPrefix, memberOffset + ai * elemStride,
+                                        effTopLevel, false);
+                        }
+                        continue;
+                    }
+
+                    ShaderReflection::UniformMember member;
+                    member.name = prefix.empty()
+                        ? memberName : (prefix + "." + memberName);
+                    member.offset = memberOffset;
+                    try {
+                        member.size = compiler.get_declared_struct_member_size(parentType, mi);
+                    } catch (...) {
+                        member.size = 0;  // unbounded tail
+                    }
+                    member.type = spirvBaseTypeToGL(memberType);
+                    member.topLevelArraySize = effTopLevel;
+                    // Row-major decoration (matrix members only).
+                    if (memberType.columns > 1) {
+                        member.isRowMajor = compiler.has_member_decoration(
+                            parentType.self, mi, spv::DecorationRowMajor);
+                    }
+                    if (!memberType.array.empty()) {
+                        member.isArray = true;
+                        member.arraySize = memberType.array[0];  // 0 for unbounded
+                    }
+                    if (compiler.has_member_decoration(parentType.self, mi,
+                            spv::DecorationArrayStride)) {
+                        member.arrayStride = static_cast<GLint>(
+                            compiler.get_member_decoration(parentType.self, mi,
+                                spv::DecorationArrayStride));
+                    }
+                    if (compiler.has_member_decoration(parentType.self, mi,
+                            spv::DecorationMatrixStride)) {
+                        member.matrixStride = static_cast<GLint>(
+                            compiler.get_member_decoration(parentType.self, mi,
+                                spv::DecorationMatrixStride));
+                    }
+                    rb.members.push_back(std::move(member));
                 }
-                const auto& memberType = compiler.get_type(ssboType.member_types[mi]);
-                member.type = spirvBaseTypeToGL(memberType);
-                // Array info: sized → arraySize = dim[0],
-                // unbounded (`vec4 data[]`) → arraySize = 0 but
-                // isArray = true. Non-array members leave both
-                // at the default zero / false.
-                if (!memberType.array.empty()) {
-                    member.isArray = true;
-                    member.arraySize = memberType.array[0];  // 0 for unbounded
-                }
-                rb.members.push_back(std::move(member));
-            }
+            };
+            flattenSSBO(ssboType, "", 0, 1, true);
             result.storageBuffers.push_back(std::move(rb));
         }
 

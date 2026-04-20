@@ -451,6 +451,12 @@ struct GLProgramResourceEntry {
     // its ATOMIC_COUNTER_BUFFER binding (from
     // `layout(offset=N)`). -1 for non-atomic uniforms.
     GLint atomicCounterOffset = -1;
+    // GL 4.6 §7.3.1 `GL_TOP_LEVEL_ARRAY_SIZE` for a buffer variable
+    // (SSBO member): the number of active array elements of the
+    // top-level block member that contains this variable. 1 for
+    // scalar top-level members, N for `TopType a[N]`, 0 for
+    // unbounded. Only meaningful on GL_BUFFER_VARIABLE entries.
+    GLint topLevelArraySize = 1;
 };
 
 // Cached uniform locations for the synthesized `appgl_*` fixed-function

@@ -71,6 +71,13 @@ struct ShaderReflection {
         // (column_major) (`GL_MATRIX_STRIDE`). For non-matrix
         // members, 0.
         GLint matrixStride = 0;
+        // GL 4.6 §7.3.1 `GL_TOP_LEVEL_ARRAY_SIZE`: for an SSBO
+        // buffer variable, the array size of the top-level block
+        // member that contains it. `buffer B { UU a[3]; }` has
+        // every leaf of `a[i].…` reporting top_level=3;
+        // `buffer B { mat4 b; }` has b reporting 1.
+        // Default 1 (non-array / scalar top).
+        GLint topLevelArraySize = 1;
     };
 
     struct ResourceBinding {

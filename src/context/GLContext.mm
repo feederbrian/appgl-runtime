@@ -11157,27 +11157,36 @@ bool GLContext::detachShader(GLuint program, GLuint shader) {
 // (npos, npos) if not found.
 static std::pair<std::size_t, std::size_t>
 findBlockBody(const std::string& source, const std::string& blockName) {
-    const std::string token = "uniform " + blockName;
-    std::size_t pos = 0;
-    while (pos < source.size()) {
-        pos = source.find(token, pos);
-        if (pos == std::string::npos) return {std::string::npos, std::string::npos};
-        std::size_t end = pos + token.size();
-        if (end < source.size() && (std::isalnum(source[end]) || source[end] == '_')) {
-            pos = end;
-            continue;
+    // Try both "uniform <block>" (UBO) and "buffer <block>" (SSBO).
+    // A block type name is scoped per-kind, so the first match of
+    // either keyword+name combo is the right one.
+    const std::array<std::string, 2> tokens = {
+        std::string("uniform ") + blockName,
+        std::string("buffer ") + blockName,
+    };
+    for (const auto& token : tokens) {
+        std::size_t pos = 0;
+        while (pos < source.size()) {
+            pos = source.find(token, pos);
+            if (pos == std::string::npos) break;
+            std::size_t end = pos + token.size();
+            if (end < source.size() &&
+                (std::isalnum(static_cast<unsigned char>(source[end])) || source[end] == '_')) {
+                pos = end;
+                continue;
+            }
+            std::size_t bracePos = source.find('{', end);
+            if (bracePos == std::string::npos) break;
+            int depth = 1;
+            std::size_t cur = bracePos + 1;
+            while (cur < source.size() && depth > 0) {
+                if (source[cur] == '{') ++depth;
+                else if (source[cur] == '}') --depth;
+                ++cur;
+            }
+            // cur is right after the closing '}'. Body is [bracePos+1, cur-2].
+            return {bracePos + 1, cur - 1};
         }
-        std::size_t bracePos = source.find('{', end);
-        if (bracePos == std::string::npos) return {std::string::npos, std::string::npos};
-        int depth = 1;
-        std::size_t cur = bracePos + 1;
-        while (cur < source.size() && depth > 0) {
-            if (source[cur] == '{') ++depth;
-            else if (source[cur] == '}') --depth;
-            ++cur;
-        }
-        // cur is right after the closing '}'. Body is [bracePos+1, cur-2].
-        return {bracePos + 1, cur - 1};
     }
     return {std::string::npos, std::string::npos};
 }
@@ -13944,7 +13953,8 @@ bool GLContext::linkProgram(GLuint program) {
         // glShaderStorageBlockBinding hits the range check in
         // shaderStorageBlockBinding() and silently drops the remap.
         auto mergeStorageBlocks = [&](const std::vector<ShaderReflection::ResourceBinding>& blocks,
-                                       GLbitfield stageBit) {
+                                       GLbitfield stageBit,
+                                       const std::string& glslSource) {
             for (const auto& block : blocks) {
                 // Track the per-stage referenced bit ONLY when the
                 // block is live in this stage's SPIR-V — a declared-
@@ -13953,37 +13963,81 @@ bool GLContext::linkProgram(GLuint program) {
                 // `program_resource.program_resource` expects
                 // `Ids` (GS-declared, GS-unused) to have
                 // GL_REFERENCED_BY_GEOMETRY_SHADER = FALSE.
-                const GLbitfield effStageBit = block.active ? stageBit : 0;
-                auto existing = std::find_if(
-                    programObject->resourceStorageBlocks.begin(),
-                    programObject->resourceStorageBlocks.end(),
-                    [&](const GLProgramResourceEntry& e) { return e.name == block.name; });
-                GLint blockIdx = -1;
-                if (existing != programObject->resourceStorageBlocks.end()) {
-                    existing->referencedBy |= effStageBit;
-                    blockIdx = static_cast<GLint>(existing - programObject->resourceStorageBlocks.begin());
-                } else {
+                const GLbitfield blockStageBit = block.active ? stageBit : 0;
+                const bool hasInstance =
+                    glslBlockHasInstanceName(glslSource, block.name);
+                const std::string instanceName = hasInstance
+                    ? glslBlockInstanceName(glslSource, block.name)
+                    : std::string();
+                const std::set<int> usedInstanceIndices =
+                    !instanceName.empty()
+                        ? glslActiveInstanceIndices(glslSource, instanceName)
+                        : std::set<int>();
+                const bool useInstanceNarrowing = !usedInstanceIndices.empty();
+
+                const int numInstances = (block.blockArraySize > 0)
+                    ? static_cast<int>(block.blockArraySize) : 1;
+                const bool isBlockArray = (block.blockArraySize > 0);
+
+                // Create one block entry per array instance. For
+                // non-array blocks, numInstances=1 and we keep the
+                // plain name. CTS `ssb-types` declares
+                // `TrickyBuffer ... } e[2];` and asserts both
+                // `TrickyBuffer[0]` and `TrickyBuffer[1]` appear
+                // in GL_SHADER_STORAGE_BLOCK.
+                GLint firstBlockIdx = -1;
+                GLbitfield firstInstStageBit = blockStageBit;
+                bool anyNew = false;
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    GLbitfield effStageBit = blockStageBit;
+                    if (useInstanceNarrowing &&
+                        usedInstanceIndices.count(inst) == 0) {
+                        effStageBit = 0;
+                    }
+                    if (inst == 0) firstInstStageBit = effStageBit;
+                    std::string entryName = block.name;
+                    if (isBlockArray) {
+                        entryName += "[" + std::to_string(inst) + "]";
+                    }
+                    auto existing = std::find_if(
+                        programObject->resourceStorageBlocks.begin(),
+                        programObject->resourceStorageBlocks.end(),
+                        [&](const GLProgramResourceEntry& e) { return e.name == entryName; });
+                    if (existing != programObject->resourceStorageBlocks.end()) {
+                        existing->referencedBy |= effStageBit;
+                        if (inst == 0) {
+                            firstBlockIdx = static_cast<GLint>(
+                                existing - programObject->resourceStorageBlocks.begin());
+                        }
+                        continue;
+                    }
+                    anyNew = true;
                     GLProgramResourceEntry entry;
-                    entry.name = block.name;
+                    entry.name = std::move(entryName);
                     entry.type = 0;
-                    entry.location = static_cast<GLint>(block.glBinding);
+                    entry.location = static_cast<GLint>(block.glBinding + inst);
                     entry.offset = static_cast<GLint>(block.byteSize);
                     entry.arraySize = 1;
                     entry.referencedBy = effStageBit;
                     programObject->resourceStorageBlocks.push_back(std::move(entry));
-                    blockIdx = static_cast<GLint>(programObject->resourceStorageBlocks.size() - 1);
+                    if (inst == 0) {
+                        firstBlockIdx = static_cast<GLint>(
+                            programObject->resourceStorageBlocks.size() - 1);
+                    }
                 }
+                if (!anyNew) continue;
+
                 // Populate buffer-variable entries for each SSBO member
                 // so glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...) can
                 // find "BlockName.memberName" — per GL 4.6 §7.3.1.1 the
                 // buffer-variable interface enumerates active SSBO
-                // members. Dedup by name (OR stage bits on re-entry)
-                // so a block declared in multiple stages collapses to
-                // one entry per member. CTS
-                // `program_resource.program_resource` expects
-                // "Positions.position" (GS-referenced) to be queryable.
+                // members. Names are prefixed with the block TYPE name
+                // when the block declaration has an instance name
+                // (`} e[2];` or `} d;`); otherwise bare member names.
                 for (const auto& member : block.members) {
-                    std::string bvName = block.name + "." + member.name;
+                    std::string bvName = hasInstance
+                        ? (block.name + "." + member.name)
+                        : member.name;
                     // GL 4.6 §7.3.1: array members (including
                     // unbounded `data[]` in SSBOs) get the "[0]"
                     // suffix. `member.isArray` covers both sized
@@ -13996,7 +14050,7 @@ bool GLContext::linkProgram(GLuint program) {
                         [&](const GLProgramResourceEntry& e) { return e.name == bvName; });
                     GLint bvIndex = -1;
                     if (bvIt != programObject->resourceBufferVariables.end()) {
-                        bvIt->referencedBy |= effStageBit;
+                        bvIt->referencedBy |= firstInstStageBit;
                         bvIndex = static_cast<GLint>(bvIt - programObject->resourceBufferVariables.begin());
                     } else {
                         GLProgramResourceEntry bv;
@@ -14006,11 +14060,12 @@ bool GLContext::linkProgram(GLuint program) {
                         bv.offset = static_cast<GLint>(member.offset);
                         bv.arraySize = static_cast<GLint>(member.arraySize);
                         bv.isArray = member.isArray;
-                        bv.blockIndex = blockIdx;
-                        bv.referencedBy = effStageBit;
+                        bv.blockIndex = firstBlockIdx;
+                        bv.referencedBy = firstInstStageBit;
                         bv.isRowMajor = member.isRowMajor;
                         bv.arrayStride = member.arrayStride;
                         bv.matrixStride = member.matrixStride;
+                        bv.topLevelArraySize = member.topLevelArraySize;
                         programObject->resourceBufferVariables.push_back(std::move(bv));
                         bvIndex = static_cast<GLint>(programObject->resourceBufferVariables.size() - 1);
                     }
@@ -14018,9 +14073,9 @@ bool GLContext::linkProgram(GLuint program) {
                     // block's active-variables list so
                     // GL_NUM_ACTIVE_VARIABLES / GL_ACTIVE_VARIABLES
                     // queries on the block return the right data.
-                    if (blockIdx >= 0
-                        && static_cast<std::size_t>(blockIdx) < programObject->resourceStorageBlocks.size()) {
-                        auto& blockEntry = programObject->resourceStorageBlocks[blockIdx];
+                    if (firstBlockIdx >= 0
+                        && static_cast<std::size_t>(firstBlockIdx) < programObject->resourceStorageBlocks.size()) {
+                        auto& blockEntry = programObject->resourceStorageBlocks[firstBlockIdx];
                         // De-dupe in case the same block gets
                         // merged from multiple stages.
                         if (std::find(blockEntry.activeVariables.begin(),
@@ -14032,10 +14087,15 @@ bool GLContext::linkProgram(GLuint program) {
                 }
             }
         };
-        mergeStorageBlocks(programObject->vertexReflection.storageBuffers, 0x01);
-        mergeStorageBlocks(programObject->fragmentReflection.storageBuffers, 0x02);
-        mergeStorageBlocks(programObject->geometryReflection.storageBuffers, 0x04);
-        mergeStorageBlocks(programObject->computeReflection.storageBuffers, 0x20);
+        static const std::string ssboEmptySrc;
+        const std::string& ssboVsSrc = vertexShader ? vertexShader->source : ssboEmptySrc;
+        const std::string& ssboFsSrc = fragmentShader ? fragmentShader->source : ssboEmptySrc;
+        const std::string& ssboGsSrc = geometryShader ? geometryShader->source : ssboEmptySrc;
+        const std::string& ssboCsSrc = computeShader ? computeShader->source : ssboEmptySrc;
+        mergeStorageBlocks(programObject->vertexReflection.storageBuffers, 0x01, ssboVsSrc);
+        mergeStorageBlocks(programObject->fragmentReflection.storageBuffers, 0x02, ssboFsSrc);
+        mergeStorageBlocks(programObject->geometryReflection.storageBuffers, 0x04, ssboGsSrc);
+        mergeStorageBlocks(programObject->computeReflection.storageBuffers, 0x20, ssboCsSrc);
 
         // GS reflection: the geometry shader is CPU-emulated — we
         // don't yet run SPIRV-Cross on it to produce a MSL
@@ -18359,7 +18419,12 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
             // GL_UNSIGNED_INT_ATOMIC_COUNTER at link time;
             // -1 on any non-atomic uniform.
             return entry.atomicCounterBufferIndex;
-        case GL_TOP_LEVEL_ARRAY_SIZE:   return 1;
+        case GL_TOP_LEVEL_ARRAY_SIZE:
+            // Only meaningful on GL_BUFFER_VARIABLE entries; spec
+            // returns 1 for non-buffer-variable queries (never
+            // reached since propInterfaceCompatible restricts this
+            // prop to GL_BUFFER_VARIABLE).
+            return entry.topLevelArraySize;
         case GL_TOP_LEVEL_ARRAY_STRIDE: return 0;
         case GL_LOCATION_INDEX:
             // Built-in outputs like `gl_FragDepth` have no user-
