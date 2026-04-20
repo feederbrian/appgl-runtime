@@ -936,3 +936,66 @@ rebuild catches the drift at compile time.
   exercise different corners; each one needs its own guard or
   the canonical pipeline checks let spec-invalid programs
   link successfully.
+
+- **2026-04-19 (session-16)** — **Round 1a: clip/cull
+  propagation infrastructure + Round 2 small wins** (commits
+  `a1b18b8`, `5588d41`). Rounds 1a + partial Round 2 from the
+  remaining-work roadmap.
+    - **`a1b18b8`** Clip/cull propagation plumbing landed
+      behind the `cc4dc88` stopgap. New machinery:
+      `EmulatedVertex::{clipDistance,cullDistance}`,
+      `EmulatedDraw::{clipDistanceLen,cullDistanceLen}` plus
+      combined packing after varyings; `Interpreter::
+      captureClipCull` (shared VS / GS helper, handles both
+      direct-BuiltIn and gl_PerVertex struct-member shapes);
+      `initVariables` populates gl_in[].gl_{Clip,Cull}Distance
+      from VS-captured arrays; pre-GS primitive cull check
+      (GL 4.6 §13.6) skips GS invocations when all vertices
+      have any cull plane ≤ 0; synth VS emits combined
+      `[[clip_distance]] [clipLen + cullLen]` slice; vertex
+      descriptor adds per-scalar clip/cull attributes to the
+      packed-buffer stride. Removing the `cc4dc88` stopgap
+      showed the plumbing works for simple passthrough GS
+      but mishandles the CTS `cull_distance.functional_test
+      _item_5_primitive_mode_{lines,triangles}` grid-of-
+      subgrids layout — kept the stopgap in place until a
+      pixel-coverage investigation can close the gap. Zero
+      current-test delta; +16 cull_distance in reach once
+      the coverage gap is fixed.
+    - **`5588d41`** Three small independent fixes:
+      (1) `GL_PROVOKING_VERTEX` static-query added with
+      default `GL_LAST_VERTEX_CONVENTION` —
+      `geometry_shader.layered_rendering.layered_rendering`
+      queries this before any draw, so the missing entry
+      aborted every layered test at startup.
+      (2) `isValidFramebufferAttachment` at dispatch widened
+      to accept `COLOR_ATTACHMENT0..+31` (was `..+8`), so
+      `COLOR_ATTACHMENT0 + MAX_COLOR_ATTACHMENTS` reaches the
+      context-level check that emits the spec-correct
+      INVALID_OPERATION (was getting INVALID_ENUM from the
+      narrow dispatch gate). Fixes
+      `layered_fbo.fb_texture_invalid_attachment`.
+      (3) `generateMipmaps` caps `finalLevel` at
+      `desc.levels - 1` for immutable textures. Prior impl
+      ran to the log2(min_dim) tail and bumped desc.levels
+      beyond the texStorage-allocated count; a later
+      `glFramebufferTexture(level=desc.levels)` accepted
+      what the spec says should be INVALID_VALUE. Fixes
+      `layered_fbo.fb_texture_invalid_level_number`.
+  Round 1b (`gl_in_array_length` cleanup SIGSEGV) + Round 2
+  full gl_Layer + layered-FBO carried forward. Round 1b
+  appears to be heap corruption that only surfaces after
+  my session-15 commits enabled the pipeline path — needs
+  an ASAN build for useful diagnosis. Round 2 layered
+  rendering needs full `gl_Layer` capture through the synth
+  VS + Metal's `renderTargetArrayLength` + render-target-
+  array texture attachments + `[[render_target_array_index]]`
+  on the VS output; 2–3 days of infrastructure work that
+  deserves a dedicated session.
+  Sweep delta vs phase 5:
+    - `geometry_shader.layered_fbo.*`: 4/8 → 6/8 (+2)
+    - `geometry_shader.*` overall: 102/136 → **104/136** (+2)
+    - `geometry_shader.rendering.rendering.*`: 33/33 held
+    - `geometry_shader.linking.*`: 13/13 held
+    - `cull_distance.*`: 41/218 held (stopgap active)
+    - `constant_expressions.*_geometry`: 232/232 held
