@@ -714,6 +714,17 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_GEOMETRY_OUTPUT_COMPONENTS] = 128;
     integerLimits_[GL_MAX_GEOMETRY_UNIFORM_BLOCKS] = std::max<GLint64>(uniformBindings, 14);
     integerLimits_[GL_MAX_GEOMETRY_SHADER_INVOCATIONS] = 32;
+    // GL 4.6 Table 23.60: GL_LAYER_PROVOKING_VERTEX selects which
+    // vertex's `gl_Layer` value drives rasterization into a layered
+    // FBO. Desktop GL accepts `GL_PROVOKING_VERTEX` (= follow the
+    // current glProvokingVertex setting), `GL_FIRST_VERTEX_CONVENTION`,
+    // `GL_LAST_VERTEX_CONVENTION`, or `GL_UNDEFINED_VERTEX`. Report
+    // `GL_PROVOKING_VERTEX` so CTS
+    // `geometry_shader.constant_variables.constant_variables` sees a
+    // spec-legal value. (Same story for `GL_VIEWPORT_INDEX_PROVOKING
+    // _VERTEX` which the same test queries.)
+    integerLimits_[GL_LAYER_PROVOKING_VERTEX] = GL_PROVOKING_VERTEX;
+    integerLimits_[GL_VIEWPORT_INDEX_PROVOKING_VERTEX] = GL_PROVOKING_VERTEX;
 
     // Tessellation caps. Same emulation-gap caveat as geometry: the
     // translator will eventually lower these onto Metal's tessellator via
@@ -755,7 +766,26 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     //     GL_MAX_UNIFORM_BUFFER_BINDINGS * GL_MAX_UNIFORM_BLOCK_SIZE / 4
     // We publish that exact derivation so engines using the floor don't
     // see a smaller number than spec.
-    const GLint64 combinedUniforms = 4096 + uniformBindings * (maxUniformBlockSize / 4);
+    // GL 4.6 Table 23.60 defines each
+    // MAX_COMBINED_<stage>_UNIFORM_COMPONENTS as being at least
+    // `MAX_<stage>_UNIFORM_BLOCKS × MAX_UNIFORM_BLOCK_SIZE / 4 +
+    //  MAX_<stage>_UNIFORM_COMPONENTS`. The CTS
+    // `geometry_shader.constant_variables.constant_variables`
+    // test queries the three per-stage values, computes the
+    // right-hand side from them, and fails if the reported
+    // COMBINED comes in below. Prior formula used `uniform
+    // Bindings × blockSize/4 + 4096`, which landed below the
+    // computed floor whenever `uniformBindings` was smaller
+    // than the 14-block spec floor we already advertise via
+    // `std::max<GLint64>(uniformBindings, 14)` above.
+    //
+    // Recompute using the effective per-stage block count
+    // (`max(uniformBindings, 14)`) + the per-stage uniform-
+    // components count we advertise so the derived
+    // COMBINED always satisfies the spec formula.
+    const GLint64 effUniformBlocks = std::max<GLint64>(uniformBindings, 14);
+    const GLint64 combinedUniforms =
+        effUniformBlocks * (maxUniformBlockSize / 4) + 1024;
     integerLimits_[GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS] = combinedUniforms;
     integerLimits_[GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS] = combinedUniforms;
     integerLimits_[GL_MAX_COMBINED_GEOMETRY_UNIFORM_COMPONENTS] = combinedUniforms;
