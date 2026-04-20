@@ -12491,7 +12491,14 @@ bool GLContext::linkProgram(GLuint program) {
 
     for (const auto& u : programObject->uniforms) {
         GLProgramResourceEntry entry;
-        entry.name = u.name;
+        // GL 4.6 §7.3.1: array uniforms report their name with the
+        // "[0]" suffix in the resource interface. CTS
+        // `program_interface_query.uniform-types` declares
+        // `uniform uvec2 c[3];` / `uniform mat2 g[8];` and expects
+        // `glGetProgramResourceName(GL_UNIFORM, …)` to return
+        // "c[0]" / "g[0]". Mirrors the fix applied to inputs +
+        // outputs in earlier iterations.
+        entry.name = (u.arraySize >= 2) ? (u.name + "[0]") : u.name;
         entry.type = u.type;
         entry.location = u.location;
         entry.binding = u.explicitBinding;  // RC-D08
@@ -17783,7 +17790,23 @@ GLint getResourceProperty(const GLProgramResourceEntry& entry, GLenum prop) {
         case GL_NUM_ACTIVE_VARIABLES: return 0;
         case GL_ACTIVE_VARIABLES:  return 0;
         case GL_IS_ROW_MAJOR:      return GL_FALSE;
-        case GL_MATRIX_STRIDE:     return 0;
+        // GL 4.6 §7.3.1: GL_MATRIX_STRIDE returns the matrix-
+        // column/row byte stride for block members, or -1 when
+        // the variable is not the member of a buffer-backed
+        // block. Plain uniforms (scalar/vector/matrix not in a
+        // UBO/SSBO) therefore report -1. Block members with
+        // matrix type should report their std140-rounded stride
+        // (we don't track this yet — return 0 for now, a
+        // follow-up can wire up block-member strides if a CTS
+        // test surfaces it).
+        case GL_MATRIX_STRIDE:
+            return entry.blockIndex >= 0 ? 0 : -1;
+        // GL 4.6 §7.3.1: GL_ARRAY_STRIDE returns the byte
+        // stride between consecutive array elements for block
+        // members, or -1 when the variable is not the member of
+        // a buffer-backed block. Same treatment as MATRIX_STRIDE.
+        case GL_ARRAY_STRIDE:
+            return entry.blockIndex >= 0 ? 0 : -1;
         case GL_ATOMIC_COUNTER_BUFFER_INDEX: return -1;
         case GL_TOP_LEVEL_ARRAY_SIZE:   return 1;
         case GL_TOP_LEVEL_ARRAY_STRIDE: return 0;
@@ -17800,7 +17823,16 @@ bool GLContext::getProgramInterfaceiv(GLuint program, GLenum programInterface, G
     }
     GLProgramObject* prog = impl_->objects->programs().get(program);
     if (prog == nullptr) {
-        pushError(GL_INVALID_VALUE);
+        // GL 4.6 §7.3.1: shader-name → INVALID_OPERATION,
+        // other bogus names → INVALID_VALUE. See
+        // getProgramResourceIndex for the same distinguishing
+        // logic. Required by CTS
+        // `program_interface_query.invalid-operation` Case 1.
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
         return false;
     }
     // CTS program_interface_query.empty-shaders constructs a program
@@ -17866,11 +17898,40 @@ bool GLContext::getProgramInterfaceiv(GLuint program, GLenum programInterface, G
             return true;
         }
         case GL_MAX_NUM_ACTIVE_VARIABLES:
-            *params = 0;
-            return true;
+            // GL 4.6 §7.3.1 table: this pname is only valid on
+            // the interfaces that expose an active-variables
+            // list (UNIFORM_BLOCK, ATOMIC_COUNTER_BUFFER,
+            // SHADER_STORAGE_BLOCK, TRANSFORM_FEEDBACK_BUFFER).
+            // CTS `program_interface_query.invalid-operation`
+            // passes GL_PROGRAM_INPUT and expects
+            // INVALID_OPERATION.
+            switch (programInterface) {
+                case GL_UNIFORM_BLOCK:
+                case GL_ATOMIC_COUNTER_BUFFER:
+                case GL_SHADER_STORAGE_BLOCK:
+                case GL_TRANSFORM_FEEDBACK_BUFFER:
+                    *params = 0;
+                    return true;
+                default:
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+            }
         case GL_MAX_NUM_COMPATIBLE_SUBROUTINES:
-            *params = 0;
-            return true;
+            // GL 4.6 §7.3.1: only valid on the *_SUBROUTINE_UNIFORM
+            // interfaces.
+            switch (programInterface) {
+                case GL_VERTEX_SUBROUTINE_UNIFORM:
+                case GL_TESS_CONTROL_SUBROUTINE_UNIFORM:
+                case GL_TESS_EVALUATION_SUBROUTINE_UNIFORM:
+                case GL_GEOMETRY_SUBROUTINE_UNIFORM:
+                case GL_FRAGMENT_SUBROUTINE_UNIFORM:
+                case GL_COMPUTE_SUBROUTINE_UNIFORM:
+                    *params = 0;
+                    return true;
+                default:
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+            }
         default:
             pushError(GL_INVALID_ENUM);
             return false;
@@ -17894,7 +17955,17 @@ bool GLContext::getProgramResourceiv(GLuint program, GLenum programInterface, GL
         return false;
     }
     GLProgramObject* prog = impl_->objects->programs().get(program);
-    if (prog == nullptr || !prog->linked) {
+    if (prog == nullptr) {
+        // Shader-name-vs-unknown-name: same rule as
+        // getProgramResourceIndex.
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return false;
+    }
+    if (!prog->linked) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -17902,6 +17973,120 @@ bool GLContext::getProgramResourceiv(GLuint program, GLenum programInterface, GL
     if (table == nullptr) {
         pushError(GL_INVALID_ENUM);
         return false;
+    }
+    // GL 4.6 §7.3.1 lists the valid prop enums for
+    // getProgramResourceiv. Anything outside this set yields
+    // GL_INVALID_ENUM. CTS `program_interface_query.invalid-enum`
+    // passes `GL_TEXTURE_1D` as a prop and expects the error.
+    auto isValidProp = [](GLenum p) {
+        switch (p) {
+            case GL_ACTIVE_VARIABLES:
+            case GL_BUFFER_BINDING:
+            case GL_BUFFER_DATA_SIZE:
+            case GL_NUM_ACTIVE_VARIABLES:
+            case GL_ARRAY_SIZE:
+            case GL_ARRAY_STRIDE:
+            case GL_BLOCK_INDEX:
+            case GL_IS_ROW_MAJOR:
+            case GL_MATRIX_STRIDE:
+            case GL_ATOMIC_COUNTER_BUFFER_INDEX:
+            case GL_NUM_COMPATIBLE_SUBROUTINES:
+            case GL_COMPATIBLE_SUBROUTINES:
+            case GL_IS_PER_PATCH:
+            case GL_LOCATION:
+            case GL_LOCATION_COMPONENT:
+            case GL_LOCATION_INDEX:
+            case GL_NAME_LENGTH:
+            case GL_OFFSET:
+            case GL_REFERENCED_BY_VERTEX_SHADER:
+            case GL_REFERENCED_BY_TESS_CONTROL_SHADER:
+            case GL_REFERENCED_BY_TESS_EVALUATION_SHADER:
+            case GL_REFERENCED_BY_GEOMETRY_SHADER:
+            case GL_REFERENCED_BY_FRAGMENT_SHADER:
+            case GL_REFERENCED_BY_COMPUTE_SHADER:
+            case GL_TOP_LEVEL_ARRAY_SIZE:
+            case GL_TOP_LEVEL_ARRAY_STRIDE:
+            case GL_TRANSFORM_FEEDBACK_BUFFER_INDEX:
+            case GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE:
+            case GL_TYPE:
+                return true;
+            default:
+                return false;
+        }
+    };
+    for (GLsizei i = 0; i < propCount; ++i) {
+        if (!isValidProp(props[i])) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+    }
+    // GL 4.6 §7.3.1 table: each prop is only valid on a subset of
+    // interfaces. Using a prop that doesn't apply to the queried
+    // interface yields INVALID_OPERATION. Only the most common
+    // incompatibilities are enforced here; the full matrix would
+    // add ~30 cases. CTS
+    // `program_interface_query.invalid-operation` Case 3 passes
+    // GL_OFFSET to GL_PROGRAM_INPUT — spec says that's an
+    // INVALID_OPERATION.
+    auto propInterfaceCompatible = [](GLenum prop, GLenum iface) {
+        switch (prop) {
+            case GL_OFFSET:
+            case GL_BLOCK_INDEX:
+            case GL_ARRAY_STRIDE:
+            case GL_MATRIX_STRIDE:
+            case GL_IS_ROW_MAJOR:
+            case GL_ATOMIC_COUNTER_BUFFER_INDEX:
+                return iface == GL_UNIFORM || iface == GL_BUFFER_VARIABLE
+                    || iface == GL_TRANSFORM_FEEDBACK_VARYING;
+            case GL_TOP_LEVEL_ARRAY_SIZE:
+            case GL_TOP_LEVEL_ARRAY_STRIDE:
+                return iface == GL_BUFFER_VARIABLE;
+            case GL_BUFFER_BINDING:
+            case GL_BUFFER_DATA_SIZE:
+            case GL_NUM_ACTIVE_VARIABLES:
+            case GL_ACTIVE_VARIABLES:
+                return iface == GL_UNIFORM_BLOCK
+                    || iface == GL_ATOMIC_COUNTER_BUFFER
+                    || iface == GL_SHADER_STORAGE_BLOCK
+                    || iface == GL_TRANSFORM_FEEDBACK_BUFFER;
+            case GL_TRANSFORM_FEEDBACK_BUFFER_INDEX:
+            case GL_TRANSFORM_FEEDBACK_BUFFER_STRIDE:
+                return iface == GL_TRANSFORM_FEEDBACK_VARYING
+                    || iface == GL_TRANSFORM_FEEDBACK_BUFFER;
+            case GL_LOCATION_INDEX:
+                return iface == GL_PROGRAM_OUTPUT;
+            case GL_IS_PER_PATCH:
+                return iface == GL_PROGRAM_INPUT || iface == GL_PROGRAM_OUTPUT;
+            case GL_LOCATION:
+            case GL_LOCATION_COMPONENT:
+                return iface == GL_UNIFORM
+                    || iface == GL_PROGRAM_INPUT
+                    || iface == GL_PROGRAM_OUTPUT
+                    || iface == GL_VERTEX_SUBROUTINE_UNIFORM
+                    || iface == GL_TESS_CONTROL_SUBROUTINE_UNIFORM
+                    || iface == GL_TESS_EVALUATION_SUBROUTINE_UNIFORM
+                    || iface == GL_GEOMETRY_SUBROUTINE_UNIFORM
+                    || iface == GL_FRAGMENT_SUBROUTINE_UNIFORM
+                    || iface == GL_COMPUTE_SUBROUTINE_UNIFORM;
+            case GL_NUM_COMPATIBLE_SUBROUTINES:
+            case GL_COMPATIBLE_SUBROUTINES:
+                return iface == GL_VERTEX_SUBROUTINE_UNIFORM
+                    || iface == GL_TESS_CONTROL_SUBROUTINE_UNIFORM
+                    || iface == GL_TESS_EVALUATION_SUBROUTINE_UNIFORM
+                    || iface == GL_GEOMETRY_SUBROUTINE_UNIFORM
+                    || iface == GL_FRAGMENT_SUBROUTINE_UNIFORM
+                    || iface == GL_COMPUTE_SUBROUTINE_UNIFORM;
+            default:
+                // GL_NAME_LENGTH / GL_TYPE / GL_ARRAY_SIZE /
+                // GL_REFERENCED_BY_* apply broadly — accept.
+                return true;
+        }
+    };
+    for (GLsizei i = 0; i < propCount; ++i) {
+        if (!propInterfaceCompatible(props[i], programInterface)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
     if (index >= table->size()) {
         pushError(GL_INVALID_VALUE);
@@ -17923,8 +18108,24 @@ bool GLContext::getProgramResourceName(GLuint program, GLenum programInterface, 
     if (length != nullptr) {
         *length = 0;
     }
+    // GL 4.6 §7.3.1: `GL_ATOMIC_COUNTER_BUFFER` /
+    // `GL_TRANSFORM_FEEDBACK_BUFFER` buffers carry no names; queries
+    // generate INVALID_ENUM.
+    if (programInterface == GL_ATOMIC_COUNTER_BUFFER ||
+        programInterface == GL_TRANSFORM_FEEDBACK_BUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     GLProgramObject* prog = impl_->objects->programs().get(program);
-    if (prog == nullptr || !prog->linked) {
+    if (prog == nullptr) {
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return false;
+    }
+    if (!prog->linked) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -17956,9 +18157,28 @@ GLuint GLContext::getProgramResourceIndex(GLuint program, GLenum programInterfac
         pushError(GL_INVALID_VALUE);
         return GL_INVALID_INDEX;
     }
+    // GL 4.6 §7.3.1: `GL_ATOMIC_COUNTER_BUFFER` buffers have no
+    // names, so this entry point is invalid on that interface.
+    // `GL_TRANSFORM_FEEDBACK_BUFFER` is similarly unnamed.
+    if (programInterface == GL_ATOMIC_COUNTER_BUFFER ||
+        programInterface == GL_TRANSFORM_FEEDBACK_BUFFER) {
+        pushError(GL_INVALID_ENUM);
+        return GL_INVALID_INDEX;
+    }
     GLProgramObject* prog = impl_->objects->programs().get(program);
     if (prog == nullptr) {
-        pushError(GL_INVALID_VALUE);
+        // GL 4.6 §7.3.1 differentiates "name refers to a shader
+        // object (INVALID_OPERATION)" from "name is not a generated
+        // program name (INVALID_VALUE)". Distinguish here by
+        // checking the shader table. CTS
+        // `program_interface_query.invalid-operation` calls these
+        // entry points with a shader name and expects the specific
+        // INVALID_OPERATION error.
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
         return GL_INVALID_INDEX;
     }
     // Unlinked program: silently return INVALID_INDEX (no match).
@@ -18017,7 +18237,15 @@ GLint GLContext::getProgramResourceLocation(GLuint program, GLenum programInterf
         return -1;
     }
     GLProgramObject* prog = impl_->objects->programs().get(program);
-    if (prog == nullptr || !prog->linked) {
+    if (prog == nullptr) {
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return -1;
+    }
+    if (!prog->linked) {
         pushError(GL_INVALID_OPERATION);
         return -1;
     }
@@ -18088,7 +18316,15 @@ GLint GLContext::getProgramResourceLocationIndex(GLuint program, GLenum programI
         return -1;
     }
     GLProgramObject* prog = impl_->objects->programs().get(program);
-    if (prog == nullptr || !prog->linked) {
+    if (prog == nullptr) {
+        if (impl_->objects->shaders().contains(program)) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return -1;
+    }
+    if (!prog->linked) {
         pushError(GL_INVALID_OPERATION);
         return -1;
     }
