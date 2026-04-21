@@ -484,6 +484,10 @@ public:
     // GL 4.6 — Indirect count draws, SPIR-V specialization, polygon offset clamp.
     bool multiDrawArraysIndirectCount(GLenum mode, const void* indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
     bool multiDrawElementsIndirectCount(GLenum mode, GLenum type, const void* indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
+    // Common validation for the two IndirectCount entries — checks
+    // drawcount alignment, PARAMETER_BUFFER binding, and buffer-size
+    // bounds. Returns false (with pushError) on any violation.
+    bool validateIndirectCount(GLintptr drawcount, GLsizei maxdrawcount);
     bool specializeShader(GLuint shader, const GLchar* pEntryPoint, GLuint numSpecializationConstants, const GLuint* pConstantIndex, const GLuint* pConstantValue);
     bool polygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp);
 

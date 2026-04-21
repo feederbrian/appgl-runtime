@@ -21940,6 +21940,25 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
     };
     const GLsizei effectiveStride = (stride == 0) ? static_cast<GLsizei>(sizeof(DrawArraysIndirectCommand)) : stride;
 
+    // GL 4.6 §10.5: pre-validate the indirect-buffer range. See
+    // multiDrawElementsIndirect for the full rationale — the check
+    // must fire BEFORE any sub-draw so we don't push a cascade of
+    // per-draw errors when the buffer has stack-garbage trailer bytes.
+    if (drawcount > 0) {
+        const GLuint indirectBuf = impl_->state->boundBuffer(GL_DRAW_INDIRECT_BUFFER);
+        if (indirectBuf != 0) {
+            GLBufferObject* bo = impl_->objects->buffers().get(indirectBuf);
+            if (bo != nullptr) {
+                const uintptr_t endOffset =
+                    reinterpret_cast<uintptr_t>(indirect) +
+                    static_cast<uintptr_t>(drawcount) * static_cast<uintptr_t>(effectiveStride);
+                if (endOffset > static_cast<uintptr_t>(bo->size)) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+            }
+        }
+    }
     for (GLsizei i = 0; i < drawcount; ++i) {
         const void* cmdPtr = reinterpret_cast<const void*>(
             reinterpret_cast<uintptr_t>(indirect) + static_cast<uintptr_t>(i) * static_cast<uintptr_t>(effectiveStride));
@@ -21992,6 +22011,27 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
     const GLsizei effectiveStride = (stride == 0) ? static_cast<GLsizei>(sizeof(DrawElementsIndirectCommand)) : stride;
     const GLsizei indexSize = (type == GL_UNSIGNED_INT) ? 4 : (type == GL_UNSIGNED_SHORT) ? 2 : 1;
 
+    // GL 4.6 §10.5: the INVALID_OPERATION check for "reading beyond
+    // the end of the draw-indirect buffer" must fire BEFORE any
+    // sub-draw is issued. Otherwise a partial loop can push a
+    // cascade of per-draw errors (e.g. a garbage cmd at i=N-1
+    // followed by the OOB at i=N), leaving the error queue with
+    // more than one entry and breaking spec-exact error tests.
+    if (drawcount > 0) {
+        const GLuint indirectBuf = impl_->state->boundBuffer(GL_DRAW_INDIRECT_BUFFER);
+        if (indirectBuf != 0) {
+            GLBufferObject* bo = impl_->objects->buffers().get(indirectBuf);
+            if (bo != nullptr) {
+                const uintptr_t endOffset =
+                    reinterpret_cast<uintptr_t>(indirect) +
+                    static_cast<uintptr_t>(drawcount) * static_cast<uintptr_t>(effectiveStride);
+                if (endOffset > static_cast<uintptr_t>(bo->size)) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+            }
+        }
+    }
     for (GLsizei i = 0; i < drawcount; ++i) {
         const void* cmdPtr = reinterpret_cast<const void*>(
             reinterpret_cast<uintptr_t>(indirect) + static_cast<uintptr_t>(i) * static_cast<uintptr_t>(effectiveStride));
@@ -25751,18 +25791,55 @@ bool GLContext::getQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname
 // GL 4.6 — Indirect count draws, SPIR-V specialization, polygon offset clamp
 // ---------------------------------------------------------------------------
 
+// GL 4.6 §10.5 validation for glMultiDraw{Arrays,Elements}IndirectCount.
+// Common gate: drawcount (offset into PARAMETER_BUFFER) must be aligned
+// to 4 bytes; PARAMETER_BUFFER must be bound; the referenced count +
+// maxdrawcount entries must fit in the parameter buffer.
+bool GLContext::validateIndirectCount(GLintptr drawcount, GLsizei maxdrawcount) {
+    if (maxdrawcount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // drawcount is a byte offset; must be a multiple of sizeof(GLsizei)=4.
+    if ((drawcount % 4) != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLuint paramBuffer =
+        impl_->state->boundBuffer(GL_PARAMETER_BUFFER);
+    if (paramBuffer == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLBufferObject* bo = impl_->objects->buffers().get(paramBuffer);
+    if (bo == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // The parameter buffer must contain at least
+    // drawcount + 4 (one GLsizei) bytes — enough to read the
+    // sub-draw count. Note: the spec does NOT require space for
+    // the full maxdrawcount entries; only the count itself.
+    if (drawcount + static_cast<GLintptr>(sizeof(GLsizei)) >
+        static_cast<GLintptr>(bo->size)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    return true;
+}
+
 bool GLContext::multiDrawArraysIndirectCount(GLenum mode, const void* indirect,
                                               GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
-    // Extends multiDrawArraysIndirect with GPU-sourced draw count from a buffer
-    // at the given offset. Currently delegates to the non-count variant with
-    // maxdrawcount as the draw count (conservative upper bound).
-    if (maxdrawcount < 0) { pushError(GL_INVALID_VALUE); return false; }
+    if (!validateIndirectCount(drawcount, maxdrawcount)) return false;
+    // Delegates to the non-count variant with maxdrawcount as the
+    // conservative upper bound. A real GPU-sourced count readback
+    // would require staging the parameter buffer at draw time.
     return multiDrawArraysIndirect(mode, indirect, maxdrawcount, stride);
 }
 
 bool GLContext::multiDrawElementsIndirectCount(GLenum mode, GLenum type, const void* indirect,
                                                 GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride) {
-    if (maxdrawcount < 0) { pushError(GL_INVALID_VALUE); return false; }
+    if (!validateIndirectCount(drawcount, maxdrawcount)) return false;
     return multiDrawElementsIndirect(mode, type, indirect, maxdrawcount, stride);
 }
 
