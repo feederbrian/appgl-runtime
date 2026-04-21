@@ -140,7 +140,19 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
             *params = hasMip ? desc.depth : 0;
             break;
         case GL_TEXTURE_INTERNAL_FORMAT:
-            *params = hasMip ? static_cast<GLint>(desc.internalFormat) : static_cast<GLint>(GL_RGBA8);
+            // Use the per-level format when available, otherwise
+            // fall back to the base-level internal format from the
+            // texture's desc. Buffer textures + immutable-storage
+            // textures don't have per-level descs but DO have a
+            // valid desc.internalFormat — falling back to GL_RGBA8
+            // would lie for those.
+            if (hasMip) {
+                *params = static_cast<GLint>(desc.internalFormat);
+            } else if (tex->desc.internalFormat != 0) {
+                *params = static_cast<GLint>(tex->desc.internalFormat);
+            } else {
+                *params = static_cast<GLint>(GL_RGBA8);
+            }
             break;
         case GL_TEXTURE_RED_SIZE:
         case GL_TEXTURE_GREEN_SIZE:
@@ -223,11 +235,34 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
             *params = static_cast<GLint>(desc.sourceBuffer);
             break;
         case GL_TEXTURE_BUFFER_OFFSET:
+            // For glTexBuffer (non-range), offset is always 0. For
+            // glTexBufferRange, it's the range offset.
             *params = static_cast<GLint>(desc.bufferOffset);
             break;
-        case GL_TEXTURE_BUFFER_SIZE:
-            *params = static_cast<GLint>(desc.bufferSize);
+        case GL_TEXTURE_BUFFER_SIZE: {
+            // GL 4.6 §8.9: for non-range attachments, reflect the
+            // current size of the buffer object (glBufferData may
+            // have resized it since the texture was attached). For
+            // range attachments, the range size is fixed at
+            // attachment time.
+            if (desc.bufferSize != 0 && desc.bufferOffset != 0) {
+                // Range attachment.
+                *params = static_cast<GLint>(desc.bufferSize);
+            } else {
+                // Non-range attachment: query the current buffer
+                // size. Fallback to recorded desc.bufferSize if the
+                // buffer was deleted.
+                GLint sz = static_cast<GLint>(desc.bufferSize);
+                if (desc.sourceBuffer != 0) {
+                    auto* bo = context->objects().buffers().get(desc.sourceBuffer);
+                    if (bo != nullptr) {
+                        sz = static_cast<GLint>(bo->size);
+                    }
+                }
+                *params = sz;
+            }
             break;
+        }
         default:
             context->pushError(GL_INVALID_ENUM);
             break;
