@@ -12262,6 +12262,49 @@ bool GLContext::compileShader(GLuint shader) {
         }
     }
 
+    // GL 4.6 §11.1.3.2 (ClipDistance) / §E.2.1 deprecated gl_ClipVertex:
+    // A vertex shader must not write to BOTH `gl_ClipVertex` and any
+    // element of `gl_ClipDistance[]`. The spec describes this as
+    // undefined behaviour, but the CTS treats it as a compile error
+    // (clip_distance.negative asserts COMPILE_STATUS = FALSE on such a
+    // shader). Detect the pattern by source-text scan — we look for
+    // the `gl_ClipVertex` assignment target and any `gl_ClipDistance`
+    // reference in the same shader body.
+    if (object->stage == GL_VERTEX_SHADER) {
+        // Scan the ORIGINAL GLSL, not the rewritten form — CompatShader-
+        // Rewrite renames `gl_ClipVertex` to `appgl_ClipVertex` before
+        // this point, so the post-rewrite scan would miss the pattern.
+        const std::string& src = object->source;
+        auto findWordBoundary = [&](const char* needle) {
+            std::size_t pos = 0;
+            const std::size_t nlen = std::strlen(needle);
+            while ((pos = src.find(needle, pos)) != std::string::npos) {
+                const bool leftBoundary = (pos == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[pos - 1])) || src[pos - 1] == '_');
+                const std::size_t end = pos + nlen;
+                const bool rightBoundary = (end >= src.size()) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[end])) || src[end] == '_');
+                if (leftBoundary && rightBoundary) return true;
+                pos = end;
+            }
+            return false;
+        };
+        const bool usesClipVertex   = findWordBoundary("gl_ClipVertex");
+        const bool usesClipDistance = findWordBoundary("gl_ClipDistance");
+        if (usesClipVertex && usesClipDistance) {
+            object->compileLog =
+                "ERROR: vertex shader must not write to both "
+                "gl_ClipVertex and gl_ClipDistance[] in the same "
+                "stage (GL 4.6 §11.1.3.2).";
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", "", "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
+
     object->declaredUniforms = std::move(reflection.uniforms);
     object->declaredInputs = std::move(reflection.inputs);
     object->declaredOutputs = std::move(reflection.outputs);
