@@ -22801,8 +22801,48 @@ bool GLContext::getNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr
     impl_->state->bindTexture(_target, _prevTex);
 
 
+// GL 4.6 §8.19 shared effective-target check for DSA TextureStorage*.
+// When the DSA function's dim-signature doesn't match the texture's
+// effective target, spec demands INVALID_OPERATION (not INVALID_ENUM).
+// CTS `direct_state_access.textures_storage_errors` asserts each.
+static bool targetIsValidForTexStorage1D(GLenum t) {
+    return t == GL_TEXTURE_1D;
+}
+static bool targetIsValidForTexStorage2D(GLenum t) {
+    return t == GL_TEXTURE_2D || t == GL_TEXTURE_1D_ARRAY ||
+           t == GL_TEXTURE_RECTANGLE || t == GL_TEXTURE_CUBE_MAP;
+}
+static bool targetIsValidForTexStorage3D(GLenum t) {
+    return t == GL_TEXTURE_3D || t == GL_TEXTURE_2D_ARRAY ||
+           t == GL_TEXTURE_CUBE_MAP_ARRAY;
+}
+static bool targetIsValidForTexStorage2DMultisample(GLenum t) {
+    return t == GL_TEXTURE_2D_MULTISAMPLE;
+}
+static bool targetIsValidForTexStorage3DMultisample(GLenum t) {
+    return t == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+}
+
+// Spec's max-level check from §8.19: levels ≤ log2(max(dim)) + 1.
+// Computed once per call for the given (width, height, depth) tuple
+// appropriate to the target.
+static GLsizei log2Floor(GLsizei x) {
+    if (x <= 1) return 0;
+    GLsizei r = 0;
+    while (x > 1) { x >>= 1; ++r; }
+    return r;
+}
+
 bool GLContext::textureStorage1D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width) {
     DSA_TEX_WRAP(texture, {
+        if (!targetIsValidForTexStorage1D(_target)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (levels > log2Floor(width) + 1) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = texStorage(GL_TEXTURE_1D, levels, internalformat, width, 1, 1);
         return ok;
     })
@@ -22810,6 +22850,18 @@ bool GLContext::textureStorage1D(GLuint texture, GLsizei levels, GLenum internal
 
 bool GLContext::textureStorage2D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height) {
     DSA_TEX_WRAP(texture, {
+        if (!targetIsValidForTexStorage2D(_target)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // TEXTURE_1D_ARRAY uses height as layer-count — levels limit
+        // is log2(width)+1 only. Other 2D targets use log2(max(w,h))+1.
+        const GLsizei maxDim = (_target == GL_TEXTURE_1D_ARRAY)
+            ? width : std::max(width, height);
+        if (levels > log2Floor(maxDim) + 1) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = texStorage(_target, levels, internalformat, width, height, 1);
         return ok;
     })
@@ -22817,6 +22869,20 @@ bool GLContext::textureStorage2D(GLuint texture, GLsizei levels, GLenum internal
 
 bool GLContext::textureStorage3D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth) {
     DSA_TEX_WRAP(texture, {
+        if (!targetIsValidForTexStorage3D(_target)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // TEXTURE_2D_ARRAY/CUBE_MAP_ARRAY treat depth as layers —
+        // level limit is log2(max(w,h))+1. TEXTURE_3D uses
+        // log2(max(w,h,d))+1.
+        const GLsizei maxDim = (_target == GL_TEXTURE_3D)
+            ? std::max({width, height, depth})
+            : std::max(width, height);
+        if (levels > log2Floor(maxDim) + 1) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = texStorage(_target, levels, internalformat, width, height, depth);
         return ok;
     })
@@ -22824,6 +22890,10 @@ bool GLContext::textureStorage3D(GLuint texture, GLsizei levels, GLenum internal
 
 bool GLContext::textureStorage2DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {
     DSA_TEX_WRAP(texture, {
+        if (!targetIsValidForTexStorage2DMultisample(_target)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = texStorageMultisample(_target, samples, internalformat, width, height, 1, fixedsamplelocations);
         return ok;
     })
@@ -22831,6 +22901,10 @@ bool GLContext::textureStorage2DMultisample(GLuint texture, GLsizei samples, GLe
 
 bool GLContext::textureStorage3DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations) {
     DSA_TEX_WRAP(texture, {
+        if (!targetIsValidForTexStorage3DMultisample(_target)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = texStorageMultisample(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, samples, internalformat, width, height, depth, fixedsamplelocations);
         return ok;
     })
