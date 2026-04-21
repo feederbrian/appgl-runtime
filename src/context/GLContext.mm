@@ -18543,7 +18543,34 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     return ok;
 }
 
+// GL 4.6 §10.1 Table 10.1 — the full set of primitive modes that
+// glDraw*/glMultiDraw* accept. Anything else raises
+// GL_INVALID_ENUM. Shared by every draw entry.
+static bool isValidDrawMode(GLenum mode) {
+    switch (mode) {
+        case GL_POINTS:
+        case GL_LINES:
+        case GL_LINE_STRIP:
+        case GL_LINE_LOOP:
+        case GL_LINES_ADJACENCY:
+        case GL_LINE_STRIP_ADJACENCY:
+        case GL_TRIANGLES:
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:
+        case GL_TRIANGLES_ADJACENCY:
+        case GL_TRIANGLE_STRIP_ADJACENCY:
+        case GL_PATCHES:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
+    if (!isValidDrawMode(mode)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -19030,6 +19057,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
 }
 
 bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount) {
+    if (!isValidDrawMode(mode)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (count < 0 || instancecount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -19367,6 +19398,10 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
 }
 
 bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
+    if (!isValidDrawMode(mode)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -19733,6 +19768,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
 // ---------------------------------------------------------------------------
 
 bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex) {
+    // GL 4.6 §10.5: mode must be a valid primitive-assembly enum.
+    if (!isValidDrawMode(mode)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (count < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -20016,6 +20056,10 @@ bool GLContext::drawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint en
 }
 
 bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex) {
+    if (!isValidDrawMode(mode)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (count < 0 || instancecount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -20344,6 +20388,10 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
 }
 
 bool GLContext::multiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices, GLsizei drawcount, const GLint* basevertex) {
+    if (!isValidDrawMode(mode)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (drawcount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -20351,6 +20399,19 @@ bool GLContext::multiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, G
     if (!isSupportedElementIndexType(type)) {
         pushError(GL_INVALID_ENUM);
         return false;
+    }
+    // GL 4.6 §10.5: per-sub-draw count must be non-negative. Check
+    // ALL entries up-front so an out-of-bounds value doesn't silently
+    // drop some sub-draws before the error is reported. CTS
+    // `draw_elements_base_vertex_tests.invalid_count_argument` asserts
+    // INVALID_VALUE.
+    if (count != nullptr) {
+        for (GLsizei i = 0; i < drawcount; ++i) {
+            if (count[i] < 0) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+        }
     }
     // Multi-draw decomposes into individual draws per the GL spec.
     for (GLsizei i = 0; i < drawcount; ++i) {
