@@ -22946,13 +22946,43 @@ bool GLContext::textureSubImage3D(GLuint texture, GLint level, GLint xoffset, GL
     })
 }
 
+// GL 4.6 §8.9 Table 8.16 — allowed internal formats for texture
+// buffers. Restricted set that maps to Metal texture-buffer
+// views. CTS `direct_state_access.textures_buffer_errors` and
+// sibling tests plant invalid formats and assert INVALID_ENUM.
+static bool isValidTextureBufferInternalFormat(GLenum fmt) {
+    switch (fmt) {
+        case GL_R8: case GL_R16: case GL_R16F: case GL_R32F:
+        case GL_R8I: case GL_R16I: case GL_R32I:
+        case GL_R8UI: case GL_R16UI: case GL_R32UI:
+        case GL_RG8: case GL_RG16: case GL_RG16F: case GL_RG32F:
+        case GL_RG8I: case GL_RG16I: case GL_RG32I:
+        case GL_RG8UI: case GL_RG16UI: case GL_RG32UI:
+        case GL_RGB32F: case GL_RGB32I: case GL_RGB32UI:
+        case GL_RGBA8: case GL_RGBA16: case GL_RGBA16F: case GL_RGBA32F:
+        case GL_RGBA8I: case GL_RGBA16I: case GL_RGBA32I:
+        case GL_RGBA8UI: case GL_RGBA16UI: case GL_RGBA32UI:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool GLContext::textureBuffer(GLuint texture, GLenum internalformat, GLuint buffer) {
     DSA_TEX_WRAP(texture, {
+        // GL 4.6 §8.9: texture's effective target must be GL_TEXTURE_BUFFER.
+        if (_target != GL_TEXTURE_BUFFER) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // GL 4.6 §8.9 Table 8.16: internalformat must be one of the
+        // sized formats the spec lists for texture buffers.
+        if (!isValidTextureBufferInternalFormat(internalformat)) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
         // GL 4.6 §8.9: if `buffer` is non-zero and doesn't name an
-        // existing buffer, raise GL_INVALID_OPERATION. Catch this
-        // here — texBufferRange would otherwise interpret the
-        // missing-buffer case as `size=0` and push INVALID_VALUE,
-        // which CTS `textures_buffer_errors` flags as the wrong code.
+        // existing buffer, raise GL_INVALID_OPERATION.
         auto* bufObj = impl_->objects->buffers().get(buffer);
         if (buffer != 0 && bufObj == nullptr) {
             pushError(GL_INVALID_OPERATION);
@@ -22971,10 +23001,43 @@ bool GLContext::textureBuffer(GLuint texture, GLenum internalformat, GLuint buff
 
 bool GLContext::textureBufferRange(GLuint texture, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size) {
     DSA_TEX_WRAP(texture, {
+        if (_target != GL_TEXTURE_BUFFER) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (!isValidTextureBufferInternalFormat(internalformat)) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
         auto* bufObj = impl_->objects->buffers().get(buffer);
         if (buffer != 0 && bufObj == nullptr) {
             pushError(GL_INVALID_OPERATION);
             return false;
+        }
+        // GL 4.6 §8.9 additional constraints on offset / size:
+        //   - offset < 0 → INVALID_VALUE
+        //   - size ≤ 0 → INVALID_VALUE
+        //   - offset is not a multiple of
+        //     TEXTURE_BUFFER_OFFSET_ALIGNMENT → INVALID_VALUE
+        //   - offset + size > buffer size → INVALID_VALUE
+        if (offset < 0 || size <= 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (bufObj != nullptr) {
+            GLint64 alignment = 16;
+            if (impl_->capabilities != nullptr) {
+                impl_->capabilities->queryInteger64(
+                    GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT, &alignment);
+            }
+            if ((offset % alignment) != 0) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            if (offset + size > bufObj->size) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
         }
         if (buffer == 0) {
             return true;
