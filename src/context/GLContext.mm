@@ -2262,7 +2262,16 @@ struct GLContext::Impl {
         if (buf == nullptr) {
             return {nullptr, false};
         }
-        if (buf->mapPointer != nullptr) {
+        // GL 4.4 ARB_buffer_storage: a buffer mapped with
+        // GL_MAP_PERSISTENT_BIT is CONCURRENTLY accessible by the
+        // application AND the GL for the lifetime of the mapping.
+        // CTS `buffer_storage.map_persistent_read_pixels` relies on
+        // this: it maps the PBO persistent + read + write, issues
+        // glReadPixels INTO the same PBO, then inspects the
+        // mapped-memory pointer. Only reject mapped PBOs when the
+        // mapping ISN'T persistent.
+        if (buf->mapPointer != nullptr &&
+            (buf->mapAccessFlags & GL_MAP_PERSISTENT_BIT) == 0) {
             return {nullptr, false};
         }
         const std::uintptr_t offsetRaw = reinterpret_cast<std::uintptr_t>(pixels);
@@ -2274,6 +2283,16 @@ struct GLContext::Impl {
             std::max<GLsizeiptr>(buf->size, 0));
         if (offset > bufSize || requiredBytes > bufSize - offset) {
             return {nullptr, false};
+        }
+        // For persistent-mapped buffers the application reads from
+        // `[metalBuffer contents] + offset`; write directly into that
+        // pointer so the persistent view sees the readback output
+        // without a separate shadow-to-metal sync pass. Fall through
+        // to the shadow path only when the buffer lacks a Metal
+        // backing (rare — software-only buffers, zero-sized PBOs).
+        std::uint8_t* metalDest = mutableBufferContents(*buf);
+        if (metalDest != nullptr) {
+            return {metalDest + offset, true};
         }
         if (buf->shadowBytes.size() < offset + requiredBytes) {
             buf->shadowBytes.resize(offset + requiredBytes);
@@ -6575,7 +6594,13 @@ void GLContext::swapBuffers() {
 }
 
 bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels) {
-    if (pixels == nullptr) {
+    // GL 4.6 §18.3.1: when GL_PIXEL_PACK_BUFFER is bound, `pixels` is
+    // a BYTE OFFSET into the bound PBO, and offset 0 is perfectly
+    // legal (CTS `buffer_storage.map_persistent_read_pixels` passes
+    // offset=0 repeatedly). Only treat a null `pixels` as INVALID_VALUE
+    // when no PBO is bound — otherwise it's an offset, not a pointer.
+    const bool packPBOBound = impl_->state->boundBuffer(GL_PIXEL_PACK_BUFFER) != 0;
+    if (pixels == nullptr && !packPBOBound) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -6585,6 +6610,25 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     }
     if (width == 0 || height == 0) {
         return true;
+    }
+
+    // When a PBO is bound, resolve the offset into the shadow byte
+    // buffer so the downstream readback paths (readFramebufferPixels,
+    // readFBOColorNative) can write into the PBO's shadow memory.
+    // Note: `requiredBytes` passed to resolvePackPBO is the MAXIMUM
+    // bytes the native readback could produce — we use bytesPerPixel
+    // of the requested format × width × height. This is the full
+    // RGBA equivalent when readback falls back to the converter path.
+    if (packPBOBound) {
+        const std::size_t packBytes = static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height) * std::max<std::size_t>(bytesPerPixel(format, type), 1);
+        const std::size_t typeBytes = std::max<std::size_t>(bytesPerComponent(type), 1);
+        auto [packDest, packOk] = impl_->resolvePackPBO(pixels, packBytes, typeBytes);
+        if (!packOk) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        pixels = packDest;
     }
 
     if (impl_->state->boundReadFramebuffer() != 0) {
@@ -21005,7 +21049,10 @@ bool GLContext::multiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, G
 // ---------------------------------------------------------------------------
 
 bool GLContext::memoryBarrier(GLbitfield barriers) {
-    // All valid GL 4.2/4.3 barrier bits.
+    // All valid GL 4.2/4.3/4.4 barrier bits. 4.4 added
+    // `GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT` (ARB_buffer_storage) —
+    // without it here, `buffer_storage.map_persistent_read_pixels`
+    // raises INVALID_VALUE on its post-readback barrier.
     constexpr GLbitfield kValidBarrierBits =
         GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT |
         GL_ELEMENT_ARRAY_BARRIER_BIT |
@@ -21019,7 +21066,8 @@ bool GLContext::memoryBarrier(GLbitfield barriers) {
         GL_FRAMEBUFFER_BARRIER_BIT |
         GL_TRANSFORM_FEEDBACK_BARRIER_BIT |
         GL_ATOMIC_COUNTER_BARRIER_BIT |
-        GL_SHADER_STORAGE_BARRIER_BIT;
+        GL_SHADER_STORAGE_BARRIER_BIT |
+        GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT;
 
     if (barriers != GL_ALL_BARRIER_BITS && (barriers & ~kValidBarrierBits) != 0) {
         pushError(GL_INVALID_VALUE);
@@ -21036,7 +21084,8 @@ bool GLContext::memoryBarrier(GLbitfield barriers) {
     constexpr GLbitfield kCpuVisibleBarriers =
         GL_BUFFER_UPDATE_BARRIER_BIT |
         GL_TEXTURE_UPDATE_BARRIER_BIT |
-        GL_PIXEL_BUFFER_BARRIER_BIT;
+        GL_PIXEL_BUFFER_BARRIER_BIT |
+        GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT;
     const bool requiresCpuSync =
         (barriers == GL_ALL_BARRIER_BITS) ||
         (barriers & kCpuVisibleBarriers) != 0;
