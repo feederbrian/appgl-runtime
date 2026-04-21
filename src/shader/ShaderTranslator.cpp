@@ -414,6 +414,81 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // causing a Metal buffer slot mismatch at draw time.
         auto resources = compiler.get_shader_resources();
         auto activeVars = compiler.get_active_interface_variables();
+
+        // GL 4.6 §7.4.1 (separate programs) — when a shader is compiled
+        // as a separable program via glCreateShaderProgramv, glslang's
+        // setAutoMapLocations(true) assigns Location decorations to bare
+        // top-level `in`/`out` varyings but *leaves interface-block*
+        // variables undecorated (the block member SPIR-V decorations
+        // use MemberDecoration/Offset rather than an OpVariable-level
+        // Location). SPIRV-Cross then emits MSL without any
+        // `[[user(locnN)]]` attribute and Metal can't match the VS's
+        // stage_out names (e.g. `vs_out_color`) against the FS's
+        // stage_in names (e.g. `fs_in_color`) across a program
+        // pipeline. CTS `vertex_attrib_binding.basic-*` exercises this.
+        //
+        // Synthesize Location decorations here so MSL gets
+        // `[[user(locnN)]]` on every user varying. Sort interface
+        // variables by SPIR-V source name so the VS and FS independent
+        // compilations agree: both stages declare the same blocks in
+        // the same GLSL order, producing the same sort key and
+        // therefore the same Location values. Keep any glslang-assigned
+        // Location untouched; only fill in missing ones starting from
+        // the next-available slot.
+        auto assignMissingLocations = [&compiler](
+            auto& vars) {
+            // Determine the highest already-used Location so we don't
+            // collide with explicit `layout(location=N)` qualifiers.
+            std::uint32_t nextLoc = 0;
+            bool anyExplicit = false;
+            for (auto& v : vars) {
+                if (compiler.has_decoration(v.id, spv::DecorationLocation)) {
+                    auto loc = compiler.get_decoration(v.id, spv::DecorationLocation);
+                    if (!anyExplicit || loc >= nextLoc) {
+                        nextLoc = loc + 1;
+                        anyExplicit = true;
+                    }
+                }
+            }
+            // Collect vars that still need a Location, sorted by the
+            // block's SPIR-V name (set by glslang from the GLSL
+            // interface block's *type* name — identical across VS/FS
+            // for matching blocks per GLSL 4.60 §4.4.1).
+            struct Pending {
+                std::uint32_t id;
+                std::string sortKey;
+            };
+            std::vector<Pending> pending;
+            for (auto& v : vars) {
+                if (compiler.has_decoration(v.id, spv::DecorationLocation)) {
+                    continue;
+                }
+                Pending p;
+                p.id = v.id;
+                // Prefer the block type name (stable across VS/FS);
+                // fall back to variable name when not an interface block.
+                p.sortKey = compiler.get_name(v.base_type_id);
+                if (p.sortKey.empty()) {
+                    p.sortKey = v.name;
+                }
+                pending.push_back(p);
+            }
+            std::sort(pending.begin(), pending.end(),
+                [](const Pending& a, const Pending& b) {
+                    return a.sortKey < b.sortKey;
+                });
+            for (const auto& p : pending) {
+                compiler.set_decoration(p.id, spv::DecorationLocation, nextLoc);
+                nextLoc++;
+            }
+        };
+        const auto execModel = compiler.get_execution_model();
+        if (execModel == spv::ExecutionModelVertex) {
+            assignMissingLocations(resources.stage_outputs);
+        } else if (execModel == spv::ExecutionModelFragment) {
+            assignMissingLocations(resources.stage_inputs);
+        }
+
         {
             // Sort by GL binding to get a deterministic assignment order
             // that matches between spirvToMSL and reflect.

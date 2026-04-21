@@ -5825,6 +5825,23 @@ struct GLContext::Impl {
     GLProgramObject* resolvePipelineEmulationProgram(
         GLuint currentProgramName, GLuint& outProgramName);
 
+    // GL 4.6 §7.4 — program pipelines route VS / FS stages through
+    // separable programs, each created via glCreateShaderProgramv or
+    // glProgramParameteri(GL_PROGRAM_SEPARABLE, TRUE). When no regular
+    // program is bound (glUseProgram(0) + active pipeline), the VS
+    // lives on `ppo->vertexProgram` and the FS on `ppo->fragmentProgram`.
+    // The translated-draw path assumes VS+FS reflection/MSL live on a
+    // single program object, so this helper splices the pipeline's FS
+    // onto the pipeline's VS program as the effective draw container.
+    // CTS `vertex_attrib_binding.basic-usage` (+ ~25 VAB tests) uses
+    // this pattern.
+    //
+    // Idempotent — the splice happens on every draw so a stage swap
+    // via useProgramStages between draws is reflected immediately.
+    // Returns nullptr when no program/pipeline is active, or when the
+    // pipeline's VS is missing or unlinked.
+    GLProgramObject* resolveDrawProgram(GLuint& programName);
+
     void encodePendingWork() {
         if (!pendingClear || frameGraph == nullptr) {
             return;
@@ -17661,6 +17678,48 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
     return gsProg;
 }
 
+GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
+    // Fast path: a current program is bound (glUseProgram), use it
+    // directly. GL 4.6 §7.3 says current program shadows any pipeline.
+    if (programName != 0) {
+        return objects->programs().get(programName);
+    }
+    // No current program — check for an active program pipeline and
+    // synthesise a merged VS+FS container on the pipeline's VS.
+    const GLuint pipelineName = state->currentProgramPipeline();
+    if (pipelineName == 0) return nullptr;
+    GLProgramPipelineObject* ppo = objects->programPipelines().get(pipelineName);
+    if (ppo == nullptr || ppo->vertexProgram == 0) return nullptr;
+    GLProgramObject* vsProg = objects->programs().get(ppo->vertexProgram);
+    if (vsProg == nullptr || !vsProg->hasTranslatedPipeline) return nullptr;
+    // Splice pipeline's FS MSL + reflection onto the VS container so
+    // the downstream translated-draw path sees a single program with
+    // both stages populated. Overwrite every call — cheap, keeps a
+    // stage swap between draws in sync. The pipeline state cache is
+    // keyed on the MSL contents so a real swap invalidates itself.
+    if (ppo->fragmentProgram != 0) {
+        GLProgramObject* fsProg = objects->programs().get(ppo->fragmentProgram);
+        if (fsProg != nullptr) {
+            vsProg->fragmentMSL = fsProg->fragmentMSL;
+            vsProg->fragmentReflection = fsProg->fragmentReflection;
+            // The translated-draw path caches uniform layouts on the
+            // container program. If we merged a new FS shape we need
+            // the layout recomputed, otherwise the vertex and fragment
+            // uniform buffers get built from stale reflection.
+            vsProg->uniformLayoutComputed = false;
+        }
+    } else {
+        // No FS stage on the pipeline — clear the container's fragment
+        // data so we don't accidentally render with a stale FS left
+        // over from a previous pipeline that did have one.
+        vsProg->fragmentMSL.clear();
+        vsProg->fragmentReflection = ShaderReflection{};
+        vsProg->uniformLayoutComputed = false;
+    }
+    programName = ppo->vertexProgram;
+    return vsProg;
+}
+
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                                            GLuint programName,
                                            const appgl::EmulatedDraw& ed)
@@ -18073,8 +18132,13 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     impl_->encodePendingWork();
 
     // Try the translated shader pipeline first (GPU-side vertex processing).
-    const GLuint programName = impl_->state->currentProgram();
-    GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+    // GL 4.6 §7.4 — prefer glUseProgram's program; fall back to the
+    // active program pipeline's VS+FS merged onto its VS container
+    // when only a pipeline is bound. Covers the CTS VAB tests that
+    // drive separable programs through glCreateShaderProgramv +
+    // glUseProgramStages without ever calling glUseProgram.
+    GLuint programName = impl_->state->currentProgram();
+    GLProgramObject* program = impl_->resolveDrawProgram(programName);
     APPGL_LOG(DRAW, @"drawArrays: mode=0x%X count=%d program=%u hasTranslated=%d",
               mode, count, programName, program ? (int)program->hasTranslatedPipeline : -1);
 
@@ -18503,8 +18567,13 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
     impl_->encodePendingWork();
 
     // Translated shader pipeline with instancing.
-    const GLuint programName = impl_->state->currentProgram();
-    GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+    // GL 4.6 §7.4 — prefer glUseProgram's program; fall back to the
+    // active program pipeline's VS+FS merged onto its VS container
+    // when only a pipeline is bound. Covers the CTS VAB tests that
+    // drive separable programs through glCreateShaderProgramv +
+    // glUseProgramStages without ever calling glUseProgram.
+    GLuint programName = impl_->state->currentProgram();
+    GLProgramObject* program = impl_->resolveDrawProgram(programName);
 
     // GS emul hook for instanced draws.
     if (program != nullptr && program->geometryEmulated && count > 0 && instancecount > 0) {
@@ -18898,8 +18967,13 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     }
 
     // Try the translated shader pipeline first (GPU-side vertex processing).
-    const GLuint programName = impl_->state->currentProgram();
-    GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+    // GL 4.6 §7.4 — prefer glUseProgram's program; fall back to the
+    // active program pipeline's VS+FS merged onto its VS container
+    // when only a pipeline is bound. Covers the CTS VAB tests that
+    // drive separable programs through glCreateShaderProgramv +
+    // glUseProgramStages without ever calling glUseProgram.
+    GLuint programName = impl_->state->currentProgram();
+    GLProgramObject* program = impl_->resolveDrawProgram(programName);
 
     // CPU GS emulation hook — mirrors drawArrays, but resolves
     // indices through the element buffer so vertex `i` reads VBO
@@ -19247,8 +19321,13 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     }
 
     // Try translated shader pipeline first.
-    const GLuint programName = impl_->state->currentProgram();
-    GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+    // GL 4.6 §7.4 — prefer glUseProgram's program; fall back to the
+    // active program pipeline's VS+FS merged onto its VS container
+    // when only a pipeline is bound. Covers the CTS VAB tests that
+    // drive separable programs through glCreateShaderProgramv +
+    // glUseProgramStages without ever calling glUseProgram.
+    GLuint programName = impl_->state->currentProgram();
+    GLProgramObject* program = impl_->resolveDrawProgram(programName);
 
     // GS emul hook for base-vertex indexed draws (drawRangeElements
     // funnels here too).
@@ -19524,8 +19603,13 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     }
 
     // Try translated shader pipeline first.
-    const GLuint programName = impl_->state->currentProgram();
-    GLProgramObject* program = (programName != 0) ? impl_->objects->programs().get(programName) : nullptr;
+    // GL 4.6 §7.4 — prefer glUseProgram's program; fall back to the
+    // active program pipeline's VS+FS merged onto its VS container
+    // when only a pipeline is bound. Covers the CTS VAB tests that
+    // drive separable programs through glCreateShaderProgramv +
+    // glUseProgramStages without ever calling glUseProgram.
+    GLuint programName = impl_->state->currentProgram();
+    GLProgramObject* program = impl_->resolveDrawProgram(programName);
 
     // GS emul hook for instanced indexed draws. See drawElements
     // and drawArraysInstanced for the sibling paths.
