@@ -7661,11 +7661,24 @@ bool GLContext::bufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    // GL 4.4 §6.3: bufferSubData is legal on a mapped buffer only
-    // when the mapping uses GL_MAP_PERSISTENT_BIT.
+    // GL 4.4 §6.3: bufferSubData is legal on a mapped buffer as
+    // long as the write region doesn't overlap the mapped region
+    // — unless the mapping uses MAP_PERSISTENT_BIT, in which case
+    // any overlap is also legal. CTS `buffer_storage.
+    // map_persistent_buffer_sub_data` exercises both cases: the
+    // persistent-map section expects all sub-writes to succeed,
+    // the non-persistent-map section expects INVALID_OPERATION
+    // only for writes that cross the mapped extent.
     if (object->mapped && (object->mapAccessFlags & GL_MAP_PERSISTENT_BIT) == 0) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+        const GLintptr mapStart = object->mapOffset;
+        const GLintptr mapEnd = mapStart + static_cast<GLintptr>(object->mapLength);
+        const GLintptr opStart = offset;
+        const GLintptr opEnd = offset + static_cast<GLintptr>(size);
+        const bool overlaps = (opStart < mapEnd) && (opEnd > mapStart);
+        if (overlaps) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
     // GL 4.4 §6.2 / §6.3: immutable-storage buffers require the
     // GL_DYNAMIC_STORAGE_BIT flag to accept {Named,}BufferSubData writes.
