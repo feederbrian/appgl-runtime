@@ -13196,6 +13196,190 @@ bool GLContext::linkProgram(GLuint program) {
     }
     // ─── End AC / ACB limits check ──────────────────────────────────
 
+    // ─── Subroutine uniform location validation (GL 4.6 §7.9) ───
+    //
+    // CTS `explicit_uniform_location.subroutine-loc-negative-link-*`
+    // asserts that glLinkProgram sets GL_LINK_STATUS=FALSE when
+    // any of the following appears in a subroutine uniform
+    // declaration (per stage, independently):
+    //   (a) Two `layout(location=N)` subroutine uniforms collide
+    //       on the same location (or overlapping array ranges).
+    //   (b) A `layout(location=N)` subroutine uniform's base
+    //       location, or any location its array occupies, is
+    //       >= GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS.
+    //   (c) The linked program's total subroutine-uniform
+    //       location count (sum of arraySizes + implicit) in
+    //       any stage exceeds GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS.
+    //
+    // Parse `layout(location=K) subroutine uniform TYPE NAME [N];`
+    // declarations straight from each attached shader's source.
+    // We can't rely on `resourceSubroutineUniforms[]` here because
+    // that table is populated *after* `linked = true` (see the
+    // resource-introspection block below). This parse is
+    // intentionally lightweight — just locations, array sizes,
+    // and layout pins — and mirrors the full scanner in
+    // `scanSubroutineDeclarations` for the pieces it needs.
+    {
+        GLint maxSrUnifLoc = 1024;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS, &maxSrUnifLoc);
+        }
+        // Per-stage parse. Returns false + sets linkLog on first
+        // spec violation (so the link fails with a descriptive
+        // message).
+        auto stripComments = [](const std::string& s) {
+            std::string out;
+            out.reserve(s.size());
+            for (std::size_t i = 0; i < s.size();) {
+                if (i + 1 < s.size() && s[i] == '/' && s[i + 1] == '/') {
+                    while (i < s.size() && s[i] != '\n') ++i;
+                } else if (i + 1 < s.size() && s[i] == '/' && s[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < s.size() && !(s[i] == '*' && s[i + 1] == '/')) ++i;
+                    if (i + 1 < s.size()) i += 2;
+                } else {
+                    out += s[i++];
+                }
+            }
+            return out;
+        };
+        auto isIdentCh = [](unsigned char c) {
+            return std::isalnum(c) || c == '_';
+        };
+        auto validateStage = [&](const std::string& sourceIn) -> bool {
+            const std::string src = stripComments(sourceIn);
+            std::unordered_set<GLint> usedLocations;
+            std::size_t totalLocations = 0;
+            const std::string kw = "subroutine";
+            std::size_t pos = 0;
+            while ((pos = src.find(kw, pos)) != std::string::npos) {
+                const bool lb = (pos == 0) ||
+                    !isIdentCh(static_cast<unsigned char>(src[pos - 1]));
+                const bool rb = (pos + kw.size() < src.size()) &&
+                    !isIdentCh(static_cast<unsigned char>(src[pos + kw.size()]));
+                if (!lb || !rb) { pos += kw.size(); continue; }
+                // Walk backward for `layout(location=K)` qualifier.
+                GLint explicitLoc = -1;
+                {
+                    std::size_t back = pos;
+                    while (back > 0 && std::isspace(
+                        static_cast<unsigned char>(src[back - 1]))) --back;
+                    if (back > 0 && src[back - 1] == ')') {
+                        int pd = 1;
+                        std::size_t bp = back - 1;
+                        while (bp > 0 && pd > 0) {
+                            --bp;
+                            if (src[bp] == ')') ++pd;
+                            else if (src[bp] == '(') --pd;
+                        }
+                        if (pd == 0 && bp >= 6) {
+                            std::size_t lp = bp;
+                            while (lp > 0 && std::isspace(
+                                static_cast<unsigned char>(src[lp - 1]))) --lp;
+                            if (lp >= 6 && src.compare(lp - 6, 6, "layout") == 0) {
+                                std::string content = src.substr(
+                                    bp + 1, (back - 1) - (bp + 1));
+                                std::size_t loc = content.find("location");
+                                if (loc != std::string::npos) {
+                                    std::size_t eq = content.find('=', loc);
+                                    if (eq != std::string::npos) {
+                                        std::size_t nb = eq + 1;
+                                        while (nb < content.size() &&
+                                               std::isspace(static_cast<unsigned char>(content[nb]))) ++nb;
+                                        std::size_t ne = nb;
+                                        while (ne < content.size() &&
+                                               (std::isdigit(static_cast<unsigned char>(content[ne])) ||
+                                                content[ne] == 'x' || content[ne] == 'X')) ++ne;
+                                        if (ne > nb) {
+                                            explicitLoc = static_cast<GLint>(
+                                                std::strtol(content.substr(nb, ne - nb).c_str(),
+                                                            nullptr, 0));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                std::size_t p = pos + kw.size();
+                while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+                // Only `subroutine uniform …` shapes consume locations.
+                if (p + 7 <= src.size() && src.compare(p, 7, "uniform") == 0 &&
+                    (p + 7 == src.size() || !isIdentCh(static_cast<unsigned char>(src[p + 7])))) {
+                    p += 7;
+                    while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+                    // Skip TYPE word.
+                    while (p < src.size() && isIdentCh(static_cast<unsigned char>(src[p]))) ++p;
+                    while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+                    // Skip NAME word.
+                    while (p < src.size() && isIdentCh(static_cast<unsigned char>(src[p]))) ++p;
+                    while (p < src.size() && std::isspace(static_cast<unsigned char>(src[p]))) ++p;
+                    // Optional `[N]` array subscript.
+                    GLint arraySize = 1;
+                    if (p < src.size() && src[p] == '[') {
+                        ++p;
+                        while (p < src.size() && std::isspace(
+                            static_cast<unsigned char>(src[p]))) ++p;
+                        const std::size_t nStart = p;
+                        while (p < src.size() && std::isdigit(
+                            static_cast<unsigned char>(src[p]))) ++p;
+                        if (p > nStart) {
+                            arraySize = std::atoi(src.substr(nStart, p - nStart).c_str());
+                            if (arraySize < 1) arraySize = 1;
+                        }
+                    }
+                    totalLocations += static_cast<std::size_t>(arraySize);
+                    // (c) total-across-stage location cap.
+                    if (static_cast<GLint>(totalLocations) > maxSrUnifLoc) {
+                        programObject->linkLog =
+                            "subroutine-uniform location count exceeds "
+                            "GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS="
+                            + std::to_string(maxSrUnifLoc);
+                        return false;
+                    }
+                    if (explicitLoc >= 0) {
+                        // (b) explicit location must be < max, for
+                        // all array-consumed locations.
+                        for (GLint k = 0; k < arraySize; ++k) {
+                            const GLint slot = explicitLoc + k;
+                            if (slot >= maxSrUnifLoc) {
+                                programObject->linkLog =
+                                    "subroutine uniform location "
+                                    + std::to_string(slot)
+                                    + " >= GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS="
+                                    + std::to_string(maxSrUnifLoc);
+                                return false;
+                            }
+                            // (a) duplicate-location check.
+                            if (!usedLocations.insert(slot).second) {
+                                programObject->linkLog =
+                                    "subroutine uniform location "
+                                    + std::to_string(slot)
+                                    + " is reused across two declarations";
+                                return false;
+                            }
+                        }
+                    }
+                }
+                pos = p;
+            }
+            return true;
+        };
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* sh = impl_->objects->shaders().get(shaderId);
+            if (sh == nullptr) continue;
+            if (!validateStage(sh->source)) {
+                programObject->linked = false;
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+        }
+    }
+    // ─── End subroutine uniform location validation ───
+
     programObject->linked = true;
     programObject->linkLog = "ok";
 
