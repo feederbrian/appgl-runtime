@@ -1845,10 +1845,48 @@ struct MetalFrameGraph::Impl {
         }
 
         MTLPrimitiveType primitive;
-        // GL_TRIANGLE_FAN and GL_LINE_LOOP have no Metal equivalent.
-        // We expand them to indexed GL_TRIANGLES / GL_LINE_STRIP here.
+        // GL_TRIANGLE_FAN, GL_LINE_LOOP, and the four *_ADJACENCY modes
+        // have no Metal equivalent. Expand to an indexed draw with a
+        // recomputed index stream here. For drawElements inputs the
+        // expansion source indexes into the user's element buffer (via
+        // `readPositional` below); for drawArrays the positional index
+        // equals the vertex ID.
         std::vector<std::uint32_t> expandedIndices;
         bool useExpandedIndices = false;
+
+        // Resolve a positional draw index (0..n-1 for drawArrays /
+        // 0..indexCount-1 for drawElements) to the vertex ID that Metal
+        // will ultimately use as the index into the vertex buffer. For
+        // drawElements we read from the user's element buffer — either
+        // CPU-side bytes (info.indices) or the Metal index buffer's
+        // mapped contents (info.metalIndexBuffer). For drawArrays the
+        // positional index is returned unchanged.
+        auto readPositional = [&](GLsizei p) -> std::uint32_t {
+            const bool hasClientIndices = (info.indices != nullptr && info.indexCount > 0);
+            const bool hasMetalIndices = (info.metalIndexBuffer != nullptr);
+            if (!hasClientIndices && !hasMetalIndices) {
+                return static_cast<std::uint32_t>(p);
+            }
+            const void* base = nullptr;
+            if (hasClientIndices) {
+                base = info.indices;
+            } else {
+                id<MTLBuffer> buf = (__bridge id<MTLBuffer>)info.metalIndexBuffer;
+                base = static_cast<const std::uint8_t*>([buf contents])
+                     + info.metalIndexBufferOffset;
+            }
+            switch (info.indexType) {
+                case GL_UNSIGNED_BYTE:
+                    return static_cast<std::uint32_t>(
+                        reinterpret_cast<const std::uint8_t*>(base)[p]);
+                case GL_UNSIGNED_SHORT:
+                    return static_cast<std::uint32_t>(
+                        reinterpret_cast<const std::uint16_t*>(base)[p]);
+                case GL_UNSIGNED_INT:
+                default:
+                    return reinterpret_cast<const std::uint32_t*>(base)[p];
+            }
+        };
 
         switch (info.mode) {
             case GL_POINTS:         primitive = MTLPrimitiveTypePoint; break;
@@ -1863,9 +1901,9 @@ struct MetalFrameGraph::Impl {
                 if (n >= 3) {
                     expandedIndices.reserve(static_cast<std::size_t>((n - 2) * 3));
                     for (GLsizei i = 1; i < n - 1; ++i) {
-                        expandedIndices.push_back(0);
-                        expandedIndices.push_back(static_cast<std::uint32_t>(i));
-                        expandedIndices.push_back(static_cast<std::uint32_t>(i + 1));
+                        expandedIndices.push_back(readPositional(0));
+                        expandedIndices.push_back(readPositional(i));
+                        expandedIndices.push_back(readPositional(i + 1));
                     }
                     useExpandedIndices = true;
                 }
@@ -1879,9 +1917,9 @@ struct MetalFrameGraph::Impl {
                 if (n >= 2) {
                     expandedIndices.reserve(static_cast<std::size_t>(n + 1));
                     for (GLsizei i = 0; i < n; ++i) {
-                        expandedIndices.push_back(static_cast<std::uint32_t>(i));
+                        expandedIndices.push_back(readPositional(i));
                     }
-                    expandedIndices.push_back(0); // Close the loop
+                    expandedIndices.push_back(readPositional(0)); // Close the loop
                     useExpandedIndices = true;
                 }
                 break;
@@ -1901,8 +1939,8 @@ struct MetalFrameGraph::Impl {
                 if (groups > 0) {
                     expandedIndices.reserve(static_cast<std::size_t>(groups) * 2);
                     for (GLsizei g = 0; g < groups; ++g) {
-                        expandedIndices.push_back(static_cast<std::uint32_t>(g * 4 + 1));
-                        expandedIndices.push_back(static_cast<std::uint32_t>(g * 4 + 2));
+                        expandedIndices.push_back(readPositional(g * 4 + 1));
+                        expandedIndices.push_back(readPositional(g * 4 + 2));
                     }
                     useExpandedIndices = true;
                 }
@@ -1916,8 +1954,8 @@ struct MetalFrameGraph::Impl {
                 if (n >= 4) {
                     expandedIndices.reserve(static_cast<std::size_t>(n - 3) * 2);
                     for (GLsizei i = 1; i <= n - 3; ++i) {
-                        expandedIndices.push_back(static_cast<std::uint32_t>(i));
-                        expandedIndices.push_back(static_cast<std::uint32_t>(i + 1));
+                        expandedIndices.push_back(readPositional(i));
+                        expandedIndices.push_back(readPositional(i + 1));
                     }
                     useExpandedIndices = true;
                 }
@@ -1932,40 +1970,42 @@ struct MetalFrameGraph::Impl {
                 if (groups > 0) {
                     expandedIndices.reserve(static_cast<std::size_t>(groups) * 3);
                     for (GLsizei g = 0; g < groups; ++g) {
-                        expandedIndices.push_back(static_cast<std::uint32_t>(g * 6 + 0));
-                        expandedIndices.push_back(static_cast<std::uint32_t>(g * 6 + 2));
-                        expandedIndices.push_back(static_cast<std::uint32_t>(g * 6 + 4));
+                        expandedIndices.push_back(readPositional(g * 6 + 0));
+                        expandedIndices.push_back(readPositional(g * 6 + 2));
+                        expandedIndices.push_back(readPositional(g * 6 + 4));
                     }
                     useExpandedIndices = true;
                 }
                 break;
             }
             case GL_TRIANGLE_STRIP_ADJACENCY: {
-                // GL 4.6 §10.1 Table 10.4 — N verts → N/2 - 2 triangles.
-                // Main verts are at indices 0, 2, 4, 6, 8, … (every-other).
-                // For each triangle p (0..N/2-3):
-                //   even p  : main(2p), main(2p+2), main(2p+4)
-                //   odd p   : main(2p+2), main(2p), main(2p+4)
-                // which in raw-index form translates to 2*(2p), 2*(2p+2), 2*(2p+4)
-                // = 4p, 4p+4, 4p+8 for even p and 4p+4, 4p, 4p+8 for odd.
+                // GL 4.6 §10.1 Table 10.2 — N verts → (N - 4) / 2
+                // triangles (equivalently N/2 - 2). Main vertices
+                // occupy positional indices 0, 2, 4, … with adjacent
+                // vertices in between at 1, 3, 5, …. For primitive p
+                // (0-indexed):
+                //   even p : raw indices 2p,     2p + 2, 2p + 4
+                //   odd  p : raw indices 2p + 2, 2p,     2p + 4
+                // The odd-p swap preserves consistent winding — the
+                // strip alternates orientation with each step.
                 primitive = MTLPrimitiveTypeTriangle;
                 const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
                     ? info.indexCount : info.vertexCount;
-                const GLsizei triCount = (n >= 6) ? (n / 2 - 2) : 0;
+                const GLsizei triCount = (n >= 6) ? ((n - 4) / 2) : 0;
                 if (triCount > 0) {
                     expandedIndices.reserve(static_cast<std::size_t>(triCount) * 3);
                     for (GLsizei p = 0; p < triCount; ++p) {
-                        const std::uint32_t a = static_cast<std::uint32_t>(2 * (2 * p + 0));
-                        const std::uint32_t b = static_cast<std::uint32_t>(2 * (2 * p + 2));
-                        const std::uint32_t c = static_cast<std::uint32_t>(2 * (2 * p + 4));
+                        const GLsizei a = 2 * p + 0;
+                        const GLsizei b = 2 * p + 2;
+                        const GLsizei c = 2 * p + 4;
                         if ((p & 1) == 0) {
-                            expandedIndices.push_back(a);
-                            expandedIndices.push_back(b);
-                            expandedIndices.push_back(c);
+                            expandedIndices.push_back(readPositional(a));
+                            expandedIndices.push_back(readPositional(b));
+                            expandedIndices.push_back(readPositional(c));
                         } else {
-                            expandedIndices.push_back(b);
-                            expandedIndices.push_back(a);
-                            expandedIndices.push_back(c);
+                            expandedIndices.push_back(readPositional(b));
+                            expandedIndices.push_back(readPositional(a));
+                            expandedIndices.push_back(readPositional(c));
                         }
                     }
                     useExpandedIndices = true;
@@ -1977,17 +2017,33 @@ struct MetalFrameGraph::Impl {
         }
 
         if (useExpandedIndices && !expandedIndices.empty()) {
-            // Primitive expansion path (GL_TRIANGLE_FAN, GL_LINE_LOOP).
+            // Primitive expansion path (GL_TRIANGLE_FAN, GL_LINE_LOOP,
+            // adjacency modes). The expanded buffer carries actual
+            // vertex IDs (for drawArrays) or actual element-buffer
+            // values (for drawElements via readPositional). baseVertex
+            // / baseInstance / instanceCount are preserved from the
+            // original draw so Metal applies them uniformly.
             const std::size_t indexBytes = expandedIndices.size() * sizeof(std::uint32_t);
             auto iAlloc = ringSuballocate(expandedIndices.data(), indexBytes);
             if (iAlloc.buffer == nil) {
                 return false;
             }
-            [currentRenderEncoder drawIndexedPrimitives:primitive
-                                indexCount:static_cast<NSUInteger>(expandedIndices.size())
-                                 indexType:MTLIndexTypeUInt32
-                               indexBuffer:iAlloc.buffer
-                         indexBufferOffset:iAlloc.offset];
+            if (info.instanceCount > 1 || info.baseVertex != 0 || info.baseInstance != 0) {
+                [currentRenderEncoder drawIndexedPrimitives:primitive
+                                    indexCount:static_cast<NSUInteger>(expandedIndices.size())
+                                     indexType:MTLIndexTypeUInt32
+                                   indexBuffer:iAlloc.buffer
+                             indexBufferOffset:iAlloc.offset
+                                 instanceCount:static_cast<NSUInteger>(info.instanceCount)
+                                    baseVertex:static_cast<NSUInteger>(info.baseVertex)
+                                  baseInstance:static_cast<NSUInteger>(info.baseInstance)];
+            } else {
+                [currentRenderEncoder drawIndexedPrimitives:primitive
+                                    indexCount:static_cast<NSUInteger>(expandedIndices.size())
+                                     indexType:MTLIndexTypeUInt32
+                                   indexBuffer:iAlloc.buffer
+                             indexBufferOffset:iAlloc.offset];
+            }
         } else if (info.indices != nullptr && info.indexCount > 0) {
             MTLIndexType metalIndexType = MTLIndexTypeUInt16;
             std::size_t bytesPerIndex = 2;
