@@ -2032,9 +2032,57 @@ static GLboolean APIENTRY glIsQuery(GLuint id) {
     return GL_TRUE;
 }
 
+// GL 4.6 §4.2.1 + ARB_pipeline_statistics_query §4.2.1 accepted
+// glBeginQuery targets. Pipeline-statistics targets that exercise
+// fixed-function stages we don't support (tessellation) must be
+// rejected with INVALID_ENUM per
+// `KHR-GL46.pipeline_statistics_query_tests_ARB.api_coverage_unsupported_calls`.
+static bool isSupportedQueryTarget(GLenum target) {
+    switch (target) {
+        case GL_SAMPLES_PASSED:
+        case GL_ANY_SAMPLES_PASSED:
+        case GL_ANY_SAMPLES_PASSED_CONSERVATIVE:
+        case GL_PRIMITIVES_GENERATED:
+        case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+        case GL_TRANSFORM_FEEDBACK_OVERFLOW:
+        case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
+        case GL_TIME_ELAPSED:
+        case GL_TIMESTAMP:
+        // Pipeline-statistics targets from
+        // ARB_pipeline_statistics_query (GL 4.6 core) — we only
+        // advertise support for the stages we actually emulate.
+        // Core-profile enum names; the ARB aliases share the same
+        // token values.
+        case GL_VERTICES_SUBMITTED:
+        case GL_PRIMITIVES_SUBMITTED:
+        case GL_VERTEX_SHADER_INVOCATIONS:
+        case GL_GEOMETRY_SHADER_INVOCATIONS:
+        case GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED:
+        case GL_FRAGMENT_SHADER_INVOCATIONS:
+        case GL_COMPUTE_SHADER_INVOCATIONS:
+        case GL_CLIPPING_INPUT_PRIMITIVES:
+        case GL_CLIPPING_OUTPUT_PRIMITIVES:
+            return true;
+        // Tessellation pipeline-statistics — NOT advertised;
+        // tessellation is not implemented so
+        // `GL_ARB_tessellation_shader` is absent from the
+        // extension string and the test expects INVALID_ENUM.
+        case GL_TESS_CONTROL_SHADER_PATCHES:
+        case GL_TESS_EVALUATION_SHADER_INVOCATIONS:
+            return false;
+        default:
+            return false;
+    }
+}
+
 static void APIENTRY glBeginQuery(GLenum target, GLuint id) {
     auto* context = currentContextOrNull();
     if (context == nullptr) {
+        return;
+    }
+    if (!isSupportedQueryTarget(target)) {
+        context->pushError(GL_INVALID_ENUM, "glBeginQuery",
+                           "target is not a supported query target");
         return;
     }
     auto* query = context->objects().queries().get(id);
