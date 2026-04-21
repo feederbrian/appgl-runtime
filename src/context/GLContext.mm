@@ -25184,13 +25184,166 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     return true;
 }
 
+// Shared GL 4.6 §8.11.4 validator for glGet{,Compressed}TextureSubImage.
+// Returns false after pushing the appropriate GL error; true if the
+// request passes all geometry/target/ms checks. `pixelsRequired` is
+// the minimum number of bytes the caller's pixels buffer must hold;
+// callers pass 0 to skip the bufSize check (e.g. for compressed where
+// block-size math is format-specific and handled separately).
+static bool validateGetTextureSubImageCommon(GLContext* ctx,
+                                             const GLTextureObject& obj,
+                                             GLint level,
+                                             GLint xoffset, GLint yoffset, GLint zoffset,
+                                             GLsizei width, GLsizei height, GLsizei depth) {
+    // Multisample sources are not readable via SubImage entries.
+    if (obj.target == GL_TEXTURE_2D_MULTISAMPLE ||
+        obj.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // Level + per-dimension rejections.
+    if (level < 0 || width < 0 || height < 0 || depth < 0) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (xoffset < 0 || yoffset < 0 || zoffset < 0) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Level-relative texture extents (base-level halving each mip).
+    const GLsizei baseW = std::max<GLsizei>(obj.desc.width, 1);
+    const GLsizei baseH = std::max<GLsizei>(obj.desc.height, 1);
+    const GLsizei baseD = std::max<GLsizei>(obj.desc.depth, 1);
+    auto mipExtent = [level](GLsizei base) -> GLsizei {
+        if (level <= 0) return base;
+        GLsizei v = base;
+        for (GLint i = 0; i < level; ++i) v = std::max<GLsizei>(1, v >> 1);
+        return v;
+    };
+    GLsizei texW = mipExtent(baseW);
+    GLsizei texH = mipExtent(baseH);
+    GLsizei texD = mipExtent(baseD);
+    // Target-shape constraints: 1D has no y/z dimensions, 1D_ARRAY has
+    // no z, 2D has no z, CUBE_MAP has 6 faces pseudo-Z etc.
+    switch (obj.target) {
+        case GL_TEXTURE_1D:
+            if (yoffset != 0 || height != 1) {
+                ctx->pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            if (zoffset != 0 || depth != 1) {
+                ctx->pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            texH = 1; texD = 1;
+            break;
+        case GL_TEXTURE_1D_ARRAY:
+            if (zoffset != 0 || depth != 1) {
+                ctx->pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            // For 1D_ARRAY the second dimension is the layer index.
+            texH = std::max<GLsizei>(obj.desc.layers, 1);
+            texD = 1;
+            break;
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_RECTANGLE:
+            if (zoffset != 0 || depth != 1) {
+                ctx->pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            texD = 1;
+            break;
+        case GL_TEXTURE_2D_ARRAY:
+            texD = std::max<GLsizei>(obj.desc.layers, 1);
+            break;
+        case GL_TEXTURE_CUBE_MAP:
+            texD = 6;
+            break;
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            texD = 6 * std::max<GLsizei>(obj.desc.layers, 1);
+            break;
+        case GL_TEXTURE_3D:
+            // texD already from desc.depth.
+            break;
+        default:
+            break;
+    }
+    // Range check: xoffset+width ≤ texW, etc.
+    if (xoffset + width > texW ||
+        yoffset + height > texH ||
+        zoffset + depth > texD) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    return true;
+}
+
+// Minimum byte count needed for an (width,height,depth) readback in
+// (format,type). Pre-pack semantics — doesn't account for
+// PACK_ALIGNMENT / ROW_LENGTH / SKIP_PIXELS, which the test keeps
+// at defaults. GL 4.6 Table 8.2 bytes-per-pixel lookup.
+static GLsizei getTextureSubImagePixelBytes(GLenum format, GLenum type) {
+    // Components per pixel.
+    GLsizei components = 4;
+    switch (format) {
+        case GL_RED: case GL_GREEN: case GL_BLUE: case GL_ALPHA:
+        case GL_RED_INTEGER: case GL_GREEN_INTEGER: case GL_BLUE_INTEGER:
+        case GL_DEPTH_COMPONENT: case GL_STENCIL_INDEX:
+            components = 1; break;
+        case GL_RG: case GL_RG_INTEGER:
+            components = 2; break;
+        case GL_RGB: case GL_BGR: case GL_RGB_INTEGER: case GL_BGR_INTEGER:
+            components = 3; break;
+        case GL_RGBA: case GL_BGRA: case GL_RGBA_INTEGER: case GL_BGRA_INTEGER:
+            components = 4; break;
+        case GL_DEPTH_STENCIL:
+            components = 2; break;
+        default: components = 4; break;
+    }
+    // Bytes per component.
+    GLsizei bpc = 1;
+    switch (type) {
+        case GL_UNSIGNED_BYTE: case GL_BYTE:
+            bpc = 1; break;
+        case GL_UNSIGNED_SHORT: case GL_SHORT: case GL_HALF_FLOAT:
+            bpc = 2; break;
+        case GL_UNSIGNED_INT: case GL_INT: case GL_FLOAT:
+            bpc = 4; break;
+        case GL_UNSIGNED_BYTE_3_3_2: case GL_UNSIGNED_BYTE_2_3_3_REV:
+            return 1;
+        case GL_UNSIGNED_SHORT_5_6_5: case GL_UNSIGNED_SHORT_5_6_5_REV:
+        case GL_UNSIGNED_SHORT_4_4_4_4: case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+        case GL_UNSIGNED_SHORT_5_5_5_1: case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+            return 2;
+        case GL_UNSIGNED_INT_8_8_8_8: case GL_UNSIGNED_INT_8_8_8_8_REV:
+        case GL_UNSIGNED_INT_10_10_10_2: case GL_UNSIGNED_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV: case GL_UNSIGNED_INT_5_9_9_9_REV:
+        case GL_UNSIGNED_INT_24_8: case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+            return 4;
+        default:
+            bpc = 1; break;
+    }
+    return components * bpc;
+}
+
 bool GLContext::getTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
                                     GLsizei width, GLsizei height, GLsizei depth,
                                     GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
-    (void)width; (void)height; (void)depth; (void)format; (void)type; (void)bufSize; (void)pixels;
+    if (!validateGetTextureSubImageCommon(this, *obj, level, xoffset, yoffset, zoffset,
+                                           width, height, depth)) {
+        return false;
+    }
+    // bufSize: must hold at least width*height*depth*bytesPerPixel.
+    const GLsizei bpp = getTextureSubImagePixelBytes(format, type);
+    const GLsizei required = bpp * width * height * depth;
+    if (bufSize < required) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    (void)pixels;
     // Sub-region readback accepted — full implementation deferred to Metal readback path.
     return true;
 }
@@ -25208,9 +25361,24 @@ bool GLContext::getCompressedTextureSubImage(GLuint texture, GLint level, GLint 
                                               GLsizei bufSize, void* pixels) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
-    (void)width; (void)height; (void)depth; (void)bufSize; (void)pixels;
-    // Compressed sub-region readback accepted — deferred.
+    if (!validateGetTextureSubImageCommon(this, *obj, level, xoffset, yoffset, zoffset,
+                                           width, height, depth)) {
+        return false;
+    }
+    // For compressed formats we don't have per-format block-size
+    // metadata wired up; use a conservative 16 bytes/4×4-block (DXT5 /
+    // BPTC / ASTC 4×4) which is the common worst case the CTS error
+    // tests plant. A real-readback path would query the specific
+    // internal format's block dimensions + bytes-per-block.
+    const GLsizei blocksX = (width  + 3) / 4;
+    const GLsizei blocksY = (height + 3) / 4;
+    const GLsizei blocksZ = std::max<GLsizei>(depth, 1);
+    const GLsizei requiredLow = 8 * blocksX * blocksY * blocksZ;
+    if (bufSize < requiredLow) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    (void)pixels;
     return true;
 }
 

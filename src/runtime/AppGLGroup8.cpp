@@ -357,14 +357,34 @@ static void APIENTRY glCompressedTexImage3D(GLenum target, GLint level, GLenum i
 }
 
 static void APIENTRY glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data) {
-    (void)target;
-    (void)level;
-    (void)internalformat;
-    (void)width;
-    (void)height;
     (void)border;
     (void)imageSize;
     (void)data;
+    // GL 4.6 §8.11.1: the compressed payload is still dropped, but
+    // callers (especially CTS error-path tests) expect the bound
+    // texture to have its width/height/internalFormat recorded so
+    // subsequent queries (textureSubImage, getTexLevelParameter,
+    // glGetCompressedTextureSubImage bounds checks) see the right
+    // dimensions. Without this update `desc.width==0` forced the
+    // §8.11.4 range check in getCompressedTextureSubImage to reject
+    // with INVALID_VALUE before the later bufSize check could fire.
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    if (level == 0 && width > 0 && height > 0) {
+        GLuint tex = ctx->state().boundTexture(target);
+        if (tex != 0) {
+            auto* obj = ctx->objects().textures().get(tex);
+            if (obj != nullptr) {
+                obj->target = target;
+                obj->desc.target = target;
+                obj->desc.width = width;
+                obj->desc.height = height;
+                obj->desc.depth = 1;
+                obj->desc.internalFormat = internalformat;
+                obj->instantiated = true;
+            }
+        }
+    }
     warnDataDroppedOnce("glCompressedTexImage2D");
 }
 
