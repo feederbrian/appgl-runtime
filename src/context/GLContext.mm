@@ -7266,6 +7266,15 @@ bool GLContext::bufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.4 §6.2 / §6.3: immutable-storage buffers require the
+    // GL_DYNAMIC_STORAGE_BIT flag to accept {Named,}BufferSubData writes.
+    // CTS `buffer_storage.errors` asserts INVALID_OPERATION when a
+    // glBufferStorage-created buffer without DYNAMIC_STORAGE_BIT takes
+    // a subsequent glBufferSubData or glNamedBufferSubData.
+    if (object->immutable && !(object->storageFlags & GL_DYNAMIC_STORAGE_BIT)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     if (offset > object->size || size > object->size - offset) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -7393,13 +7402,48 @@ void* GLContext::mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
         pushError(GL_INVALID_VALUE);
         return nullptr;
     }
-    if (!isSupportedMapBufferRangeAccess(access)) {
-        pushError(GL_INVALID_VALUE);
-        return nullptr;
-    }
     const GLuint name = impl_->state->boundBuffer(target);
     GLBufferObject* object = impl_->objects->buffers().get(name);
     if (name == 0 || object == nullptr || !object->instantiated || object->mapped) {
+        pushError(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+    // GL 4.4 §6.3.1 spec-order:
+    //   INVALID_OPERATION is generated if any bit among MAP_READ_BIT,
+    //   MAP_WRITE_BIT, MAP_PERSISTENT_BIT, MAP_COHERENT_BIT is set in
+    //   access but not in the buffer's storage flags (for immutable
+    //   buffers). For non-immutable buffers, the legacy rule is that
+    //   MAP_READ_BIT / MAP_WRITE_BIT must both be settable (they are by
+    //   default). PERSISTENT / COHERENT only exist on immutable buffers
+    //   with the matching storage-flag set.
+    //
+    // Check storage-flag compatibility BEFORE the syntactic-access
+    // check below — CTS `buffer_storage.errors` expects
+    // INVALID_OPERATION on `access=PERSISTENT, storage=DYNAMIC_STORAGE`
+    // (storage mismatch) to win over INVALID_VALUE from "access has
+    // no READ/WRITE".
+    if (object->immutable) {
+        const GLbitfield storage = object->storageFlags;
+        if ((access & GL_MAP_READ_BIT) && !(storage & GL_MAP_READ_BIT)) {
+            pushError(GL_INVALID_OPERATION);
+            return nullptr;
+        }
+        if ((access & GL_MAP_WRITE_BIT) && !(storage & GL_MAP_WRITE_BIT)) {
+            pushError(GL_INVALID_OPERATION);
+            return nullptr;
+        }
+        if ((access & GL_MAP_PERSISTENT_BIT) &&
+            !(storage & GL_MAP_PERSISTENT_BIT)) {
+            pushError(GL_INVALID_OPERATION);
+            return nullptr;
+        }
+        if ((access & GL_MAP_COHERENT_BIT) &&
+            !(storage & GL_MAP_COHERENT_BIT)) {
+            pushError(GL_INVALID_OPERATION);
+            return nullptr;
+        }
+    }
+    if (!isSupportedMapBufferRangeAccess(access)) {
         pushError(GL_INVALID_OPERATION);
         return nullptr;
     }
@@ -7409,17 +7453,6 @@ void* GLContext::mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
     }
     if (offset > object->size || length > object->size - offset) {
         pushError(GL_INVALID_VALUE);
-        return nullptr;
-    }
-    // GL 4.4 spec: persistent/coherent access requires matching storage flags.
-    if ((access & GL_MAP_PERSISTENT_BIT) &&
-        !(object->storageFlags & GL_MAP_PERSISTENT_BIT)) {
-        pushError(GL_INVALID_OPERATION);
-        return nullptr;
-    }
-    if ((access & GL_MAP_COHERENT_BIT) &&
-        !(object->storageFlags & GL_MAP_COHERENT_BIT)) {
-        pushError(GL_INVALID_OPERATION);
         return nullptr;
     }
 
@@ -21667,7 +21700,30 @@ bool GLContext::getInternalformati64v(GLenum target, GLenum internalformat, GLen
 // ---------------------------------------------------------------------------
 
 bool GLContext::bufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags) {
-    if (size < 0) {
+    // GL 4.4 §6.2: error-order matters. Binding / immutability
+    // checks run before INVALID_VALUE checks because CTS
+    // `buffer_storage.errors` specifically asserts that
+    // `glBufferStorage(target, 0 /* size */, …)` with no buffer
+    // bound returns INVALID_OPERATION (binding wins) — not
+    // INVALID_VALUE from the zero-size check.
+    GLuint name = impl_->state->boundBuffer(target);
+    if (name == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    auto* buf = impl_->objects->buffers().get(name);
+    if (!buf) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (buf->immutable) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // size must be > 0. Both `size < 0` and `size == 0` are
+    // INVALID_VALUE per GL 4.4 §6.2.1, two spec violations that
+    // CTS buffer_storage.errors cross-checks.
+    if (size <= 0) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -21684,20 +21740,6 @@ bool GLContext::bufferStorage(GLenum target, GLsizeiptr size, const void* data, 
     }
     if ((flags & GL_MAP_COHERENT_BIT) && !(flags & GL_MAP_PERSISTENT_BIT)) {
         pushError(GL_INVALID_VALUE);
-        return false;
-    }
-    GLuint name = impl_->state->boundBuffer(target);
-    if (name == 0) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    auto* buf = impl_->objects->buffers().get(name);
-    if (!buf) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    if (buf->immutable) {
-        pushError(GL_INVALID_OPERATION);
         return false;
     }
     // Delegate to replaceBufferStorage to create both shadow bytes and Metal

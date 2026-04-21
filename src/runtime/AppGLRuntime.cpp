@@ -2595,10 +2595,14 @@ void* APIENTRY glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
         recordValidationError(context, "glMapBufferRange", GL_INVALID_ENUM, "target is not a supported buffer binding point");
         return nullptr;
     }
-    if (!isValidMapBufferRangeAccess(access)) {
-        recordValidationError(context, "glMapBufferRange", GL_INVALID_VALUE, "access flags are not a supported Phase A map combination");
-        return nullptr;
-    }
+    // Access-flag validation is deferred to context->mapBufferRange,
+    // which runs the full GL 4.4 §6.3.1 spec-ordered checks — including
+    // storage-flag compatibility (INVALID_OPERATION when access bits
+    // aren't set in the buffer's storage flags). CTS
+    // `buffer_storage.errors` asserts the storage-compat check wins
+    // over the "access needs READ/WRITE" check, and having a wrapper
+    // pre-check that raises INVALID_VALUE on access=PERSISTENT alone
+    // shadows the spec-correct INVALID_OPERATION.
     void* pointer = context->mapBufferRange(target, offset, length, access);
     if (pointer != nullptr) {
         markBufferFunction(FunctionId::glMapBufferRange, "Range mapping returns a CPU-visible pointer.");
