@@ -6297,10 +6297,47 @@ void APIENTRY glBindProgramPipeline(GLuint pipeline) {
 void APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program) {
     auto* ctx = requireCurrentContext("glUseProgramStages");
     if (!ctx) return;
+    // GL 4.6 §7.4.1 — `stages` must be either GL_ALL_SHADER_BITS
+    // (the sentinel, 0xFFFFFFFF) or a subset of the six defined
+    // shader-stage bits. Any other bit raises INVALID_VALUE.
+    // CTS `sepshaderobjs.UseProgStagesApi` plants
+    // `GL_ALL_SHADER_BITS ^ (VS|FS)` which has many reserved bits
+    // set and asserts INVALID_VALUE.
+    constexpr GLbitfield kAllowedStageMask =
+        GL_VERTEX_SHADER_BIT |
+        GL_TESS_CONTROL_SHADER_BIT |
+        GL_TESS_EVALUATION_SHADER_BIT |
+        GL_GEOMETRY_SHADER_BIT |
+        GL_FRAGMENT_SHADER_BIT |
+        GL_COMPUTE_SHADER_BIT;
+    if (stages != GL_ALL_SHADER_BITS && (stages & ~kAllowedStageMask) != 0) {
+        recordValidationError(ctx, "glUseProgramStages", GL_INVALID_VALUE,
+                              "stages contains bits that are not valid shader stages");
+        return;
+    }
     auto* ppo = ctx->objects().programPipelines().get(pipeline);
     if (!ppo) {
         recordValidationError(ctx, "glUseProgramStages", GL_INVALID_OPERATION, "pipeline does not exist");
         return;
+    }
+    // GL 4.6 §7.4.1 — if `program` is non-zero, it must be the name
+    // of an existing program that is linked and has GL_PROGRAM_SEPARABLE
+    // set. Otherwise INVALID_OPERATION. CTS
+    // `sepshaderobjs.UseProgStagesApi` re-links a program with
+    // SEPARABLE=FALSE and asserts INVALID_OPERATION on the subsequent
+    // useProgramStages.
+    if (program != 0) {
+        auto* prog = ctx->objects().programs().get(program);
+        if (prog == nullptr || !prog->linked) {
+            recordValidationError(ctx, "glUseProgramStages", GL_INVALID_OPERATION,
+                                  "program is not a valid, linked program");
+            return;
+        }
+        if (!prog->separable) {
+            recordValidationError(ctx, "glUseProgramStages", GL_INVALID_OPERATION,
+                                  "program was not linked with GL_PROGRAM_SEPARABLE=TRUE");
+            return;
+        }
     }
     // Track stage assignments on CPU.
     if (stages & GL_VERTEX_SHADER_BIT)          ppo->vertexProgram = program;
