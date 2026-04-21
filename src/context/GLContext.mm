@@ -12003,6 +12003,21 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
 
 void GLContext::setTransformFeedbackActive(bool active) {
     impl_->transformFeedbackActive = active;
+    // Mirror the active flag onto the currently-bound TF object so
+    // DSA `glGetTransformFeedbackiv(xfb, GL_TRANSFORM_FEEDBACK_ACTIVE)`
+    // returns the correct per-object state. CTS
+    // `direct_state_access.xfb_functional` queries the per-TF-object
+    // active/paused state via DSA after glBeginTransformFeedback and
+    // expects GL_TRUE on the bound object.
+    const GLuint tfName = impl_->boundTransformFeedbackId;
+    if (tfName != 0) {
+        if (auto* tf = impl_->objects->transformFeedbacks().get(tfName)) {
+            tf->active = active;
+            if (!active) {
+                tf->paused = false;
+            }
+        }
+    }
 }
 
 bool GLContext::isTransformFeedbackPaused() const {
@@ -12011,6 +12026,12 @@ bool GLContext::isTransformFeedbackPaused() const {
 
 void GLContext::setTransformFeedbackPaused(bool paused) {
     impl_->transformFeedbackPaused = paused;
+    const GLuint tfName = impl_->boundTransformFeedbackId;
+    if (tfName != 0) {
+        if (auto* tf = impl_->objects->transformFeedbacks().get(tfName)) {
+            tf->paused = paused;
+        }
+    }
 }
 
 GLenum GLContext::transformFeedbackPrimitiveMode() const {
