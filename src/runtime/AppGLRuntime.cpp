@@ -6173,7 +6173,12 @@ void APIENTRY glDeleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
 GLboolean APIENTRY glIsProgramPipeline(GLuint pipeline) {
     auto* ctx = requireCurrentContext("glIsProgramPipeline");
     if (!ctx) return GL_FALSE;
-    GLboolean result = ctx->objects().programPipelines().contains(pipeline) ? GL_TRUE : GL_FALSE;
+    // GL 4.6 §7.4: glIsProgramPipeline returns TRUE only after a name
+    // has been INSTANTIATED (via glBindProgramPipeline or the DSA
+    // glCreateProgramPipelines path), not just reserved by
+    // glGenProgramPipelines.
+    auto* obj = ctx->objects().programPipelines().get(pipeline);
+    GLboolean result = (obj != nullptr && obj->instantiated) ? GL_TRUE : GL_FALSE;
     markProgramFunction(FunctionId::glIsProgramPipeline, "Program pipeline existence query.");
     return result;
 }
@@ -6181,9 +6186,14 @@ GLboolean APIENTRY glIsProgramPipeline(GLuint pipeline) {
 void APIENTRY glBindProgramPipeline(GLuint pipeline) {
     auto* ctx = requireCurrentContext("glBindProgramPipeline");
     if (!ctx) return;
-    if (pipeline != 0 && !ctx->objects().programPipelines().contains(pipeline)) {
-        recordValidationError(ctx, "glBindProgramPipeline", GL_INVALID_OPERATION, "pipeline does not exist");
-        return;
+    if (pipeline != 0) {
+        auto* obj = ctx->objects().programPipelines().get(pipeline);
+        if (!obj) {
+            recordValidationError(ctx, "glBindProgramPipeline", GL_INVALID_OPERATION, "pipeline does not exist");
+            return;
+        }
+        // First bind instantiates the glGen-reserved name.
+        obj->instantiated = true;
     }
     // State-tracked binding (no Metal effect yet — separable programs
     // still aren't wired to Metal pipeline-state), but the state-
@@ -6556,7 +6566,13 @@ void APIENTRY glDeleteTransformFeedbacks(GLsizei n, const GLuint* ids) {
 GLboolean APIENTRY glIsTransformFeedback(GLuint id) {
     auto* ctx = requireCurrentContext("glIsTransformFeedback");
     if (!ctx) return GL_FALSE;
-    GLboolean result = ctx->objects().transformFeedbacks().contains(id) ? GL_TRUE : GL_FALSE;
+    // GL 4.6 §13.2.3: glIsTransformFeedback returns TRUE only if the
+    // name has been both RESERVED (glGenTransformFeedbacks or
+    // glCreateTransformFeedbacks) AND INSTANTIATED (first
+    // glBindTransformFeedback, or the DSA Create path which
+    // instantiates up-front).
+    auto* obj = ctx->objects().transformFeedbacks().get(id);
+    GLboolean result = (obj != nullptr && obj->instantiated) ? GL_TRUE : GL_FALSE;
     markStateFunction(FunctionId::glIsTransformFeedback, "Transform feedback object existence query.");
     return result;
 }
@@ -6574,9 +6590,14 @@ void APIENTRY glBindTransformFeedback(GLenum target, GLuint id) {
                               "cannot bind transform feedback object while transform feedback is active and not paused");
         return;
     }
-    if (id != 0 && !ctx->objects().transformFeedbacks().contains(id)) {
-        recordValidationError(ctx, "glBindTransformFeedback", GL_INVALID_OPERATION, "transform feedback object does not exist");
-        return;
+    if (id != 0) {
+        auto* obj = ctx->objects().transformFeedbacks().get(id);
+        if (obj == nullptr) {
+            recordValidationError(ctx, "glBindTransformFeedback", GL_INVALID_OPERATION, "transform feedback object does not exist");
+            return;
+        }
+        // First bind "instantiates" a glGen-reserved name.
+        obj->instantiated = true;
     }
     ctx->setBoundTransformFeedback(id);
     markStateFunction(FunctionId::glBindTransformFeedback, "Transform feedback object binding (state-tracked).");

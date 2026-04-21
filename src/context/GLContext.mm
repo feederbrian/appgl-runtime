@@ -22432,6 +22432,12 @@ bool GLContext::createTransformFeedbacks(GLsizei n, GLuint* ids) {
     if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
     for (GLsizei i = 0; i < n; ++i) {
         ids[i] = impl_->objects->transformFeedbacks().reserveName();
+        auto* obj = impl_->objects->transformFeedbacks().get(ids[i]);
+        if (obj) {
+            // DSA glCreateTransformFeedbacks instantiates up-front
+            // per GL 4.5 §13.2 (no first-bind required).
+            obj->instantiated = true;
+        }
     }
     return true;
 }
@@ -22440,6 +22446,11 @@ bool GLContext::createProgramPipelines(GLsizei n, GLuint* pipelines) {
     if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
     for (GLsizei i = 0; i < n; ++i) {
         pipelines[i] = impl_->objects->programPipelines().reserveName();
+        auto* obj = impl_->objects->programPipelines().get(pipelines[i]);
+        if (obj) {
+            // DSA glCreateProgramPipelines instantiates up-front.
+            obj->instantiated = true;
+        }
     }
     return true;
 }
@@ -24017,10 +24028,18 @@ bool GLContext::transformFeedbackBufferRange(GLuint xfb, GLuint index, GLuint bu
 bool GLContext::getTransformFeedbackiv(GLuint xfb, GLenum pname, GLint* param) {
     auto* obj = impl_->objects->transformFeedbacks().get(xfb);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    // GL 4.5 §13.2.4: pname restricted to the boolean state enums.
+    // CTS `direct_state_access.xfb_errors` plants a bogus pname and
+    // asserts INVALID_ENUM; any write to the output buffer on the
+    // error path is forbidden.
+    if (pname != GL_TRANSFORM_FEEDBACK_ACTIVE &&
+        pname != GL_TRANSFORM_FEEDBACK_PAUSED) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     if (param) {
         if (pname == GL_TRANSFORM_FEEDBACK_ACTIVE) *param = obj->active ? GL_TRUE : GL_FALSE;
-        else if (pname == GL_TRANSFORM_FEEDBACK_PAUSED) *param = obj->paused ? GL_TRUE : GL_FALSE;
-        else *param = 0;
+        else *param = obj->paused ? GL_TRUE : GL_FALSE;
     }
     return true;
 }
@@ -24028,7 +24047,21 @@ bool GLContext::getTransformFeedbackiv(GLuint xfb, GLenum pname, GLint* param) {
 bool GLContext::getTransformFeedbacki_v(GLuint xfb, GLenum pname, GLuint index, GLint* param) {
     auto* obj = impl_->objects->transformFeedbacks().get(xfb);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)pname; (void)index;
+    // GL 4.5 §13.2.4: indexed 32-bit query only accepts
+    // TRANSFORM_FEEDBACK_BUFFER_BINDING.
+    if (pname != GL_TRANSFORM_FEEDBACK_BUFFER_BINDING) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    GLint64 maxXfbBuffers = 4;
+    if (impl_->capabilities != nullptr) {
+        impl_->capabilities->queryInteger64(
+            GL_MAX_TRANSFORM_FEEDBACK_BUFFERS, &maxXfbBuffers);
+    }
+    if (index >= static_cast<GLuint>(maxXfbBuffers)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     if (param) *param = 0;
     return true;
 }
@@ -24036,7 +24069,22 @@ bool GLContext::getTransformFeedbacki_v(GLuint xfb, GLenum pname, GLuint index, 
 bool GLContext::getTransformFeedbacki64_v(GLuint xfb, GLenum pname, GLuint index, GLint64* param) {
     auto* obj = impl_->objects->transformFeedbacks().get(xfb);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)pname; (void)index;
+    // GL 4.5 §13.2.4: 64-bit indexed query accepts
+    // TRANSFORM_FEEDBACK_BUFFER_{START, SIZE}.
+    if (pname != GL_TRANSFORM_FEEDBACK_BUFFER_START &&
+        pname != GL_TRANSFORM_FEEDBACK_BUFFER_SIZE) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    GLint64 maxXfbBuffers = 4;
+    if (impl_->capabilities != nullptr) {
+        impl_->capabilities->queryInteger64(
+            GL_MAX_TRANSFORM_FEEDBACK_BUFFERS, &maxXfbBuffers);
+    }
+    if (index >= static_cast<GLuint>(maxXfbBuffers)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     if (param) *param = 0;
     return true;
 }

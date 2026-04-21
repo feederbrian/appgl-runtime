@@ -776,6 +776,14 @@ struct GLSyncObject {
 struct GLTransformFeedbackObject {
     bool active = false;
     bool paused = false;
+    // GL 4.6 §13.2: glGenTransformFeedbacks reserves a name; the
+    // object isn't really created until first bound via
+    // glBindTransformFeedback. glCreateTransformFeedbacks (DSA)
+    // creates fully-instantiated objects. CTS
+    // `direct_state_access.xfb_creation` asserts the reserve-only
+    // behaviour by `glGenTransformFeedbacks` + `glIsTransformFeedback`
+    // → expect FALSE.
+    bool instantiated = false;
     bool hasCompleted = false;  // set to true when EndTransformFeedback is called
     GLenum capturedPrimitiveMode = GL_POINTS;  // mode from beginTransformFeedback
     GLsizei capturedPrimitives = 0;  // for glDrawTransformFeedback
@@ -790,6 +798,11 @@ struct GLProgramPipelineObject {
     GLuint computeProgram = 0;
     GLuint activeShaderProgram = 0;
     bool validated = false;
+    // GL 4.6 §7.4: glGenProgramPipelines reserves names; the pipeline
+    // isn't real until bound via glBindProgramPipeline. DSA
+    // glCreateProgramPipelines fully instantiates. Track the
+    // distinction for glIsProgramPipeline.
+    bool instantiated = false;
     std::string infoLog;
 };
 
