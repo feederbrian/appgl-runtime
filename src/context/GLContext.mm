@@ -10873,6 +10873,24 @@ void appendDeclarationsAsUniforms(
             if (existing->explicitOffset < 0 && decl.explicitOffset >= 0) {
                 existing->explicitOffset = decl.explicitOffset;
             }
+            // GS-max-combined-texture-units fix: when the same uniform
+            // array is declared with different sizes across stages
+            // (CTS `max_combined_texture_units` declares
+            // `usampler2D sampler[VS_UNITS]` / `[GS_UNITS]` / `[FS_UNITS]`
+            // where VS=48, GS=1, FS=31 via a per-stage split of
+            // MAX_COMBINED_TEXTURE_IMAGE_UNITS between stages — the
+            // linked program must cover queries up to
+            // sampler[VS_UNITS-1]=47, so arraySize must be 48). Take
+            // the max and OR isArray across stages. GLSL 4.6 technically
+            // flags differing array sizes as a link error, but most
+            // drivers relax and use the maximum; CTS tests assume
+            // that behaviour.
+            if (decl.arraySize > existing->arraySize) {
+                existing->arraySize = decl.arraySize;
+            }
+            if (decl.isArray) {
+                existing->isArray = true;
+            }
             continue;
         }
         GLProgramUniformInfo info;
@@ -15720,9 +15738,36 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
             }
         }
         if (changed) {
+            // Pass 1: exact match on rewritten name.
             for (const auto& uniform : object->uniforms) {
                 if (uniform.name == rewritten) {
                     return uniform.location;
+                }
+            }
+            // Pass 2: array-element subscript lookup on the rewritten name.
+            // Mirrors the non-rewritten `lookup[k]` → `base + k` path above.
+            // Needed when CTS asks for `sampler[0]` on a uniform declared
+            // `uniform usampler2D sampler[N]` — `sampler` is a Metal reserved
+            // word, CompatShaderRewrite renamed it to `_appgl_sampler`, so
+            // the base-name subscript loop at the top of this function only
+            // searches for base=`sampler` and finds nothing. The rewritten
+            // form `_appgl_sampler[0]` matches base=`_appgl_sampler` here.
+            const auto openBracketR = rewritten.rfind('[');
+            if (openBracketR != std::string::npos && rewritten.back() == ']') {
+                const std::string baseR = rewritten.substr(0, openBracketR);
+                const std::string idxStrR = rewritten.substr(openBracketR + 1, rewritten.size() - openBracketR - 2);
+                if (!baseR.empty() && !idxStrR.empty()) {
+                    char* endpR = nullptr;
+                    const long idxR = std::strtol(idxStrR.c_str(), &endpR, 10);
+                    if (endpR && *endpR == '\0' && idxR >= 0) {
+                        for (const auto& uniform : object->uniforms) {
+                            if (uniform.name == baseR && uniform.arraySize >= 1
+                                && idxR < static_cast<long>(uniform.arraySize)
+                                && uniform.location >= 0) {
+                                return uniform.location + static_cast<GLint>(idxR);
+                            }
+                        }
+                    }
                 }
             }
         }
