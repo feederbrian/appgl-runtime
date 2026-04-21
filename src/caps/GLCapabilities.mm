@@ -227,6 +227,10 @@ bool GLCapabilities::queryFloat(GLenum pname, GLfloat* out) const {
             case GL_ALIASED_LINE_WIDTH_RANGE:
                 out[1] = 1.0f;   // Metal rasterizer only supports line-width 1
                 break;
+            case GL_VIEWPORT_BOUNDS_RANGE:
+                // Min stored as -32768; max is the symmetric +32768.
+                out[1] = -floatIt->second;
+                break;
             default:
                 break;
         }
@@ -891,6 +895,15 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_CULL_DISTANCES] = 8;
     integerLimits_[GL_MAX_COMBINED_CLIP_AND_CULL_DISTANCES] = 8;
     integerLimits_[GL_MAX_VIEWPORTS] = 16;
+    // GL 4.1 ARB_viewport_array required integer + float queries.
+    // CTS `viewport_array.queries` exercises both forms; without
+    // these the initial glGetFloatv(GL_VIEWPORT_BOUNDS_RANGE) etc.
+    // errors out with GL_INVALID_ENUM and aborts the test.
+    integerLimits_[GL_VIEWPORT_SUBPIXEL_BITS] = 4;
+    // GL 4.1 spec minimum: |v| ≤ 32768 for viewport bounds.
+    // Stored as the "min" value (-32768) in floatLimits_; the
+    // pair-returning query returns (min, -min) = (-32768, 32768).
+    floatLimits_[GL_VIEWPORT_BOUNDS_RANGE] = -32768.0f;
 
     // Vertex / attribute format constraints.
     integerLimits_[GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET] = 2047;
