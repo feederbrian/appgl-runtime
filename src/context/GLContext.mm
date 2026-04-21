@@ -16747,7 +16747,15 @@ bool GLContext::linkProgram(GLuint program) {
                             programObject->resourceStorageBlocks.size() - 1);
                     }
                 }
-                if (!anyNew) continue;
+                // Member-level merge runs every stage, even when the
+                // block itself was registered by an earlier stage.
+                // CTS `geometry_shader.program_resource` declares
+                // `Positions` in both VS (writes) and GS (reads) —
+                // the VS pass creates `Positions.position[0]` with
+                // refby=0x01; the GS pass must still OR in 0x04 on
+                // that existing entry so
+                // GL_REFERENCED_BY_GEOMETRY_SHADER reports TRUE.
+                (void)anyNew;
 
                 // Populate buffer-variable entries for each SSBO member
                 // so glGetProgramResourceiv(GL_BUFFER_VARIABLE, ...) can
