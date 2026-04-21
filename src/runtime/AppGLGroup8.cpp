@@ -2049,14 +2049,16 @@ static void APIENTRY glBeginQuery(GLenum target, GLuint id) {
                            "query object was previously used with a different target");
         return;
     }
-    // GL 4.6 §4.2.1: INVALID_OPERATION if another query is already
-    // active with the same target. CTS
+    // GL 4.6 §4.2.1: `glBeginQuery(target, id)` is spec-equivalent
+    // to `glBeginQueryIndexed(target, 0, id)`. Collision check must
+    // therefore only reject when another query is active on this
+    // target AT INDEX 0 — not across all indices. CTS
     // `transform_feedback_overflow_query_ARB.error-already-active`
-    // deliberately begins a second query on the same target.
+    // uses this equivalence.
     bool collision = false;
     context->objects().queries().forEach(
         [target, id, &collision](GLuint otherId, GLQueryObject& q) {
-            if (q.active && q.target == target && otherId != id) {
+            if (q.active && q.target == target && q.index == 0 && otherId != id) {
                 collision = true;
             }
         });
@@ -2074,6 +2076,7 @@ static void APIENTRY glBeginQuery(GLenum target, GLuint id) {
     query->instantiated = true;
     query->boundTarget = target;
     query->target = target;
+    query->index = 0;
     query->active = true;
     query->result = 0;
 }
@@ -2084,12 +2087,11 @@ static void APIENTRY glEndQuery(GLenum target) {
         return;
     }
     // GL 4.6 §4.2.1: INVALID_OPERATION if no query is active on
-    // `target`. CTS `transform_feedback_overflow_query_ARB.
-    // error-no-active-query` asserts this.
+    // (target, index=0). Mirrors the glBeginQuery equivalence.
     bool anyActive = false;
     context->objects().queries().forEach(
         [target, &anyActive](GLuint /*id*/, GLQueryObject& q) {
-            if (q.active && q.target == target) anyActive = true;
+            if (q.active && q.target == target && q.index == 0) anyActive = true;
         });
     if (!anyActive) {
         context->pushError(GL_INVALID_OPERATION, "glEndQuery",
@@ -2097,7 +2099,7 @@ static void APIENTRY glEndQuery(GLenum target) {
         return;
     }
     context->objects().queries().forEach([target](GLuint /*id*/, GLQueryObject& query) {
-        if (query.active && query.target == target) {
+        if (query.active && query.target == target && query.index == 0) {
             query.active = false;
             // Preserve the accumulated result that draw-time hooks
             // produced while the query was active. For query
@@ -2132,12 +2134,16 @@ static void APIENTRY glGetQueryiv(GLenum target, GLenum pname, GLint* params) {
         // `transform_feedback_overflow_query_ARB.context-state-update`
         // binds a query via glBeginQuery and expects the subsequent
         // GL_CURRENT_QUERY query to return the same ID.
+        // `glGetQueryiv(target, CURRENT_QUERY, …)` is the non-indexed
+        // form, spec-equivalent to `glGetQueryIndexediv(target, 0, …)`.
+        // Return the active query on (target, index=0) only; don't
+        // report one started at a non-zero index.
         GLint activeId = 0;
         auto* context = currentContextOrNull();
         if (context != nullptr) {
             context->objects().queries().forEach(
                 [target, &activeId](GLuint id, GLQueryObject& q) {
-                    if (q.active && q.target == target && activeId == 0) {
+                    if (q.active && q.target == target && q.index == 0 && activeId == 0) {
                         activeId = static_cast<GLint>(id);
                     }
                 });

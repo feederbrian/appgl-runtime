@@ -766,6 +766,14 @@ struct GLProgramObject {
 struct GLQueryObject {
     GLenum target = 0;
     GLenum boundTarget = 0;   // First target used with this query; 0 = unbound
+    // Stream index for indexed-query targets (GL 4.0+
+    // TRANSFORM_FEEDBACK_STREAM_OVERFLOW and TRANSFORM_FEEDBACK_-
+    // PRIMITIVES_WRITTEN). The non-indexed BeginQuery path leaves
+    // this at 0. CTS `transform_feedback_overflow_query_ARB.
+    // context-state-update` expects GetQueryIndexediv to return
+    // the active query only at the specific index it was started
+    // on, and 0 on every other index.
+    GLuint index = 0;
     bool active = false;
     GLuint64 result = 0;
     // GL 4.6 §4.2: `glGenQueries` reserves names without creating

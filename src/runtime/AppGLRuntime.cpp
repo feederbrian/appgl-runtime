@@ -5618,6 +5618,7 @@ static bool queryTargetMaxIndex(GLenum target, GLuint& outMax) {
     switch (target) {
         case GL_PRIMITIVES_GENERATED:
         case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+        case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
             outMax = 4;  // MAX_VERTEX_STREAMS
             return true;
         case GL_SAMPLES_PASSED:
@@ -5626,7 +5627,6 @@ static bool queryTargetMaxIndex(GLenum target, GLuint& outMax) {
         case GL_TIME_ELAPSED:
         case GL_TIMESTAMP:
         case GL_TRANSFORM_FEEDBACK_OVERFLOW:
-        case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
             outMax = 1;
             return true;
     }
@@ -5642,15 +5642,47 @@ void APIENTRY glBeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
                               "index out of range for query target");
         return;
     }
-    // Index 0 for a singleton target is exactly equivalent to the
-    // non-indexed `glBeginQuery`. Route through the state-updating
-    // path so `glGetQueryiv(target, GL_CURRENT_QUERY, ...)` returns
-    // the active query ID. CTS `transform_feedback_overflow_query_ARB.
-    // context-state-update` asserts this.
-    if (auto fn = Runtime::shared().dispatch().glBeginQuery) {
-        fn(target, id);
+    auto* query = context->objects().queries().get(id);
+    if (query == nullptr) {
+        recordValidationError(context, "glBeginQueryIndexed", GL_INVALID_OPERATION,
+                              "query id is not a valid query object");
+        return;
     }
-    markStateFunction(FunctionId::glBeginQueryIndexed, "Indexed query begin routes to non-indexed begin at index 0.");
+    // GL 4.6 §4.2.1: INVALID_OPERATION if the query object is
+    // already active anywhere.
+    if (query->active) {
+        recordValidationError(context, "glBeginQueryIndexed", GL_INVALID_OPERATION,
+                              "this query object is already active");
+        return;
+    }
+    // GL 4.6 §4.2.1: INVALID_OPERATION if the query was previously
+    // used with a different target.
+    if (query->boundTarget != 0 && query->boundTarget != target) {
+        recordValidationError(context, "glBeginQueryIndexed", GL_INVALID_OPERATION,
+                              "query object was previously used with a different target");
+        return;
+    }
+    // GL 4.6 §4.2.1: INVALID_OPERATION if another query is active
+    // on (target, index).
+    bool collision = false;
+    context->objects().queries().forEach(
+        [target, index, id, &collision](GLuint otherId, GLQueryObject& q) {
+            if (q.active && q.target == target && q.index == index && otherId != id) {
+                collision = true;
+            }
+        });
+    if (collision) {
+        recordValidationError(context, "glBeginQueryIndexed", GL_INVALID_OPERATION,
+                              "another query of this target/index is already active");
+        return;
+    }
+    query->instantiated = true;
+    query->boundTarget = target;
+    query->target = target;
+    query->index = index;
+    query->active = true;
+    query->result = 0;
+    markStateFunction(FunctionId::glBeginQueryIndexed, "Indexed query begin tracks per-(target,index).");
     Runtime::shared().recordBootstrapTrace("glBeginQueryIndexed(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ", id=" + std::to_string(id) + ")");
 }
 
@@ -5663,10 +5695,33 @@ void APIENTRY glEndQueryIndexed(GLenum target, GLuint index) {
                               "index out of range for query target");
         return;
     }
-    if (auto fn = Runtime::shared().dispatch().glEndQuery) {
-        fn(target);
+    // GL 4.6 §4.2.1: INVALID_OPERATION if no query active on
+    // (target, index).
+    bool anyActive = false;
+    context->objects().queries().forEach(
+        [target, index, &anyActive](GLuint /*id*/, GLQueryObject& q) {
+            if (q.active && q.target == target && q.index == index) anyActive = true;
+        });
+    if (!anyActive) {
+        recordValidationError(context, "glEndQueryIndexed", GL_INVALID_OPERATION,
+                              "no active query on this target/index");
+        return;
     }
-    markStateFunction(FunctionId::glEndQueryIndexed, "Indexed query end routes to non-indexed end.");
+    context->objects().queries().forEach(
+        [target, index](GLuint /*id*/, GLQueryObject& q) {
+            if (q.active && q.target == target && q.index == index) {
+                q.active = false;
+                switch (q.target) {
+                    case GL_PRIMITIVES_GENERATED:
+                    case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+                        break;
+                    default:
+                        q.result = 1;
+                        break;
+                }
+            }
+        });
+    markStateFunction(FunctionId::glEndQueryIndexed, "Indexed query end finalizes per-(target,index).");
 }
 
 void APIENTRY glGetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint* params) {
@@ -5680,11 +5735,13 @@ void APIENTRY glGetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLi
     }
     if (params == nullptr) return;
     if (pname == GL_CURRENT_QUERY) {
-        // Look up the active query for this target.
+        // Look up the active query for (target, index). Multiple
+        // queries on the same target but different index each
+        // have their own active slot.
         GLint activeId = 0;
         context->objects().queries().forEach(
-            [target, &activeId](GLuint id, GLQueryObject& q) {
-                if (q.active && q.target == target && activeId == 0) {
+            [target, index, &activeId](GLuint id, GLQueryObject& q) {
+                if (q.active && q.target == target && q.index == index && activeId == 0) {
                     activeId = static_cast<GLint>(id);
                 }
             });
@@ -5694,7 +5751,7 @@ void APIENTRY glGetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLi
     } else {
         *params = 0;
     }
-    markStateFunction(FunctionId::glGetQueryIndexediv, "Indexed query get returns per-target state.");
+    markStateFunction(FunctionId::glGetQueryIndexediv, "Indexed query get returns per-(target,index) state.");
 }
 
 // --- GL 4.1: Viewport/Scissor/Depth arrays (Group 8) ---
