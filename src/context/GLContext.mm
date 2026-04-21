@@ -21907,6 +21907,23 @@ bool GLContext::bindTextures(GLuint first, GLsizei count, const GLuint* textures
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.4 §6.1.1: glBindTextures generates GL_INVALID_OPERATION if
+    // any non-zero entry in `textures` is not an existing texture name.
+    // Apply the check up-front so a mid-loop failure doesn't leave a
+    // partial set of successful bindings. CTS
+    // `multi_bind.errors_bind_textures` deliberately plants a never-
+    // generated ID in one slot and asserts INVALID_OPERATION.
+    if (textures != nullptr) {
+        for (GLsizei i = 0; i < count; ++i) {
+            GLuint tex = textures[i];
+            if (tex == 0) continue;
+            auto* obj = impl_->objects->textures().get(tex);
+            if (obj == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+        }
+    }
     for (GLsizei i = 0; i < count; ++i) {
         GLuint tex = textures ? textures[i] : 0;
         GLuint unit = first + static_cast<GLuint>(i);
@@ -21933,6 +21950,21 @@ bool GLContext::bindSamplers(GLuint first, GLsizei count, const GLuint* samplers
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.4 §6.1.1: glBindSamplers raises INVALID_OPERATION when any
+    // non-zero entry is not an existing sampler name. CTS
+    // `multi_bind.errors_bind_samplers` plants a never-generated ID
+    // in one slot and asserts INVALID_OPERATION.
+    if (samplers != nullptr) {
+        for (GLsizei i = 0; i < count; ++i) {
+            GLuint samp = samplers[i];
+            if (samp == 0) continue;
+            auto* obj = impl_->objects->samplers().get(samp);
+            if (obj == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+        }
+    }
     for (GLsizei i = 0; i < count; ++i) {
         GLuint sampler = samplers ? samplers[i] : 0;
         bindSampler(first + static_cast<GLuint>(i), sampler);
@@ -21949,6 +21981,21 @@ bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* tex
     if (static_cast<GLint64>(first) + static_cast<GLint64>(count) > maxUnits) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    // GL 4.4 §6.1.1: glBindImageTextures raises INVALID_OPERATION when
+    // any non-zero entry is not an existing texture name. CTS
+    // `multi_bind.errors_bind_image_textures` plants a never-generated
+    // ID in one slot and asserts INVALID_OPERATION.
+    if (textures != nullptr) {
+        for (GLsizei i = 0; i < count; ++i) {
+            GLuint tex = textures[i];
+            if (tex == 0) continue;
+            auto* obj = impl_->objects->textures().get(tex);
+            if (obj == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+        }
     }
     for (GLsizei i = 0; i < count; ++i) {
         GLuint tex = textures ? textures[i] : 0;
