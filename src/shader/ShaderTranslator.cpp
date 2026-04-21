@@ -507,11 +507,39 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             std::sort(sortedUBOs.begin(), sortedUBOs.end(),
                       [](const UBOEntry& a, const UBOEntry& b) { return a.glBinding < b.glBinding; });
 
+            // UBOs and SSBOs live in separate binding namespaces in GL but
+            // share (desc_set=0, binding=N) under the Vulkan-rules-relaxed
+            // glslang output we feed into SPIRV-Cross. When a UBO and an
+            // SSBO both use `layout(binding=0)`, SPIRV-Cross's MSL backend
+            // detects them as aliases (same descriptor slot) and collapses
+            // them into one `spvBufferAliasSet0Binding0` Metal slot —
+            // producing MSL whose `constant B0& b0` reference never appears
+            // in the kernel signature because it's folded into the alias
+            // cast.  CTS `multi_bind.dispatch_bind_buffers_base` plants 14
+            // UBOs all sharing (desc_set=0, binding=K) with an SSBO at
+            // binding=0 and hits this alias collapse at the binding=0 slot
+            // only — the aliased buffer then receives the SSBO pointer at
+            // dispatch time and every UBO read resolves to stale zeroes,
+            // `dispatchCompute` reports INVALID_OPERATION because the
+            // compute PSO ends up built against an aliased slot the runtime
+            // can't reconcile.
+            //
+            // Fix: reassign every UBO's SPIR-V `DescriptorSet` decoration
+            // to a different set (1), which keeps the (set, binding) pair
+            // globally unique even when binding numbers repeat across
+            // UBO/SSBO spaces. The MSL slot assignment via
+            // `add_msl_resource_binding` then lands on distinct Metal
+            // buffer slots without alias-collapse.
+            for (auto& entry : sortedUBOs) {
+                compiler.set_decoration(entry.res->id,
+                    spv::DecorationDescriptorSet, 1);
+            }
+
             std::uint32_t nextSlot = bindings.uniformBufferBase;
             for (auto& entry : sortedUBOs) {
                 spirv_cross::MSLResourceBinding binding;
                 binding.stage = compiler.get_execution_model();
-                binding.desc_set = compiler.get_decoration(entry.res->id, spv::DecorationDescriptorSet);
+                binding.desc_set = 1;  // UBO descriptor set (mirrors set_decoration above)
                 binding.binding = entry.glBinding;
                 binding.msl_buffer = nextSlot;
                 compiler.add_msl_resource_binding(binding);
