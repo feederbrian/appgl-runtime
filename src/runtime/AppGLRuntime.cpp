@@ -6314,7 +6314,11 @@ void APIENTRY glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* param
         case GL_TESS_EVALUATION_SHADER:      *params = static_cast<GLint>(ppo->tessEvalProgram); break;
         case GL_COMPUTE_SHADER:              *params = static_cast<GLint>(ppo->computeProgram); break;
         case GL_VALIDATE_STATUS:             *params = ppo->validated ? GL_TRUE : GL_FALSE; break;
-        case GL_INFO_LOG_LENGTH:             *params = static_cast<GLint>(ppo->infoLog.size() + 1); break;
+        case GL_INFO_LOG_LENGTH:
+            // GL 4.6 §7.13.1: 0 if no info log, else length + 1.
+            *params = ppo->infoLog.empty()
+                ? 0 : static_cast<GLint>(ppo->infoLog.size() + 1);
+            break;
         default:
             recordValidationError(ctx, "glGetProgramPipelineiv", GL_INVALID_ENUM, "invalid pname");
             return;
