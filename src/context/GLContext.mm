@@ -23317,6 +23317,65 @@ bool GLContext::getTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* pa
 bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    // GL 4.6 §8.11: level < 0 or level > log2(MAX_TEXTURE_SIZE) is
+    // INVALID_VALUE. CTS
+    // `direct_state_access.textures_level_parameter_errors` walks
+    // both endpoints.
+    if (level < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    {
+        GLint64 maxTexSize = 16384;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(GL_MAX_TEXTURE_SIZE, &maxTexSize);
+        }
+        GLsizei logMax = 0;
+        for (GLint64 v = maxTexSize; v > 1; v >>= 1) ++logMax;
+        if (level > logMax) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
+    // GL 4.6 §8.11: TEXTURE_COMPRESSED_IMAGE_SIZE on uncompressed
+    // textures is INVALID_OPERATION. Compressed textures have a
+    // GL_COMPRESSED_* internal format; everything else is uncompressed.
+    auto isCompressed = [](GLenum f) -> bool {
+        // Catch the two canonical prefixes used by GL 4.6 §8.5.3 /
+        // §8.14 / §8.15: GL_COMPRESSED_* (ARB_texture_compression)
+        // and GL_*_ATC_* / GL_ETC1_RGB8_OES (ES compatibility).
+        // The bitmask below is a compact version of the switch since
+        // all compressed internal formats fall in the same
+        // enum-range block (0x83F0..0x93F7, 0x8C92..0x8D70,
+        // 0x9274..0x937B). Fall back to the generic GL_COMPRESSED
+        // classifier used by glTexImage internally.
+        switch (f) {
+            case GL_COMPRESSED_RED: case GL_COMPRESSED_RG:
+            case GL_COMPRESSED_RGB: case GL_COMPRESSED_RGBA:
+            case GL_COMPRESSED_SRGB: case GL_COMPRESSED_SRGB_ALPHA:
+            case GL_COMPRESSED_RED_RGTC1: case GL_COMPRESSED_SIGNED_RED_RGTC1:
+            case GL_COMPRESSED_RG_RGTC2: case GL_COMPRESSED_SIGNED_RG_RGTC2:
+            case GL_COMPRESSED_RGBA_BPTC_UNORM:
+            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+            case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+            case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+            case GL_COMPRESSED_RGB8_ETC2: case GL_COMPRESSED_SRGB8_ETC2:
+            case GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2:
+            case GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2:
+            case GL_COMPRESSED_RGBA8_ETC2_EAC:
+            case GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC:
+            case GL_COMPRESSED_R11_EAC: case GL_COMPRESSED_SIGNED_R11_EAC:
+            case GL_COMPRESSED_RG11_EAC: case GL_COMPRESSED_SIGNED_RG11_EAC:
+                return true;
+            default:
+                return false;
+        }
+    };
+    if (pname == GL_TEXTURE_COMPRESSED_IMAGE_SIZE &&
+        !isCompressed(obj->desc.internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     if (!params) return true;
 
     // GL 4.6 §8.11 Table 8.23 — mirror the legacy glGetTexLevelParameteriv
