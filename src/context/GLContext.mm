@@ -7108,6 +7108,15 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
         *data = impl_->boundTransformFeedbackId != 0 ? GL_TRUE : GL_FALSE;
         return true;
     }
+    // GL 4.4 §10.3.5 ARB_tessellation_shader: implementation-defined
+    // boolean indicating whether glPrimitiveRestartIndex applies to
+    // GL_PATCHES. We don't support tess + primitive-restart mixing
+    // yet — return GL_FALSE so CTS `primitive_restart` skips the
+    // GL_PATCHES branch instead of raising INVALID_ENUM and aborting.
+    if (pname == GL_PRIMITIVE_RESTART_FOR_PATCHES_SUPPORTED) {
+        *data = GL_FALSE;
+        return true;
+    }
     if (impl_->state->queryBoolean(pname, data)) {
         return true;
     }
