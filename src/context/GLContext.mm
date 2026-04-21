@@ -23102,6 +23102,17 @@ bool GLContext::createVertexArrays(GLsizei n, GLuint* arrays) {
         arrays[i] = impl_->objects->vertexArrays().reserveName();
         if (auto* obj = impl_->objects->vertexArrays().get(arrays[i])) {
             obj->instantiated = true;
+            // GL 4.5 §10.3.1 — glCreateVertexArrays instantiates the
+            // object up-front (unlike glGenVertexArrays which defers
+            // to first bind). DSA state queries like
+            // glGetVertexArrayIndexediv / glVertexArrayAttribFormat
+            // are callable immediately after createVertexArrays, so
+            // the attribute + binding-point vectors need to carry
+            // their spec-defined defaults (SIZE=4, TYPE=GL_FLOAT,
+            // bindingIndex=i, binding stride=16). Without this
+            // init, the default test queries return 0 for SIZE /
+            // TYPE because the attributes vector is empty.
+            impl_->objects->initializeVertexArray(*obj);
         }
     }
     return true;
@@ -25025,20 +25036,79 @@ bool GLContext::getVertexArrayIndexediv(GLuint vaobj, GLuint index, GLenum pname
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    (void)index;
-    if (param) *param = 0;
+    // GL 4.5 §10.3.12: `index` is an attribute index for the
+    // per-attribute pnames; GL_INVALID_VALUE if out of range.
+    if (index >= _vao->attributes.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (param == nullptr) return true;
+    const auto& attr = _vao->attributes[index];
+    switch (pname) {
+        case GL_VERTEX_ATTRIB_ARRAY_ENABLED:
+            *param = attr.enabled ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_SIZE:
+            *param = attr.size;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_STRIDE:
+            // GL 4.6 Table 22.3 per-attribute state — independent from
+            // VERTEX_BINDING_STRIDE (Table 22.4 per-binding state).
+            // Returns the stride set via glVertexAttribPointer or
+            // glVertexAttribIPointer, default 0. CTS
+            // `vertex_arrays_get_vertex_array_indexed` asserts 0 on a
+            // fresh VAO even though the binding-point stride defaults
+            // to 16.
+            *param = attr.stride;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_TYPE:
+            *param = static_cast<GLint>(attr.type);
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED:
+            *param = attr.normalized ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
+            *param = attr.integer ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_LONG:
+            *param = attr.longData ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
+            if (attr.bindingIndex < _vao->bindingPoints.size()) {
+                *param = static_cast<GLint>(_vao->bindingPoints[attr.bindingIndex].divisor);
+            } else {
+                *param = static_cast<GLint>(attr.divisor);
+            }
+            return true;
+        case GL_VERTEX_ATTRIB_RELATIVE_OFFSET:
+            *param = static_cast<GLint>(attr.relativeOffset);
+            return true;
+    }
+    // Should be unreachable — isValidVertexArrayIndexedPname gated.
+    *param = 0;
     return true;
 }
 
 bool GLContext::getVertexArrayIndexed64iv(GLuint vaobj, GLuint index, GLenum pname, GLint64* param) {
     DSA_VAO_CHECK(vaobj)
-    // The 64-bit form only accepts GL_VERTEX_BINDING_OFFSET.
+    // GL 4.5 §10.3.12: The 64-bit form only accepts
+    // GL_VERTEX_BINDING_OFFSET — it's the 64-bit buffer offset from
+    // the attribute's binding point.
     if (pname != GL_VERTEX_BINDING_OFFSET) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    (void)index;
-    if (param) *param = 0;
+    if (index >= _vao->attributes.size()) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (param == nullptr) return true;
+    const auto& attr = _vao->attributes[index];
+    if (attr.bindingIndex < _vao->bindingPoints.size()) {
+        *param = static_cast<GLint64>(_vao->bindingPoints[attr.bindingIndex].offset);
+    } else {
+        *param = 0;
+    }
     return true;
 }
 
