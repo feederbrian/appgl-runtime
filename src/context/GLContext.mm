@@ -24355,9 +24355,20 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
         case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:  *params = GL_TRUE; return true;
         case GL_TEXTURE_COMPRESSED:              *params = GL_FALSE; return true;
         case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:   *params = 0; return true;
-        case GL_TEXTURE_BUFFER_DATA_STORE_BINDING: *params = 0; return true;
-        case GL_TEXTURE_BUFFER_OFFSET:           *params = 0; return true;
-        case GL_TEXTURE_BUFFER_SIZE:             *params = 0; return true;
+        case GL_TEXTURE_BUFFER_DATA_STORE_BINDING:
+            // Per GL 4.6 Table 8.23 — returns the name of the buffer
+            // object used as the data store for this texture.
+            *params = static_cast<GLint>(desc.sourceBuffer);
+            return true;
+        case GL_TEXTURE_BUFFER_OFFSET:
+            *params = static_cast<GLint>(desc.bufferOffset);
+            return true;
+        case GL_TEXTURE_BUFFER_SIZE:
+            // CTS `texture_buffer.texture_buffer_max_size` allocates a
+            // 128MB buffer texture and asserts this query returns the
+            // allocated size (134217728 bytes on the stock corpus).
+            *params = static_cast<GLint>(desc.bufferSize);
+            return true;
         default:
             pushError(GL_INVALID_ENUM);
             return false;

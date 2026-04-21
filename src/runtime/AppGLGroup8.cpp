@@ -97,6 +97,20 @@ static void APIENTRY glGetTexLevelParameterfv(GLenum target, GLint level, GLenum
 static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *params) {
     auto* context = currentContextOrNull();
     if (context == nullptr || params == nullptr) return;
+    // GL 4.6 §8.11 — level < 0 → INVALID_VALUE. For TEXTURE_BUFFER
+    // and TEXTURE_RECTANGLE (mip-less targets), level != 0 →
+    // INVALID_VALUE. CTS `texture_buffer.texture_buffer_parameters`
+    // asserts this.
+    if (level < 0) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if ((target == GL_TEXTURE_BUFFER || target == GL_TEXTURE_RECTANGLE ||
+         target == GL_TEXTURE_2D_MULTISAMPLE ||
+         target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) && level != 0) {
+        context->pushError(GL_INVALID_VALUE);
+        return;
+    }
 
     // Find the bound texture for this target
     GLuint texName = context->state().boundTexture(target);
@@ -204,13 +218,15 @@ static void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum
             *params = 0;
             break;
         case GL_TEXTURE_BUFFER_DATA_STORE_BINDING:
-            *params = 0;
+            // GL 4.6 Table 8.23 — name of the buffer object attached
+            // via glTexBuffer{,Range}.
+            *params = static_cast<GLint>(desc.sourceBuffer);
             break;
         case GL_TEXTURE_BUFFER_OFFSET:
-            *params = 0;
+            *params = static_cast<GLint>(desc.bufferOffset);
             break;
         case GL_TEXTURE_BUFFER_SIZE:
-            *params = 0;
+            *params = static_cast<GLint>(desc.bufferSize);
             break;
         default:
             context->pushError(GL_INVALID_ENUM);
