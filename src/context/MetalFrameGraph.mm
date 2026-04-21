@@ -1557,6 +1557,20 @@ struct MetalFrameGraph::Impl {
             cachedFillMode = desiredFill;
         }
 
+        // GL 4.6 §14.6.5 / GL_ARB_polygon_offset_clamp — apply depth
+        // bias. Metal's setDepthBias takes (bias, slopeScale, clamp):
+        //   bias       ↔ GL units
+        //   slopeScale ↔ GL factor
+        //   clamp      ↔ GL clamp (0 = no clamp)
+        // When no polygon-offset mode is enabled the three fields are
+        // zero; setDepthBias(0,0,0) is the Metal no-op.
+        {
+            const float bias = info.polygonOffsetEnabled ? info.polygonOffsetUnits : 0.0f;
+            const float slope = info.polygonOffsetEnabled ? info.polygonOffsetFactor : 0.0f;
+            const float clampV = info.polygonOffsetEnabled ? info.polygonOffsetClamp : 0.0f;
+            [currentRenderEncoder setDepthBias:bias slopeScale:slope clamp:clampV];
+        }
+
         // RC-A02: set Metal viewport from GL viewport state.
         // Metal framebuffer Y is top-down while OpenGL viewport Y is
         // bottom-up.  Convert: metalOriginY = renderTargetH - glY - glH.

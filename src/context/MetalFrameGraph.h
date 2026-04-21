@@ -199,6 +199,17 @@ struct TranslatedDrawInfo {
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
     bool wireframe = false;
+
+    // GL 4.6 §14.6.5 / GL_ARB_polygon_offset_clamp — depth bias for
+    // polygon offset. Plumbed so the render encoder can call
+    // setDepthBias:slopeScale:clamp: before each draw. `enabled`
+    // mirrors GL_POLYGON_OFFSET_{FILL,LINE,POINT}; when disabled,
+    // Metal gets zero-bias.
+    bool polygonOffsetEnabled = false;
+    GLfloat polygonOffsetFactor = 0.0f;
+    GLfloat polygonOffsetUnits = 0.0f;
+    GLfloat polygonOffsetClamp = 0.0f;
+
     // GL_RASTERIZER_DISCARD: when true, Metal pipeline has
     // rasterizationEnabled=NO — the VS runs for side effects (SSBO
     // writes, transform feedback) but no fragment shader stage is

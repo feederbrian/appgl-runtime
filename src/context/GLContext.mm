@@ -19478,6 +19478,18 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
     tdi.rasterizerDiscard = state.isEnabled(GL_RASTERIZER_DISCARD);
 
+    // GL 4.6 §14.6.5 — polygon offset enabled under GL_POLYGON_OFFSET_FILL
+    // (relevant for triangle rasterization) plus LINE / POINT variants.
+    // If any of the three is enabled, thread factor/units/clamp into the
+    // draw info so the render encoder applies depth bias before the draw.
+    const bool anyOffsetEnabled = state.isEnabled(GL_POLYGON_OFFSET_FILL) ||
+                                  state.isEnabled(GL_POLYGON_OFFSET_LINE) ||
+                                  state.isEnabled(GL_POLYGON_OFFSET_POINT);
+    tdi.polygonOffsetEnabled = anyOffsetEnabled;
+    tdi.polygonOffsetFactor = state.rasterState().polygonOffsetFactor;
+    tdi.polygonOffsetUnits = state.rasterState().polygonOffsetUnits;
+    tdi.polygonOffsetClamp = state.rasterState().polygonOffsetClamp;
+
     const auto& gl = state.blendState();
     tdi.blend.enabled = state.isEnabled(GL_BLEND);
     tdi.blend.srcRGB = gl.srcRGB;
