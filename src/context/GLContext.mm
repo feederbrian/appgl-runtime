@@ -26131,6 +26131,17 @@ bool GLContext::getVertexArrayIndexed64iv(GLuint vaobj, GLuint index, GLenum pna
 bool GLContext::transformFeedbackBufferBase(GLuint xfb, GLuint index, GLuint buffer) {
     auto* obj = impl_->objects->transformFeedbacks().get(xfb);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    if (index >= GLTransformFeedbackObject::kMaxTfBuffers) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Record the per-TF-object binding for the DSA getter queries
+    // (getTransformFeedbacki_v / getTransformFeedbacki64_v).
+    obj->bufferBindings[index] = {buffer, 0, 0};
+    // Also mirror into the global indexed binding so draw-time
+    // consumers of the currently-bound TF see the update (CTS's
+    // DSA xfb tests chain a Bind after Buffer* to observe the
+    // global state consistent with the per-object state).
     bindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, index, buffer);
     return true;
 }
@@ -26138,6 +26149,11 @@ bool GLContext::transformFeedbackBufferBase(GLuint xfb, GLuint index, GLuint buf
 bool GLContext::transformFeedbackBufferRange(GLuint xfb, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
     auto* obj = impl_->objects->transformFeedbacks().get(xfb);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    if (index >= GLTransformFeedbackObject::kMaxTfBuffers) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    obj->bufferBindings[index] = {buffer, offset, size};
     bindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, index, buffer, offset, size);
     return true;
 }
@@ -26179,7 +26195,13 @@ bool GLContext::getTransformFeedbacki_v(GLuint xfb, GLenum pname, GLuint index, 
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (param) *param = 0;
+    if (param) {
+        if (index < GLTransformFeedbackObject::kMaxTfBuffers) {
+            *param = static_cast<GLint>(obj->bufferBindings[index].buffer);
+        } else {
+            *param = 0;
+        }
+    }
     return true;
 }
 
@@ -26202,7 +26224,18 @@ bool GLContext::getTransformFeedbacki64_v(GLuint xfb, GLenum pname, GLuint index
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (param) *param = 0;
+    if (param) {
+        if (index < GLTransformFeedbackObject::kMaxTfBuffers) {
+            const auto& bind = obj->bufferBindings[index];
+            if (pname == GL_TRANSFORM_FEEDBACK_BUFFER_START) {
+                *param = static_cast<GLint64>(bind.offset);
+            } else {  // GL_TRANSFORM_FEEDBACK_BUFFER_SIZE
+                *param = static_cast<GLint64>(bind.size);
+            }
+        } else {
+            *param = 0;
+        }
+    }
     return true;
 }
 

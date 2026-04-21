@@ -802,6 +802,19 @@ struct GLTransformFeedbackObject {
     bool hasCompleted = false;  // set to true when EndTransformFeedback is called
     GLenum capturedPrimitiveMode = GL_POINTS;  // mode from beginTransformFeedback
     GLsizei capturedPrimitives = 0;  // for glDrawTransformFeedback
+    // Per-TF-object indexed buffer bindings recorded by the DSA
+    // `glTransformFeedbackBufferBase` / `glTransformFeedbackBufferRange`
+    // entries. Queried back via `glGetTransformFeedbacki_v` /
+    // `glGetTransformFeedbacki64_v` with pname =
+    // GL_TRANSFORM_FEEDBACK_BUFFER_{BINDING,START,SIZE}.
+    // CTS `direct_state_access.xfb_buffers` asserts the round-trip.
+    struct BufferBinding {
+        GLuint buffer = 0;
+        GLintptr offset = 0;  // 0 for BufferBase
+        GLsizeiptr size = 0;  // 0 for BufferBase (means "whole buffer")
+    };
+    static constexpr std::size_t kMaxTfBuffers = 4;  // MAX_TF_BUFFERS
+    std::array<BufferBinding, kMaxTfBuffers> bufferBindings{};
 };
 
 struct GLProgramPipelineObject {
