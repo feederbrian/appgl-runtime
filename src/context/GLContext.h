@@ -480,6 +480,13 @@ public:
     bool validateQueryBufferObjectGet(
         GLuint id, GLuint buffer, GLenum pname, GLintptr offset,
         std::size_t resultBytes);
+    // Shared writer for the four flavors — resolves the query and buffer
+    // after validation, extracts the pname-specific GLuint64 result, and
+    // stores it at `offset` as T (GLint/GLuint/GLint64/GLuint64). Defined
+    // in GLContext.mm (only instantiated from the four entry points
+    // below, which are themselves defined in that TU).
+    template <typename T>
+    bool writeQueryBufferObject(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
 
     // GL 4.6 — Indirect count draws, SPIR-V specialization, polygon offset clamp.
     bool multiDrawArraysIndirectCount(GLenum mode, const void* indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);

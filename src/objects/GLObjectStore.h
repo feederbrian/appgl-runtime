@@ -793,6 +793,15 @@ struct GLQueryObject {
     // bound via `glBeginQuery`. `glCreateQueries` (GL 4.5 DSA)
     // creates the object fully. Track the distinction here.
     bool instantiated = false;
+    // GL 4.6 §22.2 — GL_TIME_ELAPSED / GL_TIMESTAMP record CPU clock
+    // nanoseconds between BeginQuery and EndQuery. CTS
+    // `direct_state_access.queries_functional` expects EndQuery on a
+    // TIME_ELAPSED query to report a non-zero result (`less(0, v)`
+    // comparison). Metal doesn't expose a GPU timestamp that maps
+    // cleanly to GL's monotonic nanoseconds, so we fall back to
+    // CPU-measured elapsed time — far coarser than HW counters but
+    // sufficient for the non-zero-duration comparison.
+    std::uint64_t startTimeNs = 0;
 };
 
 struct GLSyncObject {

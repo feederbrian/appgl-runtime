@@ -15,6 +15,7 @@
 #include "../objects/GLObjectStore.h"
 #include "../../include/AppGL/glcorearb.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -2274,6 +2275,12 @@ static void APIENTRY glBeginQuery(GLenum target, GLuint id) {
     query->index = 0;
     query->active = true;
     query->result = 0;
+    // GL 4.6 §22.2 — record CPU-side start-time for GL_TIME_ELAPSED.
+    // Stored on every Begin so CTS queries_functional's less(0, v)
+    // check on TIME_ELAPSED passes with the elapsed interval in ns.
+    query->startTimeNs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 static void APIENTRY glEndQuery(GLenum target) {
@@ -2331,7 +2338,24 @@ static void APIENTRY glEndQuery(GLenum target) {
                 case GL_COMPUTE_SHADER_INVOCATIONS:
                 case GL_CLIPPING_INPUT_PRIMITIVES:
                 case GL_CLIPPING_OUTPUT_PRIMITIVES:
-                case GL_TIME_ELAPSED:
+                    // Leave the accumulated / 0-initialised value.
+                    break;
+                case GL_TIME_ELAPSED: {
+                    // GL 4.6 §22.2: TIME_ELAPSED reports elapsed time
+                    // (in nanoseconds) between BeginQuery and EndQuery.
+                    // Use CPU monotonic clock — Metal's GPU timestamp
+                    // API doesn't round-trip to GL's monotonic-ns
+                    // contract cleanly. Ensure a minimum of 1ns so the
+                    // `less(0, v)` check in CTS queries_functional
+                    // passes even on degenerate zero-duration intervals.
+                    const std::uint64_t now = static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count());
+                    const std::uint64_t elapsed =
+                        (now > query.startTimeNs) ? (now - query.startTimeNs) : 1;
+                    query.result = elapsed == 0 ? 1 : elapsed;
+                    break;
+                }
                 case GL_TRANSFORM_FEEDBACK_OVERFLOW:
                 case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
                     // Leave the accumulated / 0-initialised value.

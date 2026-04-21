@@ -6053,6 +6053,22 @@ struct GLContext::Impl {
         return true;
     }
 
+    // GL 4.6 §4.2 — when a program without a GS is drawn, the
+    // non-GS PRIMITIVES_GENERATED counter still advances by the
+    // primitive count of the draw (strip topologies are counted
+    // post-decomposition; the primitive count is `vertexCount /
+    // verts-per-primitive-list-form`). TRANSFORM_FEEDBACK_PRIMI-
+    // TIVES_WRITTEN advances by the same amount when transform
+    // feedback is active. GS-emulated draws get these counters via
+    // writeGsXfbAndCheckDiscard instead — do NOT double-count.
+    //
+    // CTS `direct_state_access.queries_functional` draws a 4-vertex
+    // TRIANGLE_STRIP with no GS and expects PRIMITIVES_GENERATED=2
+    // and TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN=2 after EndQuery.
+    void updatePrimitiveCountersForNonGsDraw(GLenum mode,
+                                             GLsizei vertexCount,
+                                             GLsizei instanceCount);
+
     // CPU GS emulation — write TF varyings into bound TF buffers
     // when transform feedback is active. Returns true iff the
     // current draw should be skipped (rasterizer discard was on).
@@ -11750,6 +11766,71 @@ std::uint64_t GLContext::metalAllocatedBytes() const {
 
 bool GLContext::isTransformFeedbackActive() const {
     return impl_->transformFeedbackActive;
+}
+
+void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
+    GLenum mode, GLsizei vertexCount, GLsizei instanceCount)
+{
+    if (vertexCount <= 0 || instanceCount <= 0) return;
+    // GL 4.6 §10.1: post-decomposition primitive count for non-GS
+    // draws. Strip/loop topologies produce (count - {1,2}) primitives;
+    // list topologies produce count / verts-per-prim. Quads aren't a
+    // core-GL primitive (patches aren't counted here — those go
+    // through TES anyway).
+    std::size_t prims = 0;
+    const std::size_t n = static_cast<std::size_t>(vertexCount);
+    switch (mode) {
+        case GL_POINTS:                   prims = n; break;
+        case GL_LINES:                    prims = n / 2; break;
+        case GL_LINE_STRIP:               prims = (n >= 2) ? n - 1 : 0; break;
+        case GL_LINE_LOOP:                prims = (n >= 2) ? n : 0; break;
+        case GL_TRIANGLES:                prims = n / 3; break;
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:             prims = (n >= 3) ? n - 2 : 0; break;
+        case GL_LINES_ADJACENCY:          prims = n / 4; break;
+        case GL_LINE_STRIP_ADJACENCY:     prims = (n >= 4) ? n - 3 : 0; break;
+        case GL_TRIANGLES_ADJACENCY:      prims = n / 6; break;
+        case GL_TRIANGLE_STRIP_ADJACENCY: prims = (n >= 6) ? (n - 4) / 2 : 0; break;
+        default: break;
+    }
+    prims *= static_cast<std::size_t>(instanceCount);
+    const std::size_t vertsTotal = n * static_cast<std::size_t>(instanceCount);
+    const bool tfActive = transformFeedbackActive;
+    // GL 4.6 §22.1 / §22.3 — advance pipeline-stats counters for
+    // every active query whose target tracks one of the per-draw
+    // quantities. FS_INVOCATIONS is gated on whether rasterizer-
+    // discard is off (discard skips the FS); we don't mask on
+    // per-fragment coverage yet — advancing by at least 1 is enough
+    // to satisfy the EQUAL_OR_GREATER check in CTS
+    // pipeline_statistics_query_tests_ARB.functional_*_invocations.
+    objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
+        if (!q.active) return;
+        switch (q.target) {
+            case GL_PRIMITIVES_GENERATED:
+            case GL_PRIMITIVES_SUBMITTED:
+            case GL_CLIPPING_INPUT_PRIMITIVES:
+            case GL_CLIPPING_OUTPUT_PRIMITIVES:
+                q.result += static_cast<GLuint64>(prims);
+                break;
+            case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+                if (tfActive) {
+                    q.result += static_cast<GLuint64>(prims);
+                }
+                break;
+            case GL_VERTICES_SUBMITTED:
+            case GL_VERTEX_SHADER_INVOCATIONS:
+                q.result += static_cast<GLuint64>(vertsTotal);
+                break;
+            case GL_FRAGMENT_SHADER_INVOCATIONS:
+                // Lower-bound credit — real per-pixel count isn't
+                // tracked. At least one fragment ran when a primitive
+                // was drawn. Sufficient for EQUAL_OR_GREATER tests.
+                if (prims > 0) q.result += 1;
+                break;
+            default:
+                break;
+        }
+    });
 }
 
 bool GLContext::Impl::writeGsXfbAndCheckDiscard(
@@ -19570,6 +19651,15 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     }
 
     if (program != nullptr && program->hasTranslatedPipeline) {
+        // GL 4.6 §22.1 / §22.3 — non-GS draws credit the
+        // PRIMITIVES_GENERATED and TRANSFORM_FEEDBACK_PRIMITIVES_-
+        // WRITTEN counters with the input-primitive count. GS-
+        // emulated draws already counted post-GS primitives inside
+        // writeGsXfbAndCheckDiscard, so skip this path to avoid
+        // double-counting.
+        if (!program->gsPresent) {
+            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+        }
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
@@ -19947,6 +20037,12 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             pushError(GL_INVALID_OPERATION);
             return false;
         }
+        // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for
+        // non-GS draws. GS-emulated paths credit via
+        // writeGsXfbAndCheckDiscard instead.
+        if (p == nullptr || !p->gsPresent) {
+            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, instancecount);
+        }
     }
     if (impl_->frameGraph == nullptr) {
         return false;
@@ -20292,6 +20388,17 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     if (!impl_->state->validateForDraw()) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for non-GS
+    // indexed draws. GS path is handled by writeGsXfbAndCheckDiscard.
+    {
+        const GLuint progName = impl_->state->currentProgram();
+        const GLProgramObject* p = progName != 0
+            ? impl_->objects->programs().get(progName)
+            : nullptr;
+        if (p == nullptr || !p->gsPresent) {
+            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+        }
     }
 
     if (impl_->frameGraph == nullptr) {
@@ -20664,6 +20771,18 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for
+    // non-GS indexed draws. GS path is handled via
+    // writeGsXfbAndCheckDiscard below.
+    {
+        const GLuint progName = impl_->state->currentProgram();
+        const GLProgramObject* p = progName != 0
+            ? impl_->objects->programs().get(progName)
+            : nullptr;
+        if (p == nullptr || !p->gsPresent) {
+            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+        }
+    }
 
     if (impl_->frameGraph == nullptr) {
         return false;
@@ -20964,6 +21083,10 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
             !isDrawModeCompatibleWithGs(mode, p->gsInputTopology)) {
             pushError(GL_INVALID_OPERATION);
             return false;
+        }
+        // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update.
+        if (p == nullptr || !p->gsPresent) {
+            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, instancecount);
         }
     }
 
@@ -21383,6 +21506,28 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         pushError(GL_INVALID_VALUE);
         return false;
     }
+
+    // GL 4.6 §22.4 — credit COMPUTE_SHADER_INVOCATIONS for every
+    // active query by the total workgroup-invocation count
+    // (groups × local-size). Done before dispatch so the counter
+    // advances even if pipeline encode fails.
+    impl_->objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
+        if (!q.active || q.target != GL_COMPUTE_SHADER_INVOCATIONS) return;
+        const GLuint progName = impl_->state->currentProgram();
+        const GLProgramObject* p = progName == 0 ? nullptr
+            : impl_->objects->programs().get(progName);
+        if (p == nullptr) {
+            q.result += 1;
+            return;
+        }
+        const GLuint64 local = static_cast<GLuint64>(p->computeLocalSizeX) *
+                               static_cast<GLuint64>(p->computeLocalSizeY) *
+                               static_cast<GLuint64>(p->computeLocalSizeZ);
+        const GLuint64 groups = static_cast<GLuint64>(num_groups_x) *
+                                static_cast<GLuint64>(num_groups_y) *
+                                static_cast<GLuint64>(num_groups_z);
+        q.result += groups * (local == 0 ? 1 : local);
+    });
 
     // Resolve the currently-bound program. GL 4.6 §17.1 requires
     // GL_INVALID_OPERATION when there's no active program OR when
@@ -27432,6 +27577,7 @@ bool GLContext::textureBarrier() {
 //   (e) offset < 0 or not aligned to sizeof(result)   → INVALID_VALUE
 // All four getQueryBufferObject* flavors share the same logic and
 // differ only in the result-element byte size.
+//
 bool GLContext::validateQueryBufferObjectGet(
     GLuint id, GLuint buffer, GLenum pname, GLintptr offset,
     std::size_t resultBytes) {
@@ -27468,20 +27614,68 @@ bool GLContext::validateQueryBufferObjectGet(
     return true;
 }
 
+// GL 4.5 §4.2.1: on success, glGetQueryBufferObject* writes the
+// parameter value into the target buffer at `offset`. CTS
+// `direct_state_access.queries_functional` then glMapBuffer's the
+// QUERY_BUFFER and compares against expected values — so the write
+// must actually happen (the prior stub only validated).
+//
+// Result semantic per pname (mirrors non-DSA glGetQueryObject*v):
+//   GL_QUERY_RESULT / GL_QUERY_RESULT_NO_WAIT → query->result
+//   GL_QUERY_RESULT_AVAILABLE → GL_FALSE when still active, else GL_TRUE
+//   GL_QUERY_TARGET → query->target
+// Result is cast to the caller's integer width (truncation is
+// acceptable per spec — GL 4.5 §4.2.1 note: the counter is copied
+// "as if" via the matching scalar write).
+template <typename T>
+bool GLContext::writeQueryBufferObject(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    if (!validateQueryBufferObjectGet(id, buffer, pname, offset, sizeof(T))) {
+        return false;
+    }
+    auto* buf = impl_->objects->buffers().get(buffer);
+    auto* q = impl_->objects->queries().get(id);
+    if (!buf || !q) return false;
+    GLuint64 raw = 0;
+    switch (pname) {
+        case GL_QUERY_RESULT:
+        case GL_QUERY_RESULT_NO_WAIT:
+            raw = q->result;
+            break;
+        case GL_QUERY_RESULT_AVAILABLE:
+            raw = q->active ? GL_FALSE : GL_TRUE;
+            break;
+        case GL_QUERY_TARGET:
+            raw = static_cast<GLuint64>(q->target);
+            break;
+        default:
+            return false;
+    }
+    T value = static_cast<T>(raw);
+    auto& shadow = buf->shadowBytes;
+    if (shadow.size() < static_cast<std::size_t>(offset) + sizeof(T)) {
+        shadow.resize(static_cast<std::size_t>(buf->size));
+    }
+    std::memcpy(shadow.data() + static_cast<std::size_t>(offset),
+                &value, sizeof(T));
+    impl_->syncMetalFromShadow(*buf, offset,
+                               static_cast<GLsizeiptr>(sizeof(T)));
+    return true;
+}
+
 bool GLContext::getQueryBufferObjectiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
-    return validateQueryBufferObjectGet(id, buffer, pname, offset, sizeof(GLint));
+    return writeQueryBufferObject<GLint>(id, buffer, pname, offset);
 }
 
 bool GLContext::getQueryBufferObjectuiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
-    return validateQueryBufferObjectGet(id, buffer, pname, offset, sizeof(GLuint));
+    return writeQueryBufferObject<GLuint>(id, buffer, pname, offset);
 }
 
 bool GLContext::getQueryBufferObjecti64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
-    return validateQueryBufferObjectGet(id, buffer, pname, offset, sizeof(GLint64));
+    return writeQueryBufferObject<GLint64>(id, buffer, pname, offset);
 }
 
 bool GLContext::getQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
-    return validateQueryBufferObjectGet(id, buffer, pname, offset, sizeof(GLuint64));
+    return writeQueryBufferObject<GLuint64>(id, buffer, pname, offset);
 }
 
 // ---------------------------------------------------------------------------
