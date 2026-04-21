@@ -1462,6 +1462,14 @@ struct GLContext::Impl {
             }
         }
         state->setViewport(viewportX, viewportY, viewportWidth, viewportHeight);
+        state->setScissor(viewportX, viewportY, viewportWidth, viewportHeight);
+        // GL 4.1 §13.6.1: initial indexed-viewport state broadcasts
+        // to all slots. `GLStateTracker::setViewport` /
+        // `setScissor` handles the broadcast while no explicit
+        // glViewportIndexed* / glScissorIndexed* has been called
+        // (see `anyIndexedViewportSet_` in GLStateTracker.h). Depth
+        // range already has the correct default (0, 1) in every
+        // slot via the struct default — no setDepthRange needed.
         extensionsString = capabilities != nullptr ? capabilities->extensionString() : "";
         // Initialize per-context immediate double attribs to {0,0,0,1} (OpenGL default).
         for (auto& slot : immediateDoubleAttribs) {
@@ -6993,6 +7001,25 @@ bool GLContext::queryIntegerIndexed(GLenum pname, GLuint index, GLint* data) {
             } else {
                 *data = static_cast<GLint>(impl_->state->boundTextureOnUnit(index, target));
             }
+            return true;
+        }
+        // GL 4.1+ per-viewport arrays. CTS
+        // `viewport_array.scissor_api` / `viewport_api` query
+        // GL_VIEWPORT and GL_SCISSOR_BOX via glGetIntegeri_v — both
+        // are spec-legal. Route through the state tracker's float
+        // indexed query + cast. DEPTH_RANGE is float-only per
+        // Table 22.5, so stays handled by queryFloatIndexed.
+        case GL_VIEWPORT:
+        case GL_SCISSOR_BOX: {
+            GLfloat fdata[4] = {};
+            if (!impl_->state->queryFloatIndexed(pname, index, fdata)) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            data[0] = static_cast<GLint>(fdata[0]);
+            data[1] = static_cast<GLint>(fdata[1]);
+            data[2] = static_cast<GLint>(fdata[2]);
+            data[3] = static_cast<GLint>(fdata[3]);
             return true;
         }
     }

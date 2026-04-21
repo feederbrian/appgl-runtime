@@ -466,8 +466,20 @@ GLStateTracker::GLStateTracker() {
 
 void GLStateTracker::setViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     viewport_ = {x, y, width, height};
+    const GLfloat fx = static_cast<GLfloat>(x);
+    const GLfloat fy = static_cast<GLfloat>(y);
+    const GLfloat fw = static_cast<GLfloat>(width);
+    const GLfloat fh = static_cast<GLfloat>(height);
+    if (anyIndexedViewportSet_) {
+        indexedViewports_[0] = {fx, fy, fw, fh};
+    } else {
+        for (auto& vp : indexedViewports_) {
+            vp = {fx, fy, fw, fh};
+        }
+    }
     markDirty(DirtyBit::ViewportScissor);
 }
+// === end setViewport ===
 
 const GLViewportState& GLStateTracker::viewport() const {
     return viewport_;
@@ -475,6 +487,13 @@ const GLViewportState& GLStateTracker::viewport() const {
 
 void GLStateTracker::setScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
     scissor_ = {x, y, width, height};
+    if (anyIndexedScissorSet_) {
+        indexedScissors_[0] = {x, y, width, height};
+    } else {
+        for (auto& sc : indexedScissors_) {
+            sc = {x, y, width, height};
+        }
+    }
     markDirty(DirtyBit::ViewportScissor);
 }
 
@@ -485,6 +504,13 @@ const GLScissorState& GLStateTracker::scissor() const {
 void GLStateTracker::setDepthRange(GLdouble nearValue, GLdouble farValue) {
     depthRange_.nearValue = std::clamp(nearValue, 0.0, 1.0);
     depthRange_.farValue = std::clamp(farValue, 0.0, 1.0);
+    if (anyIndexedDepthRangeSet_) {
+        indexedDepthRanges_[0] = {depthRange_.nearValue, depthRange_.farValue};
+    } else {
+        for (auto& dr : indexedDepthRanges_) {
+            dr = {depthRange_.nearValue, depthRange_.farValue};
+        }
+    }
     markDirty(DirtyBit::DepthStencilState);
 }
 
@@ -501,6 +527,9 @@ void GLStateTracker::setViewportIndexed(GLuint index, GLfloat x, GLfloat y, GLfl
         viewport_ = {static_cast<GLint>(x), static_cast<GLint>(y),
                      static_cast<GLsizei>(w), static_cast<GLsizei>(h)};
     }
+    // Any explicit indexed write flips setViewport/setScissor/
+    // setDepthRange into spec-correct single-slot mode.
+    anyIndexedViewportSet_ = true;
     markDirty(DirtyBit::ViewportScissor);
 }
 
@@ -517,6 +546,7 @@ void GLStateTracker::setScissorIndexed(GLuint index, GLint left, GLint bottom, G
     if (index == 0) {
         scissor_ = {left, bottom, width, height};
     }
+    anyIndexedScissorSet_ = true;
     markDirty(DirtyBit::ViewportScissor);
 }
 
@@ -537,6 +567,7 @@ void GLStateTracker::setDepthRangeIndexed(GLuint index, GLdouble nearVal, GLdoub
         depthRange_.nearValue = indexedDepthRanges_[0].nearValue;
         depthRange_.farValue = indexedDepthRanges_[0].farValue;
     }
+    anyIndexedDepthRangeSet_ = true;
     markDirty(DirtyBit::DepthStencilState);
 }
 
