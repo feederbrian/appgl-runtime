@@ -665,6 +665,14 @@ bool isValidVertexAttribPname(GLenum pname) {
         case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
         case GL_VERTEX_ATTRIB_ARRAY_LONG:
         case GL_CURRENT_VERTEX_ATTRIB:
+        // GL 4.3+ separated vertex format (ARB_vertex_attrib_binding).
+        // `GL_VERTEX_ATTRIB_BINDING` returns the binding index the
+        // attribute is linked to (default = attribute index), and
+        // `GL_VERTEX_ATTRIB_RELATIVE_OFFSET` returns the member
+        // offset within the vertex stride. CTS
+        // `vertex_attrib_binding.basic-state*` queries both.
+        case GL_VERTEX_ATTRIB_BINDING:
+        case GL_VERTEX_ATTRIB_RELATIVE_OFFSET:
             return true;
         default:
             return false;

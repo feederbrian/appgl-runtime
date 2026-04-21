@@ -6910,6 +6910,28 @@ bool GLContext::queryIntegerIndexed(GLenum pname, GLuint index, GLint* data) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // GL 4.3+ separated-format per-binding-point VAO state (§10.3.8).
+    // `GL_VERTEX_BINDING_{STRIDE,DIVISOR,BUFFER,OFFSET}` are indexed by
+    // binding point. CTS `vertex_attrib_binding.basic-state*` queries
+    // all four; the 64-bit OFFSET form goes through queryInteger64Indexed.
+    switch (pname) {
+        case GL_VERTEX_BINDING_STRIDE:
+        case GL_VERTEX_BINDING_DIVISOR:
+        case GL_VERTEX_BINDING_BUFFER:
+        case GL_VERTEX_BINDING_OFFSET: {
+            GLVertexArrayObject* vao = impl_->currentVertexArray();
+            if (vao == nullptr || index >= vao->bindingPoints.size()) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            const auto& bp = vao->bindingPoints[index];
+            if (pname == GL_VERTEX_BINDING_STRIDE)      *data = static_cast<GLint>(bp.stride);
+            else if (pname == GL_VERTEX_BINDING_DIVISOR) *data = static_cast<GLint>(bp.divisor);
+            else if (pname == GL_VERTEX_BINDING_BUFFER)  *data = static_cast<GLint>(bp.buffer);
+            else                                         *data = static_cast<GLint>(bp.offset);
+            return true;
+        }
+    }
     if (impl_->capabilities != nullptr
         && impl_->capabilities->queryIntegerIndexed(pname, index, data)) {
         return true;
@@ -6940,6 +6962,28 @@ bool GLContext::queryInteger64Indexed(GLenum pname, GLuint index, GLint64* data)
     if (data == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    // GL 4.3+ separated-format — same per-binding queries as the
+    // 32-bit form. `GL_VERTEX_BINDING_OFFSET` in particular is
+    // documented as the 64-bit target since offsets can exceed
+    // 2^31. Served directly from the VAO binding-point state.
+    switch (pname) {
+        case GL_VERTEX_BINDING_STRIDE:
+        case GL_VERTEX_BINDING_DIVISOR:
+        case GL_VERTEX_BINDING_BUFFER:
+        case GL_VERTEX_BINDING_OFFSET: {
+            GLVertexArrayObject* vao = impl_->currentVertexArray();
+            if (vao == nullptr || index >= vao->bindingPoints.size()) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            const auto& bp = vao->bindingPoints[index];
+            if (pname == GL_VERTEX_BINDING_STRIDE)      *data = static_cast<GLint64>(bp.stride);
+            else if (pname == GL_VERTEX_BINDING_DIVISOR) *data = static_cast<GLint64>(bp.divisor);
+            else if (pname == GL_VERTEX_BINDING_BUFFER)  *data = static_cast<GLint64>(bp.buffer);
+            else                                         *data = static_cast<GLint64>(bp.offset);
+            return true;
+        }
     }
     if (impl_->capabilities != nullptr
         && impl_->capabilities->queryInteger64Indexed(pname, index, data)) {
@@ -7864,6 +7908,22 @@ bool GLContext::vertexAttribPointer(
     attribute.buffer = buffer;
     attribute.integer = false;
     attribute.longData = false;
+    // GL 4.6 §10.3.8: glVertexAttribPointer is defined as
+    // glVertexAttribFormat(index, size, type, normalized, 0) +
+    // glVertexAttribBinding(index, index) +
+    // glBindVertexBuffer(index, buffer, (GLintptr)pointer, stride).
+    // Mirror the binding-point state so subsequent queries of
+    // GL_VERTEX_BINDING_{BUFFER,OFFSET,STRIDE} and
+    // GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING route correctly through
+    // the binding path.
+    attribute.bindingIndex = index;
+    attribute.relativeOffset = 0;
+    if (index < vertexArray->bindingPoints.size()) {
+        auto& bp = vertexArray->bindingPoints[index];
+        bp.buffer = buffer;
+        bp.offset = static_cast<GLintptr>(attribute.pointer);
+        bp.stride = stride > 0 ? stride : static_cast<GLsizei>(16);
+    }
     markVertexDescriptorDirty(*vertexArray);
     impl_->state->markDirty(DirtyBit::VertexInput);
     return true;
@@ -7894,6 +7954,15 @@ bool GLContext::vertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsi
     attribute.buffer = buffer;
     attribute.integer = true;
     attribute.longData = false;
+    // Same spec-equivalence as glVertexAttribPointer (GL 4.6 §10.3.8).
+    attribute.bindingIndex = index;
+    attribute.relativeOffset = 0;
+    if (index < vertexArray->bindingPoints.size()) {
+        auto& bp = vertexArray->bindingPoints[index];
+        bp.buffer = buffer;
+        bp.offset = static_cast<GLintptr>(attribute.pointer);
+        bp.stride = stride > 0 ? stride : static_cast<GLsizei>(16);
+    }
     markVertexDescriptorDirty(*vertexArray);
     impl_->state->markDirty(DirtyBit::VertexInput);
     return true;
@@ -7905,6 +7974,20 @@ bool GLContext::vertexAttribDivisor(GLuint index, GLuint divisor) {
         pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §10.3.8: `glVertexAttribDivisor(N, D)` is defined as
+    // `glVertexBindingDivisor(N, D)` + `glVertexAttribBinding(N, N)`.
+    // The divisor lives on the binding point, not the attribute —
+    // CTS `vertex_attrib_binding.basic-state4` asserts that a
+    // subsequent `glVertexBindingDivisor(N, new)` overwrites the
+    // same state.
+    if (index < vertexArray->bindingPoints.size()) {
+        vertexArray->bindingPoints[index].divisor = divisor;
+    }
+    vertexArray->attributes[index].bindingIndex = index;
+    // Mirror into the legacy field too so the
+    // `markVertexDescriptorDirty` + draw-time fetch still sees the
+    // value when the attribute was set via glVertexAttribPointer
+    // rather than separated-format calls.
     vertexArray->attributes[index].divisor = divisor;
     markVertexDescriptorDirty(*vertexArray);
     impl_->state->markDirty(DirtyBit::VertexInput);
@@ -8197,6 +8280,18 @@ bool GLContext::vertexBindingDivisor(GLuint bindingindex, GLuint divisor) {
         return false;
     }
     vertexArray->bindingPoints[bindingindex].divisor = divisor;
+    // Mirror into the legacy per-attribute `divisor` for every
+    // attribute currently routed to this binding — keeps the
+    // legacy draw-time path in sync. `GL_VERTEX_ATTRIB_ARRAY_DIVISOR`
+    // queries read from the binding point directly (below), so this
+    // mirror isn't what drives the query result; it just keeps the
+    // MetalVertexDescriptorBuilder's `attribute.divisor` field
+    // accurate for draws that use the legacy attribute-fields path.
+    for (auto& a : vertexArray->attributes) {
+        if (a.bindingIndex == bindingindex) {
+            a.divisor = divisor;
+        }
+    }
     markVertexDescriptorDirty(*vertexArray);
     impl_->state->markDirty(DirtyBit::VertexInput);
     return true;
@@ -8230,13 +8325,34 @@ bool GLContext::getVertexAttribInteger(GLuint index, GLenum pname, GLint* params
             params[0] = attribute.normalized;
             return true;
         case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
-            params[0] = static_cast<GLint>(attribute.buffer);
+            // GL 4.6 §10.3.8: returns the buffer bound to the
+            // *binding point* used by this attribute, not the raw
+            // legacy `attribute.buffer` field. For
+            // glVertexAttribPointer the two coincide because it
+            // implicitly sets binding=index and binds the current
+            // GL_ARRAY_BUFFER to that binding point.
+            if (attribute.bindingIndex < vertexArray->bindingPoints.size()) {
+                params[0] = static_cast<GLint>(
+                    vertexArray->bindingPoints[attribute.bindingIndex].buffer);
+            } else {
+                params[0] = static_cast<GLint>(attribute.buffer);
+            }
             return true;
         case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
             params[0] = attribute.integer ? GL_TRUE : GL_FALSE;
             return true;
         case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
-            params[0] = static_cast<GLint>(attribute.divisor);
+            // Per-attribute divisor query — always returns the
+            // divisor of the binding point the attribute uses.
+            // `glVertexAttribDivisor` / `glVertexBindingDivisor`
+            // write the same state slot per GL 4.6 §10.3.8, so the
+            // lookup needs to route through the binding index.
+            if (attribute.bindingIndex < vertexArray->bindingPoints.size()) {
+                params[0] = static_cast<GLint>(
+                    vertexArray->bindingPoints[attribute.bindingIndex].divisor);
+            } else {
+                params[0] = static_cast<GLint>(attribute.divisor);
+            }
             return true;
         case GL_VERTEX_ATTRIB_ARRAY_LONG:
             params[0] = attribute.longData ? GL_TRUE : GL_FALSE;

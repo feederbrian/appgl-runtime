@@ -64,9 +64,16 @@ void GLObjectStore::initializeVertexArray(GLVertexArrayObject& vertexArray) cons
     const auto count = static_cast<std::size_t>(maxVertexAttribs_);
     vertexArray.attributes.resize(count);
     vertexArray.bindingPoints.resize(count);
-    // GL 4.3 spec default: each attribute's bindingIndex == its own index.
+    // GL 4.3 spec defaults:
+    //   - attribute.bindingIndex = attribute index (equivalent to
+    //     `glVertexAttribBinding(N, N)`)
+    //   - bindingPoint.stride = 16 (GL 4.6 §10.3.8)
+    //   - bindingPoint.offset = 0, .divisor = 0, .buffer = 0
+    // CTS `vertex_attrib_binding.basic-state1` asserts default
+    // GL_VERTEX_BINDING_STRIDE = 16 for every binding index.
     for (std::size_t i = 0; i < count; ++i) {
         vertexArray.attributes[i].bindingIndex = static_cast<GLuint>(i);
+        vertexArray.bindingPoints[i].stride = 16;
     }
 }
 
