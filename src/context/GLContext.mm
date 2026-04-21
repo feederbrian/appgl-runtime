@@ -12663,6 +12663,61 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
 
+    // GL 4.6 §7.6.1 uniform location validation: verify that every
+    // uniform's resolved location (and every slot it occupies for
+    // array uniforms) is < GL_MAX_UNIFORM_LOCATIONS, and that no two
+    // uniforms collide on the same location. CTS
+    // `explicit_uniform_location.uniform-loc-negative-link-*`:
+    //   - `reused1` — two uniforms declared with the same
+    //     `layout(location=N)` in the same stage.
+    //   - `reused2` — two uniforms declared at the same explicit
+    //     location across two different stages (cross-stage
+    //     collision — they have different names so
+    //     `appendDeclarationsAsUniforms` does not merge them).
+    //   - `max-location` — a single uniform at
+    //     `location = GL_MAX_UNIFORM_LOCATIONS`; the valid range is
+    //     `[0, MAX-1]`, so this must fail.
+    //   - `max-num-of-locations` — an array uniform of size MAX at
+    //     location 0 plus an implicit-location uniform that
+    //     auto-assigns to MAX (overflowing).
+    // All four must set `GL_LINK_STATUS=FALSE`.
+    {
+        GLint maxUnifLoc = 1024;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(GL_MAX_UNIFORM_LOCATIONS, &maxUnifLoc);
+        }
+        std::unordered_set<GLint> occupiedLocations;
+        occupiedLocations.reserve(programObject->uniforms.size() * 2);
+        for (const auto& uniform : programObject->uniforms) {
+            if (uniform.location < 0) continue;  // atomic counters, etc.
+            const GLint slots = std::max<GLint>(uniform.arraySize, 1);
+            for (GLint s = 0; s < slots; ++s) {
+                const GLint loc = uniform.location + s;
+                if (loc >= maxUnifLoc) {
+                    programObject->linkLog = "uniform '" + uniform.name
+                        + "' location " + std::to_string(loc)
+                        + " exceeds GL_MAX_UNIFORM_LOCATIONS="
+                        + std::to_string(maxUnifLoc);
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+                if (!occupiedLocations.insert(loc).second) {
+                    programObject->linkLog = "uniform '" + uniform.name
+                        + "' location " + std::to_string(loc)
+                        + " collides with another uniform";
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+            }
+        }
+    }
+
     // GL 4.2 §7.6: for any sampler uniform declared with
     // `layout(binding = N)` in the GLSL source, seed its integer value
     // to N. Subsequent glUniform1i calls override this. For arrays,
