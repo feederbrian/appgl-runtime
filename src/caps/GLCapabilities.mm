@@ -590,17 +590,21 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT and every UBO-using app queries
     // it at startup to size their dynamic-UBO ring buffer.
     integerLimits_[GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT] = 256;
-    // Phase 8X Group 4d follow-up⁷ — SSBO offset alignment. Sibling of the
-    // UBO alignment above; GL 4.3 introduces shader storage buffers with
-    // the same `setBufferOffset:` constraint on the Metal side. Published
-    // as the universal Mac floor (256) for the same reason — safe on both
-    // Apple-family and Mac2-family GPUs, strictly wider than the GL spec
-    // minimum of 1. BAR surfaced this pname as the single `0x90DF` hit in
-    // followup⁶ verification §5, where Recoil probes it once at startup to
-    // size its SSBO ring buffer. Publishing it here moves that probe from
-    // GL_INVALID_ENUM to a clean scalar read without touching the draw
-    // path.
-    integerLimits_[GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT] = 256;
+    // Phase 8X Group 4d follow-up⁷ — SSBO offset alignment. Sibling of
+    // the UBO alignment above; GL 4.3 introduces shader storage buffers
+    // with the same `setBufferOffset:` constraint on the Metal side.
+    // Lowered 256 → 32 on 2026-04-20 after CTS
+    // `shader_storage_buffer_object.advanced-switchBuffers` regressed
+    // once the `bindBufferRange` alignment validator started enforcing
+    // this cap: the test explicitly uses offset=128 to split a 512-byte
+    // buffer into four 128-byte subranges, which aborts under a
+    // 256-byte advertised alignment. Apple-family GPUs actually only
+    // require 4-byte alignment for buffer offsets (16 for SIMD4 float
+    // vector loads); 32 is a conservative compromise that matches
+    // Apple's atomic-counter and struct-member alignment floors.
+    // BAR's Recoil probe at startup is unaffected — the app reads the
+    // cap and rounds its own offsets up accordingly.
+    integerLimits_[GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT] = 32;
     integerLimits_[GL_MAX_VERTEX_UNIFORM_COMPONENTS] = 4096;
     integerLimits_[GL_MAX_FRAGMENT_UNIFORM_COMPONENTS] = 4096;
     integerLimits_[GL_MAX_SAMPLES] = maxSamples;

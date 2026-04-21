@@ -7202,6 +7202,47 @@ bool GLContext::bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // GL 4.6 §6.1.1 alignment requirements for per-target offsets:
+    //   GL_UNIFORM_BUFFER          → multiple of GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT
+    //   GL_SHADER_STORAGE_BUFFER   → multiple of GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT
+    //   GL_ATOMIC_COUNTER_BUFFER   → multiple of 4 (atomic_uint size)
+    //   GL_TRANSFORM_FEEDBACK_BUFFER → multiple of 4 (float/int component size)
+    // Size also needs alignment checks for XFB (multiple of 4). CTS
+    // `multi_bind.errors_bind_buffers` exercises each target with a
+    // deliberately-misaligned offset and expects GL_INVALID_VALUE.
+    {
+        GLint64 alignment = 1;
+        auto queryAlignment = [this](GLenum pname) -> GLint64 {
+            GLint64 v = 1;
+            if (impl_->capabilities != nullptr) {
+                impl_->capabilities->queryInteger64(pname, &v);
+            }
+            return v;
+        };
+        switch (target) {
+            case GL_UNIFORM_BUFFER:
+                alignment = queryAlignment(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT);
+                break;
+            case GL_SHADER_STORAGE_BUFFER:
+                alignment = queryAlignment(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT);
+                break;
+            case GL_ATOMIC_COUNTER_BUFFER:
+            case GL_TRANSFORM_FEEDBACK_BUFFER:
+                alignment = 4;
+                break;
+            default:
+                break;
+        }
+        if (alignment > 1 && (offset % alignment) != 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        // XFB: size must also be a multiple of 4.
+        if (target == GL_TRANSFORM_FEEDBACK_BUFFER && (size % 4) != 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
     GLBufferObject* object = impl_->objects->buffers().get(buffer);
     if (object == nullptr) {
         pushError(GL_INVALID_OPERATION);
