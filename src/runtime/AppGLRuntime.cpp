@@ -63,13 +63,17 @@ constexpr const char* kPhaseAShaderTestId = "phase-a.shaders";
 constexpr const char* kPhaseAProgramTestId = "phase-a.programs";
 constexpr const char* kPhaseADrawTestId = "phase-a.draw";
 constexpr GLuint kPhaseAMaxDrawBuffers = 8;
-// Per-target maximum indexed buffer bindings (GL 4.6 spec minima).
+// Per-target maximum indexed buffer bindings. Must match the
+// values advertised via GL_MAX_* queries in GLCapabilities — a
+// lower dispatch-layer cap rejects spec-legal binding indices as
+// INVALID_VALUE (CTS `shader_atomic_counter_ops_tests.*` binds
+// ATOMIC_COUNTER_BUFFER at index 1, our cap says 8).
 GLuint maxIndexedBindings(GLenum target) {
     switch (target) {
         case GL_TRANSFORM_FEEDBACK_BUFFER: return 4;   // GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS
-        case GL_UNIFORM_BUFFER:            return 84;   // GL_MAX_UNIFORM_BUFFER_BINDINGS
-        case GL_ATOMIC_COUNTER_BUFFER:     return 1;    // GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS
-        case GL_SHADER_STORAGE_BUFFER:     return 8;    // GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS
+        case GL_UNIFORM_BUFFER:            return 84;  // GL_MAX_UNIFORM_BUFFER_BINDINGS
+        case GL_ATOMIC_COUNTER_BUFFER:     return 8;   // GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS
+        case GL_SHADER_STORAGE_BUFFER:     return 8;   // GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS
         default: return 0;
     }
 }
