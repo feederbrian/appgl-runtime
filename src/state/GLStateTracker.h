@@ -282,9 +282,19 @@ public:
     void applyDirtyStateForDraw(GLObjectStore& objects);
 
 private:
-    static constexpr std::size_t kMaxTextureUnits = 48;
+    // Matches advertised GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS (80) so
+    // texture + sampler bindings at indices 0..79 all reach live
+    // state slots. CTS `multi_bind.functional_bind_samplers`
+    // probes index 48; prior 48-slot cap made queries past the
+    // 48th unit return zero.
+    static constexpr std::size_t kMaxTextureUnits = 80;
     static constexpr std::size_t kMaxDrawBuffers = 8;
-    static constexpr std::size_t kMaxIndexedBufferBindings = 32;
+    // Matches advertised GL_MAX_UNIFORM_BUFFER_BINDINGS (84) +
+    // headroom for the other indexed buffer targets (TFB, SSBO,
+    // atomic-counter). CTS `multi_bind.functional_bind_buffers_*`
+    // probes UBO index 32 — the previous 32-slot cap left those
+    // slots unreachable.
+    static constexpr std::size_t kMaxIndexedBufferBindings = 96;
 
     GLViewportState viewport_;
     GLDepthRangeState depthRange_;

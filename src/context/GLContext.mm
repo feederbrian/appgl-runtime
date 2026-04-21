@@ -22730,8 +22730,18 @@ bool GLContext::bindBuffersBase(GLenum target, GLuint first, GLsizei count, cons
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.4 ARB_multi_bind §6.1.1 — per-entry semantics. Each
+    // invalid (non-zero, non-existent) buffer name generates
+    // INVALID_OPERATION and that slot is unmodified; valid entries
+    // still bind. bindBufferBase itself already pushes INVALID_
+    // OPERATION on a bad name, so just let it run through the loop
+    // and the per-entry errors accumulate naturally.
     for (GLsizei i = 0; i < count; ++i) {
         GLuint buf = buffers ? buffers[i] : 0;
+        if (buf != 0 && !impl_->objects->buffers().contains(buf)) {
+            pushError(GL_INVALID_OPERATION);
+            continue;
+        }
         bindBufferBase(target, first + static_cast<GLuint>(i), buf);
     }
     return true;
@@ -22756,6 +22766,10 @@ bool GLContext::bindBuffersRange(GLenum target, GLuint first, GLsizei count, con
         GLuint buf = buffers ? buffers[i] : 0;
         GLintptr offset = (buffers && offsets) ? offsets[i] : 0;
         GLsizeiptr sz = (buffers && sizes) ? sizes[i] : 0;
+        if (buf != 0 && !impl_->objects->buffers().contains(buf)) {
+            pushError(GL_INVALID_OPERATION);
+            continue;
+        }
         bindBufferRange(target, first + static_cast<GLuint>(i), buf, offset, sz);
     }
     return true;
@@ -22791,36 +22805,44 @@ bool GLContext::bindTextures(GLuint first, GLsizei count, const GLuint* textures
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    // GL 4.4 §6.1.1: glBindTextures generates GL_INVALID_OPERATION if
-    // any non-zero entry in `textures` is not an existing texture name.
-    // Apply the check up-front so a mid-loop failure doesn't leave a
-    // partial set of successful bindings. CTS
-    // `multi_bind.errors_bind_textures` deliberately plants a never-
-    // generated ID in one slot and asserts INVALID_OPERATION.
-    if (textures != nullptr) {
-        for (GLsizei i = 0; i < count; ++i) {
-            GLuint tex = textures[i];
-            if (tex == 0) continue;
-            auto* obj = impl_->objects->textures().get(tex);
-            if (obj == nullptr) {
-                pushError(GL_INVALID_OPERATION);
-                return false;
-            }
-        }
-    }
+    // GL 4.4 §6.1.1 / ARB_multi_bind — per-entry semantics: an
+    // invalid (non-zero, non-existent) texture name raises
+    // INVALID_OPERATION and the corresponding unit is unmodified;
+    // other valid entries still bind. Also per spec, ACTIVE_TEXTURE
+    // is NOT modified — which our prior impl broke by cycling
+    // `setActiveTextureUnit` inside the loop without restoring.
+    const GLuint savedActiveUnit = impl_->state->activeTextureUnit();
+    bool anyInvalid = false;
     for (GLsizei i = 0; i < count; ++i) {
         GLuint tex = textures ? textures[i] : 0;
         GLuint unit = first + static_cast<GLuint>(i);
         impl_->state->setActiveTextureUnit(unit);
         if (tex == 0) {
-            // Unbind all targets on this unit.
+            // Unbind every target on this unit (multi-bind unbinds
+            // regardless of previously-bound target).
+            impl_->state->bindTexture(GL_TEXTURE_1D, 0);
             impl_->state->bindTexture(GL_TEXTURE_2D, 0);
-        } else {
-            auto* obj = impl_->objects->textures().get(tex);
-            GLenum target = (obj && obj->target != 0) ? obj->target : GL_TEXTURE_2D;
-            impl_->state->bindTexture(target, tex);
+            impl_->state->bindTexture(GL_TEXTURE_3D, 0);
+            impl_->state->bindTexture(GL_TEXTURE_1D_ARRAY, 0);
+            impl_->state->bindTexture(GL_TEXTURE_2D_ARRAY, 0);
+            impl_->state->bindTexture(GL_TEXTURE_RECTANGLE, 0);
+            impl_->state->bindTexture(GL_TEXTURE_CUBE_MAP, 0);
+            impl_->state->bindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, 0);
+            impl_->state->bindTexture(GL_TEXTURE_BUFFER, 0);
+            impl_->state->bindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+            impl_->state->bindTexture(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, 0);
+            continue;
         }
+        auto* obj = impl_->objects->textures().get(tex);
+        if (obj == nullptr) {
+            anyInvalid = true;
+            continue;
+        }
+        GLenum target = obj->target != 0 ? obj->target : GL_TEXTURE_2D;
+        impl_->state->bindTexture(target, tex);
     }
+    impl_->state->setActiveTextureUnit(savedActiveUnit);
+    if (anyInvalid) pushError(GL_INVALID_OPERATION);
     return true;
 }
 
@@ -22834,25 +22856,17 @@ bool GLContext::bindSamplers(GLuint first, GLsizei count, const GLuint* samplers
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    // GL 4.4 §6.1.1: glBindSamplers raises INVALID_OPERATION when any
-    // non-zero entry is not an existing sampler name. CTS
-    // `multi_bind.errors_bind_samplers` plants a never-generated ID
-    // in one slot and asserts INVALID_OPERATION.
-    if (samplers != nullptr) {
-        for (GLsizei i = 0; i < count; ++i) {
-            GLuint samp = samplers[i];
-            if (samp == 0) continue;
-            auto* obj = impl_->objects->samplers().get(samp);
-            if (obj == nullptr) {
-                pushError(GL_INVALID_OPERATION);
-                return false;
-            }
-        }
-    }
+    // GL 4.4 §6.1.1 / ARB_multi_bind — per-entry semantics.
+    bool anyInvalid = false;
     for (GLsizei i = 0; i < count; ++i) {
         GLuint sampler = samplers ? samplers[i] : 0;
+        if (sampler != 0 && !impl_->objects->samplers().contains(sampler)) {
+            anyInvalid = true;
+            continue;
+        }
         bindSampler(first + static_cast<GLuint>(i), sampler);
     }
+    if (anyInvalid) pushError(GL_INVALID_OPERATION);
     return true;
 }
 
