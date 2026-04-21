@@ -1115,6 +1115,10 @@ bool isValidTextureParameterPname(GLenum pname) {
         case GL_TEXTURE_VIEW_NUM_LEVELS:
         case GL_TEXTURE_VIEW_NUM_LAYERS:
         case GL_TEXTURE_TARGET:
+        // GL 4.6 §8.26.2 — per-texture image-format compatibility type.
+        // Query-only (set path rejects via setTextureParameter's inner
+        // switch). Accepted on getTexParameter*.
+        case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE:
             return true;
         default:
             return false;

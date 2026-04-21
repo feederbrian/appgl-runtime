@@ -6424,7 +6424,9 @@ struct GLContext::Impl {
         GLboolean layered = GL_FALSE;
         GLint layer = 0;
         GLenum access = GL_READ_ONLY;
-        GLenum format = GL_RGBA8;
+        // GL 4.6 §8.26 Table 23.43 — initial value is GL_R8 per spec.
+        // CTS `shader_image_load_store.basic-api-bind` verifies this.
+        GLenum format = GL_R8;
     };
     static constexpr std::size_t kMaxImageUnits = 8;
     std::array<ImageBinding, kMaxImageUnits> imageBindings{};
@@ -6700,8 +6702,18 @@ bool GLContext::queryBooleanIndexed(GLenum target, GLuint index, GLboolean* data
         *data = (value != 0) ? GL_TRUE : GL_FALSE;
         return true;
     }
+    // GL 4.2+ per-image-unit state — fall back to the indexed-integer
+    // query so glGetBooleani_v returns TRUE iff the integer value is
+    // non-zero. CTS `shader_image_load_store.basic-api-bind` queries
+    // GL_IMAGE_BINDING_ACCESS via both forms and expects them to agree.
+    // Without this, the boolean form returned GL_FALSE even when the
+    // integer form reported the default GL_READ_ONLY (0x88B8 = 35000).
+    GLint intValue = 0;
+    if (queryIntegerIndexed(target, index, &intValue)) {
+        *data = (intValue != 0) ? GL_TRUE : GL_FALSE;
+        return true;
+    }
     if (index == 0) {
-        GLint intValue = 0;
         if (impl_->state->queryInteger(target, &intValue)) {
             *data = (intValue != 0) ? GL_TRUE : GL_FALSE;
             return true;
@@ -9134,6 +9146,19 @@ bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
         if (impl_->objects->textures().erase(name)) {
             impl_->state->deleteTextureBindings(name);
             impl_->deleteTextureReferencesFromFramebuffers(name);
+            // GL 4.6 §5.1.2 — deleting a texture also clears any image
+            // unit binding that referenced it. CTS
+            // `shader_image_load_store.basic-api-bind` asserts that
+            // glGetIntegeri_v(IMAGE_BINDING_NAME) returns 0 after
+            // glDeleteTextures for the previously-bound name.
+            for (auto& ib : impl_->imageBindings) {
+                if (ib.texture == name) {
+                    ib.texture = 0;
+                    ib.level = 0;
+                    ib.layered = GL_FALSE;
+                    ib.layer = 0;
+                }
+            }
             impl_->objects->deferDelete("texture " + std::to_string(name));
         }
     }
@@ -10171,6 +10196,15 @@ bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* param
         case GL_TEXTURE_TARGET:
             if (params) *params = static_cast<GLint>(object->target != 0 ? object->target : target);
             return true;
+        // GL 4.6 §8.26.2 / ARB_shader_image_load_store — for textures
+        // allocated by the GL (not views), the image-format compat
+        // type is BY_SIZE. Views have a different (BY_CLASS) value
+        // but we don't currently support texture views, so always
+        // report BY_SIZE. CTS shader_image_load_store.basic-api-texParam
+        // asserts this for glTexImage2D-allocated textures.
+        case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE:
+            if (params) *params = static_cast<GLint>(GL_IMAGE_FORMAT_COMPATIBILITY_BY_SIZE);
+            return true;
     }
     if (!getTextureParameterInteger(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
@@ -10198,6 +10232,28 @@ bool GLContext::getTexParameterUnsignedInteger(GLenum target, GLenum pname, GLui
 }
 
 bool GLContext::getTexParameterFloat(GLenum target, GLenum pname, GLfloat* params) {
+    // Storage-state / enum-valued pnames (GL 4.6 §8.11) that only
+    // the integer getter handles — route through that path and
+    // convert to float, instead of letting the per-params float
+    // helper's default reinterpret return garbage. CTS
+    // shader_image_load_store.basic-api-texParam hits this path.
+    switch (pname) {
+        case GL_TEXTURE_IMMUTABLE_FORMAT:
+        case GL_TEXTURE_IMMUTABLE_LEVELS:
+        case GL_TEXTURE_VIEW_MIN_LEVEL:
+        case GL_TEXTURE_VIEW_MIN_LAYER:
+        case GL_TEXTURE_VIEW_NUM_LEVELS:
+        case GL_TEXTURE_VIEW_NUM_LAYERS:
+        case GL_TEXTURE_TARGET:
+        case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE: {
+            GLint ival = 0;
+            if (!getTexParameterInteger(target, pname, &ival)) {
+                return false;
+            }
+            if (params) *params = static_cast<GLfloat>(ival);
+            return true;
+        }
+    }
     GLTextureObject* object = impl_->currentTexture(target);
     // Default texture query returns spec defaults (see getTexParameterInteger).
     if (object == nullptr) {
