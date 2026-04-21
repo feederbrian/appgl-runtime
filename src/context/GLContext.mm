@@ -352,6 +352,7 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         case GL_R3_G3_B2:          return MTLPixelFormatRGBA8Unorm;
         case GL_RGB4:              return MTLPixelFormatRGBA8Unorm;
         case GL_RGB5:              return MTLPixelFormatRGBA8Unorm;
+        case GL_RGB565:            return MTLPixelFormatRGBA8Unorm;
         case GL_RGBA2:             return MTLPixelFormatRGBA8Unorm;
         case GL_RGBA4:             return MTLPixelFormatRGBA8Unorm;
         case GL_RGB5_A1:           return MTLPixelFormatRGBA8Unorm;
