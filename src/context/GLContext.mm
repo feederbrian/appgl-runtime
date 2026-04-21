@@ -1362,6 +1362,18 @@ bool getTextureParameterInteger(const GLTextureParameters& params, GLenum pname,
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             values[0] = params.depthStencilTextureMode;
             return true;
+        // GL 4.6 §8.10 — glGetTexParameteriv must accept any pname
+        // accepted by glGetTexParameterfv (incl. float-typed params
+        // like LOD_BIAS / MAX_ANISOTROPY), converting float→int via
+        // the usual round-to-nearest. CTS
+        // `texture_filter_anisotropic.queries` queries
+        // TEXTURE_MAX_ANISOTROPY via the integer path and expected 1.
+        case GL_TEXTURE_LOD_BIAS:
+            values[0] = static_cast<GLint>(params.lodBias);
+            return true;
+        case GL_TEXTURE_MAX_ANISOTROPY:
+            values[0] = static_cast<GLint>(params.maxAnisotropy);
+            return true;
         default:
             return false;
     }
@@ -3047,6 +3059,14 @@ struct GLContext::Impl {
         descriptor.compareFunction = object.params.compareMode == GL_COMPARE_REF_TO_TEXTURE
             ? metalCompareFunction(object.params.compareFunc)
             : MTLCompareFunctionNever;
+        // GL_ARB_texture_filter_anisotropic — Metal's
+        // MTLSamplerDescriptor.maxAnisotropy is an NSUInteger in
+        // [1, 16]. Clamp to that range (the spec allows the driver
+        // to round the request down).
+        {
+            const float a = std::max(1.0f, std::min(16.0f, object.params.maxAnisotropy));
+            descriptor.maxAnisotropy = static_cast<NSUInteger>(a);
+        }
 
         id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:descriptor];
         if (sampler == nil) {
@@ -3103,6 +3123,11 @@ struct GLContext::Impl {
         descriptor.compareFunction = object.params.compareMode == GL_COMPARE_REF_TO_TEXTURE
             ? metalCompareFunction(object.params.compareFunc)
             : MTLCompareFunctionNever;
+        // GL_ARB_texture_filter_anisotropic — see rebuildSamplerState.
+        {
+            const float a = std::max(1.0f, std::min(16.0f, object.params.maxAnisotropy));
+            descriptor.maxAnisotropy = static_cast<NSUInteger>(a);
+        }
 
         // Phase 8X Group 4d follow-up⁹ — targeted override for compat
         // single-channel glyph formats.
@@ -9890,6 +9915,12 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
             pushError(GL_INVALID_VALUE);
             return false;
         }
+        // (a') GL_ARB_texture_filter_anisotropic — MAX_ANISOTROPY
+        // must be >= 1. Values below 1 → INVALID_VALUE.
+        if (pname == GL_TEXTURE_MAX_ANISOTROPY && params[0] < 1) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
         // (b) Sampler state on MULTISAMPLE targets → INVALID_OPERATION.
         // Sampler pnames are filter/wrap/lod/compare/border/lod_bias.
         const bool isMSTarget = (target == GL_TEXTURE_2D_MULTISAMPLE ||
@@ -9999,6 +10030,13 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
     if (params != nullptr) {
         if ((pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
             && params[0] < 0.0f) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        // GL_ARB_texture_filter_anisotropic — MAX_ANISOTROPY must be
+        // >= 1.0; values below 1.0 raise INVALID_VALUE. CTS
+        // `texture_filter_anisotropic.queries` exercises the bound.
+        if (pname == GL_TEXTURE_MAX_ANISOTROPY && params[0] < 1.0f) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
