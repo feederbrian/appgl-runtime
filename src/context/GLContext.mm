@@ -12137,9 +12137,17 @@ GLuint GLContext::createShader(GLenum stage) {
         pushError(GL_INVALID_ENUM);
         return 0;
     }
-    const GLuint id = impl_->objects->shaders().create();
-    GLShaderObject* shader = impl_->objects->shaders().get(id);
-    shader->stage = stage;
+    // GL 4.6 §7.1: shaders and programs share a single name pool.
+    // CTS `get_uniform_tests.gl_get_uniform` passes a shader handle
+    // to `glGetUniform*` and expects INVALID_OPERATION — it uses
+    // the numeric ID to discriminate, so if a shader and program
+    // both had the same ID (separate table `nextId_` counters)
+    // the discriminator broke.
+    const GLuint id = impl_->objects->reserveSharedShaderProgramName();
+    GLShaderObject* shader = impl_->objects->shaders().insertAt(id);
+    if (shader != nullptr) {
+        shader->stage = stage;
+    }
     return id;
 }
 
@@ -12760,7 +12768,10 @@ bool GLContext::getShaderSource(GLuint shader, GLsizei bufSize, GLsizei* length,
 }
 
 GLuint GLContext::createProgram() {
-    return impl_->objects->programs().create();
+    // GL 4.6 §7.1 shared shader/program name pool (see createShader).
+    const GLuint id = impl_->objects->reserveSharedShaderProgramName();
+    impl_->objects->programs().insertAt(id);
+    return id;
 }
 
 bool GLContext::deleteProgram(GLuint program) {
@@ -17900,8 +17911,17 @@ std::size_t uniformTypeComponentCount(GLenum type) {
 }  // namespace
 
 bool GLContext::getUniformfv(GLuint program, GLint location, GLfloat* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // GL 4.6 §7.7: pass a shader handle → INVALID_OPERATION.
+    if (impl_->objects->shaders().get(program) != nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     GLProgramObject* object = impl_->objects->programs().get(program);
-    if (object == nullptr || params == nullptr) {
+    if (object == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -17936,8 +17956,16 @@ bool GLContext::getUniformfv(GLuint program, GLint location, GLfloat* params) {
 }
 
 bool GLContext::getUniformiv(GLuint program, GLint location, GLint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->objects->shaders().get(program) != nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     GLProgramObject* object = impl_->objects->programs().get(program);
-    if (object == nullptr || params == nullptr) {
+    if (object == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -17972,8 +18000,16 @@ bool GLContext::getUniformiv(GLuint program, GLint location, GLint* params) {
 }
 
 bool GLContext::getUniformuiv(GLuint program, GLint location, GLuint* params) {
+    if (params == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->objects->shaders().get(program) != nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     GLProgramObject* object = impl_->objects->programs().get(program);
-    if (object == nullptr || params == nullptr) {
+    if (object == nullptr) {
         pushError(GL_INVALID_VALUE);
         return false;
     }

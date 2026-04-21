@@ -77,6 +77,22 @@ void GLObjectStore::initializeVertexArray(GLVertexArrayObject& vertexArray) cons
     }
 }
 
+GLuint GLObjectStore::reserveSharedShaderProgramName() {
+    // Scan from 1 upward until we find an ID free in BOTH tables,
+    // then mark it reserved in whichever table the caller inserts
+    // into via insertAt. Cheap because shader/program churn is
+    // low in practice.
+    GLuint id = 1;
+    while (shaders_.contains(id) || programs_.contains(id)) {
+        ++id;
+    }
+    // Bump both tables' nextId_ past this reservation so the next
+    // reserveName() in either table doesn't hand out the same ID.
+    shaders_.bumpNextIdBeyond(id);
+    programs_.bumpNextIdBeyond(id);
+    return id;
+}
+
 void GLObjectStore::deferDelete(std::string label) {
     deferredDeletes_.push_back(std::move(label));
 }

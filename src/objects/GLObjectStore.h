@@ -17,11 +17,23 @@ class ObjectTable {
 public:
     GLuint create();
     GLuint reserveName();
+    // Insert at a specific ID — used by the GL 4.6 §7.1 shared
+    // shader/program name pool (GLObjectStore::reserveSharedShaderProgramName).
+    // Returns the inserted (or already-existing) object pointer.
+    T* insertAt(GLuint id);
     bool erase(GLuint id);
     bool contains(GLuint id) const;
     T* get(GLuint id);
     const T* get(GLuint id) const;
     std::size_t size() const { return objects_.size(); }
+
+    // Skip IDs up through (and including) `id` so the next
+    // reserveName call returns at least `id + 1`. Used by the
+    // shared shader/program allocator to keep each per-table
+    // nextId_ ahead of the shared pool's high-water mark.
+    void bumpNextIdBeyond(GLuint id) {
+        if (nextId_ <= id) nextId_ = id + 1;
+    }
 
     template <typename Visitor>
     void forEach(Visitor&& visitor);
@@ -854,6 +866,13 @@ public:
     GLsizei maxVertexAttribs() const;
     void initializeVertexArray(GLVertexArrayObject& vertexArray) const;
 
+    // GL 4.6 §7.1 — shader and program names share a single allocation
+    // pool. `glCreateShader` and `glCreateProgram` should never return
+    // numerically-equal names even though the two objects live in
+    // separate tables. Scan both tables and return the lowest unused
+    // ID across them.
+    GLuint reserveSharedShaderProgramName();
+
     void deferDelete(std::string label);
     void drainDeferredDeletes();
 
@@ -889,6 +908,14 @@ GLuint ObjectTable<T>::reserveName() {
     const GLuint id = nextId_++;
     objects_.try_emplace(id, T{});
     return id;
+}
+
+template <typename T>
+T* ObjectTable<T>::insertAt(GLuint id) {
+    if (id == 0) return nullptr;
+    auto [it, inserted] = objects_.try_emplace(id, T{});
+    if (nextId_ <= id) nextId_ = id + 1;
+    return &it->second;
 }
 
 template <typename T>
