@@ -986,8 +986,48 @@ struct MetalFrameGraph::Impl {
             // Attributeless draws don't need a vertex descriptor at all.
             desc.vertexDescriptor = attributelessDraw ? nil : vertexDescriptor;
             desc.colorAttachments[0].pixelFormat = colorFormat;
-            desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
-            desc.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+            // Pipeline depth/stencil formats must match the bound
+            // textures' Metal pixel formats. Previously hard-coded to
+            // Depth32Float_Stencil8, but GL 4.6 allows depth-only
+            // (`GL_DEPTH_COMPONENT32F`, DEPTH24) or stencil-only
+            // (`GL_STENCIL_INDEX8`) attachments too, and attaching a
+            // mismatched pipeline format makes Metal silently drop
+            // every fragment (GPU-capture signature on
+            // `geometry_shader.layered_framebuffer.depth_support`,
+            // where the depth texture is pure Depth32Float but the
+            // pipeline declared Depth32Float_Stencil8).
+            {
+                MTLPixelFormat depthFmt = MTLPixelFormatInvalid;
+                MTLPixelFormat stencilFmt = MTLPixelFormatInvalid;
+                if (info.fboDepthStencilTexture != nullptr) {
+                    id<MTLTexture> dsTex = (__bridge id<MTLTexture>)info.fboDepthStencilTexture;
+                    const MTLPixelFormat pf = dsTex.pixelFormat;
+                    // Formats carrying depth.
+                    if (pf == MTLPixelFormatDepth16Unorm ||
+                        pf == MTLPixelFormatDepth32Float ||
+                        pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                        pf == MTLPixelFormatDepth24Unorm_Stencil8) {
+                        depthFmt = pf;
+                    }
+                    // Formats carrying stencil.
+                    if (pf == MTLPixelFormatStencil8 ||
+                        pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                        pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                        pf == MTLPixelFormatX32_Stencil8 ||
+                        pf == MTLPixelFormatX24_Stencil8) {
+                        stencilFmt = pf;
+                    }
+                } else if (info.fboColorTexture == nullptr) {
+                    // Default framebuffer: keep the legacy combined
+                    // format so the swapchain path (renderpass-attached
+                    // depth+stencil renderbuffer backed by
+                    // Depth32Float_Stencil8) still matches.
+                    depthFmt = MTLPixelFormatDepth32Float_Stencil8;
+                    stencilFmt = MTLPixelFormatDepth32Float_Stencil8;
+                }
+                desc.depthAttachmentPixelFormat = depthFmt;
+                desc.stencilAttachmentPixelFormat = stencilFmt;
+            }
             // Set inputPrimitiveTopology = Point for GL_POINTS ONLY.
             // Metal uses this flag to enable point-size rasterisation
             // (default point_size = 1.0 if the VS doesn't write it,

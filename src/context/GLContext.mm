@@ -2220,11 +2220,24 @@ struct GLContext::Impl {
                    ? static_cast<NSUInteger>(baseLevel.desc.depth)
                    : 1);
             const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
+            // Pick the Metal format from the internalFormat first,
+            // regardless of whether native-layout data has been buffered
+            // yet. For `glTexStorage3D(GL_DEPTH_COMPONENT32F, ...)` and
+            // similar storage-only paths (no matching texSubImage), there's
+            // no native data to check, but we still need to build the
+            // Metal texture at the correct format — otherwise depth-
+            // attached FBOs end up with an RGBA8Unorm texture in the
+            // depth slot, Metal silently fails the format match against
+            // the pipeline's DepthAttachmentPixelFormat, and every
+            // fragment gets discarded (GPU-capture signature on
+            // `geometry_shader.layered_framebuffer.depth_support`).
             MTLPixelFormat wantFormat = MTLPixelFormatRGBA8Unorm;
-            if (hasNativeData) {
+            {
                 MTLPixelFormat native = metalRenderbufferFormat(baseLevel.desc.internalFormat);
                 if (native != MTLPixelFormatInvalid) wantFormat = native;
             }
+            (void)hasNativeData;  // fast-path uploader still gates per-slice
+                                  // byte copy on this flag below.
             GLint maxLevelExisting = 0;
             for (const auto& [levelIndex, image] : object.levels) {
                 if (levelIndex >= 0 && image.defined) {
@@ -2318,12 +2331,18 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
 
-        // Choose the native Metal pixel format when possible. Fall back
-        // to RGBA8Unorm if the internal format isn't recognized or if
-        // no native data was built for level 0.
+        // Choose the native Metal pixel format from the internal format
+        // whenever we have a mapping. `hasNativeData` used to gate this,
+        // but that skipped the mapping for storage-only textures
+        // (e.g. `glTexStorage3D(GL_DEPTH_COMPONENT32F, …)` with no
+        // matching texSubImage3D) — the resulting Metal texture got
+        // RGBA8Unorm instead of Depth32Float, and FBO depth attachments
+        // silently failed the pipeline-format match, dropping every
+        // fragment. Only fall back to RGBA8Unorm when the GL internal
+        // format has no known Metal mapping.
         const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
         MTLPixelFormat chosenFormat = MTLPixelFormatRGBA8Unorm;
-        if (hasNativeData) {
+        {
             MTLPixelFormat nativeFmt = metalRenderbufferFormat(baseLevel.desc.internalFormat);
             if (nativeFmt != MTLPixelFormatInvalid) {
                 chosenFormat = nativeFmt;
