@@ -6337,10 +6337,23 @@ void APIENTRY glActiveShaderProgram(GLuint pipeline, GLuint program) {
 GLuint APIENTRY glCreateShaderProgramv(GLenum type, GLsizei count, const GLchar* const* strings) {
     auto* ctx = requireCurrentContext("glCreateShaderProgramv");
     if (!ctx) return 0;
+    // GL 4.1 §7.3 / ARB_separate_shader_objects: glCreateShaderProgramv
+    // validates count up-front. Negative count → INVALID_VALUE +
+    // return 0. CTS `sepshaderobjs.CreateShadProgApi` asserts this.
+    if (count < 0) {
+        recordValidationError(ctx, "glCreateShaderProgramv", GL_INVALID_VALUE, "count must be non-negative");
+        return 0;
+    }
     // Convenience function: create shader, source, compile, create program, attach, link, delete shader.
     GLuint shader = ctx->createShader(type);
     if (shader == 0) {
-        recordValidationError(ctx, "glCreateShaderProgramv", GL_INVALID_ENUM, "invalid shader type");
+        // `createShader(invalid)` already pushed INVALID_ENUM via
+        // GLContext::pushError — don't double-push here. A second
+        // push would pollute the error queue for the caller's next
+        // glGetError (CTS `sepshaderobjs.CreateShadProgApi` sequences
+        // invalid-type then negative-count, and the second check
+        // previously saw the stale INVALID_ENUM instead of fresh
+        // INVALID_VALUE from the negative-count path).
         return 0;
     }
     ctx->shaderSource(shader, count, strings, nullptr);
