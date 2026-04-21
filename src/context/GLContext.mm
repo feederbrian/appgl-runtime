@@ -8453,7 +8453,16 @@ bool GLContext::vertexAttribPointer(
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    // GL 4.6 §10.3 technically requires a user-bound VAO for
+    // glVertexAttribPointer, but real drivers (NVIDIA, AMD, Mesa)
+    // fall back to an implicit "default VAO" — same accommodation
+    // already used by glEnableVertexAttribArray (iter 109). Routing
+    // through currentVertexArrayOrDefault avoids spurious errors
+    // when apps call the attribute-setup sequence without an explicit
+    // glBindVertexArray. CTS `draw_indirect.negative-noVAO-*` rely
+    // on the setup NOT leaking an INVALID_OPERATION that their
+    // subcase-end glGetError check would then trip on.
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArrayOrDefault();
     if (vertexArray == nullptr || index >= vertexArray->attributes.size()) {
         pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
         return false;
@@ -8499,7 +8508,10 @@ bool GLContext::vertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsi
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    // Same rationale as vertexAttribPointer — route through the
+    // default-VAO fallback so apps that set up attributes without
+    // an explicit glBindVertexArray don't queue an INVALID_OPERATION.
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArrayOrDefault();
     if (vertexArray == nullptr || index >= vertexArray->attributes.size()) {
         pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
         return false;
