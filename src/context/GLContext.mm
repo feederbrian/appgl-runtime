@@ -19875,6 +19875,14 @@ static void populateTranslatedDrawFixedFunctionState(
     const auto& dr = state.depthRange();
     tdi.depthRangeNear = dr.nearValue;
     tdi.depthRangeFar = dr.farValue;
+
+    // GL 4.6 §14.5.1 — scissor state.
+    tdi.scissorTestEnabled = state.isEnabled(GL_SCISSOR_TEST);
+    const auto& sc = state.scissor();
+    tdi.scissorX = sc.x;
+    tdi.scissorY = sc.y;
+    tdi.scissorWidth = sc.width;
+    tdi.scissorHeight = sc.height;
 }
 
 // Phase 8X Group 4d follow-up¹⁴ — VAO → VertexAttributeLayout field

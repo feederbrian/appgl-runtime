@@ -227,6 +227,26 @@ struct TranslatedDrawInfo {
     GLdouble depthRangeNear = 0.0;
     GLdouble depthRangeFar = 1.0;
 
+    // GL 4.6 §14.5.1 / GL_SCISSOR_TEST. When enabled, fragments outside
+    // the box are discarded. Metal has no separate "scissor enabled"
+    // flag — `setScissorRect:` always applies. To mirror the GL
+    // convention, the pipeline translator sets the scissor rect to the
+    // viewport when the test is disabled (identity match) and to the
+    // app's rect when enabled. Zero-dimension scissors are clamped to
+    // 1x1 at position (width, height) outside the viewport so no
+    // fragments fall inside — this covers the CTS
+    // `viewport_array.scissor_zero_dimension` expectation that all
+    // fragments be discarded. `scissorValid` is false when the rect is
+    // entirely outside the render target (e.g. width=0 or fully
+    // off-screen negative origin) — the encoder then sets a 1x1 rect
+    // outside the target instead of calling through with a Metal-invalid
+    // descriptor.
+    bool scissorTestEnabled = false;
+    GLint scissorX = 0;
+    GLint scissorY = 0;
+    GLsizei scissorWidth = 0;
+    GLsizei scissorHeight = 0;
+
     // Phase 8X Group 4d follow-up¹⁴ — blend state plumbing.
     //
     // Before follow-up¹⁴ the pipeline descriptor's

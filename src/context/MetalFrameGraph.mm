@@ -1586,6 +1586,70 @@ struct MetalFrameGraph::Impl {
             [currentRenderEncoder setViewport:vp];
         }
 
+        // GL 4.6 §14.5.1 — scissor test. Metal has no "disable scissor"
+        // flag, so when GL_SCISSOR_TEST is off we set the scissor rect
+        // to cover the full render target. When enabled, we translate
+        // the GL scissor box (bottom-up, render-target-relative) to
+        // Metal's top-down coordinate system, clamp to the render
+        // target bounds (Metal rejects off-screen/over-large rects),
+        // and handle zero-dimension cases by placing a 1x1 rect just
+        // outside the render target so no fragments pass — matching
+        // CTS `viewport_array.scissor_zero_dimension` which expects
+        // every fragment discarded when width=height=0.
+        {
+            const NSUInteger rtW = colorTexture.width;
+            const NSUInteger rtH = colorTexture.height;
+            MTLScissorRect sr;
+            if (!info.scissorTestEnabled) {
+                sr.x = 0;
+                sr.y = 0;
+                sr.width = rtW;
+                sr.height = rtH;
+            } else if (info.scissorWidth <= 0 || info.scissorHeight <= 0) {
+                // Zero-dimension box: no fragments pass. Metal accepts
+                // width=height=0 as a valid (degenerate) scissor which
+                // correctly culls every fragment — matching GL 4.6
+                // §14.5.1 behaviour for zero-dimension scissor.
+                sr.x = 0;
+                sr.y = 0;
+                sr.width = 0;
+                sr.height = 0;
+            } else {
+                // GL scissor is bottom-up; Metal is top-down. Flip Y
+                // using render target height. Then clamp to target.
+                GLint glX = info.scissorX;
+                GLint glY = info.scissorY;
+                GLsizei glW = info.scissorWidth;
+                GLsizei glH = info.scissorHeight;
+                GLint metalX = std::max<GLint>(0, glX);
+                GLint metalY_bottomLeft = std::max<GLint>(0, glY);
+                GLint metalY =
+                    static_cast<GLint>(rtH) - metalY_bottomLeft - glH;
+                if (metalY < 0) {
+                    // Rect extends above render target; clamp top to 0
+                    // and shrink height accordingly.
+                    glH += metalY;
+                    metalY = 0;
+                }
+                GLsizei availW = static_cast<GLsizei>(rtW) - metalX;
+                GLsizei availH = static_cast<GLsizei>(rtH) - metalY;
+                GLsizei finalW = std::min<GLsizei>(glW, std::max<GLsizei>(0, availW));
+                GLsizei finalH = std::min<GLsizei>(glH, std::max<GLsizei>(0, availH));
+                if (finalW <= 0 || finalH <= 0) {
+                    sr.x = rtW > 0 ? rtW - 1 : 0;
+                    sr.y = rtH > 0 ? rtH - 1 : 0;
+                    sr.width = 1;
+                    sr.height = 1;
+                } else {
+                    sr.x = static_cast<NSUInteger>(metalX);
+                    sr.y = static_cast<NSUInteger>(metalY);
+                    sr.width = static_cast<NSUInteger>(finalW);
+                    sr.height = static_cast<NSUInteger>(finalH);
+                }
+            }
+            [currentRenderEncoder setScissorRect:sr];
+        }
+
         // Bind vertex data at buffer index 0.
         // Attributeless draws (gl_VertexID-driven) skip vertex buffer binding.
         // OPT-5: when the VBO has a pre-uploaded Metal buffer, bind it

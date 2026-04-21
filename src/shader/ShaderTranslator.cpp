@@ -172,6 +172,17 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxComputeAtomicCounters = 8;
     r.maxComputeImageUniforms = 8;
     r.maxComputeTextureImageUnits = 48;
+    // Clip / cull distances (GL 4.6 Table 23.53 — minimums 8/8, combined 8).
+    // CTS `clip_distance.coverage` compiles a VS that writes
+    // `gl_MaxClipDistances` to a transform-feedback output and
+    // compares the value against `glGetIntegerv(GL_MAX_CLIP_DISTANCES)`.
+    // The GLSL built-in constant is materialized by glslang from
+    // `resources.maxClipDistances` — although glslang's default is 8,
+    // we set it explicitly here to keep both caps in lockstep and
+    // guard against any later default change in the vendored glslang.
+    r.maxClipDistances = 8;
+    r.maxCullDistances = 8;
+    r.maxCombinedClipAndCullDistances = 8;
     return r;
 }
 
