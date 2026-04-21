@@ -9224,6 +9224,18 @@ bool GLContext::texImage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // GL 4.6 §8.5 — GL_TEXTURE_CUBE_MAP_ARRAY storage must be
+    // square (width == height) with depth a multiple of 6.
+    if (target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+        if (width != height) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if ((depth % 6) != 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
     // Enforce GL_MAX_TEXTURE_SIZE/GL_MAX_3D_TEXTURE_SIZE before reaching
     // Metal (which asserts on oversize dims).
     if (impl_->capabilities != nullptr) {
@@ -9581,6 +9593,34 @@ bool GLContext::texStorage(
     if (levels < 1 || width < 1 || height < 1 || depth < 1) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    // GL 4.6 §8.17 — GL_TEXTURE_CUBE_MAP_ARRAY storage must have
+    // width == height (cube faces are square) AND depth a multiple
+    // of 6 (cube has 6 faces per layer). CTS
+    // texture_cube_map_array.tex3D_validation exercises both.
+    if (target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+        if (width != height) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if ((depth % 6) != 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
+    // GL 4.6 §8.19 — for immutable storage, `levels` must not exceed
+    // floor(log2(max(width, height[, depth]))) + 1. Apply to the
+    // cube-map-array path explicitly; other targets have the same
+    // cap but the Metal allocator historically clamped levels down,
+    // so CTS didn't fire this error on them.
+    if (target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+        const GLsizei maxDim = std::max(width, height);
+        GLsizei maxLevels = 1;
+        for (GLsizei d = maxDim; d > 1; d >>= 1) ++maxLevels;
+        if (levels > maxLevels) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
     // GL 4.6 §8.19 + Metal reality: oversize textures must be rejected before
     // reaching MTLTextureDescriptor (which asserts rather than errors).
