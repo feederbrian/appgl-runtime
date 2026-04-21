@@ -1886,6 +1886,92 @@ struct MetalFrameGraph::Impl {
                 }
                 break;
             }
+            // GL 4.6 §10.1 — adjacency modes without a geometry shader
+            // ignore the adjacent vertices. When a GS is attached the
+            // GS emulator decomposes these into the expanded output
+            // topology upstream; this branch only runs when no GS is
+            // in play, so emit MTLPrimitiveTypeTriangle / Line with
+            // only the base-primitive verts.
+            case GL_LINES_ADJACENCY: {
+                // 4 verts per line → [1, 2] pair per group.
+                primitive = MTLPrimitiveTypeLine;
+                const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
+                    ? info.indexCount : info.vertexCount;
+                const GLsizei groups = n / 4;
+                if (groups > 0) {
+                    expandedIndices.reserve(static_cast<std::size_t>(groups) * 2);
+                    for (GLsizei g = 0; g < groups; ++g) {
+                        expandedIndices.push_back(static_cast<std::uint32_t>(g * 4 + 1));
+                        expandedIndices.push_back(static_cast<std::uint32_t>(g * 4 + 2));
+                    }
+                    useExpandedIndices = true;
+                }
+                break;
+            }
+            case GL_LINE_STRIP_ADJACENCY: {
+                // n verts → (n-3) line segments using verts[i+1], verts[i+2].
+                primitive = MTLPrimitiveTypeLine;
+                const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
+                    ? info.indexCount : info.vertexCount;
+                if (n >= 4) {
+                    expandedIndices.reserve(static_cast<std::size_t>(n - 3) * 2);
+                    for (GLsizei i = 1; i <= n - 3; ++i) {
+                        expandedIndices.push_back(static_cast<std::uint32_t>(i));
+                        expandedIndices.push_back(static_cast<std::uint32_t>(i + 1));
+                    }
+                    useExpandedIndices = true;
+                }
+                break;
+            }
+            case GL_TRIANGLES_ADJACENCY: {
+                // 6 verts per triangle → [0, 2, 4] triple per group.
+                primitive = MTLPrimitiveTypeTriangle;
+                const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
+                    ? info.indexCount : info.vertexCount;
+                const GLsizei groups = n / 6;
+                if (groups > 0) {
+                    expandedIndices.reserve(static_cast<std::size_t>(groups) * 3);
+                    for (GLsizei g = 0; g < groups; ++g) {
+                        expandedIndices.push_back(static_cast<std::uint32_t>(g * 6 + 0));
+                        expandedIndices.push_back(static_cast<std::uint32_t>(g * 6 + 2));
+                        expandedIndices.push_back(static_cast<std::uint32_t>(g * 6 + 4));
+                    }
+                    useExpandedIndices = true;
+                }
+                break;
+            }
+            case GL_TRIANGLE_STRIP_ADJACENCY: {
+                // GL 4.6 §10.1 Table 10.4 — N verts → N/2 - 2 triangles.
+                // Main verts are at indices 0, 2, 4, 6, 8, … (every-other).
+                // For each triangle p (0..N/2-3):
+                //   even p  : main(2p), main(2p+2), main(2p+4)
+                //   odd p   : main(2p+2), main(2p), main(2p+4)
+                // which in raw-index form translates to 2*(2p), 2*(2p+2), 2*(2p+4)
+                // = 4p, 4p+4, 4p+8 for even p and 4p+4, 4p, 4p+8 for odd.
+                primitive = MTLPrimitiveTypeTriangle;
+                const GLsizei n = (info.indices != nullptr && info.indexCount > 0)
+                    ? info.indexCount : info.vertexCount;
+                const GLsizei triCount = (n >= 6) ? (n / 2 - 2) : 0;
+                if (triCount > 0) {
+                    expandedIndices.reserve(static_cast<std::size_t>(triCount) * 3);
+                    for (GLsizei p = 0; p < triCount; ++p) {
+                        const std::uint32_t a = static_cast<std::uint32_t>(2 * (2 * p + 0));
+                        const std::uint32_t b = static_cast<std::uint32_t>(2 * (2 * p + 2));
+                        const std::uint32_t c = static_cast<std::uint32_t>(2 * (2 * p + 4));
+                        if ((p & 1) == 0) {
+                            expandedIndices.push_back(a);
+                            expandedIndices.push_back(b);
+                            expandedIndices.push_back(c);
+                        } else {
+                            expandedIndices.push_back(b);
+                            expandedIndices.push_back(a);
+                            expandedIndices.push_back(c);
+                        }
+                    }
+                    useExpandedIndices = true;
+                }
+                break;
+            }
             case GL_TRIANGLES:
             default:                primitive = MTLPrimitiveTypeTriangle; break;
         }
