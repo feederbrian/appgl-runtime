@@ -6931,6 +6931,70 @@ bool GLContext::queryIntegerIndexed(GLenum pname, GLuint index, GLint* data) {
             else                                         *data = static_cast<GLint>(bp.offset);
             return true;
         }
+        // GL 4.2+ image load/store per-image-unit state (§8.26.1).
+        // `index` is an image unit index in [0, MAX_IMAGE_UNITS).
+        // CTS `multi_bind.functional_bind_image_textures` exercises
+        // all six per-unit pnames after glBindImageTextures() calls.
+        case GL_IMAGE_BINDING_NAME:
+        case GL_IMAGE_BINDING_LEVEL:
+        case GL_IMAGE_BINDING_LAYERED:
+        case GL_IMAGE_BINDING_LAYER:
+        case GL_IMAGE_BINDING_ACCESS:
+        case GL_IMAGE_BINDING_FORMAT: {
+            if (index >= impl_->imageBindings.size()) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            const auto& ib = impl_->imageBindings[index];
+            if (pname == GL_IMAGE_BINDING_NAME)         *data = static_cast<GLint>(ib.texture);
+            else if (pname == GL_IMAGE_BINDING_LEVEL)   *data = ib.level;
+            else if (pname == GL_IMAGE_BINDING_LAYERED) *data = ib.layered ? GL_TRUE : GL_FALSE;
+            else if (pname == GL_IMAGE_BINDING_LAYER)   *data = ib.layer;
+            else if (pname == GL_IMAGE_BINDING_ACCESS)  *data = static_cast<GLint>(ib.access);
+            else                                        *data = static_cast<GLint>(ib.format);
+            return true;
+        }
+        // GL 4.4+ per-texture-unit bindings for all sampler targets.
+        // Indexed by texture-unit number in [0, MAX_COMBINED_TEXTURE_IMAGE_UNITS).
+        // The non-indexed form of these queries returns the binding on
+        // the currently active texture unit; the indexed form lets the
+        // caller pick any unit without switching glActiveTexture first.
+        // Used by CTS `multi_bind.functional_bind_textures`.
+        case GL_TEXTURE_BINDING_1D:
+        case GL_TEXTURE_BINDING_2D:
+        case GL_TEXTURE_BINDING_3D:
+        case GL_TEXTURE_BINDING_1D_ARRAY:
+        case GL_TEXTURE_BINDING_2D_ARRAY:
+        case GL_TEXTURE_BINDING_RECTANGLE:
+        case GL_TEXTURE_BINDING_CUBE_MAP:
+        case GL_TEXTURE_BINDING_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_BINDING_BUFFER:
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE:
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY:
+        case GL_SAMPLER_BINDING: {
+            // Map binding pname to the texture target being queried.
+            GLenum target = 0;
+            switch (pname) {
+                case GL_TEXTURE_BINDING_1D:                    target = GL_TEXTURE_1D; break;
+                case GL_TEXTURE_BINDING_2D:                    target = GL_TEXTURE_2D; break;
+                case GL_TEXTURE_BINDING_3D:                    target = GL_TEXTURE_3D; break;
+                case GL_TEXTURE_BINDING_1D_ARRAY:              target = GL_TEXTURE_1D_ARRAY; break;
+                case GL_TEXTURE_BINDING_2D_ARRAY:              target = GL_TEXTURE_2D_ARRAY; break;
+                case GL_TEXTURE_BINDING_RECTANGLE:             target = GL_TEXTURE_RECTANGLE; break;
+                case GL_TEXTURE_BINDING_CUBE_MAP:              target = GL_TEXTURE_CUBE_MAP; break;
+                case GL_TEXTURE_BINDING_CUBE_MAP_ARRAY:        target = GL_TEXTURE_CUBE_MAP_ARRAY; break;
+                case GL_TEXTURE_BINDING_BUFFER:                target = GL_TEXTURE_BUFFER; break;
+                case GL_TEXTURE_BINDING_2D_MULTISAMPLE:        target = GL_TEXTURE_2D_MULTISAMPLE; break;
+                case GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY:  target = GL_TEXTURE_2D_MULTISAMPLE_ARRAY; break;
+                case GL_SAMPLER_BINDING:                       target = GL_SAMPLER_BINDING; break;
+            }
+            if (pname == GL_SAMPLER_BINDING) {
+                *data = static_cast<GLint>(impl_->state->boundSampler(index));
+            } else {
+                *data = static_cast<GLint>(impl_->state->boundTextureOnUnit(index, target));
+            }
+            return true;
+        }
     }
     if (impl_->capabilities != nullptr
         && impl_->capabilities->queryIntegerIndexed(pname, index, data)) {
@@ -22802,31 +22866,55 @@ bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* tex
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    // GL 4.4 §6.1.1: glBindImageTextures raises INVALID_OPERATION when
-    // any non-zero entry is not an existing texture name. CTS
-    // `multi_bind.errors_bind_image_textures` plants a never-generated
-    // ID in one slot and asserts INVALID_OPERATION.
-    if (textures != nullptr) {
-        for (GLsizei i = 0; i < count; ++i) {
-            GLuint tex = textures[i];
-            if (tex == 0) continue;
-            auto* obj = impl_->objects->textures().get(tex);
-            if (obj == nullptr) {
-                pushError(GL_INVALID_OPERATION);
-                return false;
-            }
-        }
-    }
+    // GL 4.4 ARB_multi_bind / §8.22 — glBindImageTextures uses
+    // per-entry semantics: each invalid <textures> entry generates
+    // INVALID_OPERATION and that unit's binding is *unmodified*;
+    // other valid entries still get bound. Write each unit directly
+    // to avoid the per-unit bindImageTexture format whitelist, which
+    // is stricter than what the multi-bind spec implies (all
+    // texture-storage-eligible formats are OK here).
+    bool anyInvalid = false;
     for (GLsizei i = 0; i < count; ++i) {
         GLuint tex = textures ? textures[i] : 0;
         GLuint unit = first + static_cast<GLuint>(i);
+        if (unit >= impl_->imageBindings.size()) break;
+        auto& binding = impl_->imageBindings[unit];
         if (tex == 0) {
-            bindImageTexture(unit, 0, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
-        } else {
-            auto* obj = impl_->objects->textures().get(tex);
-            GLenum fmt = (obj && obj->desc.internalFormat != 0) ? obj->desc.internalFormat : GL_RGBA8;
-            bindImageTexture(unit, tex, 0, GL_TRUE, 0, GL_READ_WRITE, fmt);
+            binding.texture = 0;
+            binding.level = 0;
+            binding.layered = GL_FALSE;
+            binding.layer = 0;
+            binding.access = GL_READ_ONLY;
+            binding.format = GL_RGBA8;
+            continue;
         }
+        auto* obj = impl_->objects->textures().get(tex);
+        if (obj == nullptr) {
+            // Invalid entry — INVALID_OPERATION, unit unmodified.
+            anyInvalid = true;
+            continue;
+        }
+        // CTS `multi_bind.errors_bind_image_textures` plants a texture
+        // whose storage was never successfully allocated (texStorage2D
+        // with height=0 → INVALID_VALUE) and asserts INVALID_OPERATION
+        // here. Our textures store internalFormat only after a
+        // successful storage/image call — a 0 means storage was never
+        // provided. Functional tests (same texture via proper
+        // InitStorage) always end up with a non-zero format.
+        GLenum fmt = obj->desc.internalFormat;
+        if (fmt == 0) {
+            anyInvalid = true;
+            continue;
+        }
+        binding.texture = tex;
+        binding.level = 0;
+        binding.layered = GL_TRUE;
+        binding.layer = 0;
+        binding.access = GL_READ_WRITE;
+        binding.format = fmt;
+    }
+    if (anyInvalid) {
+        pushError(GL_INVALID_OPERATION);
     }
     return true;
 }

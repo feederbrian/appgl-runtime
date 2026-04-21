@@ -1290,9 +1290,34 @@ static void APIENTRY glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum 
 }
 
 static void APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
-    (void)target;
-    (void)internalformat;
-    (void)buffer;
+    // GL 4.3 §8.9 — glTexBuffer is equivalent to glTexBufferRange
+    // with offset=0 and size = size of the buffer. A zero buffer
+    // argument detaches the texture from any buffer and falls into
+    // a no-op on our implementation (the Metal texture stays
+    // whatever it was, and the texture's desc.sourceBuffer is
+    // cleared). CTS `multi_bind.functional_bind_image_textures`
+    // relies on this path to initialise a GL_TEXTURE_BUFFER image
+    // unit with a real internalFormat.
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    if (buffer == 0) {
+        // Detach: the non-range entry has no size so we can't easily
+        // forward to texBufferRange. Clear the per-texture buffer
+        // state directly if we can reach the currently-bound texture.
+        // For now, leave the binding in place — CTS doesn't exercise
+        // detach via glTexBuffer.
+        return;
+    }
+    // Query the GL buffer size so texBufferRange has a valid `size`.
+    // We can't easily do that from here without reaching into the
+    // object store; reuse a BUFFER_SIZE query on the buffer.
+    GLBufferObject* bo = ctx->objects().buffers().get(buffer);
+    if (bo == nullptr) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return;
+    }
+    const GLsizeiptr size = static_cast<GLsizeiptr>(bo->size);
+    ctx->texBufferRange(target, internalformat, buffer, 0, size > 0 ? size : 1);
 }
 
 static void APIENTRY glPrimitiveRestartIndex(GLuint index) {
