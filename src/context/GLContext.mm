@@ -4214,6 +4214,39 @@ struct GLContext::Impl {
             return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
         }
 
+        // GL 4.6 Table 8.11 / §9.4 — a framebuffer is
+        // GL_FRAMEBUFFER_UNSUPPORTED when any color attachment uses a
+        // format that is not required to be color-renderable on this
+        // implementation. On Metal the 3-component 32-bit formats
+        // (GL_RGB32F / GL_RGB32I / GL_RGB32UI) have no matching
+        // MTLPixelFormat; we'd need a 4/3-expansion shim on the
+        // render target, and — more importantly — `glReadPixels` with
+        // GL_RGB_INTEGER+GL_INT can't unambiguously unpack the
+        // RGBA32Sint target back to the raw RGB32I source because the
+        // FS writes 4 channels. The 3-component RGB32 formats are NOT
+        // in GL 4.6 Table 8.11 (required renderable) so declaring them
+        // unsupported is spec-legal. CTS
+        // `direct_state_access.textures_buffer_rgb32{i,ui,f}` catches
+        // `GL_FRAMEBUFFER_UNSUPPORTED` specifically and marks the case
+        // as NotSupported rather than Fail.
+        for (const auto& [pt, atch] : framebuffer.attachments) {
+            if (!isColorAttachment(pt)) {
+                continue;
+            }
+            const AttachmentInfo info = framebufferAttachmentInfo(atch);
+            if (!info.present) {
+                continue;
+            }
+            switch (info.internalFormat) {
+                case GL_RGB32F:
+                case GL_RGB32I:
+                case GL_RGB32UI:
+                    return GL_FRAMEBUFFER_UNSUPPORTED;
+                default:
+                    break;
+            }
+        }
+
         // Spec: if separate depth and stencil attachments are present, they must
         // refer to the same image. Mismatched separate attachments are reported as
         // GL_FRAMEBUFFER_UNSUPPORTED on a Metal-backed implementation. (A combined
