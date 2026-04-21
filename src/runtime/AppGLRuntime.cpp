@@ -1079,6 +1079,21 @@ bool isValidTextureParameterPname(GLenum pname) {
         case GL_TEXTURE_LOD_BIAS:
         case GL_TEXTURE_MAX_ANISOTROPY:
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
+        // GL 4.6 §8.11 storage-state pnames — valid for GetTexParameter*
+        // only. The SetTextureParameter path rejects them via the
+        // inner switch in `setTextureParameterInteger` (they don't
+        // map to a settable field), so widening this validator just
+        // moves the rejection from the dispatch layer to the context
+        // layer without changing behaviour on the set path.
+        // CTS `texture_border_clamp.gettexparameteri_errors` plants
+        // IMMUTABLE_FORMAT on CUBE_MAP and asserts NO_ERROR.
+        case GL_TEXTURE_IMMUTABLE_FORMAT:
+        case GL_TEXTURE_IMMUTABLE_LEVELS:
+        case GL_TEXTURE_VIEW_MIN_LEVEL:
+        case GL_TEXTURE_VIEW_MIN_LAYER:
+        case GL_TEXTURE_VIEW_NUM_LEVELS:
+        case GL_TEXTURE_VIEW_NUM_LAYERS:
+        case GL_TEXTURE_TARGET:
             return true;
         default:
             return false;
@@ -3235,6 +3250,16 @@ void APIENTRY glTexSubImage3D(
 }
 
 void APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param) {
+    // GL 4.6 §8.10: the scalar glTexParameteri/f entry points reject
+    // 4-component pnames (BORDER_COLOR, SWIZZLE_RGBA) with
+    // INVALID_ENUM — they require the vector form. CTS
+    // `texture_border_clamp.border_color_errors` asserts this.
+    if (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) {
+        auto* context = requireCurrentContext("glTexParameteri");
+        if (context) recordValidationError(context, "glTexParameteri", GL_INVALID_ENUM,
+            "pname takes a 4-component vector; use glTexParameteriv");
+        return;
+    }
     glTexParameteriv(target, pname, &param);
     Runtime::shared().coverageStore().markSmokeTested(FunctionId::glTexParameteri, kPhaseATextureTestId, "Texture scalar integer parameters route through the canonical parameter store.");
 }
@@ -3259,6 +3284,12 @@ void APIENTRY glTexParameteriv(GLenum target, GLenum pname, const GLint* params)
 }
 
 void APIENTRY glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
+    if (pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_SWIZZLE_RGBA) {
+        auto* context = requireCurrentContext("glTexParameterf");
+        if (context) recordValidationError(context, "glTexParameterf", GL_INVALID_ENUM,
+            "pname takes a 4-component vector; use glTexParameterfv");
+        return;
+    }
     glTexParameterfv(target, pname, &param);
     Runtime::shared().coverageStore().markSmokeTested(FunctionId::glTexParameterf, kPhaseATextureTestId, "Texture scalar float parameters route through the canonical parameter store.");
 }
@@ -3911,6 +3942,15 @@ void APIENTRY glBindSampler(GLuint unit, GLuint sampler) {
 }
 
 void APIENTRY glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) {
+    // GL 4.6 §8.10.3 — scalar glSamplerParameteri/f rejects
+    // 4-component pnames with INVALID_ENUM. CTS
+    // `texture_border_clamp.border_color_errors` asserts this.
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        auto* context = requireCurrentContext("glSamplerParameteri");
+        if (context) recordValidationError(context, "glSamplerParameteri", GL_INVALID_ENUM,
+            "pname takes a 4-component vector; use glSamplerParameteriv");
+        return;
+    }
     glSamplerParameteriv(sampler, pname, &param);
     Runtime::shared().coverageStore().markSmokeTested(FunctionId::glSamplerParameteri, kPhaseATextureTestId, "Sampler scalar integer parameters route through the canonical parameter store.");
 }
@@ -3935,6 +3975,12 @@ void APIENTRY glSamplerParameteriv(GLuint sampler, GLenum pname, const GLint* pa
 }
 
 void APIENTRY glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param) {
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        auto* context = requireCurrentContext("glSamplerParameterf");
+        if (context) recordValidationError(context, "glSamplerParameterf", GL_INVALID_ENUM,
+            "pname takes a 4-component vector; use glSamplerParameterfv");
+        return;
+    }
     glSamplerParameterfv(sampler, pname, &param);
     Runtime::shared().coverageStore().markSmokeTested(FunctionId::glSamplerParameterf, kPhaseATextureTestId, "Sampler scalar float parameters route through the canonical parameter store.");
 }

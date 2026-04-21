@@ -9490,12 +9490,53 @@ bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* param
     // (note CTS typo "intial") deletes and rebinds the same texture name
     // in a loop, so subsequent iterations bind name=0 and query defaults.
     if (object == nullptr) {
+        // Default texture's storage state is all-zero (no storage ever
+        // committed), so the storage-property queries below also route
+        // through the object-less path.
+        switch (pname) {
+            case GL_TEXTURE_IMMUTABLE_FORMAT:
+            case GL_TEXTURE_IMMUTABLE_LEVELS:
+            case GL_TEXTURE_VIEW_MIN_LEVEL:
+            case GL_TEXTURE_VIEW_MIN_LAYER:
+            case GL_TEXTURE_VIEW_NUM_LEVELS:
+            case GL_TEXTURE_VIEW_NUM_LAYERS:
+                if (params) *params = 0;
+                return true;
+            case GL_TEXTURE_TARGET:
+                if (params) *params = static_cast<GLint>(target);
+                return true;
+        }
         const GLTextureParameters defaults;
         if (!getTextureParameterInteger(defaults, pname, params)) {
             pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
             return false;
         }
         return true;
+    }
+    // GL 4.6 §8.11 storage-state queries live on the texture object
+    // (desc.immutable / desc.levels / view-slice range / target).
+    // Handle these at the caller — the per-params helper only sees
+    // `GLTextureParameters` which is the sampler-state struct.
+    switch (pname) {
+        case GL_TEXTURE_IMMUTABLE_FORMAT:
+            if (params) *params = object->desc.immutable ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_TEXTURE_IMMUTABLE_LEVELS:
+            if (params) *params = object->desc.levels;
+            return true;
+        case GL_TEXTURE_VIEW_MIN_LEVEL:
+        case GL_TEXTURE_VIEW_MIN_LAYER:
+            if (params) *params = 0;
+            return true;
+        case GL_TEXTURE_VIEW_NUM_LEVELS:
+            if (params) *params = object->desc.levels;
+            return true;
+        case GL_TEXTURE_VIEW_NUM_LAYERS:
+            if (params) *params = object->desc.layers > 0 ? object->desc.layers : 1;
+            return true;
+        case GL_TEXTURE_TARGET:
+            if (params) *params = static_cast<GLint>(object->target != 0 ? object->target : target);
+            return true;
     }
     if (!getTextureParameterInteger(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
