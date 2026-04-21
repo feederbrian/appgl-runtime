@@ -448,10 +448,19 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
         }
         out.name.erase(bracket);
         out.isArray = true;
-    } else if (tokens.size() >= 5 && tokens[2] == "[") {
-        out.arraySize = static_cast<GLint>(std::strtol(tokens[3].c_str(), nullptr, 10));
-        // Advance past `[ N ]` (three tokens).
-        postNameIdx = 5;
+    } else if (tokens.size() >= 4 && tokens[2] == "[") {
+        // GL 4.6 §4.3: `T name [N]` is a sized array; `T name []`
+        // is an unsized array (arraySize stays 0, allowed for
+        // SSBO trailing members and runtime-sized arrays). The
+        // distinction lets the atomic_uint rejection at link/
+        // compile time fire on `atomic_uint ac[];`.
+        if (tokens.size() >= 5 && tokens[3] != "]") {
+            out.arraySize = static_cast<GLint>(std::strtol(tokens[3].c_str(), nullptr, 10));
+            postNameIdx = 5;
+        } else {
+            out.arraySize = 0;
+            postNameIdx = 4;  // past `[ ]`
+        }
         out.isArray = true;
     }
     if (out.name.empty()) {

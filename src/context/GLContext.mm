@@ -12238,6 +12238,30 @@ bool GLContext::compileShader(GLuint shader) {
         }
     }
 
+    // GL 4.6 §4.3.9: `atomic_uint` uniforms may not be declared
+    // as an unsized array. CTS
+    // `shader_atomic_counters.negative-unsized-array` plants
+    // `uniform atomic_uint arr[];` in a fragment shader and
+    // expects COMPILE_STATUS = FALSE. Glslang accepts the
+    // declaration (perhaps treating it as a runtime-sized
+    // "last-member" array), so we reject it here before the
+    // glslang pass.
+    for (const auto& decl : reflection.uniforms) {
+        if (decl.type == GL_UNSIGNED_INT_ATOMIC_COUNTER &&
+            decl.isArray && decl.arraySize <= 0) {
+            object->compileLog =
+                "ERROR: atomic_uint uniform '" + decl.name +
+                "' cannot be declared as an unsized array (GL 4.6 §4.3.9).";
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", "", "", "", object->compileLog, "", false
+            });
+            return true;  // entry point completed; compile
+                         // verdict visible via getShaderiv(COMPILE_STATUS).
+        }
+    }
+
     object->declaredUniforms = std::move(reflection.uniforms);
     object->declaredInputs = std::move(reflection.inputs);
     object->declaredOutputs = std::move(reflection.outputs);
