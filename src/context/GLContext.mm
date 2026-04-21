@@ -22920,8 +22920,112 @@ bool GLContext::compressedTextureSubImage3D(GLuint texture, GLint level, GLint x
     return true;
 }
 
+// Shared GL 4.6 §8.6 validation for glCopyTextureSubImage{1,2,3}D.
+// `dim` selects the variant (1/2/3). CTS
+// `direct_state_access.textures_copy_errors` asserts each spec
+// violation individually.
+bool GLContext::validateCopyTextureSubImage(
+    GLuint texture, int dim, GLint level,
+    GLint xoffset, GLint yoffset, GLint zoffset,
+    GLsizei width, GLsizei height) {
+    auto* obj = impl_->objects->textures().get(texture);
+    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    // GL 4.6 §8.6: effective target must match the call's dim.
+    const GLenum effectiveTarget = obj->target != 0 ? obj->target : GL_TEXTURE_2D;
+    bool targetOk = false;
+    switch (dim) {
+        case 1: targetOk = (effectiveTarget == GL_TEXTURE_1D); break;
+        case 2:
+            targetOk = (effectiveTarget == GL_TEXTURE_2D ||
+                        effectiveTarget == GL_TEXTURE_1D_ARRAY ||
+                        effectiveTarget == GL_TEXTURE_RECTANGLE ||
+                        effectiveTarget == GL_TEXTURE_CUBE_MAP);
+            break;
+        case 3:
+            targetOk = (effectiveTarget == GL_TEXTURE_3D ||
+                        effectiveTarget == GL_TEXTURE_2D_ARRAY ||
+                        effectiveTarget == GL_TEXTURE_CUBE_MAP_ARRAY);
+            break;
+        default: break;
+    }
+    if (!targetOk) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (level < 0 || width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (xoffset < 0 || (dim >= 2 && yoffset < 0) || (dim >= 3 && zoffset < 0)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Target-max width/height/depth bounds per §8.6.
+    const auto levelIt = obj->levels.find(level);
+    if (levelIt != obj->levels.end() && levelIt->second.defined) {
+        const auto& desc = levelIt->second.desc;
+        if (xoffset + width > desc.width) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (dim >= 2 && yoffset + height > desc.height) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (dim >= 3 && zoffset + 1 > desc.depth) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
+    // GL 4.6 §8.6: read-framebuffer completeness + read-buffer
+    // attachment checks. Default framebuffer (read-FB name = 0) is
+    // always complete and has a default color read buffer.
+    const GLuint readFbName = impl_->state->boundReadFramebuffer();
+    if (readFbName != 0) {
+        // User-FBO: must be framebuffer complete.
+        if (checkFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+            return false;
+        }
+        // User-FBO: read buffer must not be GL_NONE, and the
+        // referenced attachment must exist.
+        const GLFramebufferObject* fbo = impl_->objects->framebuffers().get(readFbName);
+        if (fbo != nullptr) {
+            if (fbo->readBuffer == GL_NONE) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            // GL 4.6 §8.6: SAMPLE_BUFFERS for the read FB must be 0
+            // (no multisampling). Check the bound color attachment's
+            // sample count.
+            const GLFramebufferAttachment* colorAtt =
+                impl_->framebufferAttachment(*fbo, fbo->readBuffer);
+            if (colorAtt != nullptr) {
+                GLsizei attSamples = 0;
+                if (colorAtt->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                    const GLRenderbufferObject* rb =
+                        impl_->objects->renderbuffers().get(colorAtt->object);
+                    if (rb != nullptr) attSamples = rb->samples;
+                } else if (colorAtt->kind == GLFramebufferAttachment::Kind::Texture) {
+                    const GLTextureObject* t =
+                        impl_->objects->textures().get(colorAtt->object);
+                    if (t != nullptr) attSamples = t->desc.samples;
+                }
+                if (attSamples > 0) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool GLContext::copyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
     warnBypassOnce("copyTextureSubImage1D", texture);
+    if (!validateCopyTextureSubImage(texture, 1, level, xoffset, 0, 0, width, 0)) {
+        return false;
+    }
     DSA_TEX_WRAP(texture, {
         (void)level; (void)xoffset; (void)x; (void)y; (void)width;
         // Accepted — deferred to Metal blit path.
@@ -22931,6 +23035,9 @@ bool GLContext::copyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset
 
 bool GLContext::copyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
     warnBypassOnce("copyTextureSubImage2D", texture);
+    if (!validateCopyTextureSubImage(texture, 2, level, xoffset, yoffset, 0, width, height)) {
+        return false;
+    }
     DSA_TEX_WRAP(texture, {
         (void)level; (void)xoffset; (void)yoffset; (void)x; (void)y; (void)width; (void)height;
         return true;
@@ -22939,6 +23046,9 @@ bool GLContext::copyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset
 
 bool GLContext::copyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
     warnBypassOnce("copyTextureSubImage3D", texture);
+    if (!validateCopyTextureSubImage(texture, 3, level, xoffset, yoffset, zoffset, width, height)) {
+        return false;
+    }
     DSA_TEX_WRAP(texture, {
         (void)level; (void)xoffset; (void)yoffset; (void)zoffset; (void)x; (void)y; (void)width; (void)height;
         return true;

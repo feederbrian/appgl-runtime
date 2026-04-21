@@ -381,6 +381,13 @@ public:
     bool copyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width);
     bool copyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
     bool copyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+    // Shared GL 4.6 §8.6 validation for the three copyTextureSubImage
+    // variants (effective-target check, level ≥ 0, offset/size ≥ 0,
+    // bounds). `dim` ∈ {1, 2, 3} selects the per-variant constraints.
+    bool validateCopyTextureSubImage(
+        GLuint texture, int dim, GLint level,
+        GLint xoffset, GLint yoffset, GLint zoffset,
+        GLsizei width, GLsizei height);
     bool textureParameterf(GLuint texture, GLenum pname, GLfloat param);
     bool textureParameterfv(GLuint texture, GLenum pname, const GLfloat* param);
     bool textureParameteri(GLuint texture, GLenum pname, GLint param);
