@@ -9991,6 +9991,30 @@ bool GLContext::texStorage(
         return false;
     }
 
+    // GL 4.6 §8.19 / Khronos bug 11239: compressed internal formats
+    // are NOT valid on TEXTURE_3D (RGTC1/RGTC2/BPTC were never
+    // specified to have a 3D block form). Other targets
+    // (TEXTURE_2D / TEXTURE_2D_ARRAY / TEXTURE_CUBE_MAP[_ARRAY])
+    // accept them. CTS `texture_storage.compressed_data` walks the
+    // RGTC set against each target and expects INVALID_OPERATION
+    // for the TEXTURE_3D combinations.
+    if (target == GL_TEXTURE_3D) {
+        switch (internalformat) {
+            case GL_COMPRESSED_RED_RGTC1:
+            case GL_COMPRESSED_SIGNED_RED_RGTC1:
+            case GL_COMPRESSED_RG_RGTC2:
+            case GL_COMPRESSED_SIGNED_RG_RGTC2:
+            case GL_COMPRESSED_RGBA_BPTC_UNORM:
+            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+            case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+            case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            default:
+                break;
+        }
+    }
+
     GLTextureObject* object = impl_->currentTexture(target);
     if (object == nullptr || !object->instantiated) {
         pushError(GL_INVALID_OPERATION);
@@ -10021,27 +10045,42 @@ bool GLContext::texStorage(
     object->desc.immutable = true;
     object->target = target;
 
-    // Pre-create level-0 image entry so replaceMetalTexture has something to work with.
-    GLTextureImageLevel baseLevel;
-    baseLevel.desc = object->desc;
-    baseLevel.defined = true;
-    const std::size_t totalPixels = static_cast<std::size_t>(width)
-                                  * static_cast<std::size_t>(height)
-                                  * static_cast<std::size_t>(object->desc.depth);
-    baseLevel.rgba8.resize(totalPixels * 4u, 0);
-
-    // Also allocate native-format backing for non-RGBA8 internal formats.
-    {
-        MTLPixelFormat nativeFmt = metalRenderbufferFormat(internalformat);
-        if (nativeFmt != MTLPixelFormatInvalid && nativeFmt != MTLPixelFormatRGBA8Unorm) {
-            auto info = Impl::nativeFormatInfo(nativeFmt);
-            if (info.channels > 0 && info.bytesPerPixel > 0) {
-                baseLevel.nativeBpp = static_cast<std::size_t>(info.bytesPerPixel);
-                baseLevel.nativeData.resize(totalPixels * baseLevel.nativeBpp, 0);
-            }
+    // Pre-create ALL levels [0, levels-1] per GL 4.6 §8.19: "All
+    // [immutable storage] images are created by this function."
+    // A subsequent glTexSubImage2D on level >= 1 must find the level
+    // entry present — the old path only populated level 0 and
+    // CTS texture_storage.compressed_data flunked on level 1+
+    // texSubImage2D calls with GL_INVALID_OPERATION.
+    //
+    // Native-format backing is allocated per-level for non-RGBA8
+    // internal formats (compressed, packed, integer, depth, …).
+    MTLPixelFormat nativeFmt = metalRenderbufferFormat(internalformat);
+    auto nativeInfo = (nativeFmt != MTLPixelFormatInvalid &&
+                       nativeFmt != MTLPixelFormatRGBA8Unorm)
+        ? Impl::nativeFormatInfo(nativeFmt)
+        : Impl::NativeFormatInfo{};
+    for (GLsizei lvl = 0; lvl < levels; ++lvl) {
+        GLTextureImageLevel image;
+        image.desc = object->desc;
+        image.desc.width = std::max(1, width >> lvl);
+        image.desc.height = (target == GL_TEXTURE_1D)
+            ? 1 : std::max(1, height >> lvl);
+        image.desc.depth = (target == GL_TEXTURE_3D)
+            ? std::max(1, depth >> lvl)
+            : object->desc.depth;  // array / cube depth doesn't scale
+        image.defined = true;
+        const std::size_t lvlPixels =
+            static_cast<std::size_t>(image.desc.width)
+            * static_cast<std::size_t>(image.desc.height)
+            * static_cast<std::size_t>(image.desc.depth);
+        image.rgba8.resize(lvlPixels * 4u, 0);
+        if (nativeInfo.channels > 0 && nativeInfo.bytesPerPixel > 0) {
+            image.nativeBpp =
+                static_cast<std::size_t>(nativeInfo.bytesPerPixel);
+            image.nativeData.resize(lvlPixels * image.nativeBpp, 0);
         }
+        object->levels[lvl] = std::move(image);
     }
-    object->levels[0] = std::move(baseLevel);
 
     if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
         pushError(GL_OUT_OF_MEMORY);
