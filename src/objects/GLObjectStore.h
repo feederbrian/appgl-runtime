@@ -729,7 +729,17 @@ struct GLProgramObject {
         std::size_t memberOffset = 0;   // byte offset in push-constant struct
         std::size_t copyBytes = 0;      // total bytes to memcpy (0 = skip)
         GLint location = -1;            // GL uniform location for value lookup
-        bool isMat3Padded = false;      // needs col-by-col padding (12->16 bytes/col)
+        // Matrix column-padding fields. When `matPaddedCols` > 0 the
+        // member is a matrix type whose GL column width (matPaddedRows
+        // floats) is less than the 4-float (16-byte) MSL/std140 column
+        // stride — the packer loops column-by-column. Covers mat2/mat3
+        // and the non-square shapes mat2x3 / mat3x2 / mat4x3 / mat4x2
+        // (for which column stride is vec4 = 16 bytes regardless of
+        // the column's actual component count). mat4, mat2x4, mat3x4
+        // have column width = 16 bytes so no padding is needed and
+        // `matPaddedCols` stays 0.
+        int matPaddedCols = 0;
+        int matPaddedRows = 0;
         // Array-member unpadding fields. Non-zero arrayCount means the
         // member is an array with `arrayCount` elements where each GPU-
         // side element occupies `arrayStride` bytes (std140 rounds up to

@@ -16606,7 +16606,42 @@ static void computeStageUniformLayout(
         entry.memberOffset = member.offset;
         entry.copyBytes = member.size;
         entry.location = -1;
-        entry.isMat3Padded = (member.type == GL_FLOAT_MAT3 && member.size == 48);
+        // Matrix column-padding: GL 4.6 allows tight-packed mat*x* data
+        // via glUniformMatrix*fv, but MSL/std140 always aligns each
+        // matrix column to 16 bytes. When the column width
+        // (rows * 4 bytes) is < 16 we need to copy column-by-column,
+        // leaving trailing-column bytes zero. Covers mat2/mat3 (square)
+        // + mat2x3/mat3x2/mat4x3/mat4x2 (non-square). mat4/mat2x4/mat3x4
+        // have 16-byte columns and can use the plain memcpy path.
+        switch (member.type) {
+            case GL_FLOAT_MAT2:
+                entry.matPaddedCols = 2; entry.matPaddedRows = 2; break;
+            case GL_FLOAT_MAT3:
+                entry.matPaddedCols = 3; entry.matPaddedRows = 3; break;
+            case GL_FLOAT_MAT2x3:
+                entry.matPaddedCols = 2; entry.matPaddedRows = 3; break;
+            case GL_FLOAT_MAT3x2:
+                entry.matPaddedCols = 3; entry.matPaddedRows = 2; break;
+            case GL_FLOAT_MAT4x2:
+                entry.matPaddedCols = 4; entry.matPaddedRows = 2; break;
+            case GL_FLOAT_MAT4x3:
+                entry.matPaddedCols = 4; entry.matPaddedRows = 3; break;
+            default: break;
+        }
+        // Only activate padding when the MSL buffer layout actually
+        // allocates > cols*rows*4 bytes for the matrix (std140 with
+        // col-stride=16). If an MSL backend packs mat2 tightly at 16
+        // bytes (cols=2, col-stride=8) we'd double-copy; keep the
+        // plain memcpy path in that case.
+        if (entry.matPaddedCols > 0) {
+            const std::size_t tightBytes = static_cast<std::size_t>(
+                entry.matPaddedCols) * static_cast<std::size_t>(
+                entry.matPaddedRows) * sizeof(float);
+            if (member.size <= tightBytes) {
+                entry.matPaddedCols = 0;
+                entry.matPaddedRows = 0;
+            }
+        }
 
         // Array uniforms need per-element unpadding in std140 layout:
         // GL stores a float[3] as 12 packed bytes; std140 stores it as
@@ -16616,7 +16651,7 @@ static void computeStageUniformLayout(
         // KHR-GL46.explicit_uniform_location.uniform-loc-arrays-*
         // exercises this — declares `uniform float u0[3]` at location N
         // and expects each glUniform1f(N+i, …) to land at u0[i].
-        if (member.arraySize > 1 && member.size > 0 && !entry.isMat3Padded) {
+        if (member.arraySize > 1 && member.size > 0 && entry.matPaddedCols == 0) {
             entry.arrayCount = member.arraySize;
             entry.arrayStride = member.size / member.arraySize;
             // Compute the GL-packed element byte count from the element
@@ -16702,8 +16737,9 @@ static void pushSynthesizedMatrixUniforms(
         value.arraySize = 1;
         // GL stores mat3 as 9 packed floats (3 columns × 3 rows). The
         // GPU side uses 3 vec4 columns; buildStageUniformBuffer's
-        // `isMat3Padded` path repacks 9 → 12 floats when the layout
-        // entry is flagged. We store the 9-float canonical form here.
+        // matrix-column-padding path (matPaddedCols / matPaddedRows)
+        // repacks 9 → 12 floats when the layout entry is flagged. We
+        // store the 9-float canonical form here.
         value.floats.assign(9, 0.0f);
         for (int col = 0; col < 3; ++col) {
             for (int row = 0; row < 3; ++row) {
@@ -16794,12 +16830,27 @@ static void buildStageUniformBuffer(
 
         std::uint8_t* dst = outBuffer.data() + entry.memberOffset;
 
-        // mat3: GL stores 9 packed floats; Metal std140 stores 3 vec4 columns.
-        if (entry.isMat3Padded && val.floats.size() >= 9) {
-            for (int col = 0; col < 3; ++col) {
-                std::memcpy(dst + col * 16, val.floats.data() + col * 3, 3 * sizeof(float));
+        // Matrix column-padding: GL packs matrix data as `cols*rows`
+        // tight floats (column-major); MSL/std140 aligns each column
+        // to 16 bytes. Copy per-column and leave trailing bytes zero.
+        // Covers mat2 / mat3 / mat2x3 / mat3x2 / mat4x2 / mat4x3.
+        // (mat4 / mat2x4 / mat3x4 have 16-byte columns so matPaddedCols
+        // stays 0 and they fall through to the plain memcpy.)
+        if (entry.matPaddedCols > 0 && entry.matPaddedRows > 0) {
+            const std::size_t needed = static_cast<std::size_t>(
+                entry.matPaddedCols) * static_cast<std::size_t>(
+                entry.matPaddedRows);
+            if (val.floats.size() >= needed) {
+                const int cols = entry.matPaddedCols;
+                const int rows = entry.matPaddedRows;
+                for (int col = 0; col < cols; ++col) {
+                    std::memcpy(
+                        dst + col * 16,
+                        val.floats.data() + col * rows,
+                        static_cast<std::size_t>(rows) * sizeof(float));
+                }
+                continue;
             }
-            continue;
         }
 
         // Array element unpadding: GL stores element [k] at byte offset

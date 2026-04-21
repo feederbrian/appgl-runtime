@@ -615,46 +615,50 @@ static void APIENTRY glVertexAttrib4usv(GLuint index, const GLushort *v) {
     (void)v;
 }
 
+// Non-square matrix uniform setters (GL 2.1 §5.4). The `CxR` suffix
+// means C columns × R rows, and `setUniformMatrix(loc, rows, cols, …)`
+// uses (rows, cols) in that order. GL 4.6 Table 2.10 lays out the
+// 6 non-square shapes. Previously NOP stubs — CTS
+// `explicit_uniform_location.uniform-loc-types-mat` declared
+// `mat2x3 u0`, called `glUniformMatrix2x3fv(1, …)`, and then the
+// shader read all zeros because the uniform slot never got the
+// value. The `setUniformMatrix` path handles transpose + value-slot
+// storage; `buildStageUniformBuffer`'s matrix column-padding path
+// handles the std140 repack at draw time.
 static void APIENTRY glUniformMatrix2x3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    (void)location;
-    (void)count;
-    (void)transpose;
-    (void)value;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->setUniformMatrix(location, 3, 2, count, transpose, value);
 }
 
 static void APIENTRY glUniformMatrix3x2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    (void)location;
-    (void)count;
-    (void)transpose;
-    (void)value;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->setUniformMatrix(location, 2, 3, count, transpose, value);
 }
 
 static void APIENTRY glUniformMatrix2x4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    (void)location;
-    (void)count;
-    (void)transpose;
-    (void)value;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->setUniformMatrix(location, 4, 2, count, transpose, value);
 }
 
 static void APIENTRY glUniformMatrix4x2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    (void)location;
-    (void)count;
-    (void)transpose;
-    (void)value;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->setUniformMatrix(location, 2, 4, count, transpose, value);
 }
 
 static void APIENTRY glUniformMatrix3x4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    (void)location;
-    (void)count;
-    (void)transpose;
-    (void)value;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->setUniformMatrix(location, 4, 3, count, transpose, value);
 }
 
 static void APIENTRY glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    (void)location;
-    (void)count;
-    (void)transpose;
-    (void)value;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->setUniformMatrix(location, 3, 4, count, transpose, value);
 }
 
 static void APIENTRY glGetBooleani_v(GLenum target, GLuint index, GLboolean *data) {
