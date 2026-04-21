@@ -7790,6 +7790,21 @@ bool GLContext::bindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr of
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.4 §10.3.1: bindingindex must be < GL_MAX_VERTEX_ATTRIB_BINDINGS.
+    // Our VAO's bindingPoints vector is sized to MAX_VERTEX_ATTRIBS (32)
+    // which is larger than MAX_VERTEX_ATTRIB_BINDINGS (16), so the
+    // size-based check let binding indices in [16, 32) through. CTS
+    // `vertex_attrib_binding.negative-bindVertexBuffer` plants
+    // bindingindex=17 and asserts INVALID_VALUE.
+    GLint64 maxBindings = 16;
+    if (impl_->capabilities != nullptr) {
+        impl_->capabilities->queryInteger64(
+            GL_MAX_VERTEX_ATTRIB_BINDINGS, &maxBindings);
+    }
+    if (bindingindex >= static_cast<GLuint>(maxBindings)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     if (bindingindex >= vertexArray->bindingPoints.size()) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -7809,9 +7824,52 @@ bool GLContext::bindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr of
 }
 
 bool GLContext::vertexAttribFormat(GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset) {
-    if (size < 1 || size > 4) {
+    // GL 4.4 §10.3.8: size ∈ {1, 2, 3, 4, GL_BGRA}.
+    const bool sizeIsBgra = (size == static_cast<GLint>(GL_BGRA));
+    if (!sizeIsBgra && (size < 1 || size > 4)) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    // When size is GL_BGRA: type must be GL_UNSIGNED_BYTE,
+    // GL_INT_2_10_10_10_REV, or GL_UNSIGNED_INT_2_10_10_10_REV, and
+    // normalized must be GL_TRUE. Violations raise INVALID_OPERATION.
+    // CTS `vertex_attrib_binding.negative-vertexAttribFormat` plants
+    // `size=GL_BGRA, type=GL_FLOAT, normalized=GL_TRUE` and asserts
+    // INVALID_OPERATION.
+    if (sizeIsBgra) {
+        const bool typeOk = (type == GL_UNSIGNED_BYTE ||
+                             type == GL_INT_2_10_10_10_REV ||
+                             type == GL_UNSIGNED_INT_2_10_10_10_REV);
+        if (!typeOk || normalized != GL_TRUE) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+    // GL 4.4 §10.3.8: packed types (2_10_10_10_REV variants) require
+    // size = 4 or GL_BGRA. Otherwise INVALID_OPERATION. CTS
+    // `vertex_attrib_binding.negative-vertexAttribFormat` exercises
+    // `size=3, type=GL_INT_2_10_10_10_REV, normalized=GL_FALSE` and
+    // asserts INVALID_OPERATION.
+    if ((type == GL_INT_2_10_10_10_REV ||
+         type == GL_UNSIGNED_INT_2_10_10_10_REV) &&
+        !sizeIsBgra && size != 4) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.4 §10.3.8: relativeoffset must be <=
+    // GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET. Out-of-range is
+    // INVALID_VALUE. CTS plants relativeoffset=2057 with the cap
+    // at 2047.
+    {
+        GLint64 maxRelOffset = 2047;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(
+                GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET, &maxRelOffset);
+        }
+        if (relativeoffset > static_cast<GLuint>(maxRelOffset)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
     }
     GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
     if (vertexArray == nullptr || attribindex >= vertexArray->attributes.size()) {
@@ -7835,6 +7893,19 @@ bool GLContext::vertexAttribIFormat(GLuint attribindex, GLint size, GLenum type,
     if (size < 1 || size > 4) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    // GL 4.4 §10.3.8: relativeoffset > MAX_VERTEX_ATTRIB_RELATIVE_OFFSET
+    // is INVALID_VALUE.
+    {
+        GLint64 maxRelOffset = 2047;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(
+                GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET, &maxRelOffset);
+        }
+        if (relativeoffset > static_cast<GLuint>(maxRelOffset)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
     }
     GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
     if (vertexArray == nullptr || attribindex >= vertexArray->attributes.size()) {
@@ -7863,6 +7934,19 @@ bool GLContext::vertexAttribLFormat(GLuint attribindex, GLint size, GLenum type,
         pushError(GL_INVALID_ENUM);
         return false;
     }
+    // GL 4.4 §10.3.8: relativeoffset > MAX_VERTEX_ATTRIB_RELATIVE_OFFSET
+    // is INVALID_VALUE.
+    {
+        GLint64 maxRelOffset = 2047;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(
+                GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET, &maxRelOffset);
+        }
+        if (relativeoffset > static_cast<GLuint>(maxRelOffset)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
     GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
     if (vertexArray == nullptr || attribindex >= vertexArray->attributes.size()) {
         pushError(attribindex >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
@@ -7887,7 +7971,19 @@ bool GLContext::vertexAttribBinding(GLuint attribindex, GLuint bindingindex) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (attribindex >= vertexArray->attributes.size() || bindingindex >= vertexArray->bindingPoints.size()) {
+    // GL 4.4 §10.3.1: attribindex must be < MAX_VERTEX_ATTRIBS,
+    // bindingindex must be < MAX_VERTEX_ATTRIB_BINDINGS. The
+    // bindingPoints vector is sized to MAX_VERTEX_ATTRIBS (32),
+    // wider than MAX_VERTEX_ATTRIB_BINDINGS (16), so the size-
+    // based check lets binding indices in [16, 32) through.
+    GLint64 maxBindings = 16;
+    if (impl_->capabilities != nullptr) {
+        impl_->capabilities->queryInteger64(
+            GL_MAX_VERTEX_ATTRIB_BINDINGS, &maxBindings);
+    }
+    if (attribindex >= vertexArray->attributes.size() ||
+        bindingindex >= static_cast<GLuint>(maxBindings) ||
+        bindingindex >= vertexArray->bindingPoints.size()) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -7903,7 +7999,13 @@ bool GLContext::vertexBindingDivisor(GLuint bindingindex, GLuint divisor) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (bindingindex >= vertexArray->bindingPoints.size()) {
+    GLint64 maxBindings = 16;
+    if (impl_->capabilities != nullptr) {
+        impl_->capabilities->queryInteger64(
+            GL_MAX_VERTEX_ATTRIB_BINDINGS, &maxBindings);
+    }
+    if (bindingindex >= static_cast<GLuint>(maxBindings) ||
+        bindingindex >= vertexArray->bindingPoints.size()) {
         pushError(GL_INVALID_VALUE);
         return false;
     }

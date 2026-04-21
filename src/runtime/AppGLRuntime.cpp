@@ -2839,8 +2839,14 @@ void APIENTRY glVertexAttribFormat(GLuint attribindex, GLint size, GLenum type, 
     if (context == nullptr) {
         return;
     }
-    if (size < 1 || size > 4) {
-        recordValidationError(context, "glVertexAttribFormat", GL_INVALID_VALUE, "size must be 1, 2, 3, or 4");
+    // GL 4.4 §10.3.8 allows size ∈ {1, 2, 3, 4, GL_BGRA}. Context-side
+    // vertexAttribFormat handles the GL_BGRA constraints
+    // (type/normalized restrictions) and raises INVALID_OPERATION on
+    // violation — keep this pre-check narrow enough to let GL_BGRA
+    // flow through.
+    const bool sizeIsBgra = (size == static_cast<GLint>(GL_BGRA));
+    if (!sizeIsBgra && (size < 1 || size > 4)) {
+        recordValidationError(context, "glVertexAttribFormat", GL_INVALID_VALUE, "size must be 1, 2, 3, 4, or GL_BGRA");
         return;
     }
     if (!isValidVertexAttribPointerType(type)) {
