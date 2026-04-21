@@ -12262,6 +12262,70 @@ bool GLContext::compileShader(GLuint shader) {
         }
     }
 
+    // GLSL 4.60 §3.5: the `#` preprocessing operator (stringification)
+    // is not allowed in GLSL. CTS
+    // `shaders.preprocessor.basic.stringification_{vertex,fragment}`
+    // plants
+    //   `#define VEC4_STRING_PARAM(a, b, c, d) vec4(#a, #b, c, d)`
+    // and asserts COMPILE_STATUS = FALSE. glslang under
+    // `setEnvInputVulkanRulesRelaxed()` accepts the construct.
+    // Scan each `#define` directive for a `#<identifier>` token
+    // in its replacement text and reject at compile time.
+    {
+        const std::string& src = object->source;
+        std::size_t pos = 0;
+        while ((pos = src.find("#define", pos)) != std::string::npos) {
+            // Make sure we're at a line start (preceded only by
+            // whitespace on the same line). A comment containing
+            // "#define" inside should be ignored.
+            std::size_t lineStart = pos;
+            while (lineStart > 0 && src[lineStart - 1] != '\n') --lineStart;
+            bool onlyWsBefore = true;
+            for (std::size_t i = lineStart; i < pos; ++i) {
+                if (src[i] != ' ' && src[i] != '\t') { onlyWsBefore = false; break; }
+            }
+            if (!onlyWsBefore) { pos += 7; continue; }
+            // Find end of directive line (handle line continuations \).
+            std::size_t lineEnd = pos;
+            while (lineEnd < src.size()) {
+                if (src[lineEnd] == '\\' && lineEnd + 1 < src.size() && src[lineEnd + 1] == '\n') {
+                    lineEnd += 2; // continuation
+                    continue;
+                }
+                if (src[lineEnd] == '\n') break;
+                ++lineEnd;
+            }
+            // Scan the body for `#<identifier>` (stringification).
+            // Skip past `#define` itself (7 chars).
+            // Token paste `##<identifier>` is allowed in GLSL, only
+            // single-`#` stringification is the disallowed operator.
+            for (std::size_t i = pos + 7; i + 1 < lineEnd; ++i) {
+                if (src[i] != '#') continue;
+                // `##` is token-paste, valid in GLSL. Skip past both.
+                if (i + 1 < lineEnd && src[i + 1] == '#') {
+                    ++i;  // skip the second #; for loop will ++i past it
+                    continue;
+                }
+                // Single `#` followed by identifier-start is the
+                // disallowed stringification operator.
+                const unsigned char nx = static_cast<unsigned char>(src[i + 1]);
+                if (std::isalpha(nx) || nx == '_') {
+                    object->compileLog =
+                        "ERROR: GLSL does not allow the `#` preprocessing "
+                        "operator in macro replacement lists "
+                        "(GLSL 4.60 §3.5).";
+                    object->compiled = false;
+                    object->spirv.clear();
+                    Runtime::shared().recordShaderTranslation({
+                        shaderTag, "compile", "", "", "", object->compileLog, "", false
+                    });
+                    return true;
+                }
+            }
+            pos = lineEnd;
+        }
+    }
+
     // GL 4.6 §11.1.3.2 (ClipDistance) / §E.2.1 deprecated gl_ClipVertex:
     // A vertex shader must not write to BOTH `gl_ClipVertex` and any
     // element of `gl_ClipDistance[]`. The spec describes this as
