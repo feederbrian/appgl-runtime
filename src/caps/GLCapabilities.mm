@@ -618,8 +618,17 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // index type (GL_UNSIGNED_INT). It is a property of the index format, not of
     // any particular buffer's storage size.
     integerLimits_[GL_MAX_ELEMENT_INDEX] = static_cast<GLint64>(0xFFFFFFFFull);
-    integerLimits_[GL_MAX_ELEMENTS_INDICES] = std::min<GLint64>(maxBufferLength / 4, 0x7fffffff);
-    integerLimits_[GL_MAX_ELEMENTS_VERTICES] = std::min<GLint64>(maxBufferLength / 16, 0x7fffffff);
+    // GL 4.6 §22 — MAX_ELEMENTS_INDICES is a hint on the preferred
+    // upper bound for drawRangeElements's index count. Apps (and CTS
+    // `map_buffer_alignment.functional`) occasionally multiply this
+    // value by `sizeof(GLuint)` and store into a GLint, which overflows
+    // when the advertised value exceeds INT_MAX/4. Cap at INT_MAX/4
+    // (≈512M) to avoid that overflow — the hint is non-normative so
+    // advertising a smaller but still generous limit is spec-legal.
+    integerLimits_[GL_MAX_ELEMENTS_INDICES] = std::min<GLint64>(maxBufferLength / 4, 0x1fffffff);
+    // Same rationale for MAX_ELEMENTS_VERTICES — hint, non-normative,
+    // and routinely multiplied by a per-vertex byte count.
+    integerLimits_[GL_MAX_ELEMENTS_VERTICES] = std::min<GLint64>(maxBufferLength / 16, 0x1fffffff);
     integerLimits_[GL_MAX_DEBUG_MESSAGE_LENGTH] = 1024;
     integerLimits_[GL_MAX_DEBUG_LOGGED_MESSAGES] = 64;
     integerLimits_[GL_MAX_DEBUG_GROUP_STACK_DEPTH] = 64;
