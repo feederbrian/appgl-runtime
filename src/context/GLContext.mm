@@ -1114,8 +1114,59 @@ void markVertexDescriptorDirty(GLVertexArrayObject& vertexArray) {
     vertexArray.vertexDescriptorError.clear();
 }
 
+// GL 4.6 §8.10 enum-valued pname → accepted constant check. When the
+// application passes a value that's not one of the spec-allowed
+// enums for the pname, return false so the outer `texParameter*`
+// pushes INVALID_ENUM. CTS `direct_state_access.
+// textures_parameter_setup_errors` asserts this for the five
+// enum-valued pnames (MIN_FILTER, MAG_FILTER, WRAP_*,
+// COMPARE_MODE, COMPARE_FUNC) and the depth-stencil mode.
+static bool isValidTexParameterEnumValue(GLenum pname, GLint v) {
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:
+            return v == GL_NEAREST || v == GL_LINEAR ||
+                   v == GL_NEAREST_MIPMAP_NEAREST || v == GL_LINEAR_MIPMAP_NEAREST ||
+                   v == GL_NEAREST_MIPMAP_LINEAR || v == GL_LINEAR_MIPMAP_LINEAR;
+        case GL_TEXTURE_MAG_FILTER:
+            return v == GL_NEAREST || v == GL_LINEAR;
+        case GL_TEXTURE_WRAP_S:
+        case GL_TEXTURE_WRAP_T:
+        case GL_TEXTURE_WRAP_R:
+            return v == GL_CLAMP_TO_EDGE || v == GL_CLAMP_TO_BORDER ||
+                   v == GL_MIRRORED_REPEAT || v == GL_REPEAT ||
+                   v == GL_MIRROR_CLAMP_TO_EDGE;
+        case GL_TEXTURE_COMPARE_MODE:
+            return v == GL_NONE || v == GL_COMPARE_REF_TO_TEXTURE;
+        case GL_TEXTURE_COMPARE_FUNC:
+            return v == GL_LEQUAL || v == GL_GEQUAL ||
+                   v == GL_LESS || v == GL_GREATER ||
+                   v == GL_EQUAL || v == GL_NOTEQUAL ||
+                   v == GL_ALWAYS || v == GL_NEVER;
+        case GL_DEPTH_STENCIL_TEXTURE_MODE:
+            return v == GL_DEPTH_COMPONENT || v == GL_STENCIL_INDEX;
+        case GL_TEXTURE_SWIZZLE_R:
+        case GL_TEXTURE_SWIZZLE_G:
+        case GL_TEXTURE_SWIZZLE_B:
+        case GL_TEXTURE_SWIZZLE_A:
+            return v == GL_RED || v == GL_GREEN || v == GL_BLUE ||
+                   v == GL_ALPHA || v == GL_ZERO || v == GL_ONE;
+        default:
+            // Non-enum pnames or pnames whose accepted values we
+            // don't validate here (BASE_LEVEL, MAX_LEVEL, LOD_BIAS,
+            // anisotropy, border color, swizzle_rgba vector) accept
+            // any value — return true to defer to the type/range
+            // checks in the outer texParameter* code.
+            return true;
+    }
+}
+
 bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const GLint* values) {
     if (values == nullptr) {
+        return false;
+    }
+    // Reject invalid enum-valued params so the caller raises
+    // INVALID_ENUM (matches GL 4.6 §8.10 expectations).
+    if (!isValidTexParameterEnumValue(pname, values[0])) {
         return false;
     }
     switch (pname) {
@@ -9027,6 +9078,71 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §8.10 target-aware validation. The spec places several
+    // constraints on the (target, pname, param) tuple that need the
+    // target for context. Runs BEFORE the generic pname-accepted
+    // check in setTextureParameterInteger so the error code matches
+    // the spec.
+    if (params != nullptr) {
+        // (a) Negative BASE_LEVEL / MAX_LEVEL → INVALID_VALUE.
+        if ((pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
+            && params[0] < 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        // (b) Sampler state on MULTISAMPLE targets → INVALID_OPERATION.
+        // Sampler pnames are filter/wrap/lod/compare/border/lod_bias.
+        const bool isMSTarget = (target == GL_TEXTURE_2D_MULTISAMPLE ||
+                                 target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+        const bool isSamplerPname = (
+            pname == GL_TEXTURE_MIN_FILTER || pname == GL_TEXTURE_MAG_FILTER ||
+            pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T ||
+            pname == GL_TEXTURE_WRAP_R || pname == GL_TEXTURE_MIN_LOD ||
+            pname == GL_TEXTURE_MAX_LOD || pname == GL_TEXTURE_LOD_BIAS ||
+            pname == GL_TEXTURE_COMPARE_MODE || pname == GL_TEXTURE_COMPARE_FUNC ||
+            pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_MAX_ANISOTROPY);
+        if (isMSTarget && isSamplerPname) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // (c) BASE_LEVEL != 0 on MULTISAMPLE → INVALID_OPERATION.
+        if (isMSTarget && pname == GL_TEXTURE_BASE_LEVEL && params[0] != 0) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // (d) RECTANGLE-target restrictions.
+        if (target == GL_TEXTURE_RECTANGLE) {
+            // RECTANGLE BASE_LEVEL must be 0.
+            if (pname == GL_TEXTURE_BASE_LEVEL && params[0] != 0) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            // RECTANGLE wrap modes can't be MIRROR_CLAMP_TO_EDGE,
+            // MIRRORED_REPEAT, or REPEAT.
+            if ((pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T ||
+                 pname == GL_TEXTURE_WRAP_R) &&
+                (params[0] == GL_REPEAT || params[0] == GL_MIRRORED_REPEAT ||
+                 params[0] == GL_MIRROR_CLAMP_TO_EDGE)) {
+                pushError(GL_INVALID_ENUM);
+                return false;
+            }
+            // RECTANGLE MIN_FILTER must be NEAREST or LINEAR.
+            if (pname == GL_TEXTURE_MIN_FILTER &&
+                params[0] != GL_NEAREST && params[0] != GL_LINEAR) {
+                pushError(GL_INVALID_ENUM);
+                return false;
+            }
+        }
+        // (e) Scalar setter on non-scalar pname → INVALID_ENUM.
+        // BORDER_COLOR and SWIZZLE_RGBA take 4 components. The scalar
+        // glTexParameteri/f variants (not Iiv/fv) should reject these.
+        // This check is done in the wrapper's dim-sensitive path; at
+        // the context level we accept both by treating the single-element
+        // params pointer as a 4-element array for these pnames — the
+        // wrapper's 1-element buffer would then read garbage for indices
+        // 1..3. Punt this check to the runtime wrappers — those know
+        // whether the scalar or vector entry point was called.
+    }
     if (!setTextureParameterInteger(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
         return false;
@@ -9078,6 +9194,50 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
     if (!object->instantiated) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    // GL 4.6 §8.10 target-aware validation (mirrors texParameterInteger).
+    if (params != nullptr) {
+        if ((pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
+            && params[0] < 0.0f) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const bool isMSTarget = (target == GL_TEXTURE_2D_MULTISAMPLE ||
+                                 target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+        const bool isSamplerPname = (
+            pname == GL_TEXTURE_MIN_FILTER || pname == GL_TEXTURE_MAG_FILTER ||
+            pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T ||
+            pname == GL_TEXTURE_WRAP_R || pname == GL_TEXTURE_MIN_LOD ||
+            pname == GL_TEXTURE_MAX_LOD || pname == GL_TEXTURE_LOD_BIAS ||
+            pname == GL_TEXTURE_COMPARE_MODE || pname == GL_TEXTURE_COMPARE_FUNC ||
+            pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_MAX_ANISOTROPY);
+        if (isMSTarget && isSamplerPname) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (isMSTarget && pname == GL_TEXTURE_BASE_LEVEL && params[0] != 0.0f) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (target == GL_TEXTURE_RECTANGLE) {
+            if (pname == GL_TEXTURE_BASE_LEVEL && params[0] != 0.0f) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            const GLint asInt = static_cast<GLint>(params[0]);
+            if ((pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T ||
+                 pname == GL_TEXTURE_WRAP_R) &&
+                (asInt == GL_REPEAT || asInt == GL_MIRRORED_REPEAT ||
+                 asInt == GL_MIRROR_CLAMP_TO_EDGE)) {
+                pushError(GL_INVALID_ENUM);
+                return false;
+            }
+            if (pname == GL_TEXTURE_MIN_FILTER &&
+                asInt != GL_NEAREST && asInt != GL_LINEAR) {
+                pushError(GL_INVALID_ENUM);
+                return false;
+            }
+        }
     }
     if (!setTextureParameterFloat(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
@@ -23207,8 +23367,22 @@ bool GLContext::copyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset
     })
 }
 
+// GL 4.6 §8.10: scalar glTextureParameter{f,i} entry points are not
+// valid for the non-scalar pnames GL_TEXTURE_BORDER_COLOR and
+// GL_TEXTURE_SWIZZLE_RGBA — callers must use the vector form.
+// Violations raise INVALID_ENUM. CTS
+// `direct_state_access.textures_parameter_setup_errors` asserts this.
+static bool isNonScalarTexParameter(GLenum pname) {
+    return pname == GL_TEXTURE_BORDER_COLOR ||
+           pname == GL_TEXTURE_SWIZZLE_RGBA;
+}
+
 bool GLContext::textureParameterf(GLuint texture, GLenum pname, GLfloat param) {
     DSA_TEX_WRAP(texture, {
+        if (isNonScalarTexParameter(pname)) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
         const GLfloat v = param;
         bool ok = texParameterFloat(_target, pname, &v);
         return ok;
@@ -23224,6 +23398,10 @@ bool GLContext::textureParameterfv(GLuint texture, GLenum pname, const GLfloat* 
 
 bool GLContext::textureParameteri(GLuint texture, GLenum pname, GLint param) {
     DSA_TEX_WRAP(texture, {
+        if (isNonScalarTexParameter(pname)) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
         const GLint v = param;
         bool ok = texParameterInteger(_target, pname, &v);
         return ok;
