@@ -22940,6 +22940,34 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // GL 4.6 §18.2.3: srcTarget and dstTarget must each be one of
+    // the allowed texture / renderbuffer targets. TEXTURE_BUFFER is
+    // explicitly not allowed (buffer textures have no image storage
+    // in the copyImageSubData sense). CTS `copy_image.invalid_target`
+    // plants TEXTURE_BUFFER on both sides and expects INVALID_ENUM.
+    auto isValidCopyImageTarget = [](GLenum t) {
+        switch (t) {
+            case GL_RENDERBUFFER:
+            case GL_TEXTURE_1D:
+            case GL_TEXTURE_1D_ARRAY:
+            case GL_TEXTURE_2D:
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_2D_MULTISAMPLE:
+            case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            case GL_TEXTURE_3D:
+            case GL_TEXTURE_CUBE_MAP:
+            case GL_TEXTURE_CUBE_MAP_ARRAY:
+            case GL_TEXTURE_RECTANGLE:
+                return true;
+            default:
+                return false;  // TEXTURE_BUFFER, stray enums, etc.
+        }
+    };
+    if (!isValidCopyImageTarget(srcTarget) ||
+        !isValidCopyImageTarget(dstTarget)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
     // Validate source and destination exist.
     bool srcIsTex = (srcTarget != GL_RENDERBUFFER);
     bool dstIsTex = (dstTarget != GL_RENDERBUFFER);
@@ -22959,6 +22987,77 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         pushError(GL_INVALID_VALUE);
         return false;
     }
+
+    // GL 4.6 §18.2.3: srcLevel and dstLevel must be valid levels of
+    // their objects. Renderbuffers only have level 0; textures have
+    // levels [0, desc.levels). Reject out-of-range levels up-front so
+    // CTS `copy_image.non_existent_mipmap` sees the INVALID_VALUE it
+    // expects (was silently creating the level on the fly below).
+    auto isValidLevelForTex = [&](GLuint name, GLint level) -> bool {
+        if (level < 0) return false;
+        GLTextureObject* tex = impl_->objects->textures().get(name);
+        if (tex == nullptr) return false;
+        const GLsizei maxLev = std::max<GLsizei>(tex->desc.levels, 1);
+        if (level >= maxLev) return false;
+        // Non-immutable texture: also require the level to have been
+        // defined via texImage (or match desc.levels for texStorage).
+        // An undefined level on a non-immutable texture is per-spec
+        // INVALID_VALUE. Check via levels map or texStorage's desc.
+        if (!tex->desc.immutable) {
+            auto it = tex->levels.find(level);
+            if (it == tex->levels.end() || !it->second.defined) return false;
+        }
+        return true;
+    };
+    if (srcIsTex && !isValidLevelForTex(srcName, srcLevel)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (dstIsTex && !isValidLevelForTex(dstName, dstLevel)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Renderbuffers only have "level 0" — any non-zero level for a
+    // renderbuffer source or destination is INVALID_VALUE.
+    if (!srcIsTex && srcLevel != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!dstIsTex && dstLevel != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    // GL 4.6 §18.2.3: INVALID_OPERATION if source and destination have
+    // different sample counts. Renderbuffers default to samples=0;
+    // MULTISAMPLE / MULTISAMPLE_ARRAY textures typically have >0.
+    // CTS `copy_image.invalid_target` plants a RENDERBUFFER source
+    // into a 2D_MULTISAMPLE destination and expects INVALID_OPERATION.
+    auto getSamples = [&](GLuint name, bool isTex) -> GLsizei {
+        if (isTex) {
+            GLTextureObject* tex = impl_->objects->textures().get(name);
+            return tex != nullptr ? tex->desc.samples : 0;
+        }
+        GLRenderbufferObject* rb = impl_->objects->renderbuffers().get(name);
+        return rb != nullptr ? rb->samples : 0;
+    };
+    const GLsizei srcSamples = getSamples(srcName, srcIsTex);
+    const GLsizei dstSamples = getSamples(dstName, dstIsTex);
+    // A MULTISAMPLE target on a texture with samples=0 still counts
+    // as multisample-shaped for the compatibility check (the target
+    // alone signals the intent). Normalise the sample count by
+    // inspecting the target enum.
+    auto targetRequiresMS = [](GLenum t) {
+        return t == GL_TEXTURE_2D_MULTISAMPLE ||
+               t == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+    };
+    const bool srcIsMSTarget = targetRequiresMS(srcTarget);
+    const bool dstIsMSTarget = targetRequiresMS(dstTarget);
+    if (srcIsMSTarget != dstIsMSTarget || srcSamples != dstSamples) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
     // No-op for zero-sized copies.
     if (srcWidth == 0 || srcHeight == 0 || srcDepth == 0) return true;
 
