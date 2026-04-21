@@ -22504,6 +22504,21 @@ bool GLContext::createBuffers(GLsizei n, GLuint* buffers) {
 }
 
 bool GLContext::createTextures(GLenum target, GLsizei n, GLuint* textures) {
+    // GL 4.5 §8.1: target must be one of the allowed texture-object
+    // target enums. CTS `direct_state_access.textures_creation_errors`
+    // plants an invalid target and expects INVALID_ENUM.
+    switch (target) {
+        case GL_TEXTURE_1D: case GL_TEXTURE_2D: case GL_TEXTURE_3D:
+        case GL_TEXTURE_1D_ARRAY: case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_RECTANGLE: case GL_TEXTURE_BUFFER:
+        case GL_TEXTURE_CUBE_MAP: case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            break;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
     if (n < 0) { pushError(GL_INVALID_VALUE); return false; }
     for (GLsizei i = 0; i < n; ++i) {
         textures[i] = impl_->objects->textures().reserveName();
