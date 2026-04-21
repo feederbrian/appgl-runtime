@@ -7828,24 +7828,17 @@ bool GLContext::bindBuffer(GLenum target, GLuint buffer) {
 }
 
 bool GLContext::bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
-    if (buffer == 0) {
-        impl_->state->bindIndexedBuffer(target, index, 0, 0, 0);
-        // Spec: bind* with buffer == 0 also resets the generic target binding.
-        impl_->state->bindBuffer(target, 0);
-        return true;
-    }
+    // GL 4.6 §6.1.1 validation order — the offset/size/alignment
+    // checks apply regardless of whether `buffer == 0`. CTS
+    // `shader_storage_buffer_object.negative-api-bind` plants
+    // `glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 0, 31, 0)`
+    // with offset=31 against OFFSET_ALIGNMENT=32 and expects
+    // INVALID_VALUE; previously we short-circuited the buffer==0
+    // case to "success" and skipped the alignment check.
     if (offset < 0 || size < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    // GL 4.6 §6.1.1 alignment requirements for per-target offsets:
-    //   GL_UNIFORM_BUFFER          → multiple of GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT
-    //   GL_SHADER_STORAGE_BUFFER   → multiple of GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT
-    //   GL_ATOMIC_COUNTER_BUFFER   → multiple of 4 (atomic_uint size)
-    //   GL_TRANSFORM_FEEDBACK_BUFFER → multiple of 4 (float/int component size)
-    // Size also needs alignment checks for XFB (multiple of 4). CTS
-    // `multi_bind.errors_bind_buffers` exercises each target with a
-    // deliberately-misaligned offset and expects GL_INVALID_VALUE.
     {
         GLint64 alignment = 1;
         auto queryAlignment = [this](GLenum pname) -> GLint64 {
@@ -7878,6 +7871,12 @@ bool GLContext::bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
             pushError(GL_INVALID_VALUE);
             return false;
         }
+    }
+    if (buffer == 0) {
+        impl_->state->bindIndexedBuffer(target, index, 0, 0, 0);
+        // Spec: bind* with buffer == 0 also resets the generic target binding.
+        impl_->state->bindBuffer(target, 0);
+        return true;
     }
     GLBufferObject* object = impl_->objects->buffers().get(buffer);
     if (object == nullptr) {
