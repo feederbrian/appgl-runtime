@@ -25524,16 +25524,191 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
         case GL_TEXTURE_RED_SIZE:
         case GL_TEXTURE_GREEN_SIZE:
         case GL_TEXTURE_BLUE_SIZE:
-        case GL_TEXTURE_ALPHA_SIZE:      *params = 8; return true;
-        case GL_TEXTURE_DEPTH_SIZE:      *params = 0; return true;
-        case GL_TEXTURE_STENCIL_SIZE:    *params = 0; return true;
+        case GL_TEXTURE_ALPHA_SIZE: {
+            // GL 4.6 Table 8.12 / §8.11.2. Reports per-channel bit
+            // counts of the promoted internal format — NOT the
+            // Metal backing format. CTS `texture_size_promotion`
+            // creates an R8 texture and expects red=8, green=0,
+            // blue=0, alpha=0. Previously we hard-coded 8 across
+            // all four channels, which reported R8 as having
+            // red=8 green=8 blue=8 alpha=8 (wrong).
+            const GLenum fmt = desc.internalFormat;
+            auto channelSize = [fmt](int channel) -> GLint {
+                // channel: 0=R, 1=G, 2=B, 3=A
+                auto match = [fmt](std::initializer_list<GLenum> lst) {
+                    for (GLenum f : lst) if (f == fmt) return true;
+                    return false;
+                };
+                // Red-only formats: R8/R16/R8I/R8UI/R16I/R16UI/R16F/R32F/R32I/R32UI/R8_SNORM/R16_SNORM.
+                if (match({GL_R8, GL_R8_SNORM, GL_R8I, GL_R8UI})) {
+                    return channel == 0 ? 8 : 0;
+                }
+                if (match({GL_R16, GL_R16_SNORM, GL_R16I, GL_R16UI, GL_R16F})) {
+                    return channel == 0 ? 16 : 0;
+                }
+                if (match({GL_R32F, GL_R32I, GL_R32UI})) {
+                    return channel == 0 ? 32 : 0;
+                }
+                // Red+green formats.
+                if (match({GL_RG8, GL_RG8_SNORM, GL_RG8I, GL_RG8UI})) {
+                    return (channel < 2) ? 8 : 0;
+                }
+                if (match({GL_RG16, GL_RG16_SNORM, GL_RG16I, GL_RG16UI, GL_RG16F})) {
+                    return (channel < 2) ? 16 : 0;
+                }
+                if (match({GL_RG32F, GL_RG32I, GL_RG32UI})) {
+                    return (channel < 2) ? 32 : 0;
+                }
+                // R+G+B formats.
+                if (match({GL_RGB8, GL_RGB8_SNORM, GL_RGB8I, GL_RGB8UI, GL_SRGB, GL_SRGB8, GL_RGB})) {
+                    return (channel < 3) ? 8 : 0;
+                }
+                if (match({GL_RGB16, GL_RGB16_SNORM, GL_RGB16I, GL_RGB16UI, GL_RGB16F})) {
+                    return (channel < 3) ? 16 : 0;
+                }
+                if (match({GL_RGB32F, GL_RGB32I, GL_RGB32UI})) {
+                    return (channel < 3) ? 32 : 0;
+                }
+                // R+G+B+A formats.
+                if (match({GL_RGBA8, GL_RGBA8_SNORM, GL_RGBA8I, GL_RGBA8UI,
+                           GL_SRGB8_ALPHA8, GL_SRGB_ALPHA, GL_RGBA})) {
+                    return 8;
+                }
+                if (match({GL_RGBA16, GL_RGBA16_SNORM, GL_RGBA16I, GL_RGBA16UI, GL_RGBA16F})) {
+                    return 16;
+                }
+                if (match({GL_RGBA32F, GL_RGBA32I, GL_RGBA32UI})) {
+                    return 32;
+                }
+                // Packed RGB / RGBA variants.
+                if (fmt == GL_RGB565) {
+                    if (channel == 0) return 5;
+                    if (channel == 1) return 6;
+                    if (channel == 2) return 5;
+                    return 0;
+                }
+                if (fmt == GL_RGB5_A1) {
+                    if (channel < 3) return 5;
+                    return 1;
+                }
+                if (fmt == GL_RGBA4) return 4;
+                if (fmt == GL_RGB10_A2 || fmt == GL_RGB10_A2UI) {
+                    if (channel < 3) return 10;
+                    return 2;
+                }
+                if (fmt == GL_RGB10) {
+                    return (channel < 3) ? 10 : 0;
+                }
+                if (fmt == GL_R11F_G11F_B10F) {
+                    if (channel == 0 || channel == 1) return 11;
+                    if (channel == 2) return 10;
+                    return 0;
+                }
+                if (fmt == GL_RGB9_E5) {
+                    return (channel < 3) ? 9 : 0;
+                }
+                if (fmt == GL_R3_G3_B2) {
+                    if (channel == 0 || channel == 1) return 3;
+                    if (channel == 2) return 2;
+                    return 0;
+                }
+                if (fmt == GL_RGB4) {
+                    return (channel < 3) ? 4 : 0;
+                }
+                if (fmt == GL_RGB5) {
+                    return (channel < 3) ? 5 : 0;
+                }
+                if (fmt == GL_RGB12) {
+                    return (channel < 3) ? 12 : 0;
+                }
+                if (fmt == GL_RGBA2) {
+                    return 2;
+                }
+                if (fmt == GL_RGBA12) {
+                    return 12;
+                }
+                // Depth-only / stencil-only: no color channels.
+                if (isDepthFormat(fmt) || isStencilFormat(fmt)) {
+                    return 0;
+                }
+                // Unknown / unrecognised — default to 8 on all
+                // channels for Phase A compatibility (matches the
+                // old behaviour).
+                return 8;
+            };
+            switch (pname) {
+                case GL_TEXTURE_RED_SIZE:   *params = channelSize(0); break;
+                case GL_TEXTURE_GREEN_SIZE: *params = channelSize(1); break;
+                case GL_TEXTURE_BLUE_SIZE:  *params = channelSize(2); break;
+                case GL_TEXTURE_ALPHA_SIZE: *params = channelSize(3); break;
+                default: *params = 0; break;
+            }
+            return true;
+        }
+        case GL_TEXTURE_DEPTH_SIZE: {
+            const GLenum fmt = desc.internalFormat;
+            if (fmt == GL_DEPTH_COMPONENT16) { *params = 16; return true; }
+            if (fmt == GL_DEPTH_COMPONENT24 || fmt == GL_DEPTH24_STENCIL8) { *params = 24; return true; }
+            if (fmt == GL_DEPTH_COMPONENT32 || fmt == GL_DEPTH_COMPONENT32F
+                || fmt == GL_DEPTH32F_STENCIL8) { *params = 32; return true; }
+            *params = 0;
+            return true;
+        }
+        case GL_TEXTURE_STENCIL_SIZE: {
+            const GLenum fmt = desc.internalFormat;
+            if (fmt == GL_STENCIL_INDEX8 || fmt == GL_STENCIL_INDEX
+                || fmt == GL_DEPTH24_STENCIL8 || fmt == GL_DEPTH32F_STENCIL8
+                || fmt == GL_DEPTH_STENCIL) { *params = 8; return true; }
+            *params = 0;
+            return true;
+        }
         case GL_TEXTURE_SHARED_SIZE:
             *params = (desc.internalFormat == GL_RGB9_E5) ? 5 : 0;
             return true;
         case GL_TEXTURE_RED_TYPE:
         case GL_TEXTURE_GREEN_TYPE:
         case GL_TEXTURE_BLUE_TYPE:
-        case GL_TEXTURE_ALPHA_TYPE:      *params = componentType(desc.internalFormat); return true;
+        case GL_TEXTURE_ALPHA_TYPE: {
+            // GL 4.6 Table 8.12 / §8.11.2. Reports the component
+            // type of the channel (UNSIGNED_NORMALIZED, FLOAT,
+            // INT, …) — but only for channels the internal format
+            // actually provides. Non-present channels return 0.
+            const GLenum fmt = desc.internalFormat;
+            auto channelIdx = [pname]() -> int {
+                switch (pname) {
+                    case GL_TEXTURE_RED_TYPE:   return 0;
+                    case GL_TEXTURE_GREEN_TYPE: return 1;
+                    case GL_TEXTURE_BLUE_TYPE:  return 2;
+                    case GL_TEXTURE_ALPHA_TYPE: return 3;
+                    default: return 0;
+                }
+            }();
+            // Determine how many channels this format provides.
+            auto match = [fmt](std::initializer_list<GLenum> lst) {
+                for (GLenum f : lst) if (f == fmt) return true;
+                return false;
+            };
+            int nChannels = 4;  // default (RGBA)
+            if (match({GL_R8, GL_R8_SNORM, GL_R16, GL_R16_SNORM, GL_R16F, GL_R32F,
+                       GL_R8I, GL_R8UI, GL_R16I, GL_R16UI, GL_R32I, GL_R32UI})) {
+                nChannels = 1;
+            } else if (match({GL_RG8, GL_RG8_SNORM, GL_RG16, GL_RG16_SNORM, GL_RG16F, GL_RG32F,
+                              GL_RG8I, GL_RG8UI, GL_RG16I, GL_RG16UI, GL_RG32I, GL_RG32UI})) {
+                nChannels = 2;
+            } else if (match({GL_RGB8, GL_RGB8_SNORM, GL_RGB16, GL_RGB16_SNORM, GL_RGB16F, GL_RGB32F,
+                              GL_RGB8I, GL_RGB8UI, GL_RGB16I, GL_RGB16UI, GL_RGB32I, GL_RGB32UI,
+                              GL_SRGB, GL_SRGB8, GL_RGB, GL_RGB565,
+                              GL_R11F_G11F_B10F, GL_RGB9_E5, GL_R3_G3_B2, GL_RGB4, GL_RGB5,
+                              GL_RGB10, GL_RGB12})) {
+                nChannels = 3;
+            }
+            if (channelIdx >= nChannels) {
+                *params = 0;
+                return true;
+            }
+            *params = componentType(fmt);
+            return true;
+        }
         case GL_TEXTURE_DEPTH_TYPE: {
             GLenum fmt = desc.internalFormat;
             if (fmt == GL_DEPTH_COMPONENT32F || fmt == GL_DEPTH32F_STENCIL8) {
