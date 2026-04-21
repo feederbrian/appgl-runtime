@@ -4168,6 +4168,34 @@ struct GLContext::Impl {
         return vertexArray(name);
     }
 
+    // GL 3.2+ core technically requires a user-bound VAO for every
+    // vertex-array entry point. In practice most real drivers
+    // (NVIDIA, AMD, Mesa) create an implicit "default VAO" at
+    // context initialisation and fall back to it when name = 0 is
+    // addressed, which is what CTS `get_uniform_tests.gl_get_uniform`
+    // (and a small handful of other gl3c* tests) relies on: they
+    // never call glBindVertexArray before glEnableVertexAttribArray,
+    // yet expect the call to succeed.
+    //
+    // Rather than hand out per-call auto-bound VAOs we carry a
+    // persistent default VAO in Impl and return it whenever the
+    // state tracker reports name = 0. The object is lazily created
+    // on first access so non-VAO-using tests don't pay the
+    // allocation cost. User glGenVertexArrays still returns
+    // fresh names starting at 1 because the default VAO is never
+    // inserted into the object table — it lives as a stand-alone
+    // value on the Impl.
+    GLVertexArrayObject* currentVertexArrayOrDefault() {
+        if (GLVertexArrayObject* user = currentVertexArray(); user != nullptr) {
+            return user;
+        }
+        if (!defaultVertexArrayReady) {
+            objects->initializeVertexArray(defaultVertexArray);
+            defaultVertexArrayReady = true;
+        }
+        return &defaultVertexArray;
+    }
+
     void deleteBufferReferencesFromVertexArrays(GLuint buffer) {
         objects->vertexArrays().forEach([&](GLuint, GLVertexArrayObject& vertexArray) {
             if (vertexArray.elementArrayBuffer == buffer) {
@@ -6256,6 +6284,16 @@ struct GLContext::Impl {
     bool transformFeedbackPaused = false;
     GLenum transformFeedbackPrimitiveMode = GL_POINTS;
     GLuint boundTransformFeedbackId = 0;
+
+    // Persistent "default VAO" — lazy-allocated stand-alone object
+    // returned by currentVertexArrayOrDefault() when no user VAO is
+    // bound. Real drivers expose an implicit default VAO at context
+    // init; CTS tests (e.g. `get_uniform_tests`) rely on that
+    // behaviour by calling glEnableVertexAttribArray without first
+    // binding a VAO. The object lives on Impl so glGenVertexArrays
+    // still issues fresh names starting at 1.
+    GLVertexArrayObject defaultVertexArray;
+    bool defaultVertexArrayReady = false;
     // Per-context immediate double vertex attribute values (GL 4.1 glVertexAttribL*).
     // Indexed by attribute slot; each stores 4 doubles (default {0,0,0,1}).
     static constexpr std::size_t kMaxImmediateDoubleAttribs = 16;
@@ -8320,7 +8358,11 @@ bool GLContext::bindVertexArray(GLuint array) {
 }
 
 bool GLContext::enableVertexAttribArray(GLuint index, bool enabled) {
-    GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
+    // Use the default VAO fallback when no user VAO is bound (matches
+    // real-driver behaviour; CTS `get_uniform_tests.gl_get_uniform`
+    // and other gl3c* tests call enableVertexAttribArray without
+    // first binding a VAO and expect the call to succeed).
+    GLVertexArrayObject* vertexArray = impl_->currentVertexArrayOrDefault();
     if (vertexArray == nullptr || index >= vertexArray->attributes.size()) {
         pushError(index >= static_cast<GLuint>(impl_->objects->maxVertexAttribs()) ? GL_INVALID_VALUE : GL_INVALID_OPERATION);
         return false;
