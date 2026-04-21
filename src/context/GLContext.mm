@@ -4871,6 +4871,90 @@ struct GLContext::Impl {
                     case MTLPixelFormatR32Sint:        encSI(1, 4); break;
                     case MTLPixelFormatRG32Sint:       encSI(2, 4); break;
                     case MTLPixelFormatRGBA32Sint:     encSI(4, 4); break;
+                    // Packed 10_10_10_2 unorm. Little-endian layout:
+                    //   [0..9]  R, [10..19] G, [20..29] B, [30..31] A
+                    case MTLPixelFormatRGB10A2Unorm: {
+                        bpp = 4;
+                        const auto quant = [](float v, int bits) -> std::uint32_t {
+                            v = std::max(0.0f, std::min(1.0f, v));
+                            const std::uint32_t maxv = (1u << bits) - 1u;
+                            return static_cast<std::uint32_t>(v * maxv + 0.5f);
+                        };
+                        const std::uint32_t r = quant(color[0], 10);
+                        const std::uint32_t g = quant(color[1], 10);
+                        const std::uint32_t b = quant(color[2], 10);
+                        const std::uint32_t a = quant(color[3], 2);
+                        const std::uint32_t packed =
+                            (r & 0x3FF) |
+                            ((g & 0x3FF) << 10) |
+                            ((b & 0x3FF) << 20) |
+                            ((a & 0x003) << 30);
+                        std::memcpy(px, &packed, 4);
+                        break;
+                    }
+                    // Packed 10_10_10_2 uint — same bit layout, integer values.
+                    case MTLPixelFormatRGB10A2Uint: {
+                        bpp = 4;
+                        const auto clampU = [](float v, std::uint32_t maxv) -> std::uint32_t {
+                            if (v <= 0.0f) return 0u;
+                            if (v >= static_cast<float>(maxv)) return maxv;
+                            return static_cast<std::uint32_t>(v);
+                        };
+                        const std::uint32_t r = clampU(color[0], 0x3FFu);
+                        const std::uint32_t g = clampU(color[1], 0x3FFu);
+                        const std::uint32_t b = clampU(color[2], 0x3FFu);
+                        const std::uint32_t a = clampU(color[3], 0x003u);
+                        const std::uint32_t packed =
+                            (r & 0x3FF) |
+                            ((g & 0x3FF) << 10) |
+                            ((b & 0x3FF) << 20) |
+                            ((a & 0x003) << 30);
+                        std::memcpy(px, &packed, 4);
+                        break;
+                    }
+                    // Packed R11F_G11F_B10F. R and G are 11-bit floats
+                    // (5e6m, no sign, no NaN/Inf for clear), B is 10-bit
+                    // float (5e5m). Packed LSB-first: R | G<<11 | B<<22.
+                    case MTLPixelFormatRG11B10Float: {
+                        bpp = 4;
+                        auto toFloat11 = [](float f) -> std::uint32_t {
+                            // 11-bit unsigned float: 5-bit biased exp
+                            // (bias 15), 6-bit mantissa, no sign.
+                            if (f <= 0.0f || std::isnan(f)) return 0u;
+                            std::uint32_t u;
+                            std::memcpy(&u, &f, 4);
+                            std::int32_t exp = static_cast<std::int32_t>((u >> 23) & 0xFF) - 127;
+                            std::uint32_t mant = u & 0x7FFFFF;
+                            if (exp > 15) return 0x7BF;  // largest finite
+                            if (exp < -14) return 0u;    // flush denorm to 0
+                            const std::uint32_t exp11 =
+                                static_cast<std::uint32_t>(exp + 15);
+                            const std::uint32_t mant6 = mant >> 17;
+                            return ((exp11 & 0x1F) << 6) | (mant6 & 0x3F);
+                        };
+                        auto toFloat10 = [](float f) -> std::uint32_t {
+                            if (f <= 0.0f || std::isnan(f)) return 0u;
+                            std::uint32_t u;
+                            std::memcpy(&u, &f, 4);
+                            std::int32_t exp = static_cast<std::int32_t>((u >> 23) & 0xFF) - 127;
+                            std::uint32_t mant = u & 0x7FFFFF;
+                            if (exp > 15) return 0x3DF;
+                            if (exp < -14) return 0u;
+                            const std::uint32_t exp10 =
+                                static_cast<std::uint32_t>(exp + 15);
+                            const std::uint32_t mant5 = mant >> 18;
+                            return ((exp10 & 0x1F) << 5) | (mant5 & 0x1F);
+                        };
+                        const std::uint32_t r = toFloat11(color[0]);
+                        const std::uint32_t g = toFloat11(color[1]);
+                        const std::uint32_t b = toFloat10(color[2]);
+                        const std::uint32_t packed =
+                            (r & 0x7FF) |
+                            ((g & 0x7FF) << 11) |
+                            ((b & 0x3FF) << 22);
+                        std::memcpy(px, &packed, 4);
+                        break;
+                    }
                     default:
                         // Unsupported pixel format — the rgba8 shadow
                         // already holds the cleared value, so readPixels
@@ -5856,6 +5940,12 @@ struct GLContext::Impl {
             case MTLPixelFormatR32Sint:        srcBpp = 4;  srcComponents = 1; srcType = SrcType::SInt32; break;
             case MTLPixelFormatRG32Sint:       srcBpp = 8;  srcComponents = 2; srcType = SrcType::SInt32; break;
             case MTLPixelFormatRGBA32Sint:     srcBpp = 16; srcComponents = 4; srcType = SrcType::SInt32; break;
+            // Packed Metal formats — 4 bytes per pixel, 3 or 4
+            // components packed into that width. Decoded via the
+            // Packed SrcType branch in readSrcComponent below.
+            case MTLPixelFormatRGB10A2Unorm:   srcBpp = 4; srcComponents = 4; srcType = SrcType::Packed; break;
+            case MTLPixelFormatRGB10A2Uint:    srcBpp = 4; srcComponents = 4; srcType = SrcType::Packed; break;
+            case MTLPixelFormatRG11B10Float:   srcBpp = 4; srcComponents = 3; srcType = SrcType::Packed; break;
             default:
                 return false; // Unsupported format — fall back to RGBA8
         }
@@ -5910,6 +6000,57 @@ struct GLContext::Impl {
                 case SrcType::SInt16:  { std::int16_t v; std::memcpy(&v, srcPixel + comp * 2, 2); return static_cast<double>(v); }
                 case SrcType::UInt32:  { std::uint32_t v; std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v); }
                 case SrcType::SInt32:  { std::int32_t v; std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v); }
+                case SrcType::Packed: {
+                    // All packed formats currently supported here occupy
+                    // 4 bytes (RGB10A2Unorm / RGB10A2Uint / RG11B10F).
+                    // Branch on Metal pixel format to extract.
+                    std::uint32_t word;
+                    std::memcpy(&word, srcPixel, 4);
+                    if (pf == MTLPixelFormatRGB10A2Unorm) {
+                        // Unsigned-normalized: 10+10+10+2 bits.
+                        const std::uint32_t raw =
+                            comp == 3
+                                ? ((word >> 30) & 0x003u)
+                                : ((word >> (comp * 10)) & 0x3FFu);
+                        const std::uint32_t maxv = comp == 3 ? 3u : 1023u;
+                        return static_cast<double>(raw) / static_cast<double>(maxv);
+                    }
+                    if (pf == MTLPixelFormatRGB10A2Uint) {
+                        const std::uint32_t raw =
+                            comp == 3
+                                ? ((word >> 30) & 0x003u)
+                                : ((word >> (comp * 10)) & 0x3FFu);
+                        return static_cast<double>(raw);
+                    }
+                    if (pf == MTLPixelFormatRG11B10Float) {
+                        // R: bits [0..10] (11-bit float, no sign)
+                        // G: bits [11..21]
+                        // B: bits [22..31] (10-bit float, no sign)
+                        auto decode11 = [](std::uint32_t f) -> float {
+                            if (f == 0) return 0.0f;
+                            const std::uint32_t exp = (f >> 6) & 0x1F;
+                            const std::uint32_t mant = f & 0x3F;
+                            if (exp == 0) return std::ldexp(static_cast<float>(mant), -20);
+                            if (exp == 31) return mant ? NAN : INFINITY;
+                            return std::ldexp(static_cast<float>(mant + 64),
+                                              static_cast<int>(exp) - 21);
+                        };
+                        auto decode10 = [](std::uint32_t f) -> float {
+                            if (f == 0) return 0.0f;
+                            const std::uint32_t exp = (f >> 5) & 0x1F;
+                            const std::uint32_t mant = f & 0x1F;
+                            if (exp == 0) return std::ldexp(static_cast<float>(mant), -19);
+                            if (exp == 31) return mant ? NAN : INFINITY;
+                            return std::ldexp(static_cast<float>(mant + 32),
+                                              static_cast<int>(exp) - 20);
+                        };
+                        if (comp == 0) return decode11(word & 0x7FFu);
+                        if (comp == 1) return decode11((word >> 11) & 0x7FFu);
+                        if (comp == 2) return decode10((word >> 22) & 0x3FFu);
+                        return 0.0;
+                    }
+                    return 0.0;
+                }
                 default: return 0.0;
             }
         };
