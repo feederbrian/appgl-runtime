@@ -12347,11 +12347,34 @@ bool GLContext::compileShader(GLuint shader) {
             while (pp < in.size() && isIdent(static_cast<unsigned char>(in[pp]))) ++pp;
             return in.substr(s, pp - s);
         };
+        // GLSL `subroutine` is a keyword only at declaration position.
+        // CTS `CommonBugs.CommonBug_ReservedNames` plants it as a
+        // function-parameter name (`void foo(int subroutine) { ... }`)
+        // and expects the compile to fail. Our rewrite used to strip
+        // `subroutine → next `;`` blindly which deleted the closing
+        // paren, function body, and whatever followed — breaking the
+        // spec-mandated reserved-keyword check. Guard: `subroutine`
+        // only counts as a keyword when the previous non-whitespace
+        // character is a statement boundary (`;`, `{`, `}`, or start-
+        // of-file). In argument lists, after `(`, after `,`, etc., it
+        // is an identifier use that glslang will correctly reject.
+        auto isDeclPos = [&](std::size_t pos) {
+            std::size_t q = pos;
+            while (q > 0) {
+                unsigned char c = static_cast<unsigned char>(in[q - 1]);
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                    --q;
+                } else {
+                    return c == ';' || c == '{' || c == '}';
+                }
+            }
+            return true;  // start of source
+        };
         const std::string kw = "subroutine";
         while ((p = in.find(kw, p)) != std::string::npos) {
             const bool lb = (p == 0) || !isIdent(static_cast<unsigned char>(in[p-1]));
             const bool rb = (p + kw.size() < in.size()) && !isIdent(static_cast<unsigned char>(in[p+kw.size()]));
-            if (!lb || !rb) { p += kw.size(); continue; }
+            if (!lb || !rb || !isDeclPos(p)) { p += kw.size(); continue; }
             std::size_t q = p + kw.size();
             skipWs(q);
             if (q < in.size() && in[q] == '(') {
@@ -12433,7 +12456,7 @@ bool GLContext::compileShader(GLuint shader) {
             if (i + kw.size() <= in.size() && in.compare(i, kw.size(), kw) == 0) {
                 const bool lb = (i == 0) || !isIdent(static_cast<unsigned char>(in[i-1]));
                 const bool rb = (i + kw.size() < in.size()) && !isIdent(static_cast<unsigned char>(in[i+kw.size()]));
-                if (lb && rb) {
+                if (lb && rb && isDeclPos(i)) {
                     std::size_t q = i + kw.size();
                     skipWs(q);
                     if (q < in.size() && in[q] == '(') {
