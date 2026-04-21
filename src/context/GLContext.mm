@@ -23091,6 +23091,99 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         return false;
     }
 
+    // GL 4.6 §18.2.3 / Table 18.4: src and dst internal formats must
+    // be "copy-compatible" — practically this means matching bits-per-
+    // texel for non-compressed formats, and matching block-size for
+    // compressed formats. Without this check,
+    // `glCopyImageSubData(RGBA16UI, RGBA8UI, …)` ran silently; CTS
+    // `copy_image.incompatible_formats` expects INVALID_OPERATION.
+    auto getInternalFormat = [&](GLuint name, bool isTex, GLint level) -> GLenum {
+        if (isTex) {
+            const GLTextureObject* t = impl_->objects->textures().get(name);
+            if (t == nullptr) return 0;
+            auto it = t->levels.find(level);
+            if (it != t->levels.end() && it->second.desc.internalFormat != 0) {
+                return it->second.desc.internalFormat;
+            }
+            return t->desc.internalFormat;
+        }
+        const GLRenderbufferObject* rb = impl_->objects->renderbuffers().get(name);
+        return rb != nullptr ? rb->internalFormat : 0;
+    };
+    // Bits-per-texel for the set of formats covered by GL 4.6 Table
+    // 8.12 / 18.4. Returns 0 for compressed formats (caller uses
+    // block-based comparison) and for unrecognised formats (caller
+    // should let the copy proceed rather than rejecting on unknowns).
+    auto bitsPerTexel = [](GLenum fmt) -> int {
+        switch (fmt) {
+            // 8-bit per channel formats.
+            case GL_R8: case GL_R8I: case GL_R8UI:
+            case GL_R8_SNORM:
+                return 8;
+            case GL_RG8: case GL_RG8I: case GL_RG8UI:
+            case GL_RG8_SNORM:
+                return 16;
+            case GL_RGB8: case GL_RGB8I: case GL_RGB8UI:
+            case GL_RGB8_SNORM: case GL_SRGB8:
+                return 24;
+            case GL_RGBA8: case GL_RGBA8I: case GL_RGBA8UI:
+            case GL_RGBA8_SNORM: case GL_SRGB8_ALPHA8:
+                return 32;
+            // 16-bit per channel formats.
+            case GL_R16: case GL_R16I: case GL_R16UI:
+            case GL_R16_SNORM: case GL_R16F:
+                return 16;
+            case GL_RG16: case GL_RG16I: case GL_RG16UI:
+            case GL_RG16_SNORM: case GL_RG16F:
+                return 32;
+            case GL_RGB16: case GL_RGB16I: case GL_RGB16UI:
+            case GL_RGB16_SNORM: case GL_RGB16F:
+                return 48;
+            case GL_RGBA16: case GL_RGBA16I: case GL_RGBA16UI:
+            case GL_RGBA16_SNORM: case GL_RGBA16F:
+                return 64;
+            // 32-bit per channel formats.
+            case GL_R32I: case GL_R32UI: case GL_R32F:
+                return 32;
+            case GL_RG32I: case GL_RG32UI: case GL_RG32F:
+                return 64;
+            case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F:
+                return 96;
+            case GL_RGBA32I: case GL_RGBA32UI: case GL_RGBA32F:
+                return 128;
+            // Packed formats.
+            case GL_RGB565:           return 16;
+            case GL_RGB5_A1:          return 16;
+            case GL_RGBA4:            return 16;
+            case GL_R3_G3_B2:         return 8;
+            case GL_RGB10:            return 32;  // 32 with padding
+            case GL_RGB10_A2:
+            case GL_RGB10_A2UI:
+            case GL_R11F_G11F_B10F:
+            case GL_RGB9_E5:
+                return 32;
+            // Depth / stencil formats — for completeness, though CTS
+            // copy_image doesn't mix depth with color.
+            case GL_DEPTH_COMPONENT16:  return 16;
+            case GL_DEPTH_COMPONENT24:  return 32;  // padded
+            case GL_DEPTH_COMPONENT32:  return 32;
+            case GL_DEPTH_COMPONENT32F: return 32;
+            case GL_DEPTH24_STENCIL8:   return 32;
+            case GL_DEPTH32F_STENCIL8:  return 64;
+            case GL_STENCIL_INDEX8:     return 8;
+            default:
+                return 0;  // unrecognised / compressed — caller's fallback
+        }
+    };
+    const GLenum srcInternal = getInternalFormat(srcName, srcIsTex, srcLevel);
+    const GLenum dstInternal = getInternalFormat(dstName, dstIsTex, dstLevel);
+    const int srcBits = bitsPerTexel(srcInternal);
+    const int dstBits = bitsPerTexel(dstInternal);
+    if (srcBits > 0 && dstBits > 0 && srcBits != dstBits) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
     // No-op for zero-sized copies.
     if (srcWidth == 0 || srcHeight == 0 || srcDepth == 0) return true;
 
