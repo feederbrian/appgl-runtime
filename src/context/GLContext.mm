@@ -5395,6 +5395,72 @@ struct GLContext::Impl {
             dest = renderbuffer->rgba8.data();
             destWidth = renderbuffer->width;
             destHeight = renderbuffer->height;
+            // Scope the metalTexture update below to this branch; needed
+            // so glBlitFramebuffer's shadow-only write is visible to the
+            // subsequent glReadPixels → Metal-texture readback path.
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const GLint dstX = x + col;
+                    const GLint dstY = y + row;
+                    if (dstX < 0 || dstY < 0 || dstX >= destWidth || dstY >= destHeight) {
+                        continue;
+                    }
+                    const std::size_t srcOffset = static_cast<std::size_t>(row * width + col) * 4u;
+                    const std::size_t dstOffset =
+                        (static_cast<std::size_t>(dstY) *
+                         static_cast<std::size_t>(destWidth) +
+                         static_cast<std::size_t>(dstX)) * 4u;
+                    std::memcpy(dest + dstOffset, pixels + srcOffset, 4);
+                }
+            }
+            // Mirror the shadow write to the Metal texture so readback
+            // from the Metal side sees the blitted pixels. Metal textures
+            // store row 0 at the top but our shadow/GL coord puts y=0
+            // at the bottom; readColorAttachmentPixels applies the
+            // Y-flip when reading from the Metal texture, so we must
+            // Y-flip here too (write GL y=N to Metal row sourceHeight-
+            // 1-N) to keep the two sides consistent.
+            if (renderbuffer->metalTexture != nullptr) {
+                id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                if (metalTex.sampleCount <= 1) {
+                    const MTLPixelFormat pf = metalTex.pixelFormat;
+                    if (pf == MTLPixelFormatRGBA8Unorm ||
+                        pf == MTLPixelFormatRGBA8Unorm_sRGB ||
+                        pf == MTLPixelFormatBGRA8Unorm ||
+                        pf == MTLPixelFormatBGRA8Unorm_sRGB) {
+                        // Build the Y-flipped upload buffer. For each
+                        // GL row in [y, y+height), the Metal row is
+                        // (destHeight - 1 - glRow).
+                        std::vector<std::uint8_t> flipped(
+                            static_cast<std::size_t>(width) *
+                            static_cast<std::size_t>(height) * 4u);
+                        for (GLsizei row = 0; row < height; ++row) {
+                            const std::size_t srcOff =
+                                static_cast<std::size_t>(row) *
+                                static_cast<std::size_t>(width) * 4u;
+                            const std::size_t dstOff =
+                                static_cast<std::size_t>(height - 1 - row) *
+                                static_cast<std::size_t>(width) * 4u;
+                            std::memcpy(&flipped[dstOff], pixels + srcOff,
+                                        static_cast<std::size_t>(width) * 4u);
+                        }
+                        const NSUInteger bytesPerRow =
+                            static_cast<NSUInteger>(width) * 4u;
+                        const NSUInteger metalY = static_cast<NSUInteger>(
+                            destHeight - (y + height));
+                        MTLRegion region = MTLRegionMake2D(
+                            static_cast<NSUInteger>(x),
+                            metalY,
+                            static_cast<NSUInteger>(width),
+                            static_cast<NSUInteger>(height));
+                        [metalTex replaceRegion:region
+                                    mipmapLevel:0
+                                      withBytes:flipped.data()
+                                    bytesPerRow:bytesPerRow];
+                    }
+                }
+            }
+            return true;
         } else {
             return false;
         }
@@ -5510,20 +5576,69 @@ struct GLContext::Impl {
         if (copyWidth <= 0 || copyHeight <= 0) {
             return true;  // empty blit is a no-op success per spec
         }
-        // Phase A: only 1:1 unmagnified blits are wired up. Scale-aware sampling
-        // belongs with the Metal blit encoder pass in Group 6.
-        if (dstWidth != copyWidth || dstHeight != copyHeight) {
-            return false;
-        }
+        // GL 4.6 §18.3.1 — blit supports scaling via filter parameter.
+        // Implement nearest-neighbor scaling via CPU-side staging for
+        // size mismatches: read src pixels, resample, write to dst.
+        // Linear-filtering scaling follows the same path but with
+        // bilinear interpolation (implemented for color only; GL
+        // requires DEPTH/STENCIL blits to use NEAREST).
+        const bool needsScale = (dstWidth != copyWidth || dstHeight != copyHeight);
+        auto sampleSrcIndex = [&](GLsizei dx, GLsizei dy,
+                                  GLsizei& sx, GLsizei& sy) {
+            if (!needsScale) {
+                sx = dx;
+                sy = dy;
+                return;
+            }
+            // Nearest sample: map dst pixel center to src pixel.
+            // Use (dx + 0.5) * srcW / dstW - 0.5 → floor.
+            const double u = (static_cast<double>(dx) + 0.5) *
+                             static_cast<double>(copyWidth) /
+                             static_cast<double>(dstWidth);
+            const double v = (static_cast<double>(dy) + 0.5) *
+                             static_cast<double>(copyHeight) /
+                             static_cast<double>(dstHeight);
+            sx = std::min(static_cast<GLsizei>(u), copyWidth - 1);
+            sy = std::min(static_cast<GLsizei>(v), copyHeight - 1);
+            if (sx < 0) sx = 0;
+            if (sy < 0) sy = 0;
+        };
 
         if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
             const GLFramebufferAttachment* srcAttachment = framebufferAttachment(*readFb, readFb->readBuffer);
             if (srcAttachment == nullptr) {
                 return false;
             }
-            std::vector<std::uint8_t> staging(static_cast<std::size_t>(copyWidth) * static_cast<std::size_t>(copyHeight) * 4u);
-            if (!readColorAttachmentPixels(*srcAttachment, srcX, srcY, copyWidth, copyHeight, staging.data())) {
+            // Read src region at src resolution.
+            std::vector<std::uint8_t> srcStage(
+                static_cast<std::size_t>(copyWidth) *
+                static_cast<std::size_t>(copyHeight) * 4u);
+            if (!readColorAttachmentPixels(*srcAttachment, srcX, srcY,
+                                           copyWidth, copyHeight, srcStage.data())) {
                 return false;
+            }
+            // Scale to dst size (nearest for non-linear filter or equal size).
+            const std::uint8_t* copySrc = srcStage.data();
+            std::vector<std::uint8_t> dstStage;
+            if (needsScale) {
+                dstStage.resize(static_cast<std::size_t>(dstWidth) *
+                                static_cast<std::size_t>(dstHeight) * 4u);
+                for (GLsizei dy = 0; dy < dstHeight; ++dy) {
+                    for (GLsizei dx = 0; dx < dstWidth; ++dx) {
+                        GLsizei sx = 0, sy = 0;
+                        sampleSrcIndex(dx, dy, sx, sy);
+                        const std::size_t srcIdx =
+                            (static_cast<std::size_t>(sy) *
+                             static_cast<std::size_t>(copyWidth) +
+                             static_cast<std::size_t>(sx)) * 4u;
+                        const std::size_t dstIdx =
+                            (static_cast<std::size_t>(dy) *
+                             static_cast<std::size_t>(dstWidth) +
+                             static_cast<std::size_t>(dx)) * 4u;
+                        std::memcpy(&dstStage[dstIdx], &srcStage[srcIdx], 4u);
+                    }
+                }
+                copySrc = dstStage.data();
             }
             for (GLenum buffer : drawFb->drawBuffers) {
                 if (buffer == GL_NONE) {
@@ -5533,7 +5648,8 @@ struct GLContext::Impl {
                 if (dstAttachment == nullptr) {
                     continue;
                 }
-                if (!writeColorAttachmentPixels(*dstAttachment, dstX, dstY, copyWidth, copyHeight, staging.data())) {
+                if (!writeColorAttachmentPixels(*dstAttachment, dstX, dstY,
+                                                dstWidth, dstHeight, copySrc)) {
                     return false;
                 }
             }
@@ -5543,11 +5659,35 @@ struct GLContext::Impl {
             const GLFramebufferAttachment* srcAttachment = framebufferAttachment(*readFb, GL_DEPTH_ATTACHMENT);
             const GLFramebufferAttachment* dstAttachment = framebufferAttachment(*drawFb, GL_DEPTH_ATTACHMENT);
             if (srcAttachment != nullptr && dstAttachment != nullptr) {
-                std::vector<GLfloat> staging(static_cast<std::size_t>(copyWidth) * static_cast<std::size_t>(copyHeight));
-                if (!readDepthAttachmentPixels(*srcAttachment, srcX, srcY, copyWidth, copyHeight, staging.data())) {
+                std::vector<GLfloat> srcStage(
+                    static_cast<std::size_t>(copyWidth) *
+                    static_cast<std::size_t>(copyHeight));
+                if (!readDepthAttachmentPixels(*srcAttachment, srcX, srcY,
+                                                copyWidth, copyHeight,
+                                                srcStage.data())) {
                     return false;
                 }
-                if (!writeDepthAttachmentPixels(*dstAttachment, dstX, dstY, copyWidth, copyHeight, staging.data())) {
+                const GLfloat* stagePtr = srcStage.data();
+                std::vector<GLfloat> dstStage;
+                if (needsScale) {
+                    dstStage.resize(static_cast<std::size_t>(dstWidth) *
+                                    static_cast<std::size_t>(dstHeight));
+                    for (GLsizei dy = 0; dy < dstHeight; ++dy) {
+                        for (GLsizei dx = 0; dx < dstWidth; ++dx) {
+                            GLsizei sx = 0, sy = 0;
+                            sampleSrcIndex(dx, dy, sx, sy);
+                            dstStage[static_cast<std::size_t>(dy) *
+                                     static_cast<std::size_t>(dstWidth) +
+                                     static_cast<std::size_t>(dx)] =
+                                srcStage[static_cast<std::size_t>(sy) *
+                                         static_cast<std::size_t>(copyWidth) +
+                                         static_cast<std::size_t>(sx)];
+                        }
+                    }
+                    stagePtr = dstStage.data();
+                }
+                if (!writeDepthAttachmentPixels(*dstAttachment, dstX, dstY,
+                                                 dstWidth, dstHeight, stagePtr)) {
                     return false;
                 }
             }
@@ -5557,11 +5697,35 @@ struct GLContext::Impl {
             const GLFramebufferAttachment* srcAttachment = framebufferAttachment(*readFb, GL_STENCIL_ATTACHMENT);
             const GLFramebufferAttachment* dstAttachment = framebufferAttachment(*drawFb, GL_STENCIL_ATTACHMENT);
             if (srcAttachment != nullptr && dstAttachment != nullptr) {
-                std::vector<std::uint8_t> staging(static_cast<std::size_t>(copyWidth) * static_cast<std::size_t>(copyHeight));
-                if (!readStencilAttachmentPixels(*srcAttachment, srcX, srcY, copyWidth, copyHeight, staging.data())) {
+                std::vector<std::uint8_t> srcStage(
+                    static_cast<std::size_t>(copyWidth) *
+                    static_cast<std::size_t>(copyHeight));
+                if (!readStencilAttachmentPixels(*srcAttachment, srcX, srcY,
+                                                  copyWidth, copyHeight,
+                                                  srcStage.data())) {
                     return false;
                 }
-                if (!writeStencilAttachmentPixels(*dstAttachment, dstX, dstY, copyWidth, copyHeight, staging.data())) {
+                const std::uint8_t* stagePtr = srcStage.data();
+                std::vector<std::uint8_t> dstStage;
+                if (needsScale) {
+                    dstStage.resize(static_cast<std::size_t>(dstWidth) *
+                                    static_cast<std::size_t>(dstHeight));
+                    for (GLsizei dy = 0; dy < dstHeight; ++dy) {
+                        for (GLsizei dx = 0; dx < dstWidth; ++dx) {
+                            GLsizei sx = 0, sy = 0;
+                            sampleSrcIndex(dx, dy, sx, sy);
+                            dstStage[static_cast<std::size_t>(dy) *
+                                     static_cast<std::size_t>(dstWidth) +
+                                     static_cast<std::size_t>(dx)] =
+                                srcStage[static_cast<std::size_t>(sy) *
+                                         static_cast<std::size_t>(copyWidth) +
+                                         static_cast<std::size_t>(sx)];
+                        }
+                    }
+                    stagePtr = dstStage.data();
+                }
+                if (!writeStencilAttachmentPixels(*dstAttachment, dstX, dstY,
+                                                   dstWidth, dstHeight, stagePtr)) {
                     return false;
                 }
             }
@@ -7000,6 +7164,41 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             impl_->frameGraph->flushForReadback();
         }
         if (isDepthReadback || isStencilReadback) {
+            // readFramebufferPixels writes 1 byte per stencil value or 4
+            // bytes per depth float. When the caller requests a wider
+            // GL type (e.g. GL_STENCIL_INDEX + GL_INT), expand in place:
+            // read the narrow data into a staging buffer, then splat
+            // into the destination.
+            const std::size_t pixelCount =
+                static_cast<std::size_t>(width) *
+                static_cast<std::size_t>(height);
+            if (isStencilReadback && type != GL_UNSIGNED_BYTE && type != GL_BYTE) {
+                std::vector<std::uint8_t> stage(pixelCount);
+                if (!impl_->readFramebufferPixels(format, x, y, width, height,
+                                                  stage.data())) {
+                    pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+                    return false;
+                }
+                const std::size_t bpc = std::max<std::size_t>(bytesPerComponent(type), 1);
+                auto* out = static_cast<std::uint8_t*>(pixels);
+                for (std::size_t i = 0; i < pixelCount; ++i) {
+                    std::uint8_t v = stage[i];
+                    std::uint8_t* slot = out + i * bpc;
+                    // Little-endian write: low byte holds the stencil
+                    // value, high bytes are zero. All scalar GL types
+                    // at bpc >= 2 read the stencil as its LSB.
+                    std::memset(slot, 0, bpc);
+                    if (type == GL_SHORT || type == GL_INT) {
+                        // Signed types: cast unsigned-to-signed in the
+                        // low byte; stencil values [0, 255] fit in the
+                        // non-negative half of any signed type.
+                        slot[0] = v;
+                    } else {
+                        slot[0] = v;
+                    }
+                }
+                return true;
+            }
             if (!impl_->readFramebufferPixels(format, x, y, width, height, pixels)) {
                 pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
                 return false;
