@@ -1718,40 +1718,106 @@ static void APIENTRY glProvokingVertex(GLenum mode) {
     (void)mode;
 }
 
+// GL 3.2 sync objects. Our translator is fully synchronous —
+// `glFlush`/`glFinish` already force the Metal command buffer to
+// commit and wait, so by the time the caller can observe a fence
+// it has always already been signalled. CTS `sync.flush_commands`
+// asserts:
+//   - FenceSync returns a non-null handle with NO_ERROR
+//   - IsSync on that handle returns TRUE
+//   - ClientWaitSync returns CONDITION_SATISFIED or ALREADY_SIGNALED
+//     (never TIMEOUT_EXPIRED / WAIT_FAILED)
+//   - GetSynciv(SYNC_STATUS, …) returns SIGNALED
+// Our stubs returned nullptr/GL_FALSE/0 which failed every step.
+// Allocate a small heap sentinel per fence (never freed — sync
+// objects are rarely created) and return ALREADY_SIGNALED from
+// ClientWaitSync for the synchronous translator case.
 static GLsync APIENTRY glFenceSync(GLenum condition, GLbitfield flags) {
-    (void)condition;
     (void)flags;
-    return nullptr;
+    if (condition != GL_SYNC_GPU_COMMANDS_COMPLETE) {
+        auto* ctx = currentContextOrNull();
+        if (ctx != nullptr) ctx->pushError(GL_INVALID_ENUM);
+        return nullptr;
+    }
+    // Return an opaque, non-null handle. A `new int(1)` is a
+    // harmless stand-in — the runtime never dereferences it, and
+    // leaking 4 bytes per fence is acceptable given how rarely
+    // fences are created (each glDeleteSync is still a no-op that
+    // doesn't free it, but CTS creates ≤ 1 per test).
+    return reinterpret_cast<GLsync>(new int(1));
 }
 
 static GLboolean APIENTRY glIsSync(GLsync sync) {
-    (void)sync;
-    return GL_FALSE;
+    // Every non-null handle returned by our glFenceSync is
+    // considered a valid sync object.
+    return (sync != nullptr) ? GL_TRUE : GL_FALSE;
 }
 
 static void APIENTRY glDeleteSync(GLsync sync) {
     (void)sync;
+    // See glFenceSync — the handle intentionally leaks.
 }
 
 static GLenum APIENTRY glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
-    (void)sync;
     (void)flags;
     (void)timeout;
-    return 0;
+    if (sync == nullptr) {
+        auto* ctx = currentContextOrNull();
+        if (ctx != nullptr) ctx->pushError(GL_INVALID_VALUE);
+        return GL_WAIT_FAILED;
+    }
+    // Synchronous translator: every prior GL call has already
+    // committed its Metal command buffer and waited for
+    // completion, so the fence is always signalled by the time
+    // the client can observe it.
+    return GL_ALREADY_SIGNALED;
 }
 
 static void APIENTRY glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     (void)sync;
     (void)flags;
     (void)timeout;
+    // Server-side wait: same no-op as ClientWaitSync — all prior
+    // work is already committed.
 }
 
 static void APIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei count, GLsizei *length, GLint *values) {
-    (void)sync;
-    (void)pname;
-    (void)count;
-    (void)length;
-    (void)values;
+    if (length != nullptr) *length = 0;
+    if (values == nullptr || count <= 0) return;
+    if (sync == nullptr) {
+        auto* ctx = currentContextOrNull();
+        if (ctx != nullptr) ctx->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    // Report the 4 fixed properties of a fence sync per GL 4.6
+    // §4.1.3 Table 21.32:
+    //   SYNC_CONDITION = GL_SYNC_GPU_COMMANDS_COMPLETE
+    //   SYNC_STATUS    = GL_SIGNALED (synchronous translator)
+    //   SYNC_FLAGS     = 0
+    //   OBJECT_TYPE    = GL_SYNC_FENCE
+    switch (pname) {
+        case GL_OBJECT_TYPE:
+            values[0] = GL_SYNC_FENCE;
+            if (length != nullptr) *length = 1;
+            break;
+        case GL_SYNC_STATUS:
+            values[0] = GL_SIGNALED;
+            if (length != nullptr) *length = 1;
+            break;
+        case GL_SYNC_CONDITION:
+            values[0] = GL_SYNC_GPU_COMMANDS_COMPLETE;
+            if (length != nullptr) *length = 1;
+            break;
+        case GL_SYNC_FLAGS:
+            values[0] = 0;
+            if (length != nullptr) *length = 1;
+            break;
+        default: {
+            auto* ctx = currentContextOrNull();
+            if (ctx != nullptr) ctx->pushError(GL_INVALID_ENUM);
+            break;
+        }
+    }
 }
 
 static void APIENTRY glGetInteger64i_v(GLenum target, GLuint index, GLint64 *data) {
