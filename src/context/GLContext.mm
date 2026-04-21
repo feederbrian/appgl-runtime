@@ -19532,6 +19532,24 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §11.3.1: draw-mode / GS-input-topology compat applies
+    // to EVERY draw entry that targets a GS-linked program, not just
+    // glDrawArrays. CTS `draw_indirect.negative-gshIncompatible-arrays`
+    // calls `glDrawArraysIndirect(GL_POINTS, 0)` on a program with a
+    // `layout(triangles) in` GS and expects INVALID_OPERATION. The
+    // indirect path decomposes to drawArraysInstancedBaseInstance →
+    // this function, so the gate lives here.
+    {
+        const GLuint progName = impl_->state->currentProgram();
+        const GLProgramObject* p = progName != 0
+            ? impl_->objects->programs().get(progName)
+            : nullptr;
+        if (p != nullptr && p->gsPresent &&
+            !isDrawModeCompatibleWithGs(mode, p->gsInputTopology)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
     if (impl_->frameGraph == nullptr) {
         return false;
     }
@@ -20534,6 +20552,21 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     if (!impl_->state->validateForDraw()) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    // GL 4.6 §11.3.1: draw-mode / GS-input-topology compat. See
+    // drawArraysInstanced for the rationale — the drawElements
+    // indirect path lands here so the gate must live at this level
+    // to catch `draw_indirect.negative-gshIncompatible-elements`.
+    {
+        const GLuint progName = impl_->state->currentProgram();
+        const GLProgramObject* p = progName != 0
+            ? impl_->objects->programs().get(progName)
+            : nullptr;
+        if (p != nullptr && p->gsPresent &&
+            !isDrawModeCompatibleWithGs(mode, p->gsInputTopology)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
 
     if (impl_->frameGraph == nullptr) {
