@@ -22621,6 +22621,13 @@ GLint GLContext::getProgramResourceLocationIndex(GLuint program, GLenum programI
 // ---------------------------------------------------------------------------
 
 bool GLContext::shaderStorageBlockBinding(GLuint program, GLuint storageBlockIndex, GLuint storageBlockBinding) {
+    // GL 4.3 §7.6.1: INVALID_OPERATION when `program` names a
+    // shader (not a program). Must run before the programs().get()
+    // null-fallback or we'd return INVALID_VALUE instead.
+    if (impl_->objects->shaders().get(program) != nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     GLProgramObject* prog = impl_->objects->programs().get(program);
     if (prog == nullptr || !prog->linked) {
         pushError(GL_INVALID_VALUE);
@@ -22629,6 +22636,20 @@ bool GLContext::shaderStorageBlockBinding(GLuint program, GLuint storageBlockInd
     if (storageBlockIndex >= prog->resourceStorageBlocks.size()) {
         pushError(GL_INVALID_VALUE);
         return false;
+    }
+    // GL 4.3 §7.6.1: storageBlockBinding must be less than
+    // GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS. CTS
+    // `shader_storage_buffer_object.negative-api-blockBinding`
+    // plants `binding = MAX_BINDINGS` and expects INVALID_VALUE.
+    {
+        GLint maxBindings = 8;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &maxBindings);
+        }
+        if (storageBlockBinding >= static_cast<GLuint>(maxBindings)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
     }
     prog->ssboBindingRemap[storageBlockIndex] = storageBlockBinding;
     // Also update the resource entry's location field so queries reflect the remap.
