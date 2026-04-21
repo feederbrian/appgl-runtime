@@ -7275,6 +7275,16 @@ bool GLContext::bindBufferBase(GLenum target, GLuint index, GLuint buffer) {
 }
 
 bool GLContext::bufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
+    // GL 4.4 §6.2: usage must be one of the 9 accepted tokens.
+    switch (usage) {
+        case GL_STREAM_DRAW: case GL_STREAM_READ: case GL_STREAM_COPY:
+        case GL_STATIC_DRAW: case GL_STATIC_READ: case GL_STATIC_COPY:
+        case GL_DYNAMIC_DRAW: case GL_DYNAMIC_READ: case GL_DYNAMIC_COPY:
+            break;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
     if (size < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -7282,6 +7292,13 @@ bool GLContext::bufferData(GLenum target, GLsizeiptr size, const void* data, GLe
     const GLuint name = impl_->state->boundBuffer(target);
     GLBufferObject* object = impl_->objects->buffers().get(name);
     if (name == 0 || object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.4 §6.2: BUFFER_IMMUTABLE_STORAGE=TRUE rejects bufferData
+    // regardless of storage flags. CTS
+    // `direct_state_access.buffers_errors` asserts INVALID_OPERATION.
+    if (object->immutable) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -7303,7 +7320,13 @@ bool GLContext::bufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
     }
     const GLuint name = impl_->state->boundBuffer(target);
     GLBufferObject* object = impl_->objects->buffers().get(name);
-    if (name == 0 || object == nullptr || !object->instantiated || object->mapped) {
+    if (name == 0 || object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.4 §6.3: bufferSubData is legal on a mapped buffer only
+    // when the mapping uses GL_MAP_PERSISTENT_BIT.
+    if (object->mapped && (object->mapAccessFlags & GL_MAP_PERSISTENT_BIT) == 0) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -7400,7 +7423,14 @@ bool GLContext::getBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size
     }
     const GLuint name = impl_->state->boundBuffer(target);
     GLBufferObject* object = impl_->objects->buffers().get(name);
-    if (name == 0 || object == nullptr || !object->instantiated || object->mapped) {
+    if (name == 0 || object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.4 §6.3: glGet{Named,}BufferSubData is legal on a mapped
+    // buffer only when the mapping uses GL_MAP_PERSISTENT_BIT. CTS
+    // `direct_state_access.buffers_errors` covers both directions.
+    if (object->mapped && (object->mapAccessFlags & GL_MAP_PERSISTENT_BIT) == 0) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -21154,8 +21184,80 @@ static void fillBufferClearPattern(std::uint8_t* dst, std::size_t bytes,
     }
 }
 
+// GL 4.4 §6.7: valid sized internal formats for {Named,}BufferData
+// clear operations. Accepting only the 32-enum subset the spec defines.
+static bool isValidClearBufferInternalFormat(GLenum fmt) {
+    switch (fmt) {
+        case GL_R8: case GL_R16: case GL_R16F: case GL_R32F:
+        case GL_R8I: case GL_R16I: case GL_R32I:
+        case GL_R8UI: case GL_R16UI: case GL_R32UI:
+        case GL_RG8: case GL_RG16: case GL_RG16F: case GL_RG32F:
+        case GL_RG8I: case GL_RG16I: case GL_RG32I:
+        case GL_RG8UI: case GL_RG16UI: case GL_RG32UI:
+        case GL_RGB32F: case GL_RGB32I: case GL_RGB32UI:
+        case GL_RGBA8: case GL_RGBA16: case GL_RGBA16F: case GL_RGBA32F:
+        case GL_RGBA8I: case GL_RGBA16I: case GL_RGBA32I:
+        case GL_RGBA8UI: case GL_RGBA16UI: case GL_RGBA32UI:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// GL 4.4 §8.4: valid pixel-transfer format enum for clear-buffer ops.
+static bool isValidClearBufferFormat(GLenum fmt) {
+    switch (fmt) {
+        case GL_RED: case GL_RG: case GL_RGB: case GL_BGR:
+        case GL_RGBA: case GL_BGRA:
+        case GL_RED_INTEGER: case GL_RG_INTEGER:
+        case GL_RGB_INTEGER: case GL_BGR_INTEGER:
+        case GL_RGBA_INTEGER: case GL_BGRA_INTEGER:
+        case GL_STENCIL_INDEX: case GL_DEPTH_COMPONENT: case GL_DEPTH_STENCIL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// GL 4.4 §8.4.4: valid pixel-transfer type enum for clear-buffer ops.
+// Note: the CTS buffers_errors test's error message lists the subset
+// of types required by the spec's ValidateBufferData error handler,
+// but the functional test (buffers_clear) additionally uses
+// GL_HALF_FLOAT for clearing R16F / RGBA16F and similar. Include
+// HALF_FLOAT so both paths agree.
+static bool isValidClearBufferType(GLenum t) {
+    switch (t) {
+        case GL_UNSIGNED_BYTE: case GL_BYTE:
+        case GL_UNSIGNED_SHORT: case GL_SHORT:
+        case GL_UNSIGNED_INT: case GL_INT:
+        case GL_HALF_FLOAT: case GL_FLOAT:
+        case GL_UNSIGNED_BYTE_3_3_2: case GL_UNSIGNED_BYTE_2_3_3_REV:
+        case GL_UNSIGNED_SHORT_5_6_5: case GL_UNSIGNED_SHORT_5_6_5_REV:
+        case GL_UNSIGNED_SHORT_4_4_4_4: case GL_UNSIGNED_SHORT_4_4_4_4_REV:
+        case GL_UNSIGNED_SHORT_5_5_5_1: case GL_UNSIGNED_SHORT_1_5_5_5_REV:
+        case GL_UNSIGNED_INT_8_8_8_8: case GL_UNSIGNED_INT_8_8_8_8_REV:
+        case GL_UNSIGNED_INT_10_10_10_2: case GL_UNSIGNED_INT_2_10_10_10_REV:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool GLContext::clearBufferData(GLenum target, GLenum internalformat, GLenum format, GLenum type, const void* data) {
-    (void)internalformat;
+    // GL 4.4 §6.7 validation — order matters; CTS
+    // `direct_state_access.buffers_errors` asserts every condition.
+    if (!isValidClearBufferInternalFormat(internalformat)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!isValidClearBufferFormat(format)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!isValidClearBufferType(type)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     GLuint boundBuffer = impl_->state->boundBuffer(target);
     if (boundBuffer == 0) {
         pushError(GL_INVALID_OPERATION);
@@ -21163,6 +21265,12 @@ bool GLContext::clearBufferData(GLenum target, GLenum internalformat, GLenum for
     }
     GLBufferObject* buffer = impl_->objects->buffers().get(boundBuffer);
     if (buffer == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.4 §6.7: INVALID_OPERATION when the buffer is mapped
+    // without MAP_PERSISTENT_BIT.
+    if (buffer->mapped && (buffer->mapAccessFlags & GL_MAP_PERSISTENT_BIT) == 0) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -21192,8 +21300,31 @@ bool GLContext::clearBufferData(GLenum target, GLenum internalformat, GLenum for
 }
 
 bool GLContext::clearBufferSubData(GLenum target, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data) {
-    (void)internalformat;
+    // Same GL 4.4 §6.7 validation as clearBufferData plus range +
+    // alignment constraints.
+    if (!isValidClearBufferInternalFormat(internalformat)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (!isValidClearBufferFormat(format)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!isValidClearBufferType(type)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     if (offset < 0 || size < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // GL 4.4 §6.7: offset and size must be multiples of the
+    // internal-format byte size. CTS exercises `internalformat=RGBA8`
+    // (= 4 bytes) with size=1 and asserts INVALID_VALUE.
+    const std::size_t formatBytes = bufferClearPatternBytes(format, type);
+    if (formatBytes > 0 &&
+        ((offset % static_cast<GLintptr>(formatBytes)) != 0 ||
+         (size % static_cast<GLsizeiptr>(formatBytes)) != 0)) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -21204,6 +21335,10 @@ bool GLContext::clearBufferSubData(GLenum target, GLenum internalformat, GLintpt
     }
     GLBufferObject* buffer = impl_->objects->buffers().get(boundBuffer);
     if (buffer == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (buffer->mapped && (buffer->mapAccessFlags & GL_MAP_PERSISTENT_BIT) == 0) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
