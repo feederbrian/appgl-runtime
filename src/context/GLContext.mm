@@ -23099,8 +23099,31 @@ bool GLContext::textureParameterIuiv(GLuint texture, GLenum pname, const GLuint*
     })
 }
 
+// GL 4.6 §8.11: glGetTextureParameter* is defined for all texture
+// targets EXCEPT GL_TEXTURE_BUFFER. For a DSA call whose texture's
+// effective target is TEXTURE_BUFFER, spec says INVALID_OPERATION
+// (not INVALID_ENUM). CTS
+// `direct_state_access.textures_parameter_errors` asserts this.
+static bool isParameterQueryableTarget(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_1D: case GL_TEXTURE_2D: case GL_TEXTURE_3D:
+        case GL_TEXTURE_1D_ARRAY: case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_CUBE_MAP: case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool GLContext::getTextureParameterfv(GLuint texture, GLenum pname, GLfloat* params) {
     DSA_TEX_WRAP(texture, {
+        if (!isParameterQueryableTarget(_target)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = getTexParameterFloat(_target, pname, params);
         return ok;
     })
@@ -23108,6 +23131,10 @@ bool GLContext::getTextureParameterfv(GLuint texture, GLenum pname, GLfloat* par
 
 bool GLContext::getTextureParameteriv(GLuint texture, GLenum pname, GLint* params) {
     DSA_TEX_WRAP(texture, {
+        if (!isParameterQueryableTarget(_target)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = getTexParameterInteger(_target, pname, params);
         return ok;
     })
@@ -23115,6 +23142,10 @@ bool GLContext::getTextureParameteriv(GLuint texture, GLenum pname, GLint* param
 
 bool GLContext::getTextureParameterIiv(GLuint texture, GLenum pname, GLint* params) {
     DSA_TEX_WRAP(texture, {
+        if (!isParameterQueryableTarget(_target)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = getTexParameterInteger(_target, pname, params);
         return ok;
     })
@@ -23122,6 +23153,10 @@ bool GLContext::getTextureParameterIiv(GLuint texture, GLenum pname, GLint* para
 
 bool GLContext::getTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* params) {
     DSA_TEX_WRAP(texture, {
+        if (!isParameterQueryableTarget(_target)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = getTexParameterUnsignedInteger(_target, pname, params);
         return ok;
     })
