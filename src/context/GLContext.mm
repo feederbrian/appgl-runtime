@@ -13342,6 +13342,140 @@ bool GLContext::linkProgram(GLuint program) {
         outputTypeMap["gl_PointSize"]    = OutputInfo{GL_FLOAT, 1, false};
         outputTypeMap["gl_ClipDistance"] = OutputInfo{GL_FLOAT, 1, false};
 
+        // GL 4.6 §11.1.2.1 — TFB varyings inside named interface blocks
+        // are referenced as either `BlockType.member` or
+        // `instance.member`. Our GLSL scanner can't see block members
+        // (braceDepth > 0 skips them to avoid parsing function bodies),
+        // so do a focused source-text scan here to build synthetic
+        // outputTypeMap entries. CTS `vertex_attrib_binding.basic-
+        // input*` uses `"StageData.attrib[0]"` through `"StageData.
+        // attrib[15]"` — without this, glTransformFeedbackVaryings
+        // rejects the program at link time.
+        {
+            const std::string& src = xfbStage->source;
+            const std::string outKw = "out ";
+            std::size_t scanPos = 0;
+            while ((scanPos = src.find(outKw, scanPos)) != std::string::npos) {
+                const bool leftBoundary = (scanPos == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(src[scanPos - 1])) ||
+                      src[scanPos - 1] == '_');
+                if (!leftBoundary) { scanPos += outKw.size(); continue; }
+                std::size_t p = scanPos + outKw.size();
+                while (p < src.size() && (src[p] == ' ' || src[p] == '\t')) { ++p; }
+                const std::size_t nameStart = p;
+                while (p < src.size() &&
+                       (std::isalnum(static_cast<unsigned char>(src[p])) || src[p] == '_')) { ++p; }
+                const std::string blockName(src, nameStart, p - nameStart);
+                if (blockName.empty() || blockName == "gl_PerVertex") {
+                    scanPos += outKw.size();
+                    continue;
+                }
+                while (p < src.size() &&
+                       (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' || src[p] == '\r')) { ++p; }
+                if (p >= src.size() || src[p] != '{') {
+                    scanPos += outKw.size();
+                    continue;
+                }
+                const std::size_t bodyStart = p + 1;
+                int depth = 1;
+                ++p;
+                while (p < src.size() && depth > 0) {
+                    if (src[p] == '{') ++depth;
+                    else if (src[p] == '}') --depth;
+                    ++p;
+                }
+                if (depth != 0) { scanPos += outKw.size(); continue; }
+                std::string body(src, bodyStart, p - 1 - bodyStart);
+                // Split body on `;`, parse each member.
+                std::size_t bp = 0;
+                while (bp < body.size()) {
+                    auto semi = body.find(';', bp);
+                    if (semi == std::string::npos) break;
+                    std::string member = body.substr(bp, semi - bp);
+                    bp = semi + 1;
+                    // Strip whitespace + precision/interpolation quals.
+                    auto isWS = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+                    std::size_t mp = 0;
+                    while (mp < member.size() && isWS(member[mp])) ++mp;
+                    member = member.substr(mp);
+                    // Tokenize. Format: [quals...] type name[,name...];
+                    std::vector<std::string> toks;
+                    std::string cur;
+                    for (char c : member) {
+                        if (isWS(c) || c == ',' || c == '[' || c == ']') {
+                            if (!cur.empty()) { toks.push_back(cur); cur.clear(); }
+                            if (c == ',' || c == '[' || c == ']') toks.emplace_back(1, c);
+                        } else {
+                            cur.push_back(c);
+                        }
+                    }
+                    if (!cur.empty()) toks.push_back(cur);
+                    // Drop quals until we hit a known type. Only the
+                    // types that show up as XFB-capture interface-block
+                    // members in CTS need to be recognised here;
+                    // anything else stays out of outputTypeMap and the
+                    // link-time check falls back to the spec-correct
+                    // "not found" path. Keep in sync with the larger
+                    // typeTable() in GLSLReflection.cpp.
+                    auto typeFromKeyword = [](const std::string& k) -> GLenum {
+                        if (k == "float") return GL_FLOAT;
+                        if (k == "vec2")  return GL_FLOAT_VEC2;
+                        if (k == "vec3")  return GL_FLOAT_VEC3;
+                        if (k == "vec4")  return GL_FLOAT_VEC4;
+                        if (k == "int")   return GL_INT;
+                        if (k == "ivec2") return GL_INT_VEC2;
+                        if (k == "ivec3") return GL_INT_VEC3;
+                        if (k == "ivec4") return GL_INT_VEC4;
+                        if (k == "uint")  return GL_UNSIGNED_INT;
+                        if (k == "uvec2") return GL_UNSIGNED_INT_VEC2;
+                        if (k == "uvec3") return GL_UNSIGNED_INT_VEC3;
+                        if (k == "uvec4") return GL_UNSIGNED_INT_VEC4;
+                        if (k == "double") return GL_DOUBLE;
+                        if (k == "dvec2") return GL_DOUBLE_VEC2;
+                        if (k == "dvec3") return GL_DOUBLE_VEC3;
+                        if (k == "dvec4") return GL_DOUBLE_VEC4;
+                        if (k == "mat2")  return GL_FLOAT_MAT2;
+                        if (k == "mat3")  return GL_FLOAT_MAT3;
+                        if (k == "mat4")  return GL_FLOAT_MAT4;
+                        return 0;
+                    };
+                    std::size_t ti = 0;
+                    GLenum memberType = 0;
+                    while (ti < toks.size()) {
+                        GLenum t = typeFromKeyword(toks[ti]);
+                        if (t != 0) { memberType = t; ++ti; break; }
+                        ++ti;
+                    }
+                    if (memberType == 0) continue;
+                    // Names: collect identifiers (with optional [N]).
+                    while (ti < toks.size()) {
+                        if (!std::isalpha(static_cast<unsigned char>(toks[ti][0])) &&
+                            toks[ti][0] != '_') { ++ti; continue; }
+                        std::string name = toks[ti++];
+                        GLint arraySize = 1;
+                        bool isArray = false;
+                        if (ti < toks.size() && toks[ti] == "[") {
+                            ++ti;
+                            if (ti < toks.size()) {
+                                arraySize = static_cast<GLint>(std::strtol(toks[ti].c_str(), nullptr, 10));
+                                ++ti;
+                            }
+                            if (ti < toks.size() && toks[ti] == "]") ++ti;
+                            isArray = true;
+                        }
+                        OutputInfo info;
+                        info.type = memberType;
+                        info.arraySize = arraySize > 0 ? arraySize : 1;
+                        info.isArray = isArray;
+                        outputTypeMap[blockName + "." + name] = info;
+                        // Skip past `,`
+                        if (ti < toks.size() && toks[ti] == ",") ++ti;
+                    }
+                }
+                scanPos = p;
+            }
+        }
+
         // Special interleaved-mode names that are NOT real varyings:
         auto isSpecialName = [](const std::string& n) {
             return n == "gl_NextBuffer" ||
