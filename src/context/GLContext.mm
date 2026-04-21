@@ -7785,6 +7785,18 @@ bool GLContext::bindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr of
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // GL 4.4 §10.3.1: stride must be ≤ GL_MAX_VERTEX_ATTRIB_STRIDE.
+    {
+        GLint64 maxStride = 2048;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(
+                GL_MAX_VERTEX_ATTRIB_STRIDE, &maxStride);
+        }
+        if (stride > static_cast<GLsizei>(maxStride)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
     GLVertexArrayObject* vertexArray = impl_->currentVertexArray();
     if (vertexArray == nullptr) {
         pushError(GL_INVALID_OPERATION);
@@ -7824,6 +7836,25 @@ bool GLContext::bindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr of
 }
 
 bool GLContext::vertexAttribFormat(GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset) {
+    // GL 4.4 §10.3.8: type must be one of the accepted tokens.
+    // Reject unknown types with INVALID_ENUM. CTS
+    // `direct_state_access.vertex_arrays_attribute_format_errors`
+    // goes through the DSA entry path which skips the legacy wrapper's
+    // type check, so this needs to live at the context level.
+    switch (type) {
+        case GL_BYTE: case GL_UNSIGNED_BYTE:
+        case GL_SHORT: case GL_UNSIGNED_SHORT:
+        case GL_INT: case GL_UNSIGNED_INT:
+        case GL_HALF_FLOAT: case GL_FLOAT: case GL_DOUBLE:
+        case GL_FIXED:
+        case GL_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+            break;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
     // GL 4.4 §10.3.8: size ∈ {1, 2, 3, 4, GL_BGRA}.
     const bool sizeIsBgra = (size == static_cast<GLint>(GL_BGRA));
     if (!sizeIsBgra && (size < 1 || size > 4)) {
@@ -7853,6 +7884,14 @@ bool GLContext::vertexAttribFormat(GLuint attribindex, GLint size, GLenum type, 
     if ((type == GL_INT_2_10_10_10_REV ||
          type == GL_UNSIGNED_INT_2_10_10_10_REV) &&
         !sizeIsBgra && size != 4) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.4 §10.3.8: UNSIGNED_INT_10F_11F_11F_REV is a 3-channel
+    // packed float — size must be 3. CTS
+    // `vertex_arrays_attribute_format_errors` plants a size != 3 with
+    // this type and expects INVALID_OPERATION.
+    if (type == GL_UNSIGNED_INT_10F_11F_11F_REV && size != 3) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -7890,6 +7929,21 @@ bool GLContext::vertexAttribFormat(GLuint attribindex, GLint size, GLenum type, 
 }
 
 bool GLContext::vertexAttribIFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
+    // GL 4.4 §10.3.8: integer vertex attrib types — byte / short / int,
+    // signed or unsigned. Everything else (including packed floats
+    // like UNSIGNED_INT_10F_11F_11F_REV and UNSIGNED_INT_2_10_10_10_REV)
+    // is rejected with INVALID_ENUM. CTS
+    // `vertex_arrays_attribute_format_errors` plants a
+    // UNSIGNED_INT_10F_11F_11F_REV type and asserts INVALID_ENUM.
+    switch (type) {
+        case GL_BYTE: case GL_UNSIGNED_BYTE:
+        case GL_SHORT: case GL_UNSIGNED_SHORT:
+        case GL_INT: case GL_UNSIGNED_INT:
+            break;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
     if (size < 1 || size > 4) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -23850,6 +23904,13 @@ bool GLContext::vertexArrayVertexBuffers(GLuint vaobj, GLuint first, GLsizei cou
 
 bool GLContext::vertexArrayElementBuffer(GLuint vaobj, GLuint buffer) {
     DSA_VAO_CHECK(vaobj)
+    // GL 4.5 §10.3.1: buffer must be zero or an existing buffer name.
+    // CTS `direct_state_access.vertex_arrays_element_buffer_errors`
+    // plants a never-generated buffer ID and asserts INVALID_OPERATION.
+    if (buffer != 0 && !impl_->objects->buffers().contains(buffer)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     _vao->elementArrayBuffer = buffer;
     return true;
 }
@@ -23870,24 +23931,58 @@ bool GLContext::disableVertexArrayAttrib(GLuint vaobj, GLuint index) {
 
 bool GLContext::getVertexArrayiv(GLuint vaobj, GLenum pname, GLint* param) {
     DSA_VAO_CHECK(vaobj)
-    if (pname == GL_ELEMENT_ARRAY_BUFFER_BINDING) {
+    // GL 4.5 §10.3.12: pname is restricted to
+    // GL_ELEMENT_ARRAY_BUFFER_BINDING for `glGetVertexArrayiv`
+    // (no other enum is accepted at the per-VAO level). CTS
+    // `direct_state_access.vertex_arrays_get_vertex_array_errors`
+    // plants a bogus pname and asserts INVALID_ENUM.
+    if (pname != GL_ELEMENT_ARRAY_BUFFER_BINDING) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (param) {
         *param = static_cast<GLint>(_vao->elementArrayBuffer);
-    } else {
-        *param = 0;
     }
     return true;
 }
 
+// GL 4.5 §10.3.12: accepted pnames for glGetVertexArrayIndexed{,64}iv.
+static bool isValidVertexArrayIndexedPname(GLenum pname) {
+    switch (pname) {
+        case GL_VERTEX_ATTRIB_ARRAY_ENABLED:
+        case GL_VERTEX_ATTRIB_ARRAY_SIZE:
+        case GL_VERTEX_ATTRIB_ARRAY_STRIDE:
+        case GL_VERTEX_ATTRIB_ARRAY_TYPE:
+        case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED:
+        case GL_VERTEX_ATTRIB_ARRAY_INTEGER:
+        case GL_VERTEX_ATTRIB_ARRAY_LONG:
+        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:
+        case GL_VERTEX_ATTRIB_RELATIVE_OFFSET:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool GLContext::getVertexArrayIndexediv(GLuint vaobj, GLuint index, GLenum pname, GLint* param) {
     DSA_VAO_CHECK(vaobj)
-    (void)index; (void)pname;
+    if (!isValidVertexArrayIndexedPname(pname)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    (void)index;
     if (param) *param = 0;
     return true;
 }
 
 bool GLContext::getVertexArrayIndexed64iv(GLuint vaobj, GLuint index, GLenum pname, GLint64* param) {
     DSA_VAO_CHECK(vaobj)
-    (void)index; (void)pname;
+    // The 64-bit form only accepts GL_VERTEX_BINDING_OFFSET.
+    if (pname != GL_VERTEX_BINDING_OFFSET) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    (void)index;
     if (param) *param = 0;
     return true;
 }

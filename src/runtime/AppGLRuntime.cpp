@@ -632,6 +632,7 @@ bool isValidVertexAttribPointerType(GLenum type) {
         case GL_FIXED:
         case GL_INT_2_10_10_10_REV:
         case GL_UNSIGNED_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:  // GL 4.4 §10.3.8 packed float
             return true;
         default:
             return false;
