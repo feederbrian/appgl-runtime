@@ -16962,10 +16962,56 @@ bool GLContext::linkProgram(GLuint program) {
                 info.arraySize = (member.arraySize > 0)
                     ? static_cast<GLint>(member.arraySize) : 1;
                 info.isArray = member.isArray;
-                info.location = supplementNextLoc;
                 info.explicitLocation = -1;
                 info.explicitBinding = -1;
-                supplementNextLoc += std::max<GLint>(info.arraySize, 1);
+                // GL 4.6 §7.6.2.2 — when the scanner already registered
+                // the top-level parent uniform with an explicit location
+                // (e.g. `layout(location = 2) uniform float u0[2][3]`),
+                // the SPIRV-Cross-flattened members (`u0[0]`, `u0[1]`)
+                // must be located at parent.explicitLocation + i*members
+                // per element, NOT at supplementNextLoc (which would auto-
+                // assign past every explicit location). CTS
+                // `explicit_uniform_location.uniform-loc-arrays-of-arrays`
+                // asserts `u0[0][0]` = 2 for `u0[2][3]` at location 2.
+                const std::string memberTopName = topLevelName(member.name);
+                const GLProgramUniformInfo* parent = nullptr;
+                for (const auto& u : programObject->uniforms) {
+                    if (u.name == memberTopName && u.explicitLocation >= 0) {
+                        parent = &u;
+                        break;
+                    }
+                }
+                bool locationSet = false;
+                if (parent != nullptr) {
+                    // Parse the member name's subscript chain relative to the
+                    // parent. `u0[i]` for a single-subscript member of an
+                    // outer-dim-split array-of-arrays gives flattened offset
+                    // i * inner_arraySize. `u0[i].field` for a struct array
+                    // gives i * struct_size_in_locations + field_offset —
+                    // but we don't track per-field offsets here, so fall
+                    // through to supplementNextLoc for struct-member shapes.
+                    const std::string tail = member.name.substr(memberTopName.size());
+                    // Require pure `[i]` form; anything else (containing `.`
+                    // or multiple brackets) is structurally complex and we
+                    // fall back to auto-assignment.
+                    if (tail.size() >= 3 && tail.front() == '[' && tail.back() == ']'
+                        && tail.find('.') == std::string::npos
+                        && std::count(tail.begin(), tail.end(), '[') == 1) {
+                        const std::string idxText = tail.substr(1, tail.size() - 2);
+                        char* endp = nullptr;
+                        const long idx = std::strtol(idxText.c_str(), &endp, 10);
+                        if (endp && *endp == '\0' && idx >= 0) {
+                            const GLint perEntryLocs = std::max<GLint>(info.arraySize, 1);
+                            info.location = parent->explicitLocation +
+                                static_cast<GLint>(idx) * perEntryLocs;
+                            locationSet = true;
+                        }
+                    }
+                }
+                if (!locationSet) {
+                    info.location = supplementNextLoc;
+                    supplementNextLoc += std::max<GLint>(info.arraySize, 1);
+                }
                 knownUniformNames.insert(canonicalName);
 
                 // Zero-seed the uniform value.
