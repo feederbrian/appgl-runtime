@@ -22467,7 +22467,13 @@ bool GLContext::createQueries(GLenum target, GLsizei n, GLuint* ids) {
     for (GLsizei i = 0; i < n; ++i) {
         ids[i] = impl_->objects->queries().reserveName();
         auto* obj = impl_->objects->queries().get(ids[i]);
-        if (obj) obj->target = target;
+        if (obj) {
+            obj->target = target;
+            // DSA glCreateQueries creates fully-instantiated query
+            // objects — glIsQuery returns TRUE immediately without
+            // a subsequent glBeginQuery.
+            obj->instantiated = true;
+        }
     }
     return true;
 }
@@ -24105,32 +24111,67 @@ bool GLContext::textureBarrier() {
     return true;
 }
 
-bool GLContext::getQueryBufferObjectiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+// GL 4.5 §4.2 / §4.2.1 shared validation for glGetQueryBufferObject*iv
+// and the 64-bit variants. CTS
+// `direct_state_access.queries_errors` walks every spec violation
+// in sequence:
+//   (a) id is not an existing query name              → INVALID_OPERATION
+//   (b) query object `id` is still active             → INVALID_OPERATION
+//   (c) pname not one of the accepted result enums    → INVALID_ENUM
+//   (d) buffer offset + sizeof(result) > buffer size  → INVALID_OPERATION
+//   (e) offset < 0 or not aligned to sizeof(result)   → INVALID_VALUE
+// All four getQueryBufferObject* flavors share the same logic and
+// differ only in the result-element byte size.
+bool GLContext::validateQueryBufferObjectGet(
+    GLuint id, GLuint buffer, GLenum pname, GLintptr offset,
+    std::size_t resultBytes) {
     auto* buf = impl_->objects->buffers().get(buffer);
     if (!buf) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)id; (void)pname; (void)offset;
+    auto* q = impl_->objects->queries().get(id);
+    if (!q || !q->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (q->active) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    switch (pname) {
+        case GL_QUERY_RESULT:
+        case GL_QUERY_RESULT_AVAILABLE:
+        case GL_QUERY_RESULT_NO_WAIT:
+        case GL_QUERY_TARGET:
+            break;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+    if (offset < 0 ||
+        (resultBytes > 0 && (offset % static_cast<GLintptr>(resultBytes)) != 0)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (offset + static_cast<GLintptr>(resultBytes) > buf->size) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     return true;
+}
+
+bool GLContext::getQueryBufferObjectiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    return validateQueryBufferObjectGet(id, buffer, pname, offset, sizeof(GLint));
 }
 
 bool GLContext::getQueryBufferObjectuiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
-    auto* buf = impl_->objects->buffers().get(buffer);
-    if (!buf) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)id; (void)pname; (void)offset;
-    return true;
+    return validateQueryBufferObjectGet(id, buffer, pname, offset, sizeof(GLuint));
 }
 
 bool GLContext::getQueryBufferObjecti64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
-    auto* buf = impl_->objects->buffers().get(buffer);
-    if (!buf) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)id; (void)pname; (void)offset;
-    return true;
+    return validateQueryBufferObjectGet(id, buffer, pname, offset, sizeof(GLint64));
 }
 
 bool GLContext::getQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
-    auto* buf = impl_->objects->buffers().get(buffer);
-    if (!buf) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)id; (void)pname; (void)offset;
-    return true;
+    return validateQueryBufferObjectGet(id, buffer, pname, offset, sizeof(GLuint64));
 }
 
 // ---------------------------------------------------------------------------

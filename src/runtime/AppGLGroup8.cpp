@@ -1825,7 +1825,15 @@ static GLboolean APIENTRY glIsQuery(GLuint id) {
     if (context == nullptr) {
         return GL_FALSE;
     }
-    return context->objects().queries().contains(id) ? GL_TRUE : GL_FALSE;
+    // GL 4.6 §4.2: glGenQueries reserves a name but does not create
+    // the object; glIsQuery must return FALSE until the name is first
+    // bound via glBeginQuery. glCreateQueries (DSA) creates the
+    // object fully and sets `instantiated=true` up-front.
+    auto* query = context->objects().queries().get(id);
+    if (query == nullptr || !query->instantiated) {
+        return GL_FALSE;
+    }
+    return GL_TRUE;
 }
 
 static void APIENTRY glBeginQuery(GLenum target, GLuint id) {
@@ -1845,6 +1853,8 @@ static void APIENTRY glBeginQuery(GLenum target, GLuint id) {
                            "query object was previously used with a different target");
         return;
     }
+    // First bind "instantiates" a glGenQueries-reserved name.
+    query->instantiated = true;
     query->boundTarget = target;
     query->target = target;
     query->active = true;

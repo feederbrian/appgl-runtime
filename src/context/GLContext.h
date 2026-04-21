@@ -467,6 +467,12 @@ public:
     bool getQueryBufferObjectuiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
     bool getQueryBufferObjecti64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
     bool getQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
+    // Shared validator for the four glGetQueryBufferObject* entry points —
+    // enforces GL 4.5 §4.2 query-buffer-read error ordering (id-valid,
+    // not-active, pname in accepted set, offset in-range and aligned).
+    bool validateQueryBufferObjectGet(
+        GLuint id, GLuint buffer, GLenum pname, GLintptr offset,
+        std::size_t resultBytes);
 
     // GL 4.6 — Indirect count draws, SPIR-V specialization, polygon offset clamp.
     bool multiDrawArraysIndirectCount(GLenum mode, const void* indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);

@@ -761,6 +761,11 @@ struct GLQueryObject {
     GLenum boundTarget = 0;   // First target used with this query; 0 = unbound
     bool active = false;
     GLuint64 result = 0;
+    // GL 4.6 §4.2: `glGenQueries` reserves names without creating
+    // objects — `glIsQuery` returns FALSE until the query is first
+    // bound via `glBeginQuery`. `glCreateQueries` (GL 4.5 DSA)
+    // creates the object fully. Track the distinction here.
+    bool instantiated = false;
 };
 
 struct GLSyncObject {
