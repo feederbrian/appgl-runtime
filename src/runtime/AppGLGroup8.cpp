@@ -1161,12 +1161,15 @@ static void APIENTRY glClampColor(GLenum target, GLenum clamp) {
 }
 
 static void APIENTRY glBeginConditionalRender(GLuint id, GLenum mode) {
-    (void)id;
-    (void)mode;
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    ctx->beginConditionalRender(id, mode);
 }
 
 static void APIENTRY glEndConditionalRender(void) {
-
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    ctx->endConditionalRender();
 }
 
 static void APIENTRY glGetVertexAttribIiv(GLuint index, GLenum pname, GLint *params) {

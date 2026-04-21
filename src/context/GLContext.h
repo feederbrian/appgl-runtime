@@ -488,6 +488,14 @@ public:
     template <typename T>
     bool writeQueryBufferObject(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
 
+    // GL 3.0 / GL 4.5 ARB_conditional_render_inverted — begin/end a
+    // conditional draw block keyed on an occlusion query result. mode is
+    // one of GL_QUERY_{WAIT,NO_WAIT,BY_REGION_WAIT,BY_REGION_NO_WAIT}
+    // and the _INVERTED variants. While active, the draw path
+    // consults the bound query and skips draws whose predicate matches.
+    bool beginConditionalRender(GLuint id, GLenum mode);
+    void endConditionalRender();
+
     // GL 4.6 — Indirect count draws, SPIR-V specialization, polygon offset clamp.
     bool multiDrawArraysIndirectCount(GLenum mode, const void* indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
     bool multiDrawElementsIndirectCount(GLenum mode, GLenum type, const void* indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);

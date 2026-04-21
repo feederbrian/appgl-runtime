@@ -6053,6 +6053,37 @@ struct GLContext::Impl {
         return true;
     }
 
+    // GL 4.6 §2.3.3 / ARB_conditional_render_inverted — decide whether
+    // the current draw should be skipped. Called at the top of every
+    // draw entry point after basic validation; returns true when the
+    // conditional-render predicate orders the draw discarded.
+    //
+    // Non-inverted modes skip when the query result is zero (nothing
+    // passed → no occlusion). Inverted modes skip when the result is
+    // non-zero. WAIT vs NO_WAIT differ only in whether the driver may
+    // silently proceed with stale data — we always have a flushed
+    // result since our queries are CPU-credited synchronously.
+    bool shouldSkipDrawForConditionalRender() const {
+        if (conditionalRenderMode == 0) return false;
+        const auto* q = objects->queries().get(conditionalRenderQueryId);
+        if (q == nullptr) return false;
+        const bool resultPositive = (q->result > 0);
+        switch (conditionalRenderMode) {
+            case GL_QUERY_WAIT:
+            case GL_QUERY_NO_WAIT:
+            case GL_QUERY_BY_REGION_WAIT:
+            case GL_QUERY_BY_REGION_NO_WAIT:
+                return !resultPositive;   // skip when result == 0
+            case GL_QUERY_WAIT_INVERTED:
+            case GL_QUERY_NO_WAIT_INVERTED:
+            case GL_QUERY_BY_REGION_WAIT_INVERTED:
+            case GL_QUERY_BY_REGION_NO_WAIT_INVERTED:
+                return resultPositive;    // skip when result > 0
+            default:
+                return false;
+        }
+    }
+
     // GL 4.6 §4.2 — when a program without a GS is drawn, the
     // non-GS PRIMITIVES_GENERATED counter still advances by the
     // primitive count of the draw (strip topologies are counted
@@ -6300,6 +6331,19 @@ struct GLContext::Impl {
     bool transformFeedbackPaused = false;
     GLenum transformFeedbackPrimitiveMode = GL_POINTS;
     GLuint boundTransformFeedbackId = 0;
+
+    // GL 3.0 / GL 4.5 ARB_conditional_render_inverted — `glBeginConditional-
+    // Render(id, mode)` makes subsequent draws conditional on the named
+    // occlusion query's result. When active, drawArrays/drawElements inspect
+    // the query and skip when the predicate matches. `mode`:
+    //   GL_QUERY_WAIT / GL_QUERY_BY_REGION_WAIT / GL_QUERY_NO_WAIT /
+    //   GL_QUERY_BY_REGION_NO_WAIT → skip draw when query result == 0
+    //   GL_QUERY_*_INVERTED variants                   → skip draw when > 0
+    // The BY_REGION variants differ from non-region only in whether the
+    // query's scissor is considered; on AppGL (no screen-space region
+    // query) the same skip logic applies.
+    GLuint conditionalRenderQueryId = 0;
+    GLenum conditionalRenderMode = 0;  // 0 = no conditional render active
 
     // Persistent "default VAO" — lazy-allocated stand-alone object
     // returned by currentVertexArrayOrDefault() when no user VAO is
@@ -19567,6 +19611,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §2.3.3 — conditional render predicate. Skipped draws
+    // do not advance query counters.
+    if (impl_->shouldSkipDrawForConditionalRender()) {
+        return true;
+    }
 
     // GL 4.6 §11.3.1 — GS input topology / draw mode compatibility.
     // When the linked program has a GS, rejecting mismatched draw
@@ -20066,6 +20115,10 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §2.3.3 — conditional render predicate.
+    if (impl_->shouldSkipDrawForConditionalRender()) {
+        return true;
+    }
     // GL 4.6 §11.3.1: draw-mode / GS-input-topology compat applies
     // to EVERY draw entry that targets a GS-linked program, not just
     // glDrawArrays. CTS `draw_indirect.negative-gshIncompatible-arrays`
@@ -20434,6 +20487,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     if (!impl_->state->validateForDraw()) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    // GL 4.6 §2.3.3 — conditional render predicate.
+    if (impl_->shouldSkipDrawForConditionalRender()) {
+        return true;
     }
     // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for non-GS
     // indexed draws. GS path is handled by writeGsXfbAndCheckDiscard.
@@ -20817,6 +20874,10 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    // GL 4.6 §2.3.3 — conditional render predicate.
+    if (impl_->shouldSkipDrawForConditionalRender()) {
+        return true;
+    }
     // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for
     // non-GS indexed draws. GS path is handled via
     // writeGsXfbAndCheckDiscard below.
@@ -21115,6 +21176,10 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     if (!impl_->state->validateForDraw()) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    // GL 4.6 §2.3.3 — conditional render predicate.
+    if (impl_->shouldSkipDrawForConditionalRender()) {
+        return true;
     }
     // GL 4.6 §11.3.1: draw-mode / GS-input-topology compat. See
     // drawArraysInstanced for the rationale — the drawElements
@@ -27763,6 +27828,68 @@ bool GLContext::validateIndirectCount(GLintptr drawcount, GLsizei maxdrawcount) 
         return false;
     }
     return true;
+}
+
+// GL 3.0 §2.14 / GL 4.5 ARB_conditional_render_inverted:
+// begin/end a conditional draw block. `id` must be a live query object;
+// `mode` must be one of the eight accepted modes. The state lives on
+// Impl; the draw paths consult `shouldSkipDraw` below.
+bool GLContext::beginConditionalRender(GLuint id, GLenum mode) {
+    if (impl_->conditionalRenderMode != 0) {
+        // Already active — GL 4.6 §2.3.3 requires INVALID_OPERATION.
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    switch (mode) {
+        case GL_QUERY_WAIT:
+        case GL_QUERY_NO_WAIT:
+        case GL_QUERY_BY_REGION_WAIT:
+        case GL_QUERY_BY_REGION_NO_WAIT:
+        case GL_QUERY_WAIT_INVERTED:
+        case GL_QUERY_NO_WAIT_INVERTED:
+        case GL_QUERY_BY_REGION_WAIT_INVERTED:
+        case GL_QUERY_BY_REGION_NO_WAIT_INVERTED:
+            break;
+        default:
+            pushError(GL_INVALID_ENUM);
+            return false;
+    }
+    auto* q = impl_->objects->queries().get(id);
+    if (q == nullptr || !q->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // §2.3.3: if the query is currently active, INVALID_OPERATION.
+    if (q->active) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // §2.3.3: accepted query targets for conditional render.
+    switch (q->target) {
+        case GL_SAMPLES_PASSED:
+        case GL_ANY_SAMPLES_PASSED:
+        case GL_ANY_SAMPLES_PASSED_CONSERVATIVE:
+        case GL_PRIMITIVES_GENERATED:
+        case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+        case GL_TRANSFORM_FEEDBACK_OVERFLOW:
+        case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
+            break;
+        default:
+            pushError(GL_INVALID_OPERATION);
+            return false;
+    }
+    impl_->conditionalRenderQueryId = id;
+    impl_->conditionalRenderMode = mode;
+    return true;
+}
+
+void GLContext::endConditionalRender() {
+    if (impl_->conditionalRenderMode == 0) {
+        pushError(GL_INVALID_OPERATION);
+        return;
+    }
+    impl_->conditionalRenderQueryId = 0;
+    impl_->conditionalRenderMode = 0;
 }
 
 bool GLContext::multiDrawArraysIndirectCount(GLenum mode, const void* indirect,
