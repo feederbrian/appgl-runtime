@@ -14496,6 +14496,251 @@ bool GLContext::linkProgram(GLuint program) {
     }
     // ─── End subroutine uniform location validation ───
 
+    // ─── GL 4.6 §7.4.2 cross-stage uniform-block matching ───
+    // For each uniform block declared in multiple stages, the
+    // instance-name presence must match. `uniform Data { ... };`
+    // (no instance) in one stage and `uniform Data { ... } d;`
+    // (with instance) in another is a link error.
+    //
+    // Members of no-instance-name blocks are promoted to the
+    // default-uniform scope; their names must not collide with
+    // other global uniforms nor with members of other no-instance-
+    // name blocks that happen to have the same member name.
+    //
+    // CTS `shaders.uniform_block.common.name_matching` plants all
+    // of these cases and expects link to fail on each mismatch.
+    {
+        // Scan `uniform <Name> { ... } [instance]?;` in a source.
+        // Returns { blockName, hasInstance, memberIdentifiers }.
+        struct BlockDecl {
+            std::string blockName;
+            bool hasInstance = false;
+            std::vector<std::string> memberNames;
+        };
+        auto findUniformBlocks = [](const std::string& src) -> std::vector<BlockDecl> {
+            std::vector<BlockDecl> blocks;
+            std::size_t pos = 0;
+            while (pos < src.size()) {
+                // Locate the "uniform" keyword at a word boundary.
+                std::size_t kw = src.find("uniform", pos);
+                if (kw == std::string::npos) break;
+                if (kw > 0) {
+                    unsigned char prev = static_cast<unsigned char>(src[kw - 1]);
+                    if (std::isalnum(prev) || prev == '_') {
+                        pos = kw + 7;
+                        continue;
+                    }
+                }
+                std::size_t after = kw + 7;
+                if (after < src.size()) {
+                    unsigned char nx = static_cast<unsigned char>(src[after]);
+                    if (std::isalnum(nx) || nx == '_') {
+                        pos = after;
+                        continue;
+                    }
+                }
+                // Skip whitespace/newlines to the type / block-name token.
+                while (after < src.size() && std::isspace(static_cast<unsigned char>(src[after]))) ++after;
+                if (after >= src.size()) break;
+                // Capture the identifier.
+                std::size_t nameStart = after;
+                while (after < src.size() &&
+                       (std::isalnum(static_cast<unsigned char>(src[after])) || src[after] == '_')) {
+                    ++after;
+                }
+                if (after == nameStart) { pos = after + 1; continue; }
+                std::string name = src.substr(nameStart, after - nameStart);
+                // Whitespace, then '{' for a block; otherwise it's a
+                // plain uniform declaration like `uniform float f`.
+                std::size_t braceStart = after;
+                while (braceStart < src.size() && std::isspace(static_cast<unsigned char>(src[braceStart]))) ++braceStart;
+                if (braceStart >= src.size() || src[braceStart] != '{') {
+                    pos = after;
+                    continue;
+                }
+                // Walk to the matching close brace.
+                int depth = 1;
+                std::size_t bodyStart = braceStart + 1;
+                std::size_t cur = bodyStart;
+                while (cur < src.size() && depth > 0) {
+                    if (src[cur] == '{') ++depth;
+                    else if (src[cur] == '}') --depth;
+                    ++cur;
+                }
+                if (depth != 0) break;
+                std::size_t bodyEnd = cur - 1;
+                BlockDecl decl;
+                decl.blockName = std::move(name);
+                // Extract member identifiers from the block body by
+                // scanning for `;`-terminated statements.
+                std::size_t mp = bodyStart;
+                while (mp < bodyEnd) {
+                    std::size_t semi = src.find(';', mp);
+                    if (semi == std::string::npos || semi >= bodyEnd) break;
+                    // Walk backwards from the semi, skipping optional
+                    // array subscript [N] and whitespace, to the
+                    // trailing identifier.
+                    std::size_t e = semi;
+                    while (e > mp) {
+                        unsigned char c = static_cast<unsigned char>(src[e - 1]);
+                        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+                            c == ']' || c == '[' || std::isdigit(c)) {
+                            --e;
+                        } else {
+                            break;
+                        }
+                    }
+                    std::size_t b = e;
+                    while (b > mp) {
+                        unsigned char c = static_cast<unsigned char>(src[b - 1]);
+                        if (std::isalnum(c) || c == '_') {
+                            --b;
+                        } else {
+                            break;
+                        }
+                    }
+                    if (b < e) {
+                        decl.memberNames.push_back(src.substr(b, e - b));
+                    }
+                    mp = semi + 1;
+                }
+                // Detect instance name immediately past the closing brace.
+                std::size_t tail = cur;
+                while (tail < src.size() && std::isspace(static_cast<unsigned char>(src[tail]))) ++tail;
+                if (tail < src.size()) {
+                    unsigned char c = static_cast<unsigned char>(src[tail]);
+                    if (std::isalpha(c) || c == '_') decl.hasInstance = true;
+                }
+                blocks.push_back(std::move(decl));
+                pos = tail;
+            }
+            return blocks;
+        };
+        // Scan for plain `uniform <type> <name>;` declarations (not blocks).
+        auto findPlainUniforms = [](const std::string& src) -> std::vector<std::string> {
+            std::vector<std::string> names;
+            std::size_t pos = 0;
+            while (pos < src.size()) {
+                std::size_t kw = src.find("uniform", pos);
+                if (kw == std::string::npos) break;
+                if (kw > 0) {
+                    unsigned char prev = static_cast<unsigned char>(src[kw - 1]);
+                    if (std::isalnum(prev) || prev == '_') {
+                        pos = kw + 7;
+                        continue;
+                    }
+                }
+                std::size_t after = kw + 7;
+                while (after < src.size() && std::isspace(static_cast<unsigned char>(src[after]))) ++after;
+                // Consume type identifier.
+                std::size_t t0 = after;
+                while (after < src.size() &&
+                       (std::isalnum(static_cast<unsigned char>(src[after])) || src[after] == '_')) {
+                    ++after;
+                }
+                if (after == t0) { pos = after + 1; continue; }
+                while (after < src.size() && std::isspace(static_cast<unsigned char>(src[after]))) ++after;
+                if (after < src.size() && src[after] == '{') {
+                    // Block declaration — skip past it.
+                    int d = 1;
+                    ++after;
+                    while (after < src.size() && d > 0) {
+                        if (src[after] == '{') ++d;
+                        else if (src[after] == '}') --d;
+                        ++after;
+                    }
+                    pos = after;
+                    continue;
+                }
+                // Parse the uniform name.
+                std::size_t n0 = after;
+                while (after < src.size() &&
+                       (std::isalnum(static_cast<unsigned char>(src[after])) || src[after] == '_')) {
+                    ++after;
+                }
+                if (n0 < after) {
+                    names.push_back(src.substr(n0, after - n0));
+                }
+                pos = after;
+            }
+            return names;
+        };
+
+        std::unordered_map<std::string, std::vector<bool>> blockInstancePresence;
+        std::unordered_map<std::string, std::vector<std::string>>
+            noInstanceMemberNamesByBlock;
+        std::unordered_set<std::string> plainUniformNames;
+        for (GLuint shaderId : programObject->attachedShaders) {
+            GLShaderObject* sh = impl_->objects->shaders().get(shaderId);
+            if (sh == nullptr) continue;
+            auto blocks = findUniformBlocks(sh->source);
+            for (auto& b : blocks) {
+                blockInstancePresence[b.blockName].push_back(b.hasInstance);
+                if (!b.hasInstance) {
+                    auto& list = noInstanceMemberNamesByBlock[b.blockName];
+                    list.insert(list.end(), b.memberNames.begin(), b.memberNames.end());
+                }
+            }
+            auto plain = findPlainUniforms(sh->source);
+            for (auto& n : plain) plainUniformNames.insert(n);
+        }
+
+        // Rule 1: same block name across stages → instance presence must match.
+        for (const auto& [bname, flags] : blockInstancePresence) {
+            bool anyWithInstance = false, anyWithoutInstance = false;
+            for (bool f : flags) {
+                if (f) anyWithInstance = true; else anyWithoutInstance = true;
+            }
+            if (anyWithInstance && anyWithoutInstance) {
+                programObject->linkLog = "uniform block '" + bname +
+                    "' must use the same instance-name presence in every stage";
+                programObject->linked = false;
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+        }
+
+        // Rule 2: no-instance-name block members collide with plain
+        // uniforms of the same name (different stages count too).
+        for (const auto& [bname, members] : noInstanceMemberNamesByBlock) {
+            for (const auto& m : members) {
+                if (plainUniformNames.count(m)) {
+                    programObject->linkLog = "uniform block member '" + m +
+                        "' (in block '" + bname +
+                        "') collides with plain uniform of the same name";
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+            }
+        }
+
+        // Rule 3: different no-instance-name blocks must not share
+        // member names (both promote members into the default scope).
+        std::unordered_map<std::string, std::string> memberOwner;  // memberName → blockName
+        for (const auto& [bname, members] : noInstanceMemberNamesByBlock) {
+            for (const auto& m : members) {
+                auto it = memberOwner.find(m);
+                if (it != memberOwner.end() && it->second != bname) {
+                    programObject->linkLog = "no-instance-name blocks '" +
+                        it->second + "' and '" + bname +
+                        "' both declare a member '" + m + "'";
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", programObject->linkLog, "", false
+                    });
+                    return false;
+                }
+                memberOwner[m] = bname;
+            }
+        }
+    }
+    // ─── End cross-stage uniform-block matching ───
+
     programObject->linked = true;
     programObject->linkLog = "ok";
     // Snapshot the separability request at link time. The query
