@@ -260,4 +260,17 @@ inline constexpr unsigned int kSynthesizedLightSourceCount = 8;
 CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                                               GLenum stage);
 
+// Pre-glslang validation: GLSL 4.60 §4.1.8 allows ONLY precision
+// qualifiers (highp/mediump/lowp) on struct members. Everything else
+// — storage (in/out/uniform/buffer/shared), layout(...), interpolation
+// (smooth/flat/noperspective in/out), invariant, precise, memory
+// (coherent/volatile/restrict/readonly/writeonly) — is forbidden.
+// Glslang under Vulkan-relaxed rules silently accepts some of these,
+// so we enforce the rule ourselves before handing the source to
+// glslang. Returns true if OK, or false + populates `errorMessage`
+// with a glslang-style diagnostic (ready to surface via
+// getShaderInfoLog).
+bool validateStructMemberQualifiers(std::string_view source,
+                                    std::string& errorMessage);
+
 }  // namespace appgl

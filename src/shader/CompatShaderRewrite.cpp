@@ -5,6 +5,8 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <unordered_set>
 
 namespace appgl {
 
@@ -1154,6 +1156,237 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     }
 
     return result;
+}
+
+// ============================================================================
+// Struct-member qualifier validation
+// ============================================================================
+// GLSL 4.60 §4.1.8: Only precision qualifiers (highp / mediump / lowp)
+// are permitted on struct members. Glslang configured with Vulkan rules
+// (as we do for SPIR-V generation) silently accepts forbidden qualifiers
+// such as `layout(shared)`, `shared`, `coherent`, etc. CTS
+// `shaders.negative.non_precision_qualifiers_in_struct_members` verifies
+// the rule by deliberately submitting offending shaders and expecting
+// `glGetShaderiv(GL_COMPILE_STATUS)` to return `GL_FALSE`. We run this
+// pre-scan before handing the source to glslang so the compile fails
+// with a spec-correct diagnostic.
+//
+// Approach:
+//   1. Strip comments (line and block).
+//   2. Walk character-by-character looking for the keyword `struct`
+//      preceded and followed by non-identifier characters.
+//   3. After `struct` consume an optional identifier then expect `{`.
+//      (The unnamed `struct { ... }` form is also valid GLSL.)
+//   4. Within the brace-balanced body, split by `;` to get member
+//      declarations.
+//   5. Tokenize each member declaration. Any leading token that is a
+//      forbidden qualifier — or a `layout(...)` prefix — is a compile
+//      error. The first such qualifier is reported.
+bool validateStructMemberQualifiers(std::string_view source,
+                                    std::string& errorMessage) {
+    // ---- Step 1: strip comments --------------------------------------
+    std::string code;
+    code.reserve(source.size());
+    for (std::size_t i = 0; i < source.size(); ) {
+        if (i + 1 < source.size() && source[i] == '/' && source[i + 1] == '/') {
+            // Line comment — consume until newline (keep the newline so
+            // line-count is preserved for error reporting).
+            while (i < source.size() && source[i] != '\n') {
+                code.push_back(' ');  // replace with spaces to preserve column
+                ++i;
+            }
+        } else if (i + 1 < source.size() && source[i] == '/' && source[i + 1] == '*') {
+            // Block comment — consume until */. Preserve newlines so
+            // line numbers in diagnostics stay stable.
+            i += 2;
+            while (i + 1 < source.size() && !(source[i] == '*' && source[i + 1] == '/')) {
+                code.push_back(source[i] == '\n' ? '\n' : ' ');
+                ++i;
+            }
+            if (i + 1 < source.size()) i += 2;  // skip */
+        } else {
+            code.push_back(source[i]);
+            ++i;
+        }
+    }
+
+    // ---- Step 2-5: scan for struct { ... } and validate members ------
+    auto isIdent = [](unsigned char c) {
+        return std::isalnum(c) || c == '_';
+    };
+    auto skipWs = [&](std::size_t& p) {
+        while (p < code.size() && std::isspace(static_cast<unsigned char>(code[p]))) {
+            ++p;
+        }
+    };
+    auto readIdent = [&](std::size_t& p) -> std::string {
+        skipWs(p);
+        std::size_t start = p;
+        while (p < code.size() && isIdent(static_cast<unsigned char>(code[p]))) {
+            ++p;
+        }
+        return code.substr(start, p - start);
+    };
+    auto countLines = [&](std::size_t end) -> int {
+        int n = 1;
+        for (std::size_t i = 0; i < end && i < code.size(); ++i) {
+            if (code[i] == '\n') ++n;
+        }
+        return n;
+    };
+
+    // Forbidden qualifier keywords. Precision qualifiers (highp, mediump,
+    // lowp) are NOT in this set because they are the only qualifiers
+    // permitted on struct members.
+    static const std::unordered_set<std::string> kForbidden = {
+        // Storage qualifiers
+        "const", "in", "out", "attribute", "uniform", "varying",
+        "buffer", "shared",
+        // Interpolation qualifiers
+        "smooth", "flat", "noperspective", "centroid", "sample",
+        "patch",
+        // Invariant / precise
+        "invariant", "precise",
+        // Memory qualifiers
+        "coherent", "volatile", "restrict", "readonly", "writeonly",
+    };
+
+    const std::string kw = "struct";
+
+    std::size_t pos = 0;
+    while (pos < code.size()) {
+        std::size_t sp = code.find(kw, pos);
+        if (sp == std::string::npos) break;
+
+        // Word-boundary check
+        bool leftOk = (sp == 0) ||
+                      !isIdent(static_cast<unsigned char>(code[sp - 1]));
+        std::size_t endKw = sp + kw.size();
+        bool rightOk = (endKw >= code.size()) ||
+                       !isIdent(static_cast<unsigned char>(code[endKw]));
+        if (!leftOk || !rightOk) {
+            pos = sp + 1;
+            continue;
+        }
+
+        std::size_t p = endKw;
+        skipWs(p);
+        // Optional identifier (struct name). The identifier might be
+        // absent for an anonymous struct `struct { ... } x;`.
+        (void)readIdent(p);
+        skipWs(p);
+
+        if (p >= code.size() || code[p] != '{') {
+            // Not a struct definition body — could be a forward
+            // declaration `struct Foo;` or a type reference in a
+            // declaration `struct Foo f;`. Skip.
+            pos = sp + 1;
+            continue;
+        }
+
+        // Find matching close brace
+        ++p;  // past '{'
+        std::size_t bodyStart = p;
+        int depth = 1;
+        while (p < code.size() && depth > 0) {
+            if (code[p] == '{') ++depth;
+            else if (code[p] == '}') --depth;
+            ++p;
+        }
+        if (depth != 0) break;  // unbalanced — let glslang report it
+        std::size_t bodyEnd = p - 1;  // position of the matching '}'
+        std::string body = code.substr(bodyStart, bodyEnd - bodyStart);
+
+        // Split body by ';' (at depth 0 — members can use [] but not
+        // nested braces in the declarator expressions we care about).
+        std::size_t memStart = 0;
+        while (memStart < body.size()) {
+            std::size_t semi = body.find(';', memStart);
+            if (semi == std::string::npos) break;
+            std::string member = body.substr(memStart, semi - memStart);
+            memStart = semi + 1;
+
+            // Tokenize leading tokens: we only care about tokens BEFORE
+            // the type. A "type" is the first identifier that is not a
+            // known qualifier and not `layout`. The scan stops at the
+            // first recognized-qualifier hit.
+            std::size_t q = 0;
+            auto skipWsM = [&](std::size_t& qq) {
+                while (qq < member.size() &&
+                       std::isspace(static_cast<unsigned char>(member[qq]))) {
+                    ++qq;
+                }
+            };
+            skipWsM(q);
+            while (q < member.size()) {
+                // Handle `layout(...)` token explicitly.
+                if (q + 6 <= member.size() &&
+                    member.compare(q, 6, "layout") == 0 &&
+                    (q + 6 == member.size() ||
+                     !isIdent(static_cast<unsigned char>(member[q + 6])))) {
+                    // Find end of layout() parenthesis
+                    std::size_t lp = q + 6;
+                    skipWsM(lp);
+                    // Assemble the reported qualifier — e.g.
+                    // `layout(shared)`.
+                    std::string reported = "layout";
+                    if (lp < member.size() && member[lp] == '(') {
+                        int pd = 1;
+                        ++lp;
+                        std::string inner;
+                        while (lp < member.size() && pd > 0) {
+                            if (member[lp] == '(') ++pd;
+                            else if (member[lp] == ')') {
+                                --pd;
+                                if (pd == 0) break;
+                            }
+                            inner.push_back(member[lp]);
+                            ++lp;
+                        }
+                        reported = "layout(" + inner + ")";
+                    }
+                    int line = countLines(bodyStart + memStart -
+                                          (semi - (q)));  // rough
+                    (void)line;
+                    errorMessage =
+                        "ERROR: 0:0: '" + reported +
+                        "' : struct members cannot have layout qualifiers";
+                    return false;
+                }
+
+                // Read next identifier token
+                std::size_t idStart = q;
+                while (q < member.size() &&
+                       isIdent(static_cast<unsigned char>(member[q]))) {
+                    ++q;
+                }
+                if (q == idStart) {
+                    // Non-identifier character — bail, the rest is the
+                    // type / declarator.
+                    break;
+                }
+                std::string tok = member.substr(idStart, q - idStart);
+                if (kForbidden.count(tok) != 0) {
+                    errorMessage =
+                        "ERROR: 0:0: '" + tok +
+                        "' : struct members cannot have non-precision qualifiers";
+                    return false;
+                }
+                // Not a forbidden qualifier. If it's also not `highp` /
+                // `mediump` / `lowp`, treat it as the start of the type
+                // and stop scanning this member.
+                if (tok != "highp" && tok != "mediump" && tok != "lowp") {
+                    break;
+                }
+                skipWsM(q);
+            }
+        }
+
+        pos = p;  // continue after the struct body
+    }
+
+    errorMessage.clear();
+    return true;
 }
 
 }  // namespace appgl

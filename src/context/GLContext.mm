@@ -13376,6 +13376,25 @@ bool GLContext::compileShader(GLuint shader) {
     //    use #version 330 / 410 / 460 in their source headers; glslang
     //    respects the in-source directive, so the integer passed here is
     //    only the fallback when the source has no #version line.
+
+    // 3a. Pre-glslang validation: GLSL 4.60 §4.1.8 forbids all qualifiers
+    //     except precision (highp/mediump/lowp) on struct members.
+    //     Glslang under Vulkan-relaxed rules silently accepts some
+    //     forbidden qualifiers (layout(shared), shared, coherent, ...).
+    //     We enforce the rule ourselves so
+    //     `shaders.negative.non_precision_qualifiers_in_struct_members`
+    //     sees the compile-time failure it expects.
+    {
+        std::string validationError;
+        if (!validateStructMemberQualifiers(compileSource, validationError)) {
+            object->compileLog = std::move(validationError);
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return false;
+        }
+    }
+
     ShaderTranslator translator;
     std::string compileLog;
     std::vector<std::uint32_t> spirv =
