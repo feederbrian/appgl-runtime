@@ -1619,23 +1619,36 @@ static void APIENTRY glGetActiveUniformBlockiv(GLuint program, GLuint uniformBlo
             }
             break;
         }
+        // Stage-bit layout (matches the post-session-15 rework used
+        // by GL_REFERENCED_BY_*_SHADER queries on SSBOs, programResource
+        // introspection, and the mergeBlocks/mergeStorageBlocks
+        // linkProgram bit assignments):
+        //   0x01 vertex, 0x02 fragment, 0x04 geometry,
+        //   0x08 tess_control, 0x10 tess_eval, 0x20 compute
+        // The bits formerly used here (geometry=8, tess_ctrl=16,
+        // tess_eval=32, compute=4) corresponded to an older scheme
+        // that was reworked elsewhere but not mirrored here — every
+        // non-VS/FS stage returned the wrong REFERENCED_BY_* answer.
+        // CTS `compute_shader.resource-ubo` checks
+        // GL_UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER = TRUE on a
+        // CS-only program and fails when we return FALSE.
         case GL_UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
-            *params = (block.referencedBy & 1) ? GL_TRUE : GL_FALSE;
+            *params = (block.referencedBy & 0x01) ? GL_TRUE : GL_FALSE;
             break;
         case GL_UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
-            *params = (block.referencedBy & 2) ? GL_TRUE : GL_FALSE;
+            *params = (block.referencedBy & 0x02) ? GL_TRUE : GL_FALSE;
             break;
         case GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
-            *params = (block.referencedBy & 8) ? GL_TRUE : GL_FALSE;
+            *params = (block.referencedBy & 0x04) ? GL_TRUE : GL_FALSE;
             break;
         case GL_UNIFORM_BLOCK_REFERENCED_BY_TESS_CONTROL_SHADER:
-            *params = (block.referencedBy & 16) ? GL_TRUE : GL_FALSE;
+            *params = (block.referencedBy & 0x08) ? GL_TRUE : GL_FALSE;
             break;
         case GL_UNIFORM_BLOCK_REFERENCED_BY_TESS_EVALUATION_SHADER:
-            *params = (block.referencedBy & 32) ? GL_TRUE : GL_FALSE;
+            *params = (block.referencedBy & 0x10) ? GL_TRUE : GL_FALSE;
             break;
         case GL_UNIFORM_BLOCK_REFERENCED_BY_COMPUTE_SHADER:
-            *params = (block.referencedBy & 4) ? GL_TRUE : GL_FALSE;
+            *params = (block.referencedBy & 0x20) ? GL_TRUE : GL_FALSE;
             break;
         default:
             context->pushError(GL_INVALID_ENUM);
