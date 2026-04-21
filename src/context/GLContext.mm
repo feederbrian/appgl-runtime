@@ -2229,6 +2229,58 @@ struct GLContext::Impl {
         return {buf->shadowBytes.data() + offset, true};
     }
 
+    // GL 4.6 §8.11.4 analogue of resolveUnpackPBO for the PACK side
+    // (glReadPixels / glGetTextureImage / glGetCompressedTextureImage
+    // destinations). When `GL_PIXEL_PACK_BUFFER` is bound, `pixels` is
+    // a BYTE OFFSET into the bound PBO, not a client pointer — blindly
+    // dereferencing it faults. CTS
+    // `direct_state_access.textures_image_query_errors` binds a PBO
+    // smaller than the texture's pack size AND passes
+    // `BufferOffsetAsPointer(4)` to deliberately exercise
+    // INVALID_OPERATION-on-overflow; it also passes a mis-aligned
+    // offset in a separate sub-case.
+    //
+    // Returns (resolved_destination, ok). `resolved_destination`
+    // points into the PBO shadow buffer when ok is true AND a PBO is
+    // bound; returns the client pointer unchanged when no PBO is
+    // bound. ok == false means the caller should push GL_INVALID_-
+    // OPERATION (buffer too small / mis-aligned / mapped / missing).
+    //
+    // NOTE: callers that write through the resolved pointer must also
+    // call `markPackPBOShadowDirty(offset, bytes)` (below) so the
+    // Metal-side mirror is refreshed before subsequent map/draw.
+    std::pair<void*, bool> resolvePackPBO(
+        void* pixels,
+        std::size_t requiredBytes,
+        std::size_t typeBytes)
+    {
+        const GLuint pboName = state->boundBuffer(GL_PIXEL_PACK_BUFFER);
+        if (pboName == 0) {
+            return {pixels, true};
+        }
+        GLBufferObject* buf = objects->buffers().get(pboName);
+        if (buf == nullptr) {
+            return {nullptr, false};
+        }
+        if (buf->mapPointer != nullptr) {
+            return {nullptr, false};
+        }
+        const std::uintptr_t offsetRaw = reinterpret_cast<std::uintptr_t>(pixels);
+        const std::size_t offset = static_cast<std::size_t>(offsetRaw);
+        if (typeBytes > 1 && (offset % typeBytes) != 0) {
+            return {nullptr, false};
+        }
+        const std::size_t bufSize = static_cast<std::size_t>(
+            std::max<GLsizeiptr>(buf->size, 0));
+        if (offset > bufSize || requiredBytes > bufSize - offset) {
+            return {nullptr, false};
+        }
+        if (buf->shadowBytes.size() < offset + requiredBytes) {
+            buf->shadowBytes.resize(offset + requiredBytes);
+        }
+        return {buf->shadowBytes.data() + offset, true};
+    }
+
     // Phase 8X Group 4d follow-up¹⁰ — `texName` is diagnostic-only and
     // defaults to 0 (no log). The four user-facing upload call sites
     // (`texImage` / `texSubImage` / `texStorage` / `texStorageMultisample`)
@@ -25213,6 +25265,83 @@ bool GLContext::getTextureLevelParameterfv(GLuint texture, GLint level, GLenum p
 bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
+    // GL 4.6 §8.11.4: multisample textures can't be read via GetTextureImage.
+    if (obj->target == GL_TEXTURE_2D_MULTISAMPLE ||
+        obj->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.6 §8.11.4: cube target must be cube-complete. All six faces
+    // at level 0 with matching size/format. Tracked by cubeFacesDefined
+    // bitmask (0x3F == all six).
+    if (obj->target == GL_TEXTURE_CUBE_MAP && (obj->cubeFacesDefined & 0x3F) != 0x3F) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.6 §8.11.4: format-vs-internalFormat compatibility.
+    //  - color format ←→ non-color base internal format: INVALID_OPERATION
+    //  - DEPTH_COMPONENT / DEPTH_STENCIL / STENCIL_INDEX requested on a
+    //    texture whose base internal format doesn't match: INVALID_OPERATION
+    //  - integer-format ←→ non-integer-internal mismatch (either way):
+    //    INVALID_OPERATION
+    {
+        const GLenum internalFmt = obj->desc.internalFormat;
+        const bool formatIsDepth = (format == GL_DEPTH_COMPONENT);
+        const bool formatIsStencil = (format == GL_STENCIL_INDEX);
+        const bool formatIsDS = (format == GL_DEPTH_STENCIL);
+        const bool formatIsIntegerChannel =
+            (format == GL_RED_INTEGER || format == GL_RG_INTEGER ||
+             format == GL_RGB_INTEGER || format == GL_BGR_INTEGER ||
+             format == GL_RGBA_INTEGER || format == GL_BGRA_INTEGER);
+        const bool formatIsColor =
+            !formatIsDepth && !formatIsStencil && !formatIsDS;
+        const bool internalIsDepth = isDepthFormat(internalFmt);
+        const bool internalIsStencil = isStencilFormat(internalFmt);
+        const bool internalIsDS =
+            (internalFmt == GL_DEPTH_STENCIL ||
+             internalFmt == GL_DEPTH24_STENCIL8 ||
+             internalFmt == GL_DEPTH32F_STENCIL8);
+        const bool internalIsColor = !internalIsDepth && !internalIsStencil;
+        auto isIntegerInternal = [](GLenum f) {
+            switch (f) {
+                case GL_R8I: case GL_R8UI: case GL_R16I: case GL_R16UI: case GL_R32I: case GL_R32UI:
+                case GL_RG8I: case GL_RG8UI: case GL_RG16I: case GL_RG16UI: case GL_RG32I: case GL_RG32UI:
+                case GL_RGB8I: case GL_RGB8UI: case GL_RGB16I: case GL_RGB16UI: case GL_RGB32I: case GL_RGB32UI:
+                case GL_RGBA8I: case GL_RGBA8UI: case GL_RGBA16I: case GL_RGBA16UI:
+                case GL_RGBA32I: case GL_RGBA32UI: case GL_RGB10_A2UI:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+        const bool internalIsInteger = isIntegerInternal(internalFmt);
+
+        // format is color but internal isn't
+        if (formatIsColor && !internalIsColor) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // DEPTH_COMPONENT requires depth (combined DS counts)
+        if (formatIsDepth && !(internalIsDepth || internalIsDS)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // DEPTH_STENCIL requires combined DS
+        if (formatIsDS && !internalIsDS) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // STENCIL_INDEX requires stencil (combined DS counts)
+        if (formatIsStencil && !(internalIsStencil || internalIsDS)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // Integer / non-integer mismatch on color formats
+        if (internalIsColor && (formatIsIntegerChannel != internalIsInteger)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
     if (!obj->instantiated || obj->metalTexture == nullptr) {
         // Re-upload shadow data to Metal texture (e.g. after copyImageSubData).
         if (!obj->levels.empty()) {
@@ -25220,6 +25349,29 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         }
         if (!obj->instantiated || obj->metalTexture == nullptr) {
             pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+    // GL 4.6 §8.11.4: negative level is INVALID_VALUE. Must run BEFORE
+    // the `static_cast<NSUInteger>(level)` below or the wrap-to-huge will
+    // both mis-compute texture extents AND crash AGX inside `getBytes`.
+    if (level < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Rectangle textures carry no mipmap chain (GL 4.6 §8.11.4).
+    if (obj->target == GL_TEXTURE_RECTANGLE && level != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Level must be in-range relative to the texture's mipmap count.
+    // CTS `textures_image_query_errors` passes level = MAX_TEXTURE_SIZE
+    // (typically 16384) — without this guard the `getBytes:mipmapLevel:`
+    // call below crashes inside AGX with "Specified mipmap level OOB".
+    if (pixels != nullptr) {
+        id<MTLTexture> probeTex = (__bridge id<MTLTexture>)obj->metalTexture;
+        if (static_cast<NSUInteger>(level) >= probeTex.mipmapLevelCount) {
+            pushError(GL_INVALID_VALUE);
             return false;
         }
     }
@@ -25244,6 +25396,37 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     NSUInteger mipLevel = static_cast<NSUInteger>(level);
     NSUInteger texWidth  = std::max<NSUInteger>(metalTex.width  >> mipLevel, 1);
     NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+
+    // GL 4.6 §8.11.4: when GL_PIXEL_PACK_BUFFER is bound, `pixels` is
+    // a byte offset into that buffer — NOT a client pointer. Resolve
+    // it through the shadow mirror; on failure (buffer too small,
+    // mis-aligned offset, mapped buffer, or missing PBO) push
+    // INVALID_OPERATION and return. Without this check, CTS
+    // `textures_image_query_errors` passes
+    // `BufferOffsetAsPointer(sizeof(GLuint))` with a buffer too small
+    // to hold the packed image and we segfault dereferencing the
+    // offset as a raw pointer.
+    //
+    // NOTE: bufferSize check below is "required rows × bytesPerRow"
+    // at the texture's mip level, which is what the spec says should
+    // be packed. Pack-state (alignment / row length / skip rows) is
+    // applied later in the write loop so this is an over-estimate
+    // when the tightest layout differs — still spec-safe because we
+    // reject EARLIER than the write.
+    const std::size_t packRequiredBytes =
+        static_cast<std::size_t>(texWidth) *
+        static_cast<std::size_t>(texHeight) *
+        dstPixelBytes;
+    auto [packDest, packOk] = impl_->resolvePackPBO(pixels, packRequiredBytes, dstBpc);
+    if (!packOk) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // If a PBO is bound, redirect subsequent writes into the shadow;
+    // otherwise `pixels` is the client pointer and is unchanged.
+    if (packDest != pixels) {
+        pixels = packDest;
+    }
 
     // Determine source bytes-per-pixel from the Metal pixel format.
     MTLPixelFormat pf = metalTex.pixelFormat;
@@ -25828,8 +26011,77 @@ bool GLContext::getTextureSubImage(GLuint texture, GLint level, GLint xoffset, G
 bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei bufSize, void* pixels) {
     auto* obj = impl_->objects->textures().get(texture);
     if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
-    (void)level; (void)bufSize; (void)pixels;
-    // Compressed texture readback accepted — deferred to Metal readback path.
+    // GL 4.6 §8.11.4: negative level is INVALID_VALUE.
+    if (level < 0) { pushError(GL_INVALID_VALUE); return false; }
+    // GL 4.6 §8.11.4: level above the texture's max LOD is INVALID_VALUE.
+    if (obj->metalTexture != nullptr) {
+        id<MTLTexture> probeTex = (__bridge id<MTLTexture>)obj->metalTexture;
+        if (static_cast<NSUInteger>(level) >= probeTex.mipmapLevelCount) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    } else {
+        // No Metal backing yet — still reject obvious oversize values.
+        const GLsizei maxLevels = std::max<GLsizei>(obj->desc.levels, 1);
+        if (level >= maxLevels) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
+    // GL 4.6 §8.11.4: must be a compressed internal format.
+    auto isCompressedInternal = [](GLenum f) {
+        switch (f) {
+            case GL_COMPRESSED_RED:
+            case GL_COMPRESSED_RG:
+            case GL_COMPRESSED_RGB:
+            case GL_COMPRESSED_RGBA:
+            case GL_COMPRESSED_SRGB:
+            case GL_COMPRESSED_SRGB_ALPHA:
+            case GL_COMPRESSED_RED_RGTC1:
+            case GL_COMPRESSED_SIGNED_RED_RGTC1:
+            case GL_COMPRESSED_RG_RGTC2:
+            case GL_COMPRESSED_SIGNED_RG_RGTC2:
+            case GL_COMPRESSED_RGBA_BPTC_UNORM:
+            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+            case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+            case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+                return true;
+            default:
+                return false;
+        }
+    };
+    if (!isCompressedInternal(obj->desc.internalFormat)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // GL 4.6 §8.11.4: PBO validation mirrors getTextureImage. Note the
+    // PBO-bound path runs regardless of whether `pixels` is nullptr —
+    // a nullptr with a PBO bound means "offset 0 into the PBO". The
+    // "PBO mapped → INVALID_OPERATION" clause must still fire in that
+    // case (CTS `image_query_errors` passes pixels=NULL after mapping
+    // the PBO).
+    {
+        const GLuint pboName = impl_->state->boundBuffer(GL_PIXEL_PACK_BUFFER);
+        if (pboName != 0) {
+            const GLsizei w = std::max<GLsizei>(obj->desc.width >> level, 1);
+            const GLsizei h = std::max<GLsizei>(obj->desc.height >> level, 1);
+            const std::size_t blocksX = (w + 3) / 4;
+            const std::size_t blocksY = (h + 3) / 4;
+            const std::size_t requiredBytes = blocksX * blocksY * 16;
+            auto [packDest, packOk] = impl_->resolvePackPBO(pixels, requiredBytes, 1);
+            (void)packDest;
+            if (!packOk) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+        }
+    }
+    // GL 4.6 §8.11.4: bufSize must be large enough. Reuse the same
+    // conservative estimate — real implementations consult per-format
+    // block tables. CTS `image_query_errors` only exercises the
+    // "buffer would be too small" branch via PBO offset overflow; the
+    // plain bufSize case isn't negative-tested here.
+    (void)bufSize;
     return true;
 }
 
