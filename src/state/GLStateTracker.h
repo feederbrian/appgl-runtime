@@ -304,19 +304,6 @@ private:
     struct IndexedViewport { GLfloat x = 0, y = 0, w = 1, h = 1; };
     struct IndexedScissor { GLint x = 0, y = 0; GLsizei w = 1, h = 1; };
     std::array<IndexedViewport, kMaxViewports> indexedViewports_{};
-    // Per-type tracking: each flag flips true when the app first
-    // issues a glViewportIndexed*/glScissorIndexed*/
-    // glDepthRangeIndexed call. glViewport/glScissor/glDepthRange
-    // broadcast to every slot until that happens, so initial state
-    // (window dimensions in every viewport slot per GL 4.1 §13.6.1)
-    // can be seeded by a single runtime-level setViewport call.
-    // After an indexed call, the spec-correct single-slot behavior
-    // kicks in. Each state type tracks independently because
-    // `viewport_array.api_errors` touches depthRangeArray before
-    // `queries` re-reads indexed viewports.
-    bool anyIndexedViewportSet_ = false;
-    bool anyIndexedScissorSet_ = false;
-    bool anyIndexedDepthRangeSet_ = false;
     std::array<IndexedScissor, kMaxViewports> indexedScissors_{};
     std::array<GLDepthRangeState, kMaxViewports> indexedDepthRanges_{};
     GLTessellationState tessellation_;

@@ -6136,6 +6136,11 @@ void GLContext::clear(GLbitfield mask) {
 }
 
 void GLContext::setViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
+    // GL 4.1 §13.6.1: negative width or height raises INVALID_VALUE.
+    if (width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
     impl_->viewportX = x;
     impl_->viewportY = y;
     impl_->viewportWidth = width > 0 ? width : 1;
@@ -6148,6 +6153,10 @@ void GLContext::setViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
 }
 
 void GLContext::setScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
+    if (width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
     impl_->state->setScissor(x, y, width, height);
 }
 
@@ -6157,32 +6166,110 @@ void GLContext::setDepthRange(GLdouble nearValue, GLdouble farValue) {
 
 // --- Per-viewport-index state (GL 4.1 ARB_viewport_array) ---
 
+// GL 4.1 §13.6.1 — viewport-array index validation. Any out-of-range
+// index must raise INVALID_VALUE and leave state unmodified.
+// Centralised here so the check lives in one place and applies to both
+// the direct entry points and the DSA wrappers.
+static GLint64 queryMaxViewports(GLCapabilities* caps) {
+    if (caps == nullptr) return 16;
+    GLint64 v = 16;
+    caps->queryInteger64(GL_MAX_VIEWPORTS, &v);
+    return v;
+}
+
 void GLContext::setViewportIndexed(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h) {
+    if (static_cast<GLint64>(index) >= queryMaxViewports(impl_->capabilities.get())) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (w < 0.0f || h < 0.0f) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
     impl_->state->setViewportIndexed(index, x, y, w, h);
 }
 
 void GLContext::setViewportArray(GLuint first, GLsizei count, const GLfloat* v) {
+    if (count < 0) { pushError(GL_INVALID_VALUE); return; }
+    const GLint64 maxVp = queryMaxViewports(impl_->capabilities.get());
+    if (static_cast<GLint64>(first) + static_cast<GLint64>(count) > maxVp) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    // Per-entry negative-dimension check — reject any entry with
+    // w<0 or h<0. Spec is all-or-nothing: on any invalid entry,
+    // INVALID_VALUE is generated and no slot is updated.
+    if (v != nullptr) {
+        for (GLsizei i = 0; i < count; ++i) {
+            if (v[i * 4 + 2] < 0.0f || v[i * 4 + 3] < 0.0f) {
+                pushError(GL_INVALID_VALUE);
+                return;
+            }
+        }
+    }
     impl_->state->setViewportArray(first, count, v);
 }
 
 void GLContext::setScissorIndexed(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height) {
+    if (static_cast<GLint64>(index) >= queryMaxViewports(impl_->capabilities.get())) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
     impl_->state->setScissorIndexed(index, left, bottom, width, height);
 }
 
 void GLContext::setScissorArray(GLuint first, GLsizei count, const GLint* v) {
+    if (count < 0) { pushError(GL_INVALID_VALUE); return; }
+    const GLint64 maxVp = queryMaxViewports(impl_->capabilities.get());
+    if (static_cast<GLint64>(first) + static_cast<GLint64>(count) > maxVp) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
+    if (v != nullptr) {
+        for (GLsizei i = 0; i < count; ++i) {
+            if (v[i * 4 + 2] < 0 || v[i * 4 + 3] < 0) {
+                pushError(GL_INVALID_VALUE);
+                return;
+            }
+        }
+    }
     impl_->state->setScissorArray(first, count, v);
 }
 
 void GLContext::setDepthRangeIndexed(GLuint index, GLdouble nearVal, GLdouble farVal) {
+    if (static_cast<GLint64>(index) >= queryMaxViewports(impl_->capabilities.get())) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
     impl_->state->setDepthRangeIndexed(index, nearVal, farVal);
 }
 
 void GLContext::setDepthRangeArray(GLuint first, GLsizei count, const GLdouble* v) {
+    if (count < 0) { pushError(GL_INVALID_VALUE); return; }
+    const GLint64 maxVp = queryMaxViewports(impl_->capabilities.get());
+    if (static_cast<GLint64>(first) + static_cast<GLint64>(count) > maxVp) {
+        pushError(GL_INVALID_VALUE);
+        return;
+    }
     impl_->state->setDepthRangeArray(first, count, v);
 }
 
 bool GLContext::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) {
     if (data == nullptr) return false;
+    // GL 4.1 §13.6.1 — viewport-array targets reject out-of-range
+    // index with INVALID_VALUE. CTS `viewport_array.api_errors`
+    // asserts `getFloati_v(GL_VIEWPORT, GL_MAX_VIEWPORTS, ...)`
+    // raises INVALID_VALUE.
+    if (target == GL_VIEWPORT || target == GL_SCISSOR_BOX || target == GL_DEPTH_RANGE) {
+        if (static_cast<GLint64>(index) >= queryMaxViewports(impl_->capabilities.get())) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
     // Array-state path (viewport[i], depthRange[i], etc.) lives on the state tracker.
     if (impl_->state->queryFloatIndexed(target, index, data)) return true;
     // Indexed buffer binding state: BINDING/START/SIZE cast to float per
@@ -6217,6 +6304,12 @@ bool GLContext::queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) {
 
 bool GLContext::queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) {
     if (data == nullptr) return false;
+    if (target == GL_VIEWPORT || target == GL_SCISSOR_BOX || target == GL_DEPTH_RANGE) {
+        if (static_cast<GLint64>(index) >= queryMaxViewports(impl_->capabilities.get())) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
     if (impl_->state->queryDoubleIndexed(target, index, data)) return true;
     IndexedBufferPname ibp;
     if (lookupIndexedBufferPname(target, ibp)) {
@@ -7011,6 +7104,12 @@ bool GLContext::queryIntegerIndexed(GLenum pname, GLuint index, GLint* data) {
         // Table 22.5, so stays handled by queryFloatIndexed.
         case GL_VIEWPORT:
         case GL_SCISSOR_BOX: {
+            // GL 4.1 §13.6.1: index >= MAX_VIEWPORTS raises
+            // INVALID_VALUE (not INVALID_ENUM).
+            if (static_cast<GLint64>(index) >= queryMaxViewports(impl_->capabilities.get())) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
             GLfloat fdata[4] = {};
             if (!impl_->state->queryFloatIndexed(pname, index, fdata)) {
                 pushError(GL_INVALID_VALUE);

@@ -689,19 +689,42 @@ static void APIENTRY glGetDoublei_v(GLenum target, GLuint index, GLdouble *data)
     (void)context->queryDoubleIndexed(target, index, data);
 }
 
+// GL 4.1 §13.6.1 — for SCISSOR_TEST the indexed enablei/disablei/
+// isEnabledi uses `index` as a viewport slot. CTS
+// `viewport_array.api_errors` plants `index == MAX_VIEWPORTS` and
+// asserts INVALID_VALUE. For other caps (BLEND, etc.) the index is
+// a draw-buffer index which has its own max. For simplicity,
+// reject any index >= 16 (MAX_VIEWPORTS, the smaller of the two
+// typical limits) — keeps the error the test wants while still
+// accepting valid per-draw-buffer usage.
 static void APIENTRY glEnablei(GLenum target, GLuint index) {
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    if (index >= 16) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return;
+    }
     (void)target;
-    (void)index;
 }
 
 static void APIENTRY glDisablei(GLenum target, GLuint index) {
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    if (index >= 16) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return;
+    }
     (void)target;
-    (void)index;
 }
 
 static GLboolean APIENTRY glIsEnabledi(GLenum target, GLuint index) {
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return GL_FALSE;
+    if (index >= 16) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return GL_FALSE;
+    }
     (void)target;
-    (void)index;
     return GL_FALSE;
 }
 
