@@ -1156,7 +1156,12 @@ bool validateTextureParameterValues(GLenum pname, const GLint* params) {
             return isValidTextureWrap(params[0]);
         case GL_TEXTURE_BASE_LEVEL:
         case GL_TEXTURE_MAX_LEVEL:
-            return params[0] >= 0;
+            // Accept any int here so the dispatch layer doesn't map a
+            // negative value to INVALID_ENUM. The context-layer check
+            // (texParameterInteger) raises the spec-correct
+            // INVALID_VALUE. CTS texture_border_clamp.texparameteri_errors
+            // distinguishes the two error codes.
+            return true;
         case GL_TEXTURE_COMPARE_MODE:
             return isValidTextureCompareMode(params[0]);
         case GL_TEXTURE_COMPARE_FUNC:
@@ -1179,6 +1184,17 @@ bool validateTextureParameterValues(GLenum pname, const GLint* params) {
             return true;
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return params[0] == GL_DEPTH_COMPONENT || params[0] == GL_STENCIL_INDEX;
+        // GL 4.6 §8.11 storage-state pnames — read-only, valid for
+        // GetTexParameter* but SET paths must reject with INVALID_ENUM.
+        // CTS texture_border_clamp.texparameteri_errors asserts this.
+        case GL_TEXTURE_IMMUTABLE_FORMAT:
+        case GL_TEXTURE_IMMUTABLE_LEVELS:
+        case GL_TEXTURE_VIEW_MIN_LEVEL:
+        case GL_TEXTURE_VIEW_MIN_LAYER:
+        case GL_TEXTURE_VIEW_NUM_LEVELS:
+        case GL_TEXTURE_VIEW_NUM_LAYERS:
+        case GL_TEXTURE_TARGET:
+            return false;
         default:
             return false;
     }

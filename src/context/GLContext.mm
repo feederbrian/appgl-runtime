@@ -9886,28 +9886,13 @@ bool GLContext::texBufferRange(
 }
 
 bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* params) {
-    GLTextureObject* object = impl_->currentTexture(target);
-    // OpenGL 4.6 §8.10: when no user texture is bound to `target`, the
-    // parameters are applied to the "default texture object" for that
-    // target. CTS state reset (gluStateReset.cpp) relies on this: it
-    // binds name=0 and then calls texParameteri to reset swizzle/levels.
-    // If we generate GL_INVALID_OPERATION here, the reset throws and
-    // subsequent state (notably glDepthMask(GL_TRUE)) never runs, causing
-    // state bleed between tests. Silently accept the parameter instead —
-    // since nothing reads back the default texture's params, a no-op is
-    // functionally equivalent to storing them.
-    if (object == nullptr) {
-        return true;
-    }
-    if (!object->instantiated) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    // GL 4.6 §8.10 target-aware validation. The spec places several
-    // constraints on the (target, pname, param) tuple that need the
-    // target for context. Runs BEFORE the generic pname-accepted
-    // check in setTextureParameterInteger so the error code matches
-    // the spec.
+    // GL 4.6 §8.10 target-aware validation runs FIRST — before the
+    // "default texture" accommodation — so spec-violating
+    // combinations (MS+sampler-pname, BUFFER+sampler-pname, negative
+    // base-level) surface the spec-correct error even when no user
+    // texture is bound to `target`. Moving this check up is safe for
+    // CTS's gluStateReset because its reset sequence never touches
+    // the buffer / MS targets with disallowed pnames.
     if (params != nullptr) {
         // (a) Negative BASE_LEVEL / MAX_LEVEL → INVALID_VALUE.
         if ((pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
@@ -9921,10 +9906,16 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
             pushError(GL_INVALID_VALUE);
             return false;
         }
-        // (b) Sampler state on MULTISAMPLE targets → INVALID_OPERATION.
-        // Sampler pnames are filter/wrap/lod/compare/border/lod_bias.
+        // (b) GL 4.6 §8.10 — for TEXTURE_2D_MULTISAMPLE,
+        // TEXTURE_2D_MULTISAMPLE_ARRAY, and TEXTURE_BUFFER, most
+        // sampler-state pnames are INVALID_ENUM. Allowed pnames on
+        // these targets are the storage-state queries and the
+        // "layout" pnames: BASE_LEVEL, MAX_LEVEL, SWIZZLE_*,
+        // DEPTH_STENCIL_TEXTURE_MODE. Buffer textures also forbid
+        // base/max-level updates (they have no mipmap chain).
         const bool isMSTarget = (target == GL_TEXTURE_2D_MULTISAMPLE ||
                                  target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+        const bool isBufferTarget = (target == GL_TEXTURE_BUFFER);
         const bool isSamplerPname = (
             pname == GL_TEXTURE_MIN_FILTER || pname == GL_TEXTURE_MAG_FILTER ||
             pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T ||
@@ -9934,6 +9925,15 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
             pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_MAX_ANISOTROPY);
         if (isMSTarget && isSamplerPname) {
             pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // Buffer textures reject every sampler-state pname AND the
+        // level pnames (they have no mipmap chain). Per GL 4.6 §8.9
+        // these are INVALID_ENUM for buffer texture targets.
+        if (isBufferTarget &&
+            (isSamplerPname || pname == GL_TEXTURE_BASE_LEVEL ||
+             pname == GL_TEXTURE_MAX_LEVEL)) {
+            pushError(GL_INVALID_ENUM);
             return false;
         }
         // (c) BASE_LEVEL != 0 on MULTISAMPLE → INVALID_OPERATION.
@@ -9973,6 +9973,22 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
         // wrapper's 1-element buffer would then read garbage for indices
         // 1..3. Punt this check to the runtime wrappers — those know
         // whether the scalar or vector entry point was called.
+    }
+
+    GLTextureObject* object = impl_->currentTexture(target);
+    // OpenGL 4.6 §8.10: when no user texture is bound to `target`, the
+    // parameters are applied to the "default texture object" for that
+    // target. CTS state reset (gluStateReset.cpp) relies on this: it
+    // binds name=0 and then calls texParameteri to reset swizzle/levels.
+    // If we generate GL_INVALID_OPERATION here, the reset throws and
+    // subsequent state (notably glDepthMask(GL_TRUE)) never runs, causing
+    // state bleed between tests. Silently accept the parameter instead.
+    if (object == nullptr) {
+        return true;
+    }
+    if (!object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
     }
     if (!setTextureParameterInteger(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
@@ -10016,17 +10032,8 @@ bool GLContext::texParameterUnsignedInteger(GLenum target, GLenum pname, const G
 }
 
 bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* params) {
-    GLTextureObject* object = impl_->currentTexture(target);
-    // See comment in texParameterInteger — default-texture params are a
-    // no-op to keep CTS state reset from throwing.
-    if (object == nullptr) {
-        return true;
-    }
-    if (!object->instantiated) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    // GL 4.6 §8.10 target-aware validation (mirrors texParameterInteger).
+    // GL 4.6 §8.10 target-aware validation runs FIRST — see
+    // texParameterInteger for the rationale.
     if (params != nullptr) {
         if ((pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
             && params[0] < 0.0f) {
@@ -10042,6 +10049,7 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
         }
         const bool isMSTarget = (target == GL_TEXTURE_2D_MULTISAMPLE ||
                                  target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+        const bool isBufferTarget = (target == GL_TEXTURE_BUFFER);
         const bool isSamplerPname = (
             pname == GL_TEXTURE_MIN_FILTER || pname == GL_TEXTURE_MAG_FILTER ||
             pname == GL_TEXTURE_WRAP_S || pname == GL_TEXTURE_WRAP_T ||
@@ -10049,8 +10057,17 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
             pname == GL_TEXTURE_MAX_LOD || pname == GL_TEXTURE_LOD_BIAS ||
             pname == GL_TEXTURE_COMPARE_MODE || pname == GL_TEXTURE_COMPARE_FUNC ||
             pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_MAX_ANISOTROPY);
+        // GL 4.6 §8.10 — MS target + sampler pname is INVALID_OPERATION
+        // (core spec wording). Buffer target + sampler/level pname is
+        // INVALID_ENUM (buffer textures have no filter/mipmap state).
         if (isMSTarget && isSamplerPname) {
             pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (isBufferTarget &&
+            (isSamplerPname || pname == GL_TEXTURE_BASE_LEVEL ||
+             pname == GL_TEXTURE_MAX_LEVEL)) {
+            pushError(GL_INVALID_ENUM);
             return false;
         }
         if (isMSTarget && pname == GL_TEXTURE_BASE_LEVEL && params[0] != 0.0f) {
@@ -10076,6 +10093,17 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
                 return false;
             }
         }
+    }
+
+    GLTextureObject* object = impl_->currentTexture(target);
+    // See comment in texParameterInteger — default-texture params are a
+    // no-op to keep CTS state reset from throwing.
+    if (object == nullptr) {
+        return true;
+    }
+    if (!object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
     }
     if (!setTextureParameterFloat(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
