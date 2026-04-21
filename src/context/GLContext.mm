@@ -9340,6 +9340,31 @@ bool GLContext::texStorageMultisample(
     return true;
 }
 
+// GL 4.6 Table 8.12 — sized internal formats allowed for
+// GL_TEXTURE_BUFFER. Unsized formats (GL_RGBA, GL_RED, etc.) are
+// rejected with INVALID_ENUM per §8.9.
+static bool isValidBufferTextureSizedFormat(GLenum fmt) {
+    switch (fmt) {
+        // R
+        case GL_R8: case GL_R8I: case GL_R8UI:
+        case GL_R16: case GL_R16I: case GL_R16UI: case GL_R16F:
+        case GL_R32I: case GL_R32UI: case GL_R32F:
+        // RG
+        case GL_RG8: case GL_RG8I: case GL_RG8UI:
+        case GL_RG16: case GL_RG16I: case GL_RG16UI: case GL_RG16F:
+        case GL_RG32I: case GL_RG32UI: case GL_RG32F:
+        // RGB (only 32-bit variants)
+        case GL_RGB32I: case GL_RGB32UI: case GL_RGB32F:
+        // RGBA
+        case GL_RGBA8: case GL_RGBA8I: case GL_RGBA8UI:
+        case GL_RGBA16: case GL_RGBA16I: case GL_RGBA16UI: case GL_RGBA16F:
+        case GL_RGBA32I: case GL_RGBA32UI: case GL_RGBA32F:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool GLContext::texBufferRange(
     GLenum target,
     GLenum internalformat,
@@ -9351,7 +9376,10 @@ bool GLContext::texBufferRange(
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (!isSupportedInternalTextureFormat(*impl_->capabilities, internalformat)) {
+    // GL 4.6 §8.9: buffer-texture internalformat must be a sized
+    // internal format from Table 8.12. Unsized base formats (e.g.
+    // GL_RED) and others raise INVALID_ENUM.
+    if (!isValidBufferTextureSizedFormat(internalformat)) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -9359,11 +9387,38 @@ bool GLContext::texBufferRange(
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // GL 4.6 §8.9: offset must be a multiple of
+    // GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT. We advertise 16.
+    {
+        GLint64 alignment = 16;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger64(
+                GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT, &alignment);
+        }
+        if ((offset % alignment) != 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
 
     GLTextureObject* object = impl_->currentTexture(target);
     if (object == nullptr || !object->instantiated) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+    // GL 4.6 §8.9: if `buffer` is non-zero it must name an
+    // existing buffer object. Otherwise INVALID_OPERATION.
+    if (buffer != 0) {
+        GLBufferObject* checkBuf = impl_->objects->buffers().get(buffer);
+        if (checkBuf == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        // offset + size must be <= buffer's current size.
+        if (static_cast<GLsizeiptr>(offset) + size > checkBuf->size) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
     }
 
     // Record the buffer-texture binding state.
