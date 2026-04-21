@@ -1001,6 +1001,13 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
             case GL_CLIP_DEPTH_MODE:
                 *out = static_cast<GLint>(clipDepthMode_);
                 return true;
+            case GL_PROGRAM_PIPELINE_BINDING:
+                // GL 4.1+ ARB_separate_shader_objects. CTS
+                // `sepshaderobjs.PipelineApi` asserts
+                // `glGetIntegerv(GL_PROGRAM_PIPELINE_BINDING)`
+                // returns the currently bound pipeline.
+                *out = static_cast<GLint>(currentProgramPipeline_);
+                return true;
             case GL_PATCH_VERTICES:
                 *out = tessellation_.patchVertices;
                 return true;

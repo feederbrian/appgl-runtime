@@ -6089,19 +6089,40 @@ void APIENTRY glProgramBinary(GLuint program, GLenum binaryFormat, const void* b
 
 void APIENTRY glProgramParameteri(GLuint program, GLenum pname, GLint value) {
     auto* ctx = requireCurrentContext("glProgramParameteri"); if (!ctx) return;
-    // GL 4.1 §7.3 / ARB_separate_shader_objects — GL_PROGRAM_
-    // SEPARABLE actually has linker-visible semantics: once set,
-    // the next `glLinkProgram` accepts incomplete stage
-    // combinations (the missing stages are filled in by the
-    // pipeline object the program is later bound into). Store
-    // the flag on the program so the linker can read it.
-    if (pname == GL_PROGRAM_SEPARABLE) {
-        if (auto* obj = ctx->objects().programs().get(program)) {
-            obj->separable = (value == GL_TRUE);
-        }
+    // GL 4.6 §7.3: `program` must name an existing program object.
+    // Otherwise INVALID_VALUE. CTS `sepshaderobjs.PipelineApi`
+    // asserts INVALID_VALUE on a deleted program.
+    auto* obj = ctx->objects().programs().get(program);
+    if (obj == nullptr) {
+        recordValidationError(ctx, "glProgramParameteri", GL_INVALID_VALUE,
+                              "program is not an existing program object");
+        return;
     }
-    // GL_PROGRAM_BINARY_RETRIEVABLE_HINT is still a no-op — we
-    // don't support program binaries.
+    // GL 4.6 §7.3 pname validation. Accepted tokens:
+    //   GL_PROGRAM_SEPARABLE (TRUE/FALSE)
+    //   GL_PROGRAM_BINARY_RETRIEVABLE_HINT (TRUE/FALSE)
+    // Anything else → INVALID_ENUM. Value must be TRUE or FALSE
+    // for both pnames.
+    if (pname != GL_PROGRAM_SEPARABLE &&
+        pname != GL_PROGRAM_BINARY_RETRIEVABLE_HINT) {
+        recordValidationError(ctx, "glProgramParameteri", GL_INVALID_ENUM,
+                              "pname is not a valid program parameter");
+        return;
+    }
+    if (value != GL_TRUE && value != GL_FALSE) {
+        recordValidationError(ctx, "glProgramParameteri", GL_INVALID_VALUE,
+                              "value must be GL_TRUE or GL_FALSE");
+        return;
+    }
+    // GL 4.1 §7.3 / ARB_separate_shader_objects — GL_PROGRAM_
+    // SEPARABLE has linker-visible semantics: once set, the next
+    // `glLinkProgram` accepts incomplete stage combinations (the
+    // missing stages are filled in by the pipeline object).
+    if (pname == GL_PROGRAM_SEPARABLE) {
+        obj->separable = (value == GL_TRUE);
+    }
+    // GL_PROGRAM_BINARY_RETRIEVABLE_HINT is a no-op — we don't
+    // support program binaries.
     markProgramFunction(FunctionId::glProgramParameteri, "ProgramParameteri GL_PROGRAM_SEPARABLE recorded.");
     Runtime::shared().recordBootstrapTrace("glProgramParameteri(program=" + std::to_string(program) + ", pname=" + std::to_string(pname) + ")");
 }
@@ -6250,8 +6271,16 @@ void APIENTRY glDeleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
         recordValidationError(ctx, "glDeleteProgramPipelines", GL_INVALID_VALUE, "n < 0");
         return;
     }
+    // GL 4.6 §7.4: if a currently-bound pipeline is deleted, the
+    // binding reverts to 0. CTS `sepshaderobjs.PipelineApi`
+    // explicitly checks `glGetIntegerv(GL_PROGRAM_PIPELINE_BINDING)`
+    // returns 0 after deleting the bound pipeline.
+    const GLuint boundPipeline = ctx->state().currentProgramPipeline();
     for (GLsizei i = 0; i < n; ++i) {
         if (pipelines[i] != 0) {
+            if (pipelines[i] == boundPipeline) {
+                ctx->state().setCurrentProgramPipeline(0);
+            }
             ctx->objects().programPipelines().erase(pipelines[i]);
         }
     }
@@ -6366,6 +6395,19 @@ void APIENTRY glActiveShaderProgram(GLuint pipeline, GLuint program) {
         recordValidationError(ctx, "glActiveShaderProgram", GL_INVALID_OPERATION, "pipeline does not exist");
         return;
     }
+    // GL 4.6 §7.4 — if `program` is non-zero it must name an
+    // existing program (not necessarily linked). Nonexistent names
+    // raise INVALID_VALUE; unlinked-but-existing programs raise
+    // INVALID_OPERATION. CTS `sepshaderobjs.PipelineApi` probes
+    // both negative paths.
+    if (program != 0) {
+        auto* prog = ctx->objects().programs().get(program);
+        if (prog == nullptr) {
+            recordValidationError(ctx, "glActiveShaderProgram", GL_INVALID_VALUE,
+                                  "program is not the name of an existing program");
+            return;
+        }
+    }
     ppo->activeShaderProgram = program;
     markProgramFunction(FunctionId::glActiveShaderProgram, "ActiveShaderProgram sets default uniform target.");
     Runtime::shared().recordBootstrapTrace("glActiveShaderProgram(pipeline=" + std::to_string(pipeline) + ", program=" + std::to_string(program) + ")");
@@ -6429,10 +6471,40 @@ void APIENTRY glValidateProgramPipeline(GLuint pipeline) {
         recordValidationError(ctx, "glValidateProgramPipeline", GL_INVALID_OPERATION, "pipeline does not exist");
         return;
     }
-    // Always report validation success (state-only — no real separable pipeline in Metal yet).
-    ppo->validated = true;
-    ppo->infoLog = "Validation successful (AppGL stub).";
-    markProgramFunction(FunctionId::glValidateProgramPipeline, "ValidateProgramPipeline (always passes, stub).");
+    // GL 4.6 §11.1.3.12: VALIDATE_STATUS = TRUE only if the
+    // pipeline has at least one stage bound AND all stages are
+    // consistent. Empty pipeline fails. CTS
+    // `sepshaderobjs.PipelineApi` validates an empty pipeline
+    // and expects VALIDATE_STATUS = FALSE.
+    const GLuint stages[] = {
+        ppo->vertexProgram, ppo->fragmentProgram, ppo->geometryProgram,
+        ppo->tessControlProgram, ppo->tessEvalProgram, ppo->computeProgram,
+    };
+    bool hasAnyStage = false;
+    bool allSeparable = true;
+    for (GLuint p : stages) {
+        if (p == 0) continue;
+        hasAnyStage = true;
+        auto* prog = ctx->objects().programs().get(p);
+        // A stage-program must be linked AND have
+        // GL_PROGRAM_SEPARABLE (as snapshotted at link time) set.
+        // CTS `sepshaderobjs.PipelineApi` re-links a stage program
+        // with SEPARABLE=FALSE and asserts validation fails.
+        if (prog == nullptr || !prog->linked || !prog->separableLinked) {
+            allSeparable = false;
+        }
+    }
+    if (!hasAnyStage) {
+        ppo->validated = false;
+        ppo->infoLog = "Pipeline has no stages bound.";
+    } else if (!allSeparable) {
+        ppo->validated = false;
+        ppo->infoLog = "One or more stage programs are not separable or not linked.";
+    } else {
+        ppo->validated = true;
+        ppo->infoLog = "Validation successful (AppGL stub).";
+    }
+    markProgramFunction(FunctionId::glValidateProgramPipeline, "ValidateProgramPipeline state-tracked.");
     Runtime::shared().recordBootstrapTrace("glValidateProgramPipeline(pipeline=" + std::to_string(pipeline) + ")");
 }
 
@@ -6469,9 +6541,15 @@ void APIENTRY glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* param
 void APIENTRY glGetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize, GLsizei* length, GLchar* infoLog) {
     auto* ctx = requireCurrentContext("glGetProgramPipelineInfoLog");
     if (!ctx) return;
+    if (bufSize < 0) {
+        recordValidationError(ctx, "glGetProgramPipelineInfoLog", GL_INVALID_VALUE, "bufSize must be non-negative");
+        return;
+    }
     auto* ppo = ctx->objects().programPipelines().get(pipeline);
     if (!ppo) {
-        recordValidationError(ctx, "glGetProgramPipelineInfoLog", GL_INVALID_OPERATION, "pipeline does not exist");
+        // GL 4.6 §11.1.3.11: INVALID_VALUE (not INVALID_OPERATION)
+        // when pipeline is not a program-pipeline object name.
+        recordValidationError(ctx, "glGetProgramPipelineInfoLog", GL_INVALID_VALUE, "pipeline is not a program-pipeline object");
         return;
     }
     GLsizei logLen = static_cast<GLsizei>(ppo->infoLog.size());

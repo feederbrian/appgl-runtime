@@ -14443,6 +14443,11 @@ bool GLContext::linkProgram(GLuint program) {
 
     programObject->linked = true;
     programObject->linkLog = "ok";
+    // Snapshot the separability request at link time. The query
+    // `glGetProgramiv(program, GL_PROGRAM_SEPARABLE)` returns this
+    // snapshot — it matches the program's *linked* binary, not the
+    // request-level parameter. See GLProgramObject::separableLinked.
+    programObject->separableLinked = programObject->separable;
 
     // Populate GL 4.3 program resource introspection tables from the
     // reflection data we already gathered above.
@@ -16788,7 +16793,10 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             *params = 0;  // No binary program support
             return true;
         case GL_PROGRAM_SEPARABLE:
-            *params = object->separable ? GL_TRUE : GL_FALSE;
+            // Query returns the LINK-TIME snapshot, not the request
+            // parameter. Before any successful link, this is FALSE
+            // regardless of glProgramParameteri calls.
+            *params = object->separableLinked ? GL_TRUE : GL_FALSE;
             return true;
         case GL_PROGRAM_BINARY_RETRIEVABLE_HINT:
             *params = GL_FALSE;
