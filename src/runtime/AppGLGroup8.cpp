@@ -2164,19 +2164,50 @@ static void APIENTRY glEndQuery(GLenum target) {
             query.active = false;
             // Preserve the accumulated result that draw-time hooks
             // produced while the query was active. For query
-            // targets the driver doesn't implement yet, leave the
-            // synthetic-1 fallback so single-draw CTS tests that
-            // just check "did anything pass" still report success.
-            // Accumulating targets (PRIMITIVES_GENERATED,
-            // TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN) stamp their
-            // real count inside writeGsXfbAndCheckDiscard; the
-            // result field already carries the correct value.
+            // targets the driver doesn't implement yet:
+            //  - PIPELINE_STATISTICS_* (GS/FS/CS/VS/TCS/TES
+            //    invocations, primitives emitted, clipping in/out,
+            //    patches) must keep their 0-initialised value when
+            //    no draw happened. CTS
+            //    `pipeline_statistics_query_tests_ARB.
+            //    functional_default_qo_values` begins + ends the
+            //    query with no pfn_draw callback and expects 0.
+            //  - SAMPLES_PASSED / ANY_SAMPLES_PASSED get the
+            //    synthetic 1 fallback (we don't have a real
+            //    MTLVisibilityResultBuffer yet) so single-draw
+            //    CTS tests that only check "did anything pass"
+            //    still report success. Real occlusion counts
+            //    remain a future infra win.
+            //  - Accumulating targets (PRIMITIVES_GENERATED,
+            //    TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN) stamp
+            //    their real count inside writeGsXfbAndCheckDiscard;
+            //    the result field already carries the correct
+            //    value.
             switch (query.target) {
                 case GL_PRIMITIVES_GENERATED:
                 case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
-                    // `query.result` already holds the sum of
-                    // per-draw contributions. Keep it.
+                case GL_VERTICES_SUBMITTED:
+                case GL_PRIMITIVES_SUBMITTED:
+                case GL_VERTEX_SHADER_INVOCATIONS:
+                case GL_TESS_CONTROL_SHADER_PATCHES:
+                case GL_TESS_EVALUATION_SHADER_INVOCATIONS:
+                case GL_GEOMETRY_SHADER_INVOCATIONS:
+                case GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED:
+                case GL_FRAGMENT_SHADER_INVOCATIONS:
+                case GL_COMPUTE_SHADER_INVOCATIONS:
+                case GL_CLIPPING_INPUT_PRIMITIVES:
+                case GL_CLIPPING_OUTPUT_PRIMITIVES:
+                case GL_TIME_ELAPSED:
+                case GL_TRANSFORM_FEEDBACK_OVERFLOW:
+                case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
+                    // Leave the accumulated / 0-initialised value.
+                    // (Overflow queries default to 0=no-overflow;
+                    // writeGsXfbAndCheckDiscard raises them to 1
+                    // when a TF buffer actually overflows.)
                     break;
+                case GL_SAMPLES_PASSED:
+                case GL_ANY_SAMPLES_PASSED:
+                case GL_ANY_SAMPLES_PASSED_CONSERVATIVE:
                 default:
                     query.result = 1;
                     break;
