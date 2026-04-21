@@ -2220,24 +2220,50 @@ struct GLContext::Impl {
                    ? static_cast<NSUInteger>(baseLevel.desc.depth)
                    : 1);
             const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
-            // Pick the Metal format from the internalFormat first,
-            // regardless of whether native-layout data has been buffered
-            // yet. For `glTexStorage3D(GL_DEPTH_COMPONENT32F, ...)` and
-            // similar storage-only paths (no matching texSubImage), there's
-            // no native data to check, but we still need to build the
-            // Metal texture at the correct format — otherwise depth-
-            // attached FBOs end up with an RGBA8Unorm texture in the
-            // depth slot, Metal silently fails the format match against
-            // the pipeline's DepthAttachmentPixelFormat, and every
-            // fragment gets discarded (GPU-capture signature on
-            // `geometry_shader.layered_framebuffer.depth_support`).
+            // Pick the Metal format. There are three cases:
+            //   1. Storage-only depth/stencil/stencil format
+            //      (`glTexStorage3D(GL_DEPTH_COMPONENT32F, ...)` and
+            //      similar): no native data yet, but we need the
+            //      depth/stencil Metal format so FBOs can attach the
+            //      texture to the depth slot without the pipeline's
+            //      DepthAttachmentPixelFormat silently mismatching
+            //      RGBA8Unorm (GPU-capture signature on
+            //      `geometry_shader.layered_framebuffer.depth_support`).
+            //   2. Native-data-populated color format
+            //      (`glTexImage2D(GL_R32F, …)`, `glTexStorage2D` +
+            //      `glTexSubImage2D(GL_RED, GL_FLOAT)`): the native
+            //      encoder populated `nativeData`, so use the native
+            //      Metal format and the per-slice copy below hooks
+            //      up the native bytes.
+            //   3. Color format without native data
+            //      (`glTexImage2D(GL_RGB10_A2, GL_RGBA, GL_UNSIGNED_
+            //      BYTE, …)` where the app supplied RGBA8 bytes but
+            //      the GL internal format requests RGB10_A2 precision,
+            //      AND the native encoder declined to convert): fall
+            //      back to RGBA8Unorm so the RGBA8 shadow uploads.
+            //      This preserves pre-e1bd4cf behaviour for every
+            //      color format path that relies on the RGBA8
+            //      fallback — CTS `pixelstoragemodes.teximage2d.rgb10a2`
+            //      is the canonical witness.
             MTLPixelFormat wantFormat = MTLPixelFormatRGBA8Unorm;
             {
                 MTLPixelFormat native = metalRenderbufferFormat(baseLevel.desc.internalFormat);
-                if (native != MTLPixelFormatInvalid) wantFormat = native;
+                if (native != MTLPixelFormatInvalid) {
+                    const bool isDepthStencil =
+                        native == MTLPixelFormatDepth16Unorm ||
+                        native == MTLPixelFormatDepth32Float ||
+                        native == MTLPixelFormatDepth32Float_Stencil8 ||
+                        native == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                        native == MTLPixelFormatStencil8 ||
+                        native == MTLPixelFormatX32_Stencil8 ||
+                        native == MTLPixelFormatX24_Stencil8;
+                    if (isDepthStencil || hasNativeData) {
+                        wantFormat = native;
+                    }
+                    // Case 3: color format, no native data yet → leave
+                    // wantFormat at RGBA8Unorm (pre-e1bd4cf behaviour).
+                }
             }
-            (void)hasNativeData;  // fast-path uploader still gates per-slice
-                                  // byte copy on this flag below.
             GLint maxLevelExisting = 0;
             for (const auto& [levelIndex, image] : object.levels) {
                 if (levelIndex >= 0 && image.defined) {
@@ -2331,21 +2357,35 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
 
-        // Choose the native Metal pixel format from the internal format
-        // whenever we have a mapping. `hasNativeData` used to gate this,
-        // but that skipped the mapping for storage-only textures
-        // (e.g. `glTexStorage3D(GL_DEPTH_COMPONENT32F, …)` with no
-        // matching texSubImage3D) — the resulting Metal texture got
-        // RGBA8Unorm instead of Depth32Float, and FBO depth attachments
-        // silently failed the pipeline-format match, dropping every
-        // fragment. Only fall back to RGBA8Unorm when the GL internal
-        // format has no known Metal mapping.
+        // Choose the native Metal pixel format. Three cases (mirror of
+        // the fast-path above):
+        //   1. Depth/stencil internal format → always native (RGBA8
+        //      fallback is incorrect for FBO depth attachment).
+        //   2. Color format with native-layout data populated → native.
+        //   3. Color format with only the RGBA8 shadow (`glTexImage2D
+        //      (GL_RGB10_A2, GL_RGBA, GL_UNSIGNED_BYTE, …)`) → keep
+        //      RGBA8Unorm so the shadow uploads. The native encoder
+        //      for RGB10_A2 doesn't accept RGBA8-unsigned-byte source
+        //      data, so forcing RGB10A2Unorm leaves the texture empty.
+        //      CTS `pixelstoragemodes.teximage2d.rgb10a2` is the
+        //      canonical witness of the wrong behaviour (16 tests
+        //      regressed when the gate was dropped in e1bd4cf).
         const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
         MTLPixelFormat chosenFormat = MTLPixelFormatRGBA8Unorm;
         {
             MTLPixelFormat nativeFmt = metalRenderbufferFormat(baseLevel.desc.internalFormat);
             if (nativeFmt != MTLPixelFormatInvalid) {
-                chosenFormat = nativeFmt;
+                const bool isDepthStencil =
+                    nativeFmt == MTLPixelFormatDepth16Unorm ||
+                    nativeFmt == MTLPixelFormatDepth32Float ||
+                    nativeFmt == MTLPixelFormatDepth32Float_Stencil8 ||
+                    nativeFmt == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                    nativeFmt == MTLPixelFormatStencil8 ||
+                    nativeFmt == MTLPixelFormatX32_Stencil8 ||
+                    nativeFmt == MTLPixelFormatX24_Stencil8;
+                if (isDepthStencil || hasNativeData) {
+                    chosenFormat = nativeFmt;
+                }
             }
         }
 
