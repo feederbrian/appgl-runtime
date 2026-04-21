@@ -15043,18 +15043,34 @@ bool GLContext::linkProgram(GLuint program) {
                 while (mp < bodyEnd) {
                     std::size_t semi = src.find(';', mp);
                     if (semi == std::string::npos || semi >= bodyEnd) break;
-                    // Walk backwards from the semi, skipping optional
-                    // array subscript [N] and whitespace, to the
-                    // trailing identifier.
+                    // Walk backwards from the semi, skipping only
+                    // whitespace + optional array-subscript block
+                    // `[ ... ]`. The block may contain digits and
+                    // whitespace. Previously we blindly stripped any
+                    // trailing digits, which truncated `temp2;` to
+                    // `temp`.
                     std::size_t e = semi;
-                    while (e > mp) {
-                        unsigned char c = static_cast<unsigned char>(src[e - 1]);
-                        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
-                            c == ']' || c == '[' || std::isdigit(c)) {
-                            --e;
-                        } else {
-                            break;
+                    auto skipWs = [&](std::size_t& p) {
+                        while (p > mp) {
+                            unsigned char c = static_cast<unsigned char>(src[p - 1]);
+                            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                                --p;
+                            } else break;
                         }
+                    };
+                    skipWs(e);
+                    if (e > mp && src[e - 1] == ']') {
+                        // Walk back through the array-subscript brackets.
+                        // Just look for the matching `[` — anything between
+                        // (digits, whitespace, identifiers for sized types
+                        // or constants) is allowed by GLSL.
+                        int depth = 1;
+                        while (e > mp && depth > 0) {
+                            --e;
+                            if (src[e] == ']') ++depth;
+                            else if (src[e] == '[') --depth;
+                        }
+                        skipWs(e);
                     }
                     std::size_t b = e;
                     while (b > mp) {
