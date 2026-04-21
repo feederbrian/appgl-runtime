@@ -927,6 +927,11 @@ void GLStateTracker::enable(GLenum cap) {
     if (!wasEnabled) {
         dirtyMask_ |= dirtyBitsForCap(cap);
     }
+    // GL 4.1 §17.3.2: Enable(SCISSOR_TEST) is equivalent to
+    // Enablei(SCISSOR_TEST, i) for every i in 0..MAX_VIEWPORTS-1.
+    if (cap == GL_SCISSOR_TEST) {
+        for (auto& v : indexedScissorTest_) v = true;
+    }
 }
 
 void GLStateTracker::disable(GLenum cap) {
@@ -935,10 +940,38 @@ void GLStateTracker::disable(GLenum cap) {
     if (wasEnabled) {
         dirtyMask_ |= dirtyBitsForCap(cap);
     }
+    if (cap == GL_SCISSOR_TEST) {
+        for (auto& v : indexedScissorTest_) v = false;
+    }
 }
 
 bool GLStateTracker::isEnabled(GLenum cap) const {
+    // GL 4.1 §17.3.2: IsEnabled(SCISSOR_TEST) returns
+    // IsEnabledi(SCISSOR_TEST, 0). We keep enabledCaps_ in sync
+    // with enable/disable so either path works; prefer the
+    // per-index array for SCISSOR_TEST so a prior Enablei(0)
+    // also reports true here.
+    if (cap == GL_SCISSOR_TEST) {
+        return indexedScissorTest_[0];
+    }
     return enabledCaps_.contains(cap);
+}
+
+void GLStateTracker::setScissorTestIndexed(GLuint index, bool enabled) {
+    if (index >= kMaxViewports) return;
+    indexedScissorTest_[index] = enabled;
+    // Mirror slot 0 into enabledCaps_ so legacy queries that
+    // introspect enabledCaps_ (GetBoolean(GL_SCISSOR_TEST),
+    // dirtyBitsForCap, etc.) stay consistent.
+    if (index == 0) {
+        if (enabled) enabledCaps_.insert(GL_SCISSOR_TEST);
+        else enabledCaps_.erase(GL_SCISSOR_TEST);
+    }
+}
+
+bool GLStateTracker::isScissorTestIndexedEnabled(GLuint index) const {
+    if (index >= kMaxViewports) return false;
+    return indexedScissorTest_[index];
 }
 
 bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {

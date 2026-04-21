@@ -159,6 +159,15 @@ public:
     void setDepthRangeArray(GLuint first, GLsizei count, const GLdouble* v);
     bool queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) const;
     bool queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) const;
+    // Per-viewport SCISSOR_TEST state. GL 4.1 §17.3.2:
+    //   Enable(SCISSOR_TEST)       → all slots TRUE
+    //   Disable(SCISSOR_TEST)      → all slots FALSE
+    //   Enablei(SCISSOR_TEST, i)   → slot i TRUE
+    //   Disablei(SCISSOR_TEST, i)  → slot i FALSE
+    //   IsEnabled(SCISSOR_TEST)    → slot 0
+    //   IsEnabledi(SCISSOR_TEST,i) → slot i
+    void setScissorTestIndexed(GLuint index, bool enabled);
+    bool isScissorTestIndexedEnabled(GLuint index) const;
 
     // Tessellation state (GL 4.0).
     void setPatchParameteri(GLenum pname, GLint value);
@@ -306,6 +315,11 @@ private:
     std::array<IndexedViewport, kMaxViewports> indexedViewports_{};
     std::array<IndexedScissor, kMaxViewports> indexedScissors_{};
     std::array<GLDepthRangeState, kMaxViewports> indexedDepthRanges_{};
+    // Per-viewport SCISSOR_TEST enable bits (GL 4.1 §17.3.2). The
+    // non-indexed `glEnable(SCISSOR_TEST)` is spec-equivalent to
+    // setting every slot true; `glEnablei(SCISSOR_TEST, i)` sets
+    // only slot i. Initial state per spec: all slots FALSE.
+    std::array<bool, kMaxViewports> indexedScissorTest_{};
     GLTessellationState tessellation_;
     GLBlendState blend_;
     GLDepthState depth_;

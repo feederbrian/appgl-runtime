@@ -740,14 +740,19 @@ static void APIENTRY glGetDoublei_v(GLenum target, GLuint index, GLdouble *data)
     (void)context->queryDoubleIndexed(target, index, data);
 }
 
-// GL 4.1 §13.6.1 — for SCISSOR_TEST the indexed enablei/disablei/
-// isEnabledi uses `index` as a viewport slot. CTS
-// `viewport_array.api_errors` plants `index == MAX_VIEWPORTS` and
-// asserts INVALID_VALUE. For other caps (BLEND, etc.) the index is
-// a draw-buffer index which has its own max. For simplicity,
-// reject any index >= 16 (MAX_VIEWPORTS, the smaller of the two
-// typical limits) — keeps the error the test wants while still
-// accepting valid per-draw-buffer usage.
+// GL 4.1 §13.6.1 / §17.3.2 — for SCISSOR_TEST the indexed
+// enablei/disablei/isEnabledi uses `index` as a viewport slot.
+// CTS `viewport_array.api_errors` plants `index == MAX_VIEWPORTS`
+// and asserts INVALID_VALUE. For other caps (BLEND, etc.) the
+// index is a draw-buffer index which has its own max. For
+// simplicity, reject any index >= 16 (MAX_VIEWPORTS, the smaller
+// of the two typical limits) — keeps the error the test wants
+// while still accepting valid per-draw-buffer usage.
+//
+// For SCISSOR_TEST specifically, drive the per-viewport state
+// array so that `viewport_array.scissor_test_state_api` can
+// round-trip per-index enable/disable and see non-indexed
+// Enable/Disable propagate to all slots.
 static void APIENTRY glEnablei(GLenum target, GLuint index) {
     auto* ctx = currentContextOrNull();
     if (ctx == nullptr) return;
@@ -755,7 +760,9 @@ static void APIENTRY glEnablei(GLenum target, GLuint index) {
         ctx->pushError(GL_INVALID_VALUE);
         return;
     }
-    (void)target;
+    if (target == GL_SCISSOR_TEST) {
+        ctx->state().setScissorTestIndexed(index, true);
+    }
 }
 
 static void APIENTRY glDisablei(GLenum target, GLuint index) {
@@ -765,7 +772,9 @@ static void APIENTRY glDisablei(GLenum target, GLuint index) {
         ctx->pushError(GL_INVALID_VALUE);
         return;
     }
-    (void)target;
+    if (target == GL_SCISSOR_TEST) {
+        ctx->state().setScissorTestIndexed(index, false);
+    }
 }
 
 static GLboolean APIENTRY glIsEnabledi(GLenum target, GLuint index) {
@@ -775,7 +784,9 @@ static GLboolean APIENTRY glIsEnabledi(GLenum target, GLuint index) {
         ctx->pushError(GL_INVALID_VALUE);
         return GL_FALSE;
     }
-    (void)target;
+    if (target == GL_SCISSOR_TEST) {
+        return ctx->state().isScissorTestIndexedEnabled(index) ? GL_TRUE : GL_FALSE;
+    }
     return GL_FALSE;
 }
 
