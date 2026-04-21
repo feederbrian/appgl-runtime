@@ -2308,7 +2308,21 @@ struct GLContext::Impl {
                         native == MTLPixelFormatStencil8 ||
                         native == MTLPixelFormatX32_Stencil8 ||
                         native == MTLPixelFormatX24_Stencil8;
-                    if (isDepthStencil || hasNativeData) {
+                    // Metal depth/stencil formats require 2D/2DArray/Cube
+                    // texture types. Fall back to RGBA8Unorm for
+                    // mismatched targets (3D/1D/1D_ARRAY) to avoid a
+                    // hard Metal-descriptor-validation crash.
+                    const bool targetSupportsDepth = (
+                        object.target == GL_TEXTURE_2D ||
+                        object.target == GL_TEXTURE_2D_ARRAY ||
+                        object.target == GL_TEXTURE_CUBE_MAP ||
+                        object.target == GL_TEXTURE_CUBE_MAP_ARRAY ||
+                        object.target == GL_TEXTURE_2D_MULTISAMPLE ||
+                        object.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+                        object.target == GL_TEXTURE_RECTANGLE);
+                    if (isDepthStencil && !targetSupportsDepth) {
+                        // Keep RGBA8 fallback to avoid Metal crash.
+                    } else if (isDepthStencil || hasNativeData) {
                         wantFormat = native;
                     }
                     // Case 3: color format, no native data yet → leave
@@ -2434,7 +2448,28 @@ struct GLContext::Impl {
                     nativeFmt == MTLPixelFormatStencil8 ||
                     nativeFmt == MTLPixelFormatX32_Stencil8 ||
                     nativeFmt == MTLPixelFormatX24_Stencil8;
-                if (isDepthStencil || hasNativeData) {
+                // Metal requires depth/stencil formats to be paired with
+                // 2D / 2DArray / Cube / CubeArray texture types only.
+                // A GL texture with a depth/stencil internal format but a
+                // GL_TEXTURE_3D / 1D / 1D_ARRAY target would crash Metal's
+                // descriptor validator. Fall back to RGBA8Unorm on such
+                // mismatch — the swizzle tests use depth formats purely
+                // as the 2D-target functional payload, so 3D/1D paths
+                // can still run under the generic RGBA8 shadow path.
+                // CTS `texture_swizzle.functional_format_idx_63_target_
+                // idx_0` exercises one such combination.
+                const bool targetSupportsDepth = (
+                    object.target == GL_TEXTURE_2D ||
+                    object.target == GL_TEXTURE_2D_ARRAY ||
+                    object.target == GL_TEXTURE_CUBE_MAP ||
+                    object.target == GL_TEXTURE_CUBE_MAP_ARRAY ||
+                    object.target == GL_TEXTURE_2D_MULTISAMPLE ||
+                    object.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+                    object.target == GL_TEXTURE_RECTANGLE);
+                if (isDepthStencil && !targetSupportsDepth) {
+                    // Depth/stencil format on unsupported target —
+                    // Metal would reject. Keep RGBA8Unorm fallback.
+                } else if (isDepthStencil || hasNativeData) {
                     chosenFormat = nativeFmt;
                 }
             }
