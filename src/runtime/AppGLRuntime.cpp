@@ -818,6 +818,23 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
         case GL_COMPRESSED_RGBA:
         case GL_COMPRESSED_SRGB:
         case GL_COMPRESSED_SRGB_ALPHA:
+        // Specific compressed internal formats — GL 4.6 §8.5 permits
+        // TexImage* with a compressed internal format (driver chooses
+        // whether to actually compress or keep uncompressed). The CTS
+        // `copy_image.invalid_alignment` and
+        // `copy_image.incompatible_formats_compression` tests rely on
+        // this to create the compressed-texture fixture before
+        // exercising the copy path. We accept here and rely on
+        // buildRGBA8Upload + metalRenderbufferFormat to choose an
+        // uncompressed Metal backing.
+        case GL_COMPRESSED_RED_RGTC1:
+        case GL_COMPRESSED_SIGNED_RED_RGTC1:
+        case GL_COMPRESSED_RG_RGTC2:
+        case GL_COMPRESSED_SIGNED_RG_RGTC2:
+        case GL_COMPRESSED_RGBA_BPTC_UNORM:
+        case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+        case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+        case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
             return true;
         default:
             return false;

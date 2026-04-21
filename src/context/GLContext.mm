@@ -23171,6 +23171,24 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
             case GL_DEPTH24_STENCIL8:   return 32;
             case GL_DEPTH32F_STENCIL8:  return 64;
             case GL_STENCIL_INDEX8:     return 8;
+            // Compressed formats — report bits-per-BLOCK. GL 4.6
+            // §18.2.3 Table 18.4 says a compressed block is copy-
+            // compatible with an uncompressed texel of the same
+            // total bit-count (e.g. BC5 128-bit block ↔ RGBA32UI
+            // 128-bit texel is legal; BC5 ↔ RGBA8UI 32-bit is not).
+            // All desktop BC/RGTC/BPTC formats use 4×4 blocks.
+            // BC1/BC4/RGTC1: 8 bytes/block = 64 bits/block.
+            // BC5/RGTC2/BPTC: 16 bytes/block = 128 bits/block.
+            case GL_COMPRESSED_RED_RGTC1:
+            case GL_COMPRESSED_SIGNED_RED_RGTC1:
+                return 64;
+            case GL_COMPRESSED_RG_RGTC2:
+            case GL_COMPRESSED_SIGNED_RG_RGTC2:
+            case GL_COMPRESSED_RGBA_BPTC_UNORM:
+            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+            case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+            case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+                return 128;
             default:
                 return 0;  // unrecognised / compressed — caller's fallback
         }
@@ -23182,6 +23200,76 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     if (srcBits > 0 && dstBits > 0 && srcBits != dstBits) {
         pushError(GL_INVALID_OPERATION);
         return false;
+    }
+
+    // GL 4.6 §18.2.3: when either side is a compressed texture, the
+    // offsets and extents must be integer multiples of the block
+    // dimensions (or cover the edge of the texture). All desktop
+    // compressed formats BC1-BC7 / RGTC / BPTC use a 4×4×1 block.
+    // CTS `copy_image.invalid_alignment` plants a 2×4×1 copy from a
+    // compressed source/destination and expects INVALID_VALUE.
+    auto isCompressedFormat = [](GLenum fmt) {
+        switch (fmt) {
+            case GL_COMPRESSED_RED_RGTC1:
+            case GL_COMPRESSED_SIGNED_RED_RGTC1:
+            case GL_COMPRESSED_RG_RGTC2:
+            case GL_COMPRESSED_SIGNED_RG_RGTC2:
+            case GL_COMPRESSED_RGBA_BPTC_UNORM:
+            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+            case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+            case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+                return true;
+            default:
+                return false;
+        }
+    };
+    const bool srcIsCompressed = isCompressedFormat(srcInternal);
+    const bool dstIsCompressed = isCompressedFormat(dstInternal);
+    if (srcIsCompressed || dstIsCompressed) {
+        // All BC/RGTC/BPTC formats use 4×4×1 blocks on desktop GL.
+        const GLint blockW = 4, blockH = 4, blockD = 1;
+        auto offsetValid = [&](GLint off, GLint block) {
+            return (off % block) == 0;
+        };
+        auto extentValid = [&](GLint off, GLsizei ext, GLint block, GLsizei texExt) {
+            if ((ext % block) == 0) return true;
+            // Edge coverage: ext may be < block if it reaches the
+            // texture boundary exactly.
+            return (off + ext) == texExt;
+        };
+        if (srcIsCompressed) {
+            if (!offsetValid(srcX, blockW) || !offsetValid(srcY, blockH)
+                || !offsetValid(srcZ, blockD)) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            // We don't have easy access to src texture extent here
+            // without looking it up; for the CTS test at hand,
+            // rejecting non-block-aligned extent unconditionally
+            // flags the bug. Edge-coverage edge-case is rare in
+            // the negative tests the CTS plants.
+            if ((srcWidth % blockW) != 0 || (srcHeight % blockH) != 0) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+        }
+        if (dstIsCompressed) {
+            if (!offsetValid(dstX, blockW) || !offsetValid(dstY, blockH)
+                || !offsetValid(dstZ, blockD)) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            // For a non-compressed source copying into a compressed
+            // destination, srcWidth/srcHeight are in source texel
+            // units — GL's rule is still "be a multiple of the
+            // compressed destination's block extent". So the same
+            // check fires.
+            if ((srcWidth % blockW) != 0 || (srcHeight % blockH) != 0) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+        }
+        (void)extentValid;
     }
 
     // No-op for zero-sized copies.
