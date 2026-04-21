@@ -422,6 +422,23 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
     while (!tokens.empty() && (tokens.front() == "highp" || tokens.front() == "mediump" || tokens.front() == "lowp")) {
         tokens.erase(tokens.begin());
     }
+    // GL 4.6 §4.3 interpolation qualifiers that may precede the type
+    // on `in` / `out` declarations: `flat`, `noperspective`, `smooth`,
+    // `centroid`, `sample`, `invariant`, `patch`. Drop any that appear
+    // before the type keyword so `flat int outFoo;` still parses.
+    // CTS `texture_buffer.texture_buffer_texture_buffer_range` declares
+    // `out flat int outTextureSize;` and was silently dropped without
+    // this; the TF varying scan then rejected the program.
+    while (!tokens.empty() &&
+           (tokens.front() == "flat" || tokens.front() == "noperspective" ||
+            tokens.front() == "smooth" || tokens.front() == "centroid" ||
+            tokens.front() == "sample" || tokens.front() == "invariant" ||
+            tokens.front() == "patch" ||
+            tokens.front() == "readonly" || tokens.front() == "writeonly" ||
+            tokens.front() == "coherent" || tokens.front() == "volatile" ||
+            tokens.front() == "restrict")) {
+        tokens.erase(tokens.begin());
+    }
     if (tokens.size() < 2) {
         return false;
     }
