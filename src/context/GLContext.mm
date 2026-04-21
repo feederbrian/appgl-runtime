@@ -13395,6 +13395,111 @@ bool GLContext::compileShader(GLuint shader) {
         }
     }
 
+    // 3b. Tess-eval primitive-mode injection: GL 4.6 §11.2.3 requires
+    //     tess-eval shaders to declare `layout(triangles/quads/isolines)
+    //     in;` — but the rule is a LINK-time check, not compile-time.
+    //     Glslang's per-shader `TProgram::link` raises it anyway during
+    //     our compileGLSL pipeline, which would surface as a compile
+    //     error and flunk CTS
+    //     `tessellation_shader.compilation_and_linking_errors.
+    //     te_lacking_primitive_mode_declaration`.
+    //
+    //     If the user's tess-eval source lacks the directive, inject a
+    //     default `layout(triangles) in;` into the glslang-visible
+    //     `compileSource` (NOT `object->source`, which stays as the
+    //     user's unmodified text). Compile then succeeds. At real link
+    //     time, `linkProgram` inspects `tessEvalShader->source`
+    //     (original) and fails the link with the spec-correct error.
+    if (object->stage == GL_TESS_EVALUATION_SHADER) {
+        auto stripComments = [](const std::string& in) {
+            std::string out;
+            out.reserve(in.size());
+            for (std::size_t i = 0; i < in.size(); ) {
+                if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '/') {
+                    while (i < in.size() && in[i] != '\n') { ++i; }
+                } else if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < in.size() && !(in[i] == '*' && in[i + 1] == '/')) ++i;
+                    if (i + 1 < in.size()) i += 2;
+                } else {
+                    out.push_back(in[i]);
+                    ++i;
+                }
+            }
+            return out;
+        };
+        const std::string clean = stripComments(compileSource);
+        auto findPrimMode = [&](const std::string& tok) -> bool {
+            std::size_t pos = 0;
+            while (pos < clean.size()) {
+                std::size_t lp = clean.find("layout", pos);
+                if (lp == std::string::npos) return false;
+                bool leftOk = (lp == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(clean[lp - 1])) ||
+                      clean[lp - 1] == '_');
+                bool rightOk = (lp + 6 >= clean.size()) ||
+                    !(std::isalnum(static_cast<unsigned char>(clean[lp + 6])) ||
+                      clean[lp + 6] == '_');
+                if (!leftOk || !rightOk) { pos = lp + 1; continue; }
+                std::size_t op = clean.find('(', lp);
+                if (op == std::string::npos) return false;
+                std::size_t cp = clean.find(')', op);
+                if (cp == std::string::npos) return false;
+                std::string inner = clean.substr(op + 1, cp - op - 1);
+                std::size_t tp = inner.find(tok);
+                while (tp != std::string::npos) {
+                    bool lOk = (tp == 0) ||
+                        !(std::isalnum(static_cast<unsigned char>(inner[tp - 1])) ||
+                          inner[tp - 1] == '_');
+                    bool rOk = (tp + tok.size() >= inner.size()) ||
+                        !(std::isalnum(static_cast<unsigned char>(inner[tp + tok.size()])) ||
+                          inner[tp + tok.size()] == '_');
+                    if (lOk && rOk) return true;
+                    tp = inner.find(tok, tp + 1);
+                }
+                pos = cp + 1;
+            }
+            return false;
+        };
+        const bool hasPrimMode = findPrimMode("triangles") ||
+                                 findPrimMode("quads") ||
+                                 findPrimMode("isolines");
+        if (!hasPrimMode) {
+            // Inject after the `#version` line so the directive is
+            // placed in a legal spot (GLSL requires `#version` to
+            // precede all non-preprocessor tokens).
+            std::string injected = compileSource;
+            std::size_t insertAt = 0;
+            std::size_t vp = injected.find("#version");
+            if (vp != std::string::npos) {
+                std::size_t eol = injected.find('\n', vp);
+                insertAt = (eol == std::string::npos)
+                    ? injected.size() : eol + 1;
+            }
+            injected.insert(insertAt, "layout(triangles) in;\n");
+            // Compile the injected copy directly and stash on the
+            // shader for SPIR-V generation.
+            ShaderTranslator translatorTmp;
+            std::string compileLogTmp;
+            std::vector<std::uint32_t> spirvTmp = translatorTmp.compileGLSL(
+                injected, object->stage, 330, &compileLogTmp);
+            object->compileLog = std::move(compileLogTmp);
+            if (spirvTmp.empty()) {
+                Runtime::shared().recordShaderTranslation({
+                    shaderTag, "compile", sourceHash, "", "",
+                    object->compileLog, "", false
+                });
+                return false;
+            }
+            object->spirv = std::move(spirvTmp);
+            object->compiled = true;
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", "", "", true
+            });
+            return true;
+        }
+    }
+
     ShaderTranslator translator;
     std::string compileLog;
     std::vector<std::uint32_t> spirv =
@@ -15310,6 +15415,206 @@ bool GLContext::linkProgram(GLuint program) {
         }
     }
     // ─── End stage-to-stage varying type check ───────────────────────
+
+    // ─── Tess-eval primitive-mode layout (GL 4.6 §11.2.3) ────────────
+    //
+    // A tessellation evaluation shader MUST specify exactly one of
+    // `layout(triangles)`, `layout(quads)`, or `layout(isolines)` as
+    // its input primitive mode. The spec says this is a LINK-time
+    // error (not compile-time), and CTS
+    // `tessellation_shader.compilation_and_linking_errors.
+    // te_lacking_primitive_mode_declaration` expects compile to
+    // succeed and link to fail for a tess-eval shader that lacks the
+    // directive.
+    //
+    // Glslang's `TProgram::link` happens to raise the error at
+    // single-stage compile (we work around that in
+    // `ShaderTranslator::compileGLSL`). So we have to re-check the
+    // rule here at actual program link time.
+    if (tessEvalShader != nullptr) {
+        const std::string& src = tessEvalShader->source;
+        // Strip comments so `// layout(triangles)` doesn't satisfy
+        // the check. Reuse a lightweight copy here — the scan is
+        // per-link, so cost is negligible.
+        auto strip = [](const std::string& in) {
+            std::string out;
+            out.reserve(in.size());
+            for (std::size_t i = 0; i < in.size(); ) {
+                if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '/') {
+                    while (i < in.size() && in[i] != '\n') { ++i; }
+                } else if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < in.size() && !(in[i] == '*' && in[i + 1] == '/')) ++i;
+                    if (i + 1 < in.size()) i += 2;
+                } else {
+                    out.push_back(in[i]);
+                    ++i;
+                }
+            }
+            return out;
+        };
+        const std::string clean = strip(src);
+        // We need a `layout(...)` directive with one of the three
+        // primitive-mode tokens, followed by an `in` keyword (not
+        // specifically required by the spec — `layout(triangles)
+        // in;` is the canonical form, but `layout(triangles);` and
+        // `layout(triangles) in;` are both legal). We only need to
+        // see the token inside a `layout(...)` paren; spec also
+        // permits `layout(triangles, equal_spacing, ccw) in;` with
+        // multiple qualifiers.
+        auto hasPrimMode = [&](const std::string& tok) -> bool {
+            std::size_t pos = 0;
+            while (pos < clean.size()) {
+                std::size_t lp = clean.find("layout", pos);
+                if (lp == std::string::npos) return false;
+                // word-boundary
+                bool leftOk = (lp == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(clean[lp - 1])) ||
+                      clean[lp - 1] == '_');
+                bool rightOk = (lp + 6 >= clean.size()) ||
+                    !(std::isalnum(static_cast<unsigned char>(clean[lp + 6])) ||
+                      clean[lp + 6] == '_');
+                if (!leftOk || !rightOk) { pos = lp + 1; continue; }
+                std::size_t op = clean.find('(', lp);
+                if (op == std::string::npos) return false;
+                std::size_t cp = clean.find(')', op);
+                if (cp == std::string::npos) return false;
+                std::string inner = clean.substr(op + 1, cp - op - 1);
+                // Tokenize inner and check for tok as a complete word.
+                std::size_t tp = inner.find(tok);
+                while (tp != std::string::npos) {
+                    bool lOk = (tp == 0) ||
+                        !(std::isalnum(static_cast<unsigned char>(inner[tp - 1])) ||
+                          inner[tp - 1] == '_');
+                    bool rOk = (tp + tok.size() >= inner.size()) ||
+                        !(std::isalnum(static_cast<unsigned char>(inner[tp + tok.size()])) ||
+                          inner[tp + tok.size()] == '_');
+                    if (lOk && rOk) return true;
+                    tp = inner.find(tok, tp + 1);
+                }
+                pos = cp + 1;
+            }
+            return false;
+        };
+        const bool ok = hasPrimMode("triangles") ||
+                        hasPrimMode("quads") ||
+                        hasPrimMode("isolines");
+        if (!ok) {
+            programObject->linkLog =
+                "ERROR: Linking tessellation evaluation stage: "
+                "At least one shader must specify an input layout primitive";
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+    // ─── End tess-eval primitive-mode check ──────────────────────────
+
+    // ─── Tess-control output patch vertex count (GL 4.6 §11.2.1) ─────
+    //
+    // TCS specifies output patch vertex count via
+    // `layout(vertices = N) out;` where `N ∈ [1, MAX_PATCH_VERTICES]`.
+    // A value of 0 or > MAX_PATCH_VERTICES is a LINK-time error.
+    // CTS `tessellation_shader.compilation_and_linking_errors.
+    // tc_invalid_output_patch_vertex_count` tests both 0 and 33 (above
+    // the 32 limit) and expects link to fail.
+    //
+    // Glslang catches 0 at parse time (raises "vertices : must be
+    // greater than 0") so that subcase fails at compile, which is
+    // what the test expects ("Compilation failed as allowed"). The 33
+    // subcase compiles fine (glslang accepts values up to INT_MAX)
+    // and we need to fail it here at link time.
+    if (tessControlShader != nullptr) {
+        const std::string& src = tessControlShader->source;
+        auto strip = [](const std::string& in) {
+            std::string out;
+            out.reserve(in.size());
+            for (std::size_t i = 0; i < in.size(); ) {
+                if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '/') {
+                    while (i < in.size() && in[i] != '\n') { ++i; }
+                } else if (i + 1 < in.size() && in[i] == '/' && in[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < in.size() && !(in[i] == '*' && in[i + 1] == '/')) ++i;
+                    if (i + 1 < in.size()) i += 2;
+                } else {
+                    out.push_back(in[i]);
+                    ++i;
+                }
+            }
+            return out;
+        };
+        const std::string clean = strip(src);
+        // Search for `layout ( ... vertices <ws>*=<ws>* N ...)`.
+        std::size_t pos = 0;
+        int verticesN = -1;
+        while (pos < clean.size()) {
+            std::size_t lp = clean.find("layout", pos);
+            if (lp == std::string::npos) break;
+            bool leftOk = (lp == 0) ||
+                !(std::isalnum(static_cast<unsigned char>(clean[lp - 1])) ||
+                  clean[lp - 1] == '_');
+            bool rightOk = (lp + 6 >= clean.size()) ||
+                !(std::isalnum(static_cast<unsigned char>(clean[lp + 6])) ||
+                  clean[lp + 6] == '_');
+            if (!leftOk || !rightOk) { pos = lp + 1; continue; }
+            std::size_t op = clean.find('(', lp);
+            if (op == std::string::npos) break;
+            std::size_t cp = clean.find(')', op);
+            if (cp == std::string::npos) break;
+            std::string inner = clean.substr(op + 1, cp - op - 1);
+            // Search for `vertices` token inside inner.
+            std::size_t vp = inner.find("vertices");
+            while (vp != std::string::npos) {
+                bool lOk = (vp == 0) ||
+                    !(std::isalnum(static_cast<unsigned char>(inner[vp - 1])) ||
+                      inner[vp - 1] == '_');
+                std::size_t after = vp + 8;
+                bool rOk = (after >= inner.size()) ||
+                    !(std::isalnum(static_cast<unsigned char>(inner[after])) ||
+                      inner[after] == '_');
+                if (lOk && rOk) {
+                    // Skip whitespace and '='
+                    while (after < inner.size() &&
+                           std::isspace(static_cast<unsigned char>(inner[after]))) ++after;
+                    if (after < inner.size() && inner[after] == '=') {
+                        ++after;
+                        while (after < inner.size() &&
+                               std::isspace(static_cast<unsigned char>(inner[after]))) ++after;
+                        // Read integer literal
+                        std::size_t ns = after;
+                        while (after < inner.size() &&
+                               std::isdigit(static_cast<unsigned char>(inner[after]))) ++after;
+                        if (after > ns) {
+                            verticesN = std::atoi(inner.substr(ns, after - ns).c_str());
+                            break;
+                        }
+                    }
+                }
+                vp = inner.find("vertices", vp + 1);
+            }
+            if (verticesN >= 0) break;
+            pos = cp + 1;
+        }
+
+        if (verticesN > 0) {
+            const int maxPatchVertices = 32;  // matches GLCapabilities
+            if (verticesN > maxPatchVertices) {
+                programObject->linkLog =
+                    "ERROR: Linking tessellation control stage: "
+                    "layout(vertices=" + std::to_string(verticesN) +
+                    ") exceeds GL_MAX_PATCH_VERTICES (" +
+                    std::to_string(maxPatchVertices) + ")";
+                programObject->linked = false;
+                Runtime::shared().recordShaderTranslation({
+                    programTag, "link", "", "", "", programObject->linkLog, "", false
+                });
+                return false;
+            }
+        }
+    }
+    // ─── End tess-control patch vertex count check ───────────────────
 
     // ─── gl_PerVertex block re-declaration consistency (GL 4.6 §7.4.1)
     //
