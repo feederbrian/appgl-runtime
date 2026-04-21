@@ -5606,60 +5606,91 @@ void APIENTRY glPatchParameterfv(GLenum pname, const GLfloat* values) {
 
 // --- GL 4.0: Indexed queries (Group 5) — stub-with-state ---
 
+// GL 4.6 §4.2 — max allowed index depends on the query target.
+// Per-stream queries support up to MAX_VERTEX_STREAMS (= 4) for
+// PRIMITIVES_GENERATED and TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN;
+// all other targets are singletons (index must be 0).
+static bool queryTargetMaxIndex(GLenum target, GLuint& outMax) {
+    switch (target) {
+        case GL_PRIMITIVES_GENERATED:
+        case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+            outMax = 4;  // MAX_VERTEX_STREAMS
+            return true;
+        case GL_SAMPLES_PASSED:
+        case GL_ANY_SAMPLES_PASSED:
+        case GL_ANY_SAMPLES_PASSED_CONSERVATIVE:
+        case GL_TIME_ELAPSED:
+        case GL_TIMESTAMP:
+        case GL_TRANSFORM_FEEDBACK_OVERFLOW:
+        case GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW:
+            outMax = 1;
+            return true;
+    }
+    return false;
+}
+
 void APIENTRY glBeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
     auto* context = requireCurrentContext("glBeginQueryIndexed");
     if (context == nullptr) return;
-    // GL 4.6 §4.2: For TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN and PRIMITIVES_GENERATED,
-    // INVALID_VALUE when index >= GL_MAX_VERTEX_STREAMS.
-    if ((target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN || target == GL_PRIMITIVES_GENERATED) &&
-        index >= 4) {  // GL_MAX_VERTEX_STREAMS = 4
+    GLuint maxIdx = 1;
+    if (queryTargetMaxIndex(target, maxIdx) && index >= maxIdx) {
         recordValidationError(context, "glBeginQueryIndexed", GL_INVALID_VALUE,
-                              "index exceeds GL_MAX_VERTEX_STREAMS");
+                              "index out of range for query target");
         return;
     }
-    (void)id;
-    markStateFunction(FunctionId::glBeginQueryIndexed, "Indexed query begin stub accepts call shape.");
+    // Index 0 for a singleton target is exactly equivalent to the
+    // non-indexed `glBeginQuery`. Route through the state-updating
+    // path so `glGetQueryiv(target, GL_CURRENT_QUERY, ...)` returns
+    // the active query ID. CTS `transform_feedback_overflow_query_ARB.
+    // context-state-update` asserts this.
+    if (auto fn = Runtime::shared().dispatch().glBeginQuery) {
+        fn(target, id);
+    }
+    markStateFunction(FunctionId::glBeginQueryIndexed, "Indexed query begin routes to non-indexed begin at index 0.");
     Runtime::shared().recordBootstrapTrace("glBeginQueryIndexed(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ", id=" + std::to_string(id) + ")");
 }
 
 void APIENTRY glEndQueryIndexed(GLenum target, GLuint index) {
     auto* context = requireCurrentContext("glEndQueryIndexed");
     if (context == nullptr) return;
-    // GL 4.6 §4.2: Same index validation as BeginQueryIndexed.
-    if ((target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN || target == GL_PRIMITIVES_GENERATED) &&
-        index >= 4) {
+    GLuint maxIdx = 1;
+    if (queryTargetMaxIndex(target, maxIdx) && index >= maxIdx) {
         recordValidationError(context, "glEndQueryIndexed", GL_INVALID_VALUE,
-                              "index exceeds GL_MAX_VERTEX_STREAMS");
+                              "index out of range for query target");
         return;
     }
-    // GL 4.6 §4.2: INVALID_OPERATION if no query is active at the specified index.
-    // Our stub never activates queries, so any EndQueryIndexed is an error.
-    recordValidationError(context, "glEndQueryIndexed", GL_INVALID_OPERATION,
-                          "no active query at specified index");
+    if (auto fn = Runtime::shared().dispatch().glEndQuery) {
+        fn(target);
+    }
+    markStateFunction(FunctionId::glEndQueryIndexed, "Indexed query end routes to non-indexed end.");
 }
 
 void APIENTRY glGetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint* params) {
     auto* context = requireCurrentContext("glGetQueryIndexediv");
     if (context == nullptr) return;
-    // GL 4.6 §4.2: Same index validation.
-    if ((target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN || target == GL_PRIMITIVES_GENERATED) &&
-        index >= 4) {
+    GLuint maxIdx = 1;
+    if (queryTargetMaxIndex(target, maxIdx) && index >= maxIdx) {
         recordValidationError(context, "glGetQueryIndexediv", GL_INVALID_VALUE,
-                              "index exceeds GL_MAX_VERTEX_STREAMS");
+                              "index out of range for query target");
         return;
     }
-    // Return sensible defaults: CURRENT_QUERY = 0, QUERY_COUNTER_BITS = 0.
-    if (params != nullptr) {
-        if (pname == GL_CURRENT_QUERY) {
-            *params = 0;
-        } else if (pname == GL_QUERY_COUNTER_BITS) {
-            *params = 0;
-        } else {
-            *params = 0;
-        }
+    if (params == nullptr) return;
+    if (pname == GL_CURRENT_QUERY) {
+        // Look up the active query for this target.
+        GLint activeId = 0;
+        context->objects().queries().forEach(
+            [target, &activeId](GLuint id, GLQueryObject& q) {
+                if (q.active && q.target == target && activeId == 0) {
+                    activeId = static_cast<GLint>(id);
+                }
+            });
+        *params = activeId;
+    } else if (pname == GL_QUERY_COUNTER_BITS) {
+        *params = 64;
+    } else {
+        *params = 0;
     }
-    markStateFunction(FunctionId::glGetQueryIndexediv, "Indexed query get stub returns defaults.");
-    Runtime::shared().recordBootstrapTrace("glGetQueryIndexediv(target=" + std::to_string(target) + ", index=" + std::to_string(index) + ")");
+    markStateFunction(FunctionId::glGetQueryIndexediv, "Indexed query get returns per-target state.");
 }
 
 // --- GL 4.1: Viewport/Scissor/Depth arrays (Group 8) ---
