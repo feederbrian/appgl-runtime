@@ -12976,6 +12976,23 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                     q.result += static_cast<GLuint64>(primsWritten);
                 }
                 break;
+            case GL_GEOMETRY_SHADER_INVOCATIONS:
+                // GL 4.6 §22.3 — counts once per GS invocation. CTS
+                // `pipeline_statistics_query_tests_ARB.functional_
+                // geometry_shader_queries` uses EQUAL_OR_GREATER ≥ 1.
+                // The emulator runs the GS once per input primitive,
+                // so any non-zero output means at least one invocation
+                // happened. Credit 1 per call — the exact invocation
+                // count would need input-primitive tracking in
+                // EmulatedDraw (future win).
+                if (ed.vertexCount > 0) q.result += 1;
+                break;
+            case GL_GEOMETRY_SHADER_PRIMITIVES_EMITTED:
+                // GL 4.6 §22.3 — counts every EmitVertex + EndPrimitive
+                // pair the GS executed. Maps directly to primsGenerated
+                // (the emulator's expanded-output primitive count).
+                q.result += static_cast<GLuint64>(primsGenerated);
+                break;
             default:
                 break;
         }
