@@ -1060,6 +1060,9 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
                 for (int i = 0; i < 2; ++i)
                     out[i] = static_cast<GLint>(tessellation_.defaultInnerLevel[i]);
                 return true;
+            case GL_MIN_SAMPLE_SHADING_VALUE:
+                *out = static_cast<GLint>(blend_.minSampleShading);
+                return true;
             default:
                 break;
         }
@@ -1110,6 +1113,9 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
             case GL_PATCH_DEFAULT_INNER_LEVEL:
                 for (int i = 0; i < 2; ++i)
                     out[i] = static_cast<GLint64>(tessellation_.defaultInnerLevel[i]);
+                return true;
+            case GL_MIN_SAMPLE_SHADING_VALUE:
+                *out = static_cast<GLint64>(blend_.minSampleShading);
                 return true;
             default:
                 break;
@@ -1162,6 +1168,12 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
                 for (int i = 0; i < 2; ++i)
                     out[i] = tessellation_.defaultInnerLevel[i];
                 return true;
+            case GL_MIN_SAMPLE_SHADING_VALUE:
+                // GL 4.0 ARB_sample_shading — stored clamped to [0,1]
+                // by setMinSampleShading. CTS `sample_shading.api.
+                // verify` probes the value after glMinSampleShading.
+                *out = blend_.minSampleShading;
+                return true;
             default:
                 break;
         }
@@ -1212,6 +1224,9 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
             case GL_PATCH_DEFAULT_INNER_LEVEL:
                 for (int i = 0; i < 2; ++i)
                     out[i] = static_cast<GLdouble>(tessellation_.defaultInnerLevel[i]);
+                return true;
+            case GL_MIN_SAMPLE_SHADING_VALUE:
+                *out = static_cast<GLdouble>(blend_.minSampleShading);
                 return true;
             default:
                 break;
