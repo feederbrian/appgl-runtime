@@ -14966,6 +14966,17 @@ bool GLContext::linkProgram(GLuint program) {
         // caller issues a draw.
         Separable,
     };
+    // Set hasTessellation early — any attached TCS or TES counts, even
+    // when the ProgramKind path doesn't specifically handle tess (e.g.
+    // 5-stage VS+TCS+TES+GS+FS programs land on VertexGeometryFragment
+    // today but still have tess shaders in play). The draw-time GS-
+    // topology gate in drawArrays/Instanced/ElementsInstanced queries
+    // this flag to suppress the draw-mode compat check for any program
+    // with a tess stage (GS reads TES output, not the raw draw mode).
+    if (tessControlShader != nullptr || tessEvalShader != nullptr) {
+        programObject->hasTessellation = true;
+    }
+
     ProgramKind kind = ProgramKind::Unknown;
     if (computeShader != nullptr && shaderCount == 1) {
         kind = ProgramKind::Compute;
@@ -21101,6 +21112,14 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // When the linked program has a GS, rejecting mismatched draw
     // modes with GL_INVALID_OPERATION is required by the CTS
     // `geometry_shader.api.incompatible_draw_call_mode` test.
+    //
+    // Spec caveat (§10.1 / §11.2.3) — when a tessellation stage is
+    // between VS and GS, the GS receives the TES output topology
+    // (triangles/quads/isolines), NOT the draw mode. The raw draw
+    // mode is GL_PATCHES for tess, which would never match the GS's
+    // input topology under the naive check. Skip the GS-mode-compat
+    // gate when tess is present; the TES's declared output topology
+    // controls what the GS sees.
     {
         const GLuint progName = impl_->state->currentProgram();
         const GLuint pipelineName = impl_->state->currentProgramPipeline();
@@ -21108,7 +21127,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         if (progName != 0) {
             p = impl_->objects->programs().get(progName);
         }
-        if (p != nullptr && p->gsPresent &&
+        if (p != nullptr && p->gsPresent && !p->hasTessellation &&
             !isDrawModeCompatibleWithGs(mode, p->gsInputTopology)) {
             pushError(GL_INVALID_OPERATION);
             return false;
@@ -21132,7 +21151,21 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             const GLuint gsProg = ppo ? ppo->geometryProgram : 0;
             if (gsProg != 0) {
                 const GLProgramObject* gsP = impl_->objects->programs().get(gsProg);
-                if (gsP != nullptr && gsP->gsPresent &&
+                // Tess-in-pipeline suppression: if any other stage
+                // program in the pipeline declares a tess stage,
+                // skip this check (same reasoning as the in-program
+                // case above).
+                bool pipelineHasTess = false;
+                if (ppo != nullptr) {
+                    for (GLuint ps : {ppo->tessControlProgram, ppo->tessEvalProgram}) {
+                        if (ps == 0) continue;
+                        const GLProgramObject* tsP = impl_->objects->programs().get(ps);
+                        if (tsP != nullptr && tsP->hasTessellation) {
+                            pipelineHasTess = true; break;
+                        }
+                    }
+                }
+                if (gsP != nullptr && gsP->gsPresent && !pipelineHasTess &&
                     !isDrawModeCompatibleWithGs(mode, gsP->gsInputTopology)) {
                     pushError(GL_INVALID_OPERATION);
                     return false;
@@ -21615,7 +21648,9 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         const GLProgramObject* p = progName != 0
             ? impl_->objects->programs().get(progName)
             : nullptr;
-        if (p != nullptr && p->gsPresent &&
+        // Same tess-in-pipeline escape as drawArrays — see the
+        // longer comment at the top of drawArrays's matching check.
+        if (p != nullptr && p->gsPresent && !p->hasTessellation &&
             !isDrawModeCompatibleWithGs(mode, p->gsInputTopology)) {
             pushError(GL_INVALID_OPERATION);
             return false;
@@ -22684,7 +22719,8 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
         const GLProgramObject* p = progName != 0
             ? impl_->objects->programs().get(progName)
             : nullptr;
-        if (p != nullptr && p->gsPresent &&
+        // Tess-in-pipeline escape — see drawArrays for rationale.
+        if (p != nullptr && p->gsPresent && !p->hasTessellation &&
             !isDrawModeCompatibleWithGs(mode, p->gsInputTopology)) {
             pushError(GL_INVALID_OPERATION);
             return false;
