@@ -707,6 +707,35 @@ bool isValidTextureTarget(GLenum target) {
     }
 }
 
+// GL 4.6 §8.10 / §8.11.2 — glTexParameter* and glGetTexParameter* are
+// valid for the 10 sampler-capable targets: TEXTURE_1D / 2D / 3D /
+// 1D_ARRAY / 2D_ARRAY / RECTANGLE / CUBE_MAP / CUBE_MAP_ARRAY /
+// 2D_MULTISAMPLE / 2D_MULTISAMPLE_ARRAY. Notably NOT valid for
+// TEXTURE_BUFFER (no sampler state) or individual cube-map faces
+// (TEXTURE_CUBE_MAP_POSITIVE_X etc. — only the aggregate CUBE_MAP
+// target is accepted). CTS `texture_border_clamp.gettexparameteri
+// _errors` verifies both exclusions fire INVALID_ENUM for the
+// getter; `isValidTextureTarget` above is used by binding (where
+// TEXTURE_BUFFER IS valid) so we need a separate helper for the
+// parameter family.
+bool isValidTargetForGetTexParameter(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
     // Accept all sized internal formats that GL 4.6 allows for glTexImage*.
     // The legacy validator previously restricted this to 8-bit unorm only;
@@ -3310,7 +3339,7 @@ void APIENTRY glTexParameteriv(GLenum target, GLenum pname, const GLint* params)
     if (context == nullptr) {
         return;
     }
-    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+    if (!isValidTargetForGetTexParameter(target) || !isValidTextureParameterPname(pname)) {
         recordValidationError(context, "glTexParameteriv", GL_INVALID_ENUM, "target or pname is invalid");
         return;
     }
@@ -3340,7 +3369,7 @@ void APIENTRY glTexParameterfv(GLenum target, GLenum pname, const GLfloat* param
     if (context == nullptr) {
         return;
     }
-    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+    if (!isValidTargetForGetTexParameter(target) || !isValidTextureParameterPname(pname)) {
         recordValidationError(context, "glTexParameterfv", GL_INVALID_ENUM, "target or pname is invalid");
         return;
     }
@@ -3359,7 +3388,7 @@ void APIENTRY glTexParameterIiv(GLenum target, GLenum pname, const GLint* params
     if (context == nullptr) {
         return;
     }
-    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+    if (!isValidTargetForGetTexParameter(target) || !isValidTextureParameterPname(pname)) {
         recordValidationError(context, "glTexParameterIiv", GL_INVALID_ENUM, "target or pname is invalid");
         return;
     }
@@ -3378,7 +3407,7 @@ void APIENTRY glTexParameterIuiv(GLenum target, GLenum pname, const GLuint* para
     if (context == nullptr) {
         return;
     }
-    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname) || params == nullptr) {
+    if (!isValidTargetForGetTexParameter(target) || !isValidTextureParameterPname(pname) || params == nullptr) {
         recordValidationError(context, "glTexParameterIuiv", params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM, "target, pname, or params are invalid");
         return;
     }
@@ -3395,32 +3424,6 @@ void APIENTRY glTexParameterIuiv(GLenum target, GLenum pname, const GLuint* para
     if (context->texParameterUnsignedInteger(target, pname, params)) {
         markTextureFunction(FunctionId::glTexParameterIuiv, "Texture unsigned integer-vector parameters are tracked.");
         Runtime::shared().recordBootstrapTrace("glTexParameterIuiv(" + std::to_string(pname) + ")");
-    }
-}
-
-// GL 4.6 §8.11.2 — glGetTexParameter* is valid for TEXTURE_1D / 2D /
-// 3D / 1D_ARRAY / 2D_ARRAY / RECTANGLE / CUBE_MAP / CUBE_MAP_ARRAY /
-// 2D_MULTISAMPLE / 2D_MULTISAMPLE_ARRAY. Notably NOT valid for
-// TEXTURE_BUFFER (it has no sampler state) or individual cube-map
-// faces (TEXTURE_CUBE_MAP_POSITIVE_X etc. — only the cube-map
-// aggregate target is accepted). CTS
-// `texture_border_clamp.gettexparameteri_errors` verifies both
-// exclusions fire INVALID_ENUM.
-static bool isValidTargetForGetTexParameter(GLenum target) {
-    switch (target) {
-        case GL_TEXTURE_1D:
-        case GL_TEXTURE_2D:
-        case GL_TEXTURE_3D:
-        case GL_TEXTURE_1D_ARRAY:
-        case GL_TEXTURE_2D_ARRAY:
-        case GL_TEXTURE_RECTANGLE:
-        case GL_TEXTURE_CUBE_MAP:
-        case GL_TEXTURE_CUBE_MAP_ARRAY:
-        case GL_TEXTURE_2D_MULTISAMPLE:
-        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
-            return true;
-        default:
-            return false;
     }
 }
 
