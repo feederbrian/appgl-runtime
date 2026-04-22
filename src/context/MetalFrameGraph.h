@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -367,6 +368,17 @@ struct TranslatedDrawInfo {
     // resolves the bound draw-framebuffer's color attachment Metal texture
     // and sets this field; nullptr means draw to default framebuffer.
     void* fboColorTexture = nullptr;       // id<MTLTexture>
+    // Multi-Render-Target (MRT) extra color attachments beyond
+    // `fboColorTexture`. Index i here corresponds to GL
+    // `GL_COLOR_ATTACHMENT(i+1)` when the bound FBO enumerates
+    // `GL_COLOR_ATTACHMENT0` through its drawBuffers array. Null
+    // entries are ignored. Metal pipeline colorAttachments[i+1]
+    // gets the pixelFormat inferred from the texture.
+    // CTS `draw_buffers.draw_buffers_1` exercises up to 8
+    // simultaneous attachments; the length of this array matches
+    // the `GLFramebufferObject::drawBuffers[8]` shape minus the
+    // slot-0 entry already carried by `fboColorTexture`.
+    std::array<void*, 7> fboAdditionalColorTextures = {};
     void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nil
     GLsizei fboWidth = 0;
     GLsizei fboHeight = 0;

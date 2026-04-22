@@ -4496,8 +4496,10 @@ struct GLContext::Impl {
     // has no Metal texture.  Also populates width/height/depthStencil.
     void* resolveFBOColorTarget(GLsizei& outWidth, GLsizei& outHeight,
                                 void*& outDepthStencil,
-                                std::uint32_t* outColorArrayLength = nullptr) const {
+                                std::uint32_t* outColorArrayLength = nullptr,
+                                std::array<void*, 7>* outExtraColorTextures = nullptr) const {
         if (outColorArrayLength != nullptr) *outColorArrayLength = 0;
+        if (outExtraColorTextures != nullptr) outExtraColorTextures->fill(nullptr);
         const GLuint fboName = state->boundDrawFramebuffer();
         if (fboName == 0) {
             return nullptr;
@@ -4505,22 +4507,43 @@ struct GLContext::Impl {
         const GLFramebufferObject* fbo = objects->framebuffers().get(fboName);
         if (fbo == nullptr) return nullptr;
 
-        // Find the first active draw buffer's color attachment.
+        // Walk ALL 8 draw-buffer slots in order. Slot 0 feeds
+        // `colorTex` (Metal colorAttachments[0]); slots 1..7 feed
+        // `outExtraColorTextures[0..6]` (Metal colorAttachments[1..7]).
+        //
+        // The mapping is POSITIONAL, not packed — a `GL_NONE` in
+        // `drawBuffers[i]` leaves Metal slot i unbound so the shader's
+        // `layout(location = i)` output is discarded (GL 4.6 §14.6.3).
+        // SPIRV-Cross translates `fragColor_N` to `[[color(N)]]` with
+        // the index preserved, so a packed/compacted mapping here would
+        // misroute every subsequent attachment. CTS
+        // `draw_buffers.draw_buffers_1` explicitly sets
+        // `drawBuffers[1]=GL_NONE` between clear and draw and checks
+        // attachment 1 stayed at the clear value while 2..7 got the
+        // draw output — only a positional mapping makes that true.
         void* colorTex = nullptr;
         outWidth = 0;
         outHeight = 0;
-        for (GLenum buf : fbo->drawBuffers) {
+        bool primarySet = false;
+        const std::size_t maxSlots = std::min<std::size_t>(
+            fbo->drawBuffers.size(), 8);
+        for (std::size_t bi = 0; bi < maxSlots; ++bi) {
+            const GLenum buf = fbo->drawBuffers[bi];
             if (buf == GL_NONE) continue;
             const GLFramebufferAttachment* att = framebufferAttachment(*fbo, buf);
             if (att == nullptr) continue;
+            void* tex = nullptr;
+            GLsizei w = 0, h = 0;
+            bool hasSize = false;
             if (att->kind == GLFramebufferAttachment::Kind::Texture) {
-                const GLTextureObject* tex = objects->textures().get(att->object);
-                if (tex != nullptr && tex->metalTexture != nullptr) {
-                    colorTex = tex->metalTexture;
-                    const auto lvl = tex->levels.find(att->level);
-                    if (lvl != tex->levels.end()) {
-                        outWidth = lvl->second.desc.width;
-                        outHeight = lvl->second.desc.height;
+                const GLTextureObject* texObj = objects->textures().get(att->object);
+                if (texObj != nullptr && texObj->metalTexture != nullptr) {
+                    tex = texObj->metalTexture;
+                    const auto lvl = texObj->levels.find(att->level);
+                    if (lvl != texObj->levels.end()) {
+                        w = lvl->second.desc.width;
+                        h = lvl->second.desc.height;
+                        hasSize = true;
                     }
                     // Layered attachment routing: FramebufferTexture
                     // on a layered texture target exposes all layers
@@ -4528,10 +4551,10 @@ struct GLContext::Impl {
                     // FramebufferTextureLayer attaches a single slice
                     // (att->layered == false) — the whole-texture slice
                     // count doesn't apply there.
-                    if (outColorArrayLength != nullptr && att->layered) {
-                        const GLsizei layers = (tex->target == GL_TEXTURE_3D)
-                            ? std::max<GLsizei>(tex->desc.depth, 1)
-                            : std::max<GLsizei>(tex->desc.layers, 1);
+                    if (outColorArrayLength != nullptr && att->layered && !primarySet) {
+                        const GLsizei layers = (texObj->target == GL_TEXTURE_3D)
+                            ? std::max<GLsizei>(texObj->desc.depth, 1)
+                            : std::max<GLsizei>(texObj->desc.layers, 1);
                         if (layers > 1) {
                             *outColorArrayLength = static_cast<std::uint32_t>(layers);
                         }
@@ -4540,12 +4563,31 @@ struct GLContext::Impl {
             } else if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
                 const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
                 if (rb != nullptr && rb->metalTexture != nullptr) {
-                    colorTex = rb->metalTexture;
-                    outWidth = rb->width;
-                    outHeight = rb->height;
+                    tex = rb->metalTexture;
+                    w = rb->width;
+                    h = rb->height;
+                    hasSize = true;
                 }
             }
-            if (colorTex != nullptr) break;
+            if (tex == nullptr) continue;
+            if (bi == 0) {
+                colorTex = tex;
+                primarySet = true;
+                if (hasSize) {
+                    outWidth = w;
+                    outHeight = h;
+                }
+            } else if (outExtraColorTextures != nullptr) {
+                // bi - 1 is the extras index for Metal slot bi.
+                (*outExtraColorTextures)[bi - 1] = tex;
+                // Fall back to this attachment for outWidth/Height
+                // when slot 0 is GL_NONE (rare but GL allows it).
+                if (!primarySet && hasSize) {
+                    outWidth = w;
+                    outHeight = h;
+                    primarySet = true;
+                }
+            }
         }
 
         // Depth/stencil. Spec allows either Renderbuffer or Texture
@@ -20709,9 +20751,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             {
                 GLsizei fboW = 0, fboH = 0;
                 void* fboDSTex = nullptr;
-                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                std::array<void*, 7> extraColTex = {};
+                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
                 if (fboColTex != nullptr) {
                     tdi.fboColorTexture = fboColTex;
+                    tdi.fboAdditionalColorTextures = extraColTex;
                     tdi.fboDepthStencilTexture = fboDSTex;
                     tdi.fboWidth = fboW;
                     tdi.fboHeight = fboH;
@@ -20921,9 +20965,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     {
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                        std::array<void*, 7> extraColTex = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
                         if (fboColTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
+                            tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -21122,9 +21168,11 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             {
                 GLsizei fboW = 0, fboH = 0;
                 void* fboDSTex = nullptr;
-                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                std::array<void*, 7> extraColTex = {};
+                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
                 if (fboColTex != nullptr) {
                     tdi.fboColorTexture = fboColTex;
+                    tdi.fboAdditionalColorTextures = extraColTex;
                     tdi.fboDepthStencilTexture = fboDSTex;
                     tdi.fboWidth = fboW;
                     tdi.fboHeight = fboH;
@@ -21323,9 +21371,11 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     {
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                        std::array<void*, 7> extraColTex = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
                         if (fboColTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
+                            tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -21682,9 +21732,11 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     {
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                        std::array<void*, 7> extraColTex = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
                         if (fboColTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
+                            tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -21978,9 +22030,11 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     {
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                        std::array<void*, 7> extraColTex = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
                         if (fboColTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
+                            tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -22349,9 +22403,11 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     {
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex);
+                        std::array<void*, 7> extraColTex = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
                         if (fboColTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
+                            tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;

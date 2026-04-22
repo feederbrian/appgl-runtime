@@ -986,6 +986,21 @@ struct MetalFrameGraph::Impl {
             // Attributeless draws don't need a vertex descriptor at all.
             desc.vertexDescriptor = attributelessDraw ? nil : vertexDescriptor;
             desc.colorAttachments[0].pixelFormat = colorFormat;
+            // MRT: configure pixelFormat for each additional color
+            // attachment (slots 1..7). GL 4.6 §14.6 allows up to 8
+            // simultaneous color outputs (GL_MAX_DRAW_BUFFERS).
+            // CTS `draw_buffers.draw_buffers_1` writes
+            // `fragColor0..fragColor7` to distinct attachments.
+            // Slots with a nullptr texture stay at
+            // `MTLPixelFormatInvalid` (Metal's default, i.e. "not
+            // bound") and Metal silently ignores fragment-shader
+            // writes for them.
+            for (std::size_t ei = 0; ei < info.fboAdditionalColorTextures.size(); ++ei) {
+                void* rawTex = info.fboAdditionalColorTextures[ei];
+                if (rawTex == nullptr) continue;
+                id<MTLTexture> extraTex = (__bridge id<MTLTexture>)rawTex;
+                desc.colorAttachments[ei + 1].pixelFormat = extraTex.pixelFormat;
+            }
             // Pipeline depth/stencil formats must match the bound
             // textures' Metal pixel formats. Previously hard-coded to
             // Depth32Float_Stencil8, but GL 4.6 allows depth-only
@@ -1451,6 +1466,21 @@ struct MetalFrameGraph::Impl {
                 pass.colorAttachments[0].clearColor = pendingClearColor;
             } else {
                 pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            }
+            // MRT: attach additional color targets (slots 1..7). GL
+            // draw_buffers enumerations stored in
+            // `fboAdditionalColorTextures` map 1:1 to Metal
+            // colorAttachments[i+1]. Each uses Load + Store like the
+            // primary — the pending-clear color applies to slot 0
+            // only; subsequent attachments rely on
+            // `glClearBuffer*` calls or untouched contents.
+            for (std::size_t ei = 0; ei < info.fboAdditionalColorTextures.size(); ++ei) {
+                void* rawTex = info.fboAdditionalColorTextures[ei];
+                if (rawTex == nullptr) continue;
+                id<MTLTexture> extraTex = (__bridge id<MTLTexture>)rawTex;
+                pass.colorAttachments[ei + 1].texture = extraTex;
+                pass.colorAttachments[ei + 1].loadAction = MTLLoadActionLoad;
+                pass.colorAttachments[ei + 1].storeAction = MTLStoreActionStore;
             }
             // Layered rendering — GS-emul path only. When the
             // emulated GS wrote gl_Layer, the VS routes the per-
