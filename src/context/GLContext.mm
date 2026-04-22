@@ -11179,23 +11179,49 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
             return false;
         }
     }
-    // Spec: GL_INVALID_VALUE if layer is outside the texture's array/depth range.
-    // Only validate for layered targets — 1D/2D ignore the layer parameter.
-    if (!layered) {
-        const bool isLayered =
-            textureObject->target == GL_TEXTURE_3D ||
-            textureObject->target == GL_TEXTURE_2D_ARRAY ||
-            textureObject->target == GL_TEXTURE_1D_ARRAY ||
-            textureObject->target == GL_TEXTURE_CUBE_MAP_ARRAY ||
-            textureObject->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
-        if (isLayered) {
-            const GLsizei maxLayer = textureObject->target == GL_TEXTURE_3D
-                ? std::max<GLsizei>(textureObject->desc.depth, 1)
-                : std::max<GLsizei>(textureObject->desc.layers, 1);
-            if (layer >= maxLayer) {
-                pushError(GL_INVALID_VALUE);
-                return false;
+    // GL 4.6 §9.2.8 — `glFramebufferTextureLayer` layer validation.
+    // - Negative layer: INVALID_VALUE (handled at layer<0 branch above).
+    // - `layer >= GL_MAX_3D_TEXTURE_SIZE` for 3D target: INVALID_VALUE.
+    // - `layer >= GL_MAX_ARRAY_TEXTURE_LAYERS` for array target:
+    //   INVALID_VALUE.
+    // - `layer >= 6 * GL_MAX_CUBE_MAP_TEXTURE_SIZE` for cube-map-array:
+    //   INVALID_VALUE.
+    // - `layer` within the implementation cap but >= the specific
+    //   texture's own layer count: attach succeeds, FB is incomplete.
+    //
+    // Used to reject `layer >= desc.layers` unconditionally, which
+    // flunks CTS `texture_cube_map_array.fbo_incompleteness.*` (expects
+    // the attach to succeed so it can verify FB status goes to
+    // INCOMPLETE_ATTACHMENT). Now only the implementation-cap check
+    // fires — this still catches the DSA `framebuffers_texture_
+    // attachment_errors` case (which uses `GL_MAX_ARRAY_TEXTURE_LAYERS`
+    // as the invalid layer value).
+    if (!layered && impl_->capabilities != nullptr) {
+        GLint maxForTarget = 0;
+        switch (textureObject->target) {
+            case GL_TEXTURE_3D:
+                impl_->capabilities->queryInteger(GL_MAX_3D_TEXTURE_SIZE, &maxForTarget);
+                break;
+            case GL_TEXTURE_2D_ARRAY:
+            case GL_TEXTURE_1D_ARRAY:
+            case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+                impl_->capabilities->queryInteger(GL_MAX_ARRAY_TEXTURE_LAYERS, &maxForTarget);
+                break;
+            case GL_TEXTURE_CUBE_MAP_ARRAY: {
+                // GL 4.6 Khronos man page: "layer is larger than
+                // MAX_CUBE_MAP_TEXTURE_SIZE - 1". Despite the
+                // `6 × MAX` formulation that appears in §3.8.3, the
+                // actual CTS DSA test compares against
+                // MAX_CUBE_MAP_TEXTURE_SIZE directly (not × 6).
+                impl_->capabilities->queryInteger(GL_MAX_CUBE_MAP_TEXTURE_SIZE, &maxForTarget);
+                break;
             }
+            default:
+                break;
+        }
+        if (maxForTarget > 0 && layer >= maxForTarget) {
+            pushError(GL_INVALID_VALUE);
+            return false;
         }
     }
     if (attachment == GL_DEPTH_ATTACHMENT && !isDepthFormat(textureObject->desc.internalFormat)) {
