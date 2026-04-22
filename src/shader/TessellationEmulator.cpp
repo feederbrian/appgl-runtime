@@ -15,6 +15,7 @@
 #include <unordered_map>
 
 #include "../objects/GLObjectStore.h"
+#include "ShaderTranslator.h"
 
 #include "../../include/AppGL/glcorearb.h"
 
@@ -429,26 +430,53 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
     // Must have a TES at minimum (§11.2.3: TCS is optional).
     if (program.tessEvalSpirv.empty()) return false;
 
-    // Every tess-emulated draw will later need the GS-emul encode
-    // infrastructure, so short-circuit if that path is unavailable.
-    // (Non-emulated GS-present programs fall through the normal link.)
-    // Presence of a GS in the chain is fine — the GS emulator can run
-    // on top of our tessellated output — but that combined path isn't
-    // wired in this scaffolding iter. Flag accordingly.
+    // Full 5-stage (VS+TCS+TES+GS+FS) support deferred to a future
+    // infrastructure round.
     if (!program.geometrySpirv.empty()) {
-        // Full 5-stage (VS+TCS+TES+GS+FS) support is deferred.
-        // Surface the decision in the program's link log so the
-        // CTS triage tooling can see why the draw fell back.
         program.linkLog += "\n[tess-emul] TES+GS 5-stage pipeline not yet emulated";
         return false;
     }
 
-    // Scaffolding gate: this iter only records the detect call —
-    // actual emulation lands in iter 163+. Leave tessellationEmulated
-    // false so the runtime's existing non-emulated path stays in
-    // charge. Once the draw-time routine is implemented, flip this to
-    // `return true;` once the supported-execution-mode / opcode checks
-    // pass.
+    // Validate the TES execution mode is one we know how to tessellate.
+    // `extractTessellationModes` was originally built for the
+    // glGetProgramiv(GL_TESS_*) queries; it returns a normalized GL
+    // enum for domain + spacing + winding + a point_mode flag.
+    const auto teModes = extractTessellationModes(
+        program.tessEvalSpirv.data(), program.tessEvalSpirv.size());
+    const bool knownDomain =
+        teModes.genMode == GL_TRIANGLES ||
+        teModes.genMode == GL_QUADS ||
+        teModes.genMode == GL_ISOLINES;
+    const bool knownSpacing =
+        teModes.genSpacing == GL_EQUAL ||
+        teModes.genSpacing == GL_FRACTIONAL_EVEN ||
+        teModes.genSpacing == GL_FRACTIONAL_ODD;
+    if (!knownDomain || !knownSpacing) {
+        program.linkLog += "\n[tess-emul] TES execution mode outside emulated subset";
+        return false;
+    }
+
+    // Exercise the TCS scanner when a TCS is attached — it's a no-op
+    // without a TCS (TES-only program uses patch-default levels). The
+    // return value is informational here; a dynamic TCS (false) still
+    // lets detect succeed under the simplifying assumption that we'll
+    // fall back to patch defaults at draw time.
+    if (!program.tessControlSpirv.empty()) {
+        float outer[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        float inner[2] = {1.0f, 1.0f};
+        (void)scanTessControlConstantLevels(
+            program.tessControlSpirv.data(),
+            program.tessControlSpirv.size(),
+            outer, inner);
+    }
+
+    // Stays false through iter 166 — detection probes landed, but the
+    // actual draw-time emulation (VS + TES interpretation) is the
+    // next infrastructure milestone. Flipping this true without the
+    // draw path wired would route every tess draw through
+    // `emulateTessellationDraw`'s stub and silently drop the output,
+    // which the CTS would catch as a data-compare failure far worse
+    // than the existing "tess draws produce nothing meaningful" state.
     (void)isSupportedTessMode;
     return false;
 }
