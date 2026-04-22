@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <unordered_map>
 
 #include "../objects/GLObjectStore.h"
 
@@ -57,6 +59,145 @@ bool isSupportedTessMode(std::uint32_t mode) {
 }
 
 }  // namespace
+
+// ─── TCS constant-level extractor ────────────────────────────────────
+
+// Lightweight SPIR-V walker — purpose-built for the narrow "TCS writes
+// constant tess levels" case. Avoids pulling in the full GS-emul
+// interpreter (session-scale refactor deferred to future iter).
+//
+// Supported shape:
+//   %ct_1f     = OpConstant %float 1.0
+//   %ptr       = OpAccessChain %_ptr_Output_float %gl_TessLevelOuter %const_K
+//                OpStore %ptr %ct_1f
+// where gl_TessLevelOuter is decorated with BuiltIn=TessLevelOuter
+// (= 25) and gl_TessLevelInner with BuiltIn=TessLevelInner (= 26).
+//
+// Returns true if at least one level was resolved; false falls the
+// caller back to `defaults` (for now that means the state's
+// GL_PATCH_DEFAULT_{OUTER,INNER}_LEVEL values).
+bool scanTessControlConstantLevels(
+    const std::uint32_t* spirv,
+    std::size_t wordCount,
+    float outerOut[4],
+    float innerOut[2])
+{
+    if (spirv == nullptr || wordCount < 5) return false;
+    // Magic word + version + generator + bound + schema.
+    if (spirv[0] != spv::MagicNumber) return false;
+    const std::uint32_t bound = spirv[3];
+    if (bound == 0) return false;
+
+    // Pass 1: build
+    //   variableBuiltIn[varId]  → builtIn enum (TessLevelOuter / Inner)
+    //   floatConstants[constId] → float value
+    //   intConstants[constId]   → int value (for access-chain indices)
+    std::unordered_map<std::uint32_t, std::uint32_t> variableBuiltIn;
+    std::unordered_map<std::uint32_t, float> floatConstants;
+    std::unordered_map<std::uint32_t, std::int32_t> intConstants;
+    // Access-chain → (rootVarId, firstIndexConstId) — we only parse
+    // single-index chains which is all gl_TessLevelOuter[k] /
+    // gl_TessLevelInner[k] generate.
+    struct AccessChain {
+        std::uint32_t rootVarId = 0;
+        std::uint32_t indexConstId = 0;
+    };
+    std::unordered_map<std::uint32_t, AccessChain> accessChains;
+
+    std::size_t i = 5;
+    while (i < wordCount) {
+        const std::uint32_t inst = spirv[i];
+        const std::uint16_t opcode = inst & 0xFFFF;
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0 || i + wc > wordCount) return false;
+        const std::uint32_t* w = spirv + i + 1;
+
+        switch (opcode) {
+            case spv::OpDecorate: {
+                if (wc >= 4) {
+                    const std::uint32_t target = w[0];
+                    const std::uint32_t deco = w[1];
+                    if (deco == spv::DecorationBuiltIn && wc >= 4) {
+                        variableBuiltIn[target] = w[2];
+                    }
+                }
+                break;
+            }
+            case spv::OpConstant: {
+                if (wc >= 4) {
+                    const std::uint32_t resultId = w[1];
+                    const std::uint32_t literal = w[2];
+                    // Record both as-int and as-float; the callee picks
+                    // based on context (access-chain index vs OpStore
+                    // RHS). SPIR-V OpConstant's type-word (w[0]) would
+                    // let us disambiguate; for this narrow extractor,
+                    // storing both is cheapest + unambiguous at use.
+                    float asFloat;
+                    std::memcpy(&asFloat, &literal, 4);
+                    floatConstants[resultId] = asFloat;
+                    intConstants[resultId] = static_cast<std::int32_t>(literal);
+                }
+                break;
+            }
+            case spv::OpAccessChain: {
+                if (wc >= 5) {
+                    AccessChain ac;
+                    ac.rootVarId = w[2];
+                    ac.indexConstId = w[3];   // first index only
+                    accessChains[w[1]] = ac;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        i += wc;
+    }
+
+    // Pass 2: scan for OpStore instructions whose pointer is an
+    // AccessChain rooted at a gl_TessLevel* variable with a constant
+    // index + constant value.
+    bool anyResolved = false;
+    i = 5;
+    while (i < wordCount) {
+        const std::uint32_t inst = spirv[i];
+        const std::uint16_t opcode = inst & 0xFFFF;
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0 || i + wc > wordCount) break;
+        const std::uint32_t* w = spirv + i + 1;
+
+        if (opcode == spv::OpStore && wc >= 3) {
+            const std::uint32_t ptrId = w[0];
+            const std::uint32_t valId = w[1];
+            auto acIt = accessChains.find(ptrId);
+            if (acIt != accessChains.end()) {
+                const AccessChain& ac = acIt->second;
+                auto biIt = variableBuiltIn.find(ac.rootVarId);
+                auto idxIt = intConstants.find(ac.indexConstId);
+                auto valIt = floatConstants.find(valId);
+                if (biIt != variableBuiltIn.end() &&
+                    idxIt != intConstants.end() &&
+                    valIt != floatConstants.end()) {
+                    const std::uint32_t builtIn = biIt->second;
+                    const std::int32_t idx = idxIt->second;
+                    const float value = valIt->second;
+                    if (builtIn == spv::BuiltInTessLevelOuter &&
+                        idx >= 0 && idx < 4) {
+                        outerOut[idx] = value;
+                        anyResolved = true;
+                    } else if (builtIn == spv::BuiltInTessLevelInner &&
+                               idx >= 0 && idx < 2) {
+                        innerOut[idx] = value;
+                        anyResolved = true;
+                    }
+                }
+            }
+        }
+        i += wc;
+    }
+
+    return anyResolved;
+}
 
 // ─── Tessellation domain-point generation ────────────────────────────
 

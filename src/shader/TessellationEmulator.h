@@ -122,6 +122,24 @@ struct TessDomainOutput {
     GLenum topology = 0;
 };
 
+// Minimal TCS scan: walk TCS SPIR-V and find constant OpStore writes
+// to gl_TessLevelOuter[k] / gl_TessLevelInner[k]. For each level slot
+// whose write target is a constant literal, write the value into the
+// output array (initialised to `defaults[]` on entry). Returns true
+// when at least one level was resolved statically; false means the
+// TCS's tess levels are computed dynamically and need full
+// interpretation (not yet supported).
+//
+// The common shader shapes CTS exercises (both
+// `tessellation_shader.*` and `shading_language_420pack.*`) set every
+// level to a constant literal. Those are the cases this function
+// succeeds on. Iter 165 scope.
+bool scanTessControlConstantLevels(
+    const std::uint32_t* tcsSpirv,
+    std::size_t tcsWordCount,
+    float outerOut[4],
+    float innerOut[2]);
+
 // Generate the tessellation domain coords + indices for one patch.
 // All outer / inner levels are pre-clamped by the caller to
 // [1, GL_MAX_TESS_GEN_LEVEL]. Called once per patch per draw after
