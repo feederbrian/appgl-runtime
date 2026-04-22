@@ -15539,6 +15539,62 @@ bool GLContext::linkProgram(GLuint program) {
     }
     // ─── End stage-to-stage varying type check ───────────────────────
 
+    // ─── Cross-stage uniform type consistency (GL 4.6 §7.4.1) ────────
+    //
+    // When two stages declare a uniform with the same name, the types
+    // must match. CTS `shader_image_load_store.negative-linkErrors`
+    // attaches a VS with `uniform image1D g_image` and an FS with
+    // `uniform image2D g_image` and expects the link to fail with a
+    // type mismatch diagnostic. Our varying check above walks inputs
+    // vs outputs; uniforms are a separate namespace and need their
+    // own pass.
+    //
+    // We iterate every (shader_A, shader_B) pair and look for same-
+    // named entries in `declaredUniforms` with mismatched types.
+    {
+        std::vector<const GLShaderObject*> attachedStages;
+        if (vertexShader != nullptr)       attachedStages.push_back(vertexShader);
+        if (tessControlShader != nullptr)  attachedStages.push_back(tessControlShader);
+        if (tessEvalShader != nullptr)     attachedStages.push_back(tessEvalShader);
+        if (geometryShader != nullptr)     attachedStages.push_back(geometryShader);
+        if (fragmentShader != nullptr)     attachedStages.push_back(fragmentShader);
+        if (computeShader != nullptr)      attachedStages.push_back(computeShader);
+
+        bool uniformMismatch = false;
+        std::string mismatchMsg;
+        std::unordered_map<std::string, GLenum> seenUniforms;
+        for (const GLShaderObject* stage : attachedStages) {
+            if (uniformMismatch) break;
+            for (const auto& u : stage->declaredUniforms) {
+                // Skip built-ins and synthesized compat-rewrite
+                // uniforms (appgl_ModelViewMatrix etc.).
+                if (u.name.compare(0, 3, "gl_") == 0) continue;
+                if (u.name.compare(0, 6, "appgl_") == 0) continue;
+                auto it = seenUniforms.find(u.name);
+                if (it == seenUniforms.end()) {
+                    seenUniforms[u.name] = u.type;
+                } else if (it->second != u.type) {
+                    uniformMismatch = true;
+                    mismatchMsg = std::string("uniform '") + u.name +
+                        "' type mismatch across stages: seen type 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", it->second); return std::string(b); }()
+                        + ", new type 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", u.type); return std::string(b); }();
+                    break;
+                }
+            }
+        }
+        if (uniformMismatch) {
+            programObject->linkLog = mismatchMsg;
+            programObject->linked = false;
+            Runtime::shared().recordShaderTranslation({
+                programTag, "link", "", "", "", programObject->linkLog, "", false
+            });
+            return false;
+        }
+    }
+    // ─── End cross-stage uniform type consistency check ──────────────
+
     // ─── Tess-eval primitive-mode layout (GL 4.6 §11.2.3) ────────────
     //
     // A tessellation evaluation shader MUST specify exactly one of
