@@ -180,6 +180,159 @@ bool scanTessControlConstantLevels(
     return anyResolved;
 }
 
+// ─── TES interface extractor ─────────────────────────────────────────
+
+// Scan a TES SPIR-V module and describe its input + output interface.
+// Uses the shared `SpirvModule` parser for types/decorations/variables;
+// then walks the function body to detect gl_Position writes + gl_TessCoord
+// reads (both of which the draw-time emulator needs to know about).
+//
+// Called at link time (cheap — same parse cost as GS emul's detector)
+// to produce metadata that `emulateTessellationDraw` consumes per-draw.
+//
+// Output variable classification:
+//   - BuiltIn on Output storage: recorded with isBuiltIn=true,
+//     writesPosition set if builtIn == BuiltInPosition
+//   - Location on Output storage: hasLocation=true, location=N
+//   - gl_PerVertex struct on Output storage: decomposed into per-member
+//     entries so the packer can emit each member separately
+//
+// Input variable classification mirrors outputs but reads are one-way:
+// we just record the set of inputs the body might touch.
+TessEvalInterface scanTessEvalInterface(
+    const std::uint32_t* tesSpirv,
+    std::size_t tesWordCount)
+{
+    TessEvalInterface iface;
+    if (tesSpirv == nullptr || tesWordCount < 5) {
+        iface.diagnostic = "empty SPIR-V";
+        return iface;
+    }
+
+    SpirvModule module;
+    if (!module.parse(tesSpirv, tesWordCount)) {
+        iface.diagnostic = "SpirvModule::parse failed: " + module.parseError;
+        return iface;
+    }
+    iface.parsed = true;
+
+    // Helper: fill a TessEvalVarying entry from a variable id, starting
+    // at its pointee type (strip the pointer one level). Per-vertex
+    // inputs wrap the real type inside an Array, whose length is the
+    // patch-vertex count — we set isPerVertex and dive through.
+    auto recordVarying = [&](std::uint32_t varId, bool asOutput) {
+        auto varIt = module.variables.find(varId);
+        if (varIt == module.variables.end()) return;
+        const VariableInfo& vi = varIt->second;
+        auto ptrTypeIt = module.types.find(vi.typeId);
+        if (ptrTypeIt == module.types.end() ||
+            ptrTypeIt->second.kind != TypeInfo::Kind::Pointer) return;
+        std::uint32_t pointee = ptrTypeIt->second.pointeeType;
+        bool isPerVertex = false;
+
+        auto pointeeIt = module.types.find(pointee);
+        if (pointeeIt != module.types.end() &&
+            pointeeIt->second.kind == TypeInfo::Kind::Array) {
+            isPerVertex = true;
+            pointee = pointeeIt->second.componentType;
+        }
+
+        TessEvalVarying ev;
+        ev.id = varId;
+        ev.typeId = pointee;
+        ev.name = vi.name;
+        ev.isPerVertex = isPerVertex;
+
+        auto decoIt = module.decorations.find(varId);
+        if (decoIt != module.decorations.end()) {
+            if (decoIt->second.hasLocation) {
+                ev.hasLocation = true;
+                ev.location = decoIt->second.location;
+            }
+            if (decoIt->second.hasBuiltIn) {
+                ev.isBuiltIn = true;
+                ev.builtIn = decoIt->second.builtIn;
+            }
+        }
+
+        // Block-struct case: decompose into per-member entries. Most
+        // glslang-emitted TES bodies put gl_Position + user varyings
+        // in a gl_PerVertex block — the caller wants each member as
+        // a separately addressable slot.
+        auto leafIt = module.types.find(pointee);
+        if (leafIt != module.types.end() &&
+            leafIt->second.kind == TypeInfo::Kind::Struct) {
+            auto memDecoIt = module.memberDecorations.find(pointee);
+            std::uint32_t memberIdx = 0;
+            for (auto memberType : leafIt->second.memberTypes) {
+                TessEvalVarying sub;
+                sub.id = varId;
+                sub.typeId = memberType;
+                sub.isPerVertex = isPerVertex;
+                sub.scalarCount = module.scalarWidth(memberType);
+                sub.name = vi.name;
+                auto namesIt = module.memberNames.find(pointee);
+                if (namesIt != module.memberNames.end()) {
+                    auto nmIt = namesIt->second.find(memberIdx);
+                    if (nmIt != namesIt->second.end()) sub.name = nmIt->second;
+                }
+                if (memDecoIt != module.memberDecorations.end()) {
+                    auto perIt = memDecoIt->second.perMember.find(memberIdx);
+                    if (perIt != memDecoIt->second.perMember.end()) {
+                        if (perIt->second.hasBuiltIn) {
+                            sub.isBuiltIn = true;
+                            sub.builtIn = perIt->second.builtIn;
+                        }
+                        if (perIt->second.hasLocation) {
+                            sub.hasLocation = true;
+                            sub.location = perIt->second.location;
+                        }
+                    }
+                }
+                if (asOutput) {
+                    if (sub.isBuiltIn && sub.builtIn == spv::BuiltInPosition) {
+                        iface.writesPosition = true;
+                    }
+                    iface.outputs.push_back(std::move(sub));
+                } else {
+                    if (sub.isBuiltIn && sub.builtIn == spv::BuiltInTessCoord) {
+                        iface.readsTessCoord = true;
+                    }
+                    iface.inputs.push_back(std::move(sub));
+                }
+                ++memberIdx;
+            }
+            return;
+        }
+
+        // Non-block case (plain scalar / vec / array of vec).
+        ev.scalarCount = module.scalarWidth(pointee);
+        if (asOutput) {
+            if (ev.isBuiltIn && ev.builtIn == spv::BuiltInPosition) {
+                iface.writesPosition = true;
+            }
+            iface.outputs.push_back(std::move(ev));
+        } else {
+            if (ev.isBuiltIn && ev.builtIn == spv::BuiltInTessCoord) {
+                iface.readsTessCoord = true;
+            }
+            iface.inputs.push_back(std::move(ev));
+        }
+    };
+
+    for (const auto& kv : module.variables) {
+        const std::uint32_t varId = kv.first;
+        const VariableInfo& vi = kv.second;
+        if (vi.storageClass == spv::StorageClassOutput) {
+            recordVarying(varId, /*asOutput=*/true);
+        } else if (vi.storageClass == spv::StorageClassInput) {
+            recordVarying(varId, /*asOutput=*/false);
+        }
+    }
+
+    return iface;
+}
+
 // ─── Tessellation domain-point generation ────────────────────────────
 
 // Round an outer level per the spacing rule. Result is the integer
@@ -450,7 +603,19 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
             outer, inner);
     }
 
-    // Stays false through iter 166 — detection probes landed, but the
+    // Exercise the TES interface scanner — at detect-time this gives
+    // us parse coverage over every tess program CTS throws at us so
+    // a bug in the walker surfaces as a link error rather than a
+    // hard-to-diagnose crash inside `emulateTessellationDraw`. The
+    // scanner logs a diagnostic on failure but otherwise doesn't
+    // affect detector behaviour (emul still declines to fire).
+    TessEvalInterface teIface = scanTessEvalInterface(
+        program.tessEvalSpirv.data(), program.tessEvalSpirv.size());
+    if (!teIface.parsed) {
+        program.linkLog += "\n[tess-emul] TES interface parse: " + teIface.diagnostic;
+    }
+
+    // Stays false through iter 169 — detection probes landed, but the
     // actual draw-time emulation (VS + TES interpretation) is the
     // next infrastructure milestone. Flipping this true without the
     // draw path wired would route every tess draw through

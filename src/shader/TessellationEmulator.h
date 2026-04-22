@@ -140,6 +140,52 @@ bool scanTessControlConstantLevels(
     float outerOut[4],
     float innerOut[2]);
 
+// TES output / input interface description. Populated by
+// `scanTessEvalInterface` for consumption by `emulateTessellationDraw`
+// once the full draw path lands. Fields here answer:
+//   - which flat-scalar slots make up each output varying so we can
+//     pack the expanded-vertex buffer correctly
+//   - whether the TES writes gl_Position (required for the raster
+//     path)
+//   - whether the TES reads gl_TessCoord (always true in practice but
+//     an explicit signal lets the body interpreter skip initialisation
+//     otherwise)
+struct TessEvalVarying {
+    std::uint32_t id = 0;         // SPIR-V result id of the OpVariable
+    std::uint32_t location = 0;   // layout(location=N) — only valid when hasLocation
+    bool hasLocation = false;
+    bool isBuiltIn = false;
+    std::uint32_t builtIn = 0;    // spv::BuiltIn enum when isBuiltIn
+    std::uint32_t typeId = 0;     // pointer-to-T; `scalarWidth` resolves T
+    std::uint32_t scalarCount = 0; // runtime flat-scalar width of the element type
+    std::string name;
+    bool isArray = false;
+    // Per-vertex inputs arrive through gl_in[N].<member>. isPerVertex
+    // is true for such members; scalarCount reflects one element's
+    // width (not the whole gl_in[] array) because the emulator
+    // replays the TES per (patch, domain-coord) and fills gl_in[]
+    // per patch.
+    bool isPerVertex = false;
+};
+
+struct TessEvalInterface {
+    std::vector<TessEvalVarying> outputs;
+    std::vector<TessEvalVarying> inputs;
+    bool writesPosition = false;
+    bool readsTessCoord = false;
+    bool parsed = false;
+    std::string diagnostic;
+};
+
+// Walk the TES SPIR-V and populate a `TessEvalInterface`. All returned
+// varyings are populated with their type's resolved scalar width so
+// the downstream packer doesn't need to re-walk the module to answer
+// "how many floats is this output". Failure returns `parsed=false`
+// with `diagnostic` set.
+TessEvalInterface scanTessEvalInterface(
+    const std::uint32_t* tesSpirv,
+    std::size_t tesWordCount);
+
 // Generate the tessellation domain coords + indices for one patch.
 // All outer / inner levels are pre-clamped by the caller to
 // [1, GL_MAX_TESS_GEN_LEVEL]. Called once per patch per draw after
