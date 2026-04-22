@@ -7660,6 +7660,22 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         *data = static_cast<GLint>(impl_->boundTransformFeedbackId);
         return true;
     }
+    // GL 4.6 §22.3 — per-context MSAA sample state. `glGetIntegerv`
+    // with these pnames queries the CURRENT read framebuffer's
+    // sample configuration. Without MSAA infrastructure we advertise
+    // zero samples on both default and user FBOs. CTS
+    // `framebuffer_blit.scissor_blit` calls `getIntegerv(
+    // GL_SAMPLE_BUFFERS)` to decide whether to verify cleared
+    // colours (skipped if MSAA); our returning INVALID_ENUM aborted
+    // the entire test before the scissor code ran.
+    if (pname == GL_SAMPLE_BUFFERS) {
+        *data = 0;
+        return true;
+    }
+    if (pname == GL_SAMPLES) {
+        *data = 0;
+        return true;
+    }
     // GL 4.6 §18.3: GL_IMPLEMENTATION_COLOR_READ_{TYPE,FORMAT} report
     // the implementation-preferred format/type pair for glReadPixels
     // on the current read framebuffer. Resolve from the bound read
