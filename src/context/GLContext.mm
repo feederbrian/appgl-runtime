@@ -12615,12 +12615,20 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
         case GL_LINE_STRIP_ADJACENCY:     prims = (n >= 4) ? n - 3 : 0; break;
         case GL_TRIANGLES_ADJACENCY:      prims = n / 6; break;
         case GL_TRIANGLE_STRIP_ADJACENCY: prims = (n >= 6) ? (n - 4) / 2 : 0; break;
-        case GL_PATCHES:
-            // Probe fix: exact post-tess count needs GPU pipeline
-            // stats (TES invocations). Synthesize non-zero so CTS
-            // tests gated on "zero primitives generated" proceed.
-            prims = 1;
+        case GL_PATCHES: {
+            // GL 4.6 §10.1: PRIMITIVES_SUBMITTED for GL_PATCHES is
+            // vertexCount / GL_PATCH_VERTICES. CTS
+            // `pipeline_statistics_query_tests_ARB.functional_tess_
+            // queries` sets PATCH_VERTICES=3 and draws 7 indices,
+            // expecting PRIMITIVES_SUBMITTED to report 2 (EXACT_MATCH).
+            // The TCS_PATCHES / TES_INVOCATIONS counters are EQUAL_OR_
+            // GREATER in that test — any non-zero count lets them
+            // pass. A pure synthetic "1" satisfies the lower-bound
+            // queries but fails the exact-match one, hence this path.
+            const GLint pv = state ? state->tessellationState().patchVertices : 3;
+            prims = (pv > 0) ? (n / static_cast<std::size_t>(pv)) : 0;
             break;
+        }
         default: break;
     }
     prims *= static_cast<std::size_t>(instanceCount);
