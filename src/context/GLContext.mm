@@ -14725,8 +14725,18 @@ bool GLContext::linkProgram(GLuint program) {
                geometryShader != nullptr && computeShader == nullptr) {
         kind = ProgramKind::VertexGeometryFragment;
     } else if (vertexShader != nullptr && fragmentShader != nullptr &&
-               tessControlShader != nullptr && tessEvalShader != nullptr &&
+               tessEvalShader != nullptr &&
                computeShader == nullptr) {
+        // GL 4.6 §11.2.3: tess-eval is the required tess stage;
+        // tess-control is OPTIONAL. A program with VS + TES + FS
+        // (no TCS) is a valid combination — the app drives the
+        // tessellation factors via `glPatchParameterfv(
+        // GL_PATCH_DEFAULT_{INNER,OUTER}_LEVEL, ...)` instead of
+        // through a TCS. CTS `tessellation_shader.single.
+        // max_patch_vertices` builds one such program and expects
+        // link to succeed. The downstream `quickHash(
+        // tessControlShader->source)` call in the VTF branch is
+        // now null-guarded so TCS-less programs don't deref null.
         kind = ProgramKind::VertexTessellationFragment;
     } else if (vertexShader != nullptr && fragmentShader == nullptr &&
                computeShader == nullptr && geometryShader == nullptr &&
@@ -17780,7 +17790,9 @@ bool GLContext::linkProgram(GLuint program) {
 
             Runtime::shared().recordShaderTranslation({
                 programTag + "-tessellation-emulation", "tessellation",
-                quickHash(tessControlShader->source),
+                tessControlShader != nullptr
+                    ? quickHash(tessControlShader->source)
+                    : std::string(),
                 linkVertexHash, linkFragmentHash,
                 "tessellation emulation not yet available on Metal; "
                 "program translated VS+FS only, falls back to raster-without-tess",
