@@ -87,6 +87,26 @@ bool GLCapabilities::queryInteger(GLenum pname, GLint* out) const {
         out[1] = static_cast<GLint>(value->second);
         return true;
     }
+    // GL 4.6 §22.2 — {min,max} float-pair pnames are also queryable
+    // via glGetIntegerv (with value-preserving float→int conversion
+    // per §2.2.2). Route through queryFloat so the same {min,max}
+    // logic runs, then truncate. CTS
+    // `tessellation_shader.tessellation_shader_point_mode.
+    // point_rendering` calls glGetIntegerv(GL_POINT_SIZE_RANGE)
+    // directly and aborts on INVALID_ENUM if the int path doesn't
+    // know the pname.
+    if (pname == GL_POINT_SIZE_RANGE ||           // == GL_SMOOTH_POINT_SIZE_RANGE
+        pname == GL_LINE_WIDTH_RANGE ||           // == GL_SMOOTH_LINE_WIDTH_RANGE
+        pname == GL_ALIASED_LINE_WIDTH_RANGE ||
+        pname == GL_VIEWPORT_BOUNDS_RANGE) {
+        GLfloat pair[2] = {};
+        if (!queryFloat(pname, pair)) {
+            return false;
+        }
+        out[0] = static_cast<GLint>(pair[0]);
+        out[1] = static_cast<GLint>(pair[1]);
+        return true;
+    }
     // Phase 8X Group 4d follow-up⁶ — GL_COMPRESSED_TEXTURE_FORMATS is a
     // variable-length query: the caller is supposed to glGetIntegerv the
     // count from GL_NUM_COMPRESSED_TEXTURE_FORMATS first, then size the
@@ -131,6 +151,20 @@ bool GLCapabilities::queryInteger64(GLenum pname, GLint64* out) const {
         }
         out[0] = value->second;
         out[1] = value->second;
+        return true;
+    }
+    // Pair-valued float pnames are reachable through glGetInteger64v
+    // too; see queryInteger comment above for spec rationale.
+    if (pname == GL_POINT_SIZE_RANGE ||           // == GL_SMOOTH_POINT_SIZE_RANGE
+        pname == GL_LINE_WIDTH_RANGE ||           // == GL_SMOOTH_LINE_WIDTH_RANGE
+        pname == GL_ALIASED_LINE_WIDTH_RANGE ||
+        pname == GL_VIEWPORT_BOUNDS_RANGE) {
+        GLfloat pair[2] = {};
+        if (!queryFloat(pname, pair)) {
+            return false;
+        }
+        out[0] = static_cast<GLint64>(pair[0]);
+        out[1] = static_cast<GLint64>(pair[1]);
         return true;
     }
     // Phase 8X Group 4d follow-up⁶ — zero-entry variable-length cap. See
