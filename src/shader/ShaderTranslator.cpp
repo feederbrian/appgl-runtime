@@ -1181,6 +1181,26 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                             compiler.get_member_decoration(parentType.self, mi,
                                 spv::DecorationMatrixStride));
                     }
+                    // Fallback array stride from declared-size when SPIR-V
+                    // didn't decorate the member with DecorationArrayStride.
+                    // That happens for array members of nested structs (the
+                    // block-level std140 decoration flows to the outer
+                    // struct's members but not to inner struct members' own
+                    // array decorations — CTS
+                    // `shaders.struct.uniform.nested_struct_array_*` ships
+                    // `uniform S s[2]; struct S { ... T b[3]; ... };
+                    // struct T { ... vec2 b[2]; };` and the innermost
+                    // `vec2 b[2]` had stride=0, so
+                    // `buildStageUniformBuffer`'s per-element unpadding
+                    // loop never fired and element 1 stayed at the initial
+                    // zero fill). The inner stride is still std140 because
+                    // the whole block is std140; `size / arraySize` gives
+                    // the correct value.
+                    if (member.isArray && member.arraySize > 0 &&
+                        member.arrayStride == 0 && member.size > 0) {
+                        member.arrayStride = static_cast<GLint>(
+                            member.size / static_cast<std::size_t>(member.arraySize));
+                    }
                     rb.members.push_back(std::move(member));
                 }
             };
