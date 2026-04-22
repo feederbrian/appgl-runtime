@@ -700,7 +700,29 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         if (tokens.empty()) {
             return;
         }
-        LayoutQualifiers layoutQ = extractLayoutQualifiers(tokens);
+        // Merge a per-layout-block result into the accumulator. Later
+        // blocks override earlier ones per GLSL 4.2 §4.4 ("multiple
+        // layout-qualifier-id forms of a uniform... are allowed; any
+        // such repeated or redundant qualifier is taken as the last
+        // one"). Unspecified fields on the new block leave the
+        // accumulator intact so a series of single-value qualifiers
+        // composes correctly. CTS
+        // `shading_language_420pack.qualifier_override_layout`
+        // declares `in layout(location = 3) layout(location = 2) vec4
+        // in_vs_test` and expects location = 2.
+        auto mergeLayout = [](LayoutQualifiers& acc, const LayoutQualifiers& q) {
+            if (q.location >= 0)     acc.location = q.location;
+            if (q.binding  >= 0)     acc.binding  = q.binding;
+            if (q.index    >= 0)     acc.index    = q.index;
+            if (q.offset   >= 0)     acc.offset   = q.offset;
+            if (q.imageFormat != 0)  acc.imageFormat = q.imageFormat;
+        };
+        LayoutQualifiers layoutQ;
+        // Parse all LEADING layout blocks (before any in/out/uniform).
+        while (!tokens.empty() && tokens.front() == "layout") {
+            LayoutQualifiers one = extractLayoutQualifiers(tokens);
+            mergeLayout(layoutQ, one);
+        }
         if (tokens.empty()) {
             return;
         }
@@ -712,17 +734,24 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         // tokens[0] — the subsequent `uniform` check fails and the scanner
         // silently drops the image uniform, making glGetUniformLocation
         // return -1 (CTS shading_language_420pack sees "Uniform not available").
-        while (!tokens.empty() && (tokens.front() == "flat" || tokens.front() == "smooth" ||
-                                   tokens.front() == "centroid" || tokens.front() == "noperspective" ||
-                                   tokens.front() == "invariant" || tokens.front() == "precise" ||
-                                   tokens.front() == "highp" || tokens.front() == "mediump" ||
-                                   tokens.front() == "lowp" ||
-                                   tokens.front() == "readonly" || tokens.front() == "writeonly" ||
-                                   tokens.front() == "coherent" || tokens.front() == "volatile" ||
-                                   tokens.front() == "restrict" ||
-                                   tokens.front() == "patch" || tokens.front() == "sample")) {
-            tokens.erase(tokens.begin());
-        }
+        //
+        // Also handle interleaved `layout(...)` blocks between the storage
+        // keyword and subsequent qualifiers: `in layout(location = 2)
+        // smooth vec4 x` is legal and stores location = 2.
+        auto dropAuxQualifiers = [&]() {
+            while (!tokens.empty() && (tokens.front() == "flat" || tokens.front() == "smooth" ||
+                                       tokens.front() == "centroid" || tokens.front() == "noperspective" ||
+                                       tokens.front() == "invariant" || tokens.front() == "precise" ||
+                                       tokens.front() == "highp" || tokens.front() == "mediump" ||
+                                       tokens.front() == "lowp" ||
+                                       tokens.front() == "readonly" || tokens.front() == "writeonly" ||
+                                       tokens.front() == "coherent" || tokens.front() == "volatile" ||
+                                       tokens.front() == "restrict" ||
+                                       tokens.front() == "patch" || tokens.front() == "sample")) {
+                tokens.erase(tokens.begin());
+            }
+        };
+        dropAuxQualifiers();
         if (tokens.empty()) {
             return;
         }
@@ -732,6 +761,16 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
             return;
         }
         tokens.erase(tokens.begin());
+        // Parse TRAILING layout blocks (after the storage keyword).
+        // GLSL syntax: `in layout(location = 2) vec4 x;` or
+        // `in layout(location = 3) layout(location = 2) vec4 x;`.
+        while (!tokens.empty() && tokens.front() == "layout") {
+            LayoutQualifiers one = extractLayoutQualifiers(tokens);
+            mergeLayout(layoutQ, one);
+        }
+        // Drop any interpolation/precision qualifiers that come AFTER
+        // the storage+layout block (e.g. `in layout(...) smooth vec4 x`).
+        dropAuxQualifiers();
         GLShaderDeclaration decl;
         if (!parseDeclTail(tokens, decl)) {
             return;
