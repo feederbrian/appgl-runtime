@@ -23,6 +23,28 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 option(APPGL_REGENERATE "Regenerate AppGL generated files at configure time." OFF)
 option(APPGL_VENDOR_THIRD_PARTY "Add vendored shader translator dependencies to the CMake graph." OFF)
+option(APPGL_ENABLE_ASAN
+  "Build with AddressSanitizer for development/debugging. DO NOT ship."
+  OFF)
+
+# AddressSanitizer flags applied globally when APPGL_ENABLE_ASAN is on.
+# Apple's clang accepts `-fsanitize=address` for both compile and link.
+# `-fno-omit-frame-pointer` keeps the leaf frame visible in ASAN reports.
+# We drop `-O*` overrides to `-O1` so the report line numbers stay
+# faithful while performance remains workable for CTS runs.
+#
+# Usage: `cmake -S . -B build -DAPPGL_ENABLE_ASAN=ON && cmake --build build`
+# Runtime: `ASAN_OPTIONS="detect_leaks=0:abort_on_error=1" ./glcts ...`
+#
+# CTS suites are fork-bombed from glcts — use `abort_on_error=1` so the
+# first heap-corruption report aborts the process at the failure site
+# with a full backtrace, instead of sprays from subsequent corruption
+# cascading through test teardown.
+if(APPGL_ENABLE_ASAN)
+  message(STATUS "AppGL: AddressSanitizer ENABLED (dev build)")
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g -O1)
+  add_link_options(-fsanitize=address)
+endif()
 
 set(APPGL_GENERATOR "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_from_registry/generate_from_registry.py")
 
