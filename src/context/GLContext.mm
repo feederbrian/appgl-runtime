@@ -19243,6 +19243,129 @@ bool GLContext::getUniformuiv(GLuint program, GLint location, GLuint* params) {
     return true;
 }
 
+// GL 4.6 §7.6.1 — Sampler / image uniform validation shared by the
+// in-context (glUniform*) and DSA (glProgramUniform*) paths.
+// Returns `true` iff validation failed (caller should bail after
+// pushError). `element` + `vectorSize` + first int slot of `values`
+// are checked against the uniform's declared `utype`.
+static bool sampleOrImageUniformValidationFailed(
+    GLContext* ctx, GLenum utype, GLContext::UniformElementType element,
+    GLint vectorSize, const void* values)
+{
+    auto isSamplerOrImage = [](GLenum t) {
+        switch (t) {
+            case GL_SAMPLER_1D: case GL_SAMPLER_2D: case GL_SAMPLER_3D:
+            case GL_SAMPLER_CUBE: case GL_SAMPLER_1D_ARRAY:
+            case GL_SAMPLER_2D_ARRAY: case GL_SAMPLER_1D_SHADOW:
+            case GL_SAMPLER_2D_SHADOW: case GL_SAMPLER_1D_ARRAY_SHADOW:
+            case GL_SAMPLER_2D_ARRAY_SHADOW: case GL_SAMPLER_CUBE_SHADOW:
+            case GL_SAMPLER_2D_RECT: case GL_SAMPLER_2D_RECT_SHADOW:
+            case GL_SAMPLER_BUFFER: case GL_SAMPLER_2D_MULTISAMPLE:
+            case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_SAMPLER_CUBE_MAP_ARRAY:
+            case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+            case GL_INT_SAMPLER_1D: case GL_INT_SAMPLER_2D:
+            case GL_INT_SAMPLER_3D: case GL_INT_SAMPLER_CUBE:
+            case GL_INT_SAMPLER_1D_ARRAY: case GL_INT_SAMPLER_2D_ARRAY:
+            case GL_INT_SAMPLER_2D_RECT: case GL_INT_SAMPLER_BUFFER:
+            case GL_INT_SAMPLER_2D_MULTISAMPLE:
+            case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_1D:
+            case GL_UNSIGNED_INT_SAMPLER_2D:
+            case GL_UNSIGNED_INT_SAMPLER_3D:
+            case GL_UNSIGNED_INT_SAMPLER_CUBE:
+            case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+            case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+            case GL_IMAGE_1D: case GL_IMAGE_2D: case GL_IMAGE_3D:
+            case GL_IMAGE_2D_RECT: case GL_IMAGE_CUBE:
+            case GL_IMAGE_BUFFER: case GL_IMAGE_1D_ARRAY:
+            case GL_IMAGE_2D_ARRAY: case GL_IMAGE_CUBE_MAP_ARRAY:
+            case GL_IMAGE_2D_MULTISAMPLE:
+            case GL_IMAGE_2D_MULTISAMPLE_ARRAY:
+            case GL_INT_IMAGE_1D: case GL_INT_IMAGE_2D:
+            case GL_INT_IMAGE_3D: case GL_INT_IMAGE_2D_RECT:
+            case GL_INT_IMAGE_CUBE: case GL_INT_IMAGE_BUFFER:
+            case GL_INT_IMAGE_1D_ARRAY: case GL_INT_IMAGE_2D_ARRAY:
+            case GL_INT_IMAGE_CUBE_MAP_ARRAY:
+            case GL_INT_IMAGE_2D_MULTISAMPLE:
+            case GL_INT_IMAGE_2D_MULTISAMPLE_ARRAY:
+            case GL_UNSIGNED_INT_IMAGE_1D:
+            case GL_UNSIGNED_INT_IMAGE_2D:
+            case GL_UNSIGNED_INT_IMAGE_3D:
+            case GL_UNSIGNED_INT_IMAGE_2D_RECT:
+            case GL_UNSIGNED_INT_IMAGE_CUBE:
+            case GL_UNSIGNED_INT_IMAGE_BUFFER:
+            case GL_UNSIGNED_INT_IMAGE_1D_ARRAY:
+            case GL_UNSIGNED_INT_IMAGE_2D_ARRAY:
+            case GL_UNSIGNED_INT_IMAGE_CUBE_MAP_ARRAY:
+            case GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE:
+            case GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY:
+                return true;
+            default:
+                return false;
+        }
+    };
+    if (!isSamplerOrImage(utype)) return false;
+    if (element != GLContext::UniformElementType::Int || vectorSize != 1) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return true;
+    }
+    const GLint v = *static_cast<const GLint*>(values);
+    if (v < 0) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return true;
+    }
+    auto isImageType = [](GLenum t) {
+        switch (t) {
+            case GL_IMAGE_1D: case GL_IMAGE_2D: case GL_IMAGE_3D:
+            case GL_IMAGE_2D_RECT: case GL_IMAGE_CUBE:
+            case GL_IMAGE_BUFFER: case GL_IMAGE_1D_ARRAY:
+            case GL_IMAGE_2D_ARRAY: case GL_IMAGE_CUBE_MAP_ARRAY:
+            case GL_IMAGE_2D_MULTISAMPLE:
+            case GL_IMAGE_2D_MULTISAMPLE_ARRAY:
+            case GL_INT_IMAGE_1D: case GL_INT_IMAGE_2D:
+            case GL_INT_IMAGE_3D: case GL_INT_IMAGE_2D_RECT:
+            case GL_INT_IMAGE_CUBE: case GL_INT_IMAGE_BUFFER:
+            case GL_INT_IMAGE_1D_ARRAY: case GL_INT_IMAGE_2D_ARRAY:
+            case GL_INT_IMAGE_CUBE_MAP_ARRAY:
+            case GL_INT_IMAGE_2D_MULTISAMPLE:
+            case GL_INT_IMAGE_2D_MULTISAMPLE_ARRAY:
+            case GL_UNSIGNED_INT_IMAGE_1D:
+            case GL_UNSIGNED_INT_IMAGE_2D:
+            case GL_UNSIGNED_INT_IMAGE_3D:
+            case GL_UNSIGNED_INT_IMAGE_2D_RECT:
+            case GL_UNSIGNED_INT_IMAGE_CUBE:
+            case GL_UNSIGNED_INT_IMAGE_BUFFER:
+            case GL_UNSIGNED_INT_IMAGE_1D_ARRAY:
+            case GL_UNSIGNED_INT_IMAGE_2D_ARRAY:
+            case GL_UNSIGNED_INT_IMAGE_CUBE_MAP_ARRAY:
+            case GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE:
+            case GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY:
+                return true;
+            default:
+                return false;
+        }
+    };
+    GLint maxUnit = 0;
+    if (isImageType(utype)) {
+        ctx->capabilities().queryInteger(GL_MAX_IMAGE_UNITS, &maxUnit);
+    } else {
+        ctx->capabilities().queryInteger(
+            GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxUnit);
+    }
+    if (maxUnit > 0 && v >= maxUnit) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return true;
+    }
+    return false;
+}
+
 bool GLContext::setUniformScalarVector(GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
     if (location < 0) {
         return true;  // -1 silently no-ops per spec.
@@ -19263,6 +19386,11 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
         return false;
     }
     GLProgramUniformValue* slot = ref.slot;
+
+    if (sampleOrImageUniformValidationFailed(this, ref.type,
+            element, vectorSize, values)) {
+        return false;
+    }
 
     // Clamp count so writes don't overflow the declared array. GL spec: the
     // effective update is min(count, arraySize - elementIndex).
@@ -19437,6 +19565,10 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
     if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    if (sampleOrImageUniformValidationFailed(this, ref.type,
+            element, vectorSize, values)) {
+        return false;
+    }
     GLProgramUniformValue* slot = ref.slot;
     const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
     const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
