@@ -594,6 +594,22 @@ struct GLProgramObject {
     // pipeline path. See docs/geometry-shader-emulation.md.
     bool geometryEmulated = false;
     std::vector<std::uint32_t> geometrySpirv;
+    // Tessellation-emulation flag. Set by
+    // `appgl::detectTessellationEmulatable` at link time when the
+    // program has a TES stage whose SPIR-V the CPU tessellation
+    // emulator can handle (§11.2.2 / §11.2.3). Scaffolding only
+    // through iter 162 — flag stays false and drawArrays falls
+    // through to the existing path. Full tess CPU emulation lands
+    // in iters 163+. See src/shader/TessellationEmulator.{h,cpp}.
+    bool tessellationEmulated = false;
+    // TES SPIR-V copy mirrors geometrySpirv's pattern so draw time
+    // can emulate without re-reaching the shader object (which may
+    // have been detached + deleted).
+    std::vector<std::uint32_t> tessEvalSpirv;
+    // TCS SPIR-V — optional (§11.2.3). Empty when the program has a
+    // TES but no TCS; the emulator then sources tess levels from
+    // `glPatchParameterfv(GL_PATCH_DEFAULT_{INNER,OUTER}_LEVEL)`.
+    std::vector<std::uint32_t> tessControlSpirv;
     // The VS SPIR-V is stashed alongside `geometrySpirv` so the CPU
     // GS emulator can run a VS pre-pass on each drawArrays call —
     // producing real gl_in[] data (VS outputs) to feed into the GS

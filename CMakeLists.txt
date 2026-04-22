@@ -79,6 +79,7 @@ set(APPGL_SOURCES
   src/shader/GLSLReflection.cpp
   src/shader/PipelineCache.cpp
   src/shader/ShaderTranslator.cpp
+  src/shader/TessellationEmulator.cpp
   src/state/GLStateTracker.cpp
   src/state/IndexExpansion.cpp
   src/state/MatrixStateMirror.cpp

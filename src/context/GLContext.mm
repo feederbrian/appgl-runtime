@@ -6,6 +6,7 @@
 #include "../runtime/AppGLRuntime.h"
 #include "../shader/CompatShaderRewrite.h"
 #include "../shader/GeometryShaderEmulator.h"
+#include "../shader/TessellationEmulator.h"
 #include "../shader/GLSLReflection.h"
 #include "../shader/ShaderTranslator.h"
 #include "../state/GLStateTracker.h"
@@ -17964,6 +17965,22 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->hasTranslatedPipeline = true;
                 rasterTranslationOk = true;
             }
+            // Tessellation emulator detection (scaffolding — iter 162).
+            // Mirrors the GS-emul pattern: copy SPIR-V onto the program
+            // so draw-time emulation survives detach+delete, then call
+            // the detector. The detector's `.tessellationEmulated` flag
+            // stays false through iter 162 — subsequent iters flip it
+            // on once the draw-time logic lands.
+            if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                programObject->vertexSpirv = vertexShader->spirv;
+            }
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                programObject->tessControlSpirv = tessControlShader->spirv;
+            }
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                programObject->tessEvalSpirv = tessEvalShader->spirv;
+            }
+            (void)appgl::detectTessellationEmulatable(*programObject);
             break;
         }
         case ProgramKind::GeometryOnly: {
