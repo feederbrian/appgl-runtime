@@ -19752,8 +19752,21 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    const GLuint currentProgram = impl_->state->currentProgram();
-    GLProgramObject* object = impl_->objects->programs().get(currentProgram);
+    // GL 4.6 §7.3: glUniform* targets the current program; if no
+    // current program but a pipeline is bound, target the pipeline's
+    // active-shader-program (set by glActiveShaderProgram). CTS
+    // `sepshaderobjs.ProgUniformAPI` exercises this fallback.
+    GLuint targetProgram = impl_->state->currentProgram();
+    if (targetProgram == 0) {
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        if (pipelineName != 0) {
+            GLProgramPipelineObject* ppo = impl_->objects->programPipelines().get(pipelineName);
+            if (ppo != nullptr) {
+                targetProgram = ppo->activeShaderProgram;
+            }
+        }
+    }
+    GLProgramObject* object = impl_->objects->programs().get(targetProgram);
     if (object == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
@@ -19813,7 +19826,15 @@ bool GLContext::setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    const GLuint currentProgram = impl_->state->currentProgram();
+    // §7.3 active-shader-program fallback — same as setUniformScalarVector.
+    GLuint currentProgram = impl_->state->currentProgram();
+    if (currentProgram == 0) {
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        if (pipelineName != 0) {
+            GLProgramPipelineObject* ppo = impl_->objects->programPipelines().get(pipelineName);
+            if (ppo != nullptr) currentProgram = ppo->activeShaderProgram;
+        }
+    }
     GLProgramObject* object = impl_->objects->programs().get(currentProgram);
     if (object == nullptr) {
         pushError(GL_INVALID_OPERATION);
@@ -19858,7 +19879,15 @@ bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    const GLuint currentProgram = impl_->state->currentProgram();
+    // §7.3 active-shader-program fallback.
+    GLuint currentProgram = impl_->state->currentProgram();
+    if (currentProgram == 0) {
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        if (pipelineName != 0) {
+            GLProgramPipelineObject* ppo = impl_->objects->programPipelines().get(pipelineName);
+            if (ppo != nullptr) currentProgram = ppo->activeShaderProgram;
+        }
+    }
     GLProgramObject* object = impl_->objects->programs().get(currentProgram);
     if (object == nullptr) {
         pushError(GL_INVALID_OPERATION);
@@ -19891,7 +19920,15 @@ bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, G
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    const GLuint currentProgram = impl_->state->currentProgram();
+    // §7.3 active-shader-program fallback.
+    GLuint currentProgram = impl_->state->currentProgram();
+    if (currentProgram == 0) {
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        if (pipelineName != 0) {
+            GLProgramPipelineObject* ppo = impl_->objects->programPipelines().get(pipelineName);
+            if (ppo != nullptr) currentProgram = ppo->activeShaderProgram;
+        }
+    }
     GLProgramObject* object = impl_->objects->programs().get(currentProgram);
     if (object == nullptr) {
         pushError(GL_INVALID_OPERATION);
@@ -19939,8 +19976,13 @@ bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, G
 bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
     if (location < 0) return true;
     if (count < 0 || vectorSize < 1 || vectorSize > 4) { pushError(GL_INVALID_VALUE); return false; }
+    // GL 4.6 §7.6.1 — error codes for glProgramUniform*:
+    //   - program not a program name returned from glCreateProgram → INVALID_VALUE
+    //   - program not linked → INVALID_OPERATION
+    // CTS `sepshaderobjs.ProgUniformAPI` exercises both paths.
     GLProgramObject* object = impl_->objects->programs().get(program);
-    if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    if (object == nullptr) { pushError(GL_INVALID_VALUE); return false; }
+    if (!object->linked) { pushError(GL_INVALID_OPERATION); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     if (sampleOrImageUniformValidationFailed(this, ref.type,
