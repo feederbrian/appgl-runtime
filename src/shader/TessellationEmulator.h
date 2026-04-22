@@ -66,6 +66,83 @@ struct GLVertexArrayObject;
 struct GLObjectStore;
 class GLStateTracker;
 
+// ─── Tessellation domain-point generation ────────────────────────────
+//
+// Per GL 4.6 §11.2.2, the tessellator takes an abstract domain
+// (triangles / quads / isolines) + outer + inner levels + a spacing
+// rule and generates a set of (u,v,w) points inside that domain plus
+// index lists that connect them into triangles / line segments /
+// points (with point_mode).
+//
+// All three domains produce 3-component coords for uniform interface:
+//   triangles:  barycentric (u, v, w) with u+v+w = 1, w = 1-u-v
+//   quads:      (u, v, 0)  with 0 <= u, v <= 1
+//   isolines:   (u, v, 0)  with v as the line index / N-1, u along line
+//
+// Spacing rules from §11.2.2.1:
+//   Equal             → outer levels rounded up to nearest integer,
+//                       segments uniform size.
+//   FractionalEven    → outer levels rounded up to nearest even int,
+//                       inner segments uniform + two fractional edge
+//                       segments that match the neighbouring patch.
+//   FractionalOdd     → outer levels rounded up to nearest odd int,
+//                       same fractional-edge shape.
+//
+// Indices are produced as GL_TRIANGLES (3 per triangle) or GL_LINES
+// (2 per segment). Point-mode output is a separate pass — each unique
+// coord becomes one GL_POINTS vertex.
+enum class TessDomain : std::uint8_t {
+    Triangles,
+    Quads,
+    Isolines,
+};
+
+enum class TessSpacing : std::uint8_t {
+    Equal,
+    FractionalEven,
+    FractionalOdd,
+};
+
+struct TessDomainOutput {
+    // Flat list of (u, v, w) coords, 3 floats per vertex. For quads +
+    // isolines, w is always 0.0 (reserved so callers can treat every
+    // domain uniformly via gl_TessCoord).
+    std::vector<float> coords;
+
+    // GL_TRIANGLES (3 per) for triangles + quads (non-point-mode), or
+    // GL_LINES (2 per) for isolines (non-point-mode). When point_mode
+    // is set, `indices` is empty — callers emit one GL_POINTS vertex
+    // per entry in `coords`.
+    std::vector<std::uint32_t> indices;
+
+    // Draw topology the caller should use when encoding the draw.
+    //   GL_TRIANGLES  — triangles / quads without point_mode
+    //   GL_LINES      — isolines without point_mode
+    //   GL_POINTS     — any domain with point_mode
+    GLenum topology = 0;
+};
+
+// Generate the tessellation domain coords + indices for one patch.
+// All outer / inner levels are pre-clamped by the caller to
+// [1, GL_MAX_TESS_GEN_LEVEL]. Called once per patch per draw after
+// the TCS runs (or, when TCS is absent, with the default levels from
+// `glPatchParameterfv`).
+//
+// outerLevels: 4-element array indexed by domain:
+//   triangles:  [0..2]  (only 3 outer edges)
+//   quads:      [0..3]
+//   isolines:   [0..1]  (outer[0] = v subdivisions, outer[1] = u subdivisions)
+// innerLevels:
+//   triangles:  [0] only (single inner level)
+//   quads:      [0..1]
+//   isolines:   unused
+TessDomainOutput generateTessDomain(
+    TessDomain domain,
+    TessSpacing spacing,
+    const float outerLevels[4],
+    const float innerLevels[2],
+    bool pointMode);
+
 // Detect whether a program's tessellation stages can be emulated. Called
 // once at link time. Sets `program.tessellationEmulated` on success. Also
 // populates the program's tess metadata fields whenever the SPIR-V parses
