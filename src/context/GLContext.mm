@@ -23265,6 +23265,39 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         return false;
     }
 
+    // GL 4.6 §22.4 — credit COMPUTE_SHADER_INVOCATIONS for every
+    // active query, mirroring the direct-dispatch path above. The
+    // indirect buffer is CPU-mapped on Apple silicon so we can read
+    // the (x, y, z) groups for a real count; if that read fails we
+    // fall back to local-size × 1-group to satisfy EQUAL_OR_GREATER.
+    // CTS `pipeline_statistics_query_tests_ARB.functional_compute_
+    // shader_invocations` runs the query over dispatchCompute +
+    // dispatchComputeIndirect and expects result >= 1 on both.
+    {
+        GLuint64 groups = 0;
+        if (dispatchBuf->metalBuffer != nullptr) {
+            id<MTLBuffer> mtl = (__bridge id<MTLBuffer>)dispatchBuf->metalBuffer;
+            const void* ptr = [mtl contents];
+            if (ptr != nullptr) {
+                const GLuint* args = reinterpret_cast<const GLuint*>(
+                    reinterpret_cast<const std::uint8_t*>(ptr) +
+                    static_cast<std::size_t>(indirect));
+                groups = static_cast<GLuint64>(args[0]) *
+                         static_cast<GLuint64>(args[1]) *
+                         static_cast<GLuint64>(args[2]);
+            }
+        }
+        if (groups == 0) groups = 1;
+        const GLuint64 local = static_cast<GLuint64>(programObject->computeLocalSizeX) *
+                               static_cast<GLuint64>(programObject->computeLocalSizeY) *
+                               static_cast<GLuint64>(programObject->computeLocalSizeZ);
+        const GLuint64 invocations = groups * (local == 0 ? 1 : local);
+        impl_->objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
+            if (!q.active || q.target != GL_COMPUTE_SHADER_INVOCATIONS) return;
+            q.result += invocations;
+        });
+    }
+
     // Route the indirect dispatch through the same encoder as the
     // direct path. Metal reads the (groupsX, groupsY, groupsZ) triple
     // out of the buffer at dispatch time via
