@@ -1564,7 +1564,9 @@ static void APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint bu
 }
 
 static void APIENTRY glPrimitiveRestartIndex(GLuint index) {
-    (void)index;
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->state().setPrimitiveRestartIndex(index);
 }
 
 static void APIENTRY glGetUniformIndices(GLuint program, GLsizei uniformCount, const GLchar *const*uniformNames, GLuint *uniformIndices) {

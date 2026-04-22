@@ -6601,7 +6601,17 @@ struct GLContext::Impl {
     // and TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN=2 after EndQuery.
     void updatePrimitiveCountersForNonGsDraw(GLenum mode,
                                              GLsizei vertexCount,
-                                             GLsizei instanceCount);
+                                             GLsizei instanceCount,
+                                             GLsizei restartSkipCount = 0);
+
+    // Scan a client-side or PBO-backed index buffer for occurrences
+    // of the current GL_PRIMITIVE_RESTART_INDEX. Returns 0 when
+    // primitive-restart is disabled. CTS
+    // `pipeline_statistics_query_tests_ARB.functional_primitives_
+    // vertices_submitted_and_clipping_input_output_primitives` asserts
+    // that GL_VERTICES_SUBMITTED skips restart sentinels.
+    GLsizei countRestartIndices(GLenum type, const void* indices,
+                                GLsizei count) const;
 
     // CPU GS emulation — write TF varyings into bound TF buffers
     // when transform feedback is active. Returns true iff the
@@ -12593,7 +12603,8 @@ bool GLContext::isTransformFeedbackActive() const {
 }
 
 void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
-    GLenum mode, GLsizei vertexCount, GLsizei instanceCount)
+    GLenum mode, GLsizei vertexCount, GLsizei instanceCount,
+    GLsizei restartSkipCount)
 {
     if (vertexCount <= 0 || instanceCount <= 0) return;
     // GL 4.6 §10.1: post-decomposition primitive count for non-GS
@@ -12601,20 +12612,30 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
     // list topologies produce count / verts-per-prim. Quads aren't a
     // core-GL primitive (patches aren't counted here — those go
     // through TES anyway).
+    //
+    // GL 4.6 §22.3 — when primitive-restart is active, the restart
+    // index is NOT a submitted vertex nor a primitive boundary vertex
+    // for count purposes. For list-type primitives this is exactly
+    // `submittedN / verts-per-prim`. Strip/fan/adjacency topologies
+    // with restart indices in the middle need per-subsequence math —
+    // those tests exercise lists in this iter, the strip path is
+    // TODO for later.
     std::size_t prims = 0;
     const std::size_t n = static_cast<std::size_t>(vertexCount);
+    const std::size_t submittedRaw = (n > static_cast<std::size_t>(restartSkipCount))
+        ? (n - static_cast<std::size_t>(restartSkipCount)) : 0;
     switch (mode) {
-        case GL_POINTS:                   prims = n; break;
-        case GL_LINES:                    prims = n / 2; break;
-        case GL_LINE_STRIP:               prims = (n >= 2) ? n - 1 : 0; break;
-        case GL_LINE_LOOP:                prims = (n >= 2) ? n : 0; break;
-        case GL_TRIANGLES:                prims = n / 3; break;
+        case GL_POINTS:                   prims = submittedRaw; break;
+        case GL_LINES:                    prims = submittedRaw / 2; break;
+        case GL_LINE_STRIP:               prims = (submittedRaw >= 2) ? submittedRaw - 1 : 0; break;
+        case GL_LINE_LOOP:                prims = (submittedRaw >= 2) ? submittedRaw : 0; break;
+        case GL_TRIANGLES:                prims = submittedRaw / 3; break;
         case GL_TRIANGLE_STRIP:
-        case GL_TRIANGLE_FAN:             prims = (n >= 3) ? n - 2 : 0; break;
-        case GL_LINES_ADJACENCY:          prims = n / 4; break;
-        case GL_LINE_STRIP_ADJACENCY:     prims = (n >= 4) ? n - 3 : 0; break;
-        case GL_TRIANGLES_ADJACENCY:      prims = n / 6; break;
-        case GL_TRIANGLE_STRIP_ADJACENCY: prims = (n >= 6) ? (n - 4) / 2 : 0; break;
+        case GL_TRIANGLE_FAN:             prims = (submittedRaw >= 3) ? submittedRaw - 2 : 0; break;
+        case GL_LINES_ADJACENCY:          prims = submittedRaw / 4; break;
+        case GL_LINE_STRIP_ADJACENCY:     prims = (submittedRaw >= 4) ? submittedRaw - 3 : 0; break;
+        case GL_TRIANGLES_ADJACENCY:      prims = submittedRaw / 6; break;
+        case GL_TRIANGLE_STRIP_ADJACENCY: prims = (submittedRaw >= 6) ? (submittedRaw - 4) / 2 : 0; break;
         case GL_PATCHES: {
             // GL 4.6 §10.1: PRIMITIVES_SUBMITTED for GL_PATCHES is
             // vertexCount / GL_PATCH_VERTICES. CTS
@@ -12626,13 +12647,13 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
             // pass. A pure synthetic "1" satisfies the lower-bound
             // queries but fails the exact-match one, hence this path.
             const GLint pv = state ? state->tessellationState().patchVertices : 3;
-            prims = (pv > 0) ? (n / static_cast<std::size_t>(pv)) : 0;
+            prims = (pv > 0) ? (submittedRaw / static_cast<std::size_t>(pv)) : 0;
             break;
         }
         default: break;
     }
     prims *= static_cast<std::size_t>(instanceCount);
-    const std::size_t vertsTotal = n * static_cast<std::size_t>(instanceCount);
+    const std::size_t vertsTotal = submittedRaw * static_cast<std::size_t>(instanceCount);
     const bool tfActive = transformFeedbackActive;
     // GL 4.6 §22.1 / §22.3 — advance pipeline-stats counters for
     // every active query whose target tracks one of the per-draw
@@ -12669,6 +12690,54 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
                 break;
         }
     });
+}
+
+GLsizei GLContext::Impl::countRestartIndices(GLenum type, const void* indices,
+                                             GLsizei count) const
+{
+    if (count <= 0 || !state->isEnabled(GL_PRIMITIVE_RESTART)) return 0;
+    // Resolve the source bytes. When GL_ELEMENT_ARRAY_BUFFER is bound,
+    // `indices` is a byte offset into that buffer; when it's not,
+    // `indices` is a raw client pointer.
+    const std::uint8_t* base = nullptr;
+    const GLuint ebo = state->boundBuffer(GL_ELEMENT_ARRAY_BUFFER);
+    if (ebo != 0) {
+        const GLBufferObject* buf = objects->buffers().get(ebo);
+        if (buf == nullptr || buf->metalBuffer == nullptr) return 0;
+        id<MTLBuffer> mtl = (__bridge id<MTLBuffer>)buf->metalBuffer;
+        const void* ptr = [mtl contents];
+        if (ptr == nullptr) return 0;
+        base = reinterpret_cast<const std::uint8_t*>(ptr) +
+               reinterpret_cast<std::uintptr_t>(indices);
+    } else {
+        base = reinterpret_cast<const std::uint8_t*>(indices);
+    }
+    if (base == nullptr) return 0;
+
+    const GLuint restart = state->primitiveRestartIndex();
+    GLsizei occurrences = 0;
+    switch (type) {
+        case GL_UNSIGNED_BYTE: {
+            const std::uint8_t* idx = base;
+            const std::uint8_t r = static_cast<std::uint8_t>(restart & 0xFF);
+            for (GLsizei i = 0; i < count; ++i) if (idx[i] == r) ++occurrences;
+            break;
+        }
+        case GL_UNSIGNED_SHORT: {
+            const std::uint16_t* idx = reinterpret_cast<const std::uint16_t*>(base);
+            const std::uint16_t r = static_cast<std::uint16_t>(restart & 0xFFFF);
+            for (GLsizei i = 0; i < count; ++i) if (idx[i] == r) ++occurrences;
+            break;
+        }
+        case GL_UNSIGNED_INT: {
+            const std::uint32_t* idx = reinterpret_cast<const std::uint32_t*>(base);
+            const std::uint32_t r = static_cast<std::uint32_t>(restart);
+            for (GLsizei i = 0; i < count; ++i) if (idx[i] == r) ++occurrences;
+            break;
+        }
+        default: break;
+    }
+    return occurrences;
 }
 
 bool GLContext::Impl::writeGsXfbAndCheckDiscard(
@@ -21888,7 +21957,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             ? impl_->objects->programs().get(progName)
             : nullptr;
         if (p == nullptr || !p->gsPresent) {
-            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+            const GLsizei restartSkip = impl_->countRestartIndices(type, indices, count);
+            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1, restartSkip);
         }
     }
 
@@ -22277,7 +22347,8 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
             ? impl_->objects->programs().get(progName)
             : nullptr;
         if (p == nullptr || !p->gsPresent) {
-            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+            const GLsizei restartSkip = impl_->countRestartIndices(type, indices, count);
+            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1, restartSkip);
         }
     }
 
@@ -22589,7 +22660,8 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
         }
         // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update.
         if (p == nullptr || !p->gsPresent) {
-            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, instancecount);
+            const GLsizei restartSkip = impl_->countRestartIndices(type, indices, count);
+            impl_->updatePrimitiveCountersForNonGsDraw(mode, count, instancecount, restartSkip);
         }
     }
 

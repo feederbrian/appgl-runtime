@@ -642,6 +642,14 @@ const GLTessellationState& GLStateTracker::tessellationState() const {
     return tessellation_;
 }
 
+void GLStateTracker::setPrimitiveRestartIndex(GLuint index) {
+    primitiveRestartIndex_ = index;
+}
+
+GLuint GLStateTracker::primitiveRestartIndex() const {
+    return primitiveRestartIndex_;
+}
+
 void GLStateTracker::setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
     if (clear_.color[0] == red && clear_.color[1] == green && clear_.color[2] == blue && clear_.color[3] == alpha) {
         return;

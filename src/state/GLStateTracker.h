@@ -174,6 +174,12 @@ public:
     void setPatchParameterfv(GLenum pname, const GLfloat* values);
     const GLTessellationState& tessellationState() const;
 
+    // Primitive-restart index (GL 3.1). Used by the drawElements
+    // paths to skip restart indices when crediting
+    // GL_VERTICES_SUBMITTED pipeline-stats queries, per GL 4.6 §22.3.
+    void setPrimitiveRestartIndex(GLuint index);
+    GLuint primitiveRestartIndex() const;
+
     void setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
     void setClearDepth(GLdouble depth);
     void setClearStencil(GLint stencil);
@@ -321,6 +327,7 @@ private:
     // only slot i. Initial state per spec: all slots FALSE.
     std::array<bool, kMaxViewports> indexedScissorTest_{};
     GLTessellationState tessellation_;
+    GLuint primitiveRestartIndex_ = 0;
     GLBlendState blend_;
     GLDepthState depth_;
     GLStencilState stencil_;
