@@ -170,6 +170,19 @@ target_include_directories(appgl_gauntlet_cli
 target_compile_definitions(appgl_gauntlet_cli PRIVATE GL_SILENCE_DEPRECATION=1)
 target_link_libraries(appgl_gauntlet_cli PRIVATE AppGL_static)
 
+# Standalone ASAN reproducer for the SpirvModule heap-corruption bug
+# (session-12 gl_in_array_length SIGSEGV). dlopens the shared dylib
+# rather than static-linking so the DYLD_LIBRARY_PATH / ASAN-build
+# wiring matches how real apps load the runtime. Only useful when
+# APPGL_ENABLE_ASAN is on — otherwise the release dylib runs the
+# shader without ever surfacing the corruption.
+add_executable(asan_repro tests/asan_repro_gl_in_array_length.cpp)
+target_include_directories(asan_repro
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_link_libraries(asan_repro PRIVATE "-ldl")
+
 if(APPGL_VENDOR_THIRD_PARTY)
   set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
   set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
