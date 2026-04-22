@@ -15,6 +15,7 @@
 #include <unordered_map>
 
 #include "../objects/GLObjectStore.h"
+#include "../state/GLStateTracker.h"
 #include "ShaderInterpreter.h"
 #include "ShaderTranslator.h"
 
@@ -756,7 +757,42 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
     return false;
 }
 
-// ─── Public API — draw-time stub ─────────────────────────────────────
+// ─── Public API — draw-time emulator ─────────────────────────────────
+//
+// Iter 186 scope: phase-1 wiring. Computes the per-patch tessellation
+// domain (via scanTessControlConstantLevels + generateTessDomain) and
+// records the point/index count so future iters can slot the VS/TES
+// interpretation onto the same preparation. Still returns
+// `.ok = false` — the draw path falls back to the translated-no-tess
+// path for now. Phase 2 will produce a real EmulatedDraw and flip
+// `detectTessellationEmulatable` to return true for the narrow
+// pass-through cases.
+
+namespace {
+
+// Translate the program's `tessGenMode` (GL_TRIANGLES / GL_QUADS /
+// GL_ISOLINES) to the emulator's `TessDomain` enum. Caller-validated
+// to be one of the three on entry, but we fall back to Triangles for
+// safety in case a future mode creeps through.
+TessDomain tessDomainFromGenMode(GLenum genMode) {
+    switch (genMode) {
+        case GL_QUADS:    return TessDomain::Quads;
+        case GL_ISOLINES: return TessDomain::Isolines;
+        case GL_TRIANGLES:
+        default:          return TessDomain::Triangles;
+    }
+}
+
+TessSpacing tessSpacingFromGenSpacing(GLenum genSpacing) {
+    switch (genSpacing) {
+        case GL_FRACTIONAL_EVEN: return TessSpacing::FractionalEven;
+        case GL_FRACTIONAL_ODD:  return TessSpacing::FractionalOdd;
+        case GL_EQUAL:
+        default:                 return TessSpacing::Equal;
+    }
+}
+
+}  // namespace
 
 EmulatedDraw emulateTessellationDraw(
     GLProgramObject& program,
@@ -770,12 +806,8 @@ EmulatedDraw emulateTessellationDraw(
     GLsizei instanceCount,
     GLuint baseInstance)
 {
-    (void)program;
     (void)vao;
     (void)objects;
-    (void)state;
-    (void)drawMode;
-    (void)count;
     (void)first;
     (void)elementIndices;
     (void)instanceCount;
@@ -783,7 +815,66 @@ EmulatedDraw emulateTessellationDraw(
 
     EmulatedDraw d;
     d.ok = false;
-    d.diagnostic = "tessellation emulation not yet implemented (iter 162 scaffolding)";
+
+    // Phase-1 pre-checks — anything outside the expected shape short-
+    // circuits immediately so the translated-no-tess path takes over.
+    if (drawMode != GL_PATCHES || count <= 0) {
+        d.diagnostic = "tess-emul: non-PATCHES draw or empty count";
+        return d;
+    }
+    if (!program.hasTessellation || program.tessEvalSpirv.empty()) {
+        d.diagnostic = "tess-emul: program has no tess-eval stage";
+        return d;
+    }
+
+    const GLint patchVertices = state.tessellationState().patchVertices;
+    if (patchVertices <= 0 || count < patchVertices) {
+        d.diagnostic = "tess-emul: count smaller than patchVertices — draw is a no-op";
+        return d;
+    }
+    const std::size_t numPatches = static_cast<std::size_t>(count) /
+                                   static_cast<std::size_t>(patchVertices);
+
+    const TessDomain domain = tessDomainFromGenMode(program.tessGenMode);
+    const TessSpacing spacing = tessSpacingFromGenSpacing(program.tessGenSpacing);
+    const bool pointMode = (program.tessGenPointMode == GL_TRUE);
+
+    // Resolve tessellation levels. When a TCS is attached and writes
+    // constant levels, `scanTessControlConstantLevels` reads them out
+    // of the SPIR-V. Otherwise fall back to the GL state's
+    // glPatchParameterfv(GL_PATCH_DEFAULT_*_LEVEL) values.
+    float outerLevels[4];
+    float innerLevels[2];
+    const auto& tessState = state.tessellationState();
+    for (int i = 0; i < 4; ++i) outerLevels[i] = tessState.defaultOuterLevel[i];
+    for (int i = 0; i < 2; ++i) innerLevels[i] = tessState.defaultInnerLevel[i];
+    if (!program.tessControlSpirv.empty()) {
+        (void)scanTessControlConstantLevels(
+            program.tessControlSpirv.data(),
+            program.tessControlSpirv.size(),
+            outerLevels, innerLevels);
+    }
+
+    // Generate the domain coord set for ONE patch. Every patch in this
+    // draw shares the same levels (either static TCS constants or the
+    // GL_PATCH_DEFAULT_* state) so the coord layout is identical.
+    TessDomainOutput domainOut =
+        generateTessDomain(domain, spacing, outerLevels, innerLevels, pointMode);
+    const std::size_t coordsPerPatch = domainOut.coords.size() / 3;
+    if (coordsPerPatch == 0) {
+        d.diagnostic = "tess-emul: domain produced zero vertices";
+        return d;
+    }
+
+    // Phase 1 stops here — we've computed the per-patch domain but
+    // don't yet have the VS/TES body interpreter wired to produce
+    // per-vertex positions + varyings. Stash a diagnostic so
+    // `recordShaderTranslation` consumers can see progress.
+    const std::size_t totalVerts = coordsPerPatch * numPatches;
+    d.diagnostic = "tess-emul phase-1: " + std::to_string(numPatches) +
+                   " patches × " + std::to_string(coordsPerPatch) +
+                   " domain verts = " + std::to_string(totalVerts) +
+                   " pending VS/TES interpreter";
     return d;
 }
 
