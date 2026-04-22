@@ -1285,19 +1285,49 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                             if (mdIt != module_.memberDecorations.end()) {
                                 auto mm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
                                 if (mm != mdIt->second.perMember.end() && mm->second.hasBuiltIn) {
+                                    // GL 4.6 §11.3.3 gl_in[] built-in member
+                                    // population. storage.size() == scalarWidth
+                                    // (array) == len × struct-width, where
+                                    // struct-width is the sum of member widths
+                                    // INCLUDING unsized arrays that resolve to 0.
+                                    // When the GS uses `gl_in.length()` but
+                                    // DOESN'T read any gl_PerVertex members,
+                                    // glslang still emits the struct + member
+                                    // decorations but resolves the
+                                    // gl_ClipDistance[] array length from
+                                    // context (the gl_Max*ClipDistances limits
+                                    // the SPIR-V advertises) — which can exceed
+                                    // the scalar width our scalarWidth() sums
+                                    // up from the members' own type widths.
+                                    // Result: `base + runningOff + k` walks
+                                    // past the end of storage on the 2nd input
+                                    // vertex and trashes the adjacent heap
+                                    // allocation.
+                                    //
+                                    // Mirror the user-block-member branch's
+                                    // `base + runningOff + k < storage.size()`
+                                    // bound on all three built-in members so
+                                    // every indexed write stays in-buffer.
+                                    // CTS `geometry_shader.input.gl_in_array_
+                                    // length` + the asan_repro (session-16
+                                    // iter 158) both hit this path; GuardMalloc
+                                    // catches the overrun at the first write.
                                     if (mm->second.builtIn == spv::BuiltInPosition) {
-                                        for (int k = 0; k < 4 && static_cast<std::uint32_t>(k) < memW; ++k) {
+                                        for (int k = 0; k < 4 && static_cast<std::uint32_t>(k) < memW
+                                             && base + runningOff + k < storage.size(); ++k) {
                                             storage[base + runningOff + k] = inputs[vi].position[k];
                                         }
                                     } else if (mm->second.builtIn == spv::BuiltInClipDistance) {
                                         const auto& src = inputs[vi].clipDistance;
-                                        for (std::uint32_t k = 0; k < memW; ++k) {
+                                        for (std::uint32_t k = 0; k < memW
+                                             && base + runningOff + k < storage.size(); ++k) {
                                             storage[base + runningOff + k] =
                                                 (k < src.size()) ? src[k] : 0.0f;
                                         }
                                     } else if (mm->second.builtIn == spv::BuiltInCullDistance) {
                                         const auto& src = inputs[vi].cullDistance;
-                                        for (std::uint32_t k = 0; k < memW; ++k) {
+                                        for (std::uint32_t k = 0; k < memW
+                                             && base + runningOff + k < storage.size(); ++k) {
                                             storage[base + runningOff + k] =
                                                 (k < src.size()) ? src[k] : 0.0f;
                                         }
