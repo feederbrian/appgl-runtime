@@ -186,6 +186,34 @@ TessEvalInterface scanTessEvalInterface(
     const std::uint32_t* tesSpirv,
     std::size_t tesWordCount);
 
+// TCS I/O interface. TCS inputs match the VS outputs per vertex,
+// arriving via gl_in[gl_PatchVerticesIn].<member>. TCS outputs are
+// either:
+//   - per-control-point (gl_out[gl_InvocationID].<member>) — sized by
+//     `layout(vertices=W)`
+//   - per-patch (`patch out ...`) — single value shared by all W
+//     invocations + read by TES as gl_TessLevel* / patch inputs
+//
+// We track:
+//   - outputVertices  (W — the `layout(vertices=W)` constant)
+//   - writesTessLevelOuter / Inner (matters for the detector: when a
+//     TCS writes levels dynamically we fall back to scan defaults)
+//   - the full input/output varying list (same TessEvalVarying struct
+//     reused; the `isPerVertex` flag distinguishes per-cp from patch)
+struct TessControlInterface {
+    std::vector<TessEvalVarying> outputs;
+    std::vector<TessEvalVarying> inputs;
+    std::uint32_t outputVertices = 0;
+    bool writesTessLevelOuter = false;
+    bool writesTessLevelInner = false;
+    bool parsed = false;
+    std::string diagnostic;
+};
+
+TessControlInterface scanTessControlInterface(
+    const std::uint32_t* tcsSpirv,
+    std::size_t tcsWordCount);
+
 // Generate the tessellation domain coords + indices for one patch.
 // All outer / inner levels are pre-clamped by the caller to
 // [1, GL_MAX_TESS_GEN_LEVEL]. Called once per patch per draw after

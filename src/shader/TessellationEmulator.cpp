@@ -180,47 +180,28 @@ bool scanTessControlConstantLevels(
     return anyResolved;
 }
 
-// ─── TES interface extractor ─────────────────────────────────────────
+// ─── Shared TES/TCS interface walker ─────────────────────────────────
 
-// Scan a TES SPIR-V module and describe its input + output interface.
-// Uses the shared `SpirvModule` parser for types/decorations/variables;
-// then walks the function body to detect gl_Position writes + gl_TessCoord
-// reads (both of which the draw-time emulator needs to know about).
+// Shared helper used by both `scanTessEvalInterface` and
+// `scanTessControlInterface`. Walks the declarative half of a tess
+// stage's I/O: for each Input/Output variable, decomposes block
+// structs into per-member TessEvalVarying entries (so gl_PerVertex
+// members end up as separately addressable slots) and resolves flat
+// scalar widths via SpirvModule.
 //
-// Called at link time (cheap — same parse cost as GS emul's detector)
-// to produce metadata that `emulateTessellationDraw` consumes per-draw.
-//
-// Output variable classification:
-//   - BuiltIn on Output storage: recorded with isBuiltIn=true,
-//     writesPosition set if builtIn == BuiltInPosition
-//   - Location on Output storage: hasLocation=true, location=N
-//   - gl_PerVertex struct on Output storage: decomposed into per-member
-//     entries so the packer can emit each member separately
-//
-// Input variable classification mirrors outputs but reads are one-way:
-// we just record the set of inputs the body might touch.
-TessEvalInterface scanTessEvalInterface(
-    const std::uint32_t* tesSpirv,
-    std::size_t tesWordCount)
+// The two callback hooks let the caller react to per-varying
+// classification without exposing the interface layout (TCS cares
+// about TessLevelOuter/Inner writes, TES cares about Position writes
+// + TessCoord reads).
+template <typename OnOutput, typename OnInput>
+void walkTessInterface(
+    const SpirvModule& module,
+    std::vector<TessEvalVarying>* outputs,
+    std::vector<TessEvalVarying>* inputs,
+    OnOutput&& onOutput,
+    OnInput&& onInput)
 {
-    TessEvalInterface iface;
-    if (tesSpirv == nullptr || tesWordCount < 5) {
-        iface.diagnostic = "empty SPIR-V";
-        return iface;
-    }
-
-    SpirvModule module;
-    if (!module.parse(tesSpirv, tesWordCount)) {
-        iface.diagnostic = "SpirvModule::parse failed: " + module.parseError;
-        return iface;
-    }
-    iface.parsed = true;
-
-    // Helper: fill a TessEvalVarying entry from a variable id, starting
-    // at its pointee type (strip the pointer one level). Per-vertex
-    // inputs wrap the real type inside an Array, whose length is the
-    // patch-vertex count — we set isPerVertex and dive through.
-    auto recordVarying = [&](std::uint32_t varId, bool asOutput) {
+    auto record = [&](std::uint32_t varId, bool asOutput) {
         auto varIt = module.variables.find(varId);
         if (varIt == module.variables.end()) return;
         const VariableInfo& vi = varIt->second;
@@ -255,10 +236,6 @@ TessEvalInterface scanTessEvalInterface(
             }
         }
 
-        // Block-struct case: decompose into per-member entries. Most
-        // glslang-emitted TES bodies put gl_Position + user varyings
-        // in a gl_PerVertex block — the caller wants each member as
-        // a separately addressable slot.
         auto leafIt = module.types.find(pointee);
         if (leafIt != module.types.end() &&
             leafIt->second.kind == TypeInfo::Kind::Struct) {
@@ -290,33 +267,24 @@ TessEvalInterface scanTessEvalInterface(
                     }
                 }
                 if (asOutput) {
-                    if (sub.isBuiltIn && sub.builtIn == spv::BuiltInPosition) {
-                        iface.writesPosition = true;
-                    }
-                    iface.outputs.push_back(std::move(sub));
+                    onOutput(sub);
+                    if (outputs) outputs->push_back(std::move(sub));
                 } else {
-                    if (sub.isBuiltIn && sub.builtIn == spv::BuiltInTessCoord) {
-                        iface.readsTessCoord = true;
-                    }
-                    iface.inputs.push_back(std::move(sub));
+                    onInput(sub);
+                    if (inputs) inputs->push_back(std::move(sub));
                 }
                 ++memberIdx;
             }
             return;
         }
 
-        // Non-block case (plain scalar / vec / array of vec).
         ev.scalarCount = module.scalarWidth(pointee);
         if (asOutput) {
-            if (ev.isBuiltIn && ev.builtIn == spv::BuiltInPosition) {
-                iface.writesPosition = true;
-            }
-            iface.outputs.push_back(std::move(ev));
+            onOutput(ev);
+            if (outputs) outputs->push_back(std::move(ev));
         } else {
-            if (ev.isBuiltIn && ev.builtIn == spv::BuiltInTessCoord) {
-                iface.readsTessCoord = true;
-            }
-            iface.inputs.push_back(std::move(ev));
+            onInput(ev);
+            if (inputs) inputs->push_back(std::move(ev));
         }
     };
 
@@ -324,12 +292,81 @@ TessEvalInterface scanTessEvalInterface(
         const std::uint32_t varId = kv.first;
         const VariableInfo& vi = kv.second;
         if (vi.storageClass == spv::StorageClassOutput) {
-            recordVarying(varId, /*asOutput=*/true);
+            record(varId, /*asOutput=*/true);
         } else if (vi.storageClass == spv::StorageClassInput) {
-            recordVarying(varId, /*asOutput=*/false);
+            record(varId, /*asOutput=*/false);
         }
     }
+}
 
+// ─── TES interface extractor ─────────────────────────────────────────
+
+TessEvalInterface scanTessEvalInterface(
+    const std::uint32_t* tesSpirv,
+    std::size_t tesWordCount)
+{
+    TessEvalInterface iface;
+    if (tesSpirv == nullptr || tesWordCount < 5) {
+        iface.diagnostic = "empty SPIR-V";
+        return iface;
+    }
+
+    SpirvModule module;
+    if (!module.parse(tesSpirv, tesWordCount)) {
+        iface.diagnostic = "SpirvModule::parse failed: " + module.parseError;
+        return iface;
+    }
+    iface.parsed = true;
+
+    walkTessInterface(
+        module, &iface.outputs, &iface.inputs,
+        [&](const TessEvalVarying& o) {
+            if (o.isBuiltIn && o.builtIn == spv::BuiltInPosition) {
+                iface.writesPosition = true;
+            }
+        },
+        [&](const TessEvalVarying& i) {
+            if (i.isBuiltIn && i.builtIn == spv::BuiltInTessCoord) {
+                iface.readsTessCoord = true;
+            }
+        });
+    return iface;
+}
+
+// ─── TCS interface extractor ─────────────────────────────────────────
+
+TessControlInterface scanTessControlInterface(
+    const std::uint32_t* tcsSpirv,
+    std::size_t tcsWordCount)
+{
+    TessControlInterface iface;
+    if (tcsSpirv == nullptr || tcsWordCount < 5) {
+        iface.diagnostic = "empty SPIR-V";
+        return iface;
+    }
+
+    SpirvModule module;
+    if (!module.parse(tcsSpirv, tcsWordCount)) {
+        iface.diagnostic = "SpirvModule::parse failed: " + module.parseError;
+        return iface;
+    }
+    iface.parsed = true;
+
+    // OutputVertices execution mode (layout(vertices=W)).
+    auto execIt = module.executionModes.find(spv::ExecutionModeOutputVertices);
+    if (execIt != module.executionModes.end() && !execIt->second.empty()) {
+        iface.outputVertices = execIt->second[0];
+    }
+
+    walkTessInterface(
+        module, &iface.outputs, &iface.inputs,
+        [&](const TessEvalVarying& o) {
+            if (o.isBuiltIn) {
+                if (o.builtIn == spv::BuiltInTessLevelOuter) iface.writesTessLevelOuter = true;
+                if (o.builtIn == spv::BuiltInTessLevelInner) iface.writesTessLevelInner = true;
+            }
+        },
+        [&](const TessEvalVarying&) {});
     return iface;
 }
 
@@ -613,6 +650,20 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
         program.tessEvalSpirv.data(), program.tessEvalSpirv.size());
     if (!teIface.parsed) {
         program.linkLog += "\n[tess-emul] TES interface parse: " + teIface.diagnostic;
+    }
+
+    // Same for TCS when one is attached. The outputVertices metadata
+    // also lands on the program object so `glGetProgramiv(
+    // GL_TESS_CONTROL_OUTPUT_VERTICES)` has a backing value extracted
+    // via the shared parser (the previous path uses a different
+    // extractor in GLContext.mm — this keeps us in sync with no
+    // behaviour change when both agree).
+    if (!program.tessControlSpirv.empty()) {
+        TessControlInterface tcIface = scanTessControlInterface(
+            program.tessControlSpirv.data(), program.tessControlSpirv.size());
+        if (!tcIface.parsed) {
+            program.linkLog += "\n[tess-emul] TCS interface parse: " + tcIface.diagnostic;
+        }
     }
 
     // Stays false through iter 169 — detection probes landed, but the
