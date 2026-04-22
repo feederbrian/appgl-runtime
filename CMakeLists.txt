@@ -78,6 +78,7 @@ set(APPGL_SOURCES
   src/shader/GeometryShaderEmulator.cpp
   src/shader/GLSLReflection.cpp
   src/shader/PipelineCache.cpp
+  src/shader/ShaderInterpreter.cpp
   src/shader/ShaderTranslator.cpp
   src/shader/TessellationEmulator.cpp
   src/state/GLStateTracker.cpp
