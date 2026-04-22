@@ -214,6 +214,45 @@ TessControlInterface scanTessControlInterface(
     const std::uint32_t* tcsSpirv,
     std::size_t tcsWordCount);
 
+// Lightweight complexity classifier for a tess stage's function body.
+// Classifies into three buckets so the detector can cheaply decide
+// whether `emulateTessellationDraw` should attempt emulation or fall
+// back to the translated-no-tess path. Per-bucket thresholds are a
+// knob for future iters — right now only `Trivial` is a candidate
+// for emulation, the others all fall back.
+//
+//   Trivial       — reads one scalar/vec varying per output, stores
+//                   directly (passthrough). No loops, branches, or
+//                   function calls. Always emulatable once draw path
+//                   lands.
+//   Simple        — trivial + a handful of arithmetic ops. Still no
+//                   branches or loops. Future emulation target.
+//   Complex       — loops, branches, function calls, extended
+//                   instructions beyond a small GLSL.std.450 subset,
+//                   or more than ~32 ops. Requires the full
+//                   interpreter — deferred.
+enum class TessBodyComplexity : std::uint8_t {
+    Trivial,
+    Simple,
+    Complex,
+};
+
+struct TessBodyClassification {
+    TessBodyComplexity complexity = TessBodyComplexity::Complex;
+    std::uint32_t opcodeCount = 0;
+    std::uint32_t storeCount = 0;
+    std::uint32_t loadCount = 0;
+    std::uint32_t branchCount = 0;
+    std::uint32_t loopCount = 0;
+    std::uint32_t functionCallCount = 0;
+    bool parsed = false;
+    std::string diagnostic;
+};
+
+TessBodyClassification classifyTessBody(
+    const std::uint32_t* spirv,
+    std::size_t wordCount);
+
 // Generate the tessellation domain coords + indices for one patch.
 // All outer / inner levels are pre-clamped by the caller to
 // [1, GL_MAX_TESS_GEN_LEVEL]. Called once per patch per draw after

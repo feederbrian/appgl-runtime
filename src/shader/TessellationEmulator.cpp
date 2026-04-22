@@ -370,6 +370,74 @@ TessControlInterface scanTessControlInterface(
     return iface;
 }
 
+// ─── Body complexity classifier ──────────────────────────────────────
+
+// Walk the SPIR-V function body and count ops of interest. Used by the
+// detector to cheaply reject bodies the interpreter doesn't yet
+// handle. Counts are informational — the complexity bucket is derived
+// at the end from simple heuristics.
+TessBodyClassification classifyTessBody(
+    const std::uint32_t* spirv,
+    std::size_t wordCount)
+{
+    TessBodyClassification out;
+    if (spirv == nullptr || wordCount < 5) {
+        out.diagnostic = "empty SPIR-V";
+        return out;
+    }
+
+    SpirvModule module;
+    if (!module.parse(spirv, wordCount)) {
+        out.diagnostic = "SpirvModule::parse failed: " + module.parseError;
+        return out;
+    }
+    if (!module.haveFuncBody) {
+        out.diagnostic = "no function body";
+        return out;
+    }
+    out.parsed = true;
+
+    std::size_t i = module.funcBodyStart;
+    const std::size_t end = module.funcBodyEnd;
+    while (i < end) {
+        const std::uint32_t inst = module.words[i];
+        const std::uint16_t opcode = inst & 0xFFFF;
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0 || i + wc > end) break;
+        ++out.opcodeCount;
+
+        switch (opcode) {
+            case spv::OpStore:             ++out.storeCount; break;
+            case spv::OpLoad:              ++out.loadCount; break;
+            case spv::OpBranch:            ++out.branchCount; break;
+            case spv::OpBranchConditional: ++out.branchCount; break;
+            case spv::OpSwitch:            ++out.branchCount; break;
+            case spv::OpLoopMerge:         ++out.loopCount; break;
+            case spv::OpFunctionCall:      ++out.functionCallCount; break;
+            default: break;
+        }
+        i += wc;
+    }
+
+    // Bucket heuristic. "Trivial" matches a passthrough TES that
+    // writes gl_Position + a handful of varyings copy-out style
+    // (one OpLoad per OpStore, no control flow). "Simple" allows
+    // a small amount of arithmetic. Anything else is complex.
+    const bool noControlFlow =
+        out.branchCount == 0 && out.loopCount == 0 && out.functionCallCount == 0;
+    const bool loadStoreBalanced = (out.storeCount > 0) &&
+                                    (out.loadCount <= out.storeCount * 4);
+
+    if (noControlFlow && out.opcodeCount <= 32 && loadStoreBalanced) {
+        out.complexity = TessBodyComplexity::Trivial;
+    } else if (noControlFlow && out.opcodeCount <= 128) {
+        out.complexity = TessBodyComplexity::Simple;
+    } else {
+        out.complexity = TessBodyComplexity::Complex;
+    }
+    return out;
+}
+
 // ─── Tessellation domain-point generation ────────────────────────────
 
 // Round an outer level per the spacing rule. Result is the integer
@@ -664,6 +732,17 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
         if (!tcIface.parsed) {
             program.linkLog += "\n[tess-emul] TCS interface parse: " + tcIface.diagnostic;
         }
+    }
+
+    // Classify TES body complexity. Result is informational right
+    // now — when the draw path lands, only `Trivial` cases will
+    // be attempted; `Simple` and `Complex` fall back. Running the
+    // classifier here surfaces walker bugs at link time for every
+    // tess program CTS throws at us.
+    TessBodyClassification teClass = classifyTessBody(
+        program.tessEvalSpirv.data(), program.tessEvalSpirv.size());
+    if (!teClass.parsed) {
+        program.linkLog += "\n[tess-emul] TES body classify: " + teClass.diagnostic;
     }
 
     // Stays false through iter 169 — detection probes landed, but the
