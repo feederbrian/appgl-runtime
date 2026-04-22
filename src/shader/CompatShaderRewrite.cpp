@@ -490,6 +490,109 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     CompatShaderRewriteResult result;
     result.source.assign(source.begin(), source.end());
 
+    // Preprocessor-level rewrite: `#define NAME defined(OTHER)` is a
+    // glslang-error ("'defined' : cannot use in preprocessor expression
+    // when expanded from macros") even though some drivers accept the
+    // pattern. CTS
+    // `shaders.preprocessor.conditional_inclusion.basic_2_{vertex,
+    // fragment}` submits exactly this pattern and expects the shader
+    // to compile. We pre-evaluate `defined(OTHER)` by scanning the rest
+    // of the source for a matching `#define OTHER` (with no value or
+    // any value). Result: `#define NAME 1` (OTHER defined anywhere in
+    // source) or `#define NAME 0` (not defined). This matches the
+    // implementation-defined semantics real GL drivers typically use.
+    {
+        std::string& src = result.source;
+        std::size_t scan = 0;
+        while (scan < src.size()) {
+            std::size_t hash = src.find("#define", scan);
+            if (hash == std::string::npos) break;
+            // Skip the "#define" token + whitespace
+            std::size_t p = hash + 7;
+            while (p < src.size() && (src[p] == ' ' || src[p] == '\t')) ++p;
+            // Parse the macro NAME
+            std::size_t nameStart = p;
+            while (p < src.size() &&
+                   (std::isalnum(static_cast<unsigned char>(src[p])) || src[p] == '_')) {
+                ++p;
+            }
+            if (p == nameStart) { scan = hash + 1; continue; }
+            // Skip whitespace between NAME and replacement
+            std::size_t bodyStart = p;
+            while (bodyStart < src.size() && (src[bodyStart] == ' ' || src[bodyStart] == '\t')) {
+                ++bodyStart;
+            }
+            // End of line = end of #define body
+            std::size_t bodyEnd = bodyStart;
+            while (bodyEnd < src.size() && src[bodyEnd] != '\n' && src[bodyEnd] != '\r') {
+                ++bodyEnd;
+            }
+            std::string body = src.substr(bodyStart, bodyEnd - bodyStart);
+            // Look for `defined(IDENT)` or `defined IDENT` (no parens) in body
+            auto matchDefined = [](const std::string& b, std::string& other) -> bool {
+                std::size_t dp = b.find("defined");
+                if (dp == std::string::npos) return false;
+                // Word-boundary
+                if (dp > 0) {
+                    char prev = b[dp - 1];
+                    if (std::isalnum(static_cast<unsigned char>(prev)) || prev == '_') return false;
+                }
+                std::size_t ep = dp + 7;
+                if (ep < b.size() &&
+                    (std::isalnum(static_cast<unsigned char>(b[ep])) || b[ep] == '_')) {
+                    return false;
+                }
+                // Skip whitespace
+                while (ep < b.size() && (b[ep] == ' ' || b[ep] == '\t')) ++ep;
+                // Optional `(`
+                bool openParen = (ep < b.size() && b[ep] == '(');
+                if (openParen) {
+                    ++ep;
+                    while (ep < b.size() && (b[ep] == ' ' || b[ep] == '\t')) ++ep;
+                }
+                // Identifier
+                std::size_t idStart = ep;
+                while (ep < b.size() &&
+                       (std::isalnum(static_cast<unsigned char>(b[ep])) || b[ep] == '_')) {
+                    ++ep;
+                }
+                if (ep == idStart) return false;
+                other = b.substr(idStart, ep - idStart);
+                return true;
+            };
+            std::string other;
+            if (matchDefined(body, other)) {
+                // Determine if `other` is defined elsewhere in source.
+                // Simple scan: look for `#define OTHER` as a whole word.
+                auto isOtherDefined = [&](const std::string& s) {
+                    std::size_t cursor = 0;
+                    while (cursor < s.size()) {
+                        std::size_t dp = s.find("#define", cursor);
+                        if (dp == std::string::npos) return false;
+                        std::size_t q = dp + 7;
+                        while (q < s.size() && (s[q] == ' ' || s[q] == '\t')) ++q;
+                        std::size_t nameStart2 = q;
+                        while (q < s.size() &&
+                               (std::isalnum(static_cast<unsigned char>(s[q])) || s[q] == '_')) {
+                            ++q;
+                        }
+                        std::string name2 = s.substr(nameStart2, q - nameStart2);
+                        if (name2 == other) return true;
+                        cursor = dp + 1;
+                    }
+                    return false;
+                };
+                const char* replacement = isOtherDefined(src) ? "1" : "0";
+                // Rewrite the body in-place.
+                src.replace(bodyStart, bodyEnd - bodyStart, replacement);
+                result.didRewrite = true;
+                scan = bodyStart + std::strlen(replacement);
+                continue;
+            }
+            scan = bodyEnd;
+        }
+    }
+
     const bool isVertex = (stage == GL_VERTEX_SHADER);
     const bool isFragment = (stage == GL_FRAGMENT_SHADER);
 
