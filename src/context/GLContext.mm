@@ -19974,15 +19974,19 @@ bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, G
 // --- GL 4.1: glProgramUniform* family — explicit program handle variants ---
 
 bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location, UniformElementType element, GLint vectorSize, GLsizei count, const void* values) {
-    if (location < 0) return true;
-    if (count < 0 || vectorSize < 1 || vectorSize > 4) { pushError(GL_INVALID_VALUE); return false; }
-    // GL 4.6 §7.6.1 — error codes for glProgramUniform*:
+    // GL 4.6 §7.6.1 — error codes for glProgramUniform*. Validate the
+    // PROGRAM argument BEFORE checking location, because "not a valid
+    // program" and "not linked" fire regardless of location (including
+    // location=-1 which would otherwise be a silent no-op).
     //   - program not a program name returned from glCreateProgram → INVALID_VALUE
     //   - program not linked → INVALID_OPERATION
-    // CTS `sepshaderobjs.ProgUniformAPI` exercises both paths.
+    // CTS `sepshaderobjs.ProgUniformAPI` exercises both paths with a
+    // cached location=-1 from an unlinked-program glGetUniformLocation.
     GLProgramObject* object = impl_->objects->programs().get(program);
     if (object == nullptr) { pushError(GL_INVALID_VALUE); return false; }
     if (!object->linked) { pushError(GL_INVALID_OPERATION); return false; }
+    if (location < 0) return true;
+    if (count < 0 || vectorSize < 1 || vectorSize > 4) { pushError(GL_INVALID_VALUE); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     if (sampleOrImageUniformValidationFailed(this, ref.type,
