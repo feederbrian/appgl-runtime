@@ -15562,7 +15562,8 @@ bool GLContext::linkProgram(GLuint program) {
 
         bool uniformMismatch = false;
         std::string mismatchMsg;
-        std::unordered_map<std::string, GLenum> seenUniforms;
+        struct SeenUniform { GLenum type; GLenum imageFormat; };
+        std::unordered_map<std::string, SeenUniform> seenUniforms;
         for (const GLShaderObject* stage : attachedStages) {
             if (uniformMismatch) break;
             for (const auto& u : stage->declaredUniforms) {
@@ -15572,14 +15573,27 @@ bool GLContext::linkProgram(GLuint program) {
                 if (u.name.compare(0, 6, "appgl_") == 0) continue;
                 auto it = seenUniforms.find(u.name);
                 if (it == seenUniforms.end()) {
-                    seenUniforms[u.name] = u.type;
-                } else if (it->second != u.type) {
+                    seenUniforms[u.name] = {u.type, u.imageFormat};
+                } else if (it->second.type != u.type) {
                     uniformMismatch = true;
                     mismatchMsg = std::string("uniform '") + u.name +
                         "' type mismatch across stages: seen type 0x" +
-                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", it->second); return std::string(b); }()
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", it->second.type); return std::string(b); }()
                         + ", new type 0x" +
                         [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", u.type); return std::string(b); }();
+                    break;
+                } else if (it->second.imageFormat != 0 && u.imageFormat != 0 &&
+                           it->second.imageFormat != u.imageFormat) {
+                    // GL 4.6 §4.4.8.2: if both stages specify a
+                    // layout(IMAGE_FORMAT) qualifier, they must agree.
+                    // Unspecified on either side is silently allowed
+                    // (the other side's spec wins).
+                    uniformMismatch = true;
+                    mismatchMsg = std::string("image uniform '") + u.name +
+                        "' layout format mismatch across stages: seen 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", it->second.imageFormat); return std::string(b); }()
+                        + ", new 0x" +
+                        [&]{ char b[12]; std::snprintf(b, sizeof(b), "%04x", u.imageFormat); return std::string(b); }();
                     break;
                 }
             }

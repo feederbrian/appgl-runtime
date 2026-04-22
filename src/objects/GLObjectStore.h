@@ -316,6 +316,14 @@ struct GLShaderDeclaration {
     // counters in a binding). -1 = unspecified (GLSL treats that
     // as "append", we default to 0 when first counter of a binding).
     GLint explicitOffset = -1;
+    // Image format qualifier from `layout(rgba32f)`, `layout(rg32f)`,
+    // `layout(rgba8)`, etc. on an image load/store uniform. Stored
+    // as the internal-format GLenum (GL_RGBA32F, GL_RG32F, GL_RGBA8,
+    // ...). 0 = unspecified. Cross-stage link validation compares
+    // this alongside the uniform type so a program that declares
+    // the same image with different format qualifiers in different
+    // stages fails link correctly (GL 4.6 §7.4.1 + §4.4.8.2).
+    GLenum imageFormat = 0;
     // Phase 8X Group 4d follow-up¹⁵ — GLSL 4.20 / ARB_shading_language_420pack
     // lets uniform declarations carry a default-value initializer, e.g.
     //   uniform vec4 ucolor   = vec4(1.0);

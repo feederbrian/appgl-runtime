@@ -227,7 +227,68 @@ struct LayoutQualifiers {
     // (GLSL treats that as "append after previous counter in the
     // same binding"; we default to 0 when first-seen in a binding).
     GLint offset   = -1;
+    // Image format qualifier — `layout(rgba32f)` etc. on an image
+    // load/store uniform. Stored as internal-format GLenum. 0 =
+    // unspecified. Cross-stage link consistency compares this.
+    GLenum imageFormat = 0;
 };
+
+// Map a GLSL image format keyword (`rgba32f`, `rgba16f`, `rgba8`,
+// `rg32ui`, ...) to its internal-format GLenum. Covers GL 4.2
+// Table 3.16 — the canonical 42-entry set that `layout(FORMAT)` on
+// image load/store uniforms can name. Returns 0 for unrecognised
+// tokens so the layout-qualifier parser can leave the field
+// unspecified without false-positive matches.
+GLenum imageFormatEnumForKeyword(const std::string& kw) {
+    static const std::unordered_map<std::string, GLenum> table = {
+        // Float (GL 4.2 Table 3.16)
+        {"rgba32f", GL_RGBA32F},
+        {"rgba16f", GL_RGBA16F},
+        {"rg32f",   GL_RG32F},
+        {"rg16f",   GL_RG16F},
+        {"r11f_g11f_b10f", GL_R11F_G11F_B10F},
+        {"r32f",    GL_R32F},
+        {"r16f",    GL_R16F},
+        // Signed int
+        {"rgba32i", GL_RGBA32I},
+        {"rgba16i", GL_RGBA16I},
+        {"rgba8i",  GL_RGBA8I},
+        {"rg32i",   GL_RG32I},
+        {"rg16i",   GL_RG16I},
+        {"rg8i",    GL_RG8I},
+        {"r32i",    GL_R32I},
+        {"r16i",    GL_R16I},
+        {"r8i",     GL_R8I},
+        // Unsigned int
+        {"rgba32ui", GL_RGBA32UI},
+        {"rgba16ui", GL_RGBA16UI},
+        {"rgba8ui",  GL_RGBA8UI},
+        {"rgb10_a2ui", GL_RGB10_A2UI},
+        {"rg32ui",   GL_RG32UI},
+        {"rg16ui",   GL_RG16UI},
+        {"rg8ui",    GL_RG8UI},
+        {"r32ui",    GL_R32UI},
+        {"r16ui",    GL_R16UI},
+        {"r8ui",     GL_R8UI},
+        // Unorm
+        {"rgba16",   GL_RGBA16},
+        {"rgb10_a2", GL_RGB10_A2},
+        {"rgba8",    GL_RGBA8},
+        {"rg16",     GL_RG16},
+        {"rg8",      GL_RG8},
+        {"r16",      GL_R16},
+        {"r8",       GL_R8},
+        // Snorm
+        {"rgba16_snorm", GL_RGBA16_SNORM},
+        {"rgba8_snorm",  GL_RGBA8_SNORM},
+        {"rg16_snorm",   GL_RG16_SNORM},
+        {"rg8_snorm",    GL_RG8_SNORM},
+        {"r16_snorm",    GL_R16_SNORM},
+        {"r8_snorm",     GL_R8_SNORM},
+    };
+    auto it = table.find(kw);
+    return (it != table.end()) ? it->second : 0;
+}
 
 // Parse `layout(location = N, binding = M)` and similar.  Returns the
 // explicit location and binding if found, otherwise -1 for each.  The
@@ -266,6 +327,17 @@ LayoutQualifiers extractLayoutQualifiers(std::vector<std::string>& tokens) {
                 result.index = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 0));
             } else if (tokens[i] == "offset") {
                 result.offset = static_cast<GLint>(std::strtol(tokens[i + 2].c_str(), nullptr, 0));
+            }
+        } else {
+            // Bare token (no `= value`) — check for image format
+            // qualifier like `rgba32f`, `r11f_g11f_b10f`, etc. These
+            // are the only layout qualifiers that don't use the
+            // `name = value` pattern inside `layout(...)`. Other
+            // bare tokens (std140, row_major, triangles, ...) are
+            // ignored here.
+            GLenum fmt = imageFormatEnumForKeyword(tokens[i]);
+            if (fmt != 0) {
+                result.imageFormat = fmt;
             }
         }
         ++i;
@@ -668,6 +740,7 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         decl.explicitBinding  = layoutQ.binding;
         decl.explicitIndex    = layoutQ.index;
         decl.explicitOffset   = layoutQ.offset;
+        decl.imageFormat      = layoutQ.imageFormat;
 
         // Save the GL type for any additional comma-separated declarations.
         const GLenum declaredType = decl.type;
