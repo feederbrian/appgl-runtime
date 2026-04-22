@@ -25685,8 +25685,36 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
 
 bool GLContext::textureView(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat,
                             GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers) {
+    // GL 4.3 §8.18 (ARB_texture_view) — error cases as asserted by
+    // CTS `texture_view.errors`:
+    //  - texture == 0           → INVALID_VALUE (texture name 0 is
+    //                             reserved for "no binding")
+    //  - origtexture == 0       → INVALID_VALUE (same reasoning)
+    //  - texture is 0xFFFFFFFF
+    //    or otherwise not from glGenTextures → INVALID_OPERATION
+    //  - origtexture has no data store allocated → INVALID_OPERATION
+    //  - numlevels / numlayers == 0 → INVALID_VALUE
+    if (texture == 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
     GLTextureObject* viewObj = impl_->objects->textures().get(texture);
     if (viewObj == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // The view texture must be "fresh" — glTextureView cannot re-
+    // target an already-bound texture. `target != 0` means a prior
+    // glBindTexture / glCreateTextures set the target.
+    if (viewObj->target != 0) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // origtexture: both 0 and an unrecognized name produce
+    // INVALID_VALUE per the CTS errors test (differs from the
+    // `texture` argument's rule where an unrecognized name gives
+    // INVALID_OPERATION). The test exercises both codepaths.
+    if (origtexture == 0) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
