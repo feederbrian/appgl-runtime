@@ -866,15 +866,81 @@ EmulatedDraw emulateTessellationDraw(
         return d;
     }
 
-    // Phase 1 stops here — we've computed the per-patch domain but
-    // don't yet have the VS/TES body interpreter wired to produce
-    // per-vertex positions + varyings. Stash a diagnostic so
-    // `recordShaderTranslation` consumers can see progress.
+    // Phase-2a: build an EmulatedDraw whose positions come straight
+    // from the tess-domain coords. Each output vertex's position is
+    // (u, v, w, 1.0) — the raw barycentric / parametric triple. No
+    // user varyings, no VS/TES execution. This is the "zero-op
+    // passthrough" baseline: downstream ViewFromMetal code can
+    // inspect the buffer to see that phase-2 scaffolding produced
+    // a non-empty output.
+    //
+    // The draw-path caller still falls back to the legacy translated
+    // path — `.ok` stays false until phase 2b enables a narrow
+    // allowlist (TES body that writes exactly
+    // `gl_Position = gl_TessCoord` shape).
     const std::size_t totalVerts = coordsPerPatch * numPatches;
-    d.diagnostic = "tess-emul phase-1: " + std::to_string(numPatches) +
-                   " patches × " + std::to_string(coordsPerPatch) +
-                   " domain verts = " + std::to_string(totalVerts) +
-                   " pending VS/TES interpreter";
+    constexpr std::size_t kPosFloats = 4;
+    d.vertexCount = totalVerts;
+    d.floatsPerVertex = kPosFloats;
+    d.expandedVertexData.assign(totalVerts * kPosFloats, 0.0f);
+    d.topology = domainOut.topology;
+
+    // Fill in position data. For GL_POINTS/GL_LINES/GL_TRIANGLES the
+    // emitter's ordering is index-dependent — the caller's Metal
+    // encoder consumes expandedVertexData as a flat vertex buffer
+    // indexed by gl_VertexIndex, so we need to expand the index list
+    // into a de-indexed vertex stream. (GSE follows the same pattern
+    // — no index buffer in the EmulatedDraw output.)
+    const std::vector<float>& coords = domainOut.coords;
+    const std::vector<std::uint32_t>& indices = domainOut.indices;
+    const bool isPoints = (domainOut.topology == GL_POINTS);
+    const std::size_t expandPerPatch = isPoints ? coordsPerPatch : indices.size();
+    // Recompute if point-mode path was chosen — indices empty, walk coords.
+    d.vertexCount = expandPerPatch * numPatches;
+    d.expandedVertexData.assign(d.vertexCount * kPosFloats, 0.0f);
+    for (std::size_t p = 0; p < numPatches; ++p) {
+        const std::size_t dstPatchBase = p * expandPerPatch * kPosFloats;
+        if (isPoints) {
+            // One vertex per coord.
+            for (std::size_t i = 0; i < coordsPerPatch; ++i) {
+                const float u = coords[i * 3 + 0];
+                const float v = coords[i * 3 + 1];
+                const float w = coords[i * 3 + 2];
+                const std::size_t dst = dstPatchBase + i * kPosFloats;
+                d.expandedVertexData[dst + 0] = u;
+                d.expandedVertexData[dst + 1] = v;
+                d.expandedVertexData[dst + 2] = w;
+                d.expandedVertexData[dst + 3] = 1.0f;
+            }
+        } else {
+            // Walk index list; one vertex per index.
+            for (std::size_t i = 0; i < indices.size(); ++i) {
+                const std::uint32_t idx = indices[i];
+                const float u = coords[idx * 3 + 0];
+                const float v = coords[idx * 3 + 1];
+                const float w = coords[idx * 3 + 2];
+                const std::size_t dst = dstPatchBase + i * kPosFloats;
+                d.expandedVertexData[dst + 0] = u;
+                d.expandedVertexData[dst + 1] = v;
+                d.expandedVertexData[dst + 2] = w;
+                d.expandedVertexData[dst + 3] = 1.0f;
+            }
+        }
+    }
+
+    // Stays false through iter 187 — phase-2b needs to both (a)
+    // detect the narrow TES body shape where `gl_Position =
+    // gl_TessCoord[.xyzw permutations]` is the only output write,
+    // and (b) verify the FS has no user-varying inputs (otherwise
+    // the synth pass-through VS will fail pipeline-state validation
+    // against the FS's expected locations). Keep returning false
+    // so the existing-translation path handles every tess draw.
+    d.diagnostic = "tess-emul phase-2a: " + std::to_string(numPatches) +
+                   " patches × " + std::to_string(expandPerPatch) +
+                   " output verts = " + std::to_string(d.vertexCount) +
+                   " (topology=0x" +
+                   std::to_string(static_cast<unsigned>(domainOut.topology)) +
+                   ") — pending phase-2b enablement";
     return d;
 }
 
