@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 
@@ -920,8 +921,7 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
     // Phase-2b shape matcher — detect TES bodies whose whole output
     // payload is `gl_Position = vec4(gl_TessCoord.xyz, ...)`. These
     // are the only bodies the phase-2a position-only EmulatedDraw
-    // can faithfully represent. Result is informational; the
-    // emulator's draw path still returns ok=false.
+    // can faithfully represent.
     TessBodyPassthroughMatch tePass = matchTessEvalPassthrough(
         program.tessEvalSpirv.data(), program.tessEvalSpirv.size());
     if (!tePass.parsed) {
@@ -930,14 +930,33 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
         program.linkLog += "\n[tess-emul] TES is passthrough — phase-2b candidate";
     }
 
-    // Stays false through iter 169 — detection probes landed, but the
-    // actual draw-time emulation (VS + TES interpretation) is the
-    // next infrastructure milestone. Flipping this true without the
-    // draw path wired would route every tess draw through
-    // `emulateTessellationDraw`'s stub and silently drop the output,
-    // which the CTS would catch as a data-compare failure far worse
-    // than the existing "tess draws produce nothing meaningful" state.
+    // Phase-2c enablement gate (opt-in):
+    //   APPGL_ENABLE_TESS_EMUL=1 → flip tessellationEmulated for
+    //                               matched passthrough TES bodies.
+    //   unset (default)           → stay on the legacy translated-
+    //                               no-tess path (zero-regression).
+    //
+    // Opt-in-by-env is the safe rollout ramp — flipping for every
+    // matched program by default would route currently-passing
+    // tess draws through our phase-2a EmulatedDraw (positions in
+    // parametric [0,1] range rather than clip-space), which almost
+    // certainly regresses the 37/140 tess tests currently passing.
+    // Future iters will replace the position-only EmulatedDraw
+    // with a real TES body walk that produces meaningful output;
+    // once the replacement lands we can drop the env gate.
     (void)isSupportedTessMode;
+    if (tePass.matched) {
+        static const bool emulEnabled = []() {
+            const char* v = std::getenv("APPGL_ENABLE_TESS_EMUL");
+            return v != nullptr && v[0] != '0' && v[0] != '\0';
+        }();
+        if (emulEnabled) {
+            program.tessellationEmulated = true;
+            program.linkLog +=
+                "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — passthrough TES enabled";
+            return true;
+        }
+    }
     return false;
 }
 
@@ -1112,19 +1131,29 @@ EmulatedDraw emulateTessellationDraw(
         }
     }
 
-    // Stays false through iter 187 — phase-2b needs to both (a)
-    // detect the narrow TES body shape where `gl_Position =
-    // gl_TessCoord[.xyzw permutations]` is the only output write,
-    // and (b) verify the FS has no user-varying inputs (otherwise
-    // the synth pass-through VS will fail pipeline-state validation
-    // against the FS's expected locations). Keep returning false
-    // so the existing-translation path handles every tess draw.
+    // Phase-2c enablement gate: only return ok=true when the
+    // program's `tessellationEmulated` flag was flipped at link
+    // time (currently opt-in via APPGL_ENABLE_TESS_EMUL=1).
+    // Without the flag, stay on the legacy translated path so
+    // the 37 currently-passing tess tests aren't disrupted by a
+    // position-only CPU replacement that produces parametric-
+    // space positions instead of clip-space.
+    if (program.tessellationEmulated) {
+        d.ok = true;
+        d.diagnostic = "tess-emul phase-2c: " + std::to_string(numPatches) +
+                       " patches × " + std::to_string(expandPerPatch) +
+                       " verts = " + std::to_string(d.vertexCount) +
+                       " (topology=0x" +
+                       std::to_string(static_cast<unsigned>(domainOut.topology)) +
+                       ")";
+        return d;
+    }
     d.diagnostic = "tess-emul phase-2a: " + std::to_string(numPatches) +
                    " patches × " + std::to_string(expandPerPatch) +
                    " output verts = " + std::to_string(d.vertexCount) +
                    " (topology=0x" +
                    std::to_string(static_cast<unsigned>(domainOut.topology)) +
-                   ") — pending phase-2b enablement";
+                   ") — phase-2c disabled (APPGL_ENABLE_TESS_EMUL unset)";
     return d;
 }
 
