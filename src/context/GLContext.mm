@@ -15244,9 +15244,21 @@ bool GLContext::linkProgram(GLuint program) {
         // (1) No vertex-processing stage.
         // The "last vertex-processing stage" determines the capturable outputs:
         //   GS > TES > VS (in priority order).
+        // For SEPARABLE programs, a TCS-only stage is a valid last-
+        // vertex-processing stage — the program pipeline at bind time
+        // determines the downstream chain. GL 4.6 §11.1.2.1 permits
+        // capturing TCS outputs when a separable TCS program is the
+        // final vertex stage in the pipeline. CTS
+        // `tessellation_shader.single.xfb_captures_data_from_correct_
+        // stage` builds four separable programs (one per
+        // VS/TCS/TES/GS stage) with TF varyings and expects each to
+        // link. Previous behaviour rejected TCS-only at link time
+        // because xfbStage was null.
         const GLShaderObject* xfbStage = geometryShader
             ? geometryShader
-            : (tessEvalShader ? tessEvalShader : vertexShader);
+            : (tessEvalShader ? tessEvalShader
+                              : (vertexShader ? vertexShader
+                                              : (programObject->separable ? tessControlShader : nullptr)));
         if (xfbStage == nullptr) {
             programObject->linkLog = "transform feedback varyings specified but no vertex/geometry shader";
             Runtime::shared().recordShaderTranslation({
