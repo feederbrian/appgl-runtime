@@ -3398,12 +3398,38 @@ void APIENTRY glTexParameterIuiv(GLenum target, GLenum pname, const GLuint* para
     }
 }
 
+// GL 4.6 §8.11.2 — glGetTexParameter* is valid for TEXTURE_1D / 2D /
+// 3D / 1D_ARRAY / 2D_ARRAY / RECTANGLE / CUBE_MAP / CUBE_MAP_ARRAY /
+// 2D_MULTISAMPLE / 2D_MULTISAMPLE_ARRAY. Notably NOT valid for
+// TEXTURE_BUFFER (it has no sampler state) or individual cube-map
+// faces (TEXTURE_CUBE_MAP_POSITIVE_X etc. — only the cube-map
+// aggregate target is accepted). CTS
+// `texture_border_clamp.gettexparameteri_errors` verifies both
+// exclusions fire INVALID_ENUM.
+static bool isValidTargetForGetTexParameter(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint* params) {
     auto* context = requireCurrentContext("glGetTexParameteriv");
     if (context == nullptr) {
         return;
     }
-    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+    if (!isValidTargetForGetTexParameter(target) || !isValidTextureParameterPname(pname)) {
         recordValidationError(context, "glGetTexParameteriv", GL_INVALID_ENUM, "target or pname is invalid");
         return;
     }
@@ -3418,7 +3444,7 @@ void APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) 
     if (context == nullptr) {
         return;
     }
-    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+    if (!isValidTargetForGetTexParameter(target) || !isValidTextureParameterPname(pname)) {
         recordValidationError(context, "glGetTexParameterfv", GL_INVALID_ENUM, "target or pname is invalid");
         return;
     }
@@ -3438,7 +3464,7 @@ void APIENTRY glGetTexParameterIuiv(GLenum target, GLenum pname, GLuint* params)
     if (context == nullptr) {
         return;
     }
-    if (!isValidTextureTarget(target) || !isValidTextureParameterPname(pname)) {
+    if (!isValidTargetForGetTexParameter(target) || !isValidTextureParameterPname(pname)) {
         recordValidationError(context, "glGetTexParameterIuiv", GL_INVALID_ENUM, "target or pname is invalid");
         return;
     }
