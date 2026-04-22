@@ -253,6 +253,39 @@ TessBodyClassification classifyTessBody(
     const std::uint32_t* spirv,
     std::size_t wordCount);
 
+// Narrow shape matcher for a TES body that's safe to emulate with
+// the phase-2 "position = tess coord" baseline. Detects the pattern:
+//
+//   void main() {
+//     gl_Position = vec4(gl_TessCoord.x, gl_TessCoord.y, gl_TessCoord.z, 1.0);
+//   }
+//
+// (plus the glslang-emitted variants that swap component order or
+// build the vec4 through OpVectorShuffle / per-component OpAccessChain
+// of gl_TessCoord). No user varying writes, no patch-input loads, no
+// interpolation — whatever `expandedVertexData` the phase-2a builder
+// produces is literally the TES output.
+//
+// Returns `matched = true` only when ALL of:
+//  - Output write set is exactly { gl_Position }
+//  - The value stored to gl_Position is a 4-component composite where
+//    x/y/z/(w) trace back to gl_TessCoord components (and 1.0 for w
+//    when not from gl_TessCoord)
+//  - No input loads beyond gl_TessCoord
+//
+// Used by `detectTessellationEmulatable` to flip `program.
+// tessellationEmulated` on for the narrow set. `diagnostic` on a
+// false return explains which predicate broke.
+struct TessBodyPassthroughMatch {
+    bool matched = false;
+    bool parsed = false;
+    std::string diagnostic;
+};
+
+TessBodyPassthroughMatch matchTessEvalPassthrough(
+    const std::uint32_t* tesSpirv,
+    std::size_t tesWordCount);
+
 // Generate the tessellation domain coords + indices for one patch.
 // All outer / inner levels are pre-clamped by the caller to
 // [1, GL_MAX_TESS_GEN_LEVEL]. Called once per patch per draw after

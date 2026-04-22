@@ -439,6 +439,177 @@ TessBodyClassification classifyTessBody(
     return out;
 }
 
+// ─── Phase-2b passthrough shape matcher ──────────────────────────────
+
+TessBodyPassthroughMatch matchTessEvalPassthrough(
+    const std::uint32_t* tesSpirv,
+    std::size_t tesWordCount)
+{
+    TessBodyPassthroughMatch out;
+    if (tesSpirv == nullptr || tesWordCount < 5) {
+        out.diagnostic = "empty SPIR-V";
+        return out;
+    }
+    SpirvModule module;
+    if (!module.parse(tesSpirv, tesWordCount)) {
+        out.diagnostic = "SpirvModule::parse failed: " + module.parseError;
+        return out;
+    }
+    if (!module.haveFuncBody) {
+        out.diagnostic = "no function body";
+        return out;
+    }
+    out.parsed = true;
+
+    // Find the gl_Position variable id and gl_TessCoord variable id. Both
+    // are BuiltIn-decorated. gl_Position lives on the Output storage
+    // (either directly or as member 0 of a gl_PerVertex block); gl_TessCoord
+    // is an Input vec3.
+    std::uint32_t positionVarId = 0;
+    std::uint32_t positionStructMember = UINT32_MAX;  // non-UINT32_MAX if gl_Position is a block member
+    std::uint32_t tessCoordVarId = 0;
+    for (const auto& [varId, vi] : module.variables) {
+        auto decoIt = module.decorations.find(varId);
+        const bool isOutput = vi.storageClass == spv::StorageClassOutput;
+        const bool isInput = vi.storageClass == spv::StorageClassInput;
+        if (decoIt != module.decorations.end() && decoIt->second.hasBuiltIn) {
+            if (isOutput && decoIt->second.builtIn == spv::BuiltInPosition) {
+                positionVarId = varId;
+            } else if (isInput && decoIt->second.builtIn == spv::BuiltInTessCoord) {
+                tessCoordVarId = varId;
+            }
+        }
+        // gl_Position may live as a member of the Output gl_PerVertex
+        // block. Check member decorations.
+        if (isOutput && positionVarId == 0) {
+            auto ptrIt = module.types.find(vi.typeId);
+            if (ptrIt != module.types.end() && ptrIt->second.kind == TypeInfo::Kind::Pointer) {
+                auto leafIt = module.types.find(ptrIt->second.pointeeType);
+                if (leafIt != module.types.end() && leafIt->second.kind == TypeInfo::Kind::Struct) {
+                    auto memDecoIt = module.memberDecorations.find(ptrIt->second.pointeeType);
+                    if (memDecoIt != module.memberDecorations.end()) {
+                        for (const auto& [memIdx, memDeco] : memDecoIt->second.perMember) {
+                            if (memDeco.hasBuiltIn && memDeco.builtIn == spv::BuiltInPosition) {
+                                positionVarId = varId;
+                                positionStructMember = memIdx;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (positionVarId == 0) {
+        out.diagnostic = "no gl_Position output variable";
+        return out;
+    }
+    if (tessCoordVarId == 0) {
+        out.diagnostic = "no gl_TessCoord input variable";
+        return out;
+    }
+
+    // Verify no OTHER output variables carry user varyings. Built-in
+    // outputs (gl_PerVertex members we don't write) are fine — just
+    // location-decorated user varyings are the concern because our
+    // synth pass-through VS would need to emit matching MSL outputs.
+    for (const auto& [varId, vi] : module.variables) {
+        if (vi.storageClass != spv::StorageClassOutput) continue;
+        auto decoIt = module.decorations.find(varId);
+        if (decoIt != module.decorations.end() && decoIt->second.hasLocation) {
+            out.diagnostic = "TES declares user varying " + vi.name +
+                             " at location " + std::to_string(decoIt->second.location);
+            return out;
+        }
+    }
+
+    // Walk the function body. Track every OpStore's pointer — the
+    // pointer id must trace back to positionVarId via OpAccessChain(s)
+    // rooted at positionVarId. Any OpStore whose pointer isn't
+    // traceable back to positionVarId (or is to a different root
+    // Output variable) disqualifies.
+    //
+    // Also check that every OpLoad is sourced from an AccessChain
+    // rooted at tessCoordVarId (or is loading an unrelated
+    // input that happens to be permissible — we don't model that).
+    //
+    // `pointerRoot[id]` → root variable id reached via AccessChain, or
+    //                     the id itself if no AccessChain applied
+    std::unordered_map<std::uint32_t, std::uint32_t> pointerRoot;
+
+    std::size_t i = module.funcBodyStart;
+    const std::size_t end = module.funcBodyEnd;
+    std::uint32_t storesToPosition = 0;
+    std::uint32_t storesOther = 0;
+    std::uint32_t loadsFromTessCoord = 0;
+    std::uint32_t loadsOther = 0;
+    while (i < end) {
+        const std::uint32_t inst = module.words[i];
+        const std::uint16_t opcode = inst & 0xFFFF;
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0 || i + wc > end) break;
+        const std::uint32_t* w = module.words.data() + i + 1;
+
+        switch (opcode) {
+            case spv::OpAccessChain: {
+                if (wc >= 4) {
+                    const std::uint32_t resultId = w[1];
+                    const std::uint32_t baseId = w[2];
+                    auto it = pointerRoot.find(baseId);
+                    pointerRoot[resultId] = (it != pointerRoot.end()) ? it->second : baseId;
+                }
+                break;
+            }
+            case spv::OpStore: {
+                if (wc >= 3) {
+                    const std::uint32_t ptrId = w[0];
+                    auto it = pointerRoot.find(ptrId);
+                    const std::uint32_t root = (it != pointerRoot.end()) ? it->second : ptrId;
+                    if (root == positionVarId) ++storesToPosition;
+                    else ++storesOther;
+                }
+                break;
+            }
+            case spv::OpLoad: {
+                if (wc >= 4) {
+                    const std::uint32_t ptrId = w[2];
+                    auto it = pointerRoot.find(ptrId);
+                    const std::uint32_t root = (it != pointerRoot.end()) ? it->second : ptrId;
+                    if (root == tessCoordVarId) ++loadsFromTessCoord;
+                    else ++loadsOther;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        i += wc;
+    }
+
+    if (storesToPosition == 0) {
+        out.diagnostic = "body doesn't write gl_Position";
+        return out;
+    }
+    if (storesOther > 0) {
+        out.diagnostic = "body writes " + std::to_string(storesOther) +
+                         " non-Position locations";
+        return out;
+    }
+    if (loadsOther > 0) {
+        // Allow loads of constants / function-local temps — those don't
+        // go through OpLoad-of-pointer typically. `loadsOther` here
+        // means an OpLoad whose pointer rooted at a variable that isn't
+        // gl_TessCoord. That includes loads from gl_PerVertex.gl_Position
+        // for readback, which is unusual for a passthrough.
+        out.diagnostic = "body loads " + std::to_string(loadsOther) +
+                         " non-TessCoord inputs";
+        return out;
+    }
+    out.matched = true;
+    (void)positionStructMember;
+    return out;
+}
+
 // ─── Tessellation domain-point generation ────────────────────────────
 
 // Round an outer level per the spacing rule. Result is the integer
@@ -744,6 +915,19 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
         program.tessEvalSpirv.data(), program.tessEvalSpirv.size());
     if (!teClass.parsed) {
         program.linkLog += "\n[tess-emul] TES body classify: " + teClass.diagnostic;
+    }
+
+    // Phase-2b shape matcher — detect TES bodies whose whole output
+    // payload is `gl_Position = vec4(gl_TessCoord.xyz, ...)`. These
+    // are the only bodies the phase-2a position-only EmulatedDraw
+    // can faithfully represent. Result is informational; the
+    // emulator's draw path still returns ok=false.
+    TessBodyPassthroughMatch tePass = matchTessEvalPassthrough(
+        program.tessEvalSpirv.data(), program.tessEvalSpirv.size());
+    if (!tePass.parsed) {
+        program.linkLog += "\n[tess-emul] TES passthrough match: " + tePass.diagnostic;
+    } else if (tePass.matched) {
+        program.linkLog += "\n[tess-emul] TES is passthrough — phase-2b candidate";
     }
 
     // Stays false through iter 169 — detection probes landed, but the
