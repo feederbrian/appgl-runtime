@@ -679,7 +679,12 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // draw_elements_base_vertex, EXT_pixel_buffer_object) were added so
     // GLAD's string-matched has_ext() flips Recoil's VBO::IsSupported
     // gates from their default-false state.
-    integerLimits_[GL_NUM_EXTENSIONS] = 42;
+    // Bumped from 42 → 44 for GL_ARB_parallel_shader_compile +
+    // GL_KHR_parallel_shader_compile. Our implementation is
+    // synchronous (single-threaded shader compile), but advertising
+    // the extension lets CTS `parallel_shader_compile.simple_queries`
+    // and `.max_shader_compile_threads` exercise the API surface.
+    integerLimits_[GL_NUM_EXTENSIONS] = 44;
     // GL 4.6 SPIR-V extension queries.  The SPIR-V extensions CTS test
     // (KHR-GL46.spirv_extensions.spirv_extensions_queries) calls
     // glGetIntegerv(GL_NUM_SPIR_V_EXTENSIONS) and then iterates with
@@ -1121,7 +1126,14 @@ void GLCapabilities::initializeExtensions() {
         "GL_ARB_separate_shader_objects "
         "GL_ARB_program_interface_query "
         "GL_ARB_shading_language_420pack "
-        "GL_ARB_shading_language_packing";
+        "GL_ARB_shading_language_packing "
+        // GL_ARB_parallel_shader_compile / GL_KHR_parallel_shader_compile —
+        // our compile is synchronous (one thread) so the API surface is a
+        // spec-correct no-op: MAX_SHADER_COMPILER_THREADS tracks whatever
+        // glMaxShaderCompilerThreads sets, and COMPLETION_STATUS on a
+        // shader/program is always GL_TRUE (compile already finished).
+        "GL_ARB_parallel_shader_compile "
+        "GL_KHR_parallel_shader_compile";
 }
 
 }  // namespace appgl

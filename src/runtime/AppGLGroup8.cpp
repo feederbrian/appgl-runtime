@@ -1494,6 +1494,11 @@ static const char* const kAppGLExtensionList[] = {
     "GL_ARB_program_interface_query",
     "GL_ARB_shading_language_420pack",
     "GL_ARB_shading_language_packing",
+    // GL_ARB_parallel_shader_compile / GL_KHR_parallel_shader_compile
+    // — see GLCapabilities.mm for rationale (synchronous-compile
+    // no-op implementation satisfies the CTS query surface).
+    "GL_ARB_parallel_shader_compile",
+    "GL_KHR_parallel_shader_compile",
 };
 static constexpr GLuint kAppGLExtensionCount =
     static_cast<GLuint>(sizeof(kAppGLExtensionList) / sizeof(kAppGLExtensionList[0]));
@@ -1568,6 +1573,29 @@ static void APIENTRY glPrimitiveRestartIndex(GLuint index) {
     if (context == nullptr) return;
     context->state().setPrimitiveRestartIndex(index);
 }
+
+}  // namespace
+
+// GL_{ARB,KHR}_parallel_shader_compile — hand-written entry points
+// because the vendored gl.xml doesn't declare core aliases for these
+// commands, and the codegen walks core features only. Our compile
+// path is synchronous (single-thread glslang → SPIRV-Cross → MSL), so
+// the count argument is purely a round-trippable setting — no
+// threading effect. CTS
+// `parallel_shader_compile.{simple_queries,max_shader_compile_threads}`
+// call these + GL_MAX_SHADER_COMPILER_THREADS_KHR query, which is
+// wired through GLStateTracker::maxShaderCompilerThreads.
+extern "C" void APIENTRY glMaxShaderCompilerThreadsARB(GLuint count) {
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    context->state().setMaxShaderCompilerThreads(count);
+}
+
+extern "C" void APIENTRY glMaxShaderCompilerThreadsKHR(GLuint count) {
+    glMaxShaderCompilerThreadsARB(count);
+}
+
+namespace {
 
 static void APIENTRY glGetUniformIndices(GLuint program, GLsizei uniformCount, const GLchar *const*uniformNames, GLuint *uniformIndices) {
     auto* context = currentContextOrNull();

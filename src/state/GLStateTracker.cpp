@@ -4,6 +4,7 @@
 #include "../objects/GLObjectStore.h"
 
 #include <algorithm>
+#include <type_traits>
 #include <utility>
 
 namespace appgl {
@@ -650,6 +651,14 @@ GLuint GLStateTracker::primitiveRestartIndex() const {
     return primitiveRestartIndex_;
 }
 
+void GLStateTracker::setMaxShaderCompilerThreads(GLuint count) {
+    maxShaderCompilerThreads_ = count;
+}
+
+GLuint GLStateTracker::maxShaderCompilerThreads() const {
+    return maxShaderCompilerThreads_;
+}
+
 void GLStateTracker::setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
     if (clear_.color[0] == red && clear_.color[1] == green && clear_.color[2] == blue && clear_.color[3] == alpha) {
         return;
@@ -1002,6 +1011,9 @@ bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
                 for (int i = 0; i < 2; ++i)
                     out[i] = static_cast<GLboolean>(tessellation_.defaultInnerLevel[i] != 0.0f);
                 return true;
+            case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
+                *out = maxShaderCompilerThreads_ != 0 ? GL_TRUE : GL_FALSE;
+                return true;
             default:
                 break;
         }
@@ -1060,6 +1072,9 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
                 for (int i = 0; i < 2; ++i)
                     out[i] = static_cast<GLint>(tessellation_.defaultInnerLevel[i]);
                 return true;
+            case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
+                *out = static_cast<std::remove_reference_t<decltype(*out)>>(maxShaderCompilerThreads_);
+                return true;
             case GL_MIN_SAMPLE_SHADING_VALUE:
                 *out = static_cast<GLint>(blend_.minSampleShading);
                 return true;
@@ -1114,6 +1129,9 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
                 for (int i = 0; i < 2; ++i)
                     out[i] = static_cast<GLint64>(tessellation_.defaultInnerLevel[i]);
                 return true;
+            case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
+                *out = static_cast<std::remove_reference_t<decltype(*out)>>(maxShaderCompilerThreads_);
+                return true;
             case GL_MIN_SAMPLE_SHADING_VALUE:
                 *out = static_cast<GLint64>(blend_.minSampleShading);
                 return true;
@@ -1167,6 +1185,9 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
             case GL_PATCH_DEFAULT_INNER_LEVEL:
                 for (int i = 0; i < 2; ++i)
                     out[i] = tessellation_.defaultInnerLevel[i];
+                return true;
+            case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
+                *out = static_cast<std::remove_reference_t<decltype(*out)>>(maxShaderCompilerThreads_);
                 return true;
             case GL_MIN_SAMPLE_SHADING_VALUE:
                 // GL 4.0 ARB_sample_shading — stored clamped to [0,1]
@@ -1224,6 +1245,9 @@ bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
             case GL_PATCH_DEFAULT_INNER_LEVEL:
                 for (int i = 0; i < 2; ++i)
                     out[i] = static_cast<GLdouble>(tessellation_.defaultInnerLevel[i]);
+                return true;
+            case 0x91B0:   // GL_MAX_SHADER_COMPILER_THREADS_KHR / _ARB
+                *out = static_cast<std::remove_reference_t<decltype(*out)>>(maxShaderCompilerThreads_);
                 return true;
             case GL_MIN_SAMPLE_SHADING_VALUE:
                 *out = static_cast<GLdouble>(blend_.minSampleShading);

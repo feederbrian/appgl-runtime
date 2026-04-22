@@ -13922,6 +13922,15 @@ bool GLContext::getShaderiv(GLuint shader, GLenum pname, GLint* params) {
         case GL_SHADER_SOURCE_LENGTH:
             *params = static_cast<GLint>(object->source.size() + (object->source.empty() ? 0 : 1));
             return true;
+        case 0x91B1:   // GL_COMPLETION_STATUS_KHR / _ARB
+            // Our compile path is synchronous — every compile finishes
+            // before glCompileShader returns, so completion is always
+            // true. Matches GL_ARB/KHR_parallel_shader_compile spec
+            // "If this query is called before a call to glCompileShader,
+            // the implementation shall return GL_TRUE" — and after the
+            // synchronous compile, it's trivially complete.
+            *params = GL_TRUE;
+            return true;
         default:
             pushError(GL_INVALID_ENUM);
             return false;
@@ -18936,6 +18945,11 @@ bool GLContext::getProgramiv(GLuint program, GLenum pname, GLint* params) {
             return true;
         case GL_LINK_STATUS:
             *params = object->linked ? GL_TRUE : GL_FALSE;
+            return true;
+        case 0x91B1:   // GL_COMPLETION_STATUS_KHR / _ARB
+            // Synchronous link — always complete post-glLinkProgram.
+            // See matching case in getShaderiv for rationale.
+            *params = GL_TRUE;
             return true;
         case GL_VALIDATE_STATUS:
             *params = object->validated ? GL_TRUE : GL_FALSE;

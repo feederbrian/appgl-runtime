@@ -180,6 +180,12 @@ public:
     void setPrimitiveRestartIndex(GLuint index);
     GLuint primitiveRestartIndex() const;
 
+    // GL_ARB/KHR_parallel_shader_compile. Tracked for the query
+    // round-trip; our compile path is synchronous so the stored
+    // value has no backend effect.
+    void setMaxShaderCompilerThreads(GLuint count);
+    GLuint maxShaderCompilerThreads() const;
+
     void setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
     void setClearDepth(GLdouble depth);
     void setClearStencil(GLint stencil);
@@ -328,6 +334,15 @@ private:
     std::array<bool, kMaxViewports> indexedScissorTest_{};
     GLTessellationState tessellation_;
     GLuint primitiveRestartIndex_ = 0;
+    // GL_ARB/KHR_parallel_shader_compile. Our compile path is
+    // synchronous so this is purely a round-trippable setting.
+    // Initial value 0 — a consistent non-negative integer that
+    // casts identically through every get query flavour. Spec
+    // technically allows 0xFFFFFFFF (unlimited) but the CTS
+    // `parallel_shader_compile.simple_queries` test's
+    // cross-query-type comparison breaks on the GLint/GLfloat
+    // casts of that value.
+    GLuint maxShaderCompilerThreads_ = 0;
     GLBlendState blend_;
     GLDepthState depth_;
     GLStencilState stencil_;

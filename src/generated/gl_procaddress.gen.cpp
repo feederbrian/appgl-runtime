@@ -978,6 +978,8 @@ void APIENTRY glWindowPos3i(GLint x, GLint y, GLint z);
 void APIENTRY glWindowPos3iv(const GLint *v);
 void APIENTRY glWindowPos3s(GLshort x, GLshort y, GLshort z);
 void APIENTRY glWindowPos3sv(const GLshort *v);
+void APIENTRY glMaxShaderCompilerThreadsARB(GLuint count);
+void APIENTRY glMaxShaderCompilerThreadsKHR(GLuint count);
 }  // extern "C"
 
 namespace {
@@ -1731,6 +1733,8 @@ const ProcEntry kProcTable[] = {
     {"glMateriali", reinterpret_cast<AppGLProc>(&::glMateriali)},
     {"glMaterialiv", reinterpret_cast<AppGLProc>(&::glMaterialiv)},
     {"glMatrixMode", reinterpret_cast<AppGLProc>(&::glMatrixMode)},
+    {"glMaxShaderCompilerThreadsARB", reinterpret_cast<AppGLProc>(&::glMaxShaderCompilerThreadsARB)},
+    {"glMaxShaderCompilerThreadsKHR", reinterpret_cast<AppGLProc>(&::glMaxShaderCompilerThreadsKHR)},
     {"glMemoryBarrier", reinterpret_cast<AppGLProc>(&::glMemoryBarrier)},
     {"glMemoryBarrierByRegion", reinterpret_cast<AppGLProc>(&::glMemoryBarrierByRegion)},
     {"glMemoryBarrierEXT", reinterpret_cast<AppGLProc>(&::glMemoryBarrierEXT)},

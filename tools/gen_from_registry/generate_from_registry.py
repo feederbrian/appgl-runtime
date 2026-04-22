@@ -59,6 +59,25 @@ EXTRA_ALIASES = [
     ("glBindRenderbufferEXT", "glBindRenderbuffer"),
 ]
 
+# Extension commands whose names aren't reachable through the core-
+# feature walk (because the ARB/KHR extension lacks a core target and
+# the registry doesn't expose the extension in our SUPPORTED_FEATURES
+# list) but which we implement by hand. The generator emits a forward
+# declaration + proc-table entry for each; the real definition lives
+# somewhere under src/runtime or src/context and matches the signature
+# below.
+#
+# Each entry is (name, return_type, args_decl). Kept in sync with the
+# matching `extern "C"` definition in the hand-written source file.
+MANUAL_EXTENSION_COMMANDS = [
+    # GL_ARB_parallel_shader_compile / GL_KHR_parallel_shader_compile —
+    # hand-written in src/runtime/AppGLGroup8.cpp. Our compile path
+    # is synchronous, so the count argument is stored for query
+    # round-trips but has no threading effect.
+    ("glMaxShaderCompilerThreadsARB", "void", "GLuint count"),
+    ("glMaxShaderCompilerThreadsKHR", "void", "GLuint count"),
+]
+
 # Fixed-function entry points whose silent-stub bodies in
 # gl_fixed_function.gen.cpp must be SUPPRESSED so a hand-written file
 # elsewhere in the runtime can provide the real `extern "C" APIENTRY`
@@ -1033,6 +1052,8 @@ def generate_proc_address_cpp(
         all_names.add(entry["name"])
     for entry in fixed_function:
         all_names.add(entry["name"])
+    for name, _ret, _args in MANUAL_EXTENSION_COMMANDS:
+        all_names.add(name)
     sorted_names = sorted(all_names)
 
     lines = [
@@ -1058,6 +1079,8 @@ def generate_proc_address_cpp(
         lines.append(
             f'{entry["return_type"]} APIENTRY {entry["name"]}({entry["args_decl"]});'
         )
+    for name, ret, args in MANUAL_EXTENSION_COMMANDS:
+        lines.append(f'{ret} APIENTRY {name}({args});')
     lines.extend(
         [
             "}  // extern \"C\"",
