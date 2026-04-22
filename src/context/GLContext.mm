@@ -10556,7 +10556,13 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
             pname == GL_TEXTURE_COMPARE_MODE || pname == GL_TEXTURE_COMPARE_FUNC ||
             pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_MAX_ANISOTROPY);
         if (isMSTarget && isSamplerPname) {
-            pushError(GL_INVALID_OPERATION);
+            // GL 4.6 §8.10 table 23.18 — multisample targets reject
+            // every sampler-state pname with INVALID_ENUM (not
+            // INVALID_OPERATION). CTS
+            // `texture_border_clamp.texparameteri_errors` exercises
+            // the full (target × pname) matrix and dispatches on the
+            // expected error code.
+            pushError(GL_INVALID_ENUM);
             return false;
         }
         // Buffer textures reject every sampler-state pname AND the
@@ -10693,7 +10699,13 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
         // (core spec wording). Buffer target + sampler/level pname is
         // INVALID_ENUM (buffer textures have no filter/mipmap state).
         if (isMSTarget && isSamplerPname) {
-            pushError(GL_INVALID_OPERATION);
+            // GL 4.6 §8.10 table 23.18 — multisample targets reject
+            // every sampler-state pname with INVALID_ENUM (not
+            // INVALID_OPERATION). CTS
+            // `texture_border_clamp.texparameteri_errors` exercises
+            // the full (target × pname) matrix and dispatches on the
+            // expected error code.
+            pushError(GL_INVALID_ENUM);
             return false;
         }
         if (isBufferTarget &&
