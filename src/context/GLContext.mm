@@ -17849,6 +17849,11 @@ bool GLContext::linkProgram(GLuint program) {
     // Step 7-3 compute follow-up: release the retained MTLFunction.
     releaseRetainedMetalObject(programObject->metalComputeFunction);
     programObject->metalComputeFunction = nullptr;
+    // Step 7-4: release cached graphics-stage MTLFunctions on relink.
+    releaseRetainedMetalObject(programObject->metalVertexFunction);
+    programObject->metalVertexFunction = nullptr;
+    releaseRetainedMetalObject(programObject->metalFragmentFunction);
+    programObject->metalFragmentFunction = nullptr;
     // Phase 8X Group 4d follow-up¹⁴ — release every cached pipeline
     // on relink so the map doesn't hold stale id<MTLRenderPipelineState>
     // pointers derived from the old MSL. The scalar `metalPipelineState`
@@ -21705,6 +21710,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             tdi.pipelineStateOut = &program->metalPipelineState;
             tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
             tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+            tdi.metalVertexFunction = program->metalVertexFunction;
+            tdi.metalFragmentFunction = program->metalFragmentFunction;
+            tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+            tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
             tdi.program = programName;
 
             // Uniform layout (cached).
@@ -21827,6 +21836,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // so spring's 15×/frame blend toggle doesn't thrash
                     // the single-slot scalar cache above.
                     tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.metalVertexFunction = program->metalVertexFunction;
+                    tdi.metalFragmentFunction = program->metalFragmentFunction;
+                    tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+                    tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                     // Phase 8X Group 4d follow-up⁸ — diagnostic-only
                     // program identifier used by encodeTranslatedDraw's
                     // first-draw-per-program NSLog. Non-owning, no
@@ -22158,6 +22171,10 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             tdi.pipelineStateOut = &program->metalPipelineState;
             tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
             tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+            tdi.metalVertexFunction = program->metalVertexFunction;
+            tdi.metalFragmentFunction = program->metalFragmentFunction;
+            tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+            tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
             tdi.program = programName;
             if (!program->uniformLayoutComputed) {
                 computeStageUniformLayout(program->vertexUniformLayout,
@@ -22270,6 +22287,10 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // so spring's 15×/frame blend toggle doesn't thrash
                     // the single-slot scalar cache above.
                     tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.metalVertexFunction = program->metalVertexFunction;
+                    tdi.metalFragmentFunction = program->metalFragmentFunction;
+                    tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+                    tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                     // Phase 8X Group 4d follow-up⁸ — diagnostic-only
                     // program identifier used by encodeTranslatedDraw's
                     // first-draw-per-program NSLog. Non-owning, no
@@ -22689,6 +22710,10 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     // so spring's 15×/frame blend toggle doesn't thrash
                     // the single-slot scalar cache above.
                     tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.metalVertexFunction = program->metalVertexFunction;
+                    tdi.metalFragmentFunction = program->metalFragmentFunction;
+                    tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+                    tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                     // Phase 8X Group 4d follow-up⁸ — diagnostic-only
                     // program identifier used by encodeTranslatedDraw's
                     // first-draw-per-program NSLog. Non-owning, no
@@ -23044,6 +23069,10 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
                     tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.metalVertexFunction = program->metalVertexFunction;
+                    tdi.metalFragmentFunction = program->metalFragmentFunction;
+                    tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+                    tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                     tdi.program = programName;
 
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
@@ -23398,6 +23427,10 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.pipelineStateOut = &program->metalPipelineState;
                     tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
                     tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+                    tdi.metalVertexFunction = program->metalVertexFunction;
+                    tdi.metalFragmentFunction = program->metalFragmentFunction;
+                    tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+                    tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                     tdi.program = programName;
 
                     // Gather vertex attributes — group by (VBO, stride, divisor).

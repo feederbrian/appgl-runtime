@@ -353,6 +353,22 @@ struct TranslatedDrawInfo {
     // bookkeeping keeps working.
     std::unordered_map<std::uint64_t, void*>* pipelineStateCacheOut = nullptr;
 
+    // Step 7-4: MTLFunction cache slots. Under APPGL_ENABLE_ARGUMENT_BUFFERS
+    // the argbuf-encoder path needs the MTLFunction for
+    // `newArgumentEncoderWithBufferIndex:`. Pre-7-4 we forced a
+    // pipeline-cache miss on every draw so vertFn/fragFn stayed in
+    // the build-branch scope — expensive. Now, populated once on
+    // first build and reused for every subsequent draw. Input
+    // `metalVertexFunction` (read by encodeTranslatedDraw) comes
+    // from GLProgramObject; output `metalVertexFunctionOut` (written
+    // on the first build branch) is a pointer to the same slot for
+    // retaining the newly-created MTLFunction. Parallel pair for
+    // fragment.
+    void* metalVertexFunction = nullptr;         // id<MTLFunction>
+    void* metalFragmentFunction = nullptr;       // id<MTLFunction>
+    void** metalVertexFunctionOut = nullptr;     // &programObject->metalVertexFunction
+    void** metalFragmentFunctionOut = nullptr;   // &programObject->metalFragmentFunction
+
     // Phase 8X Group 4d follow-up⁴ — pipeline-build failure surfacing.
     //
     // Non-owning. When non-null, encodeTranslatedDraw populates this string

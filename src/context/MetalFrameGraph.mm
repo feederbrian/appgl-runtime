@@ -932,26 +932,24 @@ struct MetalFrameGraph::Impl {
         // stage per descriptor-set-in-use and bind it at the pinned
         // [[buffer(24)]] / [[buffer(25)]] slots.
         //
-        // Scope for this commit (7-3 MVP): textures only. UBOs / SSBOs
-        // follow in 7-3 successor commits. Tests with UBOs will still
-        // fail under argbuf mode (the shader's spvDescriptorSetBuffer1
-        // member would read garbage); tests with just samplers
-        // (texture_swizzle VS-sampling) are the target.
-        //
-        // We force a pipeline-cache miss under argbuf mode so the
-        // MTLFunction stays alive in scope after the pipeline build —
-        // `newArgumentEncoderWithBufferIndex:` has to be called on the
-        // MTLFunction, not on the pipeline state. This costs a pipeline
-        // rebuild per draw; optimization (caching the encoder alongside
-        // the pipeline) is 7-4.
+        // Step 7-4: MTLFunction caching via
+        // `info.metalVertexFunction{,Out}` and `info.metalFragmentFunction{,Out}`.
+        // First pipeline build under argbuf retains the vertex + fragment
+        // MTLFunction on the GLProgramObject; subsequent draws reuse the
+        // cache and skip the pipeline-rebuild cost. This undoes the pre-7-4
+        // pipeline-cache-miss forcing we used to keep MTLFunctions in scope.
         const bool useArgBuf = (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         id<MTLArgumentEncoder> fragArgEncoderSet0 = nil;
         id<MTLArgumentEncoder> vertArgEncoderSet0 = nil;
         id<MTLArgumentEncoder> fragArgEncoderSet1 = nil;
         id<MTLArgumentEncoder> vertArgEncoderSet1 = nil;
+        // Seeded from the program's cached functions; populated by the
+        // pipeline-build branch on first miss.
+        id<MTLFunction> cachedVertFn = (__bridge id<MTLFunction>)info.metalVertexFunction;
+        id<MTLFunction> cachedFragFn = (__bridge id<MTLFunction>)info.metalFragmentFunction;
 
         id<MTLRenderPipelineState> pipelineState = nil;
-        if (!useArgBuf && info.pipelineStateCacheOut != nullptr) {
+        if (info.pipelineStateCacheOut != nullptr) {
             auto it = info.pipelineStateCacheOut->find(pipelineCacheKey);
             if (it != info.pipelineStateCacheOut->end() && it->second != nullptr) {
                 pipelineState = (__bridge id<MTLRenderPipelineState>)(it->second);
@@ -962,7 +960,7 @@ struct MetalFrameGraph::Impl {
         // diagnostic bookkeeping (`pipelineStateOut` is still read by
         // BAR tooling) — only honoured when the map path is missing,
         // which never happens in the current draw builders.
-        if (!useArgBuf && pipelineState == nil && info.pipelineStateCacheOut == nullptr &&
+        if (pipelineState == nil && info.pipelineStateCacheOut == nullptr &&
             info.pipelineStateOut != nullptr && *info.pipelineStateOut != nullptr &&
             info.pipelineColorFormatOut != nullptr &&
             *info.pipelineColorFormatOut == static_cast<std::uint32_t>(colorFormat)) {
@@ -1049,6 +1047,16 @@ struct MetalFrameGraph::Impl {
                 recordBuildFailure("vertex-function", vertFnError);
                 return false;
             }
+            // Step 7-4: cache the MTLFunction on the program so future
+            // pipeline-cache hits can still reach it for argbuf encoder
+            // creation. Only populated when the caller opts in by
+            // supplying the out-slot (argbuf mode). CFBridgingRetain
+            // transfers ownership; released at relink in GLContext.
+            if (useArgBuf && info.metalVertexFunctionOut != nullptr &&
+                *info.metalVertexFunctionOut == nullptr) {
+                *info.metalVertexFunctionOut = (void*)CFBridgingRetain(vertFn);
+                cachedVertFn = vertFn;
+            }
 
             // ADV-2: compile fragment MSL via the library cache.
             // Skipped entirely for VS-only + rasterizerDiscard draws —
@@ -1085,6 +1093,13 @@ struct MetalFrameGraph::Impl {
                     recordBuildFailure("fragment-function", fragFnError);
                     return false;
                 }
+                // Step 7-4: cache the fragment MTLFunction. See the
+                // matching vertex-function block above.
+                if (useArgBuf && info.metalFragmentFunctionOut != nullptr &&
+                    *info.metalFragmentFunctionOut == nullptr) {
+                    *info.metalFragmentFunctionOut = (void*)CFBridgingRetain(fragFn);
+                    cachedFragFn = fragFn;
+                }
             }
 
             // Step 7-3: create per-stage argument encoders for desc_set 0
@@ -1103,55 +1118,6 @@ struct MetalFrameGraph::Impl {
             // images + SSBOs). Desc_set 1 (UBOs at [[buffer(25)]]) + the
             // compute stage + the various non-texture resource types are
             // 7-3 successor commits.
-            if (useArgBuf) {
-                // Gate on the per-stage texture list being non-empty.
-                // `newArgumentEncoderWithBufferIndex:24` asserts
-                // "bufferIndex 24 does not identify an argument buffer"
-                // on functions whose compiled MSL has no [[buffer(24)]]
-                // parameter (e.g. an FS with no samplers, or a VS whose
-                // GLSL only sampled in a sibling stage). The fragment/
-                // vertex textures list is populated upstream by
-                // resolveSamplerBindings only when the program has at
-                // least one sampler declared in the stage, so it's a
-                // reliable proxy for "this stage has a spvDescriptorSet
-                // Buffer0 argument".
-                // Per-stage set-0 needed when the stage has textures
-                // (sampled or storage image, same list) OR SSBOs.
-                bool vertNeedsSet0 = !info.vertexTextures.empty();
-                bool fragNeedsSet0 = !info.fragmentTextures.empty();
-                for (const auto& ssbo : info.ssboBindings) {
-                    if (ssbo.metalBuffer == nullptr) continue;
-                    if (ssbo.isVertex)   vertNeedsSet0 = true;
-                    if (ssbo.isFragment) fragNeedsSet0 = true;
-                }
-                if (vertFn != nil && vertNeedsSet0) {
-                    vertArgEncoderSet0 = [vertFn newArgumentEncoderWithBufferIndex:24];
-                }
-                if (fragFn != nil && fragNeedsSet0) {
-                    fragArgEncoderSet0 = [fragFn newArgumentEncoderWithBufferIndex:24];
-                }
-                // Step 7-3 UBO follow-up: desc_set 1 argument buffer at
-                // [[buffer(25)]] holds the default-uniform block and any
-                // explicit `uniform Block { … }` UBOs. Per-stage check:
-                // either stage's default uniform buffer has data, OR any
-                // uboBindings flagged for this stage.
-                bool vertNeedsSet1 = (info.vertexUniformData != nullptr &&
-                                       info.vertexUniformSize > 0);
-                bool fragNeedsSet1 = (info.fragmentUniformData != nullptr &&
-                                       info.fragmentUniformSize > 0);
-                for (const auto& ubo : info.uboBindings) {
-                    if (ubo.size == 0) continue;
-                    if (ubo.isVertex)   vertNeedsSet1 = true;
-                    if (ubo.isFragment) fragNeedsSet1 = true;
-                }
-                if (vertFn != nil && vertNeedsSet1) {
-                    vertArgEncoderSet1 = [vertFn newArgumentEncoderWithBufferIndex:25];
-                }
-                if (fragFn != nil && fragNeedsSet1) {
-                    fragArgEncoderSet1 = [fragFn newArgumentEncoderWithBufferIndex:25];
-                }
-            }
-
             // Build vertex descriptor from reflection data.  Primary vertex
             // attributes (buffer 0) are per-vertex.  Extra vertex buffers
             // (buffer 1+) may use per-instance stepping (glVertexAttribDivisor).
@@ -1693,6 +1659,53 @@ struct MetalFrameGraph::Impl {
             }
             if (info.pipelineColorFormatOut != nullptr) {
                 *info.pipelineColorFormatOut = static_cast<std::uint32_t>(colorFormat);
+            }
+        }
+
+        // Step 7-4: create per-stage argument encoders AFTER the
+        // pipeline-cache-resolve branch so cache hits share them with
+        // cache misses. Uses cachedVertFn / cachedFragFn hoisted
+        // at the top of this function — seeded from
+        // `info.metalVertexFunction` / `info.metalFragmentFunction`
+        // (the program's cached retains), then updated by the
+        // build-branch cache-write so first-build + subsequent cache-
+        // hit paths see the same `id<MTLFunction>`.
+        //
+        // `newArgumentEncoderWithBufferIndex:24` asserts "bufferIndex
+        // N does not identify an argument buffer" on stages whose
+        // compiled MSL lacks the [[buffer(N)]] parameter — gated on
+        // the per-stage resource-presence check: desc_set 0 if the
+        // stage has textures (sampled or storage; same list) or any
+        // SSBO; desc_set 1 if the stage has a default uniform block
+        // or any UBO.
+        if (useArgBuf) {
+            bool vertNeedsSet0 = !info.vertexTextures.empty();
+            bool fragNeedsSet0 = !info.fragmentTextures.empty();
+            for (const auto& ssbo : info.ssboBindings) {
+                if (ssbo.metalBuffer == nullptr) continue;
+                if (ssbo.isVertex)   vertNeedsSet0 = true;
+                if (ssbo.isFragment) fragNeedsSet0 = true;
+            }
+            if (cachedVertFn != nil && vertNeedsSet0) {
+                vertArgEncoderSet0 = [cachedVertFn newArgumentEncoderWithBufferIndex:24];
+            }
+            if (cachedFragFn != nil && fragNeedsSet0) {
+                fragArgEncoderSet0 = [cachedFragFn newArgumentEncoderWithBufferIndex:24];
+            }
+            bool vertNeedsSet1 = (info.vertexUniformData != nullptr &&
+                                   info.vertexUniformSize > 0);
+            bool fragNeedsSet1 = (info.fragmentUniformData != nullptr &&
+                                   info.fragmentUniformSize > 0);
+            for (const auto& ubo : info.uboBindings) {
+                if (ubo.size == 0) continue;
+                if (ubo.isVertex)   vertNeedsSet1 = true;
+                if (ubo.isFragment) fragNeedsSet1 = true;
+            }
+            if (cachedVertFn != nil && vertNeedsSet1) {
+                vertArgEncoderSet1 = [cachedVertFn newArgumentEncoderWithBufferIndex:25];
+            }
+            if (cachedFragFn != nil && fragNeedsSet1) {
+                fragArgEncoderSet1 = [cachedFragFn newArgumentEncoderWithBufferIndex:25];
             }
         }
 
@@ -2330,14 +2343,17 @@ struct MetalFrameGraph::Impl {
                 if (encoder == nil) return;
                 const NSUInteger len = [encoder encodedLength];
                 if (len == 0) return;
-                // One-shot per-draw argument buffer. newBufferWithLength
-                // allocates from the Metal device's shared pool; ARC lets
-                // it drop after the GPU completes. A ring-buffer variant
-                // is step 7-4 optimisation.
-                id<MTLBuffer> argBuf = [device newBufferWithLength:len
-                                                           options:MTLResourceStorageModeShared];
+                // Step 7-4: ring-buffer sub-allocation for the
+                // argument buffer. Avoids per-draw
+                // newBufferWithLength churn — a single 16-MB ring slot
+                // holds hundreds of argbufs until the GPU completes
+                // the frame. Falls back to newBufferWithLength on ring
+                // overflow (single draw exceeds remaining space).
+                RingAlloc argBufAlloc = ringAllocRaw(len);
+                id<MTLBuffer> argBuf = argBufAlloc.buffer;
+                const NSUInteger argBufOffset = argBufAlloc.offset;
                 if (argBuf == nil) return;
-                [encoder setArgumentBuffer:argBuf offset:0];
+                [encoder setArgumentBuffer:argBuf offset:argBufOffset];
                 for (const auto& binding : textures) {
                     if (binding.metalTexture == nullptr) continue;
                     id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
@@ -2391,9 +2407,9 @@ struct MetalFrameGraph::Impl {
                                                stages:stage];
                 }
                 if (isFragment) {
-                    [currentRenderEncoder setFragmentBuffer:argBuf offset:0 atIndex:24];
+                    [currentRenderEncoder setFragmentBuffer:argBuf offset:argBufOffset atIndex:24];
                 } else {
-                    [currentRenderEncoder setVertexBuffer:argBuf offset:0 atIndex:24];
+                    [currentRenderEncoder setVertexBuffer:argBuf offset:argBufOffset atIndex:24];
                 }
             };
             encodeTexturesIntoArgBuf(fragArgEncoderSet0, info.fragmentTextures,
@@ -2425,10 +2441,14 @@ struct MetalFrameGraph::Impl {
                 if (encoder == nil) return;
                 const NSUInteger len = [encoder encodedLength];
                 if (len == 0) return;
-                id<MTLBuffer> argBuf = [device newBufferWithLength:len
-                                                           options:MTLResourceStorageModeShared];
+                // Step 7-4: ring-buffer sub-allocation for the UBO
+                // argument buffer (matches the set-0 texture argbuf
+                // allocation above).
+                RingAlloc argBufAlloc = ringAllocRaw(len);
+                id<MTLBuffer> argBuf = argBufAlloc.buffer;
+                const NSUInteger argBufOffset = argBufAlloc.offset;
                 if (argBuf == nil) return;
-                [encoder setArgumentBuffer:argBuf offset:0];
+                [encoder setArgumentBuffer:argBuf offset:argBufOffset];
 
                 // Default uniform block at [[id(16)]].
                 if (uniformData != nullptr && uniformSize > 0) {
@@ -2467,9 +2487,9 @@ struct MetalFrameGraph::Impl {
                 }
 
                 if (isVertex) {
-                    [currentRenderEncoder setVertexBuffer:argBuf offset:0 atIndex:25];
+                    [currentRenderEncoder setVertexBuffer:argBuf offset:argBufOffset atIndex:25];
                 } else {
-                    [currentRenderEncoder setFragmentBuffer:argBuf offset:0 atIndex:25];
+                    [currentRenderEncoder setFragmentBuffer:argBuf offset:argBufOffset atIndex:25];
                 }
             };
             encodeUBOsIntoArgBuf(fragArgEncoderSet1,
@@ -3558,10 +3578,13 @@ fragment float4 appgl_immediate_textured_fs(
             if (argEncSet0 != nil) {
                 const NSUInteger len0 = [argEncSet0 encodedLength];
                 if (len0 > 0) {
-                    id<MTLBuffer> buf0 = [device newBufferWithLength:len0
-                                                              options:MTLResourceStorageModeShared];
+                    // Step 7-4: ring-buffer sub-allocation for compute
+                    // desc_set 0 argument buffer.
+                    RingAlloc alloc0 = ringAllocRaw(len0);
+                    id<MTLBuffer> buf0 = alloc0.buffer;
+                    const NSUInteger buf0Offset = alloc0.offset;
                     if (buf0 != nil) {
-                        [argEncSet0 setArgumentBuffer:buf0 offset:0];
+                        [argEncSet0 setArgumentBuffer:buf0 offset:buf0Offset];
                         for (const auto& tb : info.textures) {
                             id<MTLTexture> tex = (__bridge id<MTLTexture>)tb.metalTexture;
                             if (tex == nil) continue;
@@ -3591,17 +3614,20 @@ fragment float4 appgl_immediate_textured_fs(
                             [enc useResource:buf
                                         usage:MTLResourceUsageRead|MTLResourceUsageWrite];
                         }
-                        [enc setBuffer:buf0 offset:0 atIndex:24];
+                        [enc setBuffer:buf0 offset:buf0Offset atIndex:24];
                     }
                 }
             }
             if (argEncSet1 != nil) {
                 const NSUInteger len1 = [argEncSet1 encodedLength];
                 if (len1 > 0) {
-                    id<MTLBuffer> buf1 = [device newBufferWithLength:len1
-                                                              options:MTLResourceStorageModeShared];
+                    // Step 7-4: ring-buffer sub-allocation for compute
+                    // desc_set 1 argument buffer.
+                    RingAlloc alloc1 = ringAllocRaw(len1);
+                    id<MTLBuffer> buf1 = alloc1.buffer;
+                    const NSUInteger buf1Offset = alloc1.offset;
                     if (buf1 != nil) {
-                        [argEncSet1 setArgumentBuffer:buf1 offset:0];
+                        [argEncSet1 setArgumentBuffer:buf1 offset:buf1Offset];
                         if (hasUniformData) {
                             RingAlloc alloc = ringSuballocate(
                                 info.computeUniformData, info.computeUniformSize);
@@ -3613,7 +3639,7 @@ fragment float4 appgl_immediate_textured_fs(
                                             usage:MTLResourceUsageRead];
                             }
                         }
-                        [enc setBuffer:buf1 offset:0 atIndex:25];
+                        [enc setBuffer:buf1 offset:buf1Offset atIndex:25];
                     }
                 }
             }
@@ -4091,6 +4117,28 @@ private:
         // Overflow fallback: single draw exceeds remaining space.
         id<MTLBuffer> fallback = [device newBufferWithBytes:src
                                                       length:byteCount
+                                                     options:MTLResourceStorageModeShared];
+        return { fallback, 0 };
+    }
+
+    // Step 7-4: raw ring-buffer suballocation without copy. Returns
+    // writable {buffer, offset} backing the requested byteCount. The
+    // caller writes into the buffer (via MTLArgumentEncoder or manual
+    // memcpy) and passes {buffer, offset} to `setFragmentBuffer:offset:`
+    // etc. Mirrors `ringSuballocate` minus the memcpy. Used for
+    // argument-buffer allocation under APPGL_ENABLE_ARGUMENT_BUFFERS —
+    // replaces the per-draw `newBufferWithLength:` churn (one 16-MB
+    // ring slot holds hundreds of argbufs).
+    RingAlloc ringAllocRaw(std::size_t byteCount) {
+        ensureRingBuffers();
+        const std::size_t aligned = (byteCount + kRingBufferAlign - 1) & ~(kRingBufferAlign - 1);
+        id<MTLBuffer> active = ringBuffers[ringBufferIndex];
+        if (active != nil && ringBufferOffset + byteCount <= kRingBufferSize) {
+            std::size_t thisOffset = ringBufferOffset;
+            ringBufferOffset += aligned;
+            return { active, thisOffset };
+        }
+        id<MTLBuffer> fallback = [device newBufferWithLength:byteCount
                                                      options:MTLResourceStorageModeShared];
         return { fallback, 0 };
     }

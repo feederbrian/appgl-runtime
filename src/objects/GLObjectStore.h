@@ -763,6 +763,18 @@ struct GLProgramObject {
     // rebuilding the MTLFunction on every dispatch. Released at the
     // same lifetime as metalComputePipelineState.
     void* metalComputeFunction = nullptr;
+    // Step 7-4: retained id<MTLFunction> for vertex + fragment
+    // entry points, populated on the first graphics pipeline build
+    // when APPGL_ENABLE_ARGUMENT_BUFFERS is set. Without this cache
+    // `encodeTranslatedDraw` was forced to miss the pipeline cache
+    // on every argbuf draw (the MTLFunction had to stay in scope
+    // after `newFunctionWithName:` so we could call
+    // `newArgumentEncoderWithBufferIndex:` on it). With the cache,
+    // pipeline cache hits restore their O(0) cost and the encoder
+    // creation reads from this program-scoped retain. Released on
+    // relink / program-delete alongside the PSO.
+    void* metalVertexFunction = nullptr;
+    void* metalFragmentFunction = nullptr;
 
     // Phase 8X Group 4d follow-up⁴ — per-stage source hashes captured at
     // link time. Used by the pipeline-build failure path in the translated
