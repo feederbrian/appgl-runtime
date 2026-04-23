@@ -3992,15 +3992,42 @@ struct GLContext::Impl {
                 // consecutive slots. The matching GL uniform has
                 // arraySize > 1, and `ints[i]` holds the texture unit for
                 // element i. We loop over all elements below.
+                //
+                // Step 8: sampler-name reverse-rename fallback. CompatShader-
+                // Rewrite renames GLSL reserved keywords (`sampler`,
+                // `texture`, etc.) to `_appgl_<name>` before handing the
+                // source to glslang so those keyword-clashing names compile.
+                // SPIRV-Cross's reflection then reports the rewritten name
+                // (e.g. `_appgl_sampler`). `program.uniforms` was
+                // reverse-renamed back to the original GLSL name at link
+                // time so the app-facing query API sees `sampler`, which
+                // makes the direct `uinfo.name == sampledTex.name` match
+                // fail for the renamed cases. Concrete failure:
+                // `KHR-GL46.layout_location.sampler_1d` (FS has
+                // `uniform sampler1D sampler;` — the reserved name IS the
+                // uniform identifier). Attempt a reverse-rename match if
+                // the direct lookup misses.
                 GLint uniformLocation = -1;
                 GLint samplerArraySize = 1;
                 GLenum samplerGLType = 0;
-                for (const auto& uinfo : program.uniforms) {
-                    if (uinfo.name == sampledTex.name) {
-                        uniformLocation = uinfo.location;
-                        samplerArraySize = std::max<GLint>(uinfo.arraySize, 1);
-                        samplerGLType = uinfo.type;
-                        break;
+                auto matchUniform = [&](const std::string& name) -> bool {
+                    for (const auto& uinfo : program.uniforms) {
+                        if (uinfo.name == name) {
+                            uniformLocation = uinfo.location;
+                            samplerArraySize = std::max<GLint>(uinfo.arraySize, 1);
+                            samplerGLType = uinfo.type;
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                if (!matchUniform(sampledTex.name)) {
+                    // Try stripping `_appgl_` prefix — the one SPIRV-Cross
+                    // carries forward from our CompatShaderRewrite output.
+                    constexpr const char* kAppglPrefix = "_appgl_";
+                    constexpr std::size_t kAppglPrefixLen = 7;
+                    if (sampledTex.name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                        matchUniform(sampledTex.name.substr(kAppglPrefixLen));
                     }
                 }
 
