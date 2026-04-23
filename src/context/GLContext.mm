@@ -6534,6 +6534,16 @@ struct GLContext::Impl {
 
         if (metalTex == nil) return false;
 
+        // MSAA source textures can't be read via `getBytes:` — Metal
+        // aborts with a SIGSEGV inside AGX. `readColorAttachmentPixels`
+        // (the fallback RGBA8 path) already has an explicit
+        // MultisampleResolve step that handles this case, so return
+        // false here to let the caller (glReadPixels) retry through
+        // the RGBA8 fallback. Without this, the full CTS cold sweep
+        // crashes at `framebuffer_blit.multisampled_to_single_sampled_*`
+        // after ~865 tests and loses the remaining ~18,000-test body.
+        if (metalTex.sampleCount > 1) return false;
+
         // Determine source bytes-per-pixel from the Metal pixel format.
         MTLPixelFormat pf = metalTex.pixelFormat;
         NSUInteger srcBpp = 0;
