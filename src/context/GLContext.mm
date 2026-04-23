@@ -21243,6 +21243,56 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     APPGL_LOG(DRAW, @"drawArrays: mode=0x%X count=%d program=%u hasTranslated=%d",
               mode, count, programName, program ? (int)program->hasTranslatedPipeline : -1);
 
+    // CPU TES emulation — phase-3e-3 hook. Metal has no tessellation
+    // stage; for programs whose TES body matches a recognised
+    // passthrough/affine shape (matchTessEvalPassthrough in
+    // TessellationEmulator.cpp), we generate the domain on the CPU
+    // and render the expanded-vertex buffer through the same synth-
+    // VS path the GS emulator uses.
+    //
+    // Detection happened at link time. If detectTessellationEmulatable
+    // returned false (or APPGL_ENABLE_TESS_EMUL is unset), the flag
+    // stays false and this branch is a no-op — the draw falls through
+    // to the legacy translated path (which doesn't actually tessellate,
+    // same behaviour as before the emulator existed).
+    //
+    // GS+TES together: if a program has both emulable stages, skip
+    // the tess path here and let the GS emulator run. Combining the
+    // two is phase 6+ work.
+    if (program != nullptr && program->tessellationEmulated &&
+        !program->geometryEmulated) {
+        const GLuint vaoName = impl_->state->boundVertexArray();
+        GLVertexArrayObject* tvao = (vaoName != 0)
+            ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        if (tvao != nullptr) {
+            appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
+                *program, *tvao, *impl_->objects, *impl_->state,
+                mode, count, first, /*elementIndices=*/nullptr);
+            if (ted.ok) {
+                // GL_RASTERIZER_DISCARD: skip the encode — there is no
+                // TES-side XFB capture yet (phase 5+), so we just
+                // consume the draw.
+                if (impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
+                    APPGL_LOG(DRAW, @"drawArrays tess-emul: rasterizer discard");
+                    return true;
+                }
+                if (ted.vertexCount == 0) {
+                    APPGL_LOG(DRAW, @"drawArrays tess-emul: zero verts");
+                    return true;
+                }
+                if (impl_->encodeEmulatedGsDraw(*program, programName, ted)) {
+                    APPGL_LOG(DRAW, @"drawArrays tess-emul ok: verts=%zu topo=0x%X",
+                              ted.vertexCount, ted.topology);
+                    return true;
+                }
+                APPGL_LOG(SHADER, @"drawArrays tess-emul encode failed");
+                // Fall through to legacy path if encode fails.
+            } else if (!ted.diagnostic.empty()) {
+                APPGL_LOG(SHADER, @"drawArrays tess-emul: %s", ted.diagnostic.c_str());
+            }
+        }
+    }
+
     // CPU GS emulation — step 3 hook. Metal has no geometry-shader
     // stage; for the narrow subset in KHR-GL46.constant_expressions.
     // *_geometry we run the GS on the CPU (see
