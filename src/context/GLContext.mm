@@ -1737,6 +1737,19 @@ struct GLContext::Impl {
             case MTLPixelFormatRGB10A2Unorm:  return {0, 0, 4, NativeFormatInfo::UNorm};
             case MTLPixelFormatRGB10A2Uint:   return {0, 0, 4, NativeFormatInfo::UInt};
             case MTLPixelFormatRG11B10Float:  return {0, 0, 4, NativeFormatInfo::Float};
+            // ── Depth / stencil ──
+            // Metal's depth formats expose a single float or UNorm
+            // channel for sampling purposes. The `buildNativeUpload`
+            // path treats the GL source depth component as normalized
+            // [0..1] and stores it in whichever native depth-type
+            // layout the destination uses. Required so
+            // `glTexSubImage2D(GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT,
+            // …)` actually populates `image.nativeData` — without
+            // this the level stays zero-filled and shadow-compare
+            // samples always miss. Unlocks
+            // KHR-GL46.layout_location.sampler_*_shadow.
+            case MTLPixelFormatDepth16Unorm:  return {1, 2, 2, NativeFormatInfo::UNorm};
+            case MTLPixelFormatDepth32Float:  return {1, 4, 4, NativeFormatInfo::Float};
             default: return {0, 0, 0, NativeFormatInfo::UNorm};
         }
     }
@@ -2680,6 +2693,44 @@ struct GLContext::Impl {
                 existing.pixelFormat == wantFormat;
             if (shapeMatches) {
                 const bool useNativePath = (wantFormat != MTLPixelFormatRGBA8Unorm);
+                // Private-storage textures (Apple Silicon depth/stencil)
+                // can't be populated via replaceRegion — mirror the
+                // full-replace branch's blit-from-Shared-buffer upload
+                // path. See the full-replace block below for rationale.
+                const bool fastPathNeedsBlit =
+                    (existing.storageMode == MTLStorageModePrivate);
+                id<MTLCommandBuffer> fpBlitCmdBuf = nil;
+                id<MTLBlitCommandEncoder> fpBlitEnc = nil;
+                auto fpEnsureBlitEnc = [&]() -> bool {
+                    if (fpBlitEnc != nil) return true;
+                    if (commandQueue == nil) return false;
+                    fpBlitCmdBuf = [commandQueue commandBuffer];
+                    if (fpBlitCmdBuf == nil) return false;
+                    fpBlitEnc = [fpBlitCmdBuf blitCommandEncoder];
+                    return fpBlitEnc != nil;
+                };
+                auto fpBlitUpload2D = [&](const std::uint8_t* bytes,
+                                          NSUInteger bytesPerRow,
+                                          NSUInteger bytesPerImage,
+                                          const MTLRegion& region,
+                                          NSUInteger mipLevel,
+                                          NSUInteger slice) -> bool {
+                    if (!fpEnsureBlitEnc()) return false;
+                    id<MTLBuffer> staging = [device newBufferWithBytes:bytes
+                                                                length:bytesPerImage
+                                                               options:MTLResourceStorageModeShared];
+                    if (staging == nil) return false;
+                    [fpBlitEnc copyFromBuffer:staging
+                                 sourceOffset:0
+                            sourceBytesPerRow:bytesPerRow
+                          sourceBytesPerImage:bytesPerImage
+                                   sourceSize:region.size
+                                    toTexture:existing
+                             destinationSlice:slice
+                             destinationLevel:mipLevel
+                            destinationOrigin:region.origin];
+                    return true;
+                };
                 for (const auto& [levelIndex, image] : object.levels) {
                     if (levelIndex < 0 || !image.defined) continue;
                     const std::uint8_t* bytes = nullptr;
@@ -2704,9 +2755,17 @@ struct GLContext::Impl {
                             const MTLRegion r = MTLRegionMake3D(0, 0, slice,
                                 static_cast<NSUInteger>(safeDimension(image.desc.width)),
                                 static_cast<NSUInteger>(safeDimension(image.desc.height)), 1);
-                            [existing replaceRegion:r mipmapLevel:mipLevel
-                                          withBytes:bytes + slice * imageStride
-                                        bytesPerRow:rowStride];
+                            if (fastPathNeedsBlit) {
+                                const MTLRegion zr = MTLRegionMake3D(0, 0, 0,
+                                    r.size.width, r.size.height, 1);
+                                fpBlitUpload2D(bytes + slice * imageStride,
+                                               rowStride, imageStride, zr,
+                                               mipLevel, slice);
+                            } else {
+                                [existing replaceRegion:r mipmapLevel:mipLevel
+                                              withBytes:bytes + slice * imageStride
+                                            bytesPerRow:rowStride];
+                            }
                         }
                     } else if (object.target == GL_TEXTURE_2D_ARRAY) {
                         const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.depth));
@@ -2714,30 +2773,52 @@ struct GLContext::Impl {
                             static_cast<NSUInteger>(safeDimension(image.desc.width)),
                             static_cast<NSUInteger>(safeDimension(image.desc.height)));
                         for (NSUInteger layer = 0; layer < layers; ++layer) {
-                            [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
-                                          withBytes:bytes + layer * imageStride
-                                        bytesPerRow:rowStride
-                                      bytesPerImage:imageStride];
+                            if (fastPathNeedsBlit) {
+                                fpBlitUpload2D(bytes + layer * imageStride,
+                                               rowStride, imageStride, r,
+                                               mipLevel, layer);
+                            } else {
+                                [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
+                                              withBytes:bytes + layer * imageStride
+                                            bytesPerRow:rowStride
+                                          bytesPerImage:imageStride];
+                            }
                         }
                     } else if (object.target == GL_TEXTURE_1D_ARRAY) {
                         const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.height));
                         const MTLRegion r = MTLRegionMake2D(0, 0,
                             static_cast<NSUInteger>(safeDimension(image.desc.width)), 1);
                         for (NSUInteger layer = 0; layer < layers; ++layer) {
-                            [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
-                                          withBytes:bytes + layer * rowStride
-                                        bytesPerRow:rowStride
-                                      bytesPerImage:rowStride];
+                            if (fastPathNeedsBlit) {
+                                fpBlitUpload2D(bytes + layer * rowStride,
+                                               rowStride, rowStride, r,
+                                               mipLevel, layer);
+                            } else {
+                                [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
+                                              withBytes:bytes + layer * rowStride
+                                            bytesPerRow:rowStride
+                                          bytesPerImage:rowStride];
+                            }
                         }
                     } else {
                         const MTLRegion r = MTLRegionMake2D(0, 0,
                             static_cast<NSUInteger>(safeDimension(image.desc.width)),
                             static_cast<NSUInteger>(
                                 object.target == GL_TEXTURE_1D ? 1 : safeDimension(image.desc.height)));
-                        [existing replaceRegion:r mipmapLevel:mipLevel
-                                      withBytes:bytes
-                                    bytesPerRow:rowStride];
+                        if (fastPathNeedsBlit) {
+                            fpBlitUpload2D(bytes, rowStride, imageStride, r,
+                                           mipLevel, 0);
+                        } else {
+                            [existing replaceRegion:r mipmapLevel:mipLevel
+                                          withBytes:bytes
+                                        bytesPerRow:rowStride];
+                        }
                     }
+                }
+                if (fpBlitEnc != nil) {
+                    [fpBlitEnc endEncoding];
+                    [fpBlitCmdBuf commit];
+                    [fpBlitCmdBuf waitUntilCompleted];
                 }
                 object.instantiated = true;
                 (void)texName;
@@ -2874,6 +2955,55 @@ struct GLContext::Impl {
 
         const bool useNativePath = (chosenFormat != MTLPixelFormatRGBA8Unorm);
 
+        // Depth/stencil textures on Apple Silicon are created with
+        // MTLStorageModePrivate (shared storage is rejected at
+        // attachment time — see the descriptor-building comment
+        // above). replaceRegion is undefined on private textures:
+        // Metal silently drops the upload and the texture retains
+        // zero-initialised contents. The only legal way to populate
+        // a private texture is via a blit encoder. Stage the upload
+        // into a Shared MTLBuffer and `copyFromBuffer:toTexture:`
+        // into the destination. Fixes the
+        // `layout_location.sampler_{2d,cube,2d_array,1d,1d_array}_
+        // shadow` cluster which creates DEPTH_COMPONENT16 textures,
+        // calls `texSubImage2D`, and sampler-compare-reads them —
+        // without this the sample_compare always saw 0.0 and
+        // returned the GL_LESS-vs-0 failure color.
+        const bool needsBlitUpload =
+            (texture.storageMode == MTLStorageModePrivate);
+        id<MTLCommandBuffer> blitCmdBuf = nil;
+        id<MTLBlitCommandEncoder> blitEnc = nil;
+        auto ensureBlitEnc = [&]() -> bool {
+            if (blitEnc != nil) return true;
+            if (commandQueue == nil) return false;
+            blitCmdBuf = [commandQueue commandBuffer];
+            if (blitCmdBuf == nil) return false;
+            blitEnc = [blitCmdBuf blitCommandEncoder];
+            return blitEnc != nil;
+        };
+        auto blitUpload2D = [&](const std::uint8_t* bytes,
+                                NSUInteger bytesPerRow,
+                                NSUInteger bytesPerImage,
+                                const MTLRegion& region,
+                                NSUInteger mipLevel,
+                                NSUInteger slice) -> bool {
+            if (!ensureBlitEnc()) return false;
+            id<MTLBuffer> staging = [device newBufferWithBytes:bytes
+                                                        length:bytesPerImage
+                                                       options:MTLResourceStorageModeShared];
+            if (staging == nil) return false;
+            [blitEnc copyFromBuffer:staging
+                       sourceOffset:0
+                  sourceBytesPerRow:bytesPerRow
+                sourceBytesPerImage:bytesPerImage
+                         sourceSize:region.size
+                          toTexture:texture
+                   destinationSlice:slice
+                   destinationLevel:mipLevel
+                  destinationOrigin:region.origin];
+            return true;
+        };
+
         for (const auto& [levelIndex, image] : object.levels) {
             if (levelIndex < 0 || !image.defined) {
                 continue;
@@ -2921,7 +3051,12 @@ struct GLContext::Impl {
                 for (NSUInteger slice = 0; slice < region.size.depth; ++slice) {
                     const MTLRegion sliceRegion = MTLRegionMake3D(0, 0, slice, region.size.width, region.size.height, 1);
                     const auto* sliceBytes = uploadBytes + static_cast<std::size_t>(slice * bytesPerImage);
-                    [texture replaceRegion:sliceRegion mipmapLevel:mipLevel withBytes:sliceBytes bytesPerRow:bytesPerRow];
+                    if (needsBlitUpload) {
+                        const MTLRegion fullSlice = MTLRegionMake3D(0, 0, 0, region.size.width, region.size.height, 1);
+                        blitUpload2D(sliceBytes, bytesPerRow, bytesPerImage, fullSlice, mipLevel, slice);
+                    } else {
+                        [texture replaceRegion:sliceRegion mipmapLevel:mipLevel withBytes:sliceBytes bytesPerRow:bytesPerRow];
+                    }
                 }
             } else if (object.target == GL_TEXTURE_2D_ARRAY) {
                 // Each array layer is a separate Metal slice.
@@ -2929,12 +3064,16 @@ struct GLContext::Impl {
                 const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, region.size.height);
                 for (NSUInteger layer = 0; layer < layers; ++layer) {
                     const auto* layerBytes = uploadBytes + static_cast<std::size_t>(layer * bytesPerImage);
-                    [texture replaceRegion:layerRegion
-                               mipmapLevel:mipLevel
-                                     slice:layer
-                                 withBytes:layerBytes
-                               bytesPerRow:bytesPerRow
-                             bytesPerImage:bytesPerImage];
+                    if (needsBlitUpload) {
+                        blitUpload2D(layerBytes, bytesPerRow, bytesPerImage, layerRegion, mipLevel, layer);
+                    } else {
+                        [texture replaceRegion:layerRegion
+                                   mipmapLevel:mipLevel
+                                         slice:layer
+                                     withBytes:layerBytes
+                                   bytesPerRow:bytesPerRow
+                                 bytesPerImage:bytesPerImage];
+                    }
                 }
             } else if (object.target == GL_TEXTURE_1D_ARRAY) {
                 // GL stores the 1D array layer count in `height`. Each layer
@@ -2944,16 +3083,30 @@ struct GLContext::Impl {
                 const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, 1);
                 for (NSUInteger layer = 0; layer < layers; ++layer) {
                     const auto* layerBytes = uploadBytes + static_cast<std::size_t>(layer * bytesPerRow);
-                    [texture replaceRegion:layerRegion
-                               mipmapLevel:mipLevel
-                                     slice:layer
-                                 withBytes:layerBytes
-                               bytesPerRow:bytesPerRow
-                             bytesPerImage:bytesPerRow];
+                    if (needsBlitUpload) {
+                        blitUpload2D(layerBytes, bytesPerRow, bytesPerRow, layerRegion, mipLevel, layer);
+                    } else {
+                        [texture replaceRegion:layerRegion
+                                   mipmapLevel:mipLevel
+                                         slice:layer
+                                     withBytes:layerBytes
+                                   bytesPerRow:bytesPerRow
+                                 bytesPerImage:bytesPerRow];
+                    }
                 }
             } else {
-                [texture replaceRegion:region mipmapLevel:mipLevel withBytes:uploadBytes bytesPerRow:bytesPerRow];
+                if (needsBlitUpload) {
+                    const MTLRegion region2D = MTLRegionMake2D(0, 0, region.size.width, region.size.height);
+                    blitUpload2D(uploadBytes, bytesPerRow, bytesPerImage, region2D, mipLevel, 0);
+                } else {
+                    [texture replaceRegion:region mipmapLevel:mipLevel withBytes:uploadBytes bytesPerRow:bytesPerRow];
+                }
             }
+        }
+        if (blitEnc != nil) {
+            [blitEnc endEncoding];
+            [blitCmdBuf commit];
+            [blitCmdBuf waitUntilCompleted];
         }
         object.metalTexture = transferRetainedMetalObject(texture);
         // Mark the texture as instantiated so consumers (getTextureImage,
