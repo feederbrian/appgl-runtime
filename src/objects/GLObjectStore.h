@@ -609,6 +609,13 @@ struct GLProgramObject {
     // matcher REJECTS but the classifier says the body is safe to
     // walk. Gated by the same `APPGL_ENABLE_TESS_EMUL=1` opt-in.
     bool tessellationInterpreted = false;
+    // Phase-3f-4: set when the TCS body is interpretable (reads only
+    // gl_PrimitiveID / gl_InvocationID / gl_PatchVerticesIn, writes
+    // gl_TessLevel* + SSBOs). Orthogonal to `tessellationInterpreted`
+    // in principle (a program can have an interpretable TCS + a
+    // passthrough-matched TES) but both draw through the same
+    // interpreter + domain generator. Gated by APPGL_ENABLE_TESS_EMUL=1.
+    bool tessControlInterpreted = false;
     // Phase-3c/3d: when tessellationEmulated is set via the
     // passthrough matcher, these record how to derive each of the 4
     // gl_Position components from a (u,v,w) domain coord at draw time.

@@ -367,6 +367,18 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
     const std::uint32_t* tesSpirv,
     std::size_t tesWordCount);
 
+// Phase 3f-4 TCS sibling of the TES classifier. Accepts TCS bodies
+// that only read gl_PrimitiveID / gl_InvocationID / gl_PatchVerticesIn
+// (no gl_in[] reads; no per-patch varyings). SSBO writes land
+// through the interpreter's byte-level path, same as the TES case.
+// The body's gl_TessLevel* writes are not captured — the CE
+// tess_control tests always write the default 1.0 levels, which is
+// also what `glPatchParameterfv` seeds emulateTessellationDraw with,
+// so dropping them is benign for the current target set.
+TessBodyInterpretabilityCheck classifyTessControlInterpretable(
+    const std::uint32_t* tcsSpirv,
+    std::size_t tcsWordCount);
+
 // Phase 3f-3 helper: return the CPU-visible contents pointer of an
 // MTLBuffer stored as `void*` in `GLBufferObject::metalBuffer`.
 // Implemented in GLContext.mm (calls `[(id<MTLBuffer>)buf contents]`

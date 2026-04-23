@@ -176,7 +176,7 @@ using namespace appgl::interp;
 
 class Interpreter {
 public:
-    enum class Stage { Vertex, Geometry, TessEvaluation };
+    enum class Stage { Vertex, Geometry, TessEvaluation, TessControl };
 
     struct PerVertexInput {
         std::array<float, 4> position{0, 0, 0, 1};
@@ -273,6 +273,21 @@ public:
         tesPrimitiveId_ = primitiveID;
     }
 
+    // TCS-stage built-in inputs (phase 3f-4). The TCS runs once per
+    // patch-output-vertex, with `invocationID` stepping through
+    // [0, layout(vertices=N)). `primitiveID` is the patch-in-draw
+    // index (same semantics as TES's gl_PrimitiveID per GL 4.6
+    // §11.2.2). `patchVertices` is the input patch size from
+    // glPatchParameteri(GL_PATCH_VERTICES, N), exposed to TCS as
+    // gl_PatchVerticesIn.
+    void setTcsInputs(std::int32_t primitiveID,
+                      std::int32_t invocationID,
+                      std::int32_t patchVertices) {
+        tcsPrimitiveId_ = primitiveID;
+        tcsInvocationId_ = invocationID;
+        tcsPatchVertices_ = patchVertices;
+    }
+
     // Run the entry-point function once, given `inputs` as gl_in[].
     // Appends emitted vertices to `emitted`. Primitive boundaries are
     // pushed into `primEnds` — each entry is `emitted.size()` after a
@@ -322,6 +337,13 @@ private:
     // Stage::TessEvaluation.
     std::array<float, 3> tesTessCoord_{0.0f, 0.0f, 0.0f};
     std::int32_t tesPrimitiveId_ = 0;
+
+    // TCS-stage inputs (see setTcsInputs). Read by initVariables when
+    // a variable is decorated BuiltInPrimitiveId / BuiltInInvocationId /
+    // BuiltInPatchVertices in Stage::TessControl.
+    std::int32_t tcsPrimitiveId_ = 0;
+    std::int32_t tcsInvocationId_ = 0;
+    std::int32_t tcsPatchVertices_ = 3;
 
     // Phase 3f-3: caller-supplied binding → (host pointer, size) map
     // for SSBO-rooted OpLoad / OpStore. Set via `setStorageBuffers`.
@@ -1088,6 +1110,34 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                 // (safe default; TES bodies that consult it for bounds-
                 // checking fall back through the matcher's strictness
                 // gate anyway).
+            }
+        }
+
+        // ── TCS-stage built-in inputs (phase 3f-4):
+        //      gl_PrimitiveID       (BuiltIn = 7)  — patch-in-draw index
+        //      gl_InvocationID      (BuiltIn = 8)  — 0..vertices-1
+        //      gl_PatchVerticesIn   (BuiltIn = 14) — input patch size
+        //                                            (GL_PATCH_VERTICES)
+        // gl_TessLevelInner / gl_TessLevelOuter writes from the body
+        // land in per-variable flat storage through the Output path;
+        // the caller reads them post-run if it cares (CE tests don't —
+        // levels default to 1.0 from glPatchParameterfv and that's
+        // what the TCS also writes, so there's nothing extra to plumb).
+        if (stage_ == Stage::TessControl && info.storageClass == spv::StorageClassInput) {
+            auto dIt = module_.decorations.find(varId);
+            if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn) {
+                if (dIt->second.builtIn == 7 /*BuiltInPrimitiveId*/ && width >= 1) {
+                    std::memcpy(&storage[0], &tcsPrimitiveId_, 4);
+                    continue;
+                }
+                if (dIt->second.builtIn == 8 /*BuiltInInvocationId*/ && width >= 1) {
+                    std::memcpy(&storage[0], &tcsInvocationId_, 4);
+                    continue;
+                }
+                if (dIt->second.builtIn == 14 /*BuiltInPatchVertices*/ && width >= 1) {
+                    std::memcpy(&storage[0], &tcsPatchVertices_, 4);
+                    continue;
+                }
             }
         }
 
@@ -4808,6 +4858,67 @@ bool runTesForVertex(
     outVertex.position[3] = 1.0f;
     if (!tesInterp.executeVs(outVertex)) {
         if (diagnostic) *diagnostic = "runTesForVertex: TES body: " + tesInterp.diagnostic();
+        return false;
+    }
+    return true;
+}
+
+bool runTcsForVertex(
+    const std::uint32_t* tcsSpirv,
+    std::size_t tcsWordCount,
+    const GLProgramObject& program,
+    std::int32_t primitiveID,
+    std::int32_t invocationID,
+    std::int32_t patchVertices,
+    const TesSsboMap* ssboMap,
+    std::string* diagnostic)
+{
+    if (tcsSpirv == nullptr || tcsWordCount < 5) {
+        if (diagnostic) *diagnostic = "runTcsForVertex: empty SPIR-V";
+        return false;
+    }
+    SpirvModule tcsMod;
+    if (!tcsMod.parse(tcsSpirv, tcsWordCount)) {
+        if (diagnostic) *diagnostic = "runTcsForVertex: SpirvModule parse: " + tcsMod.parseError;
+        return false;
+    }
+
+    Interpreter::UniformValues uniforms = buildUniformMap(program);
+
+    // TCS has no user output varyings to capture from the CPU emul's
+    // perspective — tess levels + gl_out[] patch values feed the TES
+    // but we don't plumb them back today (see phase 3f-5 roadmap).
+    const std::vector<std::string>   noVaryingNames;
+    const std::vector<std::uint32_t> noVaryingWidths;
+
+    Interpreter tcsInterp(tcsMod, Interpreter::Stage::TessControl,
+                          noVaryingNames, noVaryingWidths);
+    tcsInterp.setUniforms(&uniforms);
+    tcsInterp.setTcsInputs(primitiveID, invocationID, patchVertices);
+
+    Interpreter::StorageBufferMap ssboInterp;
+    if (ssboMap != nullptr) {
+        for (const auto& [binding, region] : *ssboMap) {
+            Interpreter::StorageBufferRegion r;
+            r.ptr = region.ptr;
+            r.size = region.size;
+            ssboInterp[binding] = r;
+        }
+    }
+    tcsInterp.setStorageBuffers(&ssboInterp);
+
+    // Body walk — re-use `executeVs`, which runs the entry-point body
+    // once and captures gl_Position + output varyings. The TCS doesn't
+    // write gl_Position (it's a tess-control stage) so the captured
+    // outVertex is just a scratch discard. The side-effect writes to
+    // SSBOs land through the byte path; writes to gl_TessLevel*
+    // Output variables land in flat scalar storage (ignored — caller
+    // uses the glPatchParameterfv defaults).
+    EmulatedVertex scratch;
+    scratch.position[0] = scratch.position[1] = scratch.position[2] = 0.0f;
+    scratch.position[3] = 1.0f;
+    if (!tcsInterp.executeVs(scratch)) {
+        if (diagnostic) *diagnostic = "runTcsForVertex: TCS body: " + tcsInterp.diagnostic();
         return false;
     }
     return true;

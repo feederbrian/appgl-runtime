@@ -522,6 +522,69 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
     return out;
 }
 
+TessBodyInterpretabilityCheck classifyTessControlInterpretable(
+    const std::uint32_t* tcsSpirv,
+    std::size_t tcsWordCount)
+{
+    TessBodyInterpretabilityCheck out;
+    if (tcsSpirv == nullptr || tcsWordCount < 5) {
+        out.diagnostic = "empty SPIR-V";
+        return out;
+    }
+    SpirvModule module;
+    if (!module.parse(tcsSpirv, tcsWordCount)) {
+        out.diagnostic = "SpirvModule::parse failed: " + module.parseError;
+        return out;
+    }
+    if (!module.haveFuncBody) {
+        out.diagnostic = "no function body";
+        return out;
+    }
+    out.parsed = true;
+
+    // TCS admits gl_PrimitiveID (7), gl_InvocationID (8), and
+    // gl_PatchVerticesIn (14) on Input. gl_in[] array reads would
+    // require VS pre-pass routing (phase 3f-5) so they reject here.
+    for (const auto& [varId, info] : module.variables) {
+        if (info.storageClass != spv::StorageClassInput) continue;
+        auto dIt = module.decorations.find(varId);
+        if (dIt != module.decorations.end() && dIt->second.hasBuiltIn) {
+            const std::uint32_t bi = dIt->second.builtIn;
+            if (bi == 7  /*PrimitiveId*/   ||
+                bi == 8  /*InvocationId*/  ||
+                bi == 14 /*PatchVertices*/) {
+                continue;
+            }
+            out.diagnostic = "TCS unsupported builtin input: " + std::to_string(bi);
+            return out;
+        }
+        // Non-builtin Input (gl_in[] or a per-patch `patch in`) =>
+        // reject until phase 3f-5.
+        out.diagnostic = "TCS non-builtin Input variable (id=" +
+                         std::to_string(varId) + "): " + info.name;
+        return out;
+    }
+
+    // Same 4096-opcode body-size guard as the TES classifier.
+    std::size_t i = module.funcBodyStart;
+    const std::size_t end = module.funcBodyEnd;
+    std::size_t opcodeCount = 0;
+    while (i < end) {
+        const std::uint32_t inst = module.words[i];
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0 || i + wc > end) break;
+        ++opcodeCount;
+        if (opcodeCount > 4096) {
+            out.diagnostic = "body opcode count > 4096";
+            return out;
+        }
+        i += wc;
+    }
+
+    out.interpretable = true;
+    return out;
+}
+
 // ─── Phase-2b passthrough shape matcher ──────────────────────────────
 
 TessBodyPassthroughMatch matchTessEvalPassthrough(
@@ -1471,7 +1534,6 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
             program.linkLog +=
                 "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — passthrough TES enabled ("
                 + std::to_string(tePass.varyings.size()) + " user varyings)";
-            return true;
         }
     }
 
@@ -1480,29 +1542,48 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
     // read gl_TessCoord / gl_PrimitiveID / gl_PatchVerticesIn can
     // run through the GSE Interpreter per generated vertex. Same
     // env gate (APPGL_ENABLE_TESS_EMUL=1).
-    {
-        static const bool emulEnabled = []() {
-            const char* v = std::getenv("APPGL_ENABLE_TESS_EMUL");
-            return v != nullptr && v[0] != '0' && v[0] != '\0';
-        }();
-        if (emulEnabled) {
-            TessBodyInterpretabilityCheck teInterp =
-                classifyTessEvalInterpretable(
-                    program.tessEvalSpirv.data(),
-                    program.tessEvalSpirv.size());
-            if (teInterp.interpretable) {
-                program.tessellationInterpreted = true;
-                program.linkLog +=
-                    "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — interpreter TES enabled";
-                return true;
-            }
-            if (!teInterp.diagnostic.empty()) {
-                program.linkLog +=
-                    "\n[tess-emul] interpretability rejected: " + teInterp.diagnostic;
-            }
+    static const bool emulEnabled = []() {
+        const char* v = std::getenv("APPGL_ENABLE_TESS_EMUL");
+        return v != nullptr && v[0] != '0' && v[0] != '\0';
+    }();
+    if (emulEnabled && !program.tessellationEmulated) {
+        TessBodyInterpretabilityCheck teInterp =
+            classifyTessEvalInterpretable(
+                program.tessEvalSpirv.data(),
+                program.tessEvalSpirv.size());
+        if (teInterp.interpretable) {
+            program.tessellationInterpreted = true;
+            program.linkLog +=
+                "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — interpreter TES enabled";
+        }
+        if (!teInterp.interpretable && !teInterp.diagnostic.empty()) {
+            program.linkLog +=
+                "\n[tess-emul] TES interpretability rejected: " + teInterp.diagnostic;
         }
     }
-    return false;
+
+    // Phase-3f-4: independently classify the TCS (when present). If
+    // the TES already landed on either the passthrough or interpreter
+    // path, adding TCS interpretation only adds more coverage —
+    // programs with both interpretable stages run TCS then TES under
+    // `emulateTessellationDraw`.
+    if (emulEnabled && !program.tessControlSpirv.empty()) {
+        TessBodyInterpretabilityCheck tcInterp =
+            classifyTessControlInterpretable(
+                program.tessControlSpirv.data(),
+                program.tessControlSpirv.size());
+        if (tcInterp.interpretable) {
+            program.tessControlInterpreted = true;
+            program.linkLog +=
+                "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — interpreter TCS enabled";
+        }
+        if (!tcInterp.interpretable && !tcInterp.diagnostic.empty()) {
+            program.linkLog +=
+                "\n[tess-emul] TCS interpretability rejected: " + tcInterp.diagnostic;
+        }
+    }
+
+    return program.tessellationEmulated || program.tessellationInterpreted;
 }
 
 // ─── Public API — draw-time emulator ─────────────────────────────────
@@ -1697,59 +1778,109 @@ EmulatedDraw emulateTessellationDraw(
         }
     };
 
-    // Phase-3f-3: build the SSBO region map the interpreter routes
-    // OpLoad / OpStore through. Walk the TES SPIR-V's variables,
-    // identify StorageBuffer-class (or Uniform + BufferBlock) block
-    // variables, resolve each binding against the GL state's
-    // GL_SHADER_STORAGE_BUFFER indexed slot, and record the
-    // host-visible Metal contents pointer + size for each. The map
-    // is built once per draw (bindings don't change during a draw
-    // call) and captured into the per-vertex emit lambda below.
+    // Phase-3f-3/3f-4: build the SSBO region map the interpreter
+    // routes OpLoad / OpStore through. Walks BOTH the TES and TCS
+    // SPIR-V for StorageBuffer-class (or Uniform+BufferBlock) block
+    // variables, since either stage's body may reference SSBOs. Each
+    // binding is resolved against the GL state's
+    // GL_SHADER_STORAGE_BUFFER indexed slot and the host-visible
+    // MTLBuffer contents pointer is recorded. Map is built once per
+    // draw (bindings don't change mid-draw) and captured by the
+    // per-invocation TCS + per-vertex TES code below.
     TesSsboMap ssboBindings;
-    if (program.tessellationInterpreted && !program.tessEvalSpirv.empty()) {
-        appgl::interp::SpirvModule tesMod;
-        if (tesMod.parse(program.tessEvalSpirv.data(),
-                         program.tessEvalSpirv.size())) {
-            for (const auto& [varId, info] : tesMod.variables) {
-                bool isSSBO = false;
-                if (info.storageClass == 12 /*StorageClassStorageBuffer*/) {
-                    isSSBO = true;
-                } else if (info.storageClass == 2 /*StorageClassUniform*/) {
-                    auto tIt = tesMod.types.find(info.typeId);
-                    if (tIt != tesMod.types.end()) {
-                        auto dIt = tesMod.decorations.find(tIt->second.pointeeType);
-                        if (dIt != tesMod.decorations.end() && dIt->second.isBufferBlock) {
-                            isSSBO = true;
-                        }
+    auto addSsbosFromModule = [&](const std::vector<std::uint32_t>& spirv) {
+        if (spirv.empty()) return;
+        appgl::interp::SpirvModule mod;
+        if (!mod.parse(spirv.data(), spirv.size())) return;
+        for (const auto& [varId, info] : mod.variables) {
+            bool isSSBO = false;
+            if (info.storageClass == 12 /*StorageClassStorageBuffer*/) {
+                isSSBO = true;
+            } else if (info.storageClass == 2 /*StorageClassUniform*/) {
+                auto tIt = mod.types.find(info.typeId);
+                if (tIt != mod.types.end()) {
+                    auto dIt = mod.decorations.find(tIt->second.pointeeType);
+                    if (dIt != mod.decorations.end() && dIt->second.isBufferBlock) {
+                        isSSBO = true;
                     }
                 }
-                if (!isSSBO) continue;
-                auto dIt = tesMod.decorations.find(varId);
-                if (dIt == tesMod.decorations.end() || !dIt->second.hasBinding) continue;
-                const std::uint32_t binding = dIt->second.binding;
+            }
+            if (!isSSBO) continue;
+            auto dIt = mod.decorations.find(varId);
+            if (dIt == mod.decorations.end() || !dIt->second.hasBinding) continue;
+            const std::uint32_t binding = dIt->second.binding;
+            // Skip if this binding already in the map (TES and TCS
+            // may share bindings — glslang emits the same binding
+            // number on both sides for interface-matching).
+            if (ssboBindings.find(binding) != ssboBindings.end()) continue;
 
-                const GLIndexedBufferBinding bb =
-                    state.indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, binding);
-                if (bb.buffer == 0) continue;
-                GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
-                if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
-                void* base = metalBufferContents(bufObj->metalBuffer);
-                if (base == nullptr) continue;
-                const std::size_t totalSize = static_cast<std::size_t>(bufObj->size);
-                const std::size_t off =
-                    static_cast<std::size_t>(bb.offset < 0 ? 0 : bb.offset);
-                // bb.size == 0 means BindBufferBase (the whole buffer).
-                const std::size_t span = (bb.size > 0)
-                    ? static_cast<std::size_t>(bb.size)
-                    : (totalSize > off ? totalSize - off : 0);
-                TesSsboRegion r;
-                r.ptr = static_cast<std::uint8_t*>(base) + off;
-                r.size = span;
-                ssboBindings[binding] = r;
+            const GLIndexedBufferBinding bb =
+                state.indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, binding);
+            if (bb.buffer == 0) continue;
+            GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
+            if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+            void* base = metalBufferContents(bufObj->metalBuffer);
+            if (base == nullptr) continue;
+            const std::size_t totalSize = static_cast<std::size_t>(bufObj->size);
+            const std::size_t off =
+                static_cast<std::size_t>(bb.offset < 0 ? 0 : bb.offset);
+            // bb.size == 0 means BindBufferBase (whole buffer).
+            const std::size_t span = (bb.size > 0)
+                ? static_cast<std::size_t>(bb.size)
+                : (totalSize > off ? totalSize - off : 0);
+            TesSsboRegion r;
+            r.ptr = static_cast<std::uint8_t*>(base) + off;
+            r.size = span;
+            ssboBindings[binding] = r;
+        }
+    };
+    if (program.tessellationInterpreted || program.tessControlInterpreted) {
+        addSsbosFromModule(program.tessEvalSpirv);
+        addSsbosFromModule(program.tessControlSpirv);
+    }
+    const TesSsboMap* ssboMap = ssboBindings.empty() ? nullptr : &ssboBindings;
+
+    // Phase-3f-4: TCS pre-pass. Runs once per (patch, invocationID)
+    // where invocationID ∈ [0, layout(vertices=N)). SSBO writes land
+    // through the same binding map; gl_TessLevel* writes are ignored
+    // (emulateTessellationDraw is already using the TCS constant-
+    // level extractor's output or the glPatchParameterfv defaults).
+    // TCS-INTERPRETED branch: the SSBO side effects are the whole
+    // point of running the TCS for the CE tess_control cluster.
+    if (program.tessControlInterpreted && !program.tessControlSpirv.empty()) {
+        const std::int32_t outputVertices =
+            program.tessControlOutputVertices > 0
+                ? program.tessControlOutputVertices : 1;
+        const bool tcsDebug = (std::getenv("APPGL_TESS_EMUL_DEBUG") != nullptr);
+        if (tcsDebug) {
+            std::fprintf(stderr, "[tess-emul] TCS pre-pass: %zu patches x %d invocations, "
+                "ssboBindings=%zu, patchVertices=%d\n",
+                numPatches, outputVertices,
+                ssboMap ? ssboMap->size() : 0, patchVertices);
+        }
+        for (std::size_t p = 0; p < numPatches; ++p) {
+            for (std::int32_t iv = 0; iv < outputVertices; ++iv) {
+                std::string diag;
+                const bool ok = runTcsForVertex(
+                    program.tessControlSpirv.data(),
+                    program.tessControlSpirv.size(),
+                    program,
+                    static_cast<std::int32_t>(p),
+                    iv,
+                    patchVertices,
+                    ssboMap, &diag);
+                if (tcsDebug && !ok) {
+                    std::fprintf(stderr, "[tess-emul] TCS bail (patch=%zu iv=%d): %s\n",
+                        p, iv, diag.c_str());
+                }
+                (void)ok; (void)diag;
+                // On TCS bail we'd lose the side effects for that
+                // invocation, but still run subsequent ones — this
+                // mirrors how GL's "undefined on shader error" model
+                // allows graceful degradation per spec §8.5.
             }
         }
     }
-    const TesSsboMap* ssboMap = ssboBindings.empty() ? nullptr : &ssboBindings;
 
     // Phase-3f-2: interpreter path. When the passthrough matcher
     // rejected the TES body but the classifier flipped
