@@ -424,6 +424,17 @@ public:
     bool captureTessLevelsPublic(float outer[4], float inner[2]) const {
         return captureTessLevels(outer, inner);
     }
+
+    // Phase 3f-10: After a TCS invocation, read gl_out[invocationID]'s
+    // gl_Position / gl_ClipDistance / gl_CullDistance from the
+    // Output-side gl_PerVertex array's flat storage. Caller provides
+    // the invocationID the body ran with (matches tcsInvocationId_).
+    // Fills `out` with the captured values. Returns false if no
+    // gl_PerVertex-like Output array was found. Used to stitch the
+    // TCS's per-control-point outputs into the TES's gl_in[] array
+    // (GL 4.6 §11.2.2 — TES's gl_in is the array of TCS gl_out).
+    bool captureTcsOutputForInvocation(std::int32_t invocationID,
+                                       EmulatedVertex& out) const;
 private:
 
     // Diagnostic + bail.
@@ -1198,7 +1209,8 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
         }
 
         if ((stage_ == Stage::Geometry ||
-             stage_ == Stage::TessEvaluation) &&
+             stage_ == Stage::TessEvaluation ||
+             stage_ == Stage::TessControl) &&
             info.storageClass == spv::StorageClassInput) {
             // Identify the variable:
             //  - gl_PerVertex block input (contains gl_Position) —
@@ -1212,6 +1224,9 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
             //   the interpreter's `inputs` vector holds one entry per
             //   patch vertex (runTesForVertex builds it from the VS
             //   pre-pass output the caller collected upstream).
+            // Phase 3f-10: TCS also reuses this path. For TCS,
+            //   `inputs` is the VS pre-pass output per input patch
+            //   vertex (same as what TES uses when no TCS is present).
             const auto& pointeeType = module_.types.at(tIt->second.pointeeType);
             if (pointeeType.kind == TypeInfo::Kind::Array) {
                 // Determine per-vertex struct / element width.
@@ -1650,6 +1665,85 @@ bool Interpreter::captureTessLevels(float outer[4], float inner[2]) const {
         }
     }
     return anyWritten;
+}
+
+bool Interpreter::captureTcsOutputForInvocation(std::int32_t invocationID,
+                                                EmulatedVertex& out) const {
+    // Walk Output variables looking for a gl_out[]-shaped one:
+    // pointer to Array<gl_PerVertex-like Struct, N>. Read slice at
+    // scalar-offset `invocationID * perVertexWidth` for this
+    // invocation's gl_Position / gl_ClipDistance / gl_CullDistance.
+    //
+    // Initialize out with safe defaults — if no gl_out is found we
+    // still return a well-formed vertex (useful when the TCS shader
+    // is effectively a stub).
+    out.position[0] = 0.0f;
+    out.position[1] = 0.0f;
+    out.position[2] = 0.0f;
+    out.position[3] = 1.0f;
+    out.varyings.clear();
+    out.clipDistance.clear();
+    out.cullDistance.clear();
+
+    for (const auto& [varId, info] : module_.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto tIt = module_.types.find(info.typeId);
+        if (tIt == module_.types.end()) continue;
+        auto pIt = module_.types.find(tIt->second.pointeeType);
+        if (pIt == module_.types.end()) continue;
+        // Must be Array-of-Struct (gl_out[gl_PerVertex]).
+        if (pIt->second.kind != TypeInfo::Kind::Array) continue;
+        auto eIt = module_.types.find(pIt->second.componentType);
+        if (eIt == module_.types.end() ||
+            eIt->second.kind != TypeInfo::Kind::Struct) continue;
+        // Must have at least one BuiltIn-decorated member (gl_PerVertex
+        // signature).
+        auto mdIt = module_.memberDecorations.find(pIt->second.componentType);
+        if (mdIt == module_.memberDecorations.end()) continue;
+        bool hasBuiltInMember = false;
+        for (const auto& [midx, mdec] : mdIt->second.perMember) {
+            if (mdec.hasBuiltIn) { hasBuiltInMember = true; break; }
+        }
+        if (!hasBuiltInMember) continue;
+
+        auto sIt = varStorage_.find(varId);
+        if (sIt == varStorage_.end()) continue;
+        const auto& storage = sIt->second;
+        const std::uint32_t perVertexW =
+            module_.scalarWidth(pIt->second.componentType);
+        const std::uint32_t base =
+            static_cast<std::uint32_t>(invocationID) * perVertexW;
+
+        // Walk struct members + copy BuiltIn-decorated ones.
+        std::uint32_t runningOff = 0;
+        for (std::size_t m = 0; m < eIt->second.memberTypes.size(); ++m) {
+            const std::uint32_t memType = eIt->second.memberTypes[m];
+            const std::uint32_t memW = module_.scalarWidth(memType);
+            auto mm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
+            if (mm != mdIt->second.perMember.end() && mm->second.hasBuiltIn) {
+                const std::uint32_t bi = mm->second.builtIn;
+                if (bi == spv::BuiltInPosition) {
+                    for (int k = 0; k < 4 && static_cast<std::uint32_t>(k) < memW
+                         && base + runningOff + k < storage.size(); ++k) {
+                        out.position[k] = storage[base + runningOff + k];
+                    }
+                } else if (bi == spv::BuiltInClipDistance) {
+                    for (std::uint32_t k = 0; k < memW &&
+                         base + runningOff + k < storage.size(); ++k) {
+                        out.clipDistance.push_back(storage[base + runningOff + k]);
+                    }
+                } else if (bi == spv::BuiltInCullDistance) {
+                    for (std::uint32_t k = 0; k < memW &&
+                         base + runningOff + k < storage.size(); ++k) {
+                        out.cullDistance.push_back(storage[base + runningOff + k]);
+                    }
+                }
+            }
+            runningOff += memW;
+        }
+        return true;
+    }
+    return false;
 }
 
 void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
@@ -5036,6 +5130,8 @@ bool runTcsForVertex(
     std::int32_t invocationID,
     std::int32_t patchVertices,
     const TesSsboMap* ssboMap,
+    const std::vector<EmulatedVertex>& patchInputs,
+    EmulatedVertex& outVertex,
     float* outerLevelsOut,
     float* innerLevelsOut,
     std::string* diagnostic)
@@ -5053,8 +5149,9 @@ bool runTcsForVertex(
     Interpreter::UniformValues uniforms = buildUniformMap(program);
 
     // TCS has no user output varyings to capture from the CPU emul's
-    // perspective — gl_out[] patch values feed the TES but we don't
-    // plumb them back today (phase 3f-9+ roadmap).
+    // perspective — gl_out[] patch values feed the TES via
+    // captureTcsOutputForInvocation below; per-patch `patch out`
+    // varyings are phase 3f-11+ territory.
     const std::vector<std::string>   noVaryingNames;
     const std::vector<std::uint32_t> noVaryingWidths;
 
@@ -5074,18 +5171,47 @@ bool runTcsForVertex(
     }
     tcsInterp.setStorageBuffers(&ssboInterp);
 
-    // Body walk — re-use `executeVs`, which runs the entry-point body
-    // once and captures gl_Position + output varyings. The TCS doesn't
-    // write gl_Position (it's a tess-control stage) so the captured
-    // outVertex is just a scratch discard. The side-effect writes to
-    // SSBOs land through the byte path; writes to gl_TessLevel*
-    // Output variables land in flat scalar storage we read below.
+    // Phase 3f-10: convert per-patch EmulatedVertex inputs (position +
+    // clip/cull) into PerVertexInput so the interpreter's gl_in[]
+    // init path seeds TCS's input array from the VS pre-pass.
+    std::vector<Interpreter::PerVertexInput> inputs;
+    inputs.reserve(patchInputs.size());
+    for (const auto& pv : patchInputs) {
+        Interpreter::PerVertexInput pvi;
+        pvi.position[0] = pv.position[0];
+        pvi.position[1] = pv.position[1];
+        pvi.position[2] = pv.position[2];
+        pvi.position[3] = pv.position[3];
+        pvi.clipDistance = pv.clipDistance;
+        pvi.cullDistance = pv.cullDistance;
+        inputs.push_back(std::move(pvi));
+    }
+
     EmulatedVertex scratch;
     scratch.position[0] = scratch.position[1] = scratch.position[2] = 0.0f;
     scratch.position[3] = 1.0f;
-    if (!tcsInterp.executeVs(scratch)) {
+    const bool ok = inputs.empty()
+        ? tcsInterp.executeVs(scratch)
+        : tcsInterp.executeTes(scratch, inputs);
+    if (!ok) {
         if (diagnostic) *diagnostic = "runTcsForVertex: TCS body: " + tcsInterp.diagnostic();
         return false;
+    }
+
+    // Phase 3f-10: capture gl_out[invocationID] — position + clip/cull
+    // — from the Output-side gl_PerVertex array. Fallback to the
+    // VS-pass input value for this slot if the TCS didn't write one
+    // (common when TCS is a passthrough stub: it may write for some
+    // invocation indices only).
+    if (!tcsInterp.captureTcsOutputForInvocation(invocationID, outVertex)) {
+        if (static_cast<std::size_t>(invocationID) < patchInputs.size()) {
+            outVertex = patchInputs[invocationID];
+        } else {
+            outVertex.position[0] = 0.0f;
+            outVertex.position[1] = 0.0f;
+            outVertex.position[2] = 0.0f;
+            outVertex.position[3] = 1.0f;
+        }
     }
 
     // Phase 3f-8: capture tess-level writes. Only overwrite caller

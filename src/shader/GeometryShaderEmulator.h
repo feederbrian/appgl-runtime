@@ -307,9 +307,13 @@ bool runTesForVertex(
 // pre-seeded contents, so the caller can initialise them to the
 // glPatchParameterfv defaults and let the TCS override.
 //
-// Returns false on interpreter bail. `outVertex` is a dummy here —
-// TCS doesn't emit a rasterizer vertex; we only care about the
-// side-effect SSBO writes + tess-level outputs.
+// Returns false on interpreter bail. `outVertex` (phase 3f-10)
+// receives the captured gl_out[invocationID] — position, clip/cull
+// distances — for stitching into the TES stage's gl_in[] array.
+// `patchInputs` (phase 3f-10) is the input patch's VS outputs; if
+// non-empty, the TCS's gl_in[] is populated from them so bodies
+// like `gl_out[gl_InvocationID].gl_Position = gl_in[…].gl_Position`
+// produce real values.
 bool runTcsForVertex(
     const std::uint32_t* tcsSpirv,
     std::size_t tcsWordCount,
@@ -318,6 +322,8 @@ bool runTcsForVertex(
     std::int32_t invocationID,
     std::int32_t patchVertices,
     const TesSsboMap* ssboMap,
+    const std::vector<EmulatedVertex>& patchInputs,
+    EmulatedVertex& outVertex,
     float* outerLevelsOut = nullptr,
     float* innerLevelsOut = nullptr,
     std::string* diagnostic = nullptr);
