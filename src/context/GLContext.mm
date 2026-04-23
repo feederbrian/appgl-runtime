@@ -265,6 +265,18 @@ MTLTextureType metalTextureTypeForTarget(GLenum target) {
             return MTLTextureType2DArray;
         case GL_TEXTURE_CUBE_MAP:
             return MTLTextureTypeCube;
+        // Phase 6-3: MS textures must resolve to the dedicated MS
+        // texture types. Passing MTLTextureType2D for an MS target would
+        // make Metal create a single-sample texture (sampleCount is only
+        // honoured on MS types), which then silently bypasses the whole
+        // MSAA render path at pipeline-build time (colorTexture.sampleCount
+        // reads 1, rasterSampleCount falls to 1, the [[sample_id]] inject
+        // at phase 6-1e does nothing because Metal has no samples to
+        // iterate). Applies to both non-array MS and MS array targets.
+        case GL_TEXTURE_2D_MULTISAMPLE:
+            return MTLTextureType2DMultisample;
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return MTLTextureType2DMultisampleArray;
         default:
             return MTLTextureType2D;
     }
@@ -2463,6 +2475,95 @@ struct GLContext::Impl {
         }
         const GLTextureImageLevel& baseLevel = baseIt->second;
         if (device == nil || !baseLevel.defined || baseLevel.desc.width <= 0 || baseLevel.desc.height <= 0 || baseLevel.desc.depth <= 0) {
+            return true;
+        }
+
+        // Phase 6-3: MS targets take a dedicated allocation path. Metal
+        // requires `MTLTextureType2DMultisample(Array)` + explicit
+        // `sampleCount` + `MTLStorageModePrivate`, and NEVER accepts the
+        // `replaceRegion` uploads that the fast-path and full-replace
+        // paths below issue. MS textures are populated by clear actions
+        // + pipeline writes only, never by CPU upload — so we allocate
+        // the descriptor here and return before either upload path runs.
+        //
+        // texStorage2DMultisample / texStorage3DMultisample are the only
+        // callers that reach this branch (mutable MS texImage isn't a
+        // thing in GL 4.6) — they set `object.desc.samples` and
+        // `object.desc.target`. `baseLevel.rgba8` is a zero-filled
+        // 4bpp shadow buffer that exists to satisfy the non-MS fast
+        // path's existence check; we ignore it here and leave the
+        // Metal texture's contents uninitialised, matching GL 4.6
+        // §8.19.2 which says MS texel state is undefined until
+        // populated by a render-target clear or draw.
+        const bool isMSTarget = (object.target == GL_TEXTURE_2D_MULTISAMPLE ||
+                                 object.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+        if (isMSTarget) {
+            releaseRetainedMetalObject(object.metalTexture);
+            object.metalTexture = nullptr;
+
+            // MS textures only accept renderable formats — use the same
+            // mapping the renderbuffer path uses. Fall back to RGBA8Unorm
+            // if the internal format isn't recognised (matches non-MS
+            // fallback behaviour); the subsequent pipeline build will
+            // still match against the fallback format consistently.
+            MTLPixelFormat chosenFormat = metalRenderbufferFormat(baseLevel.desc.internalFormat);
+            if (chosenFormat == MTLPixelFormatInvalid) {
+                chosenFormat = MTLPixelFormatRGBA8Unorm;
+            }
+
+            const NSUInteger samples = static_cast<NSUInteger>(
+                std::max<GLsizei>(object.desc.samples, 1));
+            const bool isArray = (object.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+            // Metal's `MTLTextureType2DMultisample(Array)` requires
+            // `sampleCount >= 2`. GL permits `samples == 1` on an MS
+            // target though — GL_MAX_INTEGER_SAMPLES advertises 1 on
+            // M1 Max, so integer-format sample_shading render tests
+            // pass samples=1 here. Demote such calls to the regular
+            // 2D / 2DArray texture type instead of tripping Metal's
+            // `sampleCount must be > 1` validator. The GL-side target
+            // stays GL_TEXTURE_2D_MULTISAMPLE (the framebuffer-attach
+            // path doesn't cross-check the Metal texture type); the
+            // pipeline builder reads `colorTexture.sampleCount == 1`
+            // and falls out of MSAA mode cleanly.
+            const bool useMSType = samples >= 2;
+
+            MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+            if (useMSType) {
+                desc.textureType = isArray ? MTLTextureType2DMultisampleArray
+                                           : MTLTextureType2DMultisample;
+            } else {
+                desc.textureType = isArray ? MTLTextureType2DArray
+                                           : MTLTextureType2D;
+            }
+            desc.pixelFormat = chosenFormat;
+            desc.width = static_cast<NSUInteger>(baseLevel.desc.width);
+            desc.height = static_cast<NSUInteger>(baseLevel.desc.height);
+            desc.depth = 1;
+            desc.arrayLength = isArray
+                ? static_cast<NSUInteger>(std::max<GLsizei>(baseLevel.desc.depth, 1))
+                : 1;
+            desc.mipmapLevelCount = 1;
+            desc.sampleCount = samples;
+            // MSAA textures: no ShaderWrite (Metal rejects imageStore on
+            // MS texture types). ShaderRead is still required for
+            // sampler2DMS + texelFetch(ms, coord, sample) in stage 2 of
+            // the `sample_shading.render.*` pattern — Metal exposes that
+            // as `texture2d_ms<T>::read(coord, sample)`.
+            desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            // Apple Silicon rejects MTLStorageModeShared on MS textures
+            // (Metal validation "A texture with MTLTextureType2DMultisample
+            // can only be created with MTLStorageModePrivate"). The
+            // 1-sample demote path above picks MTLTextureType2D, which
+            // accepts Shared storage, so only the genuine-MS branch
+            // pins Private.
+            desc.storageMode = useMSType
+                ? MTLStorageModePrivate : MTLStorageModeShared;
+
+            id<MTLTexture> mt = [device newTextureWithDescriptor:desc];
+            if (mt == nil) return false;
+            object.metalTexture = transferRetainedMetalObject(mt);
+            object.instantiated = true;
+            (void)texName;
             return true;
         }
 
