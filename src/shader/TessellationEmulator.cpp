@@ -17,6 +17,7 @@
 
 #include "../objects/GLObjectStore.h"
 #include "../state/GLStateTracker.h"
+#include "GeometryShaderEmulator.h"   // runVsForVertex + EmulatedVertex
 #include "ShaderInterpreter.h"
 #include "ShaderTranslator.h"
 
@@ -1131,6 +1132,45 @@ EmulatedDraw emulateTessellationDraw(
         }
     }
 
+    // Phase-3b: VS pre-pass per patch vertex. Runs only when phase-2c
+    // emulation is enabled; we don't want to pay the cost on the
+    // legacy fallback path. Each patch's W VS outputs (position +
+    // varyings) land in `patchInputs[p][pv]`, where W =
+    // patchVertices. Future phase 3c+ iterations feed these into the
+    // TES body interpreter as gl_in[pv]. For phase 3b we capture
+    // positions only (empty varying list) since the phase-2c
+    // passthrough match guarantees the TES reads only gl_TessCoord.
+    std::vector<std::vector<EmulatedVertex>> patchInputs;
+    std::size_t vsFailures = 0;
+    if (program.tessellationEmulated && !program.vertexSpirv.empty()) {
+        patchInputs.assign(numPatches,
+            std::vector<EmulatedVertex>(static_cast<std::size_t>(patchVertices)));
+        const std::vector<std::string> noVaryingNames;
+        const std::vector<std::uint32_t> noVaryingWidths;
+        for (std::size_t p = 0; p < numPatches; ++p) {
+            const std::size_t patchBase = p * static_cast<std::size_t>(patchVertices);
+            for (GLint pv = 0; pv < patchVertices; ++pv) {
+                const std::size_t vboSlot =
+                    static_cast<std::size_t>(first) + patchBase + static_cast<std::size_t>(pv);
+                std::string vsDiag;
+                const bool vsOk = runVsForVertex(
+                    program.vertexSpirv.data(), program.vertexSpirv.size(),
+                    program, vao, objects, vboSlot, 0 /*instanceID*/,
+                    noVaryingNames, noVaryingWidths,
+                    patchInputs[p][static_cast<std::size_t>(pv)], &vsDiag);
+                if (!vsOk) {
+                    ++vsFailures;
+                    // Zero the position; future phase-3c will treat
+                    // missing VS output as a fallback signal.
+                    auto& pos = patchInputs[p][static_cast<std::size_t>(pv)].position;
+                    pos[0] = pos[1] = pos[2] = 0.0f;
+                    pos[3] = 1.0f;
+                }
+            }
+        }
+    }
+    (void)patchInputs;  // consumed by phase 3c+ TES body walker
+
     // Phase-2c enablement gate: only return ok=true when the
     // program's `tessellationEmulated` flag was flipped at link
     // time (currently opt-in via APPGL_ENABLE_TESS_EMUL=1).
@@ -1140,12 +1180,12 @@ EmulatedDraw emulateTessellationDraw(
     // space positions instead of clip-space.
     if (program.tessellationEmulated) {
         d.ok = true;
-        d.diagnostic = "tess-emul phase-2c: " + std::to_string(numPatches) +
+        d.diagnostic = "tess-emul phase-3b: " + std::to_string(numPatches) +
                        " patches × " + std::to_string(expandPerPatch) +
                        " verts = " + std::to_string(d.vertexCount) +
                        " (topology=0x" +
                        std::to_string(static_cast<unsigned>(domainOut.topology)) +
-                       ")";
+                       "), VS failures=" + std::to_string(vsFailures);
         return d;
     }
     d.diagnostic = "tess-emul phase-2a: " + std::to_string(numPatches) +
