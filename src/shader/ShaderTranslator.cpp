@@ -1427,10 +1427,33 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         }
 
         // Sampled images.
+        //
+        // Step 7-3 follow-up: under argument_buffers mode, reflection's
+        // metalBinding doubles as the argbuf `[[id(N)]]` slot so the
+        // Metal-side bind code uses it directly without resource-type-
+        // specific translation. The values here must match the
+        // `msl_texture` / `msl_sampler` set by the translator's
+        // `add_msl_resource_binding` calls (see the phase-7-2
+        // consolidation comment in spirvToMSL):
+        //
+        //   sampled_images: msl_texture = 2*glBinding, sampler = +1
+        //   storage_images: msl_texture = 128 + glBinding
+        //   SSBOs:          msl_buffer  = 192 + glBinding
+        //   UBOs:           msl_buffer  = 16 + seq  (same as direct)
+        //
+        // Direct-binding mode keeps the existing textureBase /
+        // storageBufferBase sequential assignment so baseline Metal
+        // slot layout is unchanged.
+        const bool useArgBufReflection =
+            (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         for (auto& img : resources.sampled_images) {
             ShaderReflection::ResourceBinding rb;
             rb.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
-            rb.metalBinding = bindings.textureBase + rb.glBinding;
+            if (useArgBufReflection) {
+                rb.metalBinding = 2 * rb.glBinding;
+            } else {
+                rb.metalBinding = bindings.textureBase + rb.glBinding;
+            }
             rb.name = img.name;
             result.sampledTextures.push_back(std::move(rb));
         }
@@ -1444,7 +1467,11 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         for (auto& img : resources.storage_images) {
             ShaderReflection::ResourceBinding rb;
             rb.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
-            rb.metalBinding = bindings.textureBase + rb.glBinding;
+            if (useArgBufReflection) {
+                rb.metalBinding = 128 + rb.glBinding;
+            } else {
+                rb.metalBinding = bindings.textureBase + rb.glBinding;
+            }
             rb.name = img.name;
             result.storageImages.push_back(std::move(rb));
         }
@@ -1470,7 +1497,15 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             auto& ssbo = *ssboEntry.second;
             ShaderReflection::ResourceBinding rb;
             rb.glBinding = ssboEntry.first;
-            rb.metalBinding = nextSSBOSlot++;
+            // Step 7-3 follow-up: argbuf reflection mirror — see the
+            // sampled_images block above for the full rationale. SSBOs
+            // under argbuf live at [[id(192 + glBinding)]] inside
+            // spvDescriptorSetBuffer0.
+            if (useArgBufReflection) {
+                rb.metalBinding = 192 + rb.glBinding;
+            } else {
+                rb.metalBinding = nextSSBOSlot++;
+            }
             rb.active = (ssboActive.find(ssbo.id) != ssboActive.end());
             const auto& ssboType = compiler.get_type(ssbo.base_type_id);
             const std::string typeName = compiler.get_name(ssboType.self);

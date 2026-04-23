@@ -1115,10 +1115,19 @@ struct MetalFrameGraph::Impl {
                 // least one sampler declared in the stage, so it's a
                 // reliable proxy for "this stage has a spvDescriptorSet
                 // Buffer0 argument".
-                if (vertFn != nil && !info.vertexTextures.empty()) {
+                // Per-stage set-0 needed when the stage has textures
+                // (sampled or storage image, same list) OR SSBOs.
+                bool vertNeedsSet0 = !info.vertexTextures.empty();
+                bool fragNeedsSet0 = !info.fragmentTextures.empty();
+                for (const auto& ssbo : info.ssboBindings) {
+                    if (ssbo.metalBuffer == nullptr) continue;
+                    if (ssbo.isVertex)   vertNeedsSet0 = true;
+                    if (ssbo.isFragment) fragNeedsSet0 = true;
+                }
+                if (vertFn != nil && vertNeedsSet0) {
                     vertArgEncoderSet0 = [vertFn newArgumentEncoderWithBufferIndex:24];
                 }
-                if (fragFn != nil && !info.fragmentTextures.empty()) {
+                if (fragFn != nil && fragNeedsSet0) {
                     fragArgEncoderSet0 = [fragFn newArgumentEncoderWithBufferIndex:24];
                 }
                 // Step 7-3 UBO follow-up: desc_set 1 argument buffer at
@@ -2128,13 +2137,21 @@ struct MetalFrameGraph::Impl {
         // arbitrary indexed-buffer-bound SSBOs. KHR-GL46.shader_storage_
         // buffer_object.*-{vs,fs} exercises this from both stages. MSL
         // expects the buffer at the reflected [[buffer(metalSlot)]].
-        for (const auto& ssbo : info.ssboBindings) {
-            if (ssbo.metalBuffer == nullptr) continue;
-            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)ssbo.metalBuffer;
-            const NSUInteger slot = static_cast<NSUInteger>(ssbo.metalSlot);
-            const NSUInteger off = static_cast<NSUInteger>(ssbo.offset);
-            if (ssbo.isVertex)   [currentRenderEncoder setVertexBuffer:buf offset:off atIndex:slot];
-            if (ssbo.isFragment) [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
+        //
+        // Step 7-3 follow-up: under argbuf mode, SSBOs are populated
+        // into the desc_set 0 argument buffer (same encoder as
+        // sampled/storage images) further below. Skip this direct-
+        // binding loop when argbuf is on to avoid double-binding at
+        // the wrong slot.
+        if (!useArgBuf) {
+            for (const auto& ssbo : info.ssboBindings) {
+                if (ssbo.metalBuffer == nullptr) continue;
+                id<MTLBuffer> buf = (__bridge id<MTLBuffer>)ssbo.metalBuffer;
+                const NSUInteger slot = static_cast<NSUInteger>(ssbo.metalSlot);
+                const NSUInteger off = static_cast<NSUInteger>(ssbo.offset);
+                if (ssbo.isVertex)   [currentRenderEncoder setVertexBuffer:buf offset:off atIndex:slot];
+                if (ssbo.isFragment) [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
+            }
         }
 
         // Phase 8X Group 4d follow-up⁷ — bind textures and samplers for
@@ -2304,7 +2321,13 @@ struct MetalFrameGraph::Impl {
                                                  const std::vector<TranslatedDrawInfo::TextureBinding>& textures,
                                                  MTLRenderStages stage,
                                                  bool isFragment) {
-                if (encoder == nil || textures.empty()) return;
+                // Step 7-3 follow-up: no early-return on empty textures
+                // — the set-0 argbuf may also hold SSBOs (see the SSBO
+                // loop below), and an SSBO-only shader (no samplers, no
+                // storage images) still needs its argument buffer bound.
+                // The encoder-is-nil check still fires when the stage
+                // has no desc_set 0 usage at all.
+                if (encoder == nil) return;
                 const NSUInteger len = [encoder encodedLength];
                 if (len == 0) return;
                 // One-shot per-draw argument buffer. newBufferWithLength
@@ -2316,25 +2339,55 @@ struct MetalFrameGraph::Impl {
                 if (argBuf == nil) return;
                 [encoder setArgumentBuffer:argBuf offset:0];
                 for (const auto& binding : textures) {
-                    if (binding.metalTexture == nullptr ||
-                        binding.metalSamplerState == nullptr) continue;
+                    if (binding.metalTexture == nullptr) continue;
                     id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
-                    id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
-                    // binding.metalSlot is the direct-binding slot (=glBinding
-                    // for textures when textureBase=0). Under argbuf mode,
-                    // the [[id(N)]] inside spvDescriptorSetBuffer0 is
-                    // 2*glBinding for the image half, 2*glBinding+1 for
-                    // the sampler half — matches the consolidation-
-                    // commit slot assignment in the shader translator.
-                    const NSUInteger idIdx = 2 * static_cast<NSUInteger>(binding.metalSlot);
+                    // Step 7-3 follow-up: reflection is now argbuf-aware,
+                    // so `binding.metalSlot` IS the argbuf `[[id(N)]]`
+                    // slot directly. For sampled images (metalSamplerState
+                    // non-null) the texture half lives at metalSlot and the
+                    // sampler at metalSlot+1 (reflection returns 2*glBinding
+                    // so +1 = 2*glBinding+1, matching the consolidation
+                    // convention). For storage images the sampler slot is
+                    // unused; resolveImageBindings packs them into the
+                    // same list with metalSamplerState=nullptr and
+                    // metalSlot already offset to 128+glBinding.
+                    const NSUInteger idIdx = static_cast<NSUInteger>(binding.metalSlot);
                     [encoder setTexture:tex atIndex:idIdx];
-                    [encoder setSamplerState:smp atIndex:idIdx + 1];
+                    MTLResourceUsage usage = MTLResourceUsageRead;
+                    if (binding.metalSamplerState != nullptr) {
+                        id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                        [encoder setSamplerState:smp atIndex:idIdx + 1];
+                        usage |= MTLResourceUsageSample;
+                    } else {
+                        // Storage image — add write usage since imageStore
+                        // may fire. Direct-binding's path set ShaderWrite
+                        // via MTLTextureUsage when the texture was created;
+                        // argbuf mode additionally needs runtime
+                        // useResource to track residency.
+                        usage |= MTLResourceUsageWrite;
+                    }
                     // Residency tracking: Metal's argument buffers are
                     // indirect references. Without useResource, the
                     // texture/sampler pages may not be resident on GPU
                     // when the shader reads through the argument buffer.
                     [currentRenderEncoder useResource:tex
-                                                usage:MTLResourceUsageRead|MTLResourceUsageSample
+                                                usage:usage
+                                               stages:stage];
+                }
+                // SSBOs (graphics stage) — `info.ssboBindings` stage-
+                // filtered. Under argbuf reflection SSBOs live at
+                // [[id(192 + glBinding)]]. Direct mode uses sequential
+                // 28+N slots via setVertexBuffer/setFragmentBuffer.
+                for (const auto& ssbo : info.ssboBindings) {
+                    if (ssbo.metalBuffer == nullptr) continue;
+                    if (isFragment && !ssbo.isFragment) continue;
+                    if (!isFragment && !ssbo.isVertex) continue;
+                    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)(ssbo.metalBuffer);
+                    [encoder setBuffer:buf
+                                offset:static_cast<NSUInteger>(ssbo.offset)
+                               atIndex:static_cast<NSUInteger>(ssbo.metalSlot)];
+                    [currentRenderEncoder useResource:buf
+                                                usage:MTLResourceUsageRead|MTLResourceUsageWrite
                                                stages:stage];
                 }
                 if (isFragment) {
