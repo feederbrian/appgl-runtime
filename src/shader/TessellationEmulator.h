@@ -407,7 +407,14 @@ TessDomainOutput generateTessDomain(
     TessSpacing spacing,
     const float outerLevels[4],
     const float innerLevels[2],
-    bool pointMode);
+    bool pointMode,
+    // Phase 3f-9: when true, reverse the winding of each emitted
+    // triangle (or quad-decomposed triangle) so the output matches
+    // the TES `layout(..., cw) in;` qualifier. The default (false)
+    // matches CCW which is GL's default per §11.2.2. Isolines and
+    // point-mode outputs ignore this flag since they have no triangle
+    // winding.
+    bool flipWinding = false);
 
 // Detect whether a program's tessellation stages can be emulated. Called
 // once at link time. Sets `program.tessellationEmulated` on success. Also

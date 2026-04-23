@@ -13,7 +13,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "../objects/GLObjectStore.h"
 #include "../state/GLStateTracker.h"
@@ -1420,7 +1422,8 @@ TessDomainOutput generateTessDomain(
     TessSpacing spacing,
     const float outerLevels[4],
     const float innerLevels[2],
-    bool pointMode)
+    bool pointMode,
+    bool flipWinding)
 {
     TessDomainOutput out;
     switch (domain) {
@@ -1433,6 +1436,17 @@ TessDomainOutput generateTessDomain(
         case TessDomain::Triangles:
             tessellateTriangles(outerLevels, innerLevels, spacing, pointMode, out);
             break;
+    }
+    // Phase 3f-9: CW winding = swap indices[1] and [2] in each
+    // triangle (3-element stride). Only applies to Triangle /
+    // triangle-decomposed-Quad outputs — Isolines and point-mode
+    // topology have no winding semantic. We detect that via the
+    // topology flag on the output (GL_TRIANGLES only).
+    if (flipWinding && out.topology == GL_TRIANGLES &&
+        !out.indices.empty() && (out.indices.size() % 3) == 0) {
+        for (std::size_t i = 0; i + 2 < out.indices.size(); i += 3) {
+            std::swap(out.indices[i + 1], out.indices[i + 2]);
+        }
     }
     return out;
 }
@@ -1793,8 +1807,15 @@ EmulatedDraw emulateTessellationDraw(
     // draw shares the same levels for now — per-patch level variation
     // (gl_PrimitiveID-dependent TCS) would need per-patch domain
     // regeneration, which is phase 3f-9+ infrastructure.
+    //
+    // Phase 3f-9: honour the TES's `layout(..., cw/ccw)` qualifier.
+    // Default GL winding is CCW per §11.2.2; CW flips the indices
+    // of each emitted triangle. Only affects the triangle/quad
+    // output topology (isolines/points have no winding).
+    const bool flipWinding = (program.tessGenVertexOrder == GL_CW);
     TessDomainOutput domainOut =
-        generateTessDomain(domain, spacing, outerLevels, innerLevels, pointMode);
+        generateTessDomain(domain, spacing, outerLevels, innerLevels, pointMode,
+                           flipWinding);
     const std::size_t coordsPerPatch = domainOut.coords.size() / 3;
     if (coordsPerPatch == 0) {
         d.diagnostic = "tess-emul: domain produced zero vertices";
@@ -2024,7 +2045,14 @@ EmulatedDraw emulateTessellationDraw(
         interpVaryingWidths.push_back(v.numComponents);
     }
 
-    auto emitVertexInterpreted = [&](std::size_t dstIdx,
+    // Phase 3f-9: surface interpreter bail reasons behind the debug
+    // env var. One-shot per draw (dedup by diagnostic string) so a
+    // failing body doesn't spam every vertex.
+    const bool tesDebug = (std::getenv("APPGL_TESS_EMUL_DEBUG") != nullptr);
+    auto tesBailSeen = std::make_shared<std::unordered_set<std::string>>();
+
+    auto emitVertexInterpreted = [&, tesDebug, tesBailSeen](
+                                     std::size_t dstIdx,
                                      std::size_t patchIdx,
                                      float u, float v, float w) {
         EmulatedVertex outV;
@@ -2042,6 +2070,10 @@ EmulatedDraw emulateTessellationDraw(
             program, tessCoord, primID,
             interpVaryingNames, interpVaryingWidths,
             ssboMap, thisPatchInputs, outV, &diag);
+        if (!ok && tesDebug && !diag.empty() &&
+            tesBailSeen->insert(diag).second) {
+            std::fprintf(stderr, "[tess-emul] TES bail: %s\n", diag.c_str());
+        }
         const std::size_t dst = dstIdx * floatsPerVertex;
         if (ok) {
             // Position
