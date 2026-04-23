@@ -265,6 +265,15 @@ MTLTextureType metalTextureTypeForTarget(GLenum target) {
             return MTLTextureType2DArray;
         case GL_TEXTURE_CUBE_MAP:
             return MTLTextureTypeCube;
+        // Phase 6 continuation: cube map array. Previously fell through
+        // to MTLTextureType2D, so textureSize() on `samplerCubeArray`
+        // returned 1 for the array-length dim instead of the actual
+        // cube count. `textureSize_*` tests in the texture_cube_map_array
+        // section exercise this and were all failing with
+        //   "textureSize() returned ...[1] but should be ...[N]"
+        // across every shader stage.
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+            return MTLTextureTypeCubeArray;
         // Phase 6-3: MS textures must resolve to the dedicated MS
         // texture types. Passing MTLTextureType2D for an MS target would
         // make Metal create a single-sample texture (sampleCount is only
@@ -2807,15 +2816,22 @@ struct GLContext::Impl {
         // Metal requires height=1 for 1D array textures; layers come from arrayLength.
         const bool is1DArray = (object.target == GL_TEXTURE_1D_ARRAY);
         const bool is2DArray = (object.target == GL_TEXTURE_2D_ARRAY);
+        const bool isCubeArray = (object.target == GL_TEXTURE_CUBE_MAP_ARRAY);
         descriptor.height = static_cast<NSUInteger>(
             (object.target == GL_TEXTURE_1D || is1DArray) ? 1 : baseLevel.desc.height);
         descriptor.depth = static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? baseLevel.desc.depth : 1);
         // Arrayed textures: Metal uses arrayLength. GL puts layer count in
-        // `height` for 1D_ARRAY and `depth` for 2D_ARRAY.
+        // `height` for 1D_ARRAY and `depth` for 2D_ARRAY. For
+        // GL_TEXTURE_CUBE_MAP_ARRAY, `depth` is the total layer-face
+        // count (6 × cubes). Metal's MTLTextureTypeCubeArray expects
+        // `arrayLength` to be the number of cubes — divide by 6.
         if (is1DArray) {
             descriptor.arrayLength = static_cast<NSUInteger>(baseLevel.desc.height);
         } else if (is2DArray) {
             descriptor.arrayLength = static_cast<NSUInteger>(baseLevel.desc.depth);
+        } else if (isCubeArray) {
+            const GLsizei layerFaces = std::max<GLsizei>(baseLevel.desc.depth, 6);
+            descriptor.arrayLength = static_cast<NSUInteger>(layerFaces / 6);
         }
         // MTLTextureType1D does not support mipmapping (Metal asserts
         // `mipmapLevelCount == 1` inside MTLTextureDescriptorInternal). GL
