@@ -640,14 +640,34 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
 
         // Remap sampled images (combined image samplers).
+        //
+        // Step 7-2: with argument_buffers enabled, Image and Sampler
+        // halves of each SampledImage must land at DISTINCT argument-
+        // buffer `[[id(N)]]` slots — SPIRV-Cross treats equal indices
+        // as descriptor aliasing, which trips its fixup_hooks lambda
+        // with a zero `overlapping_var_id` → Variant::get<SPIRVariable>
+        // at spirv_common.hpp:1644 throws "nullptr". The baseline
+        // (non-arg-buffer) direct-binding path uses independent Metal
+        // slot pools (setFragmentTexture + setFragmentSamplerState at
+        // the same numeric index), so colliding indices there are
+        // fine. The fix is scoped to the argument_buffers branch:
+        // give image and sampler separate id ranges (2*glBinding and
+        // 2*glBinding + 1). Outside the gate, keep the existing
+        // distinct-pool assignment unchanged — zero regression.
+        const bool useArgBuf = (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         for (auto& img : resources.sampled_images) {
             uint32_t glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
             spirv_cross::MSLResourceBinding binding;
             binding.stage = compiler.get_execution_model();
             binding.desc_set = compiler.get_decoration(img.id, spv::DecorationDescriptorSet);
             binding.binding = glBinding;
-            binding.msl_texture = bindings.textureBase + glBinding;
-            binding.msl_sampler = bindings.samplerBase + glBinding;
+            if (useArgBuf) {
+                binding.msl_texture = bindings.textureBase + 2 * glBinding;
+                binding.msl_sampler = bindings.samplerBase + 2 * glBinding + 1;
+            } else {
+                binding.msl_texture = bindings.textureBase + glBinding;
+                binding.msl_sampler = bindings.samplerBase + glBinding;
+            }
             compiler.add_msl_resource_binding(binding);
         }
 

@@ -1,0 +1,46 @@
+diff --git a/spirv_common.hpp b/spirv_common.hpp
+index cd06f75..69f3ff2 100644
+--- a/spirv_common.hpp
++++ b/spirv_common.hpp
+@@ -41,6 +41,9 @@
+ #include "spirv_cross_containers.hpp"
+ #include "spirv_cross_error_handling.hpp"
+ #include <functional>
++#include <execinfo.h>
++#include <cstdlib>
++#include <cstdio>
+ 
+ // A bit crude, but allows projects which embed SPIRV-Cross statically to
+ // effectively hide all the symbols from other projects.
+@@ -1640,8 +1643,14 @@ public:
+ 	template <typename T>
+ 	T &get()
+ 	{
+-		if (!holder)
++		if (!holder) {
++			if (std::getenv("APPGL_DUMP_MSL") != nullptr) {
++				std::fprintf(stderr, "[APPGL] Variant::get<T> nullptr T::type=%d this.type=%d\n",
++					(int)T::type, (int)type);
++				void* buf[32]; int n = ::backtrace(buf, 32); ::backtrace_symbols_fd(buf, n, 2);
++			}
+ 			SPIRV_CROSS_THROW("nullptr");
++		}
+ 		if (static_cast<Types>(T::type) != type)
+ 			SPIRV_CROSS_THROW("Bad cast");
+ 		return *static_cast<T *>(holder);
+@@ -1650,8 +1659,14 @@ public:
+ 	template <typename T>
+ 	const T &get() const
+ 	{
+-		if (!holder)
++		if (!holder) {
++			if (std::getenv("APPGL_DUMP_MSL") != nullptr) {
++				std::fprintf(stderr, "[APPGL] Variant::get<T> const nullptr T::type=%d this.type=%d\n",
++					(int)T::type, (int)type);
++				void* buf[32]; int n = ::backtrace(buf, 32); ::backtrace_symbols_fd(buf, n, 2);
++			}
+ 			SPIRV_CROSS_THROW("nullptr");
++		}
+ 		if (static_cast<Types>(T::type) != type)
+ 			SPIRV_CROSS_THROW("Bad cast");
+ 		return *static_cast<const T *>(holder);
