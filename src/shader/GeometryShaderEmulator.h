@@ -27,6 +27,7 @@
 // for a future GPU emulation path (SPIRV-Cross mesh-shader emitter
 // patch or Apple-converter chain).
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -233,6 +234,42 @@ bool runVsForVertex(
     const GLObjectStore& objects,
     std::size_t vboSlot,
     std::int32_t instanceID,
+    const std::vector<std::string>& outVaryingNames,
+    const std::vector<std::uint32_t>& outVaryingWidths,
+    EmulatedVertex& outVertex,
+    std::string* diagnostic = nullptr);
+
+// Run a single TES invocation on CPU for the vertex whose tess-space
+// barycentric / parametric coord is `tessCoord`. Exposed so the tess-
+// CPU emulator can interpret non-passthrough TES bodies (which the
+// static matcher in `matchTessEvalPassthrough` rejects) — the common
+// CTS `constant_expressions.*_tess_eval` shape, for example, mixes a
+// passthrough `gl_Position = vec4(gl_TessCoord.x, 0, 0, 1)` with SSBO
+// side-effect writes through `generateExecBufferIo`.
+//
+//   tesSpirv / tesWordCount: the TES SPIR-V module bytecode.
+//   program: source of default-uniform / block-uniform values (same
+//     uniform map the VS path builds).
+//   tessCoord: the domain coord for this output vertex. For isolines
+//     mode only .x is meaningful; for triangles / quads all three
+//     components matter.
+//   primitiveID: gl_PrimitiveID for the patch the vertex belongs to
+//     (== patch-index-in-draw, per GL 4.6 §11.2.3).
+//   outVaryingNames / outVaryingWidths: same parallel-array shape as
+//     `runVsForVertex`. Consumers get flat-scalar varying payload.
+//   outVertex: gl_Position + varyings + clip/cull distances land
+//     here, mirroring `runVsForVertex`.
+//
+// Returns false on any interpreter bail (unsupported opcode, missing
+// entry point). Phase 3f-1: scaffolding only — call sites not yet
+// wired. Phase 3f-3+ adds SSBO storage-class plumbing so the side
+// effects actually reach the bound GL buffer.
+bool runTesForVertex(
+    const std::uint32_t* tesSpirv,
+    std::size_t tesWordCount,
+    const GLProgramObject& program,
+    const std::array<float, 3>& tessCoord,
+    std::int32_t primitiveID,
     const std::vector<std::string>& outVaryingNames,
     const std::vector<std::uint32_t>& outVaryingWidths,
     EmulatedVertex& outVertex,

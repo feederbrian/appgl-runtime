@@ -174,7 +174,7 @@ using namespace appgl::interp;
 
 class Interpreter {
 public:
-    enum class Stage { Vertex, Geometry };
+    enum class Stage { Vertex, Geometry, TessEvaluation };
 
     struct PerVertexInput {
         std::array<float, 4> position{0, 0, 0, 1};
@@ -245,6 +245,19 @@ public:
     void setGsPrimitiveId(std::int32_t primId) { gsPrimitiveId_ = primId; }
     void setGsInvocationId(std::int32_t invId) { gsInvocationId_ = invId; }
 
+    // TES-stage built-in inputs. `tessCoord` feeds BuiltInTessCoord
+    // (SPIR-V enum value 13, a vec3) — for isolines only .x is the
+    // parametric coord, for triangles the three components are
+    // barycentric, for quads (.x, .y) are the domain coords. The
+    // shader always sees a vec3, so we splat all three components.
+    // `primitiveID` feeds BuiltInPrimitiveId (=7) with the patch-
+    // in-draw index per GL 4.6 §11.2.3.
+    void setTesInputs(const std::array<float, 3>& tessCoord,
+                      std::int32_t primitiveID) {
+        tesTessCoord_ = tessCoord;
+        tesPrimitiveId_ = primitiveID;
+    }
+
     // Run the entry-point function once, given `inputs` as gl_in[].
     // Appends emitted vertices to `emitted`. Primitive boundaries are
     // pushed into `primEnds` — each entry is `emitted.size()` after a
@@ -288,6 +301,12 @@ private:
     std::int32_t vsInstanceID_ = 0;
     std::int32_t gsPrimitiveId_ = 0;
     std::int32_t gsInvocationId_ = 0;
+
+    // TES-stage inputs (see setTesInputs). Read by initVariables when
+    // a variable is decorated BuiltInTessCoord / BuiltInPrimitiveId in
+    // Stage::TessEvaluation.
+    std::array<float, 3> tesTessCoord_{0.0f, 0.0f, 0.0f};
+    std::int32_t tesPrimitiveId_ = 0;
 
     // Per-id SSA values for loads/arithmetic results.
     std::unordered_map<std::uint32_t, Value> valueStore_;
@@ -742,6 +761,37 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                     std::memcpy(&storage[0], &gsInvocationId_, 4);
                     continue;
                 }
+            }
+        }
+
+        // ── TES-stage built-in inputs: gl_TessCoord (BuiltIn=13),
+        // gl_PrimitiveID (BuiltIn=7), gl_PatchVerticesIn (BuiltIn=14).
+        // Other tess built-ins (gl_in[] array, gl_TessLevel*) need the
+        // patch's TCS-output + per-patch state plumbing — they land in
+        // phase 3f-2+. For now we seed only the three that the CE
+        // tess_eval + passthrough shapes read.
+        if (stage_ == Stage::TessEvaluation && info.storageClass == spv::StorageClassInput) {
+            auto dIt = module_.decorations.find(varId);
+            if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn) {
+                if (dIt->second.builtIn == 13 /*BuiltInTessCoord*/ && width >= 3) {
+                    // vec3 (domain coord). Splat all three components;
+                    // isolines/quads shaders read only a subset but
+                    // the scalar storage still needs all three slots
+                    // populated in case the body derefs e.g. .z.
+                    storage[0] = tesTessCoord_[0];
+                    storage[1] = tesTessCoord_[1];
+                    storage[2] = tesTessCoord_[2];
+                    continue;
+                }
+                if (dIt->second.builtIn == 7 /*BuiltInPrimitiveId*/ && width >= 1) {
+                    std::memcpy(&storage[0], &tesPrimitiveId_, 4);
+                    continue;
+                }
+                // Phase 3f-1 stub: BuiltInPatchVertices = 14. We don't
+                // plumb a runtime value yet — leave the storage at 0
+                // (safe default; TES bodies that consult it for bounds-
+                // checking fall back through the matcher's strictness
+                // gate anyway).
             }
         }
 
@@ -4384,6 +4434,54 @@ bool runVsForVertex(
     outVertex.position[3] = 1.0f;
     if (!vsInterp.executeVs(outVertex)) {
         if (diagnostic) *diagnostic = "runVsForVertex: VS body: " + vsInterp.diagnostic();
+        return false;
+    }
+    return true;
+}
+
+bool runTesForVertex(
+    const std::uint32_t* tesSpirv,
+    std::size_t tesWordCount,
+    const GLProgramObject& program,
+    const std::array<float, 3>& tessCoord,
+    std::int32_t primitiveID,
+    const std::vector<std::string>& outVaryingNames,
+    const std::vector<std::uint32_t>& outVaryingWidths,
+    EmulatedVertex& outVertex,
+    std::string* diagnostic)
+{
+    if (tesSpirv == nullptr || tesWordCount < 5) {
+        if (diagnostic) *diagnostic = "runTesForVertex: empty SPIR-V";
+        return false;
+    }
+    SpirvModule tesMod;
+    if (!tesMod.parse(tesSpirv, tesWordCount)) {
+        if (diagnostic) *diagnostic = "runTesForVertex: SpirvModule parse: " + tesMod.parseError;
+        return false;
+    }
+
+    // Uniform map — identical shape to runVsForVertex. Default-uniform
+    // + block uniform values keyed by name, flattened to scalar-per-
+    // element floats (int/uint/bool are bit-cast into the float slot).
+    Interpreter::UniformValues uniforms = buildUniformMap(program);
+
+    // Re-use the VS-shape constructor (second overload). It expects
+    // `outputVaryingNames_/Widths_` — which is what the matched TES
+    // body produces as its user-varying output — and produces an
+    // `EmulatedVertex` via `executeVs`. The TES body is shape-
+    // compatible with the VS body for entry-point-run-once purposes:
+    // no OpEmitVertex, writes gl_Position + user varyings. Stage-
+    // specific built-in input seeding is driven off the new
+    // Stage::TessEvaluation discriminator inside initVariables.
+    Interpreter tesInterp(tesMod, Interpreter::Stage::TessEvaluation,
+                          outVaryingNames, outVaryingWidths);
+    tesInterp.setUniforms(&uniforms);
+    tesInterp.setTesInputs(tessCoord, primitiveID);
+
+    outVertex.position[0] = outVertex.position[1] = outVertex.position[2] = 0.0f;
+    outVertex.position[3] = 1.0f;
+    if (!tesInterp.executeVs(outVertex)) {
+        if (diagnostic) *diagnostic = "runTesForVertex: TES body: " + tesInterp.diagnostic();
         return false;
     }
     return true;
