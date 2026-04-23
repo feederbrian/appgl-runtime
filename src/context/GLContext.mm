@@ -4826,12 +4826,18 @@ struct GLContext::Impl {
     // texture suitable for use as a render target.  Returns nullptr when
     // the default framebuffer is bound (FBO 0) or when the attachment
     // has no Metal texture.  Also populates width/height/depthStencil.
+    // Phase 6-5 — optional `outColorSlices` receives the per-slot
+    // Metal-slice index for FramebufferTextureLayer-style attachments.
+    // Slot 0 feeds index 0, slots 1..7 feed indices 1..7. Every entry
+    // defaults to 0 (whole-texture attachment or non-layered).
     void* resolveFBOColorTarget(GLsizei& outWidth, GLsizei& outHeight,
                                 void*& outDepthStencil,
                                 std::uint32_t* outColorArrayLength = nullptr,
-                                std::array<void*, 7>* outExtraColorTextures = nullptr) const {
+                                std::array<void*, 7>* outExtraColorTextures = nullptr,
+                                std::array<std::uint32_t, 8>* outColorSlices = nullptr) const {
         if (outColorArrayLength != nullptr) *outColorArrayLength = 0;
         if (outExtraColorTextures != nullptr) outExtraColorTextures->fill(nullptr);
+        if (outColorSlices != nullptr) outColorSlices->fill(0);
         const GLuint fboName = state->boundDrawFramebuffer();
         if (fboName == 0) {
             return nullptr;
@@ -4902,6 +4908,16 @@ struct GLContext::Impl {
                 }
             }
             if (tex == nullptr) continue;
+            // Phase 6-5 — FramebufferTextureLayer stores the target
+            // slice in `att->layer`. For FramebufferTexture (whole-
+            // texture attachment, `att->layered`), Metal uses
+            // renderTargetArrayLength + `[[render_target_array_index]]`
+            // and leaves the slice at 0. For non-layered attachments
+            // (2D textures, renderbuffers), slice is also 0.
+            const std::uint32_t slotSlice =
+                (att->kind == GLFramebufferAttachment::Kind::Texture && !att->layered)
+                ? static_cast<std::uint32_t>(std::max<GLint>(att->layer, 0))
+                : 0;
             if (bi == 0) {
                 colorTex = tex;
                 primarySet = true;
@@ -4909,9 +4925,13 @@ struct GLContext::Impl {
                     outWidth = w;
                     outHeight = h;
                 }
+                if (outColorSlices != nullptr) (*outColorSlices)[0] = slotSlice;
             } else if (outExtraColorTextures != nullptr) {
                 // bi - 1 is the extras index for Metal slot bi.
                 (*outExtraColorTextures)[bi - 1] = tex;
+                if (outColorSlices != nullptr && bi < outColorSlices->size()) {
+                    (*outColorSlices)[bi] = slotSlice;
+                }
                 // Fall back to this attachment for outWidth/Height
                 // when slot 0 is GL_NONE (rare but GL allows it).
                 if (!primarySet && hasSize) {
@@ -21677,10 +21697,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 GLsizei fboW = 0, fboH = 0;
                 void* fboDSTex = nullptr;
                 std::array<void*, 7> extraColTex = {};
-                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
+                std::array<std::uint32_t, 8> colSlices = {};
+                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
                 if (fboColTex != nullptr) {
                     tdi.fboColorTexture = fboColTex;
                     tdi.fboAdditionalColorTextures = extraColTex;
+                    tdi.fboColorSlices = colSlices;
                     tdi.fboDepthStencilTexture = fboDSTex;
                     tdi.fboWidth = fboW;
                     tdi.fboHeight = fboH;
@@ -21891,10 +21913,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
                         std::array<void*, 7> extraColTex = {};
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
+                        std::array<std::uint32_t, 8> colSlices = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
                         if (fboColTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
+                            tdi.fboColorSlices = colSlices;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -22121,10 +22145,12 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 GLsizei fboW = 0, fboH = 0;
                 void* fboDSTex = nullptr;
                 std::array<void*, 7> extraColTex = {};
-                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
+                std::array<std::uint32_t, 8> colSlices = {};
+                void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
                 if (fboColTex != nullptr) {
                     tdi.fboColorTexture = fboColTex;
                     tdi.fboAdditionalColorTextures = extraColTex;
+                    tdi.fboColorSlices = colSlices;
                     tdi.fboDepthStencilTexture = fboDSTex;
                     tdi.fboWidth = fboW;
                     tdi.fboHeight = fboH;
@@ -22324,10 +22350,12 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
                         std::array<void*, 7> extraColTex = {};
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
+                        std::array<std::uint32_t, 8> colSlices = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
                         if (fboColTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
+                            tdi.fboColorSlices = colSlices;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -22719,10 +22747,12 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
                         std::array<void*, 7> extraColTex = {};
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
+                        std::array<std::uint32_t, 8> colSlices = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
                         if (fboColTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
+                            tdi.fboColorSlices = colSlices;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -23018,10 +23048,12 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
                         std::array<void*, 7> extraColTex = {};
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
+                        std::array<std::uint32_t, 8> colSlices = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
                         if (fboColTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
+                            tdi.fboColorSlices = colSlices;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;
@@ -23428,10 +23460,12 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         GLsizei fboW = 0, fboH = 0;
                         void* fboDSTex = nullptr;
                         std::array<void*, 7> extraColTex = {};
-                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex);
+                        std::array<std::uint32_t, 8> colSlices = {};
+                        void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
                         if (fboColTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
+                            tdi.fboColorSlices = colSlices;
                             tdi.fboDepthStencilTexture = fboDSTex;
                             tdi.fboWidth = fboW;
                             tdi.fboHeight = fboH;

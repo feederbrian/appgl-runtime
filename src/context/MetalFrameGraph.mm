@@ -1713,6 +1713,20 @@ struct MetalFrameGraph::Impl {
             MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
             pass.colorAttachments[0].texture = colorTexture;
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            // Phase 6-5: honour FramebufferTextureLayer slice selection
+            // per attachment. info.fboColorSlices carries the per-slot
+            // Metal slice (0 for non-layered / FramebufferTexture /
+            // renderbuffer attachments; layer index for
+            // FramebufferTextureLayer on array targets). Enables the
+            // CTS DSA `textures_storage_multisample_3d_*` pattern of
+            // binding each MS-array layer to a distinct color
+            // attachment. Without this, every layer silently collapses
+            // onto slice 0 and the test's per-layer reference data
+            // compares against slice-0's value.
+            if (isFBODraw && info.fboColorSlices[0] > 0) {
+                pass.colorAttachments[0].slice =
+                    static_cast<NSUInteger>(info.fboColorSlices[0]);
+            }
             if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_COLOR_BUFFER_BIT)) {
                 pass.colorAttachments[0].loadAction = MTLLoadActionClear;
                 pass.colorAttachments[0].clearColor = pendingClearColor;
@@ -1733,6 +1747,13 @@ struct MetalFrameGraph::Impl {
                 pass.colorAttachments[ei + 1].texture = extraTex;
                 pass.colorAttachments[ei + 1].loadAction = MTLLoadActionLoad;
                 pass.colorAttachments[ei + 1].storeAction = MTLStoreActionStore;
+                // Phase 6-5: per-slot slice (index ei+1 into fboColorSlices).
+                const std::size_t sliceIdx = ei + 1;
+                if (sliceIdx < info.fboColorSlices.size() &&
+                    info.fboColorSlices[sliceIdx] > 0) {
+                    pass.colorAttachments[ei + 1].slice =
+                        static_cast<NSUInteger>(info.fboColorSlices[sliceIdx]);
+                }
             }
             // Layered rendering — GS-emul path only. When the
             // emulated GS wrote gl_Layer, the VS routes the per-

@@ -406,6 +406,17 @@ struct TranslatedDrawInfo {
     // either non-layered or attached as a single slice via
     // framebufferTextureLayer, and layered output is disabled.
     std::uint32_t fboColorArrayLength = 0;
+    // Phase 6-5: per-attachment slice index for FramebufferTextureLayer
+    // attachments. When the app calls `glFramebufferTextureLayer(FBO,
+    // COLOR_ATTACHMENT0 + i, tex, 0, layer)`, Metal's equivalent is
+    // `pass.colorAttachments[i].slice = layer`. Without this, every
+    // slot defaults to slice 0 and per-layer rendering silently
+    // collapses onto layer 0. Index 0 corresponds to
+    // `fboColorTexture` (Metal slot 0); indices 1..7 correspond to
+    // `fboAdditionalColorTextures[0..6]` (Metal slots 1..7).
+    // Non-layered attachments (FramebufferTexture / FramebufferTexture2D)
+    // leave their slot at 0.
+    std::array<std::uint32_t, 8> fboColorSlices = {};
 };
 
 // Phase 8X Group 4d follow-up¹⁷ — describes a single immediate-mode
