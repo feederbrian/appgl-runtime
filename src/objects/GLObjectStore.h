@@ -614,6 +614,26 @@ struct GLProgramObject {
     float tessPositionScale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     float tessPositionOffset[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float tessPositionConstant[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    // Phase-3e-2: per-user-varying mappings captured from the TES body.
+    // Each entry is { name, location, numComponents, mapping[4],
+    // scale[4], offset[4], constant[4] } using the same encoding as
+    // the position mapping above. The draw path iterates this vector
+    // to fill the EmulatedDraw's varying slots per generated vertex.
+    // Flat layout: the same type that TessellationEmulator.h defines
+    // as `TessVaryingMapping`, but declared here as a lightweight POD
+    // so the objects header doesn't need to pull in the tess-emul
+    // header. Kept as a plain vector-of-structs because the per-
+    // varying count is small (CTS rarely exceeds 4).
+    struct TessVaryingSlot {
+        std::string name;
+        GLuint location = 0;
+        GLuint numComponents = 1;
+        std::int8_t mapping[4] = {-1, -1, -1, -1};
+        float scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        float offset[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float constant[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    };
+    std::vector<TessVaryingSlot> tessVaryings;
     // TES SPIR-V copy mirrors geometrySpirv's pattern so draw time
     // can emulate without re-reaching the shader object (which may
     // have been detached + deleted).

@@ -1371,8 +1371,25 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
                 program.tessPositionOffset[c] = tePass.positionOffset[c];
                 program.tessPositionConstant[c] = tePass.positionConstant[c];
             }
+            // Phase-3e-2: copy per-varying mappings onto the program.
+            program.tessVaryings.clear();
+            program.tessVaryings.reserve(tePass.varyings.size());
+            for (const auto& v : tePass.varyings) {
+                GLProgramObject::TessVaryingSlot slot;
+                slot.name = v.name;
+                slot.location = v.location;
+                slot.numComponents = v.numComponents;
+                for (int c = 0; c < 4; ++c) {
+                    slot.mapping[c] = v.mapping[c];
+                    slot.scale[c] = v.scale[c];
+                    slot.offset[c] = v.offset[c];
+                    slot.constant[c] = v.constant[c];
+                }
+                program.tessVaryings.push_back(std::move(slot));
+            }
             program.linkLog +=
-                "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — passthrough TES enabled";
+                "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — passthrough TES enabled ("
+                + std::to_string(tePass.varyings.size()) + " user varyings)";
             return true;
         }
     }
@@ -1502,9 +1519,24 @@ EmulatedDraw emulateTessellationDraw(
     // `gl_Position = gl_TessCoord` shape).
     const std::size_t totalVerts = coordsPerPatch * numPatches;
     constexpr std::size_t kPosFloats = 4;
+
+    // Phase-3e-2: varying layout. Each user varying adds
+    // `numComponents` floats per vertex, concatenated after the
+    // 4-wide position. The EmulatedDraw's synth-VS path reads the
+    // same flat layout via `varyingWidths` and `varyingNames`.
+    std::size_t varyingFloats = 0;
+    for (const auto& v : program.tessVaryings) {
+        d.varyingNames.push_back(v.name);
+        d.varyingWidths.push_back(static_cast<std::uint32_t>(v.numComponents));
+        d.varyingLocations.push_back(v.location);
+        d.varyingInterp.push_back(0);     // smooth (default)
+        d.varyingBaseType.push_back(0);   // float
+        varyingFloats += v.numComponents;
+    }
+    const std::size_t floatsPerVertex = kPosFloats + varyingFloats;
     d.vertexCount = totalVerts;
-    d.floatsPerVertex = kPosFloats;
-    d.expandedVertexData.assign(totalVerts * kPosFloats, 0.0f);
+    d.floatsPerVertex = floatsPerVertex;
+    d.expandedVertexData.assign(totalVerts * floatsPerVertex, 0.0f);
     d.topology = domainOut.topology;
 
     // Fill in position data. For GL_POINTS/GL_LINES/GL_TRIANGLES the
@@ -1519,15 +1551,16 @@ EmulatedDraw emulateTessellationDraw(
     const std::size_t expandPerPatch = isPoints ? coordsPerPatch : indices.size();
     // Recompute if point-mode path was chosen — indices empty, walk coords.
     d.vertexCount = expandPerPatch * numPatches;
-    d.expandedVertexData.assign(d.vertexCount * kPosFloats, 0.0f);
+    d.expandedVertexData.assign(d.vertexCount * floatsPerVertex, 0.0f);
 
-    // Phase-3c: apply the matched tess-coord → gl_Position mapping when
-    // tess emulation is enabled. Non-emulated path sticks with the
+    // Phase-3c/3d/3e-2: apply position mapping AND varying mappings to
+    // each generated domain coord. Non-emulated path sticks with the
     // phase-2a identity default (u,v,w,1) — harmless since .ok=false
     // will force the draw through the legacy translated path.
-    auto emitPosition = [&](std::size_t dstIdx, float u, float v, float w) {
+    auto emitVertex = [&](std::size_t dstIdx, float u, float v, float w) {
         const float coordsPerPatchLookup[3] = {u, v, w};
-        const std::size_t dst = dstIdx * kPosFloats;
+        const std::size_t dst = dstIdx * floatsPerVertex;
+        // Position first (always 4 floats).
         for (int c = 0; c < 4; ++c) {
             const std::int8_t src = program.tessPositionMapping[c];
             if (src >= 0 && src < 3) {
@@ -1538,6 +1571,22 @@ EmulatedDraw emulateTessellationDraw(
                 d.expandedVertexData[dst + c] = program.tessPositionConstant[c];
             }
         }
+        // Varyings after position, in declaration order.
+        std::size_t vOff = kPosFloats;
+        for (const auto& vmap : program.tessVaryings) {
+            for (std::uint32_t c = 0; c < vmap.numComponents; ++c) {
+                const std::int8_t src = vmap.mapping[c];
+                float out;
+                if (src >= 0 && src < 3) {
+                    out = coordsPerPatchLookup[src] * vmap.scale[c]
+                        + vmap.offset[c];
+                } else {
+                    out = vmap.constant[c];
+                }
+                d.expandedVertexData[dst + vOff + c] = out;
+            }
+            vOff += vmap.numComponents;
+        }
     };
 
     for (std::size_t p = 0; p < numPatches; ++p) {
@@ -1547,7 +1596,7 @@ EmulatedDraw emulateTessellationDraw(
                 const float u = coords[i * 3 + 0];
                 const float v = coords[i * 3 + 1];
                 const float w = coords[i * 3 + 2];
-                emitPosition(dstPatchBase + i, u, v, w);
+                emitVertex(dstPatchBase + i, u, v, w);
             }
         } else {
             for (std::size_t i = 0; i < indices.size(); ++i) {
@@ -1555,7 +1604,7 @@ EmulatedDraw emulateTessellationDraw(
                 const float u = coords[idx * 3 + 0];
                 const float v = coords[idx * 3 + 1];
                 const float w = coords[idx * 3 + 2];
-                emitPosition(dstPatchBase + i, u, v, w);
+                emitVertex(dstPatchBase + i, u, v, w);
             }
         }
     }
