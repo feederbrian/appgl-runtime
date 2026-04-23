@@ -719,9 +719,19 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         };
         LayoutQualifiers layoutQ;
         // Parse all LEADING layout blocks (before any in/out/uniform).
+        // Guard against infinite loops when extractLayoutQualifiers
+        // early-returns without erasing the "layout" token (e.g. a
+        // malformed `layout` statement without a following `(`, as
+        // emitted by CTS CommonBug_ReservedNames when the reserved
+        // word IS "layout"). Without the size-decrease guard the
+        // outer processStatement would hang on such shaders and burn
+        // 100% CPU in string-compare loops — reflectGLSL CPU time
+        // grows without bound for a single malformed shader.
         while (!tokens.empty() && tokens.front() == "layout") {
+            const std::size_t before = tokens.size();
             LayoutQualifiers one = extractLayoutQualifiers(tokens);
             mergeLayout(layoutQ, one);
+            if (tokens.size() >= before) break;
         }
         if (tokens.empty()) {
             return;
@@ -764,9 +774,12 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
         // Parse TRAILING layout blocks (after the storage keyword).
         // GLSL syntax: `in layout(location = 2) vec4 x;` or
         // `in layout(location = 3) layout(location = 2) vec4 x;`.
+        // Same size-decrease guard as the leading-layout loop above.
         while (!tokens.empty() && tokens.front() == "layout") {
+            const std::size_t before = tokens.size();
             LayoutQualifiers one = extractLayoutQualifiers(tokens);
             mergeLayout(layoutQ, one);
+            if (tokens.size() >= before) break;
         }
         // Drop any interpolation/precision qualifiers that come AFTER
         // the storage+layout block (e.g. `in layout(...) smooth vec4 x`).
