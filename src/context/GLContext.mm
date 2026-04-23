@@ -2511,30 +2511,33 @@ struct GLContext::Impl {
                 chosenFormat = MTLPixelFormatRGBA8Unorm;
             }
 
-            const NSUInteger samples = static_cast<NSUInteger>(
+            NSUInteger samples = static_cast<NSUInteger>(
                 std::max<GLsizei>(object.desc.samples, 1));
             const bool isArray = (object.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
             // Metal's `MTLTextureType2DMultisample(Array)` requires
-            // `sampleCount >= 2`. GL permits `samples == 1` on an MS
-            // target though — GL_MAX_INTEGER_SAMPLES advertises 1 on
-            // M1 Max, so integer-format sample_shading render tests
-            // pass samples=1 here. Demote such calls to the regular
-            // 2D / 2DArray texture type instead of tripping Metal's
-            // `sampleCount must be > 1` validator. The GL-side target
-            // stays GL_TEXTURE_2D_MULTISAMPLE (the framebuffer-attach
-            // path doesn't cross-check the Metal texture type); the
-            // pipeline builder reads `colorTexture.sampleCount == 1`
-            // and falls out of MSAA mode cleanly.
-            const bool useMSType = samples >= 2;
+            // `sampleCount >= 2` — the descriptor validator asserts
+            // "sampleCount must be > 1 for multisample textures". GL
+            // permits `samples == 1` on an MS target though, and tests
+            // like DSA `textures_storage_multisample_*` pass samples=1
+            // into `glTextureStorage2DMultisample`. Bump to 2 so the
+            // texture is a real MS texture with Metal's minimum
+            // sampleCount; GL 4.6 §8.6 explicitly allows the
+            // implementation to choose a sample count >= requested.
+            // Mirror the bump into `object.desc.samples` so
+            // `glGetTexLevelParameteriv(GL_TEXTURE_SAMPLES, ...)`
+            // reports the actual count. Downstream shaders that
+            // declare `sampler2DMS` + `texelFetch(tex, coord, 0)`
+            // continue to work — sample 0 is always a valid index
+            // and the MS draw writes the same fragment value to every
+            // sample when per-sample FS isn't active.
+            if (samples < 2) {
+                samples = 2;
+                object.desc.samples = 2;
+            }
 
             MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
-            if (useMSType) {
-                desc.textureType = isArray ? MTLTextureType2DMultisampleArray
-                                           : MTLTextureType2DMultisample;
-            } else {
-                desc.textureType = isArray ? MTLTextureType2DArray
-                                           : MTLTextureType2D;
-            }
+            desc.textureType = isArray ? MTLTextureType2DMultisampleArray
+                                       : MTLTextureType2DMultisample;
             desc.pixelFormat = chosenFormat;
             desc.width = static_cast<NSUInteger>(baseLevel.desc.width);
             desc.height = static_cast<NSUInteger>(baseLevel.desc.height);
@@ -2552,12 +2555,8 @@ struct GLContext::Impl {
             desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             // Apple Silicon rejects MTLStorageModeShared on MS textures
             // (Metal validation "A texture with MTLTextureType2DMultisample
-            // can only be created with MTLStorageModePrivate"). The
-            // 1-sample demote path above picks MTLTextureType2D, which
-            // accepts Shared storage, so only the genuine-MS branch
-            // pins Private.
-            desc.storageMode = useMSType
-                ? MTLStorageModePrivate : MTLStorageModeShared;
+            // can only be created with MTLStorageModePrivate").
+            desc.storageMode = MTLStorageModePrivate;
 
             id<MTLTexture> mt = [device newTextureWithDescriptor:desc];
             if (mt == nil) return false;
@@ -3965,12 +3964,99 @@ struct GLContext::Impl {
                 // element i. We loop over all elements below.
                 GLint uniformLocation = -1;
                 GLint samplerArraySize = 1;
+                GLenum samplerGLType = 0;
                 for (const auto& uinfo : program.uniforms) {
                     if (uinfo.name == sampledTex.name) {
                         uniformLocation = uinfo.location;
                         samplerArraySize = std::max<GLint>(uinfo.arraySize, 1);
+                        samplerGLType = uinfo.type;
                         break;
                     }
+                }
+
+                // Phase 6-4: map sampler's GL uniform type to the GL
+                // texture target the shader declares it with. When the
+                // app binds two textures to the same unit with distinct
+                // targets (GL spec permits — e.g. DSA
+                // `textures_storage_multisample_*` binds a 2D input and
+                // an MS input to unit 0, each via its native target,
+                // then uses each via a separate sampler2D / sampler2DMS
+                // program), the sampler type disambiguates which target
+                // our resolve should pick. Without this, the generic
+                // "GL_TEXTURE_2D first, then any-target" probe order
+                // silently routes the sampler2DMS lookup to the 2D
+                // texture, which trips Metal's
+                //   "incorrect type of texture (MTLTextureType2D) bound
+                //    at Texture binding at index 0 (expect
+                //    MTLTextureType2DMultisample)"
+                // draw-time assertion.
+                GLenum preferredTarget = 0;
+                switch (samplerGLType) {
+                    case GL_SAMPLER_1D:
+                    case GL_INT_SAMPLER_1D:
+                    case GL_UNSIGNED_INT_SAMPLER_1D:
+                    case GL_SAMPLER_1D_SHADOW:
+                        preferredTarget = GL_TEXTURE_1D;
+                        break;
+                    case GL_SAMPLER_2D:
+                    case GL_INT_SAMPLER_2D:
+                    case GL_UNSIGNED_INT_SAMPLER_2D:
+                    case GL_SAMPLER_2D_SHADOW:
+                        preferredTarget = GL_TEXTURE_2D;
+                        break;
+                    case GL_SAMPLER_3D:
+                    case GL_INT_SAMPLER_3D:
+                    case GL_UNSIGNED_INT_SAMPLER_3D:
+                        preferredTarget = GL_TEXTURE_3D;
+                        break;
+                    case GL_SAMPLER_CUBE:
+                    case GL_INT_SAMPLER_CUBE:
+                    case GL_UNSIGNED_INT_SAMPLER_CUBE:
+                    case GL_SAMPLER_CUBE_SHADOW:
+                        preferredTarget = GL_TEXTURE_CUBE_MAP;
+                        break;
+                    case GL_SAMPLER_1D_ARRAY:
+                    case GL_INT_SAMPLER_1D_ARRAY:
+                    case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+                    case GL_SAMPLER_1D_ARRAY_SHADOW:
+                        preferredTarget = GL_TEXTURE_1D_ARRAY;
+                        break;
+                    case GL_SAMPLER_2D_ARRAY:
+                    case GL_INT_SAMPLER_2D_ARRAY:
+                    case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+                    case GL_SAMPLER_2D_ARRAY_SHADOW:
+                        preferredTarget = GL_TEXTURE_2D_ARRAY;
+                        break;
+                    case GL_SAMPLER_CUBE_MAP_ARRAY:
+                    case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+                    case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+                    case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                        preferredTarget = GL_TEXTURE_CUBE_MAP_ARRAY;
+                        break;
+                    case GL_SAMPLER_2D_MULTISAMPLE:
+                    case GL_INT_SAMPLER_2D_MULTISAMPLE:
+                    case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+                        preferredTarget = GL_TEXTURE_2D_MULTISAMPLE;
+                        break;
+                    case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                    case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                    case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                        preferredTarget = GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+                        break;
+                    case GL_SAMPLER_2D_RECT:
+                    case GL_INT_SAMPLER_2D_RECT:
+                    case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+                    case GL_SAMPLER_2D_RECT_SHADOW:
+                        preferredTarget = GL_TEXTURE_RECTANGLE;
+                        break;
+                    case GL_SAMPLER_BUFFER:
+                    case GL_INT_SAMPLER_BUFFER:
+                    case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+                        preferredTarget = GL_TEXTURE_BUFFER;
+                        break;
+                    default:
+                        preferredTarget = 0;
+                        break;
                 }
 
                 const GLProgramUniformValue* samplerValue = nullptr;
@@ -4017,16 +4103,29 @@ struct GLContext::Impl {
                 }
 
                 // Step 3: look up the texture object bound to that unit.
-                // Try GL_TEXTURE_2D first (overwhelming common case in
-                // compat/Spring-style apps), then fall back to any-target
-                // probe so samplerCube / sampler2DArray / usampler2D /
-                // sampler3D uniforms also bind correctly. Previously this
-                // hard-coded GL_TEXTURE_2D, which meant every non-2D
-                // sampler silently dropped its binding — observed as ~497
-                // test failures in KHR-GL46.texture_swizzle.* because the
-                // suite tests on GL_TEXTURE_2D_ARRAY.
-                GLuint texName = state->boundTextureOnUnit(
-                    static_cast<GLuint>(glUnit), GL_TEXTURE_2D);
+                // Phase 6-4: probe in order:
+                //   (a) the sampler-type-matched target (e.g.
+                //       GL_TEXTURE_2D_MULTISAMPLE for sampler2DMS) —
+                //       disambiguates the multi-target binding case where
+                //       the app bound two textures to the same unit via
+                //       distinct targets and uses each through a
+                //       different sampler type (DSA MS test pattern).
+                //   (b) GL_TEXTURE_2D — the overwhelming common case in
+                //       compat/Spring-style apps.
+                //   (c) any-target probe — covers samplerCube /
+                //       sampler2DArray / usampler2D / sampler3D bindings
+                //       when (a) didn't resolve a preferred target
+                //       (e.g. samplerGLType wasn't populated by the
+                //       reflection walker yet).
+                GLuint texName = 0;
+                if (preferredTarget != 0 && preferredTarget != GL_TEXTURE_2D) {
+                    texName = state->boundTextureOnUnit(
+                        static_cast<GLuint>(glUnit), preferredTarget);
+                }
+                if (texName == 0) {
+                    texName = state->boundTextureOnUnit(
+                        static_cast<GLuint>(glUnit), GL_TEXTURE_2D);
+                }
                 if (texName == 0) {
                     GLenum discoveredTarget = 0;
                     texName = state->boundTextureOnUnitAny(
