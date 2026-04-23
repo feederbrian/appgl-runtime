@@ -733,27 +733,121 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         // Remap storage images (imageLoad/imageStore — GL `image2D` etc.).
         // These map to MSL `texture2d<T, access::read|write|read_write>`
-        // and use the same textureBase slot space as sampled images.
-        // KHR-GL46.compute_shader.copy-image and resource-image rely on
-        // this routing to read a sampled binding back into an image
-        // binding at draw time.
-        for (auto& img : resources.storage_images) {
-            uint32_t glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
-            spirv_cross::MSLResourceBinding binding;
-            binding.stage = compiler.get_execution_model();
-            binding.desc_set = compiler.get_decoration(img.id, spv::DecorationDescriptorSet);
-            binding.binding = glBinding;
-            // Step 7-2 consolidation (b) — storage-image msl_texture
-            // offset to 128+ under argument_buffers mode so the
-            // [[id(N)]] inside spvDescriptorSetBuffer0 doesn't collide
-            // with sampled-image ids at 2*N. Direct-binding path
-            // unchanged (textureBase + glBinding).
-            if (useArgBuf) {
-                binding.msl_texture = 128 + glBinding;
-            } else {
-                binding.msl_texture = bindings.textureBase + glBinding;
+        // and share Metal's single per-stage texture slot pool with
+        // sampled images. Three independent collision concerns drive
+        // the layout here:
+        //
+        //  (i) GL's sampler-uniform and image-uniform binding spaces
+        //      are INDEPENDENT — a shader can legally declare both
+        //      `layout(binding=0) uniform sampler2D s;` AND
+        //      `layout(binding=0) uniform image2D i;` and the two
+        //      units refer to different GL state. Metal has a single
+        //      texture slot pool so we partition it: sampled at
+        //      `textureBase..+47` (matches GL_MAX_TEXTURE_IMAGE_UNITS
+        //      = 48 in caps) and storage at
+        //      `storageImageBase..+7` (GL_MAX_IMAGE_UNITS = 8).
+        //
+        // (ii) Two storage-image uniforms can land with the same
+        //      glBinding — e.g. `layout(rgba8) uniform image2D a;`
+        //      and `layout(rgba8) uniform image2D b;`, both with no
+        //      explicit binding, both taking SPIR-V
+        //      DecorationBinding=0 from glslang. GL 4.6 §7.6 lets the
+        //      app then call `glUniform1i(locA, 0)` and
+        //      `glUniform1i(locB, 1)` to route them to distinct image
+        //      units at runtime. Metal requires distinct per-resource
+        //      slot indices, so we allocate SEQUENTIALLY from
+        //      `storageImageBase` in glBinding-sorted order —
+        //      mirroring how SSBOs are packed (see above) — and the
+        //      reflection-side mirror uses the same ordering so
+        //      dispatch-time binding resolution lines up.
+        //
+        // (iii) SPIRV-Cross's `add_msl_resource_binding` keys its
+        //       table on `(stage, desc_set, binding)`. Both sampler
+        //       and storage image arrive with desc_set=0 and the
+        //       same glBinding, so two writes to the same triple
+        //       silently overwrite each other. Fix: reassign storage
+        //       images' `DecorationDescriptorSet` to 2 (unused —
+        //       UBOs already sit at set=1) in direct-binding mode,
+        //       and give each image a unique synthetic binding
+        //       number equal to its sequential index. The (stage, 2,
+        //       seq) triple is then globally unique. Argument-buffer
+        //       mode already keeps sampled and storage at distinct
+        //       `[[id(N)]]` ranges inside one argbuf, so we leave
+        //       argbuf-mode at set=0 and the spvDescriptorSetBuffer0
+        //       layout undisturbed.
+        //
+        // Reflection (in reflect() below) mirrors the sort and the
+        // sequential `metalBinding = storageImageBase + seq`
+        // assignment, while keeping the original glBinding for the
+        // runtime-side glUniform1i lookup — that field drives the
+        // GL image-unit → texture resolution in dispatchCompute /
+        // resolveImageBindings.
+        //
+        // KHR-GL46.compute_shader.copy-image and resource-image also
+        // rely on the GL-side bind routing to read a sampled binding
+        // back into an image binding at draw time — that still works
+        // because the routing happens via distinct reflection lists
+        // (sampledTextures vs storageImages) with distinct metalSlot
+        // values.
+        {
+            // Filter out declared-but-unused storage images to match
+            // what reflect() does. SPIRV-Cross's dead-code pass elides
+            // inactive images from the emitted MSL, so including them
+            // in the sequential index allocation here would make
+            // active images land at different msl_texture slots than
+            // reflection expects — reflection also filters by
+            // `get_active_interface_variables()`. Mirror that filter
+            // so both sides agree on the seq→slot mapping.
+            const auto activeVarsForImages = compiler.get_active_interface_variables();
+            struct StorageImgRef { std::uint32_t glBinding; std::uint32_t id; };
+            std::vector<StorageImgRef> sortedStorageImages;
+            for (auto& img : resources.storage_images) {
+                if (activeVarsForImages.find(img.id) == activeVarsForImages.end())
+                    continue;
+                StorageImgRef r;
+                r.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
+                r.id = img.id;
+                sortedStorageImages.push_back(r);
             }
-            compiler.add_msl_resource_binding(binding);
+            std::sort(sortedStorageImages.begin(), sortedStorageImages.end(),
+                      [](const StorageImgRef& a, const StorageImgRef& b) {
+                          if (a.glBinding != b.glBinding) return a.glBinding < b.glBinding;
+                          return a.id < b.id;
+                      });
+            for (std::size_t i = 0; i < sortedStorageImages.size(); ++i) {
+                const auto& entry = sortedStorageImages[i];
+                spirv_cross::MSLResourceBinding binding;
+                binding.stage = compiler.get_execution_model();
+                if (useArgBuf) {
+                    // Argument-buffer mode: preserve the existing
+                    // [[id(128+glBinding)]] routing. Multiple images
+                    // at the same glBinding aren't something the
+                    // argbuf path currently hits (the CTS argbuf
+                    // exercises go through distinct explicit
+                    // bindings), so the glBinding-based key still
+                    // gives unique triples here.
+                    binding.desc_set = compiler.get_decoration(entry.id, spv::DecorationDescriptorSet);
+                    binding.binding = entry.glBinding;
+                    binding.msl_texture = 128 + entry.glBinding;
+                } else {
+                    constexpr std::uint32_t kStorageImageDescSet = 2;
+                    // Override both the descriptor-set AND the
+                    // binding so the (stage, set, binding) triple is
+                    // unique per image uniform even when multiple
+                    // images came in with the same glBinding. The
+                    // overridden binding is a SEQUENTIAL index into
+                    // the sorted order, so reflection can reproduce
+                    // it deterministically.
+                    compiler.set_decoration(entry.id,
+                        spv::DecorationDescriptorSet, kStorageImageDescSet);
+                    compiler.set_decoration(entry.id,
+                        spv::DecorationBinding, static_cast<std::uint32_t>(i));
+                    binding.desc_set = kStorageImageDescSet;
+                    binding.binding = static_cast<std::uint32_t>(i);
+                    binding.msl_texture = bindings.storageImageBase + static_cast<std::uint32_t>(i);
+                }
+                compiler.add_msl_resource_binding(binding);
+            }
         }
 
         std::string msl = compiler.compile();
@@ -1488,18 +1582,56 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // with a #define-toggled input-image use, so the pre-fs
         // compile drops g_input_image but retains its declaration).
         auto activeStorageImages = compiler.get_active_interface_variables();
-        for (auto& img : resources.storage_images) {
-            if (activeStorageImages.find(img.id) == activeStorageImages.end())
-                continue;
-            ShaderReflection::ResourceBinding rb;
-            rb.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
-            if (useArgBufReflection) {
-                rb.metalBinding = 128 + rb.glBinding;
-            } else {
-                rb.metalBinding = bindings.textureBase + rb.glBinding;
+        {
+            // Mirror the (glBinding, id) sort used by spirvToMSL so
+            // reflection's `metalBinding` lines up with each image's
+            // MSL-declared `[[texture(N)]]` exactly. The sequential-
+            // allocation path below depends on seeing the images in
+            // the same deterministic order. See the phase-7
+            // consolidation comment in spirvToMSL for the full
+            // rationale — summary: (1) disjoint from sampled
+            // textures via `storageImageBase`, (2) sequentially
+            // packed so two images sharing a glBinding land at
+            // distinct Metal slots, (3) runtime resolves via the
+            // original `glBinding` (read from SPIR-V here) + any
+            // glUniform1i override, not via `metalBinding`.
+            struct StorageImgRef {
+                std::uint32_t glBinding;
+                std::uint32_t id;
+                spirv_cross::Resource* res;
+            };
+            std::vector<StorageImgRef> sortedStorageImages;
+            for (auto& img : resources.storage_images) {
+                if (activeStorageImages.find(img.id) == activeStorageImages.end())
+                    continue;
+                StorageImgRef r;
+                r.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
+                r.id = img.id;
+                r.res = &img;
+                sortedStorageImages.push_back(r);
             }
-            rb.name = img.name;
-            result.storageImages.push_back(std::move(rb));
+            std::sort(sortedStorageImages.begin(), sortedStorageImages.end(),
+                      [](const StorageImgRef& a, const StorageImgRef& b) {
+                          if (a.glBinding != b.glBinding) return a.glBinding < b.glBinding;
+                          return a.id < b.id;
+                      });
+            for (std::size_t i = 0; i < sortedStorageImages.size(); ++i) {
+                const auto& entry = sortedStorageImages[i];
+                ShaderReflection::ResourceBinding rb;
+                // Preserve the ORIGINAL glBinding — runtime uses it
+                // (plus any glUniform1i override) to pick the GL
+                // image unit. metalBinding is the synthetic Metal
+                // slot chosen by our sequential allocator.
+                rb.glBinding = entry.glBinding;
+                if (useArgBufReflection) {
+                    rb.metalBinding = 128 + entry.glBinding;
+                } else {
+                    rb.metalBinding =
+                        bindings.storageImageBase + static_cast<std::uint32_t>(i);
+                }
+                rb.name = entry.res->name;
+                result.storageImages.push_back(std::move(rb));
+            }
         }
 
         // Shader-storage buffer objects (GL 4.3+). Metal side: SSBOs live

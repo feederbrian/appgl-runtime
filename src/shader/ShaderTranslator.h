@@ -19,8 +19,21 @@ struct BindingMap {
     std::uint32_t vertexBufferBase = 0;    // [ 0..16) — VBOs
     std::uint32_t uniformBufferBase = 16;  // [16..28) — UBOs
     std::uint32_t storageBufferBase = 28;  // [28..30) — SSBOs (GL 4.3+, deferred)
-    std::uint32_t textureBase = 0;
-    std::uint32_t samplerBase = 0;
+    std::uint32_t textureBase = 0;         // [ 0..48) — sampled textures (GL_MAX_TEXTURE_IMAGE_UNITS)
+    std::uint32_t samplerBase = 0;         // sampler state slots track textureBase 1:1
+    // Storage images (imageLoad/imageStore) must live in a Metal
+    // texture-slot range DISJOINT from sampled textures, otherwise a
+    // shader with both `sampler2D s` at glBinding 0 and `image2D i` at
+    // glBinding 0 (the GL binding namespaces are independent) lands
+    // both at MSL `texture2d<T>[[texture(0)]]`. Metal only exposes one
+    // texture slot pool per stage, so we partition it: slots 0..47 for
+    // sampled, 48..55 for storage images (GL_MAX_IMAGE_UNITS = 8,
+    // advertised in GLCapabilities.mm). Apple7+ supports 128 texture
+    // arguments per stage, so 48+8=56 sits well inside the budget.
+    // Fixes `shading_language_420pack.binding_samplers_texture_type_*`
+    // and `layout_location.image_*` variants that declared colliding
+    // glBindings.
+    std::uint32_t storageImageBase = 48;
 };
 
 // Compute pipelines have no vertex inputs, so the low 16 Metal buffer
