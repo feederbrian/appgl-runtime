@@ -275,10 +275,21 @@ TessBodyClassification classifyTessBody(
 //
 // On match, `positionMapping[i]` for i ∈ {0,1,2,3} encodes how
 // gl_Position.i is derived:
-//   mapping >= 0   → gl_Position.i = gl_TessCoord[mapping]
+//   mapping >= 0   → gl_Position.i = gl_TessCoord[mapping] * scale[i]
+//                                    + offset[i]
 //                    (0=x, 1=y, 2=z — always a single-component pick)
 //   mapping == -1  → gl_Position.i = positionConstant[i]
 //                    (OpConstant float, typically 0.0 or 1.0)
+//
+// Phase-3c only recognised identity mappings (scale=1, offset=0).
+// Phase-3d extends this to support affine transforms built from
+// OpFMul / OpFAdd / OpFSub with OpConstant operands. Example
+// shape that matches under phase-3d:
+//
+//   gl_Position = vec4(gl_TessCoord.x * 2.0 - 1.0,
+//                      gl_TessCoord.y * 2.0 - 1.0,
+//                      0.0, 1.0);
+//
 // Used at draw time to compute the actual TES gl_Position output for
 // each generated domain vertex — no full interpreter required for
 // this narrow shape.
@@ -293,6 +304,11 @@ struct TessBodyPassthroughMatch {
     // Per-component source: -1 = use constant, 0..2 = gl_TessCoord.{x,y,z}.
     // Only meaningful when matched.
     std::int8_t positionMapping[4] = {0, 1, 2, -1};
+    // Applied only when mapping[i] >= 0:
+    //   out[i] = tessCoord[mapping[i]] * scale[i] + offset[i]
+    // positionConstant[i] is used when mapping[i] == -1.
+    float positionScale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float positionOffset[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float positionConstant[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 };
 

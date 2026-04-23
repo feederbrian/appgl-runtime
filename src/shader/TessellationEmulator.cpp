@@ -608,20 +608,26 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
         return out;
     }
 
-    // Phase-3c: derive positionMapping[4] / positionConstant[4] by
-    // tracing the OpStore's value-source back to either an
-    // OpCompositeConstruct over 4 scalars OR a CompositeConstruct
-    // over (vec3 gl_TessCoord, float w-constant). Each scalar must
-    // resolve to either gl_TessCoord.{x,y,z} or an OpConstant float.
+    // Phase-3c/3d: derive position mapping + scale + offset per
+    // component. Each scalar feeding gl_Position is tracked as
+    // either:
+    //   - an affine combination of tessCoord[comp]: value = tc * scale + offset
+    //   - a constant float
     //
-    // Second walk: build a value-source map. For each result-id that
-    // flows into a scalar position component, record:
-    //   sourceKind[id] = TessCoordComp (0..2) or ConstantFloat
-    //   sourceValue[id] = component index or constant float
+    // Value-source record (phase-3d extension):
+    //   kind == TessCoord       → affine tc[component] * scale + offset
+    //                             (scale=1, offset=0 at the OpLoad site;
+    //                             OpFMul / OpFAdd / OpFSub combine into it)
+    //   kind == Constant        → constantValue
+    //   kind == TessCoordVec    → whole vec3 load of gl_TessCoord, used
+    //                             only by the CompositeConstruct(v3, w)
+    //                             shape.
     enum SrcKind : std::uint8_t { SrcUnknown = 0, SrcTessCoord = 1, SrcConstant = 2, SrcTessCoordVec = 3 };
     struct SrcRecord {
         SrcKind kind = SrcUnknown;
         std::int8_t component = -1;   // 0..2 for TessCoord scalar pick
+        float scale = 1.0f;
+        float offset = 0.0f;
         float constantValue = 0.0f;
     };
     std::unordered_map<std::uint32_t, SrcRecord> valueSource;
@@ -630,6 +636,20 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
     // constant first index → scalar-component AccessChain. Reuse the
     // pointerRoot map populated above + extend with the component idx.
     std::unordered_map<std::uint32_t, std::int8_t> tessCoordComponentOf;
+
+    // Seed constants BEFORE the body walk so OpFMul/FAdd/FSub folding
+    // in the walk can look them up on either operand. OpConstant
+    // records are already captured by SpirvModule::parse into
+    // `module.constants` at module-scope, so they're visible before
+    // the function body starts.
+    for (const auto& [cid, cv] : module.constants) {
+        if (cv.kind == Value::Kind::Float) {
+            SrcRecord rec;
+            rec.kind = SrcConstant;
+            rec.constantValue = cv.f[0];
+            valueSource[cid] = rec;
+        }
+    }
 
     i = module.funcBodyStart;
     while (i < end) {
@@ -695,6 +715,109 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
                         SrcRecord rec;
                         rec.kind = SrcTessCoord;
                         rec.component = static_cast<std::int8_t>(idx);
+                        rec.scale = 1.0f;
+                        rec.offset = 0.0f;
+                        valueSource[resultId] = rec;
+                    }
+                }
+                break;
+            }
+            case spv::OpFMul:
+            case spv::OpFAdd:
+            case spv::OpFSub: {
+                // Phase-3d: fold affine transforms
+                //   tc[i] * const  → scale=const
+                //   tc[i] * scaleA + const → offset=const
+                // `valueSource` already records constants for any
+                // OpConstant id (populated by the constants seed
+                // loop below — we rely on that ordering being okay
+                // because OpConstant always appears before the
+                // function body).
+                //
+                // Operand handling: commutative for FMul / FAdd;
+                // FSub requires operand-order awareness.
+                if (wc >= 5) {
+                    const std::uint32_t resultId = w[1];
+                    const std::uint32_t lhsId = w[2];
+                    const std::uint32_t rhsId = w[3];
+                    auto lhsIt = valueSource.find(lhsId);
+                    auto rhsIt = valueSource.find(rhsId);
+                    if (lhsIt == valueSource.end() || rhsIt == valueSource.end()) break;
+                    const SrcRecord& L = lhsIt->second;
+                    const SrcRecord& R = rhsIt->second;
+
+                    auto recordAffine =
+                        [&](SrcKind kind, std::int8_t comp, float scale, float offset) {
+                            SrcRecord rec;
+                            rec.kind = kind;
+                            rec.component = comp;
+                            rec.scale = scale;
+                            rec.offset = offset;
+                            valueSource[resultId] = rec;
+                        };
+
+                    if (opcode == spv::OpFMul) {
+                        // One side TessCoord-affine, other side Constant.
+                        if (L.kind == SrcTessCoord && R.kind == SrcConstant) {
+                            recordAffine(SrcTessCoord, L.component,
+                                         L.scale * R.constantValue,
+                                         L.offset * R.constantValue);
+                        } else if (R.kind == SrcTessCoord && L.kind == SrcConstant) {
+                            recordAffine(SrcTessCoord, R.component,
+                                         R.scale * L.constantValue,
+                                         R.offset * L.constantValue);
+                        } else if (L.kind == SrcConstant && R.kind == SrcConstant) {
+                            SrcRecord rec;
+                            rec.kind = SrcConstant;
+                            rec.constantValue = L.constantValue * R.constantValue;
+                            valueSource[resultId] = rec;
+                        }
+                    } else if (opcode == spv::OpFAdd) {
+                        if (L.kind == SrcTessCoord && R.kind == SrcConstant) {
+                            recordAffine(SrcTessCoord, L.component, L.scale,
+                                         L.offset + R.constantValue);
+                        } else if (R.kind == SrcTessCoord && L.kind == SrcConstant) {
+                            recordAffine(SrcTessCoord, R.component, R.scale,
+                                         R.offset + L.constantValue);
+                        } else if (L.kind == SrcConstant && R.kind == SrcConstant) {
+                            SrcRecord rec;
+                            rec.kind = SrcConstant;
+                            rec.constantValue = L.constantValue + R.constantValue;
+                            valueSource[resultId] = rec;
+                        }
+                    } else {  // OpFSub: L - R
+                        if (L.kind == SrcTessCoord && R.kind == SrcConstant) {
+                            recordAffine(SrcTessCoord, L.component, L.scale,
+                                         L.offset - R.constantValue);
+                        } else if (L.kind == SrcConstant && R.kind == SrcTessCoord) {
+                            // const - tc * scale - offset
+                            //   = -scale * tc + (const - offset)
+                            recordAffine(SrcTessCoord, R.component, -R.scale,
+                                         L.constantValue - R.offset);
+                        } else if (L.kind == SrcConstant && R.kind == SrcConstant) {
+                            SrcRecord rec;
+                            rec.kind = SrcConstant;
+                            rec.constantValue = L.constantValue - R.constantValue;
+                            valueSource[resultId] = rec;
+                        }
+                    }
+                }
+                break;
+            }
+            case spv::OpFNegate: {
+                // unary -x : flip scale and offset signs
+                if (wc >= 4) {
+                    const std::uint32_t resultId = w[1];
+                    const std::uint32_t opId = w[2];
+                    auto srcIt = valueSource.find(opId);
+                    if (srcIt != valueSource.end()) {
+                        SrcRecord rec = srcIt->second;
+                        if (rec.kind == SrcTessCoord) {
+                            rec.scale = -rec.scale;
+                            rec.offset = -rec.offset;
+                        } else if (rec.kind == SrcConstant) {
+                            rec.constantValue = -rec.constantValue;
+                        }
                         valueSource[resultId] = rec;
                     }
                 }
@@ -704,16 +827,6 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
                 break;
         }
         i += wc;
-    }
-    // Seed constants — OpConstant records are already captured by
-    // SpirvModule::parse into `module.constants`. Mark them.
-    for (const auto& [cid, cv] : module.constants) {
-        if (cv.kind == Value::Kind::Float) {
-            SrcRecord rec;
-            rec.kind = SrcConstant;
-            rec.constantValue = cv.f[0];
-            valueSource[cid] = rec;
-        }
     }
 
     // Find the OpStore to gl_Position and trace its value argument.
@@ -765,18 +878,23 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
                         const std::uint32_t opId = w[2 + c];
                         auto it = valueSource.find(opId);
                         if (it == valueSource.end()) { allOk = false; break; }
-                        if (it->second.kind == SrcTessCoord) {
-                            out.positionMapping[c] = it->second.component;
-                        } else if (it->second.kind == SrcConstant) {
+                        const SrcRecord& src = it->second;
+                        if (src.kind == SrcTessCoord) {
+                            out.positionMapping[c] = src.component;
+                            out.positionScale[c] = src.scale;
+                            out.positionOffset[c] = src.offset;
+                        } else if (src.kind == SrcConstant) {
                             out.positionMapping[c] = -1;
-                            out.positionConstant[c] = it->second.constantValue;
+                            out.positionConstant[c] = src.constantValue;
                         } else {
                             allOk = false; break;
                         }
                     }
                     if (allOk) mappingFound = true;
                 } else if (wc == 4) {
-                    // (vec3, w-constant) shape.
+                    // (vec3, w-constant) shape. The v3 always
+                    // corresponds to an identity tessCoord load
+                    // (scale=1, offset=0 per component).
                     const std::uint32_t v3Id = w[2];
                     const std::uint32_t wId = w[3];
                     auto v3It = valueSource.find(v3Id);
@@ -785,7 +903,11 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
                         v3It->second.kind == SrcTessCoordVec &&
                         wIt != valueSource.end() &&
                         wIt->second.kind == SrcConstant) {
-                        for (int c = 0; c < 3; ++c) out.positionMapping[c] = static_cast<std::int8_t>(c);
+                        for (int c = 0; c < 3; ++c) {
+                            out.positionMapping[c] = static_cast<std::int8_t>(c);
+                            out.positionScale[c] = 1.0f;
+                            out.positionOffset[c] = 0.0f;
+                        }
                         out.positionMapping[3] = -1;
                         out.positionConstant[3] = wIt->second.constantValue;
                         mappingFound = true;
@@ -1147,11 +1269,13 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
         }();
         if (emulEnabled) {
             program.tessellationEmulated = true;
-            // Copy the phase-3c position mapping onto the program so
+            // Copy the phase-3c/3d position mapping onto the program so
             // the draw path can apply it per generated vertex without
             // re-parsing the SPIR-V.
             for (int c = 0; c < 4; ++c) {
                 program.tessPositionMapping[c] = tePass.positionMapping[c];
+                program.tessPositionScale[c] = tePass.positionScale[c];
+                program.tessPositionOffset[c] = tePass.positionOffset[c];
                 program.tessPositionConstant[c] = tePass.positionConstant[c];
             }
             program.linkLog +=
@@ -1314,7 +1438,9 @@ EmulatedDraw emulateTessellationDraw(
         for (int c = 0; c < 4; ++c) {
             const std::int8_t src = program.tessPositionMapping[c];
             if (src >= 0 && src < 3) {
-                d.expandedVertexData[dst + c] = coordsPerPatchLookup[src];
+                d.expandedVertexData[dst + c] =
+                    coordsPerPatchLookup[src] * program.tessPositionScale[c]
+                    + program.tessPositionOffset[c];
             } else {
                 d.expandedVertexData[dst + c] = program.tessPositionConstant[c];
             }
