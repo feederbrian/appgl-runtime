@@ -2207,7 +2207,18 @@ EmulatedDraw emulateTessellationDraw(
     const bool tesDebug = (std::getenv("APPGL_TESS_EMUL_DEBUG") != nullptr);
     auto tesBailSeen = std::make_shared<std::unordered_set<std::string>>();
 
-    auto emitVertexInterpreted = [&, tesDebug, tesBailSeen](
+    // Phase 3f-15: track whether any TES invocation bailed. When
+    // even one body fails, the draw's output is fundamentally
+    // incorrect — silently rendering identity-coord geometry
+    // masks bugs and produces false-pass results on tests that
+    // happen not to check the bad vertex. Flipping
+    // `anyTesBailed` causes emulateTessellationDraw to return
+    // ok=false; the caller (drawArrays) falls through to the
+    // legacy translated-no-tess path, which is closer to GL's
+    // "undefined on shader error" behaviour.
+    auto anyTesBailed = std::make_shared<bool>(false);
+
+    auto emitVertexInterpreted = [&, tesDebug, tesBailSeen, anyTesBailed](
                                      std::size_t dstIdx,
                                      std::size_t patchIdx,
                                      float u, float v, float w) {
@@ -2263,12 +2274,20 @@ EmulatedDraw emulateTessellationDraw(
                 src += vmap.numComponents;
             }
         } else {
-            // Interpreter bailed — fall back to identity domain coord.
-            // Safer than uninitialized data; the draw still renders
-            // something on-screen for debug even though it's wrong.
-            d.expandedVertexData[dst + 0] = u;
-            d.expandedVertexData[dst + 1] = v;
-            d.expandedVertexData[dst + 2] = w;
+            // Phase 3f-15: interpreter bailed. Mark the draw as
+            // failed so the caller (emulateTessellationDraw's
+            // bottom-of-function enablement gate) returns
+            // ok=false. drawArrays then falls through to the
+            // legacy path, which doesn't render tessellation at
+            // all — closer to GL's "undefined on shader error"
+            // model than rendering visibly-wrong geometry.
+            // Still zero-fill this vertex's slot so downstream
+            // buffer consumers aren't reading uninitialised data
+            // (defensive — we return ok=false either way).
+            *anyTesBailed = true;
+            d.expandedVertexData[dst + 0] = 0.0f;
+            d.expandedVertexData[dst + 1] = 0.0f;
+            d.expandedVertexData[dst + 2] = 0.0f;
             d.expandedVertexData[dst + 3] = 1.0f;
         }
     };
@@ -2316,6 +2335,21 @@ EmulatedDraw emulateTessellationDraw(
     // position-only CPU replacement that produces parametric-
     // space positions instead of clip-space.
     if (program.tessellationEmulated || program.tessellationInterpreted) {
+        // Phase 3f-15: if any TES invocation bailed, the output is
+        // incorrect by construction. Return ok=false so drawArrays
+        // falls through to the legacy translated-no-tess path
+        // instead of rendering the zeros we filled the buffer with.
+        // Preserves the spec's "undefined on shader error" semantic
+        // and avoids false-pass on tests that don't check bad
+        // vertices.
+        if (*anyTesBailed) {
+            d.ok = false;
+            d.diagnostic = "tess-emul 3f-15: TES interpreter bailed on one or "
+                           "more invocations; falling back to legacy path. "
+                           "Re-run with APPGL_TESS_EMUL_DEBUG=1 to surface "
+                           "the specific bail reason.";
+            return d;
+        }
         d.ok = true;
         const char* mode = program.tessellationEmulated ? "passthrough" : "interpreter";
         d.diagnostic = std::string("tess-emul phase-3f-2 (") + mode + "): " +
