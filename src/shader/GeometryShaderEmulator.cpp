@@ -1830,10 +1830,55 @@ bool Interpreter::executeTes(EmulatedVertex& out,
     out.position[1] = currentPosition_[1];
     out.position[2] = currentPosition_[2];
     out.position[3] = currentPosition_[3];
+    // Phase 3f-6: capture user output varyings by name, matching the
+    // executeVs logic so the synth VS receives values to forward to
+    // `[[user(locnN)]]` slots. Block-scoped outputs fall through to
+    // the member-name walk shape (2).
     out.varyings.clear();
-    // User output varyings skipped for phase 3f-5 scope — the CTS
-    // tess_shader probes we target either don't use user-out or
-    // rely on FS-only default interpolation (gl_Position).
+    for (std::size_t k = 0; k < outputVaryingNames_.size(); ++k) {
+        std::vector<float> v;
+        v.assign(outputVaryingWidths_[k], 0.0f);
+        const std::string& wantName = outputVaryingNames_[k];
+        bool matched = false;
+        for (const auto& [varId, info] : module_.variables) {
+            if (info.storageClass != spv::StorageClassOutput) continue;
+            if (info.name == wantName) {
+                auto sIt = varStorage_.find(varId);
+                if (sIt != varStorage_.end()) {
+                    for (std::size_t j = 0; j < v.size() && j < sIt->second.size(); ++j) {
+                        v[j] = sIt->second[j];
+                    }
+                }
+                matched = true;
+                break;
+            }
+            auto tIt = module_.types.find(info.typeId);
+            if (tIt == module_.types.end()) continue;
+            const std::uint32_t pointeeId = tIt->second.pointeeType;
+            auto pIt = module_.types.find(pointeeId);
+            if (pIt == module_.types.end() || pIt->second.kind != TypeInfo::Kind::Struct) continue;
+            auto mnIt = module_.memberNames.find(pointeeId);
+            if (mnIt == module_.memberNames.end()) continue;
+            std::uint32_t runningOff = 0;
+            for (std::size_t m = 0; m < pIt->second.memberTypes.size(); ++m) {
+                const std::uint32_t memW = module_.scalarWidth(pIt->second.memberTypes[m]);
+                auto nameIt = mnIt->second.find(static_cast<std::uint32_t>(m));
+                if (nameIt != mnIt->second.end() && nameIt->second == wantName) {
+                    auto sIt = varStorage_.find(varId);
+                    if (sIt != varStorage_.end()) {
+                        for (std::size_t j = 0; j < v.size() && runningOff + j < sIt->second.size(); ++j) {
+                            v[j] = sIt->second[runningOff + j];
+                        }
+                    }
+                    matched = true;
+                    break;
+                }
+                runningOff += memW;
+            }
+            if (matched) break;
+        }
+        out.varyings.insert(out.varyings.end(), v.begin(), v.end());
+    }
     captureClipCull(out.clipDistance, out.cullDistance);
     return !errored_;
 }

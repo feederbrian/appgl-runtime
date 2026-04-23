@@ -1605,6 +1605,34 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
             program.tessellationInterpreted = true;
             program.linkLog +=
                 "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — interpreter TES enabled";
+
+            // Phase 3f-6: populate program.tessVaryings from the TES's
+            // location-decorated Output varyings so the interpreter
+            // path emits matching `[[user(locnN)]]` slots in the synth
+            // VS and the FS can read per-vertex interpolated values.
+            // scanTessEvalInterface walks the SPIR-V and returns one
+            // TessEvalVarying per output — we filter to non-builtin,
+            // non-per-vertex Outputs with a location decoration.
+            TessEvalInterface teIface = scanTessEvalInterface(
+                program.tessEvalSpirv.data(),
+                program.tessEvalSpirv.size());
+            program.tessVaryings.clear();
+            if (teIface.parsed) {
+                for (const auto& ov : teIface.outputs) {
+                    if (ov.isBuiltIn) continue;
+                    if (ov.isPerVertex) continue;
+                    if (!ov.hasLocation) continue;
+                    if (ov.scalarCount == 0 || ov.scalarCount > 4) continue;
+                    GLProgramObject::TessVaryingSlot slot;
+                    slot.name = ov.name;
+                    slot.location = ov.location;
+                    slot.numComponents = ov.scalarCount;
+                    // Interpreter path produces these values at runtime;
+                    // the mapping/scale/offset/constant fields are unused
+                    // (only the matcher's affine path consults them).
+                    program.tessVaryings.push_back(std::move(slot));
+                }
+            }
         }
         if (!teInterp.interpretable && !teInterp.diagnostic.empty()) {
             program.linkLog +=
@@ -1952,6 +1980,18 @@ EmulatedDraw emulateTessellationDraw(
     // gl_in[k].gl_Position reads by the TES body resolve against it.
     std::vector<std::vector<EmulatedVertex>> patchInputs;
 
+    // Build the varying-names/widths vectors the interpreter expects
+    // — same shape as the passthrough matcher's tessVaryings but
+    // produced from the scanned TES output interface at link time.
+    std::vector<std::string> interpVaryingNames;
+    std::vector<std::uint32_t> interpVaryingWidths;
+    interpVaryingNames.reserve(program.tessVaryings.size());
+    interpVaryingWidths.reserve(program.tessVaryings.size());
+    for (const auto& v : program.tessVaryings) {
+        interpVaryingNames.push_back(v.name);
+        interpVaryingWidths.push_back(v.numComponents);
+    }
+
     auto emitVertexInterpreted = [&](std::size_t dstIdx,
                                      std::size_t patchIdx,
                                      float u, float v, float w) {
@@ -1961,8 +2001,6 @@ EmulatedDraw emulateTessellationDraw(
         const std::array<float, 3> tessCoord{u, v, w};
         const std::int32_t primID = static_cast<std::int32_t>(patchIdx);
         std::string diag;
-        const std::vector<std::string> noVaryingNames;
-        const std::vector<std::uint32_t> noVaryingWidths;
         const std::vector<EmulatedVertex> emptyInputs;
         const auto& thisPatchInputs = (patchIdx < patchInputs.size())
             ? patchInputs[patchIdx] : emptyInputs;
@@ -1970,14 +2008,28 @@ EmulatedDraw emulateTessellationDraw(
             program.tessEvalSpirv.data(),
             program.tessEvalSpirv.size(),
             program, tessCoord, primID,
-            noVaryingNames, noVaryingWidths,
+            interpVaryingNames, interpVaryingWidths,
             ssboMap, thisPatchInputs, outV, &diag);
         const std::size_t dst = dstIdx * floatsPerVertex;
         if (ok) {
+            // Position
             d.expandedVertexData[dst + 0] = outV.position[0];
             d.expandedVertexData[dst + 1] = outV.position[1];
             d.expandedVertexData[dst + 2] = outV.position[2];
             d.expandedVertexData[dst + 3] = outV.position[3];
+            // User varyings, concatenated in declaration order
+            // (matches program.tessVaryings order).
+            std::size_t vOff = kPosFloats;
+            std::size_t src = 0;
+            for (const auto& vmap : program.tessVaryings) {
+                for (std::uint32_t c = 0; c < vmap.numComponents; ++c) {
+                    d.expandedVertexData[dst + vOff + c] =
+                        (src + c) < outV.varyings.size()
+                            ? outV.varyings[src + c] : 0.0f;
+                }
+                vOff += vmap.numComponents;
+                src += vmap.numComponents;
+            }
         } else {
             // Interpreter bailed — fall back to identity domain coord.
             // Safer than uninitialized data; the draw still renders
