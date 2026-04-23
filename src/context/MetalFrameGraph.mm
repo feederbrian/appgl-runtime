@@ -3443,7 +3443,16 @@ fragment float4 appgl_immediate_textured_fs(
     // GLProgramObject and free it via releaseRetainedMetalObject at
     // relink / program delete. On failure returns nullptr with the
     // NSError surfaced through `outError`.
-    void* buildComputePipelineState(const std::string& msl, std::string* outError) {
+    //
+    // Step 7-3 compute follow-up: optional `outFunction` receives the
+    // MTLFunction (transfer-retained void*) when non-null — needed so
+    // the argument-buffer path can call
+    // `newArgumentEncoderWithBufferIndex:` at dispatch time. Callers
+    // who don't use argument buffers pass nullptr and only the PSO is
+    // retained.
+    void* buildComputePipelineState(const std::string& msl, std::string* outError,
+                                     void** outFunction = nullptr) {
+        if (outFunction != nullptr) *outFunction = nullptr;
         if (device == nil || msl.empty()) {
             if (outError) *outError = "no device or empty MSL";
             return nullptr;
@@ -3483,6 +3492,9 @@ fragment float4 appgl_immediate_textured_fs(
             }
             return nullptr;
         }
+        if (outFunction != nullptr) {
+            *outFunction = (void*)CFBridgingRetain(fn);
+        }
         return (void*)CFBridgingRetain(pso);
     }
 
@@ -3515,31 +3527,123 @@ fragment float4 appgl_immediate_textured_fs(
         }
         [enc setComputePipelineState:pso];
 
-        // Default-uniform push constants (bare GL uniforms packed into
-        // one buffer at Metal index 16 — matches the graphics-stage
-        // convention used by drawArrays/drawElements). Lets compute
-        // shaders see bare `uniform vec4 u0;` updates via glUniform4fv.
-        if (info.computeUniformData != nullptr && info.computeUniformSize > 0) {
-            [enc setBytes:info.computeUniformData
-                   length:info.computeUniformSize
-                  atIndex:16];
-        }
+        // Step 7-3 compute follow-up: under argument_buffers mode, the
+        // shader was compiled with `spvDescriptorSetBuffer0/1` structs
+        // at [[buffer(24)]] / [[buffer(25)]] — bind through argument
+        // encoders instead of direct per-slot calls. Mirror the
+        // graphics-stage encodeTexturesIntoArgBuf / encodeUBOsIntoArgBuf
+        // shape.
+        const bool useArgBuf =
+            (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
+        id<MTLFunction> computeFn = (__bridge id<MTLFunction>)info.metalComputeFunction;
 
-        for (const auto& bb : info.buffers) {
-            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bb.metalBuffer;
-            if (buf == nil) continue;
-            [enc setBuffer:buf
-                    offset:static_cast<NSUInteger>(bb.offset)
-                   atIndex:static_cast<NSUInteger>(bb.metalSlot)];
-        }
-        for (const auto& tb : info.textures) {
-            id<MTLTexture> tex = (__bridge id<MTLTexture>)tb.metalTexture;
-            id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)tb.metalSamplerState;
-            if (tex != nil) {
-                [enc setTexture:tex atIndex:static_cast<NSUInteger>(tb.metalSlot)];
+        if (useArgBuf && computeFn != nil) {
+            // Desc_set 0: textures (sampled + storage) + SSBOs
+            const bool hasTextures = !info.textures.empty();
+            const bool hasBuffers  = !info.buffers.empty();
+            id<MTLArgumentEncoder> argEncSet0 = nil;
+            if (hasTextures || hasBuffers) {
+                argEncSet0 = [computeFn newArgumentEncoderWithBufferIndex:24];
             }
-            if (smp != nil) {
-                [enc setSamplerState:smp atIndex:static_cast<NSUInteger>(tb.metalSlot)];
+            // Desc_set 1: UBOs (default-uniform block comes in at
+            // [[id(16)]] from computeUniformData, plus any explicit
+            // UBO blocks collected in info.buffers at their reflection
+            // slots 16+seq). Gated similarly.
+            const bool hasUniformData =
+                (info.computeUniformData != nullptr && info.computeUniformSize > 0);
+            id<MTLArgumentEncoder> argEncSet1 = nil;
+            if (hasUniformData) {
+                argEncSet1 = [computeFn newArgumentEncoderWithBufferIndex:25];
+            }
+            if (argEncSet0 != nil) {
+                const NSUInteger len0 = [argEncSet0 encodedLength];
+                if (len0 > 0) {
+                    id<MTLBuffer> buf0 = [device newBufferWithLength:len0
+                                                              options:MTLResourceStorageModeShared];
+                    if (buf0 != nil) {
+                        [argEncSet0 setArgumentBuffer:buf0 offset:0];
+                        for (const auto& tb : info.textures) {
+                            id<MTLTexture> tex = (__bridge id<MTLTexture>)tb.metalTexture;
+                            if (tex == nil) continue;
+                            [argEncSet0 setTexture:tex
+                                           atIndex:static_cast<NSUInteger>(tb.metalSlot)];
+                            MTLResourceUsage usage = MTLResourceUsageRead;
+                            if (tb.metalSamplerState != nullptr) {
+                                id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)tb.metalSamplerState;
+                                [argEncSet0 setSamplerState:smp
+                                                    atIndex:static_cast<NSUInteger>(tb.metalSlot) + 1];
+                                usage |= MTLResourceUsageSample;
+                            } else {
+                                usage |= MTLResourceUsageWrite;
+                            }
+                            [enc useResource:tex usage:usage];
+                        }
+                        for (const auto& bb : info.buffers) {
+                            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bb.metalBuffer;
+                            if (buf == nil) continue;
+                            // Skip the default-uniform block (slot 16) —
+                            // it lives in desc_set 1 under argbuf; the
+                            // handler below writes it via the set1 encoder.
+                            if (bb.metalSlot == 16) continue;
+                            [argEncSet0 setBuffer:buf
+                                           offset:static_cast<NSUInteger>(bb.offset)
+                                          atIndex:static_cast<NSUInteger>(bb.metalSlot)];
+                            [enc useResource:buf
+                                        usage:MTLResourceUsageRead|MTLResourceUsageWrite];
+                        }
+                        [enc setBuffer:buf0 offset:0 atIndex:24];
+                    }
+                }
+            }
+            if (argEncSet1 != nil) {
+                const NSUInteger len1 = [argEncSet1 encodedLength];
+                if (len1 > 0) {
+                    id<MTLBuffer> buf1 = [device newBufferWithLength:len1
+                                                              options:MTLResourceStorageModeShared];
+                    if (buf1 != nil) {
+                        [argEncSet1 setArgumentBuffer:buf1 offset:0];
+                        if (hasUniformData) {
+                            RingAlloc alloc = ringSuballocate(
+                                info.computeUniformData, info.computeUniformSize);
+                            if (alloc.buffer != nil) {
+                                [argEncSet1 setBuffer:alloc.buffer
+                                               offset:alloc.offset
+                                              atIndex:16];
+                                [enc useResource:alloc.buffer
+                                            usage:MTLResourceUsageRead];
+                            }
+                        }
+                        [enc setBuffer:buf1 offset:0 atIndex:25];
+                    }
+                }
+            }
+        } else {
+            // Default-uniform push constants (bare GL uniforms packed into
+            // one buffer at Metal index 16 — matches the graphics-stage
+            // convention used by drawArrays/drawElements). Lets compute
+            // shaders see bare `uniform vec4 u0;` updates via glUniform4fv.
+            if (info.computeUniformData != nullptr && info.computeUniformSize > 0) {
+                [enc setBytes:info.computeUniformData
+                       length:info.computeUniformSize
+                      atIndex:16];
+            }
+
+            for (const auto& bb : info.buffers) {
+                id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bb.metalBuffer;
+                if (buf == nil) continue;
+                [enc setBuffer:buf
+                        offset:static_cast<NSUInteger>(bb.offset)
+                       atIndex:static_cast<NSUInteger>(bb.metalSlot)];
+            }
+            for (const auto& tb : info.textures) {
+                id<MTLTexture> tex = (__bridge id<MTLTexture>)tb.metalTexture;
+                id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)tb.metalSamplerState;
+                if (tex != nil) {
+                    [enc setTexture:tex atIndex:static_cast<NSUInteger>(tb.metalSlot)];
+                }
+                if (smp != nil) {
+                    [enc setSamplerState:smp atIndex:static_cast<NSUInteger>(tb.metalSlot)];
+                }
             }
         }
 
@@ -4217,8 +4321,9 @@ bool MetalFrameGraph::clearLayeredTextureColor(void* tex, std::uint32_t arrayLen
     return impl_->clearLayeredTextureColor(tex, arrayLength, rgba);
 }
 
-void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::string* outError) {
-    return impl_->buildComputePipelineState(msl, outError);
+void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::string* outError,
+                                                  void** outFunction) {
+    return impl_->buildComputePipelineState(msl, outError, outFunction);
 }
 
 bool MetalFrameGraph::encodeComputeDispatch(const ComputeDispatchInfo& info) {

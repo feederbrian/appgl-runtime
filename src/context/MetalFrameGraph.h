@@ -451,6 +451,11 @@ struct ImmediateDrawInfo {
 // the MTLComputeCommandEncoder lifecycle.
 struct ComputeDispatchInfo {
     void* metalComputePipelineState = nullptr; // id<MTLComputePipelineState>
+    // Step 7-3 compute follow-up: id<MTLFunction> for the compute
+    // entry point, used by `encodeComputeDispatch` to call
+    // `newArgumentEncoderWithBufferIndex:` when APPGL_ENABLE_ARGUMENT_
+    // BUFFERS is set. Left null outside argbuf mode.
+    void* metalComputeFunction = nullptr;     // id<MTLFunction>
     std::uint32_t groupsX = 1;
     std::uint32_t groupsY = 1;
     std::uint32_t groupsZ = 1;
@@ -554,7 +559,8 @@ public:
     // program delete / relink). Returns nullptr on build failure and
     // populates `outError` with the NSError localizedDescription if
     // provided.
-    void* buildComputePipelineState(const std::string& msl, std::string* outError);
+    void* buildComputePipelineState(const std::string& msl, std::string* outError,
+                                     void** outFunction = nullptr);
 
     // Encode + commit + wait a single compute dispatch. This creates a
     // fresh command buffer + compute encoder, binds the pipeline and

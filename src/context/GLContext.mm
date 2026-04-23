@@ -17846,6 +17846,9 @@ bool GLContext::linkProgram(GLuint program) {
     // Release the retained MTLComputePipelineState on relink.
     releaseRetainedMetalObject(programObject->metalComputePipelineState);
     programObject->metalComputePipelineState = nullptr;
+    // Step 7-3 compute follow-up: release the retained MTLFunction.
+    releaseRetainedMetalObject(programObject->metalComputeFunction);
+    programObject->metalComputeFunction = nullptr;
     // Phase 8X Group 4d follow-up¹⁴ — release every cached pipeline
     // on relink so the map doesn't hold stale id<MTLRenderPipelineState>
     // pointers derived from the old MSL. The scalar `metalPipelineState`
@@ -18184,10 +18187,19 @@ bool GLContext::linkProgram(GLuint program) {
                 // with no GPU work).
                 if (impl_->frameGraph != nullptr) {
                     std::string psoError;
+                    // Step 7-3 compute follow-up: always request the
+                    // MTLFunction too when argbuf is enabled. Released
+                    // at relink alongside the PSO. The small retain
+                    // cost is only paid under the env gate.
+                    void* computeFn = nullptr;
+                    const bool useArgBuf =
+                        (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
                     void* pso = impl_->frameGraph->buildComputePipelineState(
-                        programObject->computeMSL, &psoError);
+                        programObject->computeMSL, &psoError,
+                        useArgBuf ? &computeFn : nullptr);
                     if (pso != nullptr) {
                         programObject->metalComputePipelineState = pso;
+                        programObject->metalComputeFunction = computeFn;
                         APPGL_LOG(SHADER, @"[GL] linkProgram: compute pipeline built for program=%u "
                               @"localSize=[%u,%u,%u]",
                               program,
@@ -23705,6 +23717,7 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
 
     ComputeDispatchInfo info;
     info.metalComputePipelineState = programObject->metalComputePipelineState;
+    info.metalComputeFunction = programObject->metalComputeFunction;
     info.groupsX = num_groups_x;
     info.groupsY = num_groups_y;
     info.groupsZ = num_groups_z;
@@ -23955,6 +23968,7 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
     }
     ComputeDispatchInfo info;
     info.metalComputePipelineState = programObject->metalComputePipelineState;
+    info.metalComputeFunction = programObject->metalComputeFunction;
     info.localX = programObject->computeLocalSizeX;
     info.localY = programObject->computeLocalSizeY;
     info.localZ = programObject->computeLocalSizeZ;

@@ -756,6 +756,13 @@ struct GLProgramObject {
     // Retained id<MTLComputePipelineState> (CFBridgingRetain'd; released
     // at linkProgram reset and at program delete via releaseProgram).
     void* metalComputePipelineState = nullptr;
+    // Step 7-3 compute follow-up: retained id<MTLFunction> for the
+    // compute entry point, populated alongside the PSO when
+    // APPGL_ENABLE_ARGUMENT_BUFFERS is set. `encodeComputeDispatch`
+    // reads this to call `newArgumentEncoderWithBufferIndex:` without
+    // rebuilding the MTLFunction on every dispatch. Released at the
+    // same lifetime as metalComputePipelineState.
+    void* metalComputeFunction = nullptr;
 
     // Phase 8X Group 4d follow-up⁴ — per-stage source hashes captured at
     // link time. Used by the pipeline-build failure path in the translated
