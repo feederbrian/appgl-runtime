@@ -376,6 +376,14 @@ struct GLShaderObject {
     // ring.
     bool deleteRequested = false;
     int attachmentCount = 0;
+    // GL_ARB_gl_spirv / GL 4.6 §7.2 — true after a successful
+    // `glShaderBinary(GL_SHADER_BINARY_FORMAT_SPIR_V, …)` on this
+    // shader, cleared by any subsequent `glShaderSource`. Queryable
+    // via `glGetShaderiv(GL_SPIR_V_BINARY_ARB)`. Distinguishes
+    // shader objects whose `spirv` field came from a pre-compiled
+    // binary (user of `glSpecializeShader`) vs objects whose spirv
+    // came from our in-tree glslang path.
+    bool isSpirvBinary = false;
     std::vector<GLShaderDeclaration> declaredUniforms;
     std::vector<GLShaderDeclaration> declaredInputs;
     std::vector<GLShaderDeclaration> declaredOutputs;

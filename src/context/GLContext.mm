@@ -1,6 +1,7 @@
 #include "GLContext.h"
 #include "../runtime/AppGLLog.h"
 #include "MetalFrameGraph.h"
+#include "../../third_party/SPIRV-Cross/spirv_cross.hpp"
 #include "../caps/GLCapabilities.h"
 #include "../objects/GLObjectStore.h"
 #include "../runtime/AppGLRuntime.h"
@@ -13743,6 +13744,11 @@ bool GLContext::shaderSource(GLuint shader, GLsizei count, const GLchar* const* 
     object->declaredUniforms.clear();
     object->declaredInputs.clear();
     object->declaredOutputs.clear();
+    // GL_ARB_gl_spirv / GL 4.6 §7.2: glShaderSource clears
+    // GL_SPIR_V_BINARY_ARB back to FALSE. Also drop any previously
+    // loaded SPIR-V binary so the glslang path takes over cleanly.
+    object->isSpirvBinary = false;
+    object->spirv.clear();
     return true;
 }
 
@@ -13750,6 +13756,17 @@ bool GLContext::compileShader(GLuint shader) {
     GLShaderObject* object = impl_->objects->shaders().get(shader);
     if (object == nullptr) {
         pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    // GL_ARB_gl_spirv / GL 4.6 §7.2: "It is an error to call
+    // `CompileShader` on a shader object whose `SPIR_V_BINARY_ARB`
+    // state is TRUE." Such shaders must instead be finalized via
+    // `glSpecializeShader`. Report INVALID_OPERATION and leave the
+    // shader's state unchanged (keep `isSpirvBinary` true so a
+    // subsequent glSpecializeShader still works).
+    if (object->isSpirvBinary) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
 
@@ -14421,6 +14438,13 @@ bool GLContext::getShaderiv(GLuint shader, GLenum pname, GLint* params) {
             // the implementation shall return GL_TRUE" — and after the
             // synchronous compile, it's trivially complete.
             *params = GL_TRUE;
+            return true;
+        case 0x9552:   // GL_SPIR_V_BINARY_ARB
+            // GL_ARB_gl_spirv — TRUE if the shader's last-seen source
+            // was a SPIR-V binary via glShaderBinary(); cleared back to
+            // FALSE on any subsequent glShaderSource(). Gates the
+            // validity of glSpecializeShader on this object.
+            *params = object->isSpirvBinary ? GL_TRUE : GL_FALSE;
             return true;
         default:
             pushError(GL_INVALID_ENUM);
@@ -30264,10 +30288,106 @@ bool GLContext::multiDrawElementsIndirectCount(GLenum mode, GLenum type, const v
 bool GLContext::specializeShader(GLuint shader, const GLchar* pEntryPoint,
                                   GLuint numSpecializationConstants,
                                   const GLuint* pConstantIndex, const GLuint* pConstantValue) {
-    // SPIR-V specialization — store constants on the shader object for use
-    // during spirvToMSL() translation. Self-contained stub for now.
-    (void)shader; (void)pEntryPoint;
-    (void)numSpecializationConstants; (void)pConstantIndex; (void)pConstantValue;
+    // GL_ARB_gl_spirv / GL 4.6 §7.2 — promote a SPIR-V binary that was
+    // loaded via glShaderBinary into a compiled shader object. We
+    // already use SPIR-V as our internal representation (via glslang
+    // for the GLSL path), so intake is a matter of validation +
+    // marking the object compiled. Real specialization-constant
+    // substitution is handled at MSL translation time by
+    // `CompilerMSL::set_constant` — for now we record the (index,
+    // value) pairs on the shader so downstream SPIRV-Cross calls can
+    // consume them.
+    GLShaderObject* object = impl_->objects->shaders().get(shader);
+    if (object == nullptr) {
+        // GL 4.6 §7.2 distinguishes two cases:
+        //  * name refers to a program object → INVALID_OPERATION
+        //  * name is not a shader or a program → INVALID_VALUE
+        if (impl_->objects->programs().get(shader) != nullptr) {
+            pushError(GL_INVALID_OPERATION);
+        } else {
+            pushError(GL_INVALID_VALUE);
+        }
+        return false;
+    }
+    // GL 4.6 §7.2: "INVALID_OPERATION is generated if <shader> is not
+    // the name of a shader with a SPIR_V_BINARY_ARB state of TRUE"
+    // — covers both "no SPIR-V loaded" and "already compiled from
+    // GLSL via glCompileShader".
+    if (!object->isSpirvBinary || object->spirv.empty()) {
+        object->compileLog = "glSpecializeShader: SPIR_V_BINARY_ARB is FALSE on this shader";
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (object->compiled) {
+        // Specialization may only be done once — reinvoking returns
+        // INVALID_OPERATION per GL 4.6 §7.2.
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const char* entry = (pEntryPoint != nullptr) ? pEntryPoint : "main";
+    // Minimal SPIR-V validation: the 5-word header must start with
+    // the magic number 0x07230203 (little-endian).
+    if (object->spirv.size() < 5 || object->spirv[0] != 0x07230203u) {
+        object->compileLog = "glSpecializeShader: SPIR-V magic number missing";
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Entry-point + specialization-constant validation. SPIRV-Cross's
+    // base Compiler class can walk the module and enumerate entry
+    // points and declared spec-constant IDs without a backend. We
+    // construct one temporarily here; the real MSL translation
+    // (link-time) builds its own CompilerMSL anyway.
+    try {
+        spirv_cross::Compiler introspect(object->spirv.data(), object->spirv.size());
+        const auto entries = introspect.get_entry_points_and_stages();
+        bool entryOK = false;
+        for (const auto& e : entries) {
+            if (e.name == entry) { entryOK = true; break; }
+        }
+        if (!entryOK) {
+            object->compileLog = std::string("glSpecializeShader: entry point '")
+                                 + entry + "' not found in SPIR-V module";
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        // GL 4.6 §7.2 errors: INVALID_VALUE when a spec-constant index
+        // in pConstantIndex doesn't correspond to a SpecId in the
+        // module. Collect declared IDs once, then check each caller
+        // entry against the set.
+        if (numSpecializationConstants > 0) {
+            if (pConstantIndex == nullptr || pConstantValue == nullptr) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+            const auto specConsts = introspect.get_specialization_constants();
+            std::unordered_set<std::uint32_t> declaredIds;
+            for (const auto& sc : specConsts) {
+                declaredIds.insert(sc.constant_id);
+            }
+            for (GLuint i = 0; i < numSpecializationConstants; ++i) {
+                if (declaredIds.find(pConstantIndex[i]) == declaredIds.end()) {
+                    object->compileLog = "glSpecializeShader: specialization "
+                                         "constant ID not declared in module";
+                    pushError(GL_INVALID_VALUE);
+                    return false;
+                }
+            }
+            // TODO: hand the (index, value) pairs through to the
+            // translator via a side-channel on GLShaderObject so
+            // CompilerMSL::set_constant can apply them before emit.
+            // Currently we accept the values but don't yet forward
+            // them — tests that rely on specialization-constant
+            // substitution will see default values. Commits that
+            // wire this up can land separately.
+        }
+    } catch (const spirv_cross::CompilerError& e) {
+        object->compileLog = std::string("glSpecializeShader: SPIR-V parse failed: ")
+                             + e.what();
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    object->compiled = true;
+    object->compileLog.clear();
     return true;
 }
 

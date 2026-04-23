@@ -6252,11 +6252,54 @@ void APIENTRY glProgramParameteri(GLuint program, GLenum pname, GLint value) {
 
 void APIENTRY glShaderBinary(GLsizei count, const GLuint* shaders, GLenum binaryformat, const void* binary, GLsizei length) {
     auto* ctx = requireCurrentContext("glShaderBinary"); if (!ctx) return;
-    (void)count; (void)shaders; (void)binaryformat; (void)binary; (void)length;
-    // Spec-legal: report GL_INVALID_ENUM when binaryformat is not recognized (0 supported).
-    recordValidationError(ctx, "glShaderBinary", GL_INVALID_ENUM, "binaryformat not recognized (0 supported formats)");
-    markProgramFunction(FunctionId::glShaderBinary, "ShaderBinary stub (0 formats).");
-    Runtime::shared().recordBootstrapTrace("glShaderBinary(count=" + std::to_string(count) + ")");
+    // GL_ARB_gl_spirv / GL 4.6 §7.2 — only GL_SHADER_BINARY_FORMAT_SPIR_V
+    // (0x9551) is recognized. SPIR-V binary is a uint32 stream, so
+    // `length` must be divisible by 4. Each listed shader receives the
+    // same binary blob — callers typically pass count=1, but GL allows
+    // N shader objects sharing the binary (a multi-stage single blob
+    // isn't permitted; each call carries one SPIR-V module intended
+    // for one stage).
+    constexpr GLenum kShaderBinaryFormatSpirV = 0x9551;
+    if (binaryformat != kShaderBinaryFormatSpirV) {
+        recordValidationError(ctx, "glShaderBinary", GL_INVALID_ENUM,
+            "binaryformat not recognized (only GL_SHADER_BINARY_FORMAT_SPIR_V supported)");
+        markProgramFunction(FunctionId::glShaderBinary, "ShaderBinary rejected unknown format.");
+        return;
+    }
+    if (count < 0 || length < 0) {
+        recordValidationError(ctx, "glShaderBinary", GL_INVALID_VALUE,
+            "count/length must be non-negative");
+        return;
+    }
+    if ((length % 4) != 0) {
+        recordValidationError(ctx, "glShaderBinary", GL_INVALID_VALUE,
+            "SPIR-V binary length must be a multiple of 4 bytes");
+        return;
+    }
+    if (count > 0 && (shaders == nullptr || binary == nullptr)) {
+        recordValidationError(ctx, "glShaderBinary", GL_INVALID_VALUE,
+            "shaders/binary pointer is null");
+        return;
+    }
+    const std::uint32_t* words = static_cast<const std::uint32_t*>(binary);
+    const std::size_t wordCount = static_cast<std::size_t>(length) / 4;
+    for (GLsizei i = 0; i < count; ++i) {
+        appgl::GLShaderObject* obj = ctx->objects().shaders().get(shaders[i]);
+        if (obj == nullptr) {
+            recordValidationError(ctx, "glShaderBinary", GL_INVALID_VALUE,
+                "one or more shader names are not valid");
+            return;
+        }
+        // Store the SPIR-V blob. `compiled` stays false until
+        // `glSpecializeShader` validates the entry point and, if any,
+        // applies specialization constants.
+        obj->spirv.assign(words, words + wordCount);
+        obj->source.clear();
+        obj->compiled = false;
+        obj->compileLog.clear();
+        obj->isSpirvBinary = true;
+    }
+    markProgramFunction(FunctionId::glShaderBinary, "ShaderBinary SPIR-V accepted.");
 }
 
 void APIENTRY glReleaseShaderCompiler(void) {
