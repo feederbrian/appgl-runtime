@@ -507,7 +507,21 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
             out.diagnostic = "unsupported builtin input: " + std::to_string(bi);
             return out;
         }
-        // Non-builtin Input. Only the gl_in[] opt-in admits this.
+        // Phase 3f-13: `patch in` Input variables (scalar / vec /
+        // scalar-array shapes shared across all domain vertices of
+        // a patch). Decoration is parsed now and the rejection
+        // message is specific so future-phase callers know which
+        // gap to close; TCS-side capture + TES-side init plumbing
+        // lands in phase 3f-14+. Rejecting here keeps the
+        // interpreter from producing silently-wrong output on
+        // bodies that actually consume per-patch state.
+        if (dIt != module.decorations.end() && dIt->second.isPatch) {
+            out.diagnostic = "TES patch-in Input not yet plumbed (id=" +
+                             std::to_string(varId) + "): " + info.name;
+            return out;
+        }
+        // Non-builtin, non-patch Input. Only the gl_in[] opt-in
+        // admits per-vertex input arrays.
         if (!glInEnabled) {
             out.diagnostic = "non-builtin Input variable (id=" +
                              std::to_string(varId) + "): " + info.name +

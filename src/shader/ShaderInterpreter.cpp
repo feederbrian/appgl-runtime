@@ -36,6 +36,7 @@ namespace spv {
         DecorationLocation = 30, DecorationBuiltIn = 11,
         DecorationArrayStride = 6,
         DecorationNoPerspective = 13, DecorationFlat = 14,
+        DecorationPatch = 5,
         DecorationCentroid = 16, DecorationOffset = 35,
         DecorationDescriptorSet = 34, DecorationBinding = 33,
     };
@@ -186,6 +187,8 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                     decorations[target].isNoPerspective = true;
                 } else if (deco == spv::DecorationCentroid) {
                     decorations[target].isCentroid = true;
+                } else if (deco == spv::DecorationPatch) {
+                    decorations[target].isPatch = true;
                 } else if (deco == spv::DecorationBlock) {
                     decorations[target].isBlock = true;
                 } else if (deco == spv::DecorationBufferBlock) {
@@ -214,6 +217,8 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 } else if (deco == spv::DecorationLocation && wc >= 5) {
                     memberDecorations[target].perMember[member].hasLocation = true;
                     memberDecorations[target].perMember[member].location = w[3];
+                } else if (deco == spv::DecorationPatch) {
+                    memberDecorations[target].perMember[member].isPatch = true;
                 } else if (deco == spv::DecorationOffset && wc >= 5) {
                     memberDecorations[target].perMember[member].hasOffset = true;
                     memberDecorations[target].perMember[member].offset = w[3];

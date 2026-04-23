@@ -93,6 +93,14 @@ struct DecorationSet {
     bool isFlat = false;
     bool isNoPerspective = false;
     bool isCentroid = false;
+    // Phase 3f-13: GL 4.6 §11.2.1 `patch in` / `patch out` qualifier.
+    // Applies to TCS Output and TES Input interface variables. Marks
+    // the value as per-patch (one value shared across all domain
+    // vertices in the patch) rather than per-vertex. SPIR-V emits
+    // DecorationPatch (=5) on the variable; interpreter reads this
+    // to route data through a per-patch scratch map instead of the
+    // gl_in[] / gl_out[] array path.
+    bool isPatch = false;
     bool hasOffset = false;
     std::uint32_t offset = 0;
     bool isBlock = false;
