@@ -225,7 +225,8 @@ static MTLBlendOperation glBlendEqToMTL(GLenum eq) {
 // structured so the common toggles (opaque ↔ alpha-blended with
 // identical geometry layout) always produce distinct keys.
 static std::uint64_t computePipelineCacheKey(
-    const TranslatedDrawInfo& info, MTLPixelFormat colorFormat)
+    const TranslatedDrawInfo& info, MTLPixelFormat colorFormat,
+    NSUInteger sampleCount)
 {
     std::uint64_t key = 0;
     key |= static_cast<std::uint64_t>(colorFormat & 0xFF) << 56;
@@ -234,6 +235,19 @@ static std::uint64_t computePipelineCacheKey(
     key |= (info.blend.colorMaskB ? 1ULL : 0ULL) << 53;
     key |= (info.blend.colorMaskG ? 1ULL : 0ULL) << 52;
     key |= (info.blend.colorMaskR ? 1ULL : 0ULL) << 51;
+
+    // Phase 6-1a: mix the MSAA sample count into the cache key so
+    // pipelines built for MS attachments don't alias with non-MS
+    // pipelines. Metal supports 1/2/4/8 typically; 3 bits at a free
+    // slot (27..29 — bit 28 was the rasterizer-discard flag, below)
+    // holds the log2 nicely. Encoding: 1 → 0, 2 → 1, 4 → 2, 8 → 3.
+    std::uint64_t sampleLog2 = 0;
+    if (sampleCount <= 1) sampleLog2 = 0;
+    else if (sampleCount == 2) sampleLog2 = 1;
+    else if (sampleCount == 4) sampleLog2 = 2;
+    else if (sampleCount == 8) sampleLog2 = 3;
+    else sampleLog2 = 7;   // anything else — unique bucket
+    key |= (sampleLog2 & 0x7ULL) << 25;   // bits 25..27 (was FNV hash tail)
 
     const std::uint64_t eqRGB = static_cast<std::uint64_t>(
         glBlendEqToMTL(info.blend.equationRGB)) & 0x7ULL;
@@ -727,8 +741,15 @@ struct MetalFrameGraph::Impl {
         // distinct blend modes or distinct VBO layouts keeps
         // multiple pipelines hot instead of thrashing on every
         // `glEnable(GL_BLEND)` ping-pong.
+        // Phase 6-1a: sample count from the color attachment.
+        // Single-sample textures report sampleCount=1; MS renderbuffers
+        // created via renderbufferStorageMultisample report 2/4/8 etc.
+        // We feed this into both the pipeline cache key and the
+        // pipeline descriptor's rasterSampleCount further below.
+        const NSUInteger attachmentSampleCount =
+            colorTexture != nil ? colorTexture.sampleCount : 1;
         const std::uint64_t pipelineCacheKey =
-            computePipelineCacheKey(info, colorFormat);
+            computePipelineCacheKey(info, colorFormat, attachmentSampleCount);
 
         id<MTLRenderPipelineState> pipelineState = nil;
         if (info.pipelineStateCacheOut != nullptr) {
@@ -986,6 +1007,11 @@ struct MetalFrameGraph::Impl {
             // Attributeless draws don't need a vertex descriptor at all.
             desc.vertexDescriptor = attributelessDraw ? nil : vertexDescriptor;
             desc.colorAttachments[0].pixelFormat = colorFormat;
+            // Phase 6-1a: match the pipeline's rasterSampleCount to
+            // the attachment. Metal requires this for MSAA correctness
+            // — a 4x-MSAA attachment with a sampleCount=1 pipeline
+            // fails validation at encode time with no draw output.
+            desc.rasterSampleCount = attachmentSampleCount;
             // MRT: configure pixelFormat for each additional color
             // attachment (slots 1..7). GL 4.6 §14.6 allows up to 8
             // simultaneous color outputs (GL_MAX_DRAW_BUFFERS).
