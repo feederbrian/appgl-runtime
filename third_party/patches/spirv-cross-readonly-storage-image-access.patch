@@ -1,0 +1,30 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index f98f84d..2e5bf97 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -17549,6 +17549,25 @@ string CompilerMSL::image_type_glsl(const SPIRType &type, uint32_t id, bool memb
+ 
+ 				img_type_name += "write";
+ 			}
++			else if (p_var && has_decoration(p_var->self, DecorationNonWritable) &&
++			         !has_decoration(p_var->self, DecorationNonReadable))
++			{
++				// [appgl-local] emit `access::read` for readonly
++				// storage images (GLSL `readonly image2D`). Upstream
++				// defaults to no qualifier (â `access::sample` in
++				// MSL), which Metal's MTLArgumentEncoder doesn't
++				// expose as an argument-buffer slot without a paired
++				// sampler â breaks readonly-storage-image argbuf
++				// bindings on `compute_shader.pipeline-post-fs`.
++				// `access::read` is the correct type for a
++				// .read()-only storage image in an argument buffer.
++				// NOTE: `access::read` alone doesn't work — Metal's
++				// MTLArgumentEncoder seems to require a writable
++				// qualifier for argument-buffer slot reflection.
++				// Emit `access::read_write`; the shader body only
++				// calls .read() so the write capability is unused.
++				img_type_name += ", access::read_write";
++			}
+ 			else
+ 			{
+ 				has_access_qualifier = false;

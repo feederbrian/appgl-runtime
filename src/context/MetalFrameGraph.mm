@@ -3552,7 +3552,16 @@ fragment float4 appgl_immediate_textured_fs(
         // at [[buffer(24)]] / [[buffer(25)]] — bind through argument
         // encoders instead of direct per-slot calls. Mirror the
         // graphics-stage encodeTexturesIntoArgBuf / encodeUBOsIntoArgBuf
-        // shape.
+        // shape. Phase 7 cleanup (a) closed a two-part
+        // `compute_shader.pipeline-post-fs` regression: vendored
+        // SPIRV-Cross patch emits `access::read_write` for
+        // NonWritable storage images (bare `texture2d<T>` landed at
+        // `access::sample` and MTLArgumentEncoder didn't enumerate
+        // the sample-access slot), plus reflection-time filter that
+        // drops declared-but-unused storage images (SPIRV-Cross's
+        // dead-code pass elides them from MSL but
+        // `resources.storage_images` kept them, producing argbuf
+        // entries whose slot was outside the encoder's valid range).
         const bool useArgBuf =
             (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         id<MTLFunction> computeFn = (__bridge id<MTLFunction>)info.metalComputeFunction;
@@ -3601,13 +3610,19 @@ fragment float4 appgl_immediate_textured_fs(
                             }
                             [enc useResource:tex usage:usage];
                         }
+                        // The GL default-uniform block lives at Metal slot
+                        // `makeComputeBindingMap().uniformBufferBase` in both
+                        // direct and argbuf modes. Under argbuf the block
+                        // moves into spvDescriptorSetBuffer1 at the same
+                        // [[id(N)]] — the set-1 encoder writes it below.
+                        // Skip it in this set-0 loop so we don't
+                        // double-bind.
+                        const std::uint32_t kDefaultUniformSlot =
+                            appgl::makeComputeBindingMap().uniformBufferBase;
                         for (const auto& bb : info.buffers) {
                             id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bb.metalBuffer;
                             if (buf == nil) continue;
-                            // Skip the default-uniform block (slot 16) —
-                            // it lives in desc_set 1 under argbuf; the
-                            // handler below writes it via the set1 encoder.
-                            if (bb.metalSlot == 16) continue;
+                            if (bb.metalSlot == kDefaultUniformSlot) continue;
                             [argEncSet0 setBuffer:buf
                                            offset:static_cast<NSUInteger>(bb.offset)
                                           atIndex:static_cast<NSUInteger>(bb.metalSlot)];

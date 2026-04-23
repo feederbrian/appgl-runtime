@@ -1444,6 +1444,16 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // Direct-binding mode keeps the existing textureBase /
         // storageBufferBase sequential assignment so baseline Metal
         // slot layout is unchanged.
+        //
+        // Lifetime invariant: `APPGL_ENABLE_ARGUMENT_BUFFERS` is read
+        // once per reflect() call, mirroring the equivalent check in
+        // spirvToMSL(). Both run at glLinkProgram time (for a given
+        // program) and nothing downstream re-reads the env var, so as
+        // long as the env is set before linkProgram (which is how the
+        // gate is used — set once at process start), reflection and
+        // translation always agree. If the env var were toggled mid-
+        // process, new programs would pick up the new mode; already-
+        // linked programs retain their old mode until relinked.
         const bool useArgBufReflection =
             (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         for (auto& img : resources.sampled_images) {
@@ -1464,7 +1474,23 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // a sampler uniform that names a texture unit. Dispatch-time
         // binding resolution iterates this list separately and looks up
         // imageBindings[glBinding] rather than a uniform value.
+        //
+        // Phase 7 cleanup (a): filter to ACTIVE storage images only.
+        // A declared-but-unused `uniform image2D` would stay in
+        // `resources.storage_images` but SPIRV-Cross's dead-code pass
+        // drops it from the emitted MSL, so Metal's argument-encoder
+        // reflection doesn't see it either. Pushing the inactive
+        // binding into the GL-side list gave `ComputeDispatchInfo::
+        // textures` entries whose `metalSlot` was outside the
+        // encoder's enumerated index range, triggering
+        //   "index (N) is outside of the valid index range [M, M]"
+        // on `compute_shader.pipeline-post-fs` (shared GLSL source
+        // with a #define-toggled input-image use, so the pre-fs
+        // compile drops g_input_image but retains its declaration).
+        auto activeStorageImages = compiler.get_active_interface_variables();
         for (auto& img : resources.storage_images) {
+            if (activeStorageImages.find(img.id) == activeStorageImages.end())
+                continue;
             ShaderReflection::ResourceBinding rb;
             rb.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
             if (useArgBufReflection) {
