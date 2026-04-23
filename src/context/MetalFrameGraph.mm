@@ -226,7 +226,7 @@ static MTLBlendOperation glBlendEqToMTL(GLenum eq) {
 // identical geometry layout) always produce distinct keys.
 static std::uint64_t computePipelineCacheKey(
     const TranslatedDrawInfo& info, MTLPixelFormat colorFormat,
-    NSUInteger sampleCount)
+    NSUInteger sampleCount, bool forcePerSampleFS)
 {
     std::uint64_t key = 0;
     key |= static_cast<std::uint64_t>(colorFormat & 0xFF) << 56;
@@ -248,6 +248,10 @@ static std::uint64_t computePipelineCacheKey(
     else if (sampleCount == 8) sampleLog2 = 3;
     else sampleLog2 = 7;   // anything else — unique bucket
     key |= (sampleLog2 & 0x7ULL) << 25;   // bits 25..27 (was FNV hash tail)
+    // Phase 6-1e: distinguish per-sample-FS pipeline from the
+    // per-pixel-FS pipeline built from the same MSL source. Bit 24
+    // is free (below the 25..27 sample-count field).
+    key |= (forcePerSampleFS ? 1ULL : 0ULL) << 24;
 
     const std::uint64_t eqRGB = static_cast<std::uint64_t>(
         glBlendEqToMTL(info.blend.equationRGB)) & 0x7ULL;
@@ -302,6 +306,64 @@ static std::uint64_t computePipelineCacheKey(
     }
     key |= static_cast<std::uint64_t>(hash & 0x0FFFFFFFu);  // 28 bits (bit 28 = rasterizerDiscard)
     return key;
+}
+
+// Phase 6-1e: inject `[[sample_id]]` into the FS entry point so Metal
+// triggers per-sample fragment invocation. GL 4.6 §14.6 / ARB_sample_shading
+// says when `GL_SAMPLE_SHADING` is enabled and `min_sample_shading > 0` on
+// an MS attachment, the FS must run at least `ceil(N * min_sample_shading)`
+// times per pixel. Metal has no explicit "force per-sample FS" knob; the
+// only trigger is the shader reading a per-sample built-in like
+// `[[sample_id]]` or `[[sample_position]]`. We inject an unused
+// `[[sample_id]]` parameter — the parameter's mere presence is enough
+// for Metal to promote the FS to per-sample; no body changes are needed.
+//
+// Entry-point shape from SPIRV-Cross on macOS:
+//   fragment main0_out main0(main0_in in [[stage_in]]) { ... }
+// Also accepts the empty-param variant (`main0()`) and nested parens
+// inside the param list (e.g. cast expressions). Returns `fsMsl`
+// unchanged when the `main0(...)` signature can't be parsed or when
+// the FS already reads `[[sample_id]]` — callers treat the return as
+// the source to compile, so the fallback is always a valid MSL.
+static std::string rewriteFragmentMSLForPerSample(const std::string& fsMsl)
+{
+    // Fast-out when the shader already reads [[sample_id]]; otherwise
+    // we'd risk emitting two parameters with the same attribute and the
+    // Metal compiler would reject the pipeline.
+    if (fsMsl.find("[[sample_id]]") != std::string::npos) return fsMsl;
+
+    const std::size_t openParen = fsMsl.find("main0(");
+    if (openParen == std::string::npos) return fsMsl;
+    const std::size_t paramStart = openParen + 6;   // past "main0("
+    std::size_t depth = 1;
+    std::size_t pos = paramStart;
+    while (pos < fsMsl.size() && depth > 0) {
+        const char c = fsMsl[pos];
+        if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+            if (depth == 0) break;
+        }
+        ++pos;
+    }
+    if (depth != 0 || pos >= fsMsl.size()) return fsMsl;
+
+    // Determine whether the existing parameter list is empty (to decide
+    // whether to prefix the injected parameter with a comma).
+    const std::string paramSlice = fsMsl.substr(paramStart, pos - paramStart);
+    const bool hasExistingParams =
+        paramSlice.find_first_not_of(" \t\n\r") != std::string::npos;
+
+    std::string out;
+    out.reserve(fsMsl.size() + 64);
+    out.append(fsMsl, 0, pos);
+    if (hasExistingParams) {
+        out.append(", ");
+    }
+    out.append("uint _ap_sample_id [[sample_id]]");
+    out.append(fsMsl, pos, std::string::npos);
+    return out;
 }
 
 struct MetalFrameGraph::Impl {
@@ -748,8 +810,20 @@ struct MetalFrameGraph::Impl {
         // pipeline descriptor's rasterSampleCount further below.
         const NSUInteger attachmentSampleCount =
             colorTexture != nil ? colorTexture.sampleCount : 1;
+        // Phase 6-1e: GL_SAMPLE_SHADING + MS attachment forces the FS to
+        // run per-sample. Metal only switches to per-sample FS when the
+        // shader reads a per-sample built-in ([[sample_id]] /
+        // [[sample_position]]). When the GL state asks for sample-shading
+        // on an MS attachment, we rewrite the FS MSL below to inject an
+        // unused [[sample_id]] parameter. The pipeline cache key carries
+        // this rewrite so toggling GL_SAMPLE_SHADING doesn't collide
+        // with the per-pixel variant built from the same source.
+        const bool forcePerSampleFS =
+            info.sampleShadingEnabled && info.minSampleShading > 0.0f &&
+            attachmentSampleCount > 1;
         const std::uint64_t pipelineCacheKey =
-            computePipelineCacheKey(info, colorFormat, attachmentSampleCount);
+            computePipelineCacheKey(info, colorFormat, attachmentSampleCount,
+                                     forcePerSampleFS);
 
         id<MTLRenderPipelineState> pipelineState = nil;
         if (info.pipelineStateCacheOut != nullptr) {
@@ -858,7 +932,20 @@ struct MetalFrameGraph::Impl {
             // library / function are never used.
             id<MTLFunction> fragFn = nil;
             if (hasFragmentStage) {
-                id<MTLLibrary> fragLib = getOrCompileLibrary(*info.fragmentMSL);
+                // Phase 6-1e: when the pipeline key asked for per-sample
+                // FS, swap the source for a rewritten copy with an
+                // injected [[sample_id]] parameter. The rewrite is
+                // side-effect-free and returns the original string when
+                // no signature match is found — the fallback path still
+                // compiles. Keyed on `forcePerSampleFS` so the rewrite
+                // cost is only paid for MS + GL_SAMPLE_SHADING draws.
+                std::string rewrittenFragmentMSL;
+                if (forcePerSampleFS) {
+                    rewrittenFragmentMSL = rewriteFragmentMSLForPerSample(*info.fragmentMSL);
+                }
+                const std::string& fragSource = forcePerSampleFS
+                    ? rewrittenFragmentMSL : *info.fragmentMSL;
+                id<MTLLibrary> fragLib = getOrCompileLibrary(fragSource);
                 if (fragLib == nil) {
                     FG_TRACE(@"encodeTranslatedDraw: newLibraryWithSource(fragment) failed");
                     recordBuildFailure("fragment-library", nil);
