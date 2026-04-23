@@ -1848,7 +1848,9 @@ EmulatedDraw emulateTessellationDraw(
             /*ssboMap=*/nullptr,   // side-effect-free capture pass
             emptyPatchInputs,       // VS hasn't run yet; gl_in[] = zeros
             scratchOut,
-            outerLevels, innerLevels, &diag);
+            outerLevels, innerLevels,
+            /*precomputedUniforms=*/nullptr,  // pre-map; not built yet
+            &diag);
         tcsLevelsCaptured = ok;
     }
 
@@ -2017,6 +2019,22 @@ EmulatedDraw emulateTessellationDraw(
     }
     const TesSsboMap* ssboMap = ssboBindings.empty() ? nullptr : &ssboBindings;
 
+    // Phase 3f-12: build the uniform map ONCE for this draw. Passed
+    // to every runTes/TcsForVertex call below to avoid rebuilding
+    // (program.uniforms × uniformValues) per invocation. Uniforms
+    // can't change mid-draw — glUniform* handlers are never called
+    // while a draw is in flight — so the snapshot we take here is
+    // valid for every (patch, invocation) pair we'll generate.
+    const bool needUniformMap =
+        program.tessellationEmulated || program.tessellationInterpreted ||
+        program.tessControlInterpreted;
+    TesUniformMap precomputedUniforms;
+    const TesUniformMap* uniformMapPtr = nullptr;
+    if (needUniformMap) {
+        precomputedUniforms = buildTesUniformMap(program);
+        uniformMapPtr = &precomputedUniforms;
+    }
+
     // patchInputs[] + tcsOutputs[] declarations moved up so the TCS
     // pre-pass (below) can populate tcsOutputs and consult patchInputs
     // that the VS pre-pass (which runs BEFORE this block — order was
@@ -2111,6 +2129,7 @@ EmulatedDraw emulateTessellationDraw(
                     slot,
                     /*outerLevelsOut=*/nullptr,
                     /*innerLevelsOut=*/nullptr,
+                    uniformMapPtr,
                     &diag);
                 if (tcsDebug && !ok) {
                     std::fprintf(stderr, "[tess-emul] TCS bail (patch=%zu iv=%d): %s\n",
@@ -2178,7 +2197,8 @@ EmulatedDraw emulateTessellationDraw(
             program.tessEvalSpirv.size(),
             program, tessCoord, primID,
             interpVaryingNames, interpVaryingWidths,
-            ssboMap, thisPatchInputs, outV, &diag);
+            ssboMap, thisPatchInputs, outV,
+            uniformMapPtr, &diag);
         if (!ok && tesDebug && !diag.empty() &&
             tesBailSeen->insert(diag).second) {
             std::fprintf(stderr, "[tess-emul] TES bail: %s\n", diag.c_str());

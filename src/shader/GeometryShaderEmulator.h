@@ -277,6 +277,23 @@ struct TesSsboRegion {
 };
 using TesSsboMap = std::unordered_map<std::uint32_t, TesSsboRegion>;
 
+// Phase 3f-12: pre-built uniform map shape the tess emulator's
+// runners expect. Matches `Interpreter::UniformValues` defined
+// internally — kept as a public typedef so the runner signature
+// can accept a pointer without leaking the anonymous-namespace
+// type. Each entry is a flattened scalar-per-element float
+// vector; the runner bit-casts int/uint/bool as needed via the
+// type information in the SpirvModule.
+using TesUniformMap = std::unordered_map<std::string, std::vector<float>>;
+
+// Phase 3f-12: build a TesUniformMap from a program's current
+// uniform values. Intended to be called ONCE per
+// emulateTessellationDraw and the result passed to every
+// runTes/TcsForVertex call for that draw, avoiding per-invocation
+// rebuild cost. Keyed by uniform variable name; top-level uniforms
+// get a direct entry; block members are keyed by member name.
+TesUniformMap buildTesUniformMap(const GLProgramObject& program);
+
 bool runTesForVertex(
     const std::uint32_t* tesSpirv,
     std::size_t tesWordCount,
@@ -293,6 +310,12 @@ bool runTesForVertex(
     // gl_CullDistance when the TES body reads them.
     const std::vector<EmulatedVertex>& patchInputs,
     EmulatedVertex& outVertex,
+    // Phase 3f-12: pre-built uniform map. When non-null, the
+    // runner uses this instead of rebuilding buildUniformMap
+    // internally. Caller should build it once per
+    // emulateTessellationDraw via `buildTesUniformMap(program)`
+    // and keep it alive across all per-vertex calls.
+    const TesUniformMap* precomputedUniforms = nullptr,
     std::string* diagnostic = nullptr);
 
 // Run a single TCS invocation on CPU. One invocation per
@@ -326,6 +349,8 @@ bool runTcsForVertex(
     EmulatedVertex& outVertex,
     float* outerLevelsOut = nullptr,
     float* innerLevelsOut = nullptr,
+    // Phase 3f-12: same pre-built uniform map as runTesForVertex.
+    const TesUniformMap* precomputedUniforms = nullptr,
     std::string* diagnostic = nullptr);
 
 // Synthesise a pass-through vertex-shader MSL source that reads

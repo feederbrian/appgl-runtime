@@ -5039,6 +5039,13 @@ bool runVsForVertex(
     return true;
 }
 
+// Phase 3f-12: namespace-level wrapper so the tess emul draw path
+// (in TessellationEmulator.cpp) can pre-build the uniform map once
+// per draw and pass it to every runTes/TcsForVertex invocation.
+TesUniformMap buildTesUniformMap(const GLProgramObject& program) {
+    return buildUniformMap(program);
+}
+
 bool runTesForVertex(
     const std::uint32_t* tesSpirv,
     std::size_t tesWordCount,
@@ -5050,6 +5057,7 @@ bool runTesForVertex(
     const TesSsboMap* ssboMap,
     const std::vector<EmulatedVertex>& patchInputs,
     EmulatedVertex& outVertex,
+    const TesUniformMap* precomputedUniforms,
     std::string* diagnostic)
 {
     if (tesSpirv == nullptr || tesWordCount < 5) {
@@ -5072,10 +5080,20 @@ bool runTesForVertex(
     }
     const SpirvModule& tesMod = *program.tessEvalParsedModule;
 
-    // Uniform map — identical shape to runVsForVertex. Default-uniform
-    // + block uniform values keyed by name, flattened to scalar-per-
-    // element floats (int/uint/bool are bit-cast into the float slot).
-    Interpreter::UniformValues uniforms = buildUniformMap(program);
+    // Phase 3f-12: use the caller's pre-built uniform map when
+    // supplied; otherwise build one on the spot (legacy behaviour).
+    // The pre-built path is the tess-emul draw loop's hot path —
+    // avoids rebuilding `program.uniforms × uniformValues` per
+    // generated domain vertex.
+    Interpreter::UniformValues localUniforms;
+    const Interpreter::UniformValues* uniformsPtr = nullptr;
+    if (precomputedUniforms != nullptr) {
+        uniformsPtr = precomputedUniforms;
+    } else {
+        localUniforms = buildUniformMap(program);
+        uniformsPtr = &localUniforms;
+    }
+    const Interpreter::UniformValues& uniforms = *uniformsPtr;
 
     // Re-use the VS-shape constructor (second overload). It expects
     // `outputVaryingNames_/Widths_` — which is what the matched TES
@@ -5144,6 +5162,7 @@ bool runTcsForVertex(
     EmulatedVertex& outVertex,
     float* outerLevelsOut,
     float* innerLevelsOut,
+    const TesUniformMap* precomputedUniforms,
     std::string* diagnostic)
 {
     if (tcsSpirv == nullptr || tcsWordCount < 5) {
@@ -5164,7 +5183,17 @@ bool runTcsForVertex(
     }
     const SpirvModule& tcsMod = *program.tessControlParsedModule;
 
-    Interpreter::UniformValues uniforms = buildUniformMap(program);
+    // Phase 3f-12: use caller's precomputed uniform map when
+    // available to avoid per-invocation rebuild.
+    Interpreter::UniformValues localUniforms;
+    const Interpreter::UniformValues* uniformsPtr = nullptr;
+    if (precomputedUniforms != nullptr) {
+        uniformsPtr = precomputedUniforms;
+    } else {
+        localUniforms = buildUniformMap(program);
+        uniformsPtr = &localUniforms;
+    }
+    const Interpreter::UniformValues& uniforms = *uniformsPtr;
 
     // TCS has no user output varyings to capture from the CPU emul's
     // perspective — gl_out[] patch values feed the TES via
