@@ -308,62 +308,161 @@ static std::uint64_t computePipelineCacheKey(
     return key;
 }
 
-// Phase 6-1e: inject `[[sample_id]]` into the FS entry point so Metal
-// triggers per-sample fragment invocation. GL 4.6 §14.6 / ARB_sample_shading
-// says when `GL_SAMPLE_SHADING` is enabled and `min_sample_shading > 0` on
-// an MS attachment, the FS must run at least `ceil(N * min_sample_shading)`
-// times per pixel. Metal has no explicit "force per-sample FS" knob; the
-// only trigger is the shader reading a per-sample built-in like
-// `[[sample_id]]` or `[[sample_position]]`. We inject an unused
-// `[[sample_id]]` parameter — the parameter's mere presence is enough
-// for Metal to promote the FS to per-sample; no body changes are needed.
+// Phase 6-1e / 6-2: transform a SPIRV-Cross fragment MSL source so
+// Metal honours GL 4.6 §14.6 / ARB_sample_shading.
+//
+// Two coordinated rewrites:
+//
+// (1) Inject `uint _ap_sample_id [[sample_id]]` into `main0(...)`.
+//     Metal has no explicit "force per-sample FS" knob; the only
+//     trigger for per-sample invocation is the shader reading a
+//     per-sample built-in. The parameter's presence alone is enough
+//     — no body changes needed.
+//
+// (2) For each `[[user(locnN)]]` input varying in `main0_in`, add a
+//     `sample_perspective` qualifier. Metal's default interpolation
+//     for a user varying is `center_perspective` (pixel-center),
+//     which means that even when per-sample FS fires via (1) the
+//     interpolated input is still the same at every sample in a
+//     pixel — producing 1 unique color per pixel column rather than
+//     `samples` unique. GLSL §4.3.4.1 says when sample shading is
+//     enabled, inputs that don't carry `centroid` or `flat` are
+//     interpolated at the sample location; Metal expresses this
+//     as `sample_perspective` / `sample_no_perspective`. We use
+//     `sample_perspective` (matches the typical GLSL `smooth` /
+//     default perspective-corrected interpolation) and leave
+//     already-qualified varyings (`flat`, `centroid_*`, any prior
+//     `sample_*`) alone.
 //
 // Entry-point shape from SPIRV-Cross on macOS:
+//   struct main0_in { float4 v_color [[user(locn0)]]; };
 //   fragment main0_out main0(main0_in in [[stage_in]]) { ... }
 // Also accepts the empty-param variant (`main0()`) and nested parens
-// inside the param list (e.g. cast expressions). Returns `fsMsl`
-// unchanged when the `main0(...)` signature can't be parsed or when
-// the FS already reads `[[sample_id]]` — callers treat the return as
-// the source to compile, so the fallback is always a valid MSL.
+// inside the param list (e.g. cast expressions). Each rewrite step
+// falls back to the original MSL when its anchor isn't found, so
+// the returned string is always valid MSL.
 static std::string rewriteFragmentMSLForPerSample(const std::string& fsMsl)
 {
+    std::string working = fsMsl;
+
+    // Step (1): [[sample_id]] inject.
     // Fast-out when the shader already reads [[sample_id]]; otherwise
-    // we'd risk emitting two parameters with the same attribute and the
-    // Metal compiler would reject the pipeline.
-    if (fsMsl.find("[[sample_id]]") != std::string::npos) return fsMsl;
-
-    const std::size_t openParen = fsMsl.find("main0(");
-    if (openParen == std::string::npos) return fsMsl;
-    const std::size_t paramStart = openParen + 6;   // past "main0("
-    std::size_t depth = 1;
-    std::size_t pos = paramStart;
-    while (pos < fsMsl.size() && depth > 0) {
-        const char c = fsMsl[pos];
-        if (c == '(') {
-            ++depth;
-        } else if (c == ')') {
-            --depth;
-            if (depth == 0) break;
+    // we'd risk emitting two parameters with the same attribute and
+    // Metal would reject the pipeline.
+    if (working.find("[[sample_id]]") == std::string::npos) do {
+        const std::size_t openParen = working.find("main0(");
+        if (openParen == std::string::npos) break;
+        const std::size_t paramStart = openParen + 6;   // past "main0("
+        std::size_t depth = 1;
+        std::size_t pos = paramStart;
+        while (pos < working.size() && depth > 0) {
+            const char c = working[pos];
+            if (c == '(') {
+                ++depth;
+            } else if (c == ')') {
+                --depth;
+                if (depth == 0) break;
+            }
+            ++pos;
         }
-        ++pos;
-    }
-    if (depth != 0 || pos >= fsMsl.size()) return fsMsl;
+        if (depth != 0 || pos >= working.size()) break;
 
-    // Determine whether the existing parameter list is empty (to decide
-    // whether to prefix the injected parameter with a comma).
-    const std::string paramSlice = fsMsl.substr(paramStart, pos - paramStart);
-    const bool hasExistingParams =
-        paramSlice.find_first_not_of(" \t\n\r") != std::string::npos;
+        const std::string paramSlice = working.substr(paramStart, pos - paramStart);
+        const bool hasExistingParams =
+            paramSlice.find_first_not_of(" \t\n\r") != std::string::npos;
 
-    std::string out;
-    out.reserve(fsMsl.size() + 64);
-    out.append(fsMsl, 0, pos);
-    if (hasExistingParams) {
-        out.append(", ");
-    }
-    out.append("uint _ap_sample_id [[sample_id]]");
-    out.append(fsMsl, pos, std::string::npos);
-    return out;
+        std::string out;
+        out.reserve(working.size() + 64);
+        out.append(working, 0, pos);
+        if (hasExistingParams) {
+            out.append(", ");
+        }
+        out.append("uint _ap_sample_id [[sample_id]]");
+        out.append(working, pos, std::string::npos);
+        working = std::move(out);
+    } while (false);
+
+    // Step (2): sample_perspective qualifier on main0_in varyings.
+    // Locate the `struct main0_in {` block and rewrite each
+    // `[[user(locnN)]]` inside to `[[user(locnN), sample_perspective]]`.
+    // Leave already-qualified `[[user(locnN), flat]]` /
+    // `[[user(locnN), centroid_*]]` / `[[user(locnN), sample_*]]`
+    // unchanged — only the bare attribute gets the qualifier.
+    do {
+        const std::size_t structPos = working.find("struct main0_in");
+        if (structPos == std::string::npos) break;
+        const std::size_t openBrace = working.find('{', structPos);
+        if (openBrace == std::string::npos) break;
+        // Walk to matching close brace. main0_in is flat (no nested
+        // structs), but keep a depth counter for defensiveness.
+        std::size_t depth = 1;
+        std::size_t closeBrace = openBrace + 1;
+        while (closeBrace < working.size() && depth > 0) {
+            const char c = working[closeBrace];
+            if (c == '{') ++depth;
+            else if (c == '}') { --depth; if (depth == 0) break; }
+            ++closeBrace;
+        }
+        if (depth != 0 || closeBrace >= working.size()) break;
+
+        std::string out;
+        out.reserve(working.size() + 128);
+        out.append(working, 0, openBrace + 1);
+
+        std::size_t scan = openBrace + 1;
+        while (scan < closeBrace) {
+            const std::size_t attrStart = working.find("[[user(locn", scan);
+            if (attrStart == std::string::npos || attrStart >= closeBrace) {
+                out.append(working, scan, closeBrace - scan);
+                break;
+            }
+            // Walk from `[[user(locn` to the closing `)`.
+            std::size_t cursor = attrStart + 11;   // past "[[user(locn"
+            while (cursor < closeBrace && working[cursor] != ')') ++cursor;
+            if (cursor >= closeBrace) {
+                out.append(working, scan, closeBrace - scan);
+                break;
+            }
+            // Now `working[cursor]` is the ')' that closes the user
+            // locn. Check what follows. Bare `[[user(locnN)]]` →
+            // `cursor+1 == ']'` && `cursor+2 == ']'`. Qualified (has
+            // comma inside) → the attribute ends past `]]` later.
+            const bool isBare =
+                cursor + 2 < working.size() &&
+                working[cursor + 1] == ']' &&
+                working[cursor + 2] == ']';
+            if (isBare) {
+                // Copy [scan .. cursor+1) → "[[user(locnN)" (+ all prior text)
+                out.append(working, scan, (cursor + 1) - scan);
+                // Insert ", sample_perspective" before the "]]"
+                out.append(", sample_perspective");
+                // Copy "]]"
+                out.append(working, cursor + 1, 2);
+                scan = cursor + 3;
+            } else {
+                // Already qualified. Walk to the attribute's closing
+                // `]]` and copy verbatim.
+                std::size_t end = cursor + 1;
+                while (end + 1 < closeBrace &&
+                       !(working[end] == ']' && working[end + 1] == ']')) {
+                    ++end;
+                }
+                if (end + 1 >= closeBrace) {
+                    // Malformed; bail and copy rest verbatim.
+                    out.append(working, scan, closeBrace - scan);
+                    scan = closeBrace;
+                    break;
+                }
+                out.append(working, scan, (end + 2) - scan);
+                scan = end + 2;
+            }
+        }
+
+        out.append(working, closeBrace, std::string::npos);
+        working = std::move(out);
+    } while (false);
+
+    return working;
 }
 
 struct MetalFrameGraph::Impl {
