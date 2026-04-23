@@ -1482,6 +1482,46 @@ struct MetalFrameGraph::Impl {
                 drawableHeight = static_cast<GLsizei>(colorTexture.height);
             }
 
+            // Phase 6-1b: when color attachment is multisample but
+            // the bound depth attachment isn't (or vice versa),
+            // Metal rejects the pass with a sampleCount mismatch. Two
+            // recovery paths:
+            //   (a) non-FBO (default framebuffer) — rebuild the
+            //       depthStencilTexture with matching sample count,
+            //       same way we handle size mismatches above.
+            //   (b) FBO with user-supplied depth — drop the depth
+            //       attachment (render without depth test) rather
+            //       than crash. Tests that need depth with MSAA must
+            //       attach an MS depth renderbuffer; our
+            //       renderbufferStorageMultisample path creates them
+            //       correctly when the caller asks for samples > 1.
+            if (colorTexture != nil && passDepthStencil != nil &&
+                colorTexture.sampleCount != passDepthStencil.sampleCount) {
+                if (!isFBODraw) {
+                    APPGL_LOG(PIPELINE, @"[FG] depth/color sample-count MISMATCH: depth=%lu color=%lu — rebuilding depth with matching MS",
+                          (unsigned long)passDepthStencil.sampleCount,
+                          (unsigned long)colorTexture.sampleCount);
+                    MTLTextureDescriptor* dd = [MTLTextureDescriptor
+                        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                    width:colorTexture.width
+                                                   height:colorTexture.height
+                                                mipmapped:NO];
+                    dd.storageMode = MTLStorageModePrivate;
+                    dd.usage = MTLTextureUsageRenderTarget;
+                    if (colorTexture.sampleCount > 1) {
+                        dd.textureType = MTLTextureType2DMultisample;
+                        dd.sampleCount = colorTexture.sampleCount;
+                    }
+                    depthStencilTexture = [device newTextureWithDescriptor:dd];
+                    passDepthStencil = depthStencilTexture;
+                } else {
+                    APPGL_LOG(PIPELINE, @"[FG] FBO depth/color sample-count MISMATCH: depth=%lu color=%lu — dropping depth",
+                          (unsigned long)passDepthStencil.sampleCount,
+                          (unsigned long)colorTexture.sampleCount);
+                    passDepthStencil = nil;
+                }
+            }
+
             // Build the render pass, merging any pending clear into the load
             // action so clear+draws share a single render pass (OPT-4).
             MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
