@@ -511,18 +511,52 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
         return out;
     }
 
-    // Verify no OTHER output variables carry user varyings. Built-in
-    // outputs (gl_PerVertex members we don't write) are fine — just
-    // location-decorated user varyings are the concern because our
-    // synth pass-through VS would need to emit matching MSL outputs.
+    // Phase-3e: collect user-varying Output variables by location.
+    // Each will get a store-target mapping traced during the body
+    // walk. Currently scalar floats only — wider types need per-
+    // component source tracking (punt to a later phase).
+    struct UserVaryingInfo {
+        std::uint32_t varId = 0;
+        std::uint32_t location = 0;
+        std::string name;
+        std::uint8_t numComponents = 1;
+        // Filled in after the body walk from the OpStore's value.
+        TessVaryingMapping mapping;
+    };
+    std::vector<UserVaryingInfo> userVaryings;
+    std::unordered_map<std::uint32_t, std::size_t> varIdToUserVaryingIdx;
+
     for (const auto& [varId, vi] : module.variables) {
         if (vi.storageClass != spv::StorageClassOutput) continue;
         auto decoIt = module.decorations.find(varId);
-        if (decoIt != module.decorations.end() && decoIt->second.hasLocation) {
-            out.diagnostic = "TES declares user varying " + vi.name +
-                             " at location " + std::to_string(decoIt->second.location);
+        if (decoIt == module.decorations.end() || !decoIt->second.hasLocation) continue;
+
+        // Inspect the pointee type — we support scalar float only
+        // for this phase. Anything else falls back to rejection.
+        auto ptrTypeIt = module.types.find(vi.typeId);
+        if (ptrTypeIt == module.types.end() ||
+            ptrTypeIt->second.kind != TypeInfo::Kind::Pointer) {
+            out.diagnostic = "user varying " + vi.name + " has non-pointer type";
             return out;
         }
+        auto pointeeIt = module.types.find(ptrTypeIt->second.pointeeType);
+        if (pointeeIt == module.types.end() ||
+            pointeeIt->second.kind != TypeInfo::Kind::Float) {
+            out.diagnostic = "user varying " + vi.name +
+                             " is not scalar float (phase-3e scope)";
+            return out;
+        }
+
+        UserVaryingInfo uv;
+        uv.varId = varId;
+        uv.location = decoIt->second.location;
+        uv.name = vi.name;
+        uv.numComponents = 1;
+        uv.mapping.name = vi.name;
+        uv.mapping.location = uv.location;
+        uv.mapping.numComponents = 1;
+        varIdToUserVaryingIdx[varId] = userVaryings.size();
+        userVaryings.push_back(std::move(uv));
     }
 
     // Walk the function body. Track every OpStore's pointer — the
@@ -567,8 +601,17 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
                     const std::uint32_t ptrId = w[0];
                     auto it = pointerRoot.find(ptrId);
                     const std::uint32_t root = (it != pointerRoot.end()) ? it->second : ptrId;
-                    if (root == positionVarId) ++storesToPosition;
-                    else ++storesOther;
+                    if (root == positionVarId) {
+                        ++storesToPosition;
+                    } else {
+                        // Phase-3e: accept stores whose root is a
+                        // tracked user varying. Anything else counts
+                        // as "other" and disqualifies the match.
+                        auto uvIt = varIdToUserVaryingIdx.find(root);
+                        if (uvIt == varIdToUserVaryingIdx.end()) {
+                            ++storesOther;
+                        }
+                    }
                 }
                 break;
             }
@@ -921,6 +964,56 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
     if (!mappingFound) {
         out.diagnostic = "gl_Position store value isn't a simple CompositeConstruct";
         return out;
+    }
+
+    // Phase-3e: trace each user varying's store value back to the
+    // same valueSource map and populate its TessVaryingMapping. For
+    // scalar float varyings the OpStore's value is either a
+    // TessCoord-affine scalar or a constant float. A varying that
+    // isn't written anywhere (unusual — glslang inlines constants
+    // into the store) disqualifies the match since the FS would
+    // still read it.
+    i = module.funcBodyStart;
+    std::vector<bool> varyingMatched(userVaryings.size(), false);
+    while (i < end) {
+        const std::uint32_t inst = module.words[i];
+        const std::uint16_t opcode = inst & 0xFFFF;
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0 || i + wc > end) break;
+        const std::uint32_t* w = module.words.data() + i + 1;
+        if (opcode == spv::OpStore && wc >= 3) {
+            const std::uint32_t ptrId = w[0];
+            auto pit = pointerRoot.find(ptrId);
+            const std::uint32_t root = (pit != pointerRoot.end()) ? pit->second : ptrId;
+            auto uvIt = varIdToUserVaryingIdx.find(root);
+            if (uvIt != varIdToUserVaryingIdx.end()) {
+                const std::size_t idx = uvIt->second;
+                const std::uint32_t valueId = w[1];
+                auto vsIt = valueSource.find(valueId);
+                if (vsIt != valueSource.end()) {
+                    const SrcRecord& src = vsIt->second;
+                    if (src.kind == SrcTessCoord) {
+                        userVaryings[idx].mapping.mapping[0] = src.component;
+                        userVaryings[idx].mapping.scale[0] = src.scale;
+                        userVaryings[idx].mapping.offset[0] = src.offset;
+                        varyingMatched[idx] = true;
+                    } else if (src.kind == SrcConstant) {
+                        userVaryings[idx].mapping.mapping[0] = -1;
+                        userVaryings[idx].mapping.constant[0] = src.constantValue;
+                        varyingMatched[idx] = true;
+                    }
+                }
+            }
+        }
+        i += wc;
+    }
+    for (std::size_t k = 0; k < userVaryings.size(); ++k) {
+        if (!varyingMatched[k]) {
+            out.diagnostic = "user varying " + userVaryings[k].name +
+                             " has non-affine store value (phase-3e scope)";
+            return out;
+        }
+        out.varyings.push_back(userVaryings[k].mapping);
     }
 
     out.matched = true;

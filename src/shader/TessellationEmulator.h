@@ -297,6 +297,27 @@ TessBodyClassification classifyTessBody(
 // Used by `detectTessellationEmulatable` to flip `program.
 // tessellationEmulated` on for the narrow set. `diagnostic` on a
 // false return explains which predicate broke.
+// Per-varying mapping record populated by phase-3e. Each stored-to
+// location-decorated Output varying gets one entry; the mapping is
+// the same shape as gl_Position's (single tessCoord component +
+// affine scale/offset, or a constant fallback).
+//
+// Phase 3e-1 supports scalar float varyings only — `numComponents`
+// is always 1 for now. Later phases will extend to vec2/3/4 with
+// per-component mappings.
+struct TessVaryingMapping {
+    std::string name;
+    std::uint32_t location = 0;
+    std::uint8_t numComponents = 1;
+    // Per-component source (same encoding as positionMapping):
+    //   mapping[i] >= 0 → varying.i = tessCoord[mapping] * scale[i] + offset[i]
+    //   mapping[i] == -1 → varying.i = constant[i]
+    std::int8_t mapping[4] = {-1, -1, -1, -1};
+    float scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float offset[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float constant[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+};
+
 struct TessBodyPassthroughMatch {
     bool matched = false;
     bool parsed = false;
@@ -310,6 +331,10 @@ struct TessBodyPassthroughMatch {
     float positionScale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     float positionOffset[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float positionConstant[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    // Phase-3e — per-user-varying mappings. Empty under phase-3d
+    // (the legacy no-user-varying matcher still populates this).
+    // Future phases consume it in the draw path + synth VS.
+    std::vector<TessVaryingMapping> varyings;
 };
 
 TessBodyPassthroughMatch matchTessEvalPassthrough(
