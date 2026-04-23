@@ -1787,8 +1787,6 @@ EmulatedDraw emulateTessellationDraw(
     GLuint baseInstance)
 {
     (void)vao;
-    (void)first;
-    (void)elementIndices;
     (void)instanceCount;
     (void)baseInstance;
 
@@ -2092,8 +2090,20 @@ EmulatedDraw emulateTessellationDraw(
         for (std::size_t p = 0; p < numPatches; ++p) {
             const std::size_t patchBase = p * static_cast<std::size_t>(patchVertices);
             for (GLint pv = 0; pv < patchVertices; ++pv) {
-                const std::size_t vboSlot =
-                    static_cast<std::size_t>(first) + patchBase + static_cast<std::size_t>(pv);
+                // Phase 3f-16: pick the VBO slot based on the draw
+                // entry. drawArrays: (first + patchBase + pv).
+                // drawElements: elementIndices[patchBase + pv] — the
+                // index buffer resolves to the VBO slot. Caller is
+                // responsible for uint32-promotion of byte/short
+                // indices (IndexExpansion handles it).
+                std::size_t vboSlot;
+                if (elementIndices != nullptr) {
+                    const std::size_t elemIdx = patchBase + static_cast<std::size_t>(pv);
+                    vboSlot = static_cast<std::size_t>(elementIndices[elemIdx]);
+                } else {
+                    vboSlot = static_cast<std::size_t>(first) + patchBase +
+                              static_cast<std::size_t>(pv);
+                }
                 std::string vsDiag;
                 const bool vsOk = runVsForVertex(
                     program.vertexSpirv.data(), program.vertexSpirv.size(),

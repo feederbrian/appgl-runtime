@@ -21787,6 +21787,31 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
     GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = impl_->resolveDrawProgram(programName);
 
+    // Phase 3f-16: tess-emul hook for instanced drawArrays. The
+    // interpreter currently treats every instance identically (the
+    // VS pre-pass ignores instance — gl_InstanceID seeding lives
+    // in runVsForVertex but isn't stepped here). Correct for tess
+    // tests that don't read gl_InstanceID in the VS; CTS uses
+    // instancing primarily for attribute-divisor checks that the
+    // passthrough matcher path handles correctly.
+    if (program != nullptr &&
+        (program->tessellationEmulated || program->tessellationInterpreted) &&
+        !program->geometryEmulated && count > 0 && instancecount > 0) {
+        const GLuint vaoName = impl_->state->boundVertexArray();
+        GLVertexArrayObject* tvao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        if (tvao != nullptr) {
+            appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
+                *program, *tvao, *impl_->objects, *impl_->state,
+                mode, count, first, /*elementIndices=*/nullptr,
+                instancecount, /*baseInstance=*/0);
+            if (ted.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ted)) return true;
+                if (ted.vertexCount == 0) return true;
+                if (impl_->encodeEmulatedGsDraw(*program, programName, ted)) return true;
+            }
+        }
+    }
+
     // GS emul hook for instanced draws.
     if (program != nullptr && program->geometryEmulated && count > 0 && instancecount > 0) {
         const GLuint vaoName = impl_->state->boundVertexArray();
@@ -22210,6 +22235,39 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // glUseProgramStages without ever calling glUseProgram.
     GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = impl_->resolveDrawProgram(programName);
+
+    // Phase 3f-16: CPU TES emulation hook for drawElements. Mirrors
+    // the drawArrays block but feeds the resolved index buffer into
+    // emulateTessellationDraw so the VS pre-pass reads the indexed
+    // VBO slots. Same short-circuit shape: rasterDiscard /
+    // zero-vertex / encode. On ok=false (interpreter bailed per
+    // 3f-15 or classifier rejected) we fall through to the GS-emul
+    // path below, which in turn falls through to the legacy
+    // translated pipeline.
+    if (program != nullptr &&
+        (program->tessellationEmulated || program->tessellationInterpreted) &&
+        !program->geometryEmulated && count > 0) {
+        std::vector<std::uint32_t> idx32;
+        if (effectiveType == GL_UNSIGNED_INT) {
+            idx32.assign(count, 0);
+            std::memcpy(idx32.data(), effectivePtr, count * sizeof(std::uint32_t));
+        } else if (effectiveType == GL_UNSIGNED_SHORT) {
+            idx32.assign(count, 0);
+            const std::uint16_t* src16 =
+                static_cast<const std::uint16_t*>(effectivePtr);
+            for (GLsizei i = 0; i < count; ++i) idx32[i] = src16[i];
+        }
+        if (!idx32.empty()) {
+            appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, /*first=*/0, idx32.data());
+            if (ted.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ted)) return true;
+                if (ted.vertexCount == 0) return true;
+                if (impl_->encodeEmulatedGsDraw(*program, programName, ted)) return true;
+            }
+        }
+    }
 
     // CPU GS emulation hook — mirrors drawArrays, but resolves
     // indices through the element buffer so vertex `i` reads VBO
@@ -22901,6 +22959,41 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     // glUseProgramStages without ever calling glUseProgram.
     GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = impl_->resolveDrawProgram(programName);
+
+    // Phase 3f-16: tess-emul for instanced indexed draws. Mirrors
+    // the GS path below; the only shared code is the idx32 expand
+    // + optional basevertex bias. Kept as a separate block so the
+    // passthrough/interpreter precedence over GS-emul (they're
+    // mutually exclusive via !geometryEmulated) is preserved.
+    if (program != nullptr &&
+        (program->tessellationEmulated || program->tessellationInterpreted) &&
+        !program->geometryEmulated && count > 0 && instancecount > 0) {
+        std::vector<std::uint32_t> tidx32;
+        if (effectiveType == GL_UNSIGNED_INT) {
+            tidx32.assign(count, 0);
+            std::memcpy(tidx32.data(), effectivePtr, count * sizeof(std::uint32_t));
+        } else if (effectiveType == GL_UNSIGNED_SHORT) {
+            tidx32.assign(count, 0);
+            const std::uint16_t* src16 =
+                static_cast<const std::uint16_t*>(effectivePtr);
+            for (GLsizei i = 0; i < count; ++i) tidx32[i] = src16[i];
+        }
+        if (!tidx32.empty()) {
+            if (basevertex != 0) {
+                for (auto& v : tidx32) v = static_cast<std::uint32_t>(
+                    static_cast<std::int32_t>(v) + basevertex);
+            }
+            appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, /*first=*/0, tidx32.data(),
+                instancecount, /*baseInstance=*/0);
+            if (ted.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ted)) return true;
+                if (ted.vertexCount == 0) return true;
+                if (impl_->encodeEmulatedGsDraw(*program, programName, ted)) return true;
+            }
+        }
+    }
 
     // GS emul hook for instanced indexed draws. See drawElements
     // and drawArraysInstanced for the sibling paths.
