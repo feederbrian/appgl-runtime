@@ -924,8 +924,32 @@ struct MetalFrameGraph::Impl {
             computePipelineCacheKey(info, colorFormat, attachmentSampleCount,
                                      forcePerSampleFS);
 
+        // Step 7-3: argument-buffer mode. When APPGL_ENABLE_ARGUMENT_BUFFERS
+        // is set, the fragment/vertex shader was compiled to read resources
+        // through `constant spvDescriptorSetBuffer0& spvDescriptorSet0
+        // [[buffer(24)]]` rather than direct [[texture(N)]] /
+        // [[sampler(N)]] slots. We must build a Metal argument buffer per
+        // stage per descriptor-set-in-use and bind it at the pinned
+        // [[buffer(24)]] / [[buffer(25)]] slots.
+        //
+        // Scope for this commit (7-3 MVP): textures only. UBOs / SSBOs
+        // follow in 7-3 successor commits. Tests with UBOs will still
+        // fail under argbuf mode (the shader's spvDescriptorSetBuffer1
+        // member would read garbage); tests with just samplers
+        // (texture_swizzle VS-sampling) are the target.
+        //
+        // We force a pipeline-cache miss under argbuf mode so the
+        // MTLFunction stays alive in scope after the pipeline build —
+        // `newArgumentEncoderWithBufferIndex:` has to be called on the
+        // MTLFunction, not on the pipeline state. This costs a pipeline
+        // rebuild per draw; optimization (caching the encoder alongside
+        // the pipeline) is 7-4.
+        const bool useArgBuf = (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
+        id<MTLArgumentEncoder> fragArgEncoderSet0 = nil;
+        id<MTLArgumentEncoder> vertArgEncoderSet0 = nil;
+
         id<MTLRenderPipelineState> pipelineState = nil;
-        if (info.pipelineStateCacheOut != nullptr) {
+        if (!useArgBuf && info.pipelineStateCacheOut != nullptr) {
             auto it = info.pipelineStateCacheOut->find(pipelineCacheKey);
             if (it != info.pipelineStateCacheOut->end() && it->second != nullptr) {
                 pipelineState = (__bridge id<MTLRenderPipelineState>)(it->second);
@@ -936,7 +960,7 @@ struct MetalFrameGraph::Impl {
         // diagnostic bookkeeping (`pipelineStateOut` is still read by
         // BAR tooling) — only honoured when the map path is missing,
         // which never happens in the current draw builders.
-        if (pipelineState == nil && info.pipelineStateCacheOut == nullptr &&
+        if (!useArgBuf && pipelineState == nil && info.pipelineStateCacheOut == nullptr &&
             info.pipelineStateOut != nullptr && *info.pipelineStateOut != nullptr &&
             info.pipelineColorFormatOut != nullptr &&
             *info.pipelineColorFormatOut == static_cast<std::uint32_t>(colorFormat)) {
@@ -1058,6 +1082,42 @@ struct MetalFrameGraph::Impl {
                     FG_TRACE(@"encodeTranslatedDraw: newFunctionWithName(fragment,main0) failed: %@", fragFnError);
                     recordBuildFailure("fragment-function", fragFnError);
                     return false;
+                }
+            }
+
+            // Step 7-3: create per-stage argument encoders for desc_set 0
+            // when argument_buffers is enabled. The encoder is created
+            // from the MTLFunction (not the pipeline state) so it must
+            // live in this pipeline-build scope. Hoisted to encode-
+            // Translated-Draw's outer scope via the pre-declared
+            // `fragArgEncoderSet0` / `vertArgEncoderSet0` locals above
+            // so the bind step can reach them. Encoders are safe to
+            // create even when the shader has no [[buffer(24)]] — Metal
+            // just returns an encoder with encodedLength=0, which our
+            // binding loop below handles via the "no fragmentTextures"
+            // short-circuit.
+            //
+            // Only desc_set 0 is wired in this commit (samplers + storage
+            // images + SSBOs). Desc_set 1 (UBOs at [[buffer(25)]]) + the
+            // compute stage + the various non-texture resource types are
+            // 7-3 successor commits.
+            if (useArgBuf) {
+                // Gate on the per-stage texture list being non-empty.
+                // `newArgumentEncoderWithBufferIndex:24` asserts
+                // "bufferIndex 24 does not identify an argument buffer"
+                // on functions whose compiled MSL has no [[buffer(24)]]
+                // parameter (e.g. an FS with no samplers, or a VS whose
+                // GLSL only sampled in a sibling stage). The fragment/
+                // vertex textures list is populated upstream by
+                // resolveSamplerBindings only when the program has at
+                // least one sampler declared in the stage, so it's a
+                // reliable proxy for "this stage has a spvDescriptorSet
+                // Buffer0 argument".
+                if (vertFn != nil && !info.vertexTextures.empty()) {
+                    vertArgEncoderSet0 = [vertFn newArgumentEncoderWithBufferIndex:24];
+                }
+                if (fragFn != nil && !info.fragmentTextures.empty()) {
+                    fragArgEncoderSet0 = [fragFn newArgumentEncoderWithBufferIndex:24];
                 }
             }
 
@@ -2202,27 +2262,84 @@ struct MetalFrameGraph::Impl {
                 APPGL_LOG(DRAW, @"[GL]     vbo peek32 skip=private-or-null");
             }
         }
-        for (const auto& binding : info.fragmentTextures) {
-            if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
-                continue;
+        // Step 7-3: argument-buffer binding path. When argbuf is enabled
+        // and the pipeline has desc_set 0 (fragment and/or vertex stage),
+        // allocate a per-stage argument buffer, populate it via the
+        // MTLArgumentEncoder, bind at [[buffer(24)]], and call
+        // useResource for each bound texture + sampler so Metal
+        // residency tracks them. When argbuf is disabled, fall through
+        // to the baseline direct-binding path unchanged.
+        if (useArgBuf && (fragArgEncoderSet0 != nil || vertArgEncoderSet0 != nil)) {
+            auto encodeTexturesIntoArgBuf = [&](id<MTLArgumentEncoder> encoder,
+                                                 const std::vector<TranslatedDrawInfo::TextureBinding>& textures,
+                                                 MTLRenderStages stage,
+                                                 bool isFragment) {
+                if (encoder == nil || textures.empty()) return;
+                const NSUInteger len = [encoder encodedLength];
+                if (len == 0) return;
+                // One-shot per-draw argument buffer. newBufferWithLength
+                // allocates from the Metal device's shared pool; ARC lets
+                // it drop after the GPU completes. A ring-buffer variant
+                // is step 7-4 optimisation.
+                id<MTLBuffer> argBuf = [device newBufferWithLength:len
+                                                           options:MTLResourceStorageModeShared];
+                if (argBuf == nil) return;
+                [encoder setArgumentBuffer:argBuf offset:0];
+                for (const auto& binding : textures) {
+                    if (binding.metalTexture == nullptr ||
+                        binding.metalSamplerState == nullptr) continue;
+                    id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
+                    id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                    // binding.metalSlot is the direct-binding slot (=glBinding
+                    // for textures when textureBase=0). Under argbuf mode,
+                    // the [[id(N)]] inside spvDescriptorSetBuffer0 is
+                    // 2*glBinding for the image half, 2*glBinding+1 for
+                    // the sampler half — matches the consolidation-
+                    // commit slot assignment in the shader translator.
+                    const NSUInteger idIdx = 2 * static_cast<NSUInteger>(binding.metalSlot);
+                    [encoder setTexture:tex atIndex:idIdx];
+                    [encoder setSamplerState:smp atIndex:idIdx + 1];
+                    // Residency tracking: Metal's argument buffers are
+                    // indirect references. Without useResource, the
+                    // texture/sampler pages may not be resident on GPU
+                    // when the shader reads through the argument buffer.
+                    [currentRenderEncoder useResource:tex
+                                                usage:MTLResourceUsageRead|MTLResourceUsageSample
+                                               stages:stage];
+                }
+                if (isFragment) {
+                    [currentRenderEncoder setFragmentBuffer:argBuf offset:0 atIndex:24];
+                } else {
+                    [currentRenderEncoder setVertexBuffer:argBuf offset:0 atIndex:24];
+                }
+            };
+            encodeTexturesIntoArgBuf(fragArgEncoderSet0, info.fragmentTextures,
+                                      MTLRenderStageFragment, true);
+            encodeTexturesIntoArgBuf(vertArgEncoderSet0, info.vertexTextures,
+                                      MTLRenderStageVertex, false);
+        } else {
+            for (const auto& binding : info.fragmentTextures) {
+                if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+                    continue;
+                }
+                id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
+                id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                [currentRenderEncoder setFragmentTexture:tex
+                                                 atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                [currentRenderEncoder setFragmentSamplerState:smp
+                                                      atIndex:static_cast<NSUInteger>(binding.metalSlot)];
             }
-            id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
-            id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
-            [currentRenderEncoder setFragmentTexture:tex
-                                             atIndex:static_cast<NSUInteger>(binding.metalSlot)];
-            [currentRenderEncoder setFragmentSamplerState:smp
-                                                  atIndex:static_cast<NSUInteger>(binding.metalSlot)];
-        }
-        for (const auto& binding : info.vertexTextures) {
-            if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
-                continue;
+            for (const auto& binding : info.vertexTextures) {
+                if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+                    continue;
+                }
+                id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
+                id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                [currentRenderEncoder setVertexTexture:tex
+                                               atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                [currentRenderEncoder setVertexSamplerState:smp
+                                                    atIndex:static_cast<NSUInteger>(binding.metalSlot)];
             }
-            id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
-            id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
-            [currentRenderEncoder setVertexTexture:tex
-                                           atIndex:static_cast<NSUInteger>(binding.metalSlot)];
-            [currentRenderEncoder setVertexSamplerState:smp
-                                                atIndex:static_cast<NSUInteger>(binding.metalSlot)];
         }
 
         MTLPrimitiveType primitive;

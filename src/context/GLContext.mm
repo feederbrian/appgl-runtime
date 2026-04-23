@@ -3315,6 +3315,16 @@ struct GLContext::Impl {
             const float a = std::max(1.0f, std::min(16.0f, object.params.maxAnisotropy));
             descriptor.maxAnisotropy = static_cast<NSUInteger>(a);
         }
+        // Step 7-3: enable argument-buffer compatibility so this sampler
+        // state can be `[encoder setSamplerState:atIndex:]`-ed into an
+        // argument buffer. Metal validation asserts "Sampler state did
+        // not have supportArgumentBuffers flag set on creation, but is
+        // used with argument buffers" otherwise. The flag adds a small
+        // (~5 %) perf cost, paid unconditionally so the same sampler
+        // object works for both direct binding and argument-buffer
+        // binding paths — avoids needing a shadow "argbuf-compatible"
+        // sampler variant per GLSamplerObject.
+        descriptor.supportArgumentBuffers = YES;
 
         id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:descriptor];
         if (sampler == nil) {
@@ -3496,6 +3506,10 @@ struct GLContext::Impl {
             descriptor.lodMaxClamp = 0.25f;
             descriptor.compareFunction = MTLCompareFunctionNever;
         }
+        // Step 7-3: argument-buffer compatibility (see
+        // rebuildSamplerState for rationale — mirror enable here on
+        // the texture-local sampler path).
+        descriptor.supportArgumentBuffers = YES;
 
         id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:descriptor];
         if (sampler == nil) {
