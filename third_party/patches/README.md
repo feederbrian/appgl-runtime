@@ -4,6 +4,31 @@ Local modifications applied to vendored third-party checkouts. Keep this
 directory in sync with the actual state of `third_party/<name>/` on disk
 so a clean rebuild can re-apply.
 
+## Fork Policy (2026-04-23)
+
+The `third_party/SPIRV-Cross/` checkout is treated as an **AppGL fork** —
+take free reign to modify it for any changes pertinent to AppGL. We ship
+the modified SPIRV-Cross tree alongside appgl-runtime. The original
+Khronos maintainers can choose to upstream any of our patches they like;
+we don't block on upstream review. Patches captured here are both a
+documentation trail and a mechanism to re-apply on a clean re-fetch of
+the upstream SHA we branched from.
+
+Typical triggers for a SPIRV-Cross modification:
+- Metal backend emits MSL that's valid per the SPIRV-Cross test corpus
+  but hits a Metal API-validation assertion we can't work around at the
+  AppGL layer (phase-7 argbuf: bare `texture2d<T>` for readonly storage
+  images → `access::read_write`).
+- Missing SPIR-V opcode handling surfaces when a CTS shader uses a
+  corner-case construct (session-6 atomic-unpacked-expression).
+- Runtime arrays on Apple GPUs need a declared size bump to avoid
+  silent drop (`unsized_array_fallback_literal`).
+
+Prefer the AppGL layer when feasible (post-process MSL, SPIR-V
+decoration edits, etc.); fall back to SPIRV-Cross when the change is
+structural enough that string processing or decoration fiddling would
+be brittle.
+
 ## Applying
 
 ```bash
