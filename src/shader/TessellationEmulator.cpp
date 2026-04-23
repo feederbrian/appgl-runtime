@@ -441,6 +441,87 @@ TessBodyClassification classifyTessBody(
     return out;
 }
 
+// ─── Phase-3f-2 interpretability classifier ──────────────────────────
+//
+// Wider gate than the passthrough matcher below. Interpreter path
+// cost: one `Interpreter` per generated domain vertex. Safe to admit
+// any TES body that only reads built-ins the init seeding knows how
+// to populate (gl_TessCoord, gl_PrimitiveID) — reading gl_in[] or
+// per-patch varyings would return zeros, which corrupts rasterization
+// output silently. So we stay strict on inputs and rely on the
+// interpreter itself to bail on unsupported opcodes.
+
+TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
+    const std::uint32_t* tesSpirv,
+    std::size_t tesWordCount)
+{
+    TessBodyInterpretabilityCheck out;
+    if (tesSpirv == nullptr || tesWordCount < 5) {
+        out.diagnostic = "empty SPIR-V";
+        return out;
+    }
+    SpirvModule module;
+    if (!module.parse(tesSpirv, tesWordCount)) {
+        out.diagnostic = "SpirvModule::parse failed: " + module.parseError;
+        return out;
+    }
+    if (!module.haveFuncBody) {
+        out.diagnostic = "no function body";
+        return out;
+    }
+    out.parsed = true;
+
+    // Walk every Input variable and reject if it's anything beyond
+    // gl_TessCoord (BuiltIn=13), gl_PrimitiveID (BuiltIn=7), or
+    // gl_PatchVerticesIn (BuiltIn=14). gl_in[] arrays, per-patch
+    // varyings, and any location-decorated (user) Input reject the
+    // shader until phase 3f-4+ plumbs them through.
+    for (const auto& [varId, info] : module.variables) {
+        if (info.storageClass != spv::StorageClassInput) continue;
+        auto dIt = module.decorations.find(varId);
+        if (dIt != module.decorations.end() && dIt->second.hasBuiltIn) {
+            const std::uint32_t bi = dIt->second.builtIn;
+            if (bi == 13 /*TessCoord*/ ||
+                bi == 7  /*PrimitiveId*/ ||
+                bi == 14 /*PatchVertices*/) {
+                continue;
+            }
+            // Other built-in inputs (gl_InvocationID, gl_TessLevel*
+            // when read from TES) fall through and reject. Extend in
+            // phase 3f-4+ once their init-seeding exists.
+            out.diagnostic = "unsupported builtin input: " + std::to_string(bi);
+            return out;
+        }
+        // Either a user varying or a gl_PerVertex-style struct array.
+        // Both need gl_in[] plumbing we don't have yet — reject.
+        out.diagnostic = "non-builtin Input variable (id=" +
+                         std::to_string(varId) + "): " + info.name;
+        return out;
+    }
+
+    // Upper bound on body size so a pathological shader can't hang
+    // the draw path. The CE test template body is ~40-80 opcodes; we
+    // pick a generous ceiling (4096) that still guards against
+    // mischievous shaders.
+    std::size_t i = module.funcBodyStart;
+    const std::size_t end = module.funcBodyEnd;
+    std::size_t opcodeCount = 0;
+    while (i < end) {
+        const std::uint32_t inst = module.words[i];
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0 || i + wc > end) break;
+        ++opcodeCount;
+        if (opcodeCount > 4096) {
+            out.diagnostic = "body opcode count > 4096";
+            return out;
+        }
+        i += wc;
+    }
+
+    out.interpretable = true;
+    return out;
+}
+
 // ─── Phase-2b passthrough shape matcher ──────────────────────────────
 
 TessBodyPassthroughMatch matchTessEvalPassthrough(
@@ -1393,6 +1474,34 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
             return true;
         }
     }
+
+    // Phase-3f-2: if the passthrough matcher rejected the body,
+    // try the wider interpretability classifier. Shapes that only
+    // read gl_TessCoord / gl_PrimitiveID / gl_PatchVerticesIn can
+    // run through the GSE Interpreter per generated vertex. Same
+    // env gate (APPGL_ENABLE_TESS_EMUL=1).
+    {
+        static const bool emulEnabled = []() {
+            const char* v = std::getenv("APPGL_ENABLE_TESS_EMUL");
+            return v != nullptr && v[0] != '0' && v[0] != '\0';
+        }();
+        if (emulEnabled) {
+            TessBodyInterpretabilityCheck teInterp =
+                classifyTessEvalInterpretable(
+                    program.tessEvalSpirv.data(),
+                    program.tessEvalSpirv.size());
+            if (teInterp.interpretable) {
+                program.tessellationInterpreted = true;
+                program.linkLog +=
+                    "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — interpreter TES enabled";
+                return true;
+            }
+            if (!teInterp.diagnostic.empty()) {
+                program.linkLog +=
+                    "\n[tess-emul] interpretability rejected: " + teInterp.diagnostic;
+            }
+        }
+    }
     return false;
 }
 
@@ -1589,6 +1698,52 @@ EmulatedDraw emulateTessellationDraw(
         }
     };
 
+    // Phase-3f-2: interpreter path. When the passthrough matcher
+    // rejected the TES body but the classifier flipped
+    // `tessellationInterpreted`, invoke runTesForVertex per generated
+    // vertex — slower (one interpreter run per output vertex) but
+    // expressive enough to handle CE tess_eval bodies. Position is
+    // captured from gl_Position; user varyings are NOT propagated yet
+    // (phase 3f-4 scans TES outputs to populate tessVaryings). Any
+    // SSBO reads/writes in the body are currently silent no-ops —
+    // phase 3f-3 wires the byte-level SSBO path.
+    auto emitVertexInterpreted = [&](std::size_t dstIdx,
+                                     std::size_t patchIdx,
+                                     float u, float v, float w) {
+        EmulatedVertex outV;
+        outV.position[0] = 0.0f; outV.position[1] = 0.0f;
+        outV.position[2] = 0.0f; outV.position[3] = 1.0f;
+        const std::array<float, 3> tessCoord{u, v, w};
+        const std::int32_t primID = static_cast<std::int32_t>(patchIdx);
+        std::string diag;
+        const std::vector<std::string> noVaryingNames;
+        const std::vector<std::uint32_t> noVaryingWidths;
+        const bool ok = runTesForVertex(
+            program.tessEvalSpirv.data(),
+            program.tessEvalSpirv.size(),
+            program, tessCoord, primID,
+            noVaryingNames, noVaryingWidths,
+            outV, &diag);
+        const std::size_t dst = dstIdx * floatsPerVertex;
+        if (ok) {
+            d.expandedVertexData[dst + 0] = outV.position[0];
+            d.expandedVertexData[dst + 1] = outV.position[1];
+            d.expandedVertexData[dst + 2] = outV.position[2];
+            d.expandedVertexData[dst + 3] = outV.position[3];
+        } else {
+            // Interpreter bailed — fall back to identity domain coord.
+            // Safer than uninitialized data; the draw still renders
+            // something on-screen for debug even though it's wrong.
+            d.expandedVertexData[dst + 0] = u;
+            d.expandedVertexData[dst + 1] = v;
+            d.expandedVertexData[dst + 2] = w;
+            d.expandedVertexData[dst + 3] = 1.0f;
+        }
+    };
+
+    const bool useInterpreter =
+        program.tessellationInterpreted && !program.tessellationEmulated;
+
     for (std::size_t p = 0; p < numPatches; ++p) {
         const std::size_t dstPatchBase = p * expandPerPatch;
         if (isPoints) {
@@ -1596,7 +1751,11 @@ EmulatedDraw emulateTessellationDraw(
                 const float u = coords[i * 3 + 0];
                 const float v = coords[i * 3 + 1];
                 const float w = coords[i * 3 + 2];
-                emitVertex(dstPatchBase + i, u, v, w);
+                if (useInterpreter) {
+                    emitVertexInterpreted(dstPatchBase + i, p, u, v, w);
+                } else {
+                    emitVertex(dstPatchBase + i, u, v, w);
+                }
             }
         } else {
             for (std::size_t i = 0; i < indices.size(); ++i) {
@@ -1604,7 +1763,11 @@ EmulatedDraw emulateTessellationDraw(
                 const float u = coords[idx * 3 + 0];
                 const float v = coords[idx * 3 + 1];
                 const float w = coords[idx * 3 + 2];
-                emitVertex(dstPatchBase + i, u, v, w);
+                if (useInterpreter) {
+                    emitVertexInterpreted(dstPatchBase + i, p, u, v, w);
+                } else {
+                    emitVertex(dstPatchBase + i, u, v, w);
+                }
             }
         }
     }
@@ -1655,9 +1818,11 @@ EmulatedDraw emulateTessellationDraw(
     // the 37 currently-passing tess tests aren't disrupted by a
     // position-only CPU replacement that produces parametric-
     // space positions instead of clip-space.
-    if (program.tessellationEmulated) {
+    if (program.tessellationEmulated || program.tessellationInterpreted) {
         d.ok = true;
-        d.diagnostic = "tess-emul phase-3b: " + std::to_string(numPatches) +
+        const char* mode = program.tessellationEmulated ? "passthrough" : "interpreter";
+        d.diagnostic = std::string("tess-emul phase-3f-2 (") + mode + "): " +
+                       std::to_string(numPatches) +
                        " patches × " + std::to_string(expandPerPatch) +
                        " verts = " + std::to_string(d.vertexCount) +
                        " (topology=0x" +

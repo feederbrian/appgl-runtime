@@ -602,6 +602,13 @@ struct GLProgramObject {
     // through to the existing path. Full tess CPU emulation lands
     // in iters 163+. See src/shader/TessellationEmulator.{h,cpp}.
     bool tessellationEmulated = false;
+    // Phase-3f-2: set when the TES body can be run through the GSE
+    // Interpreter (runTesForVertex) per generated vertex rather than
+    // reduced to an affine mapping. Orthogonal to `tessellationEmulated`
+    // — a program gets the interpreter path when the passthrough
+    // matcher REJECTS but the classifier says the body is safe to
+    // walk. Gated by the same `APPGL_ENABLE_TESS_EMUL=1` opt-in.
+    bool tessellationInterpreted = false;
     // Phase-3c/3d: when tessellationEmulated is set via the
     // passthrough matcher, these record how to derive each of the 4
     // gl_Position components from a (u,v,w) domain coord at draw time.

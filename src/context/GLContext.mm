@@ -21259,7 +21259,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // GS+TES together: if a program has both emulable stages, skip
     // the tess path here and let the GS emulator run. Combining the
     // two is phase 6+ work.
-    if (program != nullptr && program->tessellationEmulated &&
+    if (program != nullptr &&
+        (program->tessellationEmulated || program->tessellationInterpreted) &&
         !program->geometryEmulated) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* tvao = (vaoName != 0)

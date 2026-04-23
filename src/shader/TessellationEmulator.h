@@ -341,6 +341,32 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
     const std::uint32_t* tesSpirv,
     std::size_t tesWordCount);
 
+// Wider gate than `matchTessEvalPassthrough`: decides whether the
+// GSE `Interpreter` (via `runTesForVertex`) can execute the TES
+// body per generated domain vertex. Phase 3f-2 opens the door to
+// shapes the passthrough matcher rejects — gl_Position writes mixed
+// with side-effect SSBO reads/writes, for example — but still keeps
+// out the hard cases:
+//
+//   - Reading `gl_in[]` (the TCS output array) requires per-patch-
+//     vertex plumbing that doesn't exist yet.
+//   - Writing `gl_TessLevel*` outputs from TES is a no-op per spec
+//     but glslang still emits the opcode; harmless to interpret.
+//
+// The interpreter itself already bails on any opcode it doesn't
+// support, so this classifier only needs to rule out interfaces
+// the init path can't seed. Returns `interpretable = true` when
+// the caller can safely attempt the interpreter path.
+struct TessBodyInterpretabilityCheck {
+    bool interpretable = false;
+    bool parsed = false;
+    std::string diagnostic;
+};
+
+TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
+    const std::uint32_t* tesSpirv,
+    std::size_t tesWordCount);
+
 // Generate the tessellation domain coords + indices for one patch.
 // All outer / inner levels are pre-clamped by the caller to
 // [1, GL_MAX_TESS_GEN_LEVEL]. Called once per patch per draw after
