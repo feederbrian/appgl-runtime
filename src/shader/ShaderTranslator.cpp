@@ -593,6 +593,57 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             }
         }
 
+        // Step 7-2 consolidation: argument-buffers layout needs three
+        // additional scoped adjustments relative to the direct-binding
+        // baseline (all gated on APPGL_ENABLE_ARGUMENT_BUFFERS):
+        //
+        //   (a) The argument-buffer variables themselves (one per
+        //       descriptor set) must sit at Metal buffer slots that
+        //       don't collide with VBOs (`vertexBufferBase` = 0..15),
+        //       push-constants (`uniformBufferBase` = 16), or legacy
+        //       UBO slots (16..). We pin them at [[buffer(24)]] and
+        //       [[buffer(25)]] for descriptor sets 0 and 1. SPIRV-Cross
+        //       would otherwise auto-allocate starting from 0, stomping
+        //       the VBO slot 0 on the VS stage.
+        //
+        //   (b) Storage images would otherwise get `msl_texture =
+        //       textureBase + glBinding`, which under argument_buffers
+        //       becomes [[id(glBinding)]] inside spvDescriptorSetBuffer0
+        //       — colliding with sampled_images at 2*glBinding_sampled.
+        //       Offset storage-image ids to 128+ so they live in a
+        //       clearly-separated range.
+        //
+        //   (c) SSBOs would otherwise get `msl_buffer = storageBufferBase
+        //       + K (=28+K)`, colliding with sampled-image ids 2*14..
+        //       inside the same argument buffer. Offset SSBO ids to 192+
+        //       so they sit above both sampled (0..) and storage (128..)
+        //       image ranges.
+        //
+        // Full id-space layout per argument buffer (desc_set 0):
+        //   [0..127]    sampled_images   (2*N for image, 2*N+1 for sampler)
+        //   [128..191]  storage_images
+        //   [192..255]  SSBOs
+        //
+        // Desc_set 1 contains only UBOs, so no internal collision risk.
+        // Push constants stay as a direct [[buffer(16)]] binding per
+        // SPIRV-Cross's convention (they're never placed inside an
+        // argument buffer by `analyze_argument_buffers`).
+        const bool useArgBuf = (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
+        if (useArgBuf) {
+            // (a) Argument-buffer self-bindings. One per descriptor set
+            // in use (0 = samplers/storage/SSBOs; 1 = UBOs). When a
+            // descriptor set has no resources, the binding is silently
+            // ignored by SPIRV-Cross.
+            for (uint32_t set = 0; set < 2; ++set) {
+                spirv_cross::MSLResourceBinding argBufBinding;
+                argBufBinding.stage = compiler.get_execution_model();
+                argBufBinding.desc_set = set;
+                argBufBinding.binding = spirv_cross::kArgumentBufferBinding;
+                argBufBinding.msl_buffer = 24 + set;
+                compiler.add_msl_resource_binding(argBufBinding);
+            }
+        }
+
         // Remap push-constant blocks (SPIRV-Cross treats default-block uniforms
         // as a push-constant buffer when coming from OpenGL GLSL).
         for (auto& pc : resources.push_constant_buffers) {
@@ -634,7 +685,17 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 binding.stage = compiler.get_execution_model();
                 binding.desc_set = compiler.get_decoration(entry.res->id, spv::DecorationDescriptorSet);
                 binding.binding = entry.glBinding;
-                binding.msl_buffer = nextSSBOSlot++;
+                // Step 7-2 consolidation (c) — SSBO msl_buffer offset to
+                // 192+ under argument_buffers mode to avoid colliding
+                // with sampled-image ids (2*n) and storage-image ids
+                // (128+n) within the same spvDescriptorSetBuffer0.
+                // Direct-binding path unchanged (sequential from
+                // storageBufferBase=28).
+                if (useArgBuf) {
+                    binding.msl_buffer = 192 + entry.glBinding;
+                } else {
+                    binding.msl_buffer = nextSSBOSlot++;
+                }
                 compiler.add_msl_resource_binding(binding);
             }
         }
@@ -654,7 +715,6 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // give image and sampler separate id ranges (2*glBinding and
         // 2*glBinding + 1). Outside the gate, keep the existing
         // distinct-pool assignment unchanged — zero regression.
-        const bool useArgBuf = (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         for (auto& img : resources.sampled_images) {
             uint32_t glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
             spirv_cross::MSLResourceBinding binding;
@@ -683,7 +743,16 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             binding.stage = compiler.get_execution_model();
             binding.desc_set = compiler.get_decoration(img.id, spv::DecorationDescriptorSet);
             binding.binding = glBinding;
-            binding.msl_texture = bindings.textureBase + glBinding;
+            // Step 7-2 consolidation (b) — storage-image msl_texture
+            // offset to 128+ under argument_buffers mode so the
+            // [[id(N)]] inside spvDescriptorSetBuffer0 doesn't collide
+            // with sampled-image ids at 2*N. Direct-binding path
+            // unchanged (textureBase + glBinding).
+            if (useArgBuf) {
+                binding.msl_texture = 128 + glBinding;
+            } else {
+                binding.msl_texture = bindings.textureBase + glBinding;
+            }
             compiler.add_msl_resource_binding(binding);
         }
 
