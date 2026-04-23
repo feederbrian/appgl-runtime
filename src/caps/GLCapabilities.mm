@@ -985,7 +985,18 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_SAMPLE_MASK_WORDS] = 1;
     integerLimits_[GL_MAX_COLOR_TEXTURE_SAMPLES] = maxSamples;
     integerLimits_[GL_MAX_DEPTH_TEXTURE_SAMPLES] = maxSamples;
-    integerLimits_[GL_MAX_INTEGER_SAMPLES] = 1;  // Metal: 1 for integer formats
+    // Phase 6-2b: M1 Max supports MS integer textures (RGBA8Sint /
+    // RGBA8Uint / similar) at sample counts 1, 2, and 4 — verified by
+    // `[MTLDevice supportsTextureSampleCount:]` + successful descriptor
+    // creation with MTLTextureType2DMultisample + MTLPixelFormatRGBA8Sint
+    // at sampleCount=2/4. The previous conservative value of 1 forced
+    // CTS sample_shading.render.rgba8i/ui.* to the samples=1 degenerate
+    // path where the MS texture demoted to a non-MS Metal type and the
+    // `isampler2DMS` binding type-mismatched the actual texture2d<int>.
+    // Advertising the real cap lets the test use real MS integer
+    // textures; the phase 6-3 demote path only fires when samples<2
+    // which no longer happens for integer formats.
+    integerLimits_[GL_MAX_INTEGER_SAMPLES] = maxSamples;
     integerLimits_[GL_MAX_DUAL_SOURCE_DRAW_BUFFERS] = 1;
     integerLimits_[GL_MAX_IMAGE_SAMPLES] = 0;
 
