@@ -4322,4 +4322,71 @@ std::unordered_set<std::string> scanStageReferencedUniforms(
     return out;
 }
 
+// ─── Public helper — one-off VS run for tess CPU emulator ───────────
+//
+// Wraps the anonymous-namespace Interpreter so external code
+// (currently TessellationEmulator.cpp) can interpret the VS once per
+// patch vertex without duplicating the parse + attrib-read + setup
+// sequence. Returns false on any interpreter bail; `diagnostic`
+// (when non-null) receives the interpreter's failure message.
+bool runVsForVertex(
+    const std::uint32_t* vsSpirv,
+    std::size_t vsWordCount,
+    const GLProgramObject& program,
+    const GLVertexArrayObject& vao,
+    const GLObjectStore& objects,
+    std::size_t vboSlot,
+    std::int32_t instanceID,
+    const std::vector<std::string>& outVaryingNames,
+    const std::vector<std::uint32_t>& outVaryingWidths,
+    EmulatedVertex& outVertex,
+    std::string* diagnostic)
+{
+    if (vsSpirv == nullptr || vsWordCount < 5) {
+        if (diagnostic) *diagnostic = "runVsForVertex: empty SPIR-V";
+        return false;
+    }
+    SpirvModule vsMod;
+    if (!vsMod.parse(vsSpirv, vsWordCount)) {
+        if (diagnostic) *diagnostic = "runVsForVertex: SpirvModule parse: " + vsMod.parseError;
+        return false;
+    }
+
+    // Build uniform map + vertex-attribute map the Interpreter expects.
+    // `buildUniformMap` + `readVertexAttribFromVAO` live in the anon
+    // namespace alongside the Interpreter — same TU, so we can call
+    // them here.
+    Interpreter::UniformValues uniforms = buildUniformMap(program);
+
+    // `readVertexAttribFromVAO` takes non-const GLObjectStore&
+    // because the BufferObject shadow-pointer readback path is
+    // non-const. We cast away the const on the caller's input since
+    // we're only reading — future readVertexAttribFromVAO could be
+    // made const but that's a GSE-internal refactor for another iter.
+    GLObjectStore& mutableObjects = const_cast<GLObjectStore&>(objects);
+
+    Interpreter::VertexAttribs vsAttribs;
+    for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
+        if (!vao.attributes[ai].enabled) continue;
+        Value v = readVertexAttribFromVAO(vao, mutableObjects, ai, vboSlot);
+        if (v.kind != Value::Kind::Invalid) {
+            vsAttribs[static_cast<std::uint32_t>(ai)] = v;
+        }
+    }
+
+    Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
+                         outVaryingNames, outVaryingWidths);
+    vsInterp.setUniforms(&uniforms);
+    vsInterp.setVsInputs(&vsAttribs,
+                         static_cast<std::int32_t>(vboSlot), instanceID);
+
+    outVertex.position[0] = outVertex.position[1] = outVertex.position[2] = 0.0f;
+    outVertex.position[3] = 1.0f;
+    if (!vsInterp.executeVs(outVertex)) {
+        if (diagnostic) *diagnostic = "runVsForVertex: VS body: " + vsInterp.diagnostic();
+        return false;
+    }
+    return true;
+}
+
 }  // namespace appgl

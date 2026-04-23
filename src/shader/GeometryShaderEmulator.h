@@ -204,6 +204,40 @@ EmulatedDraw emulateGeometryDraw(
     GLsizei instanceCount = 1,
     GLuint baseInstance = 0);
 
+// Run a single VS invocation on CPU for the vertex at `vboSlot`.
+// Exposed so the tess-CPU emulator can reuse the same interpreter
+// to produce per-patch-vertex outputs (position + named varyings)
+// before the TES body walk consumes them.
+//
+//   vsSpirv / vsWordCount: the VS SPIR-V module bytecode.
+//   program: source of default-uniform and block-uniform values.
+//   vao: vertex-attribute format + enabled-slot config.
+//   objects: shared object store (for VBO shadow lookup).
+//   vboSlot: the i-th vertex (0..count-1) within this draw.
+//   instanceID: gl_InstanceID value to feed the interpreter.
+//   outVaryingNames / outVaryingWidths: list of location-decorated
+//     Output varyings we want captured, in parallel — consumers get
+//     the flat-scalar payload in `out.varyings` in the same order.
+//   outVertex: the returned vertex state. gl_Position lands in
+//     `position[0..3]`; flat varyings in `varyings`; clip/cull
+//     distances in the respective vectors when the VS writes them.
+//
+// Returns false on interpreter failure (unsupported opcode, missing
+// entry point). The tess-emul caller should fall back to the legacy
+// translated path in that case.
+bool runVsForVertex(
+    const std::uint32_t* vsSpirv,
+    std::size_t vsWordCount,
+    const GLProgramObject& program,
+    const GLVertexArrayObject& vao,
+    const GLObjectStore& objects,
+    std::size_t vboSlot,
+    std::int32_t instanceID,
+    const std::vector<std::string>& outVaryingNames,
+    const std::vector<std::uint32_t>& outVaryingWidths,
+    EmulatedVertex& outVertex,
+    std::string* diagnostic = nullptr);
+
 // Synthesise a pass-through vertex-shader MSL source that reads
 // the expanded per-vertex payload (one buffer slot with gl_Position
 // + all user varyings packed sequentially) and writes gl_Position
