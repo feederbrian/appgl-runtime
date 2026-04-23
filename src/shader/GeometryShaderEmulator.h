@@ -286,6 +286,12 @@ bool runTesForVertex(
     const std::vector<std::string>& outVaryingNames,
     const std::vector<std::uint32_t>& outVaryingWidths,
     const TesSsboMap* ssboMap,
+    // Phase 3f-5: per-input-patch-vertex data (the VS pre-pass's
+    // EmulatedVertex outputs for this patch). Empty vector means
+    // "no gl_in[] plumbing" (phase 3f-2 behaviour). Interpreter
+    // populates gl_in[k].gl_Position / gl_ClipDistance /
+    // gl_CullDistance when the TES body reads them.
+    const std::vector<EmulatedVertex>& patchInputs,
     EmulatedVertex& outVertex,
     std::string* diagnostic = nullptr);
 

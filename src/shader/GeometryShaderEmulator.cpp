@@ -312,6 +312,15 @@ public:
     // on any interpreter bail.
     bool executeVs(EmulatedVertex& out);
 
+    // TES entry point. Same body-walk shape as VS (run once, capture
+    // gl_Position + varyings + clip/cull), but initVariables is
+    // given the caller's per-patch-vertex input data so gl_in[] is
+    // populated from the VS pre-pass outputs. Used when the TES
+    // interprets from gl_in[] (phase 3f-5). Caller fills `patchInputs`
+    // — one PerVertexInput per input patch vertex.
+    bool executeTes(EmulatedVertex& out,
+                    const std::vector<PerVertexInput>& patchInputs);
+
     const std::string& diagnostic() const { return diagnostic_; }
 
 private:
@@ -1170,7 +1179,9 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
             continue;
         }
 
-        if (stage_ == Stage::Geometry && info.storageClass == spv::StorageClassInput) {
+        if ((stage_ == Stage::Geometry ||
+             stage_ == Stage::TessEvaluation) &&
+            info.storageClass == spv::StorageClassInput) {
             // Identify the variable:
             //  - gl_PerVertex block input (contains gl_Position) —
             //    member 0 is BuiltInPosition. The SPIR-V pointee type
@@ -1179,6 +1190,10 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
             //    positions at the member-0 offset within each element.
             //  - Named user varying array (vtx_out_*) — flat array
             //    keyed by varying name, width = array_len × per_vertex.
+            // Phase 3f-5: TES reuses the exact same gl_in[] shape —
+            //   the interpreter's `inputs` vector holds one entry per
+            //   patch vertex (runTesForVertex builds it from the VS
+            //   pre-pass output the caller collected upstream).
             const auto& pointeeType = module_.types.at(tIt->second.pointeeType);
             if (pointeeType.kind == TypeInfo::Kind::Array) {
                 // Determine per-vertex struct / element width.
@@ -1793,6 +1808,34 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
             bail("OpExtInst: unsupported GLSL.std.450 op " + std::to_string(glslOp));
             return a;
     }
+}
+
+bool Interpreter::executeTes(EmulatedVertex& out,
+                             const std::vector<PerVertexInput>& patchInputs) {
+    if (!module_.haveFuncBody) {
+        diagnostic_ = "SPIR-V module has no function body";
+        return false;
+    }
+    // initVariables populates gl_in[] from `patchInputs` (the VS
+    // pre-pass output for each input patch vertex) via the shared
+    // Geometry/TessEvaluation arm. Built-ins (gl_TessCoord /
+    // gl_PrimitiveID) are still seeded from tesTessCoord_ /
+    // tesPrimitiveId_ set by setTesInputs.
+    initVariables(patchInputs);
+    currentOutVaryings_.clear();
+    currentOutVaryings_.resize(outputVaryingNames_.size());
+    std::vector<EmulatedVertex> dummy;
+    if (!execute(patchInputs, dummy)) return false;
+    out.position[0] = currentPosition_[0];
+    out.position[1] = currentPosition_[1];
+    out.position[2] = currentPosition_[2];
+    out.position[3] = currentPosition_[3];
+    out.varyings.clear();
+    // User output varyings skipped for phase 3f-5 scope — the CTS
+    // tess_shader probes we target either don't use user-out or
+    // rely on FS-only default interpolation (gl_Position).
+    captureClipCull(out.clipDistance, out.cullDistance);
+    return !errored_;
 }
 
 bool Interpreter::executeVs(EmulatedVertex& out) {
@@ -4809,6 +4852,7 @@ bool runTesForVertex(
     const std::vector<std::string>& outVaryingNames,
     const std::vector<std::uint32_t>& outVaryingWidths,
     const TesSsboMap* ssboMap,
+    const std::vector<EmulatedVertex>& patchInputs,
     EmulatedVertex& outVertex,
     std::string* diagnostic)
 {
@@ -4830,11 +4874,9 @@ bool runTesForVertex(
     // Re-use the VS-shape constructor (second overload). It expects
     // `outputVaryingNames_/Widths_` — which is what the matched TES
     // body produces as its user-varying output — and produces an
-    // `EmulatedVertex` via `executeVs`. The TES body is shape-
-    // compatible with the VS body for entry-point-run-once purposes:
-    // no OpEmitVertex, writes gl_Position + user varyings. Stage-
-    // specific built-in input seeding is driven off the new
-    // Stage::TessEvaluation discriminator inside initVariables.
+    // `EmulatedVertex` via `executeTes` (phase 3f-5) or `executeVs`
+    // (phase 3f-2 no-gl_in[] shortcut). Stage::TessEvaluation drives
+    // the built-in init seeding inside initVariables.
     Interpreter tesInterp(tesMod, Interpreter::Stage::TessEvaluation,
                           outVaryingNames, outVaryingWidths);
     tesInterp.setUniforms(&uniforms);
@@ -4854,9 +4896,30 @@ bool runTesForVertex(
     }
     tesInterp.setStorageBuffers(&ssboInterp);
 
+    // Phase 3f-5: convert per-patch EmulatedVertex inputs (position +
+    // clip/cull) into PerVertexInput records the interpreter's
+    // gl_in[] init path consumes. User varyings are not plumbed for
+    // phase 3f-5 scope — the tess_shader.* tests we target use
+    // gl_Position only.
+    std::vector<Interpreter::PerVertexInput> inputs;
+    inputs.reserve(patchInputs.size());
+    for (const auto& pv : patchInputs) {
+        Interpreter::PerVertexInput pvi;
+        pvi.position[0] = pv.position[0];
+        pvi.position[1] = pv.position[1];
+        pvi.position[2] = pv.position[2];
+        pvi.position[3] = pv.position[3];
+        pvi.clipDistance = pv.clipDistance;
+        pvi.cullDistance = pv.cullDistance;
+        inputs.push_back(std::move(pvi));
+    }
+
     outVertex.position[0] = outVertex.position[1] = outVertex.position[2] = 0.0f;
     outVertex.position[3] = 1.0f;
-    if (!tesInterp.executeVs(outVertex)) {
+    const bool ok = inputs.empty()
+        ? tesInterp.executeVs(outVertex)
+        : tesInterp.executeTes(outVertex, inputs);
+    if (!ok) {
         if (diagnostic) *diagnostic = "runTesForVertex: TES body: " + tesInterp.diagnostic();
         return false;
     }

@@ -471,11 +471,27 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
     }
     out.parsed = true;
 
-    // Walk every Input variable and reject if it's anything beyond
-    // gl_TessCoord (BuiltIn=13), gl_PrimitiveID (BuiltIn=7), or
-    // gl_PatchVerticesIn (BuiltIn=14). gl_in[] arrays, per-patch
-    // varyings, and any location-decorated (user) Input reject the
-    // shader until phase 3f-4+ plumbs them through.
+    // Walk every Input variable and reject anything the interpreter
+    // can't seed. Accept shapes:
+    //   - Built-in inputs: gl_TessCoord (13), gl_PrimitiveID (7),
+    //     gl_PatchVerticesIn (14).
+    //   - gl_in[] arrays: Input variable typed Array-of-Struct where
+    //     the struct has at least one BuiltIn-decorated member
+    //     (i.e. a gl_PerVertex block). Gated by a secondary
+    //     `APPGL_ENABLE_TESS_EMUL_GLIN=1` opt-in so bodies that
+    //     touch gl_in[] don't auto-route through the interpreter
+    //     before we're confident the body's other ops (mix, vec4
+    //     arithmetic, OpVectorTimesScalar, etc.) all execute
+    //     correctly. Phase 3f-5 landed the plumbing; phase 3f-6+
+    //     enables the default once the ops catalogue is stress-
+    //     tested against the full tessellation_shader.* matrix.
+    // Reject per-patch Input varyings (non-array Input struct) and
+    // location-decorated user inputs — those still need dedicated
+    // plumbing.
+    static const bool glInEnabled = []() {
+        const char* v = std::getenv("APPGL_ENABLE_TESS_EMUL_GLIN");
+        return v != nullptr && v[0] != '0' && v[0] != '\0';
+    }();
     for (const auto& [varId, info] : module.variables) {
         if (info.storageClass != spv::StorageClassInput) continue;
         auto dIt = module.decorations.find(varId);
@@ -486,17 +502,51 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
                 bi == 14 /*PatchVertices*/) {
                 continue;
             }
-            // Other built-in inputs (gl_InvocationID, gl_TessLevel*
-            // when read from TES) fall through and reject. Extend in
-            // phase 3f-4+ once their init-seeding exists.
             out.diagnostic = "unsupported builtin input: " + std::to_string(bi);
             return out;
         }
-        // Either a user varying or a gl_PerVertex-style struct array.
-        // Both need gl_in[] plumbing we don't have yet — reject.
-        out.diagnostic = "non-builtin Input variable (id=" +
-                         std::to_string(varId) + "): " + info.name;
-        return out;
+        // Non-builtin Input. Only the gl_in[] opt-in admits this.
+        if (!glInEnabled) {
+            out.diagnostic = "non-builtin Input variable (id=" +
+                             std::to_string(varId) + "): " + info.name +
+                             " (gl_in[] path gated by APPGL_ENABLE_TESS_EMUL_GLIN)";
+            return out;
+        }
+        auto tIt = module.types.find(info.typeId);
+        if (tIt == module.types.end()) {
+            out.diagnostic = "Input var with missing type (id=" +
+                             std::to_string(varId) + ")";
+            return out;
+        }
+        auto pIt = module.types.find(tIt->second.pointeeType);
+        if (pIt == module.types.end() ||
+            pIt->second.kind != appgl::interp::TypeInfo::Kind::Array) {
+            out.diagnostic = "non-builtin Input variable (id=" +
+                             std::to_string(varId) + "): " + info.name;
+            return out;
+        }
+        auto eIt = module.types.find(pIt->second.componentType);
+        if (eIt == module.types.end() ||
+            eIt->second.kind != appgl::interp::TypeInfo::Kind::Struct) {
+            out.diagnostic = "Input array of non-struct (id=" +
+                             std::to_string(varId) + "): " + info.name;
+            return out;
+        }
+        // Require at least one member with BuiltIn decoration — that's
+        // the signature of a gl_PerVertex-style block.
+        bool sawBuiltInMember = false;
+        auto mdIt = module.memberDecorations.find(pIt->second.componentType);
+        if (mdIt != module.memberDecorations.end()) {
+            for (const auto& [midx, mdec] : mdIt->second.perMember) {
+                if (mdec.hasBuiltIn) { sawBuiltInMember = true; break; }
+            }
+        }
+        if (!sawBuiltInMember) {
+            out.diagnostic = "Input array-of-struct has no BuiltIn members (id=" +
+                             std::to_string(varId) + "): " + info.name;
+            return out;
+        }
+        // Accepted — gl_in[] gl_PerVertex block, opt-in enabled.
     }
 
     // Upper bound on body size so a pathological shader can't hang
@@ -1891,6 +1941,17 @@ EmulatedDraw emulateTessellationDraw(
     // (phase 3f-4 scans TES outputs to populate tessVaryings). SSBO
     // reads/writes are routed byte-level through `ssboMap` into the
     // bound GL buffer's Metal contents.
+    // patchInputs[] is populated in a VS pre-pass further below, but
+    // the emitVertex lambda captures it by reference so the later
+    // populate still reaches this closure at call time.
+    //
+    // Each `patchInputs[p]` is a vector<EmulatedVertex> of length
+    // `patchVertices` (== glPatchParameteri value) holding the VS
+    // output for each input patch control point. The interpreter
+    // consumes this through runTesForVertex's `patchInputs` param —
+    // gl_in[k].gl_Position reads by the TES body resolve against it.
+    std::vector<std::vector<EmulatedVertex>> patchInputs;
+
     auto emitVertexInterpreted = [&](std::size_t dstIdx,
                                      std::size_t patchIdx,
                                      float u, float v, float w) {
@@ -1902,12 +1963,15 @@ EmulatedDraw emulateTessellationDraw(
         std::string diag;
         const std::vector<std::string> noVaryingNames;
         const std::vector<std::uint32_t> noVaryingWidths;
+        const std::vector<EmulatedVertex> emptyInputs;
+        const auto& thisPatchInputs = (patchIdx < patchInputs.size())
+            ? patchInputs[patchIdx] : emptyInputs;
         const bool ok = runTesForVertex(
             program.tessEvalSpirv.data(),
             program.tessEvalSpirv.size(),
             program, tessCoord, primID,
             noVaryingNames, noVaryingWidths,
-            ssboMap, outV, &diag);
+            ssboMap, thisPatchInputs, outV, &diag);
         const std::size_t dst = dstIdx * floatsPerVertex;
         if (ok) {
             d.expandedVertexData[dst + 0] = outV.position[0];
@@ -1924,6 +1988,46 @@ EmulatedDraw emulateTessellationDraw(
             d.expandedVertexData[dst + 3] = 1.0f;
         }
     };
+
+    // Phase-3b / 3f-5: VS pre-pass per patch vertex. Runs whenever
+    // EITHER `tessellationEmulated` (passthrough matcher) or
+    // `tessellationInterpreted` (body walker) is set — the matcher
+    // path doesn't strictly need VS outputs but the dry run verifies
+    // the attribute fetch works, and the interpreter path needs
+    // `patchInputs[p][pv]` populated so the TES's gl_in[] reads
+    // resolve to real VS-output data. Runs BEFORE the TES emit loop
+    // so emitVertexInterpreted's closure sees populated data.
+    std::size_t vsFailures = 0;
+    const bool needVsPrePass =
+        (program.tessellationEmulated || program.tessellationInterpreted) &&
+        !program.vertexSpirv.empty();
+    if (needVsPrePass) {
+        patchInputs.assign(numPatches,
+            std::vector<EmulatedVertex>(static_cast<std::size_t>(patchVertices)));
+        const std::vector<std::string> noVaryingNames;
+        const std::vector<std::uint32_t> noVaryingWidths;
+        for (std::size_t p = 0; p < numPatches; ++p) {
+            const std::size_t patchBase = p * static_cast<std::size_t>(patchVertices);
+            for (GLint pv = 0; pv < patchVertices; ++pv) {
+                const std::size_t vboSlot =
+                    static_cast<std::size_t>(first) + patchBase + static_cast<std::size_t>(pv);
+                std::string vsDiag;
+                const bool vsOk = runVsForVertex(
+                    program.vertexSpirv.data(), program.vertexSpirv.size(),
+                    program, vao, objects, vboSlot, 0 /*instanceID*/,
+                    noVaryingNames, noVaryingWidths,
+                    patchInputs[p][static_cast<std::size_t>(pv)], &vsDiag);
+                if (!vsOk) {
+                    ++vsFailures;
+                    // Zero the position; future phase-3c will treat
+                    // missing VS output as a fallback signal.
+                    auto& pos = patchInputs[p][static_cast<std::size_t>(pv)].position;
+                    pos[0] = pos[1] = pos[2] = 0.0f;
+                    pos[3] = 1.0f;
+                }
+            }
+        }
+    }
 
     const bool useInterpreter =
         program.tessellationInterpreted && !program.tessellationEmulated;
@@ -1955,45 +2059,6 @@ EmulatedDraw emulateTessellationDraw(
             }
         }
     }
-
-    // Phase-3b: VS pre-pass per patch vertex. Runs only when phase-2c
-    // emulation is enabled; we don't want to pay the cost on the
-    // legacy fallback path. Each patch's W VS outputs (position +
-    // varyings) land in `patchInputs[p][pv]`, where W =
-    // patchVertices. Future phase 3c+ iterations feed these into the
-    // TES body interpreter as gl_in[pv]. For phase 3b we capture
-    // positions only (empty varying list) since the phase-2c
-    // passthrough match guarantees the TES reads only gl_TessCoord.
-    std::vector<std::vector<EmulatedVertex>> patchInputs;
-    std::size_t vsFailures = 0;
-    if (program.tessellationEmulated && !program.vertexSpirv.empty()) {
-        patchInputs.assign(numPatches,
-            std::vector<EmulatedVertex>(static_cast<std::size_t>(patchVertices)));
-        const std::vector<std::string> noVaryingNames;
-        const std::vector<std::uint32_t> noVaryingWidths;
-        for (std::size_t p = 0; p < numPatches; ++p) {
-            const std::size_t patchBase = p * static_cast<std::size_t>(patchVertices);
-            for (GLint pv = 0; pv < patchVertices; ++pv) {
-                const std::size_t vboSlot =
-                    static_cast<std::size_t>(first) + patchBase + static_cast<std::size_t>(pv);
-                std::string vsDiag;
-                const bool vsOk = runVsForVertex(
-                    program.vertexSpirv.data(), program.vertexSpirv.size(),
-                    program, vao, objects, vboSlot, 0 /*instanceID*/,
-                    noVaryingNames, noVaryingWidths,
-                    patchInputs[p][static_cast<std::size_t>(pv)], &vsDiag);
-                if (!vsOk) {
-                    ++vsFailures;
-                    // Zero the position; future phase-3c will treat
-                    // missing VS output as a fallback signal.
-                    auto& pos = patchInputs[p][static_cast<std::size_t>(pv)].position;
-                    pos[0] = pos[1] = pos[2] = 0.0f;
-                    pos[3] = 1.0f;
-                }
-            }
-        }
-    }
-    (void)patchInputs;  // consumed by phase 3c+ TES body walker
 
     // Phase-2c enablement gate: only return ok=true when the
     // program's `tessellationEmulated` flag was flipped at link
