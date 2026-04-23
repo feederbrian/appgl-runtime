@@ -300,15 +300,16 @@ bool runTesForVertex(
 // Body reads are limited to gl_PrimitiveID / gl_InvocationID /
 // gl_PatchVerticesIn (phase 3f-4 scope); any SSBO writes route
 // through `ssboMap` into the bound GL buffer (same plumbing as
-// runTesForVertex). tessLevels are not captured — the CE tests use
-// fixed default levels that match glPatchParameterfv defaults, so
-// the TCS's writes are redundant with what `emulateTessellationDraw`
-// already uses. Phase 3f-5+ will capture tess-level writes for
-// shaders that actually compute them dynamically.
+// runTesForVertex). Phase 3f-8 adds optional tess-level capture via
+// `outerLevelsOut` / `innerLevelsOut`: when non-null, after the body
+// runs the interpreter reads BuiltInTessLevelOuter / Inner stored
+// values into those arrays. Slots the TCS didn't write keep their
+// pre-seeded contents, so the caller can initialise them to the
+// glPatchParameterfv defaults and let the TCS override.
 //
 // Returns false on interpreter bail. `outVertex` is a dummy here —
 // TCS doesn't emit a rasterizer vertex; we only care about the
-// side-effect SSBO writes.
+// side-effect SSBO writes + tess-level outputs.
 bool runTcsForVertex(
     const std::uint32_t* tcsSpirv,
     std::size_t tcsWordCount,
@@ -317,6 +318,8 @@ bool runTcsForVertex(
     std::int32_t invocationID,
     std::int32_t patchVertices,
     const TesSsboMap* ssboMap,
+    float* outerLevelsOut = nullptr,
+    float* innerLevelsOut = nullptr,
     std::string* diagnostic = nullptr);
 
 // Synthesise a pass-through vertex-shader MSL source that reads

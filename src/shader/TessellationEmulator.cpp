@@ -1745,10 +1745,16 @@ EmulatedDraw emulateTessellationDraw(
     const TessSpacing spacing = tessSpacingFromGenSpacing(program.tessGenSpacing);
     const bool pointMode = (program.tessGenPointMode == GL_TRUE);
 
-    // Resolve tessellation levels. When a TCS is attached and writes
-    // constant levels, `scanTessControlConstantLevels` reads them out
-    // of the SPIR-V. Otherwise fall back to the GL state's
-    // glPatchParameterfv(GL_PATCH_DEFAULT_*_LEVEL) values.
+    // Resolve tessellation levels. Precedence (low → high):
+    //   1. glPatchParameterfv(GL_PATCH_DEFAULT_*_LEVEL) defaults
+    //   2. Compile-time constants written by the TCS body
+    //      (scanTessControlConstantLevels)
+    //   3. Phase 3f-8: runtime-computed tess levels captured by
+    //      running the TCS interpreter for patch 0 invocation 0
+    //      and reading back BuiltInTessLevel{Outer,Inner} storage.
+    //      This handles shaders that compute levels from uniforms
+    //      or gl_PrimitiveID (typical in CTS vertex_spacing,
+    //      tessellation_invariance, etc.).
     float outerLevels[4];
     float innerLevels[2];
     const auto& tessState = state.tessellationState();
@@ -1761,9 +1767,32 @@ EmulatedDraw emulateTessellationDraw(
             outerLevels, innerLevels);
     }
 
+    // Phase 3f-8: TCS runtime tess-level capture. When the TCS is
+    // interpretable, run invocation 0 of patch 0 for its side
+    // effect on the tess-level outputs. SSBO writes the invocation
+    // performs are intentional — we'll run the remaining
+    // (patch × invocation) pairs in the full pre-pass below. This
+    // first run is only for getting correct tess levels before we
+    // compute the domain.
+    bool tcsLevelsCaptured = false;
+    if (program.tessControlInterpreted && !program.tessControlSpirv.empty() &&
+        numPatches > 0) {
+        std::string diag;
+        const bool ok = runTcsForVertex(
+            program.tessControlSpirv.data(),
+            program.tessControlSpirv.size(),
+            program,
+            /*primitiveID=*/0, /*invocationID=*/0,
+            patchVertices,
+            /*ssboMap=*/nullptr,   // side-effect-free capture pass
+            outerLevels, innerLevels, &diag);
+        tcsLevelsCaptured = ok;
+    }
+
     // Generate the domain coord set for ONE patch. Every patch in this
-    // draw shares the same levels (either static TCS constants or the
-    // GL_PATCH_DEFAULT_* state) so the coord layout is identical.
+    // draw shares the same levels for now — per-patch level variation
+    // (gl_PrimitiveID-dependent TCS) would need per-patch domain
+    // regeneration, which is phase 3f-9+ infrastructure.
     TessDomainOutput domainOut =
         generateTessDomain(domain, spacing, outerLevels, innerLevels, pointMode);
     const std::size_t coordsPerPatch = domainOut.coords.size() / 3;
@@ -1946,7 +1975,10 @@ EmulatedDraw emulateTessellationDraw(
                     static_cast<std::int32_t>(p),
                     iv,
                     patchVertices,
-                    ssboMap, &diag);
+                    ssboMap,
+                    /*outerLevelsOut=*/nullptr,
+                    /*innerLevelsOut=*/nullptr,
+                    &diag);
                 if (tcsDebug && !ok) {
                     std::fprintf(stderr, "[tess-emul] TCS bail (patch=%zu iv=%d): %s\n",
                         p, iv, diag.c_str());

@@ -417,6 +417,13 @@ public:
     bool didWriteLayer() const { return didWriteLayer_; }
     bool didWritePointSize() const { return didWritePointSize_; }
     bool didWritePrimitiveID() const { return didWritePrimitiveID_; }
+
+    // Phase 3f-8: exposed so `runTcsForVertex` can read back
+    // gl_TessLevel{Outer,Inner} writes after executeVs completes.
+    // Wraps the private-section `captureTessLevels` declared below.
+    bool captureTessLevelsPublic(float outer[4], float inner[2]) const {
+        return captureTessLevels(outer, inner);
+    }
 private:
 
     // Diagnostic + bail.
@@ -453,6 +460,17 @@ private:
     // so the synth pass-through VS can emit
     // `[[render_target_array_index]]`.
     std::optional<std::int32_t> captureLayer() const;
+
+    // Phase 3f-8: after a TCS invocation, scan Output variables for
+    // gl_TessLevelOuter (BuiltIn = 11) and gl_TessLevelInner
+    // (BuiltIn = 12) writes and copy values into the caller's
+    // `outer[4]` / `inner[2]` arrays. Slots the TCS didn't write
+    // are left at whatever the caller pre-seeded (typically the
+    // glPatchParameterfv defaults). Returns true iff any slot was
+    // updated — a signal the draw path can use to rebuild the
+    // tess domain using the TCS-computed levels instead of the
+    // static defaults.
+    bool captureTessLevels(float outer[4], float inner[2]) const;
 
     // Same two-shape walk for BuiltInPointSize. `std::nullopt` when
     // the GS never writes gl_PointSize — caller keeps the default
@@ -1593,6 +1611,45 @@ std::optional<std::int32_t> Interpreter::captureLayer() const {
         }
     }
     return std::nullopt;
+}
+
+bool Interpreter::captureTessLevels(float outer[4], float inner[2]) const {
+    // Scan Output variables for gl_TessLevelOuter / gl_TessLevelInner
+    // (BuiltIn = 11 / 12 respectively). These are always arrays of
+    // float in GLSL: outer[4] for triangles/quads/isolines (the first
+    // `genMode`-dependent count of entries is meaningful; Triangles
+    // uses [0..2], Quads [0..3], Isolines [0..1]) and inner[2]
+    // (Triangles uses [0], Quads [0..1], Isolines unused).
+    //
+    // glslang emits them as direct Output-decorated variables (not as
+    // members of a gl_PerVertex-style block — gl_PerVertex doesn't
+    // include the tess levels). Shape walk:
+    //   1. Output var decorated BuiltInTessLevelOuter — pointee is
+    //      Array<float, 4>, storage is 4 flat floats.
+    //   2. Output var decorated BuiltInTessLevelInner — pointee is
+    //      Array<float, 2>, storage is 2 flat floats.
+    bool anyWritten = false;
+    for (const auto& [varId, info] : module_.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto dIt = module_.decorations.find(varId);
+        if (dIt == module_.decorations.end() || !dIt->second.hasBuiltIn) continue;
+        const std::uint32_t bi = dIt->second.builtIn;
+        auto sIt = varStorage_.find(varId);
+        if (sIt == varStorage_.end()) continue;
+        const auto& storage = sIt->second;
+        if (bi == 11 /*BuiltInTessLevelOuter*/) {
+            for (std::uint32_t k = 0; k < 4 && k < storage.size(); ++k) {
+                outer[k] = storage[k];
+            }
+            anyWritten = true;
+        } else if (bi == 12 /*BuiltInTessLevelInner*/) {
+            for (std::uint32_t k = 0; k < 2 && k < storage.size(); ++k) {
+                inner[k] = storage[k];
+            }
+            anyWritten = true;
+        }
+    }
+    return anyWritten;
 }
 
 void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
@@ -4979,6 +5036,8 @@ bool runTcsForVertex(
     std::int32_t invocationID,
     std::int32_t patchVertices,
     const TesSsboMap* ssboMap,
+    float* outerLevelsOut,
+    float* innerLevelsOut,
     std::string* diagnostic)
 {
     if (tcsSpirv == nullptr || tcsWordCount < 5) {
@@ -4994,8 +5053,8 @@ bool runTcsForVertex(
     Interpreter::UniformValues uniforms = buildUniformMap(program);
 
     // TCS has no user output varyings to capture from the CPU emul's
-    // perspective — tess levels + gl_out[] patch values feed the TES
-    // but we don't plumb them back today (see phase 3f-5 roadmap).
+    // perspective — gl_out[] patch values feed the TES but we don't
+    // plumb them back today (phase 3f-9+ roadmap).
     const std::vector<std::string>   noVaryingNames;
     const std::vector<std::uint32_t> noVaryingWidths;
 
@@ -5020,14 +5079,37 @@ bool runTcsForVertex(
     // write gl_Position (it's a tess-control stage) so the captured
     // outVertex is just a scratch discard. The side-effect writes to
     // SSBOs land through the byte path; writes to gl_TessLevel*
-    // Output variables land in flat scalar storage (ignored — caller
-    // uses the glPatchParameterfv defaults).
+    // Output variables land in flat scalar storage we read below.
     EmulatedVertex scratch;
     scratch.position[0] = scratch.position[1] = scratch.position[2] = 0.0f;
     scratch.position[3] = 1.0f;
     if (!tcsInterp.executeVs(scratch)) {
         if (diagnostic) *diagnostic = "runTcsForVertex: TCS body: " + tcsInterp.diagnostic();
         return false;
+    }
+
+    // Phase 3f-8: capture tess-level writes. Only overwrite caller
+    // arrays when non-null AND at least one level was written by the
+    // TCS — unwritten slots keep whatever the caller pre-seeded
+    // (typically the glPatchParameterfv defaults).
+    if (outerLevelsOut != nullptr || innerLevelsOut != nullptr) {
+        float capturedOuter[4] = {
+            outerLevelsOut ? outerLevelsOut[0] : 1.0f,
+            outerLevelsOut ? outerLevelsOut[1] : 1.0f,
+            outerLevelsOut ? outerLevelsOut[2] : 1.0f,
+            outerLevelsOut ? outerLevelsOut[3] : 1.0f,
+        };
+        float capturedInner[2] = {
+            innerLevelsOut ? innerLevelsOut[0] : 1.0f,
+            innerLevelsOut ? innerLevelsOut[1] : 1.0f,
+        };
+        (void)tcsInterp.captureTessLevelsPublic(capturedOuter, capturedInner);
+        if (outerLevelsOut != nullptr) {
+            for (int i = 0; i < 4; ++i) outerLevelsOut[i] = capturedOuter[i];
+        }
+        if (innerLevelsOut != nullptr) {
+            for (int i = 0; i < 2; ++i) innerLevelsOut[i] = capturedInner[i];
+        }
     }
     return true;
 }
