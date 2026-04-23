@@ -2,7 +2,23 @@
 
 #include <utility>
 
+// Phase 3f-11: full definition of appgl::interp::SpirvModule is needed
+// here so the `std::unique_ptr<SpirvModule>` fields in GLProgramObject
+// can be destroyed and moved from this TU without the caller seeing
+// the complete type. The ctor/dtor/move ops below live here for the
+// same reason — any other TU that instantiates `~GLProgramObject`
+// would otherwise try to dereference an incomplete type.
+#include "../shader/ShaderInterpreter.h"
+
 namespace appgl {
+
+// GLProgramObject special members. All default-bodies; the pointer
+// cache fields destruct cleanly because SpirvModule is complete in
+// this TU.
+GLProgramObject::GLProgramObject() = default;
+GLProgramObject::~GLProgramObject() = default;
+GLProgramObject::GLProgramObject(GLProgramObject&&) noexcept = default;
+GLProgramObject& GLProgramObject::operator=(GLProgramObject&&) noexcept = default;
 
 GLObjectStore::GLObjectStore(GLsizei maxVertexAttribs)
     : maxVertexAttribs_(maxVertexAttribs) {

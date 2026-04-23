@@ -6,6 +6,7 @@
 #include "../runtime/AppGLRuntime.h"
 #include "../shader/CompatShaderRewrite.h"
 #include "../shader/GeometryShaderEmulator.h"
+#include "../shader/ShaderInterpreter.h"  // phase 3f-11: SpirvModule complete-type for unique_ptr<SpirvModule> .reset() calls
 #include "../shader/TessellationEmulator.h"
 #include "../shader/GLSLReflection.h"
 #include "../shader/ShaderTranslator.h"
@@ -18090,9 +18091,14 @@ bool GLContext::linkProgram(GLuint program) {
             }
             if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
                 programObject->tessControlSpirv = tessControlShader->spirv;
+                // Phase 3f-11: invalidate the parsed-module cache so
+                // subsequent runTcsForVertex calls re-parse against
+                // the new SPIR-V blob.
+                programObject->tessControlParsedModule.reset();
             }
             if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
                 programObject->tessEvalSpirv = tessEvalShader->spirv;
+                programObject->tessEvalParsedModule.reset();
             }
             (void)appgl::detectTessellationEmulatable(*programObject);
             break;

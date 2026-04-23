@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -9,6 +10,17 @@
 
 #include "../../include/AppGL/glcorearb.h"
 #include "../shader/ShaderTranslator.h"
+
+namespace appgl::interp {
+// Forward-declared; full definition in ../shader/ShaderInterpreter.h.
+// Used by GLProgramObject's tess-emul SpirvModule cache (phase 3f-11).
+// Carrying the field as `unique_ptr<SpirvModule>` instead of an
+// `optional<SpirvModule>` or raw instance lets us keep ShaderInterpreter.h
+// out of GLObjectStore.h's wide dependency fan-in — the destructor must
+// be instantiated in a TU that does see the full type, which
+// GLObjectStore.cpp handles via an explicit dtor.
+struct SpirvModule;
+}  // namespace appgl::interp
 
 namespace appgl {
 
@@ -518,6 +530,18 @@ struct GLSynthesizedMatrixSlots {
 };
 
 struct GLProgramObject {
+    // Phase 3f-11: explicit special members declared here + defined
+    // in GLObjectStore.cpp, where appgl::interp::SpirvModule is a
+    // complete type. Necessary so `std::unique_ptr<SpirvModule>`
+    // cache fields (below) can be destroyed cleanly without
+    // dragging ShaderInterpreter.h into this widely-included header.
+    GLProgramObject();
+    ~GLProgramObject();
+    GLProgramObject(const GLProgramObject&) = delete;
+    GLProgramObject& operator=(const GLProgramObject&) = delete;
+    GLProgramObject(GLProgramObject&&) noexcept;
+    GLProgramObject& operator=(GLProgramObject&&) noexcept;
+
     std::vector<GLuint> attachedShaders;
     std::string linkLog;
     std::string validateLog;
@@ -656,6 +680,14 @@ struct GLProgramObject {
     // TES but no TCS; the emulator then sources tess levels from
     // `glPatchParameterfv(GL_PATCH_DEFAULT_{INNER,OUTER}_LEVEL)`.
     std::vector<std::uint32_t> tessControlSpirv;
+    // Phase 3f-11: cached parsed SpirvModule instances so the tess
+    // emulator's per-invocation runners don't re-parse the module on
+    // every (patch, invocation) pair. Filled lazily by runTes/Tcs
+    // ForVertex; reset when tess*Spirv is re-assigned (re-link). The
+    // mutable qualifier keeps the cache fill writable from functions
+    // that take `const GLProgramObject&`.
+    mutable std::unique_ptr<appgl::interp::SpirvModule> tessEvalParsedModule;
+    mutable std::unique_ptr<appgl::interp::SpirvModule> tessControlParsedModule;
     // The VS SPIR-V is stashed alongside `geometrySpirv` so the CPU
     // GS emulator can run a VS pre-pass on each drawArrays call —
     // producing real gl_in[] data (VS outputs) to feed into the GS

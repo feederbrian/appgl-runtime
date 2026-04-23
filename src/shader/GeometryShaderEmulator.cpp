@@ -5056,11 +5056,21 @@ bool runTesForVertex(
         if (diagnostic) *diagnostic = "runTesForVertex: empty SPIR-V";
         return false;
     }
-    SpirvModule tesMod;
-    if (!tesMod.parse(tesSpirv, tesWordCount)) {
-        if (diagnostic) *diagnostic = "runTesForVertex: SpirvModule parse: " + tesMod.parseError;
-        return false;
+    // Phase 3f-11: use the cached parsed SpirvModule on the program
+    // object when one exists; otherwise parse once and install into
+    // the cache so subsequent (patch, invocation) calls don't re-parse.
+    // Cache invalidation happens at link time (see tessEvalSpirv =
+    // shader->spirv in GLContext.mm, which resets the unique_ptr).
+    if (!program.tessEvalParsedModule) {
+        auto fresh = std::make_unique<SpirvModule>();
+        if (!fresh->parse(tesSpirv, tesWordCount)) {
+            if (diagnostic) *diagnostic =
+                "runTesForVertex: SpirvModule parse: " + fresh->parseError;
+            return false;
+        }
+        program.tessEvalParsedModule = std::move(fresh);
     }
+    const SpirvModule& tesMod = *program.tessEvalParsedModule;
 
     // Uniform map — identical shape to runVsForVertex. Default-uniform
     // + block uniform values keyed by name, flattened to scalar-per-
@@ -5140,11 +5150,19 @@ bool runTcsForVertex(
         if (diagnostic) *diagnostic = "runTcsForVertex: empty SPIR-V";
         return false;
     }
-    SpirvModule tcsMod;
-    if (!tcsMod.parse(tcsSpirv, tcsWordCount)) {
-        if (diagnostic) *diagnostic = "runTcsForVertex: SpirvModule parse: " + tcsMod.parseError;
-        return false;
+    // Phase 3f-11: reuse cached parsed module when available; parse
+    // once + install on miss. Invalidated on re-link alongside
+    // tessControlSpirv.
+    if (!program.tessControlParsedModule) {
+        auto fresh = std::make_unique<SpirvModule>();
+        if (!fresh->parse(tcsSpirv, tcsWordCount)) {
+            if (diagnostic) *diagnostic =
+                "runTcsForVertex: SpirvModule parse: " + fresh->parseError;
+            return false;
+        }
+        program.tessControlParsedModule = std::move(fresh);
     }
+    const SpirvModule& tcsMod = *program.tessControlParsedModule;
 
     Interpreter::UniformValues uniforms = buildUniformMap(program);
 
