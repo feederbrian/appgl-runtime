@@ -1555,7 +1555,6 @@ EmulatedDraw emulateTessellationDraw(
     GLuint baseInstance)
 {
     (void)vao;
-    (void)objects;
     (void)first;
     (void)elementIndices;
     (void)instanceCount;
@@ -1698,15 +1697,69 @@ EmulatedDraw emulateTessellationDraw(
         }
     };
 
+    // Phase-3f-3: build the SSBO region map the interpreter routes
+    // OpLoad / OpStore through. Walk the TES SPIR-V's variables,
+    // identify StorageBuffer-class (or Uniform + BufferBlock) block
+    // variables, resolve each binding against the GL state's
+    // GL_SHADER_STORAGE_BUFFER indexed slot, and record the
+    // host-visible Metal contents pointer + size for each. The map
+    // is built once per draw (bindings don't change during a draw
+    // call) and captured into the per-vertex emit lambda below.
+    TesSsboMap ssboBindings;
+    if (program.tessellationInterpreted && !program.tessEvalSpirv.empty()) {
+        appgl::interp::SpirvModule tesMod;
+        if (tesMod.parse(program.tessEvalSpirv.data(),
+                         program.tessEvalSpirv.size())) {
+            for (const auto& [varId, info] : tesMod.variables) {
+                bool isSSBO = false;
+                if (info.storageClass == 12 /*StorageClassStorageBuffer*/) {
+                    isSSBO = true;
+                } else if (info.storageClass == 2 /*StorageClassUniform*/) {
+                    auto tIt = tesMod.types.find(info.typeId);
+                    if (tIt != tesMod.types.end()) {
+                        auto dIt = tesMod.decorations.find(tIt->second.pointeeType);
+                        if (dIt != tesMod.decorations.end() && dIt->second.isBufferBlock) {
+                            isSSBO = true;
+                        }
+                    }
+                }
+                if (!isSSBO) continue;
+                auto dIt = tesMod.decorations.find(varId);
+                if (dIt == tesMod.decorations.end() || !dIt->second.hasBinding) continue;
+                const std::uint32_t binding = dIt->second.binding;
+
+                const GLIndexedBufferBinding bb =
+                    state.indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, binding);
+                if (bb.buffer == 0) continue;
+                GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
+                if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+                void* base = metalBufferContents(bufObj->metalBuffer);
+                if (base == nullptr) continue;
+                const std::size_t totalSize = static_cast<std::size_t>(bufObj->size);
+                const std::size_t off =
+                    static_cast<std::size_t>(bb.offset < 0 ? 0 : bb.offset);
+                // bb.size == 0 means BindBufferBase (the whole buffer).
+                const std::size_t span = (bb.size > 0)
+                    ? static_cast<std::size_t>(bb.size)
+                    : (totalSize > off ? totalSize - off : 0);
+                TesSsboRegion r;
+                r.ptr = static_cast<std::uint8_t*>(base) + off;
+                r.size = span;
+                ssboBindings[binding] = r;
+            }
+        }
+    }
+    const TesSsboMap* ssboMap = ssboBindings.empty() ? nullptr : &ssboBindings;
+
     // Phase-3f-2: interpreter path. When the passthrough matcher
     // rejected the TES body but the classifier flipped
     // `tessellationInterpreted`, invoke runTesForVertex per generated
     // vertex — slower (one interpreter run per output vertex) but
     // expressive enough to handle CE tess_eval bodies. Position is
     // captured from gl_Position; user varyings are NOT propagated yet
-    // (phase 3f-4 scans TES outputs to populate tessVaryings). Any
-    // SSBO reads/writes in the body are currently silent no-ops —
-    // phase 3f-3 wires the byte-level SSBO path.
+    // (phase 3f-4 scans TES outputs to populate tessVaryings). SSBO
+    // reads/writes are routed byte-level through `ssboMap` into the
+    // bound GL buffer's Metal contents.
     auto emitVertexInterpreted = [&](std::size_t dstIdx,
                                      std::size_t patchIdx,
                                      float u, float v, float w) {
@@ -1723,7 +1776,7 @@ EmulatedDraw emulateTessellationDraw(
             program.tessEvalSpirv.size(),
             program, tessCoord, primID,
             noVaryingNames, noVaryingWidths,
-            outV, &diag);
+            ssboMap, outV, &diag);
         const std::size_t dst = dstIdx * floatsPerVertex;
         if (ok) {
             d.expandedVertexData[dst + 0] = outV.position[0];

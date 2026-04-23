@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -264,6 +265,18 @@ bool runVsForVertex(
 // entry point). Phase 3f-1: scaffolding only — call sites not yet
 // wired. Phase 3f-3+ adds SSBO storage-class plumbing so the side
 // effects actually reach the bound GL buffer.
+// Phase 3f-3: SSBO region handed to the interpreter. `ptr` is a host-
+// visible pointer into a Metal buffer's contents (MTLResourceStorage-
+// ModeShared guarantees CPU visibility on Apple Silicon), `size` is
+// the byte size available at that pointer (typically buffer.length -
+// bufferBinding.offset). Keyed by the SPIR-V binding number on the
+// SSBO's variable DecorationBinding.
+struct TesSsboRegion {
+    void* ptr = nullptr;
+    std::size_t size = 0;
+};
+using TesSsboMap = std::unordered_map<std::uint32_t, TesSsboRegion>;
+
 bool runTesForVertex(
     const std::uint32_t* tesSpirv,
     std::size_t tesWordCount,
@@ -272,6 +285,7 @@ bool runTesForVertex(
     std::int32_t primitiveID,
     const std::vector<std::string>& outVaryingNames,
     const std::vector<std::uint32_t>& outVaryingWidths,
+    const TesSsboMap* ssboMap,
     EmulatedVertex& outVertex,
     std::string* diagnostic = nullptr);
 

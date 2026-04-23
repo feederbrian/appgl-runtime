@@ -367,6 +367,15 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
     const std::uint32_t* tesSpirv,
     std::size_t tesWordCount);
 
+// Phase 3f-3 helper: return the CPU-visible contents pointer of an
+// MTLBuffer stored as `void*` in `GLBufferObject::metalBuffer`.
+// Implemented in GLContext.mm (calls `[(id<MTLBuffer>)buf contents]`
+// under the __bridge cast). Returns nullptr when the input is nil or
+// when the buffer has been torn down. Lives here because the tess
+// emulator is the first CPU-side consumer; future CPU-shader paths
+// can reuse the same hook.
+void* metalBufferContents(void* metalBuffer);
+
 // Generate the tessellation domain coords + indices for one patch.
 // All outer / inner levels are pre-clamped by the caller to
 // [1, GL_MAX_TESS_GEN_LEVEL]. Called once per patch per draw after

@@ -80,6 +80,7 @@ namespace spv {
     enum Decoration : std::uint32_t {
         DecorationBlock = 2, DecorationBufferBlock = 3,
         DecorationLocation = 30, DecorationBuiltIn = 11,
+        DecorationArrayStride = 6,
         DecorationNoPerspective = 13, DecorationFlat = 14, DecorationCentroid = 16,
         DecorationOffset = 35,
         DecorationDescriptorSet = 34, DecorationBinding = 33,
@@ -87,7 +88,8 @@ namespace spv {
     enum StorageClass : std::uint32_t {
         StorageClassUniformConstant = 0, StorageClassInput = 1,
         StorageClassUniform = 2, StorageClassOutput = 3,
-        StorageClassFunction = 7, StorageClassPrivate = 6
+        StorageClassFunction = 7, StorageClassPrivate = 6,
+        StorageClassStorageBuffer = 12,
     };
     enum BuiltIn : std::uint32_t {
         BuiltInPosition = 0, BuiltInPointSize = 1,
@@ -232,6 +234,19 @@ public:
           outputVaryingWidths_(std::move(outputVaryingWidths)),
           stage_(stage) {}
 
+    // Phase 3f-3: SSBO / shader-storage-buffer plumbing. Caller
+    // supplies a binding → (host-pointer, size-in-bytes) map drawn
+    // from the GL state (indexedBufferBinding(GL_SHADER_STORAGE_BUFFER,
+    // N) → MTLBuffer.contents + offset). OpLoad / OpStore through an
+    // access chain rooted in a StorageBuffer variable routes byte-
+    // level reads/writes into this region.
+    struct StorageBufferRegion {
+        void* ptr = nullptr;
+        std::size_t size = 0;
+    };
+    using StorageBufferMap = std::unordered_map<std::uint32_t, StorageBufferRegion>;
+    void setStorageBuffers(const StorageBufferMap* m) { storageBuffers_ = m; }
+
     void setUniforms(const UniformValues* u) { uniforms_ = u; }
     void setVsInputs(const VertexAttribs* a, std::int32_t vertexID, std::int32_t instanceID) {
         vsAttribs_ = a;
@@ -307,6 +322,21 @@ private:
     // Stage::TessEvaluation.
     std::array<float, 3> tesTessCoord_{0.0f, 0.0f, 0.0f};
     std::int32_t tesPrimitiveId_ = 0;
+
+    // Phase 3f-3: caller-supplied binding → (host pointer, size) map
+    // for SSBO-rooted OpLoad / OpStore. Set via `setStorageBuffers`.
+    // Per-variable metadata populated from the SpirvModule at
+    // initVariables time (so storeSSBO/loadSSBO know which binding
+    // and which element/member stride each root varId maps to).
+    const StorageBufferMap* storageBuffers_ = nullptr;
+    struct StorageBufferVarMeta {
+        std::uint32_t binding = 0;
+        // Optional top-level struct member offsets + inner array
+        // strides — filled in on demand at resolveAccessChain time
+        // from the SpirvModule's decoration tables (no pre-compute
+        // cache required; the TES bodies we see are small).
+    };
+    std::unordered_map<std::uint32_t, StorageBufferVarMeta> ssboVarMeta_;
 
     // Per-id SSA values for loads/arithmetic results.
     std::unordered_map<std::uint32_t, Value> valueStore_;
@@ -425,6 +455,16 @@ private:
     void storeToVar(std::uint32_t varId, std::uint32_t off,
                     const Value& v);
 
+    // Phase 3f-3: byte-level SSBO read/write via caller-supplied
+    // binding → (host ptr, size) map. leafTypeId determines how many
+    // scalars to copy (1 for scalar, 2/3/4 for vec2/3/4, struct layout
+    // is deferred — the access-chain walk reaches a scalar leaf in
+    // the common CE test case).
+    Value loadFromSSBO(std::uint32_t binding, std::uint32_t byteOffset,
+                       std::uint32_t leafTypeId);
+    void storeToSSBO(std::uint32_t binding, std::uint32_t byteOffset,
+                     const Value& v, std::uint32_t leafTypeId);
+
     // Apply GLSL.std.450 extended instruction.
     Value evalExtInst(std::uint32_t glslOp, const std::uint32_t* operands,
                       std::uint32_t nOperands);
@@ -452,8 +492,40 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     // Walk the type hierarchy following each index.
     auto tIt = module_.types.find(vIt->second.typeId);
     if (tIt == module_.types.end()) { bail("missing type for variable"); return r; }
+
+    // Phase 3f-3: check whether the root variable is an SSBO. Two
+    // spellings of an SSBO in SPIR-V:
+    //   (a) StorageClassStorageBuffer (SPV_KHR_storage_buffer_storage_class,
+    //       the default since glslang 7 / GLSL 4.30+ / SPIR-V 1.3).
+    //   (b) StorageClassUniform with BufferBlock decoration on the
+    //       pointee struct type (the pre-extension spelling).
+    // Either way, the caller's binding map is keyed by the
+    // DecorationBinding value on the VARIABLE.
+    const auto& varInfo = vIt->second;
+    bool rootIsSSBO = false;
+    std::uint32_t rootBinding = 0;
+    if (varInfo.storageClass == spv::StorageClassStorageBuffer) {
+        rootIsSSBO = true;
+    } else if (varInfo.storageClass == spv::StorageClassUniform) {
+        auto pIt = module_.types.find(tIt->second.pointeeType);
+        if (pIt != module_.types.end()) {
+            auto dIt = module_.decorations.find(tIt->second.pointeeType);
+            if (dIt != module_.decorations.end() && dIt->second.isBufferBlock) {
+                rootIsSSBO = true;
+            }
+        }
+    }
+    if (rootIsSSBO) {
+        auto dIt = module_.decorations.find(base);
+        if (dIt != module_.decorations.end() && dIt->second.hasBinding) {
+            rootBinding = dIt->second.binding;
+        }
+    }
+
     std::uint32_t curType = tIt->second.pointeeType;   // deref pointer
-    std::uint32_t offset = 0;
+    std::uint32_t offset = 0;         // scalar offset (non-SSBO path)
+    std::uint32_t byteOffset = 0;     // byte offset (SSBO path; std430)
+
     for (std::uint32_t k = 0; k < nIndices; ++k) {
         auto curTIt = module_.types.find(curType);
         if (curTIt == module_.types.end()) { bail("missing type in access chain"); return r; }
@@ -472,9 +544,26 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
                 return r;
             }
         }
-        if (t.kind == TypeInfo::Kind::Array) {
+        if (t.kind == TypeInfo::Kind::Array ||
+            t.kind == TypeInfo::Kind::RuntimeArray) {
             const std::uint32_t elemW = module_.scalarWidth(t.componentType);
             offset += static_cast<std::uint32_t>(idx) * elemW;
+            // SSBO byte offset: use DecorationArrayStride on the array
+            // type, else fall back to scalar-width * 4 bytes (covers
+            // packed scalar arrays).
+            if (rootIsSSBO) {
+                std::uint32_t stride = 0;
+                auto dIt = module_.decorations.find(curType);
+                if (dIt != module_.decorations.end() && dIt->second.hasArrayStride) {
+                    stride = dIt->second.arrayStride;
+                }
+                if (stride == 0) {
+                    // Fallback: std430 packed — 4 bytes per scalar.
+                    stride = elemW * 4u;
+                    if (stride == 0) stride = 4;
+                }
+                byteOffset += static_cast<std::uint32_t>(idx) * stride;
+            }
             curType = t.componentType;
         } else if (t.kind == TypeInfo::Kind::Struct) {
             if (static_cast<std::uint32_t>(idx) >= t.memberTypes.size()) {
@@ -483,14 +572,39 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             for (std::uint32_t m = 0; m < static_cast<std::uint32_t>(idx); ++m) {
                 offset += module_.scalarWidth(t.memberTypes[m]);
             }
+            // SSBO byte offset: read DecorationOffset from member
+            // decorations. glslang always emits this for every SSBO /
+            // UBO struct member.
+            if (rootIsSSBO) {
+                auto mdIt = module_.memberDecorations.find(curType);
+                if (mdIt != module_.memberDecorations.end()) {
+                    auto pIt2 = mdIt->second.perMember.find(
+                        static_cast<std::uint32_t>(idx));
+                    if (pIt2 != mdIt->second.perMember.end() &&
+                        pIt2->second.hasOffset) {
+                        byteOffset += pIt2->second.offset;
+                    }
+                }
+            }
             curType = t.memberTypes[idx];
         } else if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
                    t.kind == TypeInfo::Kind::Vec4) {
             offset += static_cast<std::uint32_t>(idx);
+            if (rootIsSSBO) {
+                // std430: vec component = 4 bytes for float/int/uint.
+                byteOffset += static_cast<std::uint32_t>(idx) * 4u;
+            }
             curType = t.componentType;
         } else if (t.kind == TypeInfo::Kind::Matrix) {
             const std::uint32_t colW = module_.scalarWidth(t.componentType);
             offset += static_cast<std::uint32_t>(idx) * colW;
+            if (rootIsSSBO) {
+                // Matrix column stride: fall back to colW * 4 bytes
+                // (std430 vec-column-packed) when no MatrixStride
+                // decoration is parsed. Matrices in SSBO are rare in
+                // the CE tess_eval target set.
+                byteOffset += static_cast<std::uint32_t>(idx) * colW * 4u;
+            }
             curType = t.componentType;
         } else {
             bail("access-chain into unsupported type");
@@ -501,6 +615,9 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     r.scalarCount  = module_.scalarWidth(curType);
     r.leafTypeId   = curType;
     r.ok = true;
+    r.isStorageBuffer = rootIsSSBO;
+    r.byteOffset = byteOffset;
+    r.binding = rootBinding;
     return r;
 }
 
@@ -628,6 +745,158 @@ void Interpreter::storeToVar(std::uint32_t varId, std::uint32_t off,
     }
 }
 
+// ─── Phase 3f-3: byte-level SSBO load/store ──────────────────────────
+//
+// Leaf type drives scalar count + kind. Scalars, vec2, vec3, vec4 at
+// the access-chain leaf. Each scalar is 4 bytes; vec3 is packed as 12
+// bytes (std430 leaf access — the "aligned to 16" rule applies to the
+// parent array/struct stride, which resolveAccessChain already
+// consumed via DecorationArrayStride / DecorationOffset).
+
+Value Interpreter::loadFromSSBO(std::uint32_t binding,
+                                std::uint32_t byteOffset,
+                                std::uint32_t leafTypeId)
+{
+    Value v;
+    if (storageBuffers_ == nullptr) {
+        bail("loadFromSSBO: no storage buffer map set");
+        return v;
+    }
+    auto bIt = storageBuffers_->find(binding);
+    if (bIt == storageBuffers_->end() || bIt->second.ptr == nullptr) {
+        // Binding unbound: return zero (GL 4.6 §7.8 — writes to an
+        // unbound SSBO are silently ignored; reads are undefined
+        // but zero is a safe choice). Not a hard failure.
+        auto tIt = module_.types.find(leafTypeId);
+        if (tIt != module_.types.end()) {
+            switch (tIt->second.kind) {
+                case TypeInfo::Kind::Int:   v.kind = Value::Kind::Int;   break;
+                case TypeInfo::Kind::UInt:  v.kind = Value::Kind::UInt;  break;
+                case TypeInfo::Kind::Bool:  v.kind = Value::Kind::Bool;  break;
+                case TypeInfo::Kind::Vec2:  v.kind = Value::Kind::Float2; break;
+                case TypeInfo::Kind::Vec3:  v.kind = Value::Kind::Float3; break;
+                case TypeInfo::Kind::Vec4:  v.kind = Value::Kind::Float4; break;
+                default:                    v.kind = Value::Kind::Float;  break;
+            }
+        }
+        return v;
+    }
+    const std::uint8_t* base = static_cast<const std::uint8_t*>(bIt->second.ptr);
+    const std::size_t   size = bIt->second.size;
+
+    auto readScalar = [&](std::uint32_t off) -> std::uint32_t {
+        if (off + 4 > size) return 0;
+        std::uint32_t raw = 0;
+        std::memcpy(&raw, base + off, 4);
+        return raw;
+    };
+
+    auto tIt = module_.types.find(leafTypeId);
+    if (tIt == module_.types.end()) {
+        bail("loadFromSSBO: unknown leaf type");
+        return v;
+    }
+    const TypeInfo& t = tIt->second;
+
+    auto leafIsInt = [&]() -> bool {
+        if (t.kind == TypeInfo::Kind::Int)  return true;
+        if (t.kind == TypeInfo::Kind::UInt) return true;
+        if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
+            t.kind == TypeInfo::Kind::Vec4) {
+            auto cIt = module_.types.find(t.componentType);
+            if (cIt != module_.types.end()) {
+                return cIt->second.kind == TypeInfo::Kind::Int ||
+                       cIt->second.kind == TypeInfo::Kind::UInt;
+            }
+        }
+        return false;
+    };
+    auto leafIsUInt = [&]() -> bool {
+        if (t.kind == TypeInfo::Kind::UInt) return true;
+        if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
+            t.kind == TypeInfo::Kind::Vec4) {
+            auto cIt = module_.types.find(t.componentType);
+            if (cIt != module_.types.end()) {
+                return cIt->second.kind == TypeInfo::Kind::UInt;
+            }
+        }
+        return false;
+    };
+
+    const int n = (t.kind == TypeInfo::Kind::Vec4)  ? 4 :
+                  (t.kind == TypeInfo::Kind::Vec3)  ? 3 :
+                  (t.kind == TypeInfo::Kind::Vec2)  ? 2 : 1;
+
+    const bool isInt  = leafIsInt();
+    const bool isUInt = leafIsUInt();
+
+    if (isInt) {
+        v.kind = isUInt ? (n == 1 ? Value::Kind::UInt :
+                           n == 2 ? Value::Kind::UInt2 :
+                           n == 3 ? Value::Kind::UInt3 : Value::Kind::UInt4)
+                        : (n == 1 ? Value::Kind::Int :
+                           n == 2 ? Value::Kind::Int2 :
+                           n == 3 ? Value::Kind::Int3 : Value::Kind::Int4);
+        for (int k = 0; k < n; ++k) {
+            std::uint32_t raw = readScalar(byteOffset + k * 4);
+            std::memcpy(&v.i[k], &raw, 4);
+        }
+    } else if (t.kind == TypeInfo::Kind::Bool) {
+        std::uint32_t raw = readScalar(byteOffset);
+        v.kind = Value::Kind::Bool;
+        v.bval = (raw != 0);
+    } else {
+        v.kind = (n == 1 ? Value::Kind::Float  :
+                  n == 2 ? Value::Kind::Float2 :
+                  n == 3 ? Value::Kind::Float3 : Value::Kind::Float4);
+        for (int k = 0; k < n; ++k) {
+            std::uint32_t raw = readScalar(byteOffset + k * 4);
+            float f = 0.0f;
+            std::memcpy(&f, &raw, 4);
+            v.f[k] = f;
+        }
+    }
+    return v;
+}
+
+void Interpreter::storeToSSBO(std::uint32_t binding,
+                              std::uint32_t byteOffset,
+                              const Value& v,
+                              std::uint32_t leafTypeId)
+{
+    (void)leafTypeId;   // leaf drives the scalar count via v.componentCount()
+    if (storageBuffers_ == nullptr) return;   // silent no-op
+    auto bIt = storageBuffers_->find(binding);
+    if (bIt == storageBuffers_->end() || bIt->second.ptr == nullptr) return;
+    std::uint8_t* base = static_cast<std::uint8_t*>(bIt->second.ptr);
+    const std::size_t size = bIt->second.size;
+
+    const int n = v.componentCount();
+    auto writeScalar = [&](std::uint32_t off, std::uint32_t raw) {
+        if (off + 4 > size) return;
+        std::memcpy(base + off, &raw, 4);
+    };
+
+    if (v.isFloatKind()) {
+        for (int k = 0; k < n; ++k) {
+            std::uint32_t raw = 0;
+            std::memcpy(&raw, &v.f[k], 4);
+            writeScalar(byteOffset + k * 4, raw);
+        }
+    } else if (v.isIntKind()) {
+        for (int k = 0; k < n; ++k) {
+            std::uint32_t raw = 0;
+            std::memcpy(&raw, &v.i[k], 4);
+            writeScalar(byteOffset + k * 4, raw);
+        }
+    } else if (v.kind == Value::Kind::Bool) {
+        std::uint32_t raw = v.bval ? 1u : 0u;
+        writeScalar(byteOffset, raw);
+    } else {
+        bail("storeToSSBO: unsupported value kind");
+    }
+}
+
 void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
     // Resolve input locations once up front — glslang doesn't emit
     // DecorationLocation when the GLSL omits `layout(location=N)`,
@@ -675,6 +944,33 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
         const std::uint32_t width = module_.scalarWidth(tIt->second.pointeeType);
         auto& storage = varStorage_[varId];
         storage.assign(width, 0.0f);
+
+        // Phase 3f-3: SSBO variables don't get flat-scalar storage —
+        // OpLoad / OpStore route through the caller's binding map
+        // into real buffer memory. Populate ssboVarMeta_ so the
+        // access-chain walk can confirm the root binding later.
+        const bool isSSBO = [&]() {
+            if (info.storageClass == spv::StorageClassStorageBuffer) return true;
+            if (info.storageClass == spv::StorageClassUniform) {
+                auto pIt = module_.types.find(tIt->second.pointeeType);
+                if (pIt != module_.types.end()) {
+                    auto dIt = module_.decorations.find(tIt->second.pointeeType);
+                    if (dIt != module_.decorations.end() && dIt->second.isBufferBlock) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }();
+        if (isSSBO) {
+            StorageBufferVarMeta meta;
+            auto dIt = module_.decorations.find(varId);
+            if (dIt != module_.decorations.end() && dIt->second.hasBinding) {
+                meta.binding = dIt->second.binding;
+            }
+            ssboVarMeta_[varId] = meta;
+            continue;   // skip uniform seeding + other per-var handlers
+        }
 
         // ── Uniform / UniformConstant — seed from caller's map.
         if ((info.storageClass == spv::StorageClassUniform ||
@@ -1608,10 +1904,18 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     // Pointer came from OpAccessChain.
                     auto acIt = accessChains_.find(w[2]);
                     if (acIt != accessChains_.end()) {
-                        valueStore_[w[1]] = loadFromVar(acIt->second.rootVarId,
-                                                        acIt->second.scalarOffset,
-                                                        acIt->second.scalarCount,
-                                                        acIt->second.leafTypeId);
+                        if (acIt->second.isStorageBuffer) {
+                            valueStore_[w[1]] = loadFromSSBO(
+                                acIt->second.binding,
+                                acIt->second.byteOffset,
+                                acIt->second.leafTypeId);
+                        } else {
+                            valueStore_[w[1]] = loadFromVar(
+                                acIt->second.rootVarId,
+                                acIt->second.scalarOffset,
+                                acIt->second.scalarCount,
+                                acIt->second.leafTypeId);
+                        }
                     } else {
                         bail("OpLoad: unresolved pointer");
                     }
@@ -1637,6 +1941,13 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 } else {
                     auto acIt = accessChains_.find(w[0]);
                     if (acIt != accessChains_.end()) {
+                        if (acIt->second.isStorageBuffer) {
+                            storeToSSBO(acIt->second.binding,
+                                        acIt->second.byteOffset, v,
+                                        acIt->second.leafTypeId);
+                            pc += wc;
+                            break;
+                        }
                         storeToVar(acIt->second.rootVarId, acIt->second.scalarOffset, v);
                         // Built-in position via struct member.
                         auto mdIt = module_.memberDecorations.find(0);   // stub — expand
@@ -4447,6 +4758,7 @@ bool runTesForVertex(
     std::int32_t primitiveID,
     const std::vector<std::string>& outVaryingNames,
     const std::vector<std::uint32_t>& outVaryingWidths,
+    const TesSsboMap* ssboMap,
     EmulatedVertex& outVertex,
     std::string* diagnostic)
 {
@@ -4477,6 +4789,20 @@ bool runTesForVertex(
                           outVaryingNames, outVaryingWidths);
     tesInterp.setUniforms(&uniforms);
     tesInterp.setTesInputs(tessCoord, primitiveID);
+
+    // Phase 3f-3: convert public TesSsboMap → Interpreter::StorageBufferMap.
+    // Same underlying shape (binding → ptr+size); separate types so the
+    // Interpreter's public header doesn't leak through GSE.h.
+    Interpreter::StorageBufferMap ssboInterp;
+    if (ssboMap != nullptr) {
+        for (const auto& [binding, region] : *ssboMap) {
+            Interpreter::StorageBufferRegion r;
+            r.ptr = region.ptr;
+            r.size = region.size;
+            ssboInterp[binding] = r;
+        }
+    }
+    tesInterp.setStorageBuffers(&ssboInterp);
 
     outVertex.position[0] = outVertex.position[1] = outVertex.position[2] = 0.0f;
     outVertex.position[3] = 1.0f;

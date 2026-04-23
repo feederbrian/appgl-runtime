@@ -66,7 +66,7 @@ struct Value {
 struct TypeInfo {
     enum class Kind { Void, Bool, Int, UInt, Float,
                       Vec2, Vec3, Vec4,
-                      Matrix, Array, Struct, Pointer, Function,
+                      Matrix, Array, RuntimeArray, Struct, Pointer, Function,
                       Unknown };
     Kind kind = Kind::Unknown;
     std::uint32_t componentType = 0;
@@ -96,10 +96,23 @@ struct DecorationSet {
     bool hasOffset = false;
     std::uint32_t offset = 0;
     bool isBlock = false;
+    // Phase 3f-3: BufferBlock (GLSL 4.2-style SSBO) is distinct from
+    // Block (UBO / StorageBuffer storage class). `isBlock` catches
+    // both so the interpreter can tell "this is a block-decorated
+    // struct" at a glance; `isBufferBlock` narrows to the SSBO
+    // variant for storage-class reasoning.
+    bool isBufferBlock = false;
     bool hasBinding = false;
     std::uint32_t binding = 0;
     bool hasDescriptorSet = false;
     std::uint32_t descriptorSet = 0;
+    // Phase 3f-3: std430 byte stride on OpTypeArray /
+    // OpTypeRuntimeArray (via OpDecorate target ArrayStride), and on
+    // individual struct-member arrays via OpMemberDecorate. Populated
+    // from `DecorationArrayStride = 6` when glslang emits it (every
+    // SSBO runtime-array it generates).
+    bool hasArrayStride = false;
+    std::uint32_t arrayStride = 0;
 };
 
 struct MemberDecorations {
@@ -144,6 +157,14 @@ struct AccessChainResult {
     std::uint32_t scalarCount = 1;
     std::uint32_t leafTypeId = 0;
     bool ok = false;
+    // Phase 3f-3: when the root variable is a StorageBuffer (or
+    // Uniform with BufferBlock), `isStorageBuffer` flips on and
+    // the interpreter uses `byteOffset` / `binding` to route
+    // OpLoad / OpStore through a caller-supplied raw-pointer map
+    // instead of the flat-scalar `varStorage_`.
+    bool isStorageBuffer = false;
+    std::uint32_t byteOffset = 0;
+    std::uint32_t binding = 0;
 };
 
 }  // namespace appgl::interp

@@ -29615,4 +29615,17 @@ bool GLContext::polygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp)
     return true;
 }
 
+// Phase 3f-3: tess-emul CPU interpreter hook. Given a void* handle
+// stored in `GLBufferObject::metalBuffer`, return the CPU-visible
+// contents pointer. Apple Silicon's unified memory exposes MTLBuffer
+// contents as a writable CPU pointer when the buffer is created in
+// storage mode Shared (the default for every buffer AppGL creates
+// for GL_ARRAY_BUFFER / GL_SHADER_STORAGE_BUFFER / …). nullptr on
+// nil inputs so the caller can short-circuit cleanly.
+void* metalBufferContents(void* metalBuffer) {
+    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)metalBuffer;
+    if (buf == nil) return nullptr;
+    return [buf contents];
+}
+
 }  // namespace appgl

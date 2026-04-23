@@ -24,7 +24,8 @@ namespace spv {
         OpDecorate = 71, OpMemberDecorate = 72,
         OpTypeVoid = 19, OpTypeBool = 20, OpTypeInt = 21,
         OpTypeFloat = 22, OpTypeVector = 23, OpTypeMatrix = 24,
-        OpTypeArray = 28, OpTypeStruct = 30, OpTypePointer = 32,
+        OpTypeArray = 28, OpTypeRuntimeArray = 29,
+        OpTypeStruct = 30, OpTypePointer = 32,
         OpTypeFunction = 33,
         OpConstant = 43, OpConstantTrue = 41, OpConstantFalse = 42,
         OpConstantComposite = 44,
@@ -33,6 +34,7 @@ namespace spv {
     enum Decoration : std::uint32_t {
         DecorationBlock = 2, DecorationBufferBlock = 3,
         DecorationLocation = 30, DecorationBuiltIn = 11,
+        DecorationArrayStride = 6,
         DecorationNoPerspective = 13, DecorationFlat = 14,
         DecorationCentroid = 16, DecorationOffset = 35,
         DecorationDescriptorSet = 34, DecorationBinding = 33,
@@ -81,6 +83,12 @@ std::uint32_t SpirvModule::scalarWidth(std::uint32_t typeId) const {
             }
             return len * scalarWidth(t.componentType);
         }
+        case TypeInfo::Kind::RuntimeArray:
+            // Unbounded — scalar-count isn't statically known. Returning
+            // 0 means "don't allocate flat storage for this type"; the
+            // interpreter's initVariables skips it and the access-chain
+            // path routes through StorageBuffer byte-offsets instead.
+            return 0;
         case TypeInfo::Kind::Struct: {
             std::uint32_t s = 0;
             for (auto m : t.memberTypes) s += scalarWidth(m);
@@ -178,8 +186,14 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                     decorations[target].isNoPerspective = true;
                 } else if (deco == spv::DecorationCentroid) {
                     decorations[target].isCentroid = true;
-                } else if (deco == spv::DecorationBlock || deco == spv::DecorationBufferBlock) {
+                } else if (deco == spv::DecorationBlock) {
                     decorations[target].isBlock = true;
+                } else if (deco == spv::DecorationBufferBlock) {
+                    decorations[target].isBlock = true;
+                    decorations[target].isBufferBlock = true;
+                } else if (deco == spv::DecorationArrayStride && wc >= 4) {
+                    decorations[target].hasArrayStride = true;
+                    decorations[target].arrayStride = w[2];
                 } else if (deco == spv::DecorationBinding && wc >= 4) {
                     decorations[target].hasBinding = true;
                     decorations[target].binding = w[2];
@@ -203,6 +217,9 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 } else if (deco == spv::DecorationOffset && wc >= 5) {
                     memberDecorations[target].perMember[member].hasOffset = true;
                     memberDecorations[target].perMember[member].offset = w[3];
+                } else if (deco == spv::DecorationArrayStride && wc >= 5) {
+                    memberDecorations[target].perMember[member].hasArrayStride = true;
+                    memberDecorations[target].perMember[member].arrayStride = w[3];
                 }
                 break;
             }
@@ -239,6 +256,20 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 t.kind = TypeInfo::Kind::Array;
                 t.componentType = w[1];
                 t.arrayLengthConstId = w[2];
+                types[w[0]] = t;
+                break;
+            }
+            case spv::OpTypeRuntimeArray: {
+                // Unbounded array. Only meaningful inside StorageBuffer /
+                // UBO blocks. Byte stride lives in the DecorationArrayStride
+                // decoration (already parsed above). The element scalar
+                // width is computed on demand via `scalarWidth` when
+                // needed — we don't know the array length so the total
+                // storage allocation is driven by the caller's buffer
+                // map (phase 3f-3).
+                TypeInfo t;
+                t.kind = TypeInfo::Kind::RuntimeArray;
+                t.componentType = w[1];
                 types[w[0]] = t;
                 break;
             }
