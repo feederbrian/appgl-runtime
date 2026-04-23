@@ -607,6 +607,200 @@ TessBodyPassthroughMatch matchTessEvalPassthrough(
                          " non-TessCoord inputs";
         return out;
     }
+
+    // Phase-3c: derive positionMapping[4] / positionConstant[4] by
+    // tracing the OpStore's value-source back to either an
+    // OpCompositeConstruct over 4 scalars OR a CompositeConstruct
+    // over (vec3 gl_TessCoord, float w-constant). Each scalar must
+    // resolve to either gl_TessCoord.{x,y,z} or an OpConstant float.
+    //
+    // Second walk: build a value-source map. For each result-id that
+    // flows into a scalar position component, record:
+    //   sourceKind[id] = TessCoordComp (0..2) or ConstantFloat
+    //   sourceValue[id] = component index or constant float
+    enum SrcKind : std::uint8_t { SrcUnknown = 0, SrcTessCoord = 1, SrcConstant = 2, SrcTessCoordVec = 3 };
+    struct SrcRecord {
+        SrcKind kind = SrcUnknown;
+        std::int8_t component = -1;   // 0..2 for TessCoord scalar pick
+        float constantValue = 0.0f;
+    };
+    std::unordered_map<std::uint32_t, SrcRecord> valueSource;
+
+    // Track OpAccessChain results that point into gl_TessCoord with a
+    // constant first index → scalar-component AccessChain. Reuse the
+    // pointerRoot map populated above + extend with the component idx.
+    std::unordered_map<std::uint32_t, std::int8_t> tessCoordComponentOf;
+
+    i = module.funcBodyStart;
+    while (i < end) {
+        const std::uint32_t inst = module.words[i];
+        const std::uint16_t opcode = inst & 0xFFFF;
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0 || i + wc > end) break;
+        const std::uint32_t* w = module.words.data() + i + 1;
+
+        switch (opcode) {
+            case spv::OpAccessChain: {
+                // result, baseVar, idx0, idx1, ...
+                if (wc >= 5) {
+                    const std::uint32_t resultId = w[1];
+                    const std::uint32_t baseId = w[2];
+                    if (baseId == tessCoordVarId) {
+                        // idx0 should be a constant int (0, 1, 2).
+                        auto idxIt = module.constants.find(w[3]);
+                        if (idxIt != module.constants.end() &&
+                            (idxIt->second.kind == Value::Kind::Int ||
+                             idxIt->second.kind == Value::Kind::UInt)) {
+                            const std::int32_t cIdx = idxIt->second.i[0];
+                            if (cIdx >= 0 && cIdx < 3) {
+                                tessCoordComponentOf[resultId] =
+                                    static_cast<std::int8_t>(cIdx);
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            case spv::OpLoad: {
+                // result, type, pointer
+                if (wc >= 4) {
+                    const std::uint32_t resultId = w[1];
+                    const std::uint32_t ptrId = w[2];
+                    auto compIt = tessCoordComponentOf.find(ptrId);
+                    if (compIt != tessCoordComponentOf.end()) {
+                        SrcRecord rec;
+                        rec.kind = SrcTessCoord;
+                        rec.component = compIt->second;
+                        valueSource[resultId] = rec;
+                    } else if (ptrId == tessCoordVarId) {
+                        // Whole-vec3 load of gl_TessCoord — used by
+                        // CompositeConstruct(v3, 1.0) shape.
+                        SrcRecord rec;
+                        rec.kind = SrcTessCoordVec;
+                        valueSource[resultId] = rec;
+                    }
+                }
+                break;
+            }
+            case spv::OpCompositeExtract: {
+                // result, type, composite, idx0 (literal)
+                if (wc >= 5) {
+                    const std::uint32_t resultId = w[1];
+                    const std::uint32_t compositeId = w[2];
+                    const std::uint32_t idx = w[3];
+                    auto srcIt = valueSource.find(compositeId);
+                    if (srcIt != valueSource.end() &&
+                        srcIt->second.kind == SrcTessCoordVec &&
+                        idx < 3) {
+                        SrcRecord rec;
+                        rec.kind = SrcTessCoord;
+                        rec.component = static_cast<std::int8_t>(idx);
+                        valueSource[resultId] = rec;
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        i += wc;
+    }
+    // Seed constants — OpConstant records are already captured by
+    // SpirvModule::parse into `module.constants`. Mark them.
+    for (const auto& [cid, cv] : module.constants) {
+        if (cv.kind == Value::Kind::Float) {
+            SrcRecord rec;
+            rec.kind = SrcConstant;
+            rec.constantValue = cv.f[0];
+            valueSource[cid] = rec;
+        }
+    }
+
+    // Find the OpStore to gl_Position and trace its value argument.
+    std::uint32_t positionStoreValue = 0;
+    i = module.funcBodyStart;
+    while (i < end) {
+        const std::uint32_t inst = module.words[i];
+        const std::uint16_t opcode = inst & 0xFFFF;
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0 || i + wc > end) break;
+        const std::uint32_t* w = module.words.data() + i + 1;
+        if (opcode == spv::OpStore && wc >= 3) {
+            const std::uint32_t ptrId = w[0];
+            auto pit = pointerRoot.find(ptrId);
+            const std::uint32_t root = (pit != pointerRoot.end()) ? pit->second : ptrId;
+            if (root == positionVarId) {
+                positionStoreValue = w[1];
+                break;
+            }
+        }
+        i += wc;
+    }
+    if (positionStoreValue == 0) {
+        out.diagnostic = "failed to locate gl_Position store value";
+        return out;
+    }
+
+    // The value is expected to be an OpCompositeConstruct over
+    // 4 scalar operands (or over (vec3, float) — glslang splits
+    // vec4(gl_TessCoord, 1.0) into (v3_load, 1.0_const)).
+    i = module.funcBodyStart;
+    bool mappingFound = false;
+    while (i < end && !mappingFound) {
+        const std::uint32_t inst = module.words[i];
+        const std::uint16_t opcode = inst & 0xFFFF;
+        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+        if (wc == 0 || i + wc > end) break;
+        const std::uint32_t* w = module.words.data() + i + 1;
+        if (opcode == spv::OpCompositeConstruct && wc >= 3) {
+            const std::uint32_t resultId = w[1];
+            if (resultId == positionStoreValue) {
+                // Handle two shapes:
+                //   wc == 6 (4 scalars)  → 4 operands at w[2..5]
+                //   wc == 4 (vec3, w)    → operand at w[2] is v3,
+                //                          w[3] is w-constant
+                if (wc == 6) {
+                    bool allOk = true;
+                    for (int c = 0; c < 4; ++c) {
+                        const std::uint32_t opId = w[2 + c];
+                        auto it = valueSource.find(opId);
+                        if (it == valueSource.end()) { allOk = false; break; }
+                        if (it->second.kind == SrcTessCoord) {
+                            out.positionMapping[c] = it->second.component;
+                        } else if (it->second.kind == SrcConstant) {
+                            out.positionMapping[c] = -1;
+                            out.positionConstant[c] = it->second.constantValue;
+                        } else {
+                            allOk = false; break;
+                        }
+                    }
+                    if (allOk) mappingFound = true;
+                } else if (wc == 4) {
+                    // (vec3, w-constant) shape.
+                    const std::uint32_t v3Id = w[2];
+                    const std::uint32_t wId = w[3];
+                    auto v3It = valueSource.find(v3Id);
+                    auto wIt = valueSource.find(wId);
+                    if (v3It != valueSource.end() &&
+                        v3It->second.kind == SrcTessCoordVec &&
+                        wIt != valueSource.end() &&
+                        wIt->second.kind == SrcConstant) {
+                        for (int c = 0; c < 3; ++c) out.positionMapping[c] = static_cast<std::int8_t>(c);
+                        out.positionMapping[3] = -1;
+                        out.positionConstant[3] = wIt->second.constantValue;
+                        mappingFound = true;
+                    }
+                }
+            }
+        }
+        i += wc;
+    }
+
+    if (!mappingFound) {
+        out.diagnostic = "gl_Position store value isn't a simple CompositeConstruct";
+        return out;
+    }
+
     out.matched = true;
     (void)positionStructMember;
     return out;
@@ -953,6 +1147,13 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
         }();
         if (emulEnabled) {
             program.tessellationEmulated = true;
+            // Copy the phase-3c position mapping onto the program so
+            // the draw path can apply it per generated vertex without
+            // re-parsing the SPIR-V.
+            for (int c = 0; c < 4; ++c) {
+                program.tessPositionMapping[c] = tePass.positionMapping[c];
+                program.tessPositionConstant[c] = tePass.positionConstant[c];
+            }
             program.linkLog +=
                 "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — passthrough TES enabled";
             return true;
@@ -1102,32 +1303,40 @@ EmulatedDraw emulateTessellationDraw(
     // Recompute if point-mode path was chosen — indices empty, walk coords.
     d.vertexCount = expandPerPatch * numPatches;
     d.expandedVertexData.assign(d.vertexCount * kPosFloats, 0.0f);
+
+    // Phase-3c: apply the matched tess-coord → gl_Position mapping when
+    // tess emulation is enabled. Non-emulated path sticks with the
+    // phase-2a identity default (u,v,w,1) — harmless since .ok=false
+    // will force the draw through the legacy translated path.
+    auto emitPosition = [&](std::size_t dstIdx, float u, float v, float w) {
+        const float coordsPerPatchLookup[3] = {u, v, w};
+        const std::size_t dst = dstIdx * kPosFloats;
+        for (int c = 0; c < 4; ++c) {
+            const std::int8_t src = program.tessPositionMapping[c];
+            if (src >= 0 && src < 3) {
+                d.expandedVertexData[dst + c] = coordsPerPatchLookup[src];
+            } else {
+                d.expandedVertexData[dst + c] = program.tessPositionConstant[c];
+            }
+        }
+    };
+
     for (std::size_t p = 0; p < numPatches; ++p) {
-        const std::size_t dstPatchBase = p * expandPerPatch * kPosFloats;
+        const std::size_t dstPatchBase = p * expandPerPatch;
         if (isPoints) {
-            // One vertex per coord.
             for (std::size_t i = 0; i < coordsPerPatch; ++i) {
                 const float u = coords[i * 3 + 0];
                 const float v = coords[i * 3 + 1];
                 const float w = coords[i * 3 + 2];
-                const std::size_t dst = dstPatchBase + i * kPosFloats;
-                d.expandedVertexData[dst + 0] = u;
-                d.expandedVertexData[dst + 1] = v;
-                d.expandedVertexData[dst + 2] = w;
-                d.expandedVertexData[dst + 3] = 1.0f;
+                emitPosition(dstPatchBase + i, u, v, w);
             }
         } else {
-            // Walk index list; one vertex per index.
             for (std::size_t i = 0; i < indices.size(); ++i) {
                 const std::uint32_t idx = indices[i];
                 const float u = coords[idx * 3 + 0];
                 const float v = coords[idx * 3 + 1];
                 const float w = coords[idx * 3 + 2];
-                const std::size_t dst = dstPatchBase + i * kPosFloats;
-                d.expandedVertexData[dst + 0] = u;
-                d.expandedVertexData[dst + 1] = v;
-                d.expandedVertexData[dst + 2] = w;
-                d.expandedVertexData[dst + 3] = 1.0f;
+                emitPosition(dstPatchBase + i, u, v, w);
             }
         }
     }

@@ -602,6 +602,15 @@ struct GLProgramObject {
     // through to the existing path. Full tess CPU emulation lands
     // in iters 163+. See src/shader/TessellationEmulator.{h,cpp}.
     bool tessellationEmulated = false;
+    // Phase-3c: when tessellationEmulated is set via the passthrough
+    // matcher, these record how to derive each of the 4 gl_Position
+    // components from a (u,v,w) domain coord at draw time.
+    //   tessPositionMapping[i] >= 0 → gl_Position.i = tessCoord[mapping]
+    //   tessPositionMapping[i] == -1 → gl_Position.i = tessPositionConstant[i]
+    // Initialized to the phase-2a identity mapping (x,y,z,1.0) so the
+    // non-emulated path keeps a safe default.
+    std::int8_t tessPositionMapping[4] = {0, 1, 2, -1};
+    float tessPositionConstant[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     // TES SPIR-V copy mirrors geometrySpirv's pattern so draw time
     // can emulate without re-reaching the shader object (which may
     // have been detached + deleted).

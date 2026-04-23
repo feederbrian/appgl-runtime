@@ -273,6 +273,16 @@ TessBodyClassification classifyTessBody(
 //    when not from gl_TessCoord)
 //  - No input loads beyond gl_TessCoord
 //
+// On match, `positionMapping[i]` for i ∈ {0,1,2,3} encodes how
+// gl_Position.i is derived:
+//   mapping >= 0   → gl_Position.i = gl_TessCoord[mapping]
+//                    (0=x, 1=y, 2=z — always a single-component pick)
+//   mapping == -1  → gl_Position.i = positionConstant[i]
+//                    (OpConstant float, typically 0.0 or 1.0)
+// Used at draw time to compute the actual TES gl_Position output for
+// each generated domain vertex — no full interpreter required for
+// this narrow shape.
+//
 // Used by `detectTessellationEmulatable` to flip `program.
 // tessellationEmulated` on for the narrow set. `diagnostic` on a
 // false return explains which predicate broke.
@@ -280,6 +290,10 @@ struct TessBodyPassthroughMatch {
     bool matched = false;
     bool parsed = false;
     std::string diagnostic;
+    // Per-component source: -1 = use constant, 0..2 = gl_TessCoord.{x,y,z}.
+    // Only meaningful when matched.
+    std::int8_t positionMapping[4] = {0, 1, 2, -1};
+    float positionConstant[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 };
 
 TessBodyPassthroughMatch matchTessEvalPassthrough(
