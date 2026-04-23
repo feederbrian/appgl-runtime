@@ -21270,11 +21270,18 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 *program, *tvao, *impl_->objects, *impl_->state,
                 mode, count, first, /*elementIndices=*/nullptr);
             if (ted.ok) {
-                // GL_RASTERIZER_DISCARD: skip the encode — there is no
-                // TES-side XFB capture yet (phase 5+), so we just
-                // consume the draw.
-                if (impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
-                    APPGL_LOG(DRAW, @"drawArrays tess-emul: rasterizer discard");
+                // Phase 3f-7: transform-feedback capture + rasterizer-
+                // discard early-out. The helper walks
+                // program.transformFeedbackVaryingNames against
+                // ted.varyingNames, writes per-vertex bytes to the
+                // bound TF buffers, and updates PRIMITIVES_GENERATED /
+                // TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN queries. When
+                // rasterDiscard is enabled it returns true so we skip
+                // the Metal encode. Same helper the GS-emul path uses;
+                // tess-emul's EmulatedDraw layout (position + varying
+                // floats per vertex) is byte-compatible with what the
+                // helper expects.
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ted)) {
                     return true;
                 }
                 if (ted.vertexCount == 0) {
