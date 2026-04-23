@@ -354,6 +354,12 @@ private:
     std::int32_t tcsInvocationId_ = 0;
     std::int32_t tcsPatchVertices_ = 3;
 
+    // Phase 3f-14: caller-supplied patch-in varying map for TES.
+    // Pointer so the caller controls lifetime (typically a vector
+    // of maps per patch, one entry dereferenced per TES call).
+    const std::unordered_map<std::uint32_t, std::vector<float>>*
+        tesPatchInputs_ = nullptr;
+
     // Phase 3f-3: caller-supplied binding → (host pointer, size) map
     // for SSBO-rooted OpLoad / OpStore. Set via `setStorageBuffers`.
     // Per-variable metadata populated from the SpirvModule at
@@ -435,6 +441,25 @@ public:
     // (GL 4.6 §11.2.2 — TES's gl_in is the array of TCS gl_out).
     bool captureTcsOutputForInvocation(std::int32_t invocationID,
                                        EmulatedVertex& out) const;
+
+    // Phase 3f-14: walk TCS Output variables decorated with
+    // DecorationPatch + DecorationLocation. Copy their flat scalar
+    // float storage (just-written by the body) into `out`, keyed by
+    // Location. Existing entries in `out` are overwritten — the
+    // caller uses the same map across all invocations of a patch,
+    // yielding last-write-wins semantics (spec-permitted when two
+    // TCS invocations write the same patch-out variable).
+    void captureTcsPatchOutputs(
+        std::unordered_map<std::uint32_t, std::vector<float>>& out) const;
+
+    // Phase 3f-14: caller-supplied patch-in varying map for TES.
+    // initVariables consults this pointer when seeding Input
+    // variables with DecorationPatch + DecorationLocation. Nullptr
+    // leaves the storage at its default-zero state.
+    void setTesPatchInputs(
+        const std::unordered_map<std::uint32_t, std::vector<float>>* m) {
+        tesPatchInputs_ = m;
+    }
 private:
 
     // Diagnostic + bail.
@@ -1149,6 +1174,24 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                 // checking fall back through the matcher's strictness
                 // gate anyway).
             }
+            // Phase 3f-14: patch-in varyings — scalar/vec/scalar-array
+            // Input variables decorated with DecorationPatch plus
+            // DecorationLocation. Seed from the caller-supplied
+            // per-patch map. If the TCS didn't write this location
+            // for this patch, the storage stays at its zero init
+            // (safe default matching GL's behaviour of "undefined but
+            // implementation-consistent").
+            if (dIt != module_.decorations.end() && dIt->second.isPatch &&
+                dIt->second.hasLocation && tesPatchInputs_ != nullptr) {
+                auto pIt = tesPatchInputs_->find(dIt->second.location);
+                if (pIt != tesPatchInputs_->end()) {
+                    const auto& src = pIt->second;
+                    for (std::size_t k = 0; k < src.size() && k < storage.size(); ++k) {
+                        storage[k] = src[k];
+                    }
+                }
+                continue;
+            }
         }
 
         // ── TCS-stage built-in inputs (phase 3f-4):
@@ -1744,6 +1787,31 @@ bool Interpreter::captureTcsOutputForInvocation(std::int32_t invocationID,
         return true;
     }
     return false;
+}
+
+void Interpreter::captureTcsPatchOutputs(
+    std::unordered_map<std::uint32_t, std::vector<float>>& out) const
+{
+    // Walk Output variables. Any with DecorationPatch AND
+    // DecorationLocation is a `patch out <type>` varying; copy
+    // its flat-float storage into the caller's map, keyed by
+    // Location. Variables without DecorationPatch (gl_out[]
+    // array, gl_TessLevel*) are skipped — those flow through
+    // captureTcsOutputForInvocation / captureTessLevels.
+    for (const auto& [varId, info] : module_.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto dIt = module_.decorations.find(varId);
+        if (dIt == module_.decorations.end()) continue;
+        if (!dIt->second.isPatch) continue;
+        if (!dIt->second.hasLocation) continue;
+        auto sIt = varStorage_.find(varId);
+        if (sIt == varStorage_.end()) continue;
+        if (sIt->second.empty()) continue;
+        // Overwrite any existing entry — last-write-wins across
+        // invocations (GL 4.6 §11.2.2 permits this when multiple
+        // TCS invocations write the same patch-out).
+        out[dIt->second.location] = sIt->second;
+    }
 }
 
 void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
@@ -5058,6 +5126,7 @@ bool runTesForVertex(
     const std::vector<EmulatedVertex>& patchInputs,
     EmulatedVertex& outVertex,
     const TesUniformMap* precomputedUniforms,
+    const TesPatchVaryingMap* patchVaryings,
     std::string* diagnostic)
 {
     if (tesSpirv == nullptr || tesWordCount < 5) {
@@ -5120,6 +5189,11 @@ bool runTesForVertex(
     }
     tesInterp.setStorageBuffers(&ssboInterp);
 
+    // Phase 3f-14: wire the patch-varying map. Interpreter's TES
+    // initVariables arm pulls Input-Patch-Location varying values
+    // from here.
+    tesInterp.setTesPatchInputs(patchVaryings);
+
     // Phase 3f-5: convert per-patch EmulatedVertex inputs (position +
     // clip/cull) into PerVertexInput records the interpreter's
     // gl_in[] init path consumes. User varyings are not plumbed for
@@ -5163,6 +5237,7 @@ bool runTcsForVertex(
     float* outerLevelsOut,
     float* innerLevelsOut,
     const TesUniformMap* precomputedUniforms,
+    TesPatchVaryingMap* patchVaryingsOut,
     std::string* diagnostic)
 {
     if (tcsSpirv == nullptr || tcsWordCount < 5) {
@@ -5283,6 +5358,13 @@ bool runTcsForVertex(
         if (innerLevelsOut != nullptr) {
             for (int i = 0; i < 2; ++i) innerLevelsOut[i] = capturedInner[i];
         }
+    }
+
+    // Phase 3f-14: capture patch-out Output varyings into the
+    // caller's map. Overwrites on conflict — last-write-wins across
+    // invocations of the same patch.
+    if (patchVaryingsOut != nullptr) {
+        tcsInterp.captureTcsPatchOutputs(*patchVaryingsOut);
     }
     return true;
 }

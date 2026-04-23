@@ -507,18 +507,20 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
             out.diagnostic = "unsupported builtin input: " + std::to_string(bi);
             return out;
         }
-        // Phase 3f-13: `patch in` Input variables (scalar / vec /
-        // scalar-array shapes shared across all domain vertices of
-        // a patch). Decoration is parsed now and the rejection
-        // message is specific so future-phase callers know which
-        // gap to close; TCS-side capture + TES-side init plumbing
-        // lands in phase 3f-14+. Rejecting here keeps the
-        // interpreter from producing silently-wrong output on
-        // bodies that actually consume per-patch state.
+        // Phase 3f-14: accept `patch in` Input variables. Per-patch
+        // scalar/vec shape shared across all domain vertices. TCS-
+        // side capture + TES-side init (in initVariables' TES arm)
+        // feed the caller's TesPatchVaryingMap, keyed by Location.
+        // Arrays of scalars (e.g. `patch in float foo[4]`) are
+        // also covered — the flat-scalar storage convention means
+        // the whole array lives in a single vector<float>.
         if (dIt != module.decorations.end() && dIt->second.isPatch) {
-            out.diagnostic = "TES patch-in Input not yet plumbed (id=" +
-                             std::to_string(varId) + "): " + info.name;
-            return out;
+            if (!dIt->second.hasLocation) {
+                out.diagnostic = "TES patch-in Input without Location (id=" +
+                                 std::to_string(varId) + "): " + info.name;
+                return out;
+            }
+            continue;
         }
         // Non-builtin, non-patch Input. Only the gl_in[] opt-in
         // admits per-vertex input arrays.
@@ -1864,6 +1866,10 @@ EmulatedDraw emulateTessellationDraw(
             scratchOut,
             outerLevels, innerLevels,
             /*precomputedUniforms=*/nullptr,  // pre-map; not built yet
+            /*patchVaryingsOut=*/nullptr,    // phase 3f-14 — early capture
+                                             // discards per-patch outputs;
+                                             // the full pre-pass rebuilds
+                                             // them below.
             &diag);
         tcsLevelsCaptured = ok;
     }
@@ -2062,6 +2068,14 @@ EmulatedDraw emulateTessellationDraw(
     std::vector<std::vector<EmulatedVertex>> tcsOutputs;
     bool tcsOutputsValid = false;
 
+    // Phase 3f-14: per-patch varying maps. tcsPatchVaryings[p]
+    // accumulates TCS patch-out writes across invocations of patch
+    // `p` (last-write-wins on Location collisions). The TES emit
+    // loop's lambda consults tcsPatchVaryings[patchIdx] and hands
+    // the matching map pointer to runTesForVertex so Input-Patch-
+    // Location variables are seeded with the right values.
+    std::vector<TesPatchVaryingMap> tcsPatchVaryings;
+
     // Phase 3f-10: VS pre-pass now runs BEFORE the TCS pre-pass so
     // TCS's gl_in[] reads see real VS outputs. Runs whenever EITHER
     // `tessellationEmulated` (passthrough) or `tessellationInterpreted`
@@ -2122,6 +2136,10 @@ EmulatedDraw emulateTessellationDraw(
         // no-op fallback keeps the VS-direct flow.
         tcsOutputs.assign(numPatches,
             std::vector<EmulatedVertex>(static_cast<std::size_t>(outputVertices)));
+        // Phase 3f-14: allocate one patch-varying map per patch.
+        // Each invocation of a given patch accumulates into the
+        // same map (last-write-wins per GL 4.6 §11.2.2).
+        tcsPatchVaryings.assign(numPatches, TesPatchVaryingMap{});
         const std::vector<EmulatedVertex> emptyPatchInputs;
         for (std::size_t p = 0; p < numPatches; ++p) {
             const auto& thisPatchInputs = (p < patchInputs.size())
@@ -2144,6 +2162,7 @@ EmulatedDraw emulateTessellationDraw(
                     /*outerLevelsOut=*/nullptr,
                     /*innerLevelsOut=*/nullptr,
                     uniformMapPtr,
+                    &tcsPatchVaryings[p],
                     &diag);
                 if (tcsDebug && !ok) {
                     std::fprintf(stderr, "[tess-emul] TCS bail (patch=%zu iv=%d): %s\n",
@@ -2206,13 +2225,19 @@ EmulatedDraw emulateTessellationDraw(
                 ? tcsOutputs[patchIdx]
                 : (patchIdx < patchInputs.size()
                        ? patchInputs[patchIdx] : emptyInputs);
+        // Phase 3f-14: pick the patch-varying map for this patch.
+        // Empty (no TCS ran, or no patch-out captured) is safe —
+        // patch-in vars just stay at zero init.
+        const TesPatchVaryingMap* thisPatchVaryings =
+            (patchIdx < tcsPatchVaryings.size())
+                ? &tcsPatchVaryings[patchIdx] : nullptr;
         const bool ok = runTesForVertex(
             program.tessEvalSpirv.data(),
             program.tessEvalSpirv.size(),
             program, tessCoord, primID,
             interpVaryingNames, interpVaryingWidths,
             ssboMap, thisPatchInputs, outV,
-            uniformMapPtr, &diag);
+            uniformMapPtr, thisPatchVaryings, &diag);
         if (!ok && tesDebug && !diag.empty() &&
             tesBailSeen->insert(diag).second) {
             std::fprintf(stderr, "[tess-emul] TES bail: %s\n", diag.c_str());

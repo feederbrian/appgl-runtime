@@ -294,6 +294,20 @@ using TesUniformMap = std::unordered_map<std::string, std::vector<float>>;
 // get a direct entry; block members are keyed by member name.
 TesUniformMap buildTesUniformMap(const GLProgramObject& program);
 
+// Phase 3f-14: per-patch varying map shared across the TCS
+// invocations for a single patch AND the TES vertices generated
+// from that same patch. Shape matches `patch out vec<N>` /
+// `patch in vec<N>` / scalar-array interfaces: keyed by the
+// SPIR-V Location decoration, value is a flat scalar-per-element
+// float vector (same convention as TesUniformMap values).
+//
+// TCS captures into this map after each invocation's body run —
+// last-write-wins per GL 4.6 §11.2.2 (only one TCS invocation
+// should write any given per-patch output; if multiple write,
+// the spec lets implementations pick). TES seeds its Input
+// patch-in variables from this map at initVariables time.
+using TesPatchVaryingMap = std::unordered_map<std::uint32_t, std::vector<float>>;
+
 bool runTesForVertex(
     const std::uint32_t* tesSpirv,
     std::size_t tesWordCount,
@@ -316,6 +330,12 @@ bool runTesForVertex(
     // emulateTessellationDraw via `buildTesUniformMap(program)`
     // and keep it alive across all per-vertex calls.
     const TesUniformMap* precomputedUniforms = nullptr,
+    // Phase 3f-14: per-patch varyings captured by the TCS pre-
+    // pass for this patch. TES bodies declaring
+    // `patch in <type> name;` read the values keyed by Location
+    // from this map in their init. Nullptr keeps the legacy
+    // behaviour of zero-initialising patch-in variables.
+    const TesPatchVaryingMap* patchVaryings = nullptr,
     std::string* diagnostic = nullptr);
 
 // Run a single TCS invocation on CPU. One invocation per
@@ -351,6 +371,15 @@ bool runTcsForVertex(
     float* innerLevelsOut = nullptr,
     // Phase 3f-12: same pre-built uniform map as runTesForVertex.
     const TesUniformMap* precomputedUniforms = nullptr,
+    // Phase 3f-14: out-parameter for per-patch varyings. When
+    // non-null, after the TCS body runs the runner walks Output
+    // variables with DecorationPatch + DecorationLocation and
+    // writes their flat-scalar-float storage into this map
+    // keyed by Location. Subsequent invocations of the same
+    // patch (or future draws targeting the same map) overwrite
+    // per-Location. Callers that don't consume patch-out pass
+    // nullptr.
+    TesPatchVaryingMap* patchVaryingsOut = nullptr,
     std::string* diagnostic = nullptr);
 
 // Synthesise a pass-through vertex-shader MSL source that reads
