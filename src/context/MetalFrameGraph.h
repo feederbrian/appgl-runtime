@@ -219,6 +219,21 @@ struct TranslatedDrawInfo {
     // SSBO-write-only VS tests) build as a valid Metal pipeline.
     bool rasterizerDiscard = false;
 
+    // Phase 6-1d: GL 4.0 / ARB_sample_shading state snapshot. When
+    // `sampleShadingEnabled` is true AND the color attachment is MS,
+    // the fragment shader must run per-sample with at least
+    // `minSampleShading * sampleCount` unique invocations per pixel.
+    // Metal doesn't have a direct "force N samples per pixel" knob —
+    // per-sample invocation triggers automatically when the FS reads
+    // `[[sample_id]]` or `[[sample_position]]`. For GL_SAMPLE_SHADING
+    // to work on shaders that don't already read gl_SampleID, a
+    // future phase (6-1e+) will either rewrite the FS MSL to inject
+    // a `[[sample_id]]` read OR post-process SPIRV-Cross output to
+    // add the attribute. This field makes the state available at
+    // pipeline-build time.
+    bool sampleShadingEnabled = false;
+    float minSampleShading = 0.0f;
+
     // RC-A02: viewport state.  Plumbed from glViewport so Metal's render
     // encoder receives the correct viewport rectangle.
     GLint viewportX = 0;

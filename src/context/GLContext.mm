@@ -20521,6 +20521,12 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.frontFace = state.rasterState().frontFace;
     tdi.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
     tdi.rasterizerDiscard = state.isEnabled(GL_RASTERIZER_DISCARD);
+    // Phase 6-1d: sample-shading snapshot. The Metal side uses this
+    // to force per-sample FS invocation when the bound attachment
+    // is MS; until that plumbing lands (6-1e+), the state is merely
+    // captured so the correct values are available when we need them.
+    tdi.sampleShadingEnabled = state.isEnabled(GL_SAMPLE_SHADING);
+    tdi.minSampleShading = state.blendState().minSampleShading;
 
     // GL 4.6 §14.6.5 — polygon offset enabled under GL_POLYGON_OFFSET_FILL
     // (relevant for triangle rasterization) plus LINE / POINT variants.
