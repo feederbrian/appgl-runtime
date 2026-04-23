@@ -5392,6 +5392,41 @@ struct GLContext::Impl {
         const bool isBGRA = (metalTex.pixelFormat == MTLPixelFormatBGRA8Unorm);
         const NSUInteger bytesPerRow = static_cast<NSUInteger>(sourceWidth) * 4u;
 
+        // Phase 6-1c: if the source is multisample, Metal's
+        // `-getBytes:` is invalid on it — we have to resolve first.
+        // Create a single-sample temp texture matching the MS source's
+        // pixel format / size, run a zero-draw render pass with
+        // MTLStoreActionMultisampleResolve to trigger the implicit
+        // resolve, and read from the temp. Non-MS textures fall
+        // through to the direct getBytes path unchanged.
+        id<MTLTexture> readTex = metalTex;
+        if (metalTex.sampleCount > 1 && device != nil && commandQueue != nil) {
+            MTLTextureDescriptor* tempDesc = [MTLTextureDescriptor
+                texture2DDescriptorWithPixelFormat:metalTex.pixelFormat
+                                            width:metalTex.width
+                                           height:metalTex.height
+                                        mipmapped:NO];
+            tempDesc.storageMode = MTLStorageModeShared;
+            tempDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            id<MTLTexture> resolvedTex = [device newTextureWithDescriptor:tempDesc];
+            if (resolvedTex != nil) {
+                MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+                rpd.colorAttachments[0].texture = metalTex;
+                rpd.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                rpd.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+                rpd.colorAttachments[0].resolveTexture = resolvedTex;
+                rpd.colorAttachments[0].resolveLevel = 0;
+                rpd.colorAttachments[0].resolveSlice = 0;
+                id<MTLCommandBuffer> cb = [commandQueue commandBuffer];
+                id<MTLRenderCommandEncoder> enc =
+                    [cb renderCommandEncoderWithDescriptor:rpd];
+                [enc endEncoding];
+                [cb commit];
+                [cb waitUntilCompleted];
+                readTex = resolvedTex;
+            }
+        }
+
         // Read the entire mip level into a temporary buffer, then extract
         // the requested rectangle.
         std::vector<std::uint8_t> fullLevel(static_cast<std::size_t>(sourceWidth) * static_cast<std::size_t>(sourceHeight) * 4u);
@@ -5402,7 +5437,7 @@ struct GLContext::Impl {
             : MTLRegionMake2D(0, 0,
                 static_cast<NSUInteger>(sourceWidth),
                 static_cast<NSUInteger>(sourceHeight));
-        [metalTex getBytes:fullLevel.data()
+        [readTex getBytes:fullLevel.data()
                bytesPerRow:bytesPerRow
             bytesPerImage:0
                fromRegion:fullRegion
