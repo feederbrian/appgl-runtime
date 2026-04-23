@@ -406,6 +406,41 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // where the shader outputs fewer components than the render target
         // format (e.g. float → MTLPixelFormatRGBA8Unorm).
         mslOpts.pad_fragment_output_components = true;
+        // Step 7 (phase-7-1): env-gated argument-buffers (Tier-2)
+        // emission. When APPGL_ENABLE_ARGUMENT_BUFFERS=1, SPIRV-Cross
+        // emits the fragment/vertex/compute entry points with
+        // `constant spvDescriptorSetBufferN& spvDescriptorSetN
+        // [[buffer(N)]]` arguments instead of individual
+        // `[[texture(N)]]` / `[[sampler(N)]]` / `[[buffer(N)]]`
+        // parameters. Unlocks Metal's per-stage 31-texture limit
+        // (matches Metal 3 bindless resource counts) and is required
+        // for the advertised GL_MAX_TEXTURE_IMAGE_UNITS=48 to work on
+        // shaders that actually sample all 48 units.
+        //
+        // THE METAL-SIDE BINDING IS NOT YET WIRED — enabling this env
+        // var WILL BREAK tests because the CPU-side encoder still
+        // calls setFragmentTexture/Sampler/Buffer with direct slots.
+        // A follow-up phase 7-2 adds the argument-buffer construction
+        // on the consumer side. This commit's scope is just the
+        // translator opt-in; leaving the baseline untouched so the
+        // full Phase 6 arc + the 67-test win stack stays intact.
+        //
+        // Tier-2 (vs Tier-1): Apple Silicon M1+ supports Tier-2
+        // (writable images on macOS + higher resource limits). We
+        // advertise + require Apple7-class GPUs, so Tier-2 is always
+        // the right pick.
+        if (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr) {
+            // MSL 3.0 required for Tier-2 full mutable aliasing —
+            // SPIRV-Cross throws "Full mutable aliasing of argument
+            // buffer descriptors only works on Metal 3+" when this
+            // option is enabled with MSL < 3.0. Available on macOS 13
+            // (Ventura, 2022) and later; safe bump because we require
+            // Apple7+ GPUs which are all on macOS ≥ 13 by now.
+            mslOpts.set_msl_version(3, 0);
+            mslOpts.argument_buffers = true;
+            mslOpts.argument_buffers_tier =
+                spirv_cross::CompilerMSL::Options::ArgumentBuffersTier::Tier2;
+        }
         compiler.set_msl_options(mslOpts);
 
         spirv_cross::CompilerGLSL::Options glslOpts = compiler.get_common_options();
@@ -905,6 +940,13 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
     } catch (const spirv_cross::CompilerError& e) {
         if (log != nullptr) {
             *log = std::string("SPIRV-Cross error: ") + e.what();
+        }
+        // Step 7 debug: SPIRV-Cross throw → log to stderr when
+        // APPGL_DUMP_MSL is set so argument-buffer experimentation
+        // isn't silent. Caught at the `spirvToMSL` frame; callers see
+        // the empty return.
+        if (std::getenv("APPGL_DUMP_MSL") != nullptr) {
+            std::fprintf(stderr, "[APPGL] SPIRV-Cross throw: %s\n", e.what());
         }
         return {};
     }
