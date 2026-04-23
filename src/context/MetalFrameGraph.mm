@@ -947,6 +947,8 @@ struct MetalFrameGraph::Impl {
         const bool useArgBuf = (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         id<MTLArgumentEncoder> fragArgEncoderSet0 = nil;
         id<MTLArgumentEncoder> vertArgEncoderSet0 = nil;
+        id<MTLArgumentEncoder> fragArgEncoderSet1 = nil;
+        id<MTLArgumentEncoder> vertArgEncoderSet1 = nil;
 
         id<MTLRenderPipelineState> pipelineState = nil;
         if (!useArgBuf && info.pipelineStateCacheOut != nullptr) {
@@ -1118,6 +1120,26 @@ struct MetalFrameGraph::Impl {
                 }
                 if (fragFn != nil && !info.fragmentTextures.empty()) {
                     fragArgEncoderSet0 = [fragFn newArgumentEncoderWithBufferIndex:24];
+                }
+                // Step 7-3 UBO follow-up: desc_set 1 argument buffer at
+                // [[buffer(25)]] holds the default-uniform block and any
+                // explicit `uniform Block { … }` UBOs. Per-stage check:
+                // either stage's default uniform buffer has data, OR any
+                // uboBindings flagged for this stage.
+                bool vertNeedsSet1 = (info.vertexUniformData != nullptr &&
+                                       info.vertexUniformSize > 0);
+                bool fragNeedsSet1 = (info.fragmentUniformData != nullptr &&
+                                       info.fragmentUniformSize > 0);
+                for (const auto& ubo : info.uboBindings) {
+                    if (ubo.size == 0) continue;
+                    if (ubo.isVertex)   vertNeedsSet1 = true;
+                    if (ubo.isFragment) fragNeedsSet1 = true;
+                }
+                if (vertFn != nil && vertNeedsSet1) {
+                    vertArgEncoderSet1 = [vertFn newArgumentEncoderWithBufferIndex:25];
+                }
+                if (fragFn != nil && fragNeedsSet1) {
+                    fragArgEncoderSet1 = [fragFn newArgumentEncoderWithBufferIndex:25];
                 }
             }
 
@@ -2053,43 +2075,50 @@ struct MetalFrameGraph::Impl {
             }
         }
 
-        // Bind per-stage uniform buffers at Metal buffer index 16.
-        // Each stage has its own push-constant struct layout (they may
-        // declare different subsets of the program's bare GL uniforms).
-        if (info.vertexUniformData != nullptr && info.vertexUniformSize > 0) {
-            [currentRenderEncoder setVertexBytes:info.vertexUniformData
-                                          length:info.vertexUniformSize
-                                         atIndex:16];
-        }
-        if (info.fragmentUniformData != nullptr && info.fragmentUniformSize > 0) {
-            [currentRenderEncoder setFragmentBytes:info.fragmentUniformData
-                                            length:info.fragmentUniformSize
-                                           atIndex:16];
-        }
+        // Bind per-stage uniform buffers. Under argbuf mode, these are
+        // populated into the desc_set 1 argument buffer via the
+        // fragArgEncoderSet1 / vertArgEncoderSet1 encoders further
+        // below. The direct-binding path here still fires when argbuf
+        // is off OR when the stage has NO samplers (set 0) AND no
+        // UBOs — which normally means the shader has nothing at all,
+        // so the setBytes calls are no-ops. Under argbuf mode with
+        // UBOs present, skip the direct-binding calls entirely.
+        if (!useArgBuf) {
+            if (info.vertexUniformData != nullptr && info.vertexUniformSize > 0) {
+                [currentRenderEncoder setVertexBytes:info.vertexUniformData
+                                              length:info.vertexUniformSize
+                                             atIndex:16];
+            }
+            if (info.fragmentUniformData != nullptr && info.fragmentUniformSize > 0) {
+                [currentRenderEncoder setFragmentBytes:info.fragmentUniformData
+                                                length:info.fragmentUniformSize
+                                               atIndex:16];
+            }
 
-        // Bind UBO data to the Metal encoder at the reflection-specified
-        // [[buffer(N)]] slots.  Each entry was resolved by GLContext from
-        // the GL uniform buffer binding state.
-        for (const auto& ubo : info.uboBindings) {
-            if (ubo.size == 0) continue;
-            const NSUInteger slot = static_cast<NSUInteger>(ubo.metalSlot);
-            if (ubo.metalBuffer != nullptr) {
-                // Large UBO (>4KB): bind the Metal buffer directly.
-                id<MTLBuffer> buf = (__bridge id<MTLBuffer>)(ubo.metalBuffer);
-                const NSUInteger off = static_cast<NSUInteger>(ubo.metalBufferOffset);
-                if (ubo.isVertex)   [currentRenderEncoder setVertexBuffer:buf offset:off atIndex:slot];
-                if (ubo.isFragment) [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
-            } else if (ubo.data != nullptr) {
-                // Small UBO (≤4KB): inline bytes.
-                if (ubo.isVertex) {
-                    [currentRenderEncoder setVertexBytes:ubo.data
-                                                  length:static_cast<NSUInteger>(ubo.size)
-                                                 atIndex:slot];
-                }
-                if (ubo.isFragment) {
-                    [currentRenderEncoder setFragmentBytes:ubo.data
-                                                    length:static_cast<NSUInteger>(ubo.size)
-                                                   atIndex:slot];
+            // Bind UBO data to the Metal encoder at the reflection-specified
+            // [[buffer(N)]] slots.  Each entry was resolved by GLContext from
+            // the GL uniform buffer binding state.
+            for (const auto& ubo : info.uboBindings) {
+                if (ubo.size == 0) continue;
+                const NSUInteger slot = static_cast<NSUInteger>(ubo.metalSlot);
+                if (ubo.metalBuffer != nullptr) {
+                    // Large UBO (>4KB): bind the Metal buffer directly.
+                    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)(ubo.metalBuffer);
+                    const NSUInteger off = static_cast<NSUInteger>(ubo.metalBufferOffset);
+                    if (ubo.isVertex)   [currentRenderEncoder setVertexBuffer:buf offset:off atIndex:slot];
+                    if (ubo.isFragment) [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
+                } else if (ubo.data != nullptr) {
+                    // Small UBO (≤4KB): inline bytes.
+                    if (ubo.isVertex) {
+                        [currentRenderEncoder setVertexBytes:ubo.data
+                                                      length:static_cast<NSUInteger>(ubo.size)
+                                                     atIndex:slot];
+                    }
+                    if (ubo.isFragment) {
+                        [currentRenderEncoder setFragmentBytes:ubo.data
+                                                        length:static_cast<NSUInteger>(ubo.size)
+                                                       atIndex:slot];
+                    }
                 }
             }
         }
@@ -2269,7 +2298,8 @@ struct MetalFrameGraph::Impl {
         // useResource for each bound texture + sampler so Metal
         // residency tracks them. When argbuf is disabled, fall through
         // to the baseline direct-binding path unchanged.
-        if (useArgBuf && (fragArgEncoderSet0 != nil || vertArgEncoderSet0 != nil)) {
+        if (useArgBuf && (fragArgEncoderSet0 != nil || vertArgEncoderSet0 != nil ||
+                          fragArgEncoderSet1 != nil || vertArgEncoderSet1 != nil)) {
             auto encodeTexturesIntoArgBuf = [&](id<MTLArgumentEncoder> encoder,
                                                  const std::vector<TranslatedDrawInfo::TextureBinding>& textures,
                                                  MTLRenderStages stage,
@@ -2317,6 +2347,84 @@ struct MetalFrameGraph::Impl {
                                       MTLRenderStageFragment, true);
             encodeTexturesIntoArgBuf(vertArgEncoderSet0, info.vertexTextures,
                                       MTLRenderStageVertex, false);
+
+            // Step 7-3 UBO follow-up: populate desc_set 1 argbuf with
+            // the default uniform block + explicit `uniform Block`
+            // UBOs. Default uniform block lives at [[id(16)]] per the
+            // translator's uniformBufferBase convention; explicit UBOs
+            // at sequential slots 16 + per-stage-offset (the
+            // info.uboBindings entries carry their final metalSlot
+            // from reflection).
+            //
+            // Small UBO data (ubo.data != nullptr, metalBuffer = nullptr)
+            // was previously inlined via setVertexBytes/setFragmentBytes
+            // which isn't usable inside an argument buffer — we must
+            // hand the encoder a real MTLBuffer. Route through
+            // `ringSuballocate` which copies the CPU bytes into a
+            // device-visible transient buffer and returns its handle
+            // + offset. The same path works for the default uniform
+            // block data.
+            auto encodeUBOsIntoArgBuf = [&](id<MTLArgumentEncoder> encoder,
+                                             const void* uniformData,
+                                             NSUInteger uniformSize,
+                                             bool isVertex,
+                                             MTLRenderStages stage) {
+                if (encoder == nil) return;
+                const NSUInteger len = [encoder encodedLength];
+                if (len == 0) return;
+                id<MTLBuffer> argBuf = [device newBufferWithLength:len
+                                                           options:MTLResourceStorageModeShared];
+                if (argBuf == nil) return;
+                [encoder setArgumentBuffer:argBuf offset:0];
+
+                // Default uniform block at [[id(16)]].
+                if (uniformData != nullptr && uniformSize > 0) {
+                    RingAlloc alloc = ringSuballocate(uniformData, uniformSize);
+                    if (alloc.buffer != nil) {
+                        [encoder setBuffer:alloc.buffer
+                                    offset:alloc.offset
+                                   atIndex:16];
+                        [currentRenderEncoder useResource:alloc.buffer
+                                                    usage:MTLResourceUsageRead
+                                                   stages:stage];
+                    }
+                }
+
+                // Explicit UBOs at their reflection-specified slots.
+                for (const auto& ubo : info.uboBindings) {
+                    if (ubo.size == 0) continue;
+                    if (isVertex && !ubo.isVertex) continue;
+                    if (!isVertex && !ubo.isFragment) continue;
+                    const NSUInteger slot = static_cast<NSUInteger>(ubo.metalSlot);
+                    id<MTLBuffer> uboBuf = nil;
+                    NSUInteger uboOff = 0;
+                    if (ubo.metalBuffer != nullptr) {
+                        uboBuf = (__bridge id<MTLBuffer>)(ubo.metalBuffer);
+                        uboOff = static_cast<NSUInteger>(ubo.metalBufferOffset);
+                    } else if (ubo.data != nullptr) {
+                        RingAlloc alloc = ringSuballocate(ubo.data, ubo.size);
+                        uboBuf = alloc.buffer;
+                        uboOff = alloc.offset;
+                    }
+                    if (uboBuf == nil) continue;
+                    [encoder setBuffer:uboBuf offset:uboOff atIndex:slot];
+                    [currentRenderEncoder useResource:uboBuf
+                                                usage:MTLResourceUsageRead
+                                               stages:stage];
+                }
+
+                if (isVertex) {
+                    [currentRenderEncoder setVertexBuffer:argBuf offset:0 atIndex:25];
+                } else {
+                    [currentRenderEncoder setFragmentBuffer:argBuf offset:0 atIndex:25];
+                }
+            };
+            encodeUBOsIntoArgBuf(fragArgEncoderSet1,
+                                  info.fragmentUniformData, info.fragmentUniformSize,
+                                  /*isVertex=*/false, MTLRenderStageFragment);
+            encodeUBOsIntoArgBuf(vertArgEncoderSet1,
+                                  info.vertexUniformData, info.vertexUniformSize,
+                                  /*isVertex=*/true, MTLRenderStageVertex);
         } else {
             for (const auto& binding : info.fragmentTextures) {
                 if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
