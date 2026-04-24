@@ -907,12 +907,16 @@ bool isValidTextureUploadFormat(GLenum format) {
     // to include integer variants, depth/stencil, and BGR ordering.
     switch (format) {
         case GL_RED:
+        case GL_GREEN:
+        case GL_BLUE:
         case GL_RG:
         case GL_RGB:
         case GL_RGBA:
         case GL_BGR:
         case GL_BGRA:
         case GL_RED_INTEGER:
+        case GL_GREEN_INTEGER:
+        case GL_BLUE_INTEGER:
         case GL_RG_INTEGER:
         case GL_RGB_INTEGER:
         case GL_RGBA_INTEGER:
