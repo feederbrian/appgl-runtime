@@ -22015,11 +22015,21 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         program.tessControlMSL.find("_DefaultUniforms") != std::string::npos ||
         program.tessEvalAsComputeMSL.find("_DefaultUniforms") != std::string::npos ||
         program.tessVertexAsComputeMSL.find("_DefaultUniforms") != std::string::npos;
+    // Phase 5 probe-only env: APPGL_LIFT_TESS_UNIFORM_GUARD routes
+    // uniform-using tess programs through Metal instead of the CPU
+    // fallback. Net delta with this env on is -13 (6 invariance +
+    // 8 vertex_spacing regress, 1 tessellation_shader_tessellation
+    // win) because our Metal domain-gen output disagrees with CTS
+    // counter-program probe counts for several (mode, spacing,
+    // level) combinations. Off by default — Phase 5 proper needs a
+    // tess-spec-exact rewrite of `spvGenTessDomain` + counter-
+    // program routing to match. Left in for future ratcheting.
+    const bool liftUniformGuard = std::getenv("APPGL_LIFT_TESS_UNIFORM_GUARD") != nullptr;
     const bool tessTFActive =
         transformFeedbackActive &&
         program.metalTessEvalComputePipelineState != nullptr &&
         program.tessEvalOutputLayout.structSize > 0 &&
-        !tessUsesUniforms &&
+        (liftUniformGuard || !tessUsesUniforms) &&
         std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
     if (transformFeedbackActive && !tessTFActive) {
         return false;
@@ -22068,12 +22078,50 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // program. Only runs when the program actually references
     // _DefaultUniforms in its compute MSL — otherwise we skip the
     // per-draw pack cost.
-    // Phase 4 [metal-tess-TF] dormant: uniform plumbing is ready
-    // (see buildStageUniformBuffer / MetalTessDrawInfo slots), but
-    // `tessUsesUniforms` forces those programs to the CPU tess
-    // interpreter until our domain-gen output matches CTS's
-    // correctness probes. Packing is skipped here to keep this
-    // function side-effect-free for the CPU-fallback case.
+    // Phase 5 opt-in path: when APPGL_LIFT_TESS_UNIFORM_GUARD is
+    // set, pack the default uniforms so the Metal path feeds the
+    // right tess factors to TCS/VS-compute/TES-compute.
+    thread_local std::vector<std::uint8_t> tcsUniformScratch;
+    thread_local std::vector<std::uint8_t> vsComputeUniformScratch;
+    thread_local std::vector<std::uint8_t> tesComputeUniformScratch;
+    if (liftUniformGuard && tessUsesUniforms && tessTFActive) {
+        if (program.tessControlUniformLayout.empty() &&
+            !program.tessControlReflection.uniformBlocks.empty()) {
+            computeStageUniformLayout(program.tessControlUniformLayout,
+                program.tessControlReflection, program.uniforms);
+        }
+        if (program.tessVertexAsComputeUniformLayout.empty() &&
+            !program.tessVertexAsComputeReflection.uniformBlocks.empty()) {
+            computeStageUniformLayout(program.tessVertexAsComputeUniformLayout,
+                program.tessVertexAsComputeReflection, program.uniforms);
+        }
+        if (program.tessEvalAsComputeUniformLayout.empty() &&
+            !program.tessEvalAsComputeReflection.uniformBlocks.empty()) {
+            computeStageUniformLayout(program.tessEvalAsComputeUniformLayout,
+                program.tessEvalAsComputeReflection, program.uniforms);
+        }
+        if (!program.tessControlUniformLayout.empty()) {
+            buildStageUniformBuffer(tcsUniformScratch,
+                program.tessControlReflection, program.uniformValues,
+                program.tessControlUniformLayout);
+            info.tessControlUniformData = tcsUniformScratch.data();
+            info.tessControlUniformSize = tcsUniformScratch.size();
+        }
+        if (!program.tessVertexAsComputeUniformLayout.empty()) {
+            buildStageUniformBuffer(vsComputeUniformScratch,
+                program.tessVertexAsComputeReflection, program.uniformValues,
+                program.tessVertexAsComputeUniformLayout);
+            info.tessVertexAsComputeUniformData = vsComputeUniformScratch.data();
+            info.tessVertexAsComputeUniformSize = vsComputeUniformScratch.size();
+        }
+        if (!program.tessEvalAsComputeUniformLayout.empty()) {
+            buildStageUniformBuffer(tesComputeUniformScratch,
+                program.tessEvalAsComputeReflection, program.uniformValues,
+                program.tessEvalAsComputeUniformLayout);
+            info.tessEvalAsComputeUniformData = tesComputeUniformScratch.data();
+            info.tessEvalAsComputeUniformSize = tesComputeUniformScratch.size();
+        }
+    }
 
     // Fixed-function state snapshot (mirrors
     // populateTranslatedDrawFixedFunctionState but scoped to the
