@@ -7885,20 +7885,33 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
              || format == GL_RGBA_INTEGER
              || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
         // GL 4.6 Table 18.2 — GL_DEPTH_COMPONENT readback accepts any
-        // scalar type (byte/short/int/half/float and unsigned variants)
-        // plus the packed GL_UNSIGNED_INT_24_8 / GL_FLOAT_32_UNSIGNED
-        // _INT_24_8_REV. Previous impl hardcoded GL_FLOAT only — CTS
-        // `texture_cube_map_array.color_depth_attachments` queries
-        // depth data with GL_UNSIGNED_SHORT / GL_UNSIGNED_INT per the
-        // texture's bit depth, and saw INVALID_ENUM. Same liberal
-        // per-format acceptance as the stencil branch below.
+        // scalar type (byte/short/int/half/float and unsigned variants).
+        // The packed depth-stencil types (GL_UNSIGNED_INT_24_8 and
+        // GL_FLOAT_32_UNSIGNED_INT_24_8_REV) are NOT compatible with
+        // GL_DEPTH_COMPONENT — they require format=GL_DEPTH_STENCIL,
+        // and rejecting them here surfaces the INVALID_OPERATION CTS
+        // expects (`packed_pixels.rectangle.depth_component16_format
+        // _depth_component` checks for the rejection explicitly).
         const bool isDepthReadback = (format == GL_DEPTH_COMPONENT
             && (type == GL_UNSIGNED_BYTE || type == GL_BYTE
                 || type == GL_UNSIGNED_SHORT || type == GL_SHORT
                 || type == GL_UNSIGNED_INT || type == GL_INT
-                || type == GL_FLOAT || type == GL_HALF_FLOAT
-                || type == GL_UNSIGNED_INT_24_8
-                || type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV));
+                || type == GL_FLOAT || type == GL_HALF_FLOAT));
+        // Detect the cross-class spec violation: a depth/stencil/depth-
+        // stencil format paired with a type that is otherwise valid for
+        // some other class. Without this check the fall-through at line
+        // 7917 raises INVALID_ENUM, but Table 18.2 says the right error
+        // is INVALID_OPERATION.
+        const bool isDepthStencilPackedType = (type == GL_UNSIGNED_INT_24_8
+            || type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV);
+        if (format == GL_DEPTH_COMPONENT && isDepthStencilPackedType) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (format == GL_STENCIL_INDEX && isDepthStencilPackedType) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         // GL_DEPTH_STENCIL readback is also accepted by the spec with
         // the two depth-stencil packed types.
         const bool isDepthStencilReadback = (format == GL_DEPTH_STENCIL
@@ -28672,6 +28685,162 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     NSUInteger mipLevel = static_cast<NSUInteger>(level);
     NSUInteger texWidth  = std::max<NSUInteger>(metalTex.width  >> mipLevel, 1);
     NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+
+    // GL 4.6 §8.11.4 depth-format readback. The color converter below
+    // doesn't know about Metal depth pixel formats and would push
+    // INVALID_OPERATION at the srcType switch. Handle DEPTH_COMPONENT
+    // separately — blit the texture into a Shared staging buffer (depth
+    // textures default to Private storage on AGX), unpack to floats,
+    // then quantise to the caller's requested type per Table 18.2.
+    if (format == GL_DEPTH_COMPONENT) {
+        const MTLPixelFormat pf = metalTex.pixelFormat;
+        NSUInteger srcBpp = 0;
+        switch (pf) {
+            case MTLPixelFormatDepth16Unorm:                srcBpp = 2; break;
+            case MTLPixelFormatDepth32Float:                srcBpp = 4; break;
+            case MTLPixelFormatDepth24Unorm_Stencil8:       srcBpp = 4; break;
+            case MTLPixelFormatDepth32Float_Stencil8:       srcBpp = 8; break;
+            default: break;
+        }
+        if (srcBpp > 0) {
+            const NSUInteger bytesPerRow = texWidth * srcBpp;
+            const NSUInteger bytesPerImage = bytesPerRow * texHeight;
+            std::vector<std::uint8_t> raw(bytesPerImage);
+            if (metalTex.storageMode != MTLStorageModePrivate) {
+                MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
+                [metalTex getBytes:raw.data()
+                       bytesPerRow:bytesPerRow
+                        fromRegion:region
+                       mipmapLevel:mipLevel];
+            } else {
+                id<MTLDevice> mtlDevice = impl_->device;
+                id<MTLCommandQueue> mtlQueue = impl_->commandQueue;
+                if (mtlDevice == nil || mtlQueue == nil) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+                id<MTLBuffer> staging = [mtlDevice newBufferWithLength:bytesPerImage
+                                                              options:MTLResourceStorageModeShared];
+                if (staging == nil) {
+                    pushError(GL_OUT_OF_MEMORY);
+                    return false;
+                }
+                id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
+                id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+                MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
+                [blit copyFromTexture:metalTex
+                          sourceSlice:0
+                          sourceLevel:mipLevel
+                         sourceOrigin:region.origin
+                           sourceSize:region.size
+                             toBuffer:staging
+                    destinationOffset:0
+               destinationBytesPerRow:bytesPerRow
+             destinationBytesPerImage:bytesPerImage];
+                [blit endEncoding];
+                [cmd commit];
+                [cmd waitUntilCompleted];
+                std::memcpy(raw.data(), [staging contents], bytesPerImage);
+            }
+            auto readDepthFloat = [&](NSUInteger sx, NSUInteger sy) -> float {
+                const std::uint8_t* p = raw.data() + (sy * texWidth + sx) * srcBpp;
+                switch (pf) {
+                    case MTLPixelFormatDepth16Unorm: {
+                        std::uint16_t v; std::memcpy(&v, p, 2);
+                        return static_cast<float>(v) / 65535.0f;
+                    }
+                    case MTLPixelFormatDepth32Float: {
+                        float v; std::memcpy(&v, p, 4); return v;
+                    }
+                    case MTLPixelFormatDepth32Float_Stencil8: {
+                        float v; std::memcpy(&v, p, 4); return v;
+                    }
+                    case MTLPixelFormatDepth24Unorm_Stencil8: {
+                        std::uint32_t v; std::memcpy(&v, p, 4);
+                        return static_cast<float>(v & 0x00FFFFFF) /
+                               static_cast<float>(0x00FFFFFF);
+                    }
+                    default: return 0.0f;
+                }
+            };
+            auto* outBytes = static_cast<std::uint8_t*>(pixels);
+            const std::size_t pixCount = static_cast<std::size_t>(texWidth) *
+                                         static_cast<std::size_t>(texHeight);
+            auto clamp01 = [](float v) {
+                return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            };
+            for (NSUInteger row = 0; row < texHeight; ++row) {
+                for (NSUInteger col = 0; col < texWidth; ++col) {
+                    const std::size_t i = row * texWidth + col;
+                    const float d = clamp01(readDepthFloat(col, row));
+                    switch (type) {
+                        case GL_UNSIGNED_BYTE: {
+                            const std::uint8_t v = static_cast<std::uint8_t>(d * 255.0f + 0.5f);
+                            std::memcpy(outBytes + i, &v, 1);
+                            break;
+                        }
+                        case GL_BYTE: {
+                            const std::int8_t v = static_cast<std::int8_t>(d * 127.0f + 0.5f);
+                            std::memcpy(outBytes + i, &v, 1);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT: {
+                            const std::uint16_t v = static_cast<std::uint16_t>(d * 65535.0f + 0.5f);
+                            std::memcpy(outBytes + i * 2, &v, 2);
+                            break;
+                        }
+                        case GL_SHORT: {
+                            const std::int16_t v = static_cast<std::int16_t>(d * 32767.0f + 0.5f);
+                            std::memcpy(outBytes + i * 2, &v, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_INT: {
+                            const std::uint32_t v = static_cast<std::uint32_t>(
+                                static_cast<double>(d) * 4294967295.0 + 0.5);
+                            std::memcpy(outBytes + i * 4, &v, 4);
+                            break;
+                        }
+                        case GL_INT: {
+                            const std::int32_t v = static_cast<std::int32_t>(
+                                static_cast<double>(d) * 2147483647.0 + 0.5);
+                            std::memcpy(outBytes + i * 4, &v, 4);
+                            break;
+                        }
+                        case GL_FLOAT: {
+                            std::memcpy(outBytes + i * 4, &d, 4);
+                            break;
+                        }
+                        case GL_HALF_FLOAT: {
+                            std::uint32_t f; std::memcpy(&f, &d, 4);
+                            const std::uint32_t sign = (f >> 16) & 0x8000;
+                            std::int32_t exp = static_cast<std::int32_t>((f >> 23) & 0xFF) - 127 + 15;
+                            std::uint32_t mant = f & 0x7FFFFF;
+                            std::uint16_t h;
+                            if (exp <= 0) h = static_cast<std::uint16_t>(sign);
+                            else if (exp >= 31) h = static_cast<std::uint16_t>(sign | 0x7C00);
+                            else h = static_cast<std::uint16_t>(
+                                sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
+                            std::memcpy(outBytes + i * 2, &h, 2);
+                            break;
+                        }
+                        default:
+                            // Unknown / packed type — leave the slot
+                            // untouched and let the caller's type-
+                            // validity check raise the appropriate
+                            // error. (DEPTH_COMPONENT + 24_8 packed
+                            // types is filtered by isFormatType-
+                            // Compatible upstream.)
+                            break;
+                    }
+                }
+            }
+            (void)pixCount;
+            return true;
+        }
+        // Non-depth Metal pixel format with depth GL format — fall
+        // through to the generic switch which will raise INVALID_-
+        // OPERATION via the unsupported-source-format default arm.
+    }
 
     // GL 4.6 §8.11.4: when GL_PIXEL_PACK_BUFFER is bound, `pixels` is
     // a byte offset into that buffer — NOT a client pointer. Resolve
