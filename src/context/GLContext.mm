@@ -8015,6 +8015,92 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                 }
                 return true;
             }
+            if (isDepthReadback && type != GL_FLOAT) {
+                // readDepthAttachmentPixels writes 4-byte GLfloat per pixel.
+                // When the caller requests a narrower or wider integer type
+                // (e.g. GL_UNSIGNED_SHORT for DEPTH_COMPONENT16 readback), we
+                // would overflow / underwrite the caller buffer. Stage to
+                // floats then convert per GL 4.6 §18.2.10.
+                std::vector<GLfloat> stage(pixelCount);
+                if (!impl_->readFramebufferPixels(format, x, y, width, height,
+                                                  stage.data())) {
+                    pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+                    return false;
+                }
+                auto clamp01 = [](float v) {
+                    return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                };
+                auto* outBytes = static_cast<std::uint8_t*>(pixels);
+                for (std::size_t i = 0; i < pixelCount; ++i) {
+                    const float d = clamp01(stage[i]);
+                    switch (type) {
+                        case GL_UNSIGNED_BYTE: {
+                            const std::uint8_t v =
+                                static_cast<std::uint8_t>(d * 255.0f + 0.5f);
+                            std::memcpy(outBytes + i, &v, 1);
+                            break;
+                        }
+                        case GL_BYTE: {
+                            const std::int8_t v =
+                                static_cast<std::int8_t>(d * 127.0f + 0.5f);
+                            std::memcpy(outBytes + i, &v, 1);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT: {
+                            const std::uint16_t v =
+                                static_cast<std::uint16_t>(d * 65535.0f + 0.5f);
+                            std::memcpy(outBytes + i * 2, &v, 2);
+                            break;
+                        }
+                        case GL_SHORT: {
+                            const std::int16_t v =
+                                static_cast<std::int16_t>(d * 32767.0f + 0.5f);
+                            std::memcpy(outBytes + i * 2, &v, 2);
+                            break;
+                        }
+                        case GL_UNSIGNED_INT: {
+                            const std::uint32_t v = static_cast<std::uint32_t>(
+                                static_cast<double>(d) * 4294967295.0 + 0.5);
+                            std::memcpy(outBytes + i * 4, &v, 4);
+                            break;
+                        }
+                        case GL_INT: {
+                            const std::int32_t v = static_cast<std::int32_t>(
+                                static_cast<double>(d) * 2147483647.0 + 0.5);
+                            std::memcpy(outBytes + i * 4, &v, 4);
+                            break;
+                        }
+                        case GL_HALF_FLOAT: {
+                            // IEEE-754 binary16 encoding (round-to-nearest,
+                            // ties-to-even via the rounding-bias trick).
+                            std::uint32_t f;
+                            std::memcpy(&f, &d, 4);
+                            const std::uint32_t sign = (f >> 16) & 0x8000;
+                            std::int32_t exp = static_cast<std::int32_t>((f >> 23) & 0xFF) - 127 + 15;
+                            std::uint32_t mant = f & 0x7FFFFF;
+                            std::uint16_t h;
+                            if (exp <= 0) {
+                                h = static_cast<std::uint16_t>(sign);
+                            } else if (exp >= 31) {
+                                h = static_cast<std::uint16_t>(sign | 0x7C00);
+                            } else {
+                                h = static_cast<std::uint16_t>(
+                                    sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
+                            }
+                            std::memcpy(outBytes + i * 2, &h, 2);
+                            break;
+                        }
+                        default: {
+                            // Packed types and unknowns: leave the slot
+                            // untouched. isFormatTypeCompatible filters
+                            // illegal combos earlier; this branch is
+                            // defensive only.
+                            break;
+                        }
+                    }
+                }
+                return true;
+            }
             if (!impl_->readFramebufferPixels(format, x, y, width, height, pixels)) {
                 pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
                 return false;
