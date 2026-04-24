@@ -4,21 +4,15 @@ feature so a rebase onto a different upstream SHA can merge pieces
 independently. See specs-worker-docs/phase3b-tf-capture-design.md for
 the full rationale.
 
-Current state: kernel MSL COMPILES (MSL-level). Body references
-are satisfied by placeholder `float3 gl_TessCoord = float3(0.0);`
-and `uint gl_PrimitiveID = 0u;` zero-init locals emitted via
-`fixup_hooks_in`. The values are wrong — every thread reads the
-same (0,0,0) tess coord — so the kernel is compilable but produces
-incorrect output.
-
-REMAINING WORK (3B.2.4): replace the placeholder initialisers with
-reads from a new `spvDomainData [[buffer(25)]]` entry-point arg
-typed as `const device spvDomainVertex*` where `struct
-spvDomainVertex { float3 tessCoord; uint primID; };`. Caller
-(AppGL encoder) allocates + seeds that buffer via a companion
-domain-generator compute kernel (3B.3). Until the domain arg +
-fixup seeds are done, this patch is regression-free because
-AppGL doesn't yet build a PSO from the produced MSL.
+Current state: **kernel MSL compiles AND builds a live
+MTLComputePipelineState** on Apple Silicon. Verified with a
+standalone `newLibraryWithSource` + `newComputePipelineStateWithFunction`
+test harness. Kernel reads gl_TessCoord from
+`packed_float3* spvDomainTessCoord [[buffer(25)]]` and
+gl_PrimitiveID from `uint* spvDomainPrimID [[buffer(24)]]`,
+indexed by `[[thread_position_in_grid]].x`. Caller (AppGL encoder,
+Phase 3B.3+) allocates + populates those buffers and dispatches
+one thread per output vertex.
 
 --- a/spirv_msl.hpp
 +++ b/spirv_msl.hpp
@@ -96,18 +90,35 @@ AppGL doesn't yet build a PSO from the produced MSL.
 +			entry_type = "kernel";
 +		else if (msl_options.is_ios())
 
+--- a/spirv_msl.cpp   (entry_point_args: inject spvDomainTessCoord + spvDomainPrimID)
++++ b/spirv_msl.cpp
+@@ (after spvIndirectParams injection inside `if (capture_output_to_buffer)`)
++		// AppGL patch (phase-3B-metal-tess-TF): inject domain-coord buffer args
++		// for TES-as-compute. Caller supplies per-thread (gl_TessCoord, gl_PrimitiveID)
++		// in two buffers at slots 25 + 24.
++		if (get_execution_model() == ExecutionModelTessellationEvaluation &&
++		    msl_options.tess_evaluation_as_compute)
++		{
++			if (!ep_args.empty())
++				ep_args += ", ";
++			ep_args += "const device packed_float3* spvDomainTessCoord [[buffer(25)]]";
++			ep_args += ", const device uint* spvDomainPrimID [[buffer(24)]]";
++		}
+
 --- a/spirv_msl.cpp   (BuiltInTessCoord / BuiltInPrimitiveId fixup hooks)
 +++ b/spirv_msl.cpp
 @@ (BuiltInTessCoord case, before the quad-padding branch)
-+			// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute doesn't
-+			// receive `[[position_in_patch]]` as an entry-point arg; declare
-+			// gl_TessCoord as a prologue local. 3B.2 (partial) seeds zero;
-+			// 3B.2.4 reads from spvDomainData.
++			// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute reads
++			// gl_TessCoord from `spvDomainTessCoord [[buffer(25)]]` indexed
++			// by `[[thread_position_in_grid]].x`. Caller supplies coords
++			// already compensated for winding / spacing / domain origin.
 +			if (is_tese_shader() && msl_options.tess_evaluation_as_compute)
 +			{
 +				string tc_name = to_expression(var_id);
 +				entry_func.fixup_hooks_in.push_back([=]() {
-+					statement("float3 ", tc_name, " = float3(0.0);  // TES-as-compute: seed from spvDomainData in 3B.2.4");
++					statement("float3 ", tc_name,
++					          " = float3(spvDomainTessCoord[",
++					          to_expression(builtin_invocation_id_id), ".x]);");
 +				});
 +				break;
 +			}
@@ -117,7 +128,8 @@ AppGL doesn't yet build a PSO from the produced MSL.
 +			{
 +				string pid_name = to_expression(var_id);
 +				entry_func.fixup_hooks_in.push_back([=]() {
-+					statement("uint ", pid_name, " = 0u;  // TES-as-compute: seed from spvDomainData in 3B.2.4");
++					statement("uint ", pid_name, " = spvDomainPrimID[",
++					          to_expression(builtin_invocation_id_id), ".x];");
 +				});
 +				break;
 +			}
