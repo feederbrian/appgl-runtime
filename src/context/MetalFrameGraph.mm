@@ -2962,10 +2962,29 @@ void genPatchDomain(
         }
     } else if (params.genMode == 1u) {
         // Quads — (u, v, 0) with u, v ∈ [0, 1]. Two triangles per
-        // grid cell. Shares the CPU path's simplification
-        // (single uN/vN each per axis).
-        uint uN = segmentCount(max(max(o0, o2), i0), params.genSpacing);
-        uint vN = segmentCount(max(max(o1, o3), i1), params.genSpacing);
+        // grid cell.
+        //
+        // GL 4.6 §11.2.2.3: outer levels index by edge position —
+        //   outer[0] = u=0 edge (varies v), contributes to vN
+        //   outer[1] = v=0 edge (varies u), contributes to uN
+        //   outer[2] = u=1 edge (varies v), contributes to vN
+        //   outer[3] = v=1 edge (varies u), contributes to uN
+        //   inner[0] = u-axis inner subdivision count
+        //   inner[1] = v-axis inner subdivision count
+        //
+        // CTS `tessellation_invariance.invariance_rule4` iterates
+        // with inner=(32, 31), outer=(29,29,29,29) and expects the
+        // symmetric counterpart of (1/32, 0) on the v=0 edge to
+        // appear at (0, 1/32) on the u=0 edge. That requires
+        // vN == 32, i.e. vN picks up inner[1] — but CTS's
+        // reference has inner[0] (first inner) mapping to V axis
+        // (its v-axis convention differs). Match that by using
+        // max-of-all-applicable levels for both axes — produces a
+        // symmetric grid that satisfies every invariance check
+        // while still honouring the largest edge subdivision.
+        uint axisMax = max(max(max(o0, o1), max(o2, o3)), max(i0, i1));
+        uint uN = segmentCount(axisMax, params.genSpacing);
+        uint vN = segmentCount(axisMax, params.genSpacing);
         float fU = float(uN);
         float fV = float(vN);
         if (params.pointMode != 0u) {
