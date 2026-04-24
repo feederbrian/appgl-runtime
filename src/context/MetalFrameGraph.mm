@@ -3129,6 +3129,32 @@ kernel void spvGenTessDomain(
 #include <metal_stdlib>
 using namespace metal;
 
+// Factor-clamp kernel. Metal HW tess drops the entire patch if ANY
+// tess factor is <= 0; GL 4.6 §11.2.3 says outer<=0 ignores that edge
+// (the rest of the patch still tessellates) and inner<1 is silently
+// clamped to 1. Our MSL-kernel domain-gen path clamps to [1, 64] in
+// `segmentCount`. Mirror that clamp here so Metal HW sees the same
+// spec-compliant values the CPU path already does.
+//
+// Reads/writes `MTLQuadTessellationFactorsHalf` layout (edge[0..3] at
+// bytes 0..7, inside[0..1] at bytes 8..11). SPIRV-Cross's emitted TCS
+// writes this layout regardless of patch type — Metal reads the
+// triangle subset (edge[0..2] + inside at half[3]) correctly from the
+// first 8 bytes.
+kernel void spvTessFactorClamp(
+    device half* factors [[buffer(0)]],
+    constant uint& patchCount [[buffer(1)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= patchCount) return;
+    uint base = gid * 6u;  // 6 halves per patch (quad struct size)
+    for (uint i = 0u; i < 6u; ++i) {
+        half v = factors[base + i];
+        factors[base + i] = (v < half(1.0)) ? half(1.0) :
+                            (v > half(64.0)) ? half(64.0) : v;
+    }
+}
+
 [[patch(quad, 0)]] vertex void spvTessDomainCaptureQuad(
     float2 gl_TessCoordIn [[position_in_patch]],
     uint   gl_PrimitiveID [[patch_id]],
@@ -3162,6 +3188,26 @@ using namespace metal;
             return false;
         }
         return true;
+    }
+
+    // Phase 3C [metal-tess-TF] — lazily build the factor-clamp compute
+    // PSO. Shares `tessDomainCaptureLibrary` with the capture vertex
+    // fns. Returns nil on build failure — caller falls back to skipping
+    // the clamp (HW path will fail on degenerate factors).
+    id<MTLComputePipelineState> ensureTessFactorClampPipelineState() {
+        if (tessFactorClampPipelineState != nil) return tessFactorClampPipelineState;
+        if (!ensureTessDomainCaptureLibrary()) return nil;
+        id<MTLFunction> fn =
+            [tessDomainCaptureLibrary newFunctionWithName:@"spvTessFactorClamp"];
+        if (fn == nil) return nil;
+        NSError* err = nil;
+        tessFactorClampPipelineState =
+            [device newComputePipelineStateWithFunction:fn error:&err];
+        if (tessFactorClampPipelineState == nil) {
+            FG_TRACE(@"ensureTessFactorClampPipelineState failed: %@",
+                      err ? err.localizedDescription : @"(no err)");
+        }
+        return tessFactorClampPipelineState;
     }
 
     // Phase 3C [metal-tess-TF] — build (and cache) a PSO that captures
@@ -4460,6 +4506,35 @@ fragment float4 appgl_immediate_textured_fs(
                     // factor buffer per-patch based on the PSO's
                     // declared patch type; `instanceStride:0` matches
                     // the main Phase 3 tess draw convention.
+                    //
+                    // Preamble: clamp factors to [1, 64] (Metal HW
+                    // drops patches with any factor <= 0; GL spec says
+                    // inner < 1 silently clamps, and our MSL-kernel
+                    // path clamps in `segmentCount`). Skipped if the
+                    // clamp PSO build failed — in that case the HW
+                    // draw may legitimately produce 0 verts for
+                    // degenerate factor values and the TES-compute
+                    // dispatch is skipped.
+                    id<MTLComputePipelineState> clampPSO =
+                        ensureTessFactorClampPipelineState();
+                    if (clampPSO != nil) {
+                        uint32_t patchCountU = (uint32_t)info.patchCount;
+                        id<MTLCommandBuffer> clampCmd = [commandQueue commandBuffer];
+                        clampCmd.label = @"appgl-tess-factor-clamp";
+                        id<MTLComputeCommandEncoder> clampEnc =
+                            [clampCmd computeCommandEncoder];
+                        [clampEnc setComputePipelineState:clampPSO];
+                        [clampEnc setBuffer:factorBuf offset:0 atIndex:0];
+                        [clampEnc setBytes:&patchCountU
+                                    length:sizeof(patchCountU)
+                                   atIndex:1];
+                        [clampEnc dispatchThreads:MTLSizeMake((NSUInteger)patchCountU, 1, 1)
+                          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                        [clampEnc endEncoding];
+                        [clampCmd commit];
+                        [clampCmd waitUntilCompleted];
+                    }
+
                     MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor new];
                     rpd.renderTargetWidth = 1;
                     rpd.renderTargetHeight = 1;
@@ -5313,6 +5388,9 @@ private:
     id<MTLLibrary> tessDomainCaptureLibrary = nil;
     std::unordered_map<std::uint32_t, id<MTLRenderPipelineState>>
         tessDomainCapturePSOCache;
+    // Factor-clamp compute PSO. Shared across all HW capture draws
+    // (no partition/winding specialization needed — pure value clamp).
+    id<MTLComputePipelineState> tessFactorClampPipelineState = nil;
 
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
     // shader library, two pipeline states, and a default sampler.
