@@ -384,9 +384,52 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
 std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const {
     try {
         spirv_cross::CompilerMSL compiler(spirv, wordCount);
+        const auto execModel = compiler.get_execution_model();
+        const bool isTessControl = (execModel == spv::ExecutionModelTessellationControl);
+        const bool isTessEval = (execModel == spv::ExecutionModelTessellationEvaluation);
+        const bool isVertex = (execModel == spv::ExecutionModelVertex);
+        (void)isTessControl; (void)isTessEval; (void)isVertex;
 
         spirv_cross::CompilerMSL::Options mslOpts;
         mslOpts.platform = spirv_cross::CompilerMSL::Options::macOS;
+        // Step 8 (tessellation on Metal via SPIRV-Cross): when the shader is
+        // a tess stage, we emit MSL compatible with Metal's native tess
+        // pipeline (TCS-as-compute + TES-as-vertex-function + hardware
+        // tessellator). The Metal-side wiring is not yet in place, so
+        // this emission is gated behind APPGL_ENABLE_METAL_TESS=1 — when
+        // unset, tess stages fall back to the CPU interpreter path.
+        //
+        // SPIRV-Cross emits for the three stages under these options:
+        //  * VS (when `vertex_for_tessellation=true, capture_output_to_
+        //    buffer=true`): `kernel` that writes per-vertex attribs to
+        //    a buffer indexed by gl_VertexID. Input comes via
+        //    MTLStageInputOutputDescriptor bound to the compute encoder.
+        //  * TCS (auto on `ExecutionModelTessellationControl`): `kernel`
+        //    with per-thread `[[stage_in]]` pulling VS output buffer,
+        //    threadgroup `gl_in[]`, per-CP output buffer at buffer(28),
+        //    patch output at buffer(27), tess factor buffer at
+        //    buffer(26).
+        //  * TES (auto on `ExecutionModelTessellationEvaluation`):
+        //    `vertex` function intended for an MTLRenderPipeline with
+        //    `tessellationEnabled = YES`. `raw_buffer_tese_input=true`
+        //    makes it read per-CP (buffer 22) and per-patch (buffer 20)
+        //    inputs from buffers, enabling nested-array varyings.
+        static const bool metalTessEnabled = []() {
+            const char* v = std::getenv("APPGL_ENABLE_METAL_TESS");
+            return v != nullptr && v[0] != '0' && v[0] != '\0';
+        }();
+        if (metalTessEnabled && (isTessControl || isTessEval)) {
+            if (isTessEval) {
+                mslOpts.raw_buffer_tese_input = true;
+            }
+            mslOpts.tess_domain_origin_lower_left = true;
+        }
+        // TODO(step 8-2): at link time, detect that a VS is paired with
+        // TCS/TES in the same program; plumb that down here as a
+        // translator flag and set
+        //    mslOpts.vertex_for_tessellation = true;
+        //    mslOpts.capture_output_to_buffer = true;
+        // on the VS so it emits as a compute kernel writing to buffer.
         // MSL 2.2 (macOS 10.15+, 2019) required for:
         //   - `[[primitive_id]]` in fragment shaders on macOS — without it
         //     SPIRV-Cross throws `PrimitiveId on macOS requires MSL 2.2`
@@ -528,7 +571,6 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 nextLoc++;
             }
         };
-        const auto execModel = compiler.get_execution_model();
         if (execModel == spv::ExecutionModelVertex) {
             assignMissingLocations(resources.stage_outputs);
         } else if (execModel == spv::ExecutionModelFragment) {
