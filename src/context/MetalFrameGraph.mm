@@ -6101,26 +6101,44 @@ kernel void spvGenTessDomainQuadsPort(
 
     struct Case {
         appgl::TessDomain domain;
+        appgl::TessSpacing spacing;
         float outer[4];
         float inner[2];
         const char* name;
     };
     const Case cases[] = {
-        // Triangles
-        {appgl::TessDomain::Triangles, {2.0f, 2.0f, 2.0f, 0.0f}, {2.0f, 0.0f}, "tri equal N=2"},
-        {appgl::TessDomain::Triangles, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, "tri equal N=3"},
-        {appgl::TessDomain::Triangles, {5.0f, 5.0f, 5.0f, 0.0f}, {5.0f, 0.0f}, "tri equal N=5"},
-        {appgl::TessDomain::Triangles, {7.0f, 4.0f, 3.0f, 0.0f}, {6.0f, 0.0f}, "tri equal mixed"},
-        {appgl::TessDomain::Triangles, {1.0f, 1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, "tri equal N=1 (min)"},
-        {appgl::TessDomain::Triangles, {12.0f, 9.0f, 7.0f, 0.0f}, {10.0f, 0.0f}, "tri equal asym"},
-        // Quads — split-axis uN/vN. Mixed inner tests asymmetric grids.
-        {appgl::TessDomain::Quads, {2.0f, 2.0f, 2.0f, 2.0f}, {2.0f, 2.0f}, "quad equal N=2"},
-        {appgl::TessDomain::Quads, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, "quad equal N=4"},
-        {appgl::TessDomain::Quads, {8.0f, 8.0f, 8.0f, 8.0f}, {8.0f, 8.0f}, "quad equal N=8"},
-        {appgl::TessDomain::Quads, {1.0f, 1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, "quad equal N=1 (min)"},
-        // Split-axis: inner[0] drives u, inner[1] drives v. CTS rule4 style.
-        {appgl::TessDomain::Quads, {29.0f, 29.0f, 29.0f, 29.0f}, {32.0f, 31.0f}, "quad equal rule4-ish"},
-        {appgl::TessDomain::Quads, {5.0f, 7.0f, 9.0f, 11.0f}, {13.0f, 17.0f}, "quad equal asym"},
+        // Triangles — Equal
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {2.0f, 2.0f, 2.0f, 0.0f}, {2.0f, 0.0f}, "tri eq N=2"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, "tri eq N=3"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {5.0f, 5.0f, 5.0f, 0.0f}, {5.0f, 0.0f}, "tri eq N=5"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {7.0f, 4.0f, 3.0f, 0.0f}, {6.0f, 0.0f}, "tri eq mixed"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {1.0f, 1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, "tri eq N=1 (min)"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {12.0f, 9.0f, 7.0f, 0.0f}, {10.0f, 0.0f}, "tri eq asym"},
+        // Triangles — FractionalEven (rounds up to next even ≥ 2)
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {4.0f, 4.0f, 4.0f, 0.0f}, {4.0f, 0.0f}, "tri fEven N=4"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {4.5f, 4.5f, 4.5f, 0.0f}, {4.5f, 0.0f}, "tri fEven N=4.5 → 6"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {1.0f, 1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, "tri fEven min (→ 2)"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {8.0f, 6.0f, 4.0f, 0.0f}, {7.0f, 0.0f}, "tri fEven asym"},
+        // Triangles — FractionalOdd (rounds up to next odd ≥ 1)
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, "tri fOdd N=3"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {3.5f, 3.5f, 3.5f, 0.0f}, {3.5f, 0.0f}, "tri fOdd N=3.5 → 5"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {4.0f, 4.0f, 4.0f, 0.0f}, {4.0f, 0.0f}, "tri fOdd N=4 → 5"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {8.0f, 6.0f, 4.0f, 0.0f}, {7.0f, 0.0f}, "tri fOdd asym"},
+        // Quads — Equal
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {2.0f, 2.0f, 2.0f, 2.0f}, {2.0f, 2.0f}, "quad eq N=2"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, "quad eq N=4"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {8.0f, 8.0f, 8.0f, 8.0f}, {8.0f, 8.0f}, "quad eq N=8"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {1.0f, 1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, "quad eq N=1 (min)"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {29.0f, 29.0f, 29.0f, 29.0f}, {32.0f, 31.0f}, "quad eq rule4-ish"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {5.0f, 7.0f, 9.0f, 11.0f}, {13.0f, 17.0f}, "quad eq asym"},
+        // Quads — FractionalEven
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, "quad fEven N=4"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {3.5f, 3.5f, 3.5f, 3.5f}, {3.5f, 3.5f}, "quad fEven N=3.5 → 4"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {8.0f, 6.0f, 4.0f, 2.0f}, {7.0f, 5.0f}, "quad fEven asym"},
+        // Quads — FractionalOdd
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {3.0f, 3.0f, 3.0f, 3.0f}, {3.0f, 3.0f}, "quad fOdd N=3"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, "quad fOdd N=4 → 5"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {8.0f, 6.0f, 4.0f, 2.0f}, {7.0f, 5.0f}, "quad fOdd asym"},
     };
 
     uint32_t passCount = 0;
@@ -6131,7 +6149,7 @@ kernel void spvGenTessDomainQuadsPort(
                 ? trianglesPSO : quadsPSO;
         if (pso == nil) continue;
         appgl::TessDomainOutput cpuOut = appgl::generateTessDomain(
-            tc.domain, appgl::TessSpacing::Equal,
+            tc.domain, tc.spacing,
             tc.outer, tc.inner, /*pointMode=*/false, /*flipWinding=*/false);
 
         // Expand CPU's indexed output into non-indexed "one coord per
@@ -6163,9 +6181,15 @@ kernel void spvGenTessDomainQuadsPort(
             uint32_t pointMode;
             uint32_t flipWinding;
         };
+        uint32_t spacingEnum = 0u;
+        switch (tc.spacing) {
+            case appgl::TessSpacing::Equal:          spacingEnum = 0u; break;
+            case appgl::TessSpacing::FractionalEven: spacingEnum = 1u; break;
+            case appgl::TessSpacing::FractionalOdd:  spacingEnum = 2u; break;
+        }
         PortParams params{
             tc.domain == appgl::TessDomain::Quads ? 1u : 0u,
-            0u, 1u, 0u, 0u
+            spacingEnum, 1u, 0u, 0u
         };
         id<MTLBuffer> paramsBuf = [device
             newBufferWithBytes:&params
