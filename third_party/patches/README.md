@@ -38,6 +38,44 @@ git apply ../../third_party/patches/<patch-name>.patch
 
 ## Patches
 
+### `spirv-cross-tess-struct-parity.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` —
+`CompilerMSL::add_variable_to_interface_block`.
+
+**Summary:** Force `gl_PerVertex` block builtin members (gl_Position,
+gl_PointSize, gl_ClipDistance, gl_CullDistance) to be emitted in the
+MSL interface struct regardless of whether the current stage actively
+references them, whenever the storage is a **tess capture-buffer
+interface**:
+
+- `StorageClassOutput` from a VS compiled with
+  `vertex_for_tessellation + capture_output_to_buffer` (or from a TCS
+  writing to its per-CP output buffer)
+- `StorageClassInput` of a TCS in `multi_patch_workgroup` mode
+- `StorageClassInput` of a TES in `raw_buffer_tese_input` mode
+
+**Why:** Upstream's `has_active_builtin` gate (line 4004) prunes
+unused-in-this-stage builtins. For the tess capture-buffer model, VS
+and TCS (or TCS and TES) read/write a shared struct typed as `device
+main0_in*` / `device main0_out*` — pointer arithmetic uses
+`sizeof(main0_in)`. If VS writes `gl_PointSize` (so the VS's
+`main0_out` includes it) but the TCS doesn't read `gl_PointSize`
+(so the TCS's `main0_in` prunes it), struct strides diverge and the
+TCS's indexed reads return garbage for every patch past the first.
+
+Forcing gl_PerVertex inclusion on both sides keeps stride parity at
+the cost of a few unused bytes per vertex. No effect outside tess
+capture-buffer mode — the gate is tightly scoped so non-tess and
+non-capture-mode stages continue to emit the minimal struct.
+
+**CTS tests unlocked:** Phase 3 of the metal-tess project requires
+this. Without the patch, `tessellation_invariance.invariance_rule3-7`
+and much of the `vertex_spacing.*` / `tessellation_control_to_
+tessellation_evaluation.*` clusters read wrong per-CP/per-patch data
+even when the Metal dispatch shape is correct. With the patch plus
+the other Phase 3 infrastructure, TF-free programs can validate.
+
 ### `spirv-cross-unsized-array-fallback-literal.patch`
 
 **Target:** `third_party/SPIRV-Cross/` (KhronosGroup/SPIRV-Cross @ 4d4b79b)
