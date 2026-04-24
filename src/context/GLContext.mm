@@ -9564,7 +9564,29 @@ bool GLContext::vertexAttribPointer(
         auto& bp = vertexArray->bindingPoints[index];
         bp.buffer = buffer;
         bp.offset = static_cast<GLintptr>(attribute.pointer);
-        bp.stride = stride > 0 ? stride : static_cast<GLsizei>(16);
+        // GL 4.6 §10.3.8: glVertexAttribPointer(stride=0) means "tight
+        // pack using size*sizeof(type)" — not the VAO default (16).
+        // The binding-point stride propagates to
+        // `MetalVertexDescriptor.layouts[slot].stride`; writing 16
+        // for a small (e.g. size=2 FLOAT = 8-byte) attribute makes
+        // Metal fetch every other vertex and zero-fills intermediate
+        // ones.
+        GLsizei effStride = stride;
+        if (effStride <= 0) {
+            auto byteSize = [](GLenum t) -> GLsizei {
+                switch (t) {
+                    case GL_BYTE: case GL_UNSIGNED_BYTE: return 1;
+                    case GL_SHORT: case GL_UNSIGNED_SHORT: case GL_HALF_FLOAT: return 2;
+                    case GL_FIXED:
+                    case GL_FLOAT: case GL_INT: case GL_UNSIGNED_INT: return 4;
+                    case GL_DOUBLE: return 8;
+                    default: return 4;
+                }
+            };
+            effStride = static_cast<GLsizei>(size) * byteSize(type);
+            if (effStride <= 0) effStride = 16;
+        }
+        bp.stride = effStride;
     }
     markVertexDescriptorDirty(*vertexArray);
     impl_->state->markDirty(DirtyBit::VertexInput);
@@ -20971,21 +20993,41 @@ static ResolvedVertexAttrib resolveVertexAttrib(
     const GLVertexArrayObject& vao)
 {
     ResolvedVertexAttrib r;
-    if (attr.useSeparatedFormat && attr.bindingIndex < vao.bindingPoints.size()) {
-        const auto& bp = vao.bindingPoints[attr.bindingIndex];
-        r.bufferName = bp.buffer;
-        r.stride = bp.stride > 0
-            ? static_cast<std::size_t>(bp.stride)
-            : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
-        r.offset = static_cast<std::size_t>(bp.offset)
-                 + static_cast<std::size_t>(attr.relativeOffset);
-    } else {
-        r.bufferName = attr.buffer;
-        r.stride = attr.stride > 0
-            ? static_cast<std::size_t>(attr.stride)
-            : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
-        r.offset = static_cast<std::size_t>(attr.pointer);
+    // GL 4.3 separated vertex format: attribute[i].bindingIndex = i by
+    // default (see `GLObjectStore::initializeVertexArray`), and
+    // `glBindVertexBuffer(s)` writes buffer/offset/stride to
+    // `bindingPoints[N]` independently. An attribute can reach that
+    // binding state WITHOUT a prior `glVertexAttribFormat` — the
+    // default per-attribute format (size=4, type=GL_FLOAT,
+    // relativeOffset=0) is always in effect. So we take the
+    // binding-point path whenever a bound buffer is present there,
+    // even when `useSeparatedFormat` is still false.
+    //
+    // Without this fallback, `multi_bind.draw_bind_vertex_buffers`
+    // and similar "bindVertexBuffers + default-format-draw" tests
+    // read zeros from every attribute — `attr.buffer` is 0
+    // (VertexAttribPointer was never called), so the legacy branch
+    // returned bufferName=0 and Metal fetched nothing.
+    const bool hasSeparatedBinding =
+        (attr.bindingIndex < vao.bindingPoints.size()) &&
+        (vao.bindingPoints[attr.bindingIndex].buffer != 0);
+    if (attr.useSeparatedFormat || hasSeparatedBinding) {
+        if (attr.bindingIndex < vao.bindingPoints.size()) {
+            const auto& bp = vao.bindingPoints[attr.bindingIndex];
+            r.bufferName = bp.buffer;
+            r.stride = bp.stride > 0
+                ? static_cast<std::size_t>(bp.stride)
+                : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
+            r.offset = static_cast<std::size_t>(bp.offset)
+                     + static_cast<std::size_t>(attr.relativeOffset);
+            return r;
+        }
     }
+    r.bufferName = attr.buffer;
+    r.stride = attr.stride > 0
+        ? static_cast<std::size_t>(attr.stride)
+        : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
+    r.offset = static_cast<std::size_t>(attr.pointer);
     return r;
 }
 

@@ -268,24 +268,53 @@ MetalVertexDescriptorBuildResult buildMetalVertexDescriptor(const GLVertexArrayO
             return result;
         }
 
-        const std::uint32_t stride = static_cast<std::uint32_t>(
-            attribute.stride > 0 ? static_cast<std::size_t>(attribute.stride) : attributeByteSize(attribute)
-        );
-        const std::uint32_t metalSlot = findOrAssignSlot(attribute.buffer, stride, attribute.divisor);
+        // GL 4.3 separated vertex format: when `glBindVertexBuffer(s)`
+        // has written a buffer/stride/offset to the attribute's
+        // binding point, prefer that over the legacy
+        // `attr.buffer/stride/pointer` — even if
+        // `glVertexAttribFormat` was never called. The default
+        // per-attribute format (size=4, type=FLOAT, relativeOffset=0)
+        // is always in effect. Without this, tests that rely on
+        // "enableVertexAttribArray + bindVertexBuffers + draw" (e.g.
+        // `multi_bind.draw_bind_vertex_buffers`) fetch zeros because
+        // `attr.buffer` is 0 (VertexAttribPointer was never called).
+        GLuint bufferName = attribute.buffer;
+        std::uint32_t stride = 0;
+        NSUInteger vertexOffset = static_cast<NSUInteger>(attribute.pointer);
+        GLuint divisor = attribute.divisor;
+        const bool hasSeparatedBinding =
+            (attribute.bindingIndex < vertexArray.bindingPoints.size()) &&
+            (vertexArray.bindingPoints[attribute.bindingIndex].buffer != 0);
+        if (attribute.useSeparatedFormat || hasSeparatedBinding) {
+            const auto& bp = vertexArray.bindingPoints[attribute.bindingIndex];
+            bufferName = bp.buffer;
+            stride = static_cast<std::uint32_t>(
+                bp.stride > 0 ? static_cast<std::size_t>(bp.stride)
+                              : attributeByteSize(attribute));
+            vertexOffset = static_cast<NSUInteger>(
+                static_cast<std::size_t>(bp.offset) +
+                static_cast<std::size_t>(attribute.relativeOffset));
+            divisor = bp.divisor;
+        } else {
+            stride = static_cast<std::uint32_t>(
+                attribute.stride > 0 ? static_cast<std::size_t>(attribute.stride)
+                                     : attributeByteSize(attribute));
+        }
+        const std::uint32_t metalSlot = findOrAssignSlot(bufferName, stride, divisor);
 
         descriptor.attributes[index].format = format;
-        descriptor.attributes[index].offset = static_cast<NSUInteger>(attribute.pointer);
+        descriptor.attributes[index].offset = vertexOffset;
         descriptor.attributes[index].bufferIndex = static_cast<NSUInteger>(metalSlot);
         descriptor.layouts[metalSlot].stride = static_cast<NSUInteger>(stride);
-        descriptor.layouts[metalSlot].stepFunction = attribute.divisor == 0 ? MTLVertexStepFunctionPerVertex : MTLVertexStepFunctionPerInstance;
-        descriptor.layouts[metalSlot].stepRate = attribute.divisor == 0 ? 1 : static_cast<NSUInteger>(attribute.divisor);
+        descriptor.layouts[metalSlot].stepFunction = divisor == 0 ? MTLVertexStepFunctionPerVertex : MTLVertexStepFunctionPerInstance;
+        descriptor.layouts[metalSlot].stepRate = divisor == 0 ? 1 : static_cast<NSUInteger>(divisor);
 
         hashValue(hash, static_cast<std::uint64_t>(index));
         hashValue(hash, static_cast<std::uint64_t>(format));
-        hashValue(hash, static_cast<std::uint64_t>(attribute.pointer));
+        hashValue(hash, static_cast<std::uint64_t>(vertexOffset));
         hashValue(hash, static_cast<std::uint64_t>(stride));
-        hashValue(hash, static_cast<std::uint64_t>(attribute.divisor));
-        hashValue(hash, static_cast<std::uint64_t>(attribute.buffer));
+        hashValue(hash, static_cast<std::uint64_t>(divisor));
+        hashValue(hash, static_cast<std::uint64_t>(bufferName));
         hashValue(hash, static_cast<std::uint64_t>(metalSlot));
         hashValue(hash, attribute.integer ? 1u : 0u);
     }
