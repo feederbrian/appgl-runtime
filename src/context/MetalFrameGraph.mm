@@ -2,6 +2,7 @@
 
 #include "../objects/GLObjectStore.h"
 #include "../runtime/AppGLLog.h"
+#include "../shader/TessellationEmulator.h"
 #include "../state/GLStateTracker.h"
 
 #import <Metal/Metal.h>
@@ -5799,6 +5800,341 @@ static void stopMetalCaptureIfActive() {
     NSLog(@"[GL] MTLCapture: stopped, trace flushed");
 }
 
+// Option A probe [metal-tess-TF]: bit-exact diff between a ported-to-MSL
+// domain generator and `appgl::generateTessDomain` (the CPU reference
+// that `TessellationEmulator.cpp` exposes and CTS's
+// `getAmountOfVerticesGeneratedByTessellator` probe matches bit-for-bit).
+//
+// Runs once on first MetalFrameGraph construction, gated on
+// APPGL_TEST_TESS_DOMAIN_PORT=1. Dispatches the new kernel for a curated
+// set of (mode, spacing, outer, inner) cases, walks `generateTessDomain`'s
+// indexed output into the non-indexed "one-coord-per-emitted-vertex"
+// shape the downstream TES-compute consumes, diffs element-for-element,
+// and reports MATCH/DIFFER to stderr.
+//
+// Scope of this first landing: triangles, equal-spacing, integer
+// partition, no winding flip, no point_mode. Later commits widen.
+static void phaseAProbeTessDomainPort(id<MTLDevice> device,
+                                       id<MTLCommandQueue> commandQueue)
+{
+    if (std::getenv("APPGL_TEST_TESS_DOMAIN_PORT") == nullptr) return;
+    if (device == nil || commandQueue == nil) return;
+    static bool sRan = false;
+    if (sRan) return;
+    sRan = true;
+
+    std::fprintf(stderr, "[APPGL domain-port] probe starting\n");
+
+    // Kernel source. Bit-exact port of `tessellateTriangles` in
+    // TessellationEmulator.cpp (equal-spacing only for this commit).
+    // Factor buffer layout is `MTLQuadTessellationFactorsHalf` — edge
+    // first, then inside — so the same buffer works whether
+    // SPIRV-Cross emits TCS for triangles or quads.
+    NSString* msl = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct QuadFactors {
+    half edgeTessellationFactor[4];
+    half insideTessellationFactor[2];
+};
+
+struct TessPortParams {
+    uint genMode;        // 0=Triangles, 1=Quads (Isolines deferred)
+    uint genSpacing;     // 0=Equal, 1=FractionalEven, 2=FractionalOdd
+    uint patchCount;
+    uint pointMode;
+    uint flipWinding;
+};
+
+// Port of `segmentCount` in TessellationEmulator.cpp. Clamp matches
+// the CPU's `!(level >= 1.0f)` semantics (NaN goes to 1.0 too).
+inline uint spvPortSegmentCount(float level, uint spacing) {
+    if (!(level >= 1.0f)) level = 1.0f;
+    if (level > 64.0f) level = 64.0f;
+    int n = int(ceil(level));
+    if (spacing == 1u) {
+        if (n < 2) n = 2;
+        if ((n & 1) != 0) n += 1;
+    } else if (spacing == 2u) {
+        if (n < 1) n = 1;
+        if ((n & 1) == 0) n += 1;
+    } else {
+        if (n < 1) n = 1;
+    }
+    return uint(n);
+}
+
+// Triangle domain emission. Port of `tessellateTriangles` — single
+// subdivision count N = segmentCount(max(outer[0..2], inner[0]), spacing).
+// Emits non-indexed triangle list (expansion of CPU's indexed form) via
+// atomic cursor so downstream TES-compute reads flat per-vertex.
+inline void spvPortEmitTriangle(
+    float3 a, float3 b, float3 c,
+    uint primID, uint flipWinding,
+    device atomic_uint* cursor,
+    device packed_float3* coords,
+    device uint* primIDs)
+{
+    uint base = atomic_fetch_add_explicit(cursor, 3u, memory_order_relaxed);
+    coords[base + 0] = packed_float3(a);
+    if (flipWinding != 0u) {
+        coords[base + 1] = packed_float3(c);
+        coords[base + 2] = packed_float3(b);
+    } else {
+        coords[base + 1] = packed_float3(b);
+        coords[base + 2] = packed_float3(c);
+    }
+    primIDs[base + 0] = primID;
+    primIDs[base + 1] = primID;
+    primIDs[base + 2] = primID;
+}
+
+void spvPortGenTriangles(
+    uint patchID,
+    constant TessPortParams& params,
+    const device QuadFactors* factors,
+    device packed_float3* coords,
+    device uint* primIDs,
+    device atomic_uint* cursor)
+{
+    QuadFactors f = factors[patchID];
+    float o0 = float(f.edgeTessellationFactor[0]);
+    float o1 = float(f.edgeTessellationFactor[1]);
+    float o2 = float(f.edgeTessellationFactor[2]);
+    float i0 = float(f.insideTessellationFactor[0]);
+    uint N = spvPortSegmentCount(max(max(o0, o1), max(o2, i0)),
+                                  params.genSpacing);
+    float fN = float(N);
+
+    if (params.pointMode != 0u) {
+        // Walk grid row-major, emit every vertex once.
+        for (uint j = 0u; j <= N; ++j) {
+            uint rowLen = N + 1u - j;
+            float fv = precise::divide(float(j), fN);
+            for (uint i = 0u; i < rowLen; ++i) {
+                float fu = precise::divide(float(i), fN);
+                float fw = 1.0f - fu - fv;
+                uint base = atomic_fetch_add_explicit(
+                    cursor, 1u, memory_order_relaxed);
+                coords[base] = packed_float3(fu, fv, fw);
+                primIDs[base] = patchID;
+            }
+        }
+        return;
+    }
+
+    // Triangulation (matches CPU index loop).
+    // `precise::divide` forces IEEE 754 round-to-nearest; the default
+    // `/` operator permits 2.5 ULP on Metal, which diverged from the
+    // CPU reference at N=7 + N=12 patches (1 ULP off on 3/7 + 5/12).
+    for (uint j = 0u; j + 1u <= N; ++j) {
+        uint row0Len = N + 1u - j;
+        uint row1Len = N - j;
+        float vj0 = precise::divide(float(j),        fN);
+        float vj1 = precise::divide(float(j + 1u),   fN);
+        for (uint i = 0u; i + 1u < row0Len; ++i) {
+            float ui0 = precise::divide(float(i),        fN);
+            float ui1 = precise::divide(float(i + 1u),   fN);
+            float wa0 = 1.0f - ui0 - vj0;
+            float wa1 = 1.0f - ui1 - vj0;
+            float wb0 = 1.0f - ui0 - vj1;
+            float wb1 = 1.0f - ui1 - vj1;
+            // Upward triangle: (i, j), (i+1, j), (i, j+1).
+            if (i < row1Len) {
+                spvPortEmitTriangle(
+                    float3(ui0, vj0, wa0),
+                    float3(ui1, vj0, wa1),
+                    float3(ui0, vj1, wb0),
+                    patchID, params.flipWinding,
+                    cursor, coords, primIDs);
+            }
+            // Downward triangle: (i+1, j), (i+1, j+1), (i, j+1).
+            if (i + 1u < row1Len) {
+                spvPortEmitTriangle(
+                    float3(ui1, vj0, wa1),
+                    float3(ui1, vj1, wb1),
+                    float3(ui0, vj1, wb0),
+                    patchID, params.flipWinding,
+                    cursor, coords, primIDs);
+            }
+        }
+    }
+}
+
+kernel void spvGenTessDomainTrianglesPort(
+    constant TessPortParams& params [[buffer(0)]],
+    const device QuadFactors* factors [[buffer(26)]],
+    device packed_float3* coords [[buffer(25)]],
+    device uint* primIDs [[buffer(24)]],
+    device atomic_uint* cursor [[buffer(23)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid != 0u) return;
+    for (uint p = 0u; p < params.patchCount; ++p) {
+        spvPortGenTriangles(p, params, factors, coords, primIDs, cursor);
+    }
+}
+)MSL";
+
+    NSError* libErr = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:msl options:nil error:&libErr];
+    if (lib == nil) {
+        std::fprintf(stderr, "[APPGL domain-port] library build failed: %s\n",
+                     libErr ? libErr.localizedDescription.UTF8String : "(no err)");
+        return;
+    }
+    id<MTLFunction> fn = [lib newFunctionWithName:@"spvGenTessDomainTrianglesPort"];
+    if (fn == nil) {
+        std::fprintf(stderr, "[APPGL domain-port] function not found\n");
+        return;
+    }
+    NSError* psoErr = nil;
+    id<MTLComputePipelineState> pso =
+        [device newComputePipelineStateWithFunction:fn error:&psoErr];
+    if (pso == nil) {
+        std::fprintf(stderr, "[APPGL domain-port] PSO build failed: %s\n",
+                     psoErr ? psoErr.localizedDescription.UTF8String : "(no err)");
+        return;
+    }
+
+    auto toHalf = [](float fv) -> uint16_t {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &fv, sizeof(bits));
+        uint32_t sign = (bits >> 31) & 0x1;
+        int32_t  exp  = (int32_t)((bits >> 23) & 0xff) - 127;
+        uint32_t mant = bits & 0x7fffff;
+        if (exp >= 16) return (uint16_t)((sign << 15) | 0x7c00);
+        if (exp <= -15) return (uint16_t)(sign << 15);
+        return (uint16_t)((sign << 15) | (((exp + 15) & 0x1f) << 10) |
+                          (mant >> 13));
+    };
+
+    struct Case {
+        float outer[4];
+        float inner[2];
+        const char* name;
+    };
+    const Case cases[] = {
+        {{2.0f, 2.0f, 2.0f, 0.0f}, {2.0f, 0.0f}, "tri equal N=2"},
+        {{3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, "tri equal N=3"},
+        {{5.0f, 5.0f, 5.0f, 0.0f}, {5.0f, 0.0f}, "tri equal N=5"},
+        {{7.0f, 4.0f, 3.0f, 0.0f}, {6.0f, 0.0f}, "tri equal mixed"},
+        {{1.0f, 1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, "tri equal N=1 (min)"},
+        {{12.0f, 9.0f, 7.0f, 0.0f}, {10.0f, 0.0f}, "tri equal asym"},
+    };
+
+    uint32_t passCount = 0;
+    uint32_t failCount = 0;
+    for (const Case& tc : cases) {
+        appgl::TessDomainOutput cpuOut = appgl::generateTessDomain(
+            appgl::TessDomain::Triangles, appgl::TessSpacing::Equal,
+            tc.outer, tc.inner, /*pointMode=*/false, /*flipWinding=*/false);
+
+        // Expand CPU's indexed output into non-indexed "one coord per
+        // emitted vertex" shape — same layout the GPU kernel produces.
+        std::vector<float> cpuExpanded;
+        cpuExpanded.reserve(cpuOut.indices.size() * 3);
+        for (std::uint32_t idx : cpuOut.indices) {
+            cpuExpanded.push_back(cpuOut.coords[idx * 3 + 0]);
+            cpuExpanded.push_back(cpuOut.coords[idx * 3 + 1]);
+            cpuExpanded.push_back(cpuOut.coords[idx * 3 + 2]);
+        }
+
+        uint16_t factorData[6] = {0};
+        factorData[0] = toHalf(tc.outer[0]);
+        factorData[1] = toHalf(tc.outer[1]);
+        factorData[2] = toHalf(tc.outer[2]);
+        factorData[3] = toHalf(tc.outer[3]);
+        factorData[4] = toHalf(tc.inner[0]);
+        factorData[5] = toHalf(tc.inner[1]);
+        id<MTLBuffer> factorBuf = [device
+            newBufferWithBytes:factorData
+                        length:sizeof(MTLQuadTessellationFactorsHalf)
+                       options:MTLResourceStorageModeShared];
+
+        struct PortParams {
+            uint32_t genMode;
+            uint32_t genSpacing;
+            uint32_t patchCount;
+            uint32_t pointMode;
+            uint32_t flipWinding;
+        };
+        PortParams params{0u, 0u, 1u, 0u, 0u};
+        id<MTLBuffer> paramsBuf = [device
+            newBufferWithBytes:&params
+                        length:sizeof(params)
+                       options:MTLResourceStorageModeShared];
+
+        uint32_t zero = 0;
+        id<MTLBuffer> cursorBuf = [device
+            newBufferWithBytes:&zero length:sizeof(uint32_t)
+                       options:MTLResourceStorageModeShared];
+        const NSUInteger kMaxVerts = 100000;
+        id<MTLBuffer> coordsBuf = [device
+            newBufferWithLength:kMaxVerts * 12
+                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> primIDsBuf = [device
+            newBufferWithLength:kMaxVerts * sizeof(uint32_t)
+                        options:MTLResourceStorageModeShared];
+
+        id<MTLCommandBuffer> cb = [commandQueue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:pso];
+        [enc setBuffer:paramsBuf offset:0 atIndex:0];
+        [enc setBuffer:factorBuf offset:0 atIndex:26];
+        [enc setBuffer:coordsBuf offset:0 atIndex:25];
+        [enc setBuffer:primIDsBuf offset:0 atIndex:24];
+        [enc setBuffer:cursorBuf offset:0 atIndex:23];
+        [enc dispatchThreads:MTLSizeMake(1, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+
+        uint32_t gpuVerts = *(const uint32_t*)cursorBuf.contents;
+        const float* gpuCoords = (const float*)coordsBuf.contents;
+
+        bool match = true;
+        const std::size_t cpuN = cpuExpanded.size() / 3;
+        if (gpuVerts != cpuN) {
+            match = false;
+        } else {
+            for (std::size_t k = 0; k < cpuExpanded.size(); ++k) {
+                if (gpuCoords[k] != cpuExpanded[k]) { match = false; break; }
+            }
+        }
+        if (match) {
+            std::fprintf(stderr, "[APPGL domain-port]   %-24s MATCH   (%zu verts)\n",
+                         tc.name, cpuN);
+            ++passCount;
+        } else {
+            std::fprintf(stderr, "[APPGL domain-port]   %-24s DIFFER  (CPU=%zu GPU=%u)\n",
+                         tc.name, cpuN, gpuVerts);
+            ++failCount;
+            const std::size_t nShow = std::min<std::size_t>(cpuN, gpuVerts);
+            for (std::size_t k = 0; k < nShow; ++k) {
+                float cu = cpuExpanded[k*3+0];
+                float cv = cpuExpanded[k*3+1];
+                float cw = cpuExpanded[k*3+2];
+                float gu = gpuCoords[k*3+0];
+                float gv = gpuCoords[k*3+1];
+                float gw = gpuCoords[k*3+2];
+                if (cu != gu || cv != gv || cw != gw) {
+                    std::fprintf(stderr,
+                        "[APPGL domain-port]     first diff at vert %zu: "
+                        "CPU=(%.9g,%.9g,%.9g) GPU=(%.9g,%.9g,%.9g)\n",
+                        k, cu, cv, cw, gu, gv, gw);
+                    break;
+                }
+            }
+        }
+    }
+    std::fprintf(stderr,
+        "[APPGL domain-port] probe done: %u MATCH / %u DIFFER\n",
+        passCount, failCount);
+}
+
 // Phase 5 PoC [metal-tess-TF]: probe Metal's HW tessellator directly
 // with a minimal capture vertex function. Dumps (tessCoord, primID)
 // for a given (primitive, spacing, inner, outer) — so we can compare
@@ -6008,6 +6344,8 @@ MetalFrameGraph::MetalFrameGraph(void* layer, void* device, void* commandQueue)
     startMetalCaptureIfRequested((__bridge id<MTLDevice>)device);
     phase5ProbeMetalNativeTess((__bridge id<MTLDevice>)device,
                                 (__bridge id<MTLCommandQueue>)commandQueue);
+    phaseAProbeTessDomainPort((__bridge id<MTLDevice>)device,
+                               (__bridge id<MTLCommandQueue>)commandQueue);
 }
 
 MetalFrameGraph::~MetalFrameGraph() {
