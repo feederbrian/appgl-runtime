@@ -3518,6 +3518,139 @@ fragment float4 appgl_immediate_textured_fs(
         return (void*)CFBridgingRetain(pso);
     }
 
+    // Metal tess Phase 1 probe — validates that the SPIRV-Cross-emitted
+    // tess MSL compiles and the Metal tessellation pipeline descriptor
+    // accepts the TES + FS function pair. See the public
+    // `MetalFrameGraph::probeTessellationPipeline` declaration for the
+    // full contract.
+    MetalFrameGraph::TessPipelineProbeResult probeTessellationPipeline(
+        const std::string& tcsMSL,
+        const std::string& tesMSL,
+        const std::string& fsMSL,
+        GLenum genMode,
+        GLenum genSpacing,
+        GLenum genVertexOrder)
+    {
+        MetalFrameGraph::TessPipelineProbeResult result;
+        if (device == nil) {
+            result.diagnostic = "no Metal device";
+            return result;
+        }
+        if (tcsMSL.empty() || tesMSL.empty() || fsMSL.empty()) {
+            result.diagnostic = "missing MSL for one or more stages (tcs/tes/fs)";
+            return result;
+        }
+
+        // Stage 1 — TCS compute PSO. Shares `buildComputePipelineState`
+        // so any refinements to compute-pipeline validation flow through
+        // the tess path too.
+        std::string tcsError;
+        void* tcsPSO = buildComputePipelineState(tcsMSL, &tcsError, nullptr);
+        if (tcsPSO == nullptr) {
+            result.diagnostic = std::string("tcs-compute: ") + tcsError;
+            return result;
+        }
+        result.computeOk = true;
+        result.computePipelineState = tcsPSO;
+
+        // Stage 2 — TES + FS libraries + functions.
+        NSError* tesLibErr = nil;
+        id<MTLLibrary> tesLib = [device newLibraryWithSource:
+            [NSString stringWithUTF8String:tesMSL.c_str()]
+            options:nil error:&tesLibErr];
+        if (tesLib == nil) {
+            result.diagnostic = std::string("tes-library: ") +
+                (tesLibErr.localizedDescription.UTF8String
+                    ? tesLibErr.localizedDescription.UTF8String
+                    : "(nil description)");
+            return result;
+        }
+        MTLFunctionConstantValues* emptyConstants = [[MTLFunctionConstantValues alloc] init];
+        NSError* tesFnErr = nil;
+        id<MTLFunction> tesFn = [tesLib newFunctionWithName:@"main0"
+                                              constantValues:emptyConstants
+                                                       error:&tesFnErr];
+        if (tesFn == nil) {
+            result.diagnostic = std::string("tes-function: ") +
+                (tesFnErr.localizedDescription.UTF8String
+                    ? tesFnErr.localizedDescription.UTF8String
+                    : "(nil description)");
+            return result;
+        }
+
+        NSError* fsLibErr = nil;
+        id<MTLLibrary> fsLib = [device newLibraryWithSource:
+            [NSString stringWithUTF8String:fsMSL.c_str()]
+            options:nil error:&fsLibErr];
+        if (fsLib == nil) {
+            result.diagnostic = std::string("fs-library: ") +
+                (fsLibErr.localizedDescription.UTF8String
+                    ? fsLibErr.localizedDescription.UTF8String
+                    : "(nil description)");
+            return result;
+        }
+        NSError* fsFnErr = nil;
+        id<MTLFunction> fsFn = [fsLib newFunctionWithName:@"main0"
+                                            constantValues:emptyConstants
+                                                     error:&fsFnErr];
+        if (fsFn == nil) {
+            result.diagnostic = std::string("fs-function: ") +
+                (fsFnErr.localizedDescription.UTF8String
+                    ? fsFnErr.localizedDescription.UTF8String
+                    : "(nil description)");
+            return result;
+        }
+
+        // Stage 3 — tess-enabled render pipeline descriptor. The format
+        // is BGRA8Unorm for the probe; Phase 2's real draw path rebuilds
+        // per FBO color format inside the encoder.
+        MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.vertexFunction = tesFn;
+        desc.fragmentFunction = fsFn;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+
+        // Partition mode maps per GL 4.6 §11.2.2.1:
+        //   GL_EQUAL            → integer
+        //   GL_FRACTIONAL_EVEN  → fractionalEven
+        //   GL_FRACTIONAL_ODD   → fractionalOdd
+        // Metal's .pow2 has no GL analogue. Winding mirrors the
+        // TES `layout(cw|ccw)` qualifier.
+        switch (genSpacing) {
+            case GL_FRACTIONAL_EVEN:
+                desc.tessellationPartitionMode = MTLTessellationPartitionModeFractionalEven;
+                break;
+            case GL_FRACTIONAL_ODD:
+                desc.tessellationPartitionMode = MTLTessellationPartitionModeFractionalOdd;
+                break;
+            case GL_EQUAL:
+            default:
+                desc.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
+                break;
+        }
+        desc.tessellationOutputWindingOrder =
+            (genVertexOrder == GL_CW) ? MTLWindingClockwise : MTLWindingCounterClockwise;
+        desc.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+        desc.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionConstant;
+        desc.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+        desc.maxTessellationFactor = 64;  // GL_MAX_TESS_GEN_LEVEL
+        (void)genMode;
+
+        NSError* psoErr = nil;
+        id<MTLRenderPipelineState> renderPSO =
+            [device newRenderPipelineStateWithDescriptor:desc error:&psoErr];
+        if (renderPSO == nil) {
+            result.diagnostic = std::string("tess-render-pipeline: ") +
+                (psoErr.localizedDescription.UTF8String
+                    ? psoErr.localizedDescription.UTF8String
+                    : "(nil description)");
+            return result;
+        }
+        result.renderOk = true;
+        (void)renderPSO;   // released at autorelease-pool drain; Phase 2
+                           // rebuilds the render PSO per FBO format.
+        return result;
+    }
+
     // Encode + commit + wait a single compute dispatch. The wait is
     // synchronous to match CTS's "dispatch, then map SSBO" pattern —
     // without it, the map'd bytes are stale compute-shader input
@@ -4387,6 +4520,18 @@ bool MetalFrameGraph::clearLayeredTextureColor(void* tex, std::uint32_t arrayLen
 void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::string* outError,
                                                   void** outFunction) {
     return impl_->buildComputePipelineState(msl, outError, outFunction);
+}
+
+MetalFrameGraph::TessPipelineProbeResult MetalFrameGraph::probeTessellationPipeline(
+    const std::string& tcsMSL,
+    const std::string& tesMSL,
+    const std::string& fsMSL,
+    GLenum genMode,
+    GLenum genSpacing,
+    GLenum genVertexOrder)
+{
+    return impl_->probeTessellationPipeline(tcsMSL, tesMSL, fsMSL,
+                                             genMode, genSpacing, genVertexOrder);
 }
 
 bool MetalFrameGraph::encodeComputeDispatch(const ComputeDispatchInfo& info) {

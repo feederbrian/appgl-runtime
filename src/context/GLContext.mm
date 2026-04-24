@@ -18240,6 +18240,8 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->hasTranslatedPipeline = false;
     programObject->vertexMSL.clear();
     programObject->fragmentMSL.clear();
+    programObject->tessControlMSL.clear();
+    programObject->tessEvalMSL.clear();
     programObject->computeMSL.clear();
     programObject->computeReflection = ShaderReflection{};
     // Zero default so glGetProgramiv(GL_COMPUTE_WORK_GROUP_SIZE) returns
@@ -18256,6 +18258,10 @@ bool GLContext::linkProgram(GLuint program) {
     // Step 7-3 compute follow-up: release the retained MTLFunction.
     releaseRetainedMetalObject(programObject->metalComputeFunction);
     programObject->metalComputeFunction = nullptr;
+    // Metal tess Phase 1: release the retained TCS-as-compute PSO built
+    // by probeTessellationPipeline on the previous link.
+    releaseRetainedMetalObject(programObject->metalTessControlPipelineState);
+    programObject->metalTessControlPipelineState = nullptr;
     // Step 7-4: release cached graphics-stage MTLFunctions on relink.
     releaseRetainedMetalObject(programObject->metalVertexFunction);
     programObject->metalVertexFunction = nullptr;
@@ -18319,7 +18325,8 @@ bool GLContext::linkProgram(GLuint program) {
                               std::size_t spirvWords,
                               const std::string& sourceText,
                               std::string& mslOut,
-                              ShaderReflection& reflectionOut) -> bool {
+                              ShaderReflection& reflectionOut,
+                              const appgl::TranslatorOptions& options = {}) -> bool {
         if (spirvData == nullptr || spirvWords == 0) {
             return false;
         }
@@ -18339,7 +18346,7 @@ bool GLContext::linkProgram(GLuint program) {
         std::string msl;
         try {
             msl = translator.spirvToMSL(
-                spirvData, spirvWords, bindings, &mslLog);
+                spirvData, spirvWords, bindings, &mslLog, options);
         } catch (const std::exception& e) {
             APPGL_LOG(SHADER, @"[GL] linkProgram-step=spirv-to-msl program=%u stage=%s THREW: %s",
                   program, stageName, e.what());
@@ -18418,13 +18425,14 @@ bool GLContext::linkProgram(GLuint program) {
     auto translateCachedStage = [&](const char* stageName,
                                     GLShaderObject* stage,
                                     std::string& mslOut,
-                                    ShaderReflection& reflectionOut) -> bool {
+                                    ShaderReflection& reflectionOut,
+                                    const appgl::TranslatorOptions& options = {}) -> bool {
         if (stage == nullptr) {
             return false;
         }
         return translateStage(stageName,
                               stage->spirv.data(), stage->spirv.size(),
-                              stage->source, mslOut, reflectionOut);
+                              stage->source, mslOut, reflectionOut, options);
     };
 
     // Phase 8X Group 4d follow-up⁵ — VS+FS cross-stage-linked SPIR-V path.
@@ -18753,9 +18761,20 @@ bool GLContext::linkProgram(GLuint program) {
             const bool fsOk = translateStage(
                 "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
                 programObject->fragmentMSL, fsRefl);
-            std::string unusedTcMSL, unusedTeMSL;
-            (void)translateCachedStage("tess-control", tessControlShader, unusedTcMSL, tcRefl);
-            (void)translateCachedStage("tess-eval", tessEvalShader, unusedTeMSL, teRefl);
+            // Metal tess Phase 1: force SPIRV-Cross tess options on for
+            // TCS/TES translation regardless of APPGL_ENABLE_METAL_TESS
+            // env. The emitted MSL shape matches what the Metal tess
+            // pipeline (TCS-as-compute + TES-as-vertex-function with
+            // tessellationEnabled=YES) can consume. MSL is stashed on the
+            // program so MetalFrameGraph can build the pipeline states.
+            appgl::TranslatorOptions tessOpts;
+            tessOpts.forceTessellation = true;
+            (void)translateCachedStage("tess-control", tessControlShader,
+                                       programObject->tessControlMSL, tcRefl,
+                                       tessOpts);
+            (void)translateCachedStage("tess-eval", tessEvalShader,
+                                       programObject->tessEvalMSL, teRefl,
+                                       tessOpts);
 
             // Extract tessellation execution modes from SPIR-V.
             programObject->hasTessellation = true;
@@ -18810,6 +18829,59 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->tessEvalParsedModule.reset();
             }
             (void)appgl::detectTessellationEmulatable(*programObject);
+
+            // Metal tess Phase 1 probe — validate that the tess-MSL
+            // stashed above compiles into Metal pipeline states. No
+            // draw-time consumer yet; the CPU interpreter path still
+            // handles every drawArrays(GL_PATCHES, ...) call. The
+            // retained TCS compute PSO becomes Phase 2's input.
+            if (impl_->frameGraph != nullptr &&
+                !programObject->tessControlMSL.empty() &&
+                !programObject->tessEvalMSL.empty() &&
+                !programObject->fragmentMSL.empty()) {
+                MetalFrameGraph::TessPipelineProbeResult probe =
+                    impl_->frameGraph->probeTessellationPipeline(
+                        programObject->tessControlMSL,
+                        programObject->tessEvalMSL,
+                        programObject->fragmentMSL,
+                        programObject->tessGenMode,
+                        programObject->tessGenSpacing,
+                        programObject->tessGenVertexOrder);
+                if (probe.computeOk) {
+                    programObject->metalTessControlPipelineState =
+                        probe.computePipelineState;
+                }
+                if (std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "[APPGL] tess-probe program=%u computeOk=%d renderOk=%d"
+                        " genMode=0x%04X genSpacing=0x%04X genVertexOrder=0x%04X"
+                        " tcsMSL=%zub tesMSL=%zub fsMSL=%zub diag=%s\n",
+                        program,
+                        probe.computeOk ? 1 : 0,
+                        probe.renderOk ? 1 : 0,
+                        programObject->tessGenMode,
+                        programObject->tessGenSpacing,
+                        programObject->tessGenVertexOrder,
+                        programObject->tessControlMSL.size(),
+                        programObject->tessEvalMSL.size(),
+                        programObject->fragmentMSL.size(),
+                        probe.diagnostic.c_str());
+                }
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-tessellation-metal-probe", "tessellation",
+                    tessControlShader != nullptr
+                        ? quickHash(tessControlShader->source)
+                        : std::string(),
+                    linkVertexHash, linkFragmentHash,
+                    probe.renderOk
+                        ? std::string("Metal tess pipeline probe: compute + render both built")
+                        : (probe.computeOk
+                            ? std::string("Metal tess render pipeline failed: ") + probe.diagnostic
+                            : std::string("Metal tess compute pipeline failed: ") + probe.diagnostic),
+                    "",
+                    probe.computeOk && probe.renderOk
+                });
+            }
             break;
         }
         case ProgramKind::GeometryOnly: {
@@ -18834,10 +18906,14 @@ bool GLContext::linkProgram(GLuint program) {
         case ProgramKind::TessControlOnly: {
             // Separable TCS-only program (for use with program pipelines).
             // Translate to MSL for reflection + extract tessellation modes.
-            std::string unusedTcMSL;
+            // Metal tess Phase 1: force tess options so the stashed MSL
+            // matches the Metal-native tess pipeline shape.
+            appgl::TranslatorOptions tessOpts;
+            tessOpts.forceTessellation = true;
             ShaderReflection tcRefl;
             (void)translateCachedStage("tess-control", tessControlShader,
-                                       unusedTcMSL, tcRefl);
+                                       programObject->tessControlMSL, tcRefl,
+                                       tessOpts);
             // Extract tessellation execution modes from SPIR-V.
             programObject->hasTessellation = true;
             if (!tessControlShader->spirv.empty()) {
@@ -18852,10 +18928,13 @@ bool GLContext::linkProgram(GLuint program) {
         }
         case ProgramKind::TessEvalOnly: {
             // Separable TES-only program (for use with program pipelines).
-            std::string unusedTeMSL;
+            // Metal tess Phase 1: force tess options on.
+            appgl::TranslatorOptions tessOpts;
+            tessOpts.forceTessellation = true;
             ShaderReflection teRefl;
             (void)translateCachedStage("tess-eval", tessEvalShader,
-                                       unusedTeMSL, teRefl);
+                                       programObject->tessEvalMSL, teRefl,
+                                       tessOpts);
             // Extract tessellation execution modes from SPIR-V.
             programObject->hasTessellation = true;
             if (!tessEvalShader->spirv.empty()) {

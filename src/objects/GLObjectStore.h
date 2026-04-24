@@ -603,6 +603,14 @@ struct GLProgramObject {
     // to create MTLRenderPipelineState on first draw.
     std::string vertexMSL;
     std::string fragmentMSL;
+    // Metal-native tessellation pipeline MSL (Phase 1 of the metal-tess
+    // project). Populated at link time for tess programs with SPIRV-Cross's
+    // tess options forced on, so TCS is emittable as a compute kernel and
+    // TES as a `vertex` function post-tessellator. Consumed by
+    // MetalFrameGraph to build the tess compute + render pipeline states.
+    // Empty for non-tess programs.
+    std::string tessControlMSL;
+    std::string tessEvalMSL;
     ShaderReflection vertexReflection;
     ShaderReflection fragmentReflection;
     // Reflection for the geometry stage, harvested from SPIRV-Cross
@@ -764,6 +772,13 @@ struct GLProgramObject {
     // Retained id<MTLComputePipelineState> (CFBridgingRetain'd; released
     // at linkProgram reset and at program delete via releaseProgram).
     void* metalComputePipelineState = nullptr;
+    // Metal tess Phase 1: retained id<MTLComputePipelineState> for the
+    // TCS-as-compute stage of a tessellation program. Built at link time
+    // by MetalFrameGraph::probeTessellationPipeline alongside the render
+    // pipeline probe. Phase 2 will consume this at draw time for the
+    // compute-encode TCS step; Phase 1 only validates the build.
+    // Released at linkProgram reset and at program delete.
+    void* metalTessControlPipelineState = nullptr;
     // Step 7-3 compute follow-up: retained id<MTLFunction> for the
     // compute entry point, populated alongside the PSO when
     // APPGL_ENABLE_ARGUMENT_BUFFERS is set. `encodeComputeDispatch`

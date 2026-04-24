@@ -382,6 +382,10 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
 }
 
 std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const {
+    return spirvToMSL(spirv, wordCount, bindings, log, TranslatorOptions{});
+}
+
+std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log, const TranslatorOptions& options) const {
     try {
         spirv_cross::CompilerMSL compiler(spirv, wordCount);
         const auto execModel = compiler.get_execution_model();
@@ -414,10 +418,11 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         //    `tessellationEnabled = YES`. `raw_buffer_tese_input=true`
         //    makes it read per-CP (buffer 22) and per-patch (buffer 20)
         //    inputs from buffers, enabling nested-array varyings.
-        static const bool metalTessEnabled = []() {
+        static const bool metalTessEnvEnabled = []() {
             const char* v = std::getenv("APPGL_ENABLE_METAL_TESS");
             return v != nullptr && v[0] != '0' && v[0] != '\0';
         }();
+        const bool metalTessEnabled = metalTessEnvEnabled || options.forceTessellation;
         if (metalTessEnabled && (isTessControl || isTessEval)) {
             if (isTessEval) {
                 mslOpts.raw_buffer_tese_input = true;

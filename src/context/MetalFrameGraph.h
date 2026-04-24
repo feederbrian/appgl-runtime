@@ -578,6 +578,44 @@ public:
     void* buildComputePipelineState(const std::string& msl, std::string* outError,
                                      void** outFunction = nullptr);
 
+    // Metal-native tessellation pipeline probe (Phase 1 of the metal-tess
+    // project). Given SPIRV-Cross-emitted MSL for a tess program's three
+    // stages (TCS compute kernel, TES vertex function with `[[patch(...)]]`
+    // attribute, FS fragment function), validate that:
+    //   1. TCS MSL compiles via `[device newLibraryWithSource:]` and the
+    //      compute pipeline state builds from it.
+    //   2. TES + FS MSL compiles and a tessellation-enabled render
+    //      pipeline descriptor (`tessellationPartitionMode`,
+    //      `tessellationOutputWindingOrder`, `tessellationFactorFormat =
+    //      .half`) accepts both functions at
+    //      `newRenderPipelineStateWithDescriptor:error:` time.
+    //
+    // No encoded state is wired to a draw call — the probe is a build-time
+    // smoke test for Phase 1. The compute PSO is retained and returned
+    // via `outComputePipelineState` (CFBridgingRelease at release time)
+    // so Phase 2 can reuse it without rebuilding; the render PSO is
+    // release-on-return because it is color-format-keyed and will be
+    // rebuilt at draw time against the actual FBO format. `outError` is
+    // populated with the first failure's description.
+    //
+    // `genMode`, `genSpacing`, `genVertexOrder` come from the TES
+    // execution modes (`tessGenMode`, `tessGenSpacing`,
+    // `tessGenVertexOrder` on the program object). They map to Metal
+    // tess pipeline fields per GL 4.6 §11.2.2 / Metal docs.
+    struct TessPipelineProbeResult {
+        bool computeOk = false;
+        bool renderOk = false;
+        std::string diagnostic;          // empty on full success
+        void* computePipelineState = nullptr; // CFBridgingRetain'd on computeOk
+    };
+    TessPipelineProbeResult probeTessellationPipeline(
+        const std::string& tcsMSL,
+        const std::string& tesMSL,
+        const std::string& fsMSL,
+        GLenum genMode,
+        GLenum genSpacing,
+        GLenum genVertexOrder);
+
     // Encode + commit + wait a single compute dispatch. This creates a
     // fresh command buffer + compute encoder, binds the pipeline and
     // the caller-supplied buffer / texture bindings, issues

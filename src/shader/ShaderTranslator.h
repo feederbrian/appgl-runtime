@@ -185,10 +185,24 @@ TessellationModes extractTessellationModes(const std::uint32_t* spirv, std::size
 // keeps dispatchThreadgroups from getting a zero size).
 ComputeExecutionModes extractComputeModes(const std::uint32_t* spirv, std::size_t wordCount);
 
+// Per-call overrides for `spirvToMSL`. Default-constructed options reproduce
+// the env-driven behaviour that predated Phase 1 of the Metal tess pipeline;
+// callers that need tess-stage MSL regardless of the `APPGL_ENABLE_METAL_TESS`
+// env gate (e.g. link-time tess-program translation) set `forceTessellation`.
+struct TranslatorOptions {
+    // When true, SPIRV-Cross tess options are applied to TCS/TES stages
+    // even if APPGL_ENABLE_METAL_TESS is unset. No effect on non-tess
+    // stages. Env gate still forces the options on when set — this field
+    // only UPGRADES the decision from "off by default" to "on for this
+    // call".
+    bool forceTessellation = false;
+};
+
 class ShaderTranslator {
 public:
     std::vector<std::uint32_t> compileGLSL(std::string_view source, GLenum stage, int version, std::string* log) const;
     std::string spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const;
+    std::string spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log, const TranslatorOptions& options) const;
     ShaderReflection reflect(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const;
 
     // Phase 8X Group 4d follow-up⁵ — link-time co-compile entry point.
