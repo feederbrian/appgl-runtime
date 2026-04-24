@@ -18924,12 +18924,22 @@ bool GLContext::linkProgram(GLuint program) {
                         programObject->tessControlMSL.find("spvPatchOut [[buffer(") != std::string::npos ||
                         programObject->tessEvalMSL.find("spvIn [[buffer(") != std::string::npos ||
                         programObject->tessEvalMSL.find("spvPatchIn [[buffer(") != std::string::npos);
-                if (probe.computeOk && !needsPhase3) {
+                // Programs that declared TF varyings at link time
+                // must source TES output into the bound TF buffer at
+                // draw time. Our Metal tess encoder doesn't integrate
+                // with TF capture yet — refuse Metal here so the CPU
+                // tessellation interpreter handles the draw. This also
+                // downgrades programs where the VS-spacing tests' "how
+                // many vertices did the tessellator emit" sanity check
+                // goes through TF.
+                const bool tessUsesTF =
+                    !programObject->transformFeedbackVaryingNames.empty();
+                if (probe.computeOk && !needsPhase3 && !tessUsesTF) {
                     programObject->metalTessTier =
                         GLProgramObject::MetalTessTier::Phase2;
                     programObject->metalTessControlPipelineState =
                         probe.computePipelineState;
-                } else if (probe.computeOk && needsPhase3 && probe.vertexComputeOk) {
+                } else if (probe.computeOk && needsPhase3 && !tessUsesTF && probe.vertexComputeOk) {
                     programObject->metalTessTier =
                         GLProgramObject::MetalTessTier::Phase3;
                     programObject->metalTessControlPipelineState =
@@ -21697,6 +21707,22 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     }
     if (program.tessControlOutputVertices <= 0) return false;
 
+    // Transform feedback on tess draws is unwired. Tests that activate
+    // TF (whether or not rasterizer-discard is on) need the CPU
+    // interpreter path to source TES output into the bound TF buffer;
+    // our Metal encoder runs the tessellator on-GPU but has no
+    // read-back-and-deposit step. Refusing here keeps TF tests
+    // regression-clean — the draw-path gate falls straight to the CPU
+    // interpreter.
+    if (transformFeedbackActive) {
+        return false;
+    }
+    // Rasterizer-discard is usually paired with TF, but can be set
+    // alone. Same treatment — CPU handles the side-effect-only shape.
+    if (state->isEnabled(GL_RASTERIZER_DISCARD)) {
+        return false;
+    }
+
     const GLint pv = state->tessellationState().patchVertices;
     if (pv <= 0 || count < pv) return false;
     const GLsizei patchCount = count / pv;
@@ -22254,25 +22280,20 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // two is phase 6+ work.
     // Metal-native tessellation path. Tier is set at link time:
     //   Phase2 — factor + indirect only (winding.* shape). Goes
-    //     through `encodeMetalTessellationDraw`.
+    //     through the Phase-2 code path in `encodeMetalTessellationDraw`.
     //   Phase3 — VS-as-compute + TCS with per-CP / per-patch
-    //     buffers. Same encoder, Phase-3 code path. Gated behind
-    //     `APPGL_ENABLE_METAL_TESS_PHASE3=1` while buffer-sizing,
-    //     transform-feedback plumbing, and other Phase-3-complete
-    //     work stabilises; flipping default on closes Phase 3.
+    //     buffers. Same encoder, Phase-3 code path.
     //   None   — CPU tessellation interpreter.
-    // No geometryEmulated gate yet — Phase 5 extends the Metal path
-    // to consume TES output through the GS emulator; until then,
-    // GS-after-tess programs fall straight through to the CPU
-    // interpreter.
-    const bool metalTessEligible =
-        program != nullptr &&
+    // Programs that need transform feedback or rasterizer-discard
+    // side effects get downgraded to None at link time (TF-varyings
+    // guard in linkProgram) + at draw time (transformFeedbackActive
+    // guard in tryMetalTessellationDraw). GS-after-tess is also gated
+    // off here; Phase 5 will extend the Metal path to consume TES
+    // output through the GS emulator.
+    if (program != nullptr &&
         program->hasTessellation &&
-        !program->geometryEmulated &&
-        (program->metalTessTier == GLProgramObject::MetalTessTier::Phase2 ||
-         (program->metalTessTier == GLProgramObject::MetalTessTier::Phase3 &&
-          std::getenv("APPGL_ENABLE_METAL_TESS_PHASE3") != nullptr));
-    if (metalTessEligible) {
+        program->metalTessTier != GLProgramObject::MetalTessTier::None &&
+        !program->geometryEmulated) {
         if (impl_->tryMetalTessellationDraw(
                 *program, programName, mode, count, first)) {
             APPGL_LOG(DRAW, @"drawArrays metal-tess ok: count=%d first=%d",
