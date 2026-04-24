@@ -2793,6 +2793,187 @@ struct MetalFrameGraph::Impl {
         return true;
     }
 
+    // Phase 3B.3 [metal-tess-TF] — build the tess domain-point
+    // generator compute kernel. Takes per-patch MTLQuadTessellation
+    // FactorsHalf (from TCS output at buffer(26)) + a small param
+    // struct and writes per-output-vertex (tessCoord, primID) into
+    // two buffers that the TES-as-compute kernel consumes at
+    // buffer(25) / buffer(24). Equivalent to
+    // `generateTessDomain` from TessellationEmulator.cpp, ported to
+    // MSL.
+    //
+    // MVP (3B.3): supports `triangles` + `quads` domains with all
+    // three spacing modes. Isolines deferred to Phase 4 (Metal has
+    // no native isoline tess at all, and we can reuse the `quads`
+    // path with one collapsed axis). Point-mode deferred to 3B.5.
+    //
+    // Dispatch: one thread per patch. The thread sequentially writes
+    // its patch's domain vertices starting at an atomic-claimed slot
+    // in the output buffer. Multi-patch ordering isn't guaranteed
+    // (atomics claim in thread-scheduler order) — for Phase 3B tests
+    // the CTS cases are single-patch so this doesn't matter yet;
+    // Phase 3B.4 adds prefix-sum offsets for deterministic ordering
+    // when it becomes necessary.
+    bool ensureTessDomainGenLibrary() {
+        if (tessDomainGenLibrary != nil && tessDomainGenPipelineState != nil) {
+            return true;
+        }
+        NSString* source = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+// Must match MTLQuadTessellationFactorsHalf byte layout.
+struct QuadFactors {
+    half insideTessellationFactor[2];
+    half edgeTessellationFactor[4];
+};
+
+// Runtime parameters for domain generation. Host packs before dispatch.
+//   genMode:    0=Triangles, 1=Quads (2=Isolines deferred)
+//   genSpacing: 0=Equal, 1=FractionalEven, 2=FractionalOdd
+//   patchCount: number of patches to process
+struct TessGenParams {
+    uint genMode;
+    uint genSpacing;
+    uint patchCount;
+};
+
+// Round factor value up to the nearest valid segment count for the
+// given spacing. Matches `segmentCount` in TessellationEmulator.cpp.
+inline uint segmentCount(float level, uint spacing) {
+    level = clamp(level, 1.0f, 64.0f);
+    int n = int(ceil(level));
+    if (spacing == 1u) {               // FractionalEven: round up to even >= 2
+        if (n < 2) n = 2;
+        if ((n & 1) != 0) n += 1;
+    } else if (spacing == 2u) {        // FractionalOdd: round up to odd >= 1
+        if (n < 1) n = 1;
+        if ((n & 1) == 0) n += 1;
+    } else {                            // Equal: plain ceil, floor at 1
+        if (n < 1) n = 1;
+    }
+    return uint(n);
+}
+
+// Emit one triangle's worth (3 verts) of (tessCoord, primID) into the
+// output buffer via an atomic claim. Barycentric coords for
+// triangle-domain tests.
+inline void emitTriangle(
+    float3 a, float3 b, float3 c,
+    uint primID,
+    device atomic_uint* cursor,
+    device packed_float3* coords,
+    device uint* primIDs)
+{
+    uint base = atomic_fetch_add_explicit(cursor, 3u, memory_order_relaxed);
+    coords[base + 0] = packed_float3(a);
+    coords[base + 1] = packed_float3(b);
+    coords[base + 2] = packed_float3(c);
+    primIDs[base + 0] = primID;
+    primIDs[base + 1] = primID;
+    primIDs[base + 2] = primID;
+}
+
+kernel void spvGenTessDomain(
+    uint patchID [[thread_position_in_grid]],
+    constant TessGenParams& params [[buffer(0)]],
+    const device QuadFactors* factors [[buffer(26)]],
+    device packed_float3* domainTessCoord [[buffer(25)]],
+    device uint* domainPrimID [[buffer(24)]],
+    device atomic_uint* totalVertCount [[buffer(23)]])
+{
+    if (patchID >= params.patchCount) return;
+
+    QuadFactors f = factors[patchID];
+    float o0 = float(f.edgeTessellationFactor[0]);
+    float o1 = float(f.edgeTessellationFactor[1]);
+    float o2 = float(f.edgeTessellationFactor[2]);
+    float o3 = float(f.edgeTessellationFactor[3]);
+    float i0 = float(f.insideTessellationFactor[0]);
+    float i1 = float(f.insideTessellationFactor[1]);
+
+    if (params.genMode == 0u) {
+        // Triangles — barycentric (u, v, w=1-u-v). Simplified (single
+        // N from max factor) mirroring the CPU path. All primitive
+        // vertices get the same primID (= patchID).
+        uint N = segmentCount(max(max(o0, o1), max(o2, i0)), params.genSpacing);
+        float fN = float(N);
+        for (uint j = 0; j + 1u <= N; ++j) {
+            uint row0Len = N + 1u - j;
+            uint row1Len = N - j;
+            float vj0 = float(j) / fN;
+            float vj1 = float(j + 1u) / fN;
+            for (uint i = 0u; i + 1u < row0Len; ++i) {
+                float ui0 = float(i) / fN;
+                float ui1 = float(i + 1u) / fN;
+                // Upward triangle (base on row j, apex on row j+1).
+                if (i < row1Len) {
+                    float3 a = float3(ui0, vj0, 1.0f - ui0 - vj0);
+                    float3 b = float3(ui1, vj0, 1.0f - ui1 - vj0);
+                    float3 c = float3(ui0, vj1, 1.0f - ui0 - vj1);
+                    emitTriangle(a, b, c, patchID,
+                                  totalVertCount, domainTessCoord, domainPrimID);
+                }
+                // Downward triangle.
+                if (i + 1u < row1Len) {
+                    float3 a = float3(ui1, vj0, 1.0f - ui1 - vj0);
+                    float3 b = float3(ui1, vj1, 1.0f - ui1 - vj1);
+                    float3 c = float3(ui0, vj1, 1.0f - ui0 - vj1);
+                    emitTriangle(a, b, c, patchID,
+                                  totalVertCount, domainTessCoord, domainPrimID);
+                }
+            }
+        }
+    } else if (params.genMode == 1u) {
+        // Quads — (u, v, 0) with u, v ∈ [0, 1]. Two triangles per
+        // grid cell. Shares the CPU path's simplification
+        // (single uN/vN each per axis).
+        uint uN = segmentCount(max(max(o0, o2), i0), params.genSpacing);
+        uint vN = segmentCount(max(max(o1, o3), i1), params.genSpacing);
+        float fU = float(uN);
+        float fV = float(vN);
+        for (uint j = 0u; j < vN; ++j) {
+            float vj0 = float(j) / fV;
+            float vj1 = float(j + 1u) / fV;
+            for (uint i = 0u; i < uN; ++i) {
+                float ui0 = float(i) / fU;
+                float ui1 = float(i + 1u) / fU;
+                float3 a = float3(ui0, vj0, 0.0f);
+                float3 b = float3(ui1, vj0, 0.0f);
+                float3 c = float3(ui0, vj1, 0.0f);
+                float3 d = float3(ui1, vj1, 0.0f);
+                emitTriangle(a, b, d, patchID,
+                              totalVertCount, domainTessCoord, domainPrimID);
+                emitTriangle(a, d, c, patchID,
+                              totalVertCount, domainTessCoord, domainPrimID);
+            }
+        }
+    }
+    // Isolines (genMode == 2u): Phase 4 work. Noop here for now.
+}
+)MSL";
+        NSError* error = nil;
+        tessDomainGenLibrary = [device newLibraryWithSource:source options:nil error:&error];
+        if (tessDomainGenLibrary == nil) {
+            FG_TRACE(@"ensureTessDomainGenLibrary: newLibraryWithSource failed: %@",
+                      error ? error.localizedDescription : @"(no err)");
+            return false;
+        }
+        id<MTLFunction> fn = [tessDomainGenLibrary newFunctionWithName:@"spvGenTessDomain"];
+        if (fn == nil) {
+            return false;
+        }
+        NSError* psoError = nil;
+        tessDomainGenPipelineState = [device newComputePipelineStateWithFunction:fn
+                                                                            error:&psoError];
+        if (tessDomainGenPipelineState == nil) {
+            FG_TRACE(@"ensureTessDomainGenLibrary: newComputePipelineStateWithFunction failed: %@",
+                      psoError ? psoError.localizedDescription : @"(no err)");
+            return false;
+        }
+        return true;
+    }
+
     bool ensureSolidColorLibrary() {
         if (solidColorLibrary != nil) {
             return true;
@@ -4536,6 +4717,14 @@ private:
     id<MTLFunction> solidColorFragmentFn = nil;
     id<MTLRenderPipelineState> solidColorPipelineState = nil;
     MTLPixelFormat solidColorPipelineColorFormat = MTLPixelFormatInvalid;
+
+    // Phase 3B.3 [metal-tess-TF] — tess domain-point generator compute
+    // kernel. Built lazily the first time a TES-as-compute path needs
+    // it (usually on first tess draw that bypasses the CPU interpreter).
+    // See `ensureTessDomainGenLibrary` for the MSL source — MSL port of
+    // `generateTessDomain` from TessellationEmulator.cpp.
+    id<MTLLibrary> tessDomainGenLibrary = nil;
+    id<MTLComputePipelineState> tessDomainGenPipelineState = nil;
 
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
     // shader library, two pipeline states, and a default sampler.
