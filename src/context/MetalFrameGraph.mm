@@ -28,7 +28,229 @@
 
 namespace appgl {
 
+// Phase 4A [metal-tess-TF] — MSL source for the CPU-exact domain-gen
+// port. Shared between the production path (`ensureTessDomainPortLibrary`
+// on `Impl`) and the validation probe (`phaseAProbeTessDomainPort`).
+//
+// Bit-exact port of `generateTessDomain` in TessellationEmulator.cpp
+// (source of truth per
+// `specs-worker-docs/HANDOFF-2026-04-24-pm-tess-domain-msl-port.md`).
+// CPU parity requires compiling with `MTLMathModeSafe` — default
+// compile options fuse `1 - fu - fv` into single-rounded ops and
+// drift 1 ULP on boundary vertices.
+static NSString* const kTessDomainPortMSL = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
 
+struct QuadFactors {
+    half edgeTessellationFactor[4];
+    half insideTessellationFactor[2];
+};
+
+struct TessPortParams {
+    uint genMode;        // 0=Triangles, 1=Quads (Isolines deferred)
+    uint genSpacing;     // 0=Equal, 1=FractionalEven, 2=FractionalOdd
+    uint patchCount;
+    uint pointMode;
+    uint flipWinding;
+};
+
+// Port of `segmentCount` in TessellationEmulator.cpp. Clamp matches
+// the CPU's `!(level >= 1.0f)` semantics (NaN goes to 1.0 too).
+inline uint spvPortSegmentCount(float level, uint spacing) {
+    if (!(level >= 1.0f)) level = 1.0f;
+    if (level > 64.0f) level = 64.0f;
+    int n = int(ceil(level));
+    if (spacing == 1u) {
+        if (n < 2) n = 2;
+        if ((n & 1) != 0) n += 1;
+    } else if (spacing == 2u) {
+        if (n < 1) n = 1;
+        if ((n & 1) == 0) n += 1;
+    } else {
+        if (n < 1) n = 1;
+    }
+    return uint(n);
+}
+
+inline void spvPortEmitTriangle(
+    float3 a, float3 b, float3 c,
+    uint primID, uint flipWinding,
+    device atomic_uint* cursor,
+    device packed_float3* coords,
+    device uint* primIDs)
+{
+    uint base = atomic_fetch_add_explicit(cursor, 3u, memory_order_relaxed);
+    coords[base + 0] = packed_float3(a);
+    if (flipWinding != 0u) {
+        coords[base + 1] = packed_float3(c);
+        coords[base + 2] = packed_float3(b);
+    } else {
+        coords[base + 1] = packed_float3(b);
+        coords[base + 2] = packed_float3(c);
+    }
+    primIDs[base + 0] = primID;
+    primIDs[base + 1] = primID;
+    primIDs[base + 2] = primID;
+}
+
+inline void spvPortEmitPoint(
+    float3 c,
+    uint primID,
+    device atomic_uint* cursor,
+    device packed_float3* coords,
+    device uint* primIDs)
+{
+    uint base = atomic_fetch_add_explicit(cursor, 1u, memory_order_relaxed);
+    coords[base] = packed_float3(c);
+    primIDs[base] = primID;
+}
+
+void spvPortGenTriangles(
+    uint patchID,
+    constant TessPortParams& params,
+    const device QuadFactors* factors,
+    device packed_float3* coords,
+    device uint* primIDs,
+    device atomic_uint* cursor)
+{
+    QuadFactors f = factors[patchID];
+    float o0 = float(f.edgeTessellationFactor[0]);
+    float o1 = float(f.edgeTessellationFactor[1]);
+    float o2 = float(f.edgeTessellationFactor[2]);
+    float i0 = float(f.insideTessellationFactor[0]);
+    uint N = spvPortSegmentCount(max(max(o0, o1), max(o2, i0)),
+                                  params.genSpacing);
+    float fN = float(N);
+
+    if (params.pointMode != 0u) {
+        for (uint j = 0u; j <= N; ++j) {
+            uint rowLen = N + 1u - j;
+            float fv = precise::divide(float(j), fN);
+            for (uint i = 0u; i < rowLen; ++i) {
+                float fu = precise::divide(float(i), fN);
+                float fw = 1.0f - fu - fv;
+                spvPortEmitPoint(float3(fu, fv, fw), patchID,
+                                  cursor, coords, primIDs);
+            }
+        }
+        return;
+    }
+
+    for (uint j = 0u; j + 1u <= N; ++j) {
+        uint row0Len = N + 1u - j;
+        uint row1Len = N - j;
+        float vj0 = precise::divide(float(j),        fN);
+        float vj1 = precise::divide(float(j + 1u),   fN);
+        for (uint i = 0u; i + 1u < row0Len; ++i) {
+            float ui0 = precise::divide(float(i),        fN);
+            float ui1 = precise::divide(float(i + 1u),   fN);
+            float wa0 = 1.0f - ui0 - vj0;
+            float wa1 = 1.0f - ui1 - vj0;
+            float wb0 = 1.0f - ui0 - vj1;
+            float wb1 = 1.0f - ui1 - vj1;
+            if (i < row1Len) {
+                spvPortEmitTriangle(
+                    float3(ui0, vj0, wa0),
+                    float3(ui1, vj0, wa1),
+                    float3(ui0, vj1, wb0),
+                    patchID, params.flipWinding,
+                    cursor, coords, primIDs);
+            }
+            if (i + 1u < row1Len) {
+                spvPortEmitTriangle(
+                    float3(ui1, vj0, wa1),
+                    float3(ui1, vj1, wb1),
+                    float3(ui0, vj1, wb0),
+                    patchID, params.flipWinding,
+                    cursor, coords, primIDs);
+            }
+        }
+    }
+}
+
+void spvPortGenQuads(
+    uint patchID,
+    constant TessPortParams& params,
+    const device QuadFactors* factors,
+    device packed_float3* coords,
+    device uint* primIDs,
+    device atomic_uint* cursor)
+{
+    QuadFactors f = factors[patchID];
+    float o0 = float(f.edgeTessellationFactor[0]);
+    float o1 = float(f.edgeTessellationFactor[1]);
+    float o2 = float(f.edgeTessellationFactor[2]);
+    float o3 = float(f.edgeTessellationFactor[3]);
+    float i0 = float(f.insideTessellationFactor[0]);
+    float i1 = float(f.insideTessellationFactor[1]);
+    uint uN = spvPortSegmentCount(max(max(o0, o2), i0), params.genSpacing);
+    uint vN = spvPortSegmentCount(max(max(o1, o3), i1), params.genSpacing);
+    float fuN = float(uN);
+    float fvN = float(vN);
+
+    if (params.pointMode != 0u) {
+        for (uint j = 0u; j <= vN; ++j) {
+            float v = precise::divide(float(j), fvN);
+            for (uint i = 0u; i <= uN; ++i) {
+                float u = precise::divide(float(i), fuN);
+                spvPortEmitPoint(float3(u, v, 0.0f), patchID,
+                                  cursor, coords, primIDs);
+            }
+        }
+        return;
+    }
+
+    for (uint j = 0u; j < vN; ++j) {
+        float v0 = precise::divide(float(j),        fvN);
+        float v1 = precise::divide(float(j + 1u),   fvN);
+        for (uint i = 0u; i < uN; ++i) {
+            float u0 = precise::divide(float(i),        fuN);
+            float u1 = precise::divide(float(i + 1u),   fuN);
+            spvPortEmitTriangle(
+                float3(u0, v0, 0.0f),
+                float3(u1, v0, 0.0f),
+                float3(u1, v1, 0.0f),
+                patchID, params.flipWinding,
+                cursor, coords, primIDs);
+            spvPortEmitTriangle(
+                float3(u0, v0, 0.0f),
+                float3(u1, v1, 0.0f),
+                float3(u0, v1, 0.0f),
+                patchID, params.flipWinding,
+                cursor, coords, primIDs);
+        }
+    }
+}
+
+kernel void spvGenTessDomainTrianglesPort(
+    constant TessPortParams& params [[buffer(0)]],
+    const device QuadFactors* factors [[buffer(26)]],
+    device packed_float3* coords [[buffer(25)]],
+    device uint* primIDs [[buffer(24)]],
+    device atomic_uint* cursor [[buffer(23)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid != 0u) return;
+    for (uint p = 0u; p < params.patchCount; ++p) {
+        spvPortGenTriangles(p, params, factors, coords, primIDs, cursor);
+    }
+}
+
+kernel void spvGenTessDomainQuadsPort(
+    constant TessPortParams& params [[buffer(0)]],
+    const device QuadFactors* factors [[buffer(26)]],
+    device packed_float3* coords [[buffer(25)]],
+    device uint* primIDs [[buffer(24)]],
+    device atomic_uint* cursor [[buffer(23)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid != 0u) return;
+    for (uint p = 0u; p < params.patchCount; ++p) {
+        spvPortGenQuads(p, params, factors, coords, primIDs, cursor);
+    }
+}
+)MSL";
 
 // Phase 8X Group 4d follow-up¹⁴ — shared Metal translation helpers.
 //
@@ -3211,6 +3433,58 @@ kernel void spvTessFactorClamp(
         return tessFactorClampPipelineState;
     }
 
+    // Phase 4A [metal-tess-TF] — lazily build the MSL-port domain-gen
+    // library + its two PSOs (triangles, quads). MSL source lives at
+    // file scope (`kTessDomainPortMSL`) so the validation probe
+    // (`phaseAProbeTessDomainPort`) can share it.
+    //
+    // Compiled with `MTLMathModeSafe` — required for bit-exact CPU
+    // parity (default options fuse `1 - fu - fv` into single-rounded
+    // ops and drift 1 ULP at boundary vertices).
+    bool ensureTessDomainPortLibrary() {
+        if (tessDomainPortTrianglesPSO != nil &&
+            tessDomainPortQuadsPSO != nil) {
+            return true;
+        }
+        if (tessDomainPortLibrary == nil) {
+            MTLCompileOptions* opts = [MTLCompileOptions new];
+            if (@available(macOS 15.0, *)) {
+                opts.mathMode = MTLMathModeSafe;
+            } else {
+                opts.fastMathEnabled = NO;
+            }
+            NSError* libErr = nil;
+            tessDomainPortLibrary = [device
+                newLibraryWithSource:kTessDomainPortMSL
+                             options:opts
+                               error:&libErr];
+            if (tessDomainPortLibrary == nil) {
+                FG_TRACE(@"ensureTessDomainPortLibrary: library build failed: %@",
+                          libErr ? libErr.localizedDescription : @"(no err)");
+                return false;
+            }
+        }
+        auto buildPSO = [&](NSString* fnName) -> id<MTLComputePipelineState> {
+            id<MTLFunction> f = [tessDomainPortLibrary newFunctionWithName:fnName];
+            if (f == nil) return nil;
+            NSError* perr = nil;
+            id<MTLComputePipelineState> p =
+                [device newComputePipelineStateWithFunction:f error:&perr];
+            if (p == nil) {
+                FG_TRACE(@"ensureTessDomainPortLibrary: PSO %@ failed: %@",
+                          fnName,
+                          perr ? perr.localizedDescription : @"(no err)");
+            }
+            return p;
+        };
+        if (tessDomainPortTrianglesPSO == nil)
+            tessDomainPortTrianglesPSO = buildPSO(@"spvGenTessDomainTrianglesPort");
+        if (tessDomainPortQuadsPSO == nil)
+            tessDomainPortQuadsPSO = buildPSO(@"spvGenTessDomainQuadsPort");
+        return tessDomainPortTrianglesPSO != nil &&
+               tessDomainPortQuadsPSO != nil;
+    }
+
     // Phase 3C [metal-tess-TF] — build (and cache) a PSO that captures
     // tessellator output for the given patchType / partition / winding.
     // Cache key packs all three enum values into a uint32. Returns nil
@@ -4562,29 +4836,95 @@ fragment float4 appgl_immediate_textured_fs(
                     [dgCmdBuf commit];
                     [dgCmdBuf waitUntilCompleted];
                 } else {
-                    // Compute-kernel path (default, and fallback when
-                    // HW PSO build fails or flag disabled).
-                    //
-                    // Serial driver: 1 thread walks all patches in
-                    // order (see `spvGenTessDomain` comment). Paralleli-
-                    // zation revisited once Phase 4/5 stabilize the TF
-                    // capture protocol — the atomic cursor then becomes
-                    // safe.
-                    id<MTLCommandBuffer> dgCmdBuf = [commandQueue commandBuffer];
-                    dgCmdBuf.label = @"appgl-tess-domain-gen";
-                    id<MTLComputeCommandEncoder> dgEnc =
-                        [dgCmdBuf computeCommandEncoder];
-                    [dgEnc setComputePipelineState:tessDomainGenPipelineState];
-                    [dgEnc setBuffer:domainGenParamsBuf offset:0 atIndex:0];
-                    [dgEnc setBuffer:factorBuf offset:0 atIndex:26];
-                    [dgEnc setBuffer:domainCoordBuf offset:0 atIndex:25];
-                    [dgEnc setBuffer:domainPrimIDBuf offset:0 atIndex:24];
-                    [dgEnc setBuffer:totalVertCountBuf offset:0 atIndex:23];
-                    [dgEnc dispatchThreads:MTLSizeMake(1, 1, 1)
-                      threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-                    [dgEnc endEncoding];
-                    [dgCmdBuf commit];
-                    [dgCmdBuf waitUntilCompleted];
+                    // Phase 4A [metal-tess-TF]: when
+                    // APPGL_TESS_DOMAIN_PORT is set and the genMode is
+                    // triangles or quads, use the CPU-exact MSL port
+                    // (`spvGenTessDomainTrianglesPort` /
+                    // `spvGenTessDomainQuadsPort`). Output-buffer
+                    // layout matches `spvGenTessDomain` so the
+                    // downstream TES-compute dispatch is unchanged.
+                    // Isolines stay on the original kernel (no Metal
+                    // `.isoline` patch type, no port yet).
+                    const bool useDomainPort =
+                        (std::getenv("APPGL_TESS_DOMAIN_PORT") != nullptr) &&
+                        (info.genMode == GL_TRIANGLES ||
+                         info.genMode == GL_QUADS);
+                    id<MTLComputePipelineState> portPSO = nil;
+                    if (useDomainPort && ensureTessDomainPortLibrary()) {
+                        portPSO = (info.genMode == GL_QUADS)
+                            ? tessDomainPortQuadsPSO
+                            : tessDomainPortTrianglesPSO;
+                    }
+
+                    if (portPSO != nil) {
+                        // Port kernel params: same 5-field shape as
+                        // the original `TessGenParams`; genMode is
+                        // 0=tri / 1=quad (isolines route elsewhere).
+                        struct TessPortParamsCPU {
+                            uint32_t genMode;
+                            uint32_t genSpacing;
+                            uint32_t patchCount;
+                            uint32_t pointMode;
+                            uint32_t flipWinding;
+                        };
+                        TessPortParamsCPU pp{};
+                        pp.genMode = (info.genMode == GL_QUADS) ? 1u : 0u;
+                        switch (info.genSpacing) {
+                            case GL_FRACTIONAL_EVEN: pp.genSpacing = 1u; break;
+                            case GL_FRACTIONAL_ODD:  pp.genSpacing = 2u; break;
+                            case GL_EQUAL:
+                            default:                  pp.genSpacing = 0u; break;
+                        }
+                        pp.patchCount = (uint32_t)info.patchCount;
+                        pp.pointMode = info.pointMode ? 1u : 0u;
+                        pp.flipWinding = (info.genVertexOrder == GL_CW) ? 1u : 0u;
+                        id<MTLBuffer> portParamsBuf = [device
+                            newBufferWithBytes:&pp
+                                        length:sizeof(pp)
+                                       options:MTLResourceStorageModeShared];
+
+                        id<MTLCommandBuffer> dgCmdBuf =
+                            [commandQueue commandBuffer];
+                        dgCmdBuf.label = @"appgl-tess-domain-port";
+                        id<MTLComputeCommandEncoder> dgEnc =
+                            [dgCmdBuf computeCommandEncoder];
+                        [dgEnc setComputePipelineState:portPSO];
+                        [dgEnc setBuffer:portParamsBuf offset:0 atIndex:0];
+                        [dgEnc setBuffer:factorBuf offset:0 atIndex:26];
+                        [dgEnc setBuffer:domainCoordBuf offset:0 atIndex:25];
+                        [dgEnc setBuffer:domainPrimIDBuf offset:0 atIndex:24];
+                        [dgEnc setBuffer:totalVertCountBuf offset:0 atIndex:23];
+                        [dgEnc dispatchThreads:MTLSizeMake(1, 1, 1)
+                          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                        [dgEnc endEncoding];
+                        [dgCmdBuf commit];
+                        [dgCmdBuf waitUntilCompleted];
+                    } else {
+                        // Compute-kernel path (default, and fallback
+                        // when port PSO unavailable or flag disabled).
+                        //
+                        // Serial driver: 1 thread walks all patches in
+                        // order (see `spvGenTessDomain` comment).
+                        // Parallelization revisited once Phase 4/5
+                        // stabilize the TF capture protocol — the
+                        // atomic cursor then becomes safe.
+                        id<MTLCommandBuffer> dgCmdBuf =
+                            [commandQueue commandBuffer];
+                        dgCmdBuf.label = @"appgl-tess-domain-gen";
+                        id<MTLComputeCommandEncoder> dgEnc =
+                            [dgCmdBuf computeCommandEncoder];
+                        [dgEnc setComputePipelineState:tessDomainGenPipelineState];
+                        [dgEnc setBuffer:domainGenParamsBuf offset:0 atIndex:0];
+                        [dgEnc setBuffer:factorBuf offset:0 atIndex:26];
+                        [dgEnc setBuffer:domainCoordBuf offset:0 atIndex:25];
+                        [dgEnc setBuffer:domainPrimIDBuf offset:0 atIndex:24];
+                        [dgEnc setBuffer:totalVertCountBuf offset:0 atIndex:23];
+                        [dgEnc dispatchThreads:MTLSizeMake(1, 1, 1)
+                          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                        [dgEnc endEncoding];
+                        [dgCmdBuf commit];
+                        [dgCmdBuf waitUntilCompleted];
+                    }
                 }
 
                 // CPU-read the produced vertex count.
@@ -5393,6 +5733,19 @@ private:
     // (no partition/winding specialization needed — pure value clamp).
     id<MTLComputePipelineState> tessFactorClampPipelineState = nil;
 
+    // Phase 4A [metal-tess-TF] — CPU-exact MSL port of
+    // `TessellationEmulator::generateTessDomain`. Replaces the
+    // Phase 3B.3 `spvGenTessDomain` kernel when
+    // APPGL_TESS_DOMAIN_PORT is set. The ported kernel matches the
+    // CPU reference bit-for-bit (validated by
+    // `phaseAProbeTessDomainPort`), so CTS's counter-probe expectations
+    // align. Compiled with `MTLMathModeSafe` to prevent fp-contract
+    // fusion. Triangles + quads only — isolines stay on
+    // `spvGenTessDomain` (no Metal `.isoline` patch type).
+    id<MTLLibrary> tessDomainPortLibrary = nil;
+    id<MTLComputePipelineState> tessDomainPortTrianglesPSO = nil;
+    id<MTLComputePipelineState> tessDomainPortQuadsPSO = nil;
+
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
     // shader library, two pipeline states, and a default sampler.
     // See `ensureImmediateModeLibrary` and `ensureImmediateModePipelines`
@@ -5825,262 +6178,7 @@ static void phaseAProbeTessDomainPort(id<MTLDevice> device,
 
     std::fprintf(stderr, "[APPGL domain-port] probe starting\n");
 
-    // Kernel source. Bit-exact port of `tessellateTriangles` in
-    // TessellationEmulator.cpp (equal-spacing only for this commit).
-    // Factor buffer layout is `MTLQuadTessellationFactorsHalf` — edge
-    // first, then inside — so the same buffer works whether
-    // SPIRV-Cross emits TCS for triangles or quads.
-    NSString* msl = @R"MSL(
-#include <metal_stdlib>
-using namespace metal;
-
-// Bit-exact CPU parity — compiled with MTLMathModeSafe to disable
-// fp-contract fusion that would otherwise rewrite `1 - fu - fv` into
-// single-rounded ops and drift 1 ULP vs the CPU's left-to-right
-// IEEE evaluation.
-
-struct QuadFactors {
-    half edgeTessellationFactor[4];
-    half insideTessellationFactor[2];
-};
-
-struct TessPortParams {
-    uint genMode;        // 0=Triangles, 1=Quads (Isolines deferred)
-    uint genSpacing;     // 0=Equal, 1=FractionalEven, 2=FractionalOdd
-    uint patchCount;
-    uint pointMode;
-    uint flipWinding;
-};
-
-// Port of `segmentCount` in TessellationEmulator.cpp. Clamp matches
-// the CPU's `!(level >= 1.0f)` semantics (NaN goes to 1.0 too).
-inline uint spvPortSegmentCount(float level, uint spacing) {
-    if (!(level >= 1.0f)) level = 1.0f;
-    if (level > 64.0f) level = 64.0f;
-    int n = int(ceil(level));
-    if (spacing == 1u) {
-        if (n < 2) n = 2;
-        if ((n & 1) != 0) n += 1;
-    } else if (spacing == 2u) {
-        if (n < 1) n = 1;
-        if ((n & 1) == 0) n += 1;
-    } else {
-        if (n < 1) n = 1;
-    }
-    return uint(n);
-}
-
-// Triangle domain emission. Port of `tessellateTriangles` — single
-// subdivision count N = segmentCount(max(outer[0..2], inner[0]), spacing).
-// Emits non-indexed triangle list (expansion of CPU's indexed form) via
-// atomic cursor so downstream TES-compute reads flat per-vertex.
-inline void spvPortEmitTriangle(
-    float3 a, float3 b, float3 c,
-    uint primID, uint flipWinding,
-    device atomic_uint* cursor,
-    device packed_float3* coords,
-    device uint* primIDs)
-{
-    uint base = atomic_fetch_add_explicit(cursor, 3u, memory_order_relaxed);
-    coords[base + 0] = packed_float3(a);
-    if (flipWinding != 0u) {
-        coords[base + 1] = packed_float3(c);
-        coords[base + 2] = packed_float3(b);
-    } else {
-        coords[base + 1] = packed_float3(b);
-        coords[base + 2] = packed_float3(c);
-    }
-    primIDs[base + 0] = primID;
-    primIDs[base + 1] = primID;
-    primIDs[base + 2] = primID;
-}
-
-// Emit one point-mode vertex. Takes `c` by value (matches the
-// structural pattern of `spvPortEmitTriangle` — function-call
-// boundary prevents the compiler from fusing the subtraction chain
-// used to compute `c.z` with surrounding ops).
-inline void spvPortEmitPoint(
-    float3 c,
-    uint primID,
-    device atomic_uint* cursor,
-    device packed_float3* coords,
-    device uint* primIDs)
-{
-    uint base = atomic_fetch_add_explicit(cursor, 1u, memory_order_relaxed);
-    coords[base] = packed_float3(c);
-    primIDs[base] = primID;
-}
-
-void spvPortGenTriangles(
-    uint patchID,
-    constant TessPortParams& params,
-    const device QuadFactors* factors,
-    device packed_float3* coords,
-    device uint* primIDs,
-    device atomic_uint* cursor)
-{
-    QuadFactors f = factors[patchID];
-    float o0 = float(f.edgeTessellationFactor[0]);
-    float o1 = float(f.edgeTessellationFactor[1]);
-    float o2 = float(f.edgeTessellationFactor[2]);
-    float i0 = float(f.insideTessellationFactor[0]);
-    uint N = spvPortSegmentCount(max(max(o0, o1), max(o2, i0)),
-                                  params.genSpacing);
-    float fN = float(N);
-
-    if (params.pointMode != 0u) {
-        // Walk grid row-major, emit every vertex once.
-        //
-        // Route through `spvPortEmitPoint` so the compiler can't fuse
-        // the `1 - fu - fv` chain into `1 - (fu + fv)` (which differs
-        // by 1 ULP from the CPU's left-to-right eval for (fu = fv =
-        // 1/3) and other rational pairs). Inline store does fuse; the
-        // function-call barrier pins the order.
-        for (uint j = 0u; j <= N; ++j) {
-            uint rowLen = N + 1u - j;
-            float fv = precise::divide(float(j), fN);
-            for (uint i = 0u; i < rowLen; ++i) {
-                float fu = precise::divide(float(i), fN);
-                float fw = 1.0f - fu - fv;
-                spvPortEmitPoint(float3(fu, fv, fw), patchID,
-                                  cursor, coords, primIDs);
-            }
-        }
-        return;
-    }
-
-    // Triangulation (matches CPU index loop).
-    // `precise::divide` forces IEEE 754 round-to-nearest; the default
-    // `/` operator permits 2.5 ULP on Metal, which diverged from the
-    // CPU reference at N=7 + N=12 patches (1 ULP off on 3/7 + 5/12).
-    for (uint j = 0u; j + 1u <= N; ++j) {
-        uint row0Len = N + 1u - j;
-        uint row1Len = N - j;
-        float vj0 = precise::divide(float(j),        fN);
-        float vj1 = precise::divide(float(j + 1u),   fN);
-        for (uint i = 0u; i + 1u < row0Len; ++i) {
-            float ui0 = precise::divide(float(i),        fN);
-            float ui1 = precise::divide(float(i + 1u),   fN);
-            float wa0 = 1.0f - ui0 - vj0;
-            float wa1 = 1.0f - ui1 - vj0;
-            float wb0 = 1.0f - ui0 - vj1;
-            float wb1 = 1.0f - ui1 - vj1;
-            // Upward triangle: (i, j), (i+1, j), (i, j+1).
-            if (i < row1Len) {
-                spvPortEmitTriangle(
-                    float3(ui0, vj0, wa0),
-                    float3(ui1, vj0, wa1),
-                    float3(ui0, vj1, wb0),
-                    patchID, params.flipWinding,
-                    cursor, coords, primIDs);
-            }
-            // Downward triangle: (i+1, j), (i+1, j+1), (i, j+1).
-            if (i + 1u < row1Len) {
-                spvPortEmitTriangle(
-                    float3(ui1, vj0, wa1),
-                    float3(ui1, vj1, wb1),
-                    float3(ui0, vj1, wb0),
-                    patchID, params.flipWinding,
-                    cursor, coords, primIDs);
-            }
-        }
-    }
-}
-
-// Quad domain emission. Port of `tessellateQuads` — split subdivision:
-// uN = segmentCount(max(outer[0], outer[2], inner[0]), spacing) and
-// vN = segmentCount(max(outer[1], outer[3], inner[1]), spacing). Grid
-// of (uN+1) × (vN+1) points emitted row-major (v outer, u inner).
-// Non-indexed triangle list: 2 triangles per cell, 6 verts/cell.
-void spvPortGenQuads(
-    uint patchID,
-    constant TessPortParams& params,
-    const device QuadFactors* factors,
-    device packed_float3* coords,
-    device uint* primIDs,
-    device atomic_uint* cursor)
-{
-    QuadFactors f = factors[patchID];
-    float o0 = float(f.edgeTessellationFactor[0]);
-    float o1 = float(f.edgeTessellationFactor[1]);
-    float o2 = float(f.edgeTessellationFactor[2]);
-    float o3 = float(f.edgeTessellationFactor[3]);
-    float i0 = float(f.insideTessellationFactor[0]);
-    float i1 = float(f.insideTessellationFactor[1]);
-    uint uN = spvPortSegmentCount(max(max(o0, o2), i0), params.genSpacing);
-    uint vN = spvPortSegmentCount(max(max(o1, o3), i1), params.genSpacing);
-    float fuN = float(uN);
-    float fvN = float(vN);
-
-    if (params.pointMode != 0u) {
-        for (uint j = 0u; j <= vN; ++j) {
-            float v = precise::divide(float(j), fvN);
-            for (uint i = 0u; i <= uN; ++i) {
-                float u = precise::divide(float(i), fuN);
-                uint base = atomic_fetch_add_explicit(
-                    cursor, 1u, memory_order_relaxed);
-                coords[base] = packed_float3(u, v, 0.0f);
-                primIDs[base] = patchID;
-            }
-        }
-        return;
-    }
-
-    // Two triangles per cell. CPU emits indices (a, b, d) then (a, d, c)
-    // where a = j*(uN+1)+i, b = a+1, c = a+(uN+1), d = c+1. In
-    // (u, v, 0) coords that's:
-    //   Tri 1: (u0,v0), (u1,v0), (u1,v1)
-    //   Tri 2: (u0,v0), (u1,v1), (u0,v1)
-    for (uint j = 0u; j < vN; ++j) {
-        float v0 = precise::divide(float(j),        fvN);
-        float v1 = precise::divide(float(j + 1u),   fvN);
-        for (uint i = 0u; i < uN; ++i) {
-            float u0 = precise::divide(float(i),        fuN);
-            float u1 = precise::divide(float(i + 1u),   fuN);
-            spvPortEmitTriangle(
-                float3(u0, v0, 0.0f),
-                float3(u1, v0, 0.0f),
-                float3(u1, v1, 0.0f),
-                patchID, params.flipWinding,
-                cursor, coords, primIDs);
-            spvPortEmitTriangle(
-                float3(u0, v0, 0.0f),
-                float3(u1, v1, 0.0f),
-                float3(u0, v1, 0.0f),
-                patchID, params.flipWinding,
-                cursor, coords, primIDs);
-        }
-    }
-}
-
-kernel void spvGenTessDomainTrianglesPort(
-    constant TessPortParams& params [[buffer(0)]],
-    const device QuadFactors* factors [[buffer(26)]],
-    device packed_float3* coords [[buffer(25)]],
-    device uint* primIDs [[buffer(24)]],
-    device atomic_uint* cursor [[buffer(23)]],
-    uint gid [[thread_position_in_grid]])
-{
-    if (gid != 0u) return;
-    for (uint p = 0u; p < params.patchCount; ++p) {
-        spvPortGenTriangles(p, params, factors, coords, primIDs, cursor);
-    }
-}
-
-kernel void spvGenTessDomainQuadsPort(
-    constant TessPortParams& params [[buffer(0)]],
-    const device QuadFactors* factors [[buffer(26)]],
-    device packed_float3* coords [[buffer(25)]],
-    device uint* primIDs [[buffer(24)]],
-    device atomic_uint* cursor [[buffer(23)]],
-    uint gid [[thread_position_in_grid]])
-{
-    if (gid != 0u) return;
-    for (uint p = 0u; p < params.patchCount; ++p) {
-        spvPortGenQuads(p, params, factors, coords, primIDs, cursor);
-    }
-}
-)MSL";
+    NSString* msl = kTessDomainPortMSL;
 
     NSError* libErr = nil;
     // Force IEEE-strict FP. Default compile options enable fp-contract
@@ -6176,6 +6274,9 @@ kernel void spvGenTessDomainQuadsPort(
         {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {3.0f, 3.0f, 3.0f, 3.0f}, {3.0f, 3.0f}, false, false, "quad fOdd N=3"},
         {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, false, false, "quad fOdd N=4 → 5"},
         {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {8.0f, 6.0f, 4.0f, 2.0f}, {7.0f, 5.0f}, false, false, "quad fOdd asym"},
+        // CTS rule4 quad — exact levels the test uses.
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {29.0f, 29.0f, 29.0f, 29.0f}, {32.0f, 31.0f}, false, false, "rule4 (32,31) (29,29,29,29)"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {29.0f, 29.0f, 29.0f, 29.0f}, {31.0f, 32.0f}, false, false, "rule4 (31,32) (29,29,29,29)"},
         // Winding flip (CW) — swap last two verts per triangle.
         {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, false, true, "tri eq N=3 CW"},
         {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {5.0f, 5.0f, 5.0f, 0.0f}, {5.0f, 0.0f}, false, true, "tri fOdd CW"},
