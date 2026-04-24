@@ -4064,6 +4064,12 @@ fragment float4 appgl_immediate_textured_fs(
                 (__bridge id<MTLComputePipelineState>)info.vertexComputePipelineState;
             [vsEnc setComputePipelineState:vsPSO];
             [vsEnc setBuffer:vsOutBuf offset:0 atIndex:28];
+            if (info.tessVertexAsComputeUniformData != nullptr &&
+                info.tessVertexAsComputeUniformSize > 0) {
+                [vsEnc setBytes:info.tessVertexAsComputeUniformData
+                         length:info.tessVertexAsComputeUniformSize
+                        atIndex:16];
+            }
             // For VS without stage_in inputs, the VS-compute MSL uses
             // `gl_GlobalInvocationID` as the per-vertex index (Y=0 for
             // non-instanced). `dispatchThreads` maps 1:1 onto
@@ -4101,6 +4107,12 @@ fragment float4 appgl_immediate_textured_fs(
         [cenc setComputePipelineState:tcsPSO];
         [cenc setBuffer:factorBuf offset:0 atIndex:26];
         [cenc setBuffer:indirectBuf offset:0 atIndex:29];
+        if (info.tessControlUniformData != nullptr &&
+            info.tessControlUniformSize > 0) {
+            [cenc setBytes:info.tessControlUniformData
+                    length:info.tessControlUniformSize
+                   atIndex:16];
+        }
         if (isPhase3) {
             [cenc setBuffer:vsOutBuf offset:0 atIndex:22];
             [cenc setBuffer:patchOutBuf offset:0 atIndex:27];
@@ -4121,9 +4133,11 @@ fragment float4 appgl_immediate_textured_fs(
         // per-output-vertex results in `tesComputeOutBuf`. Phase 3B.5
         // reads those bytes into the bound transform-feedback buffers.
         //
-        // Gated on `info.tessEvalComputePipelineState != nullptr`
-        // AND a runtime opt-in env so regressions stay zero while TF
-        // plumbing settles. Default-off = path is a no-op.
+        // Runs whenever info.tessEvalComputePipelineState is non-null
+        // and the env flag is set. The caller toggles the TF write
+        // portion via `info.outGeneratedVertCount` / `info.outTesComputeOutBuf`;
+        // when both are null the chain just counts verts (needed for
+        // PRIMITIVES_GENERATED on tess draws without TF).
         const bool isTessTF = (info.tessEvalComputePipelineState != nullptr) &&
             (std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr);
         id<MTLBuffer> domainCoordBuf = nil;
@@ -4262,6 +4276,12 @@ fragment float4 appgl_immediate_textured_fs(
                     id<MTLComputePipelineState> tesComputePSO =
                         (__bridge id<MTLComputePipelineState>)info.tessEvalComputePipelineState;
                     [tesEnc setComputePipelineState:tesComputePSO];
+                    if (info.tessEvalAsComputeUniformData != nullptr &&
+                        info.tessEvalAsComputeUniformSize > 0) {
+                        [tesEnc setBytes:info.tessEvalAsComputeUniformData
+                                  length:info.tessEvalAsComputeUniformSize
+                                 atIndex:16];
+                    }
                     // TES-compute output buffer (spvOut at buffer 28).
                     [tesEnc setBuffer:tesComputeOutBuf offset:0 atIndex:28];
                     // spvIndirectParams at 29 — reuse the one we built

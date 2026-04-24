@@ -19023,6 +19023,7 @@ bool GLContext::linkProgram(GLuint program) {
             (void)translateCachedStage("tess-eval", tessEvalShader,
                                        programObject->tessEvalMSL, teRefl,
                                        tessOpts);
+            programObject->tessControlReflection = tcRefl;
             // Metal tess Phase 3: compile VS as a compute kernel with
             // `vertex_for_tessellation + capture_output_to_buffer` so
             // the TCS compute dispatch can consume its outputs via
@@ -19038,6 +19039,7 @@ bool GLContext::linkProgram(GLuint program) {
                 vertexShader->source,
                 programObject->tessVertexAsComputeMSL, vsComputeRefl,
                 vsComputeOpts);
+            programObject->tessVertexAsComputeReflection = vsComputeRefl;
             // SPIRV-Cross inserts a `[[grid_size]]`-based early-return
             // in VS-for-tessellation to guard against out-of-range
             // threads. On macOS Apple Silicon with `dispatchThreads`
@@ -19087,6 +19089,7 @@ bool GLContext::linkProgram(GLuint program) {
                 "tess-eval-as-compute", tessEvalShader,
                 programObject->tessEvalAsComputeMSL, tesComputeRefl,
                 tesComputeOpts);
+            programObject->tessEvalAsComputeReflection = tesComputeRefl;
             // Phase 3B.5 [metal-tess-TF]: reflect the TES output
             // struct layout under the same translator options so the
             // TF-capture encoder can locate each GL-declared TF
@@ -22002,11 +22005,16 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // reflected. If those conditions hold, the Metal path runs the
     // full compute chain + deposits TF bytes on CPU. Otherwise we
     // defer to the CPU tessellation interpreter.
-    // Phase 3B.5 guard: my TF-capture path doesn't yet plumb default
-    // uniforms into the TCS/TES compute dispatches. If either stage's
-    // MSL references the uniform buffer slot, the compute kernels
-    // read garbage and emit wrong tess factors. Fall back to CPU tess
-    // in that case so the existing correctness is preserved.
+    // Phase 3B.5 guard: the Metal tess-TF path doesn't yet plumb
+    // default uniforms through to the TCS/TES-compute dispatches, so
+    // programs that reference `_DefaultUniforms` in their tess
+    // MSL read zero factors and produce wrong output. Fall back to
+    // the CPU tessellator in that case. Phase 3B.6 added the
+    // infrastructure (per-stage reflection, layout, uniform
+    // MetalTessDrawInfo fields) but keeps the path dormant until the
+    // isolines domain-gen kernel lands — otherwise iteration
+    // mismatches between Metal-serviced primitive modes and CPU-
+    // serviced isolines modes break invariance + vertex_spacing.
     const bool tessUsesUniforms =
         program.tessControlMSL.find("_DefaultUniforms") != std::string::npos ||
         program.tessEvalAsComputeMSL.find("_DefaultUniforms") != std::string::npos ||
@@ -22058,6 +22066,13 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     info.baseInstance = baseInstance;
     info.program = programName;
 
+    // Phase 3B.6 [metal-tess-TF] dormant infrastructure: the
+    // MetalTessDrawInfo now has fields for per-stage default-
+    // uniform bytes. Layout-compute + pack remain wired out until
+    // the isolines domain-gen kernel lands — until then, uniform
+    // programs fall back to CPU via the tessUsesUniforms guard
+    // above, so plumbing the bytes is dead code.
+
     // Fixed-function state snapshot (mirrors
     // populateTranslatedDrawFixedFunctionState but scoped to the
     // minimum Phase 2 needs).
@@ -22101,6 +22116,14 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // buffer + deposit TF bytes after the encode completes.
     std::uint32_t tfGeneratedVerts = 0;
     void* tfRetainedOutBuf = nullptr;
+    // NOTE: this intentionally fires on ANY tess draw that reaches
+    // this point with the compute chain wired — including non-TF
+    // draws — because `writeTessTFAndUpdateCounters` below updates
+    // PRIMITIVES_GENERATED from the domain-gen vertex count, and
+    // CTS tests compare that count against expected vs actual
+    // iteration counts (invariance_rule*, vertex_spacing_*). When
+    // TF is inactive the internal `doTF` check still skips the
+    // actual TF buffer write.
     const bool runTessTFWrite =
         program.metalTessEvalComputePipelineState != nullptr &&
         program.tessEvalOutputLayout.structSize > 0 &&

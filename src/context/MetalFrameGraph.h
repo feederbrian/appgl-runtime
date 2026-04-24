@@ -552,6 +552,21 @@ struct MetalTessDrawInfo {
     // run for observability only).
     std::uint32_t* outGeneratedVertCount = nullptr;
     void** outTesComputeOutBuf = nullptr;  // id<MTLBuffer>*
+
+    // Phase 3B.6 [metal-tess-TF]: default-uniform block bytes for
+    // each compute stage. Bound at Metal buffer slot 16 (the
+    // `_DefaultUniforms` slot SPIRV-Cross's translator uses for
+    // bare GL uniforms). Caller packs via buildStageUniformBuffer
+    // against the matching stage reflection; non-owning views that
+    // must outlive the encode call. Any of the three may be null
+    // if the program has no uniforms in that stage.
+    const void* tessControlUniformData = nullptr;
+    std::size_t tessControlUniformSize = 0;
+    const void* tessVertexAsComputeUniformData = nullptr;
+    std::size_t tessVertexAsComputeUniformSize = 0;
+    const void* tessEvalAsComputeUniformData = nullptr;
+    std::size_t tessEvalAsComputeUniformSize = 0;
+
     // Cached MSL sources for rebuilding the render pipeline on FBO
     // format changes. Non-owning; must outlive the encode call.
     const std::string* tessEvalMSL = nullptr;

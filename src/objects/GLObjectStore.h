@@ -636,6 +636,15 @@ struct GLProgramObject {
     // bytes into the bound TF buffer at GL's interleaved/separate
     // layout. Empty for non-tess / non-Phase-3B programs.
     appgl::StageOutputLayout tessEvalOutputLayout;
+    // Reflections for the tess compute stages. Used to build the
+    // per-dispatch default-uniform bytes so TCS / VS-compute / TES-
+    // compute can read glUniform* values (CTS tess_invariance + the
+    // getAmountOfVerticesGeneratedByTessellator counter program use
+    // uniform-fed tess factors and were stuck in the CPU fallback
+    // until these were plumbed).
+    ShaderReflection tessControlReflection;
+    ShaderReflection tessVertexAsComputeReflection;
+    ShaderReflection tessEvalAsComputeReflection;
     ShaderReflection vertexReflection;
     ShaderReflection fragmentReflection;
     // Reflection for the geometry stage, harvested from SPIRV-Cross
@@ -972,6 +981,9 @@ struct GLProgramObject {
     std::vector<UniformLayoutEntry> vertexUniformLayout;
     std::vector<UniformLayoutEntry> fragmentUniformLayout;
     std::vector<UniformLayoutEntry> computeUniformLayout;
+    std::vector<UniformLayoutEntry> tessControlUniformLayout;
+    std::vector<UniformLayoutEntry> tessVertexAsComputeUniformLayout;
+    std::vector<UniformLayoutEntry> tessEvalAsComputeUniformLayout;
     bool uniformLayoutComputed = false;
 };
 
