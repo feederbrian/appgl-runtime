@@ -3111,6 +3111,112 @@ kernel void spvGenTessDomain(
         return true;
     }
 
+    // Phase 3C [metal-tess-TF] — build the library containing the
+    // HW-tessellator domain-coord capture vertex functions.
+    // Both fns share the same output-buffer layout as the compute kernel
+    // (`spvGenTessDomain`) so the downstream TES-as-compute path reads
+    // the same buffers without branching:
+    //     buffer(23) → `device atomic_uint*    totalVertCount`
+    //     buffer(24) → `device uint*           domainPrimID`
+    //     buffer(25) → `device packed_float3*  domainTessCoord`
+    // Metal's HW tessellator drives the function once per generated
+    // vertex, with `[[position_in_patch]]` supplying the tessCoord in
+    // domain-native units (barycentric for triangles, 2D for quads) and
+    // `[[patch_id]]` supplying the patch index.
+    bool ensureTessDomainCaptureLibrary() {
+        if (tessDomainCaptureLibrary != nil) return true;
+        NSString* source = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+[[patch(quad, 0)]] vertex void spvTessDomainCaptureQuad(
+    float2 gl_TessCoordIn [[position_in_patch]],
+    uint   gl_PrimitiveID [[patch_id]],
+    device atomic_uint*   totalVertCount  [[buffer(23)]],
+    device uint*          domainPrimID    [[buffer(24)]],
+    device packed_float3* domainTessCoord [[buffer(25)]])
+{
+    uint base = atomic_fetch_add_explicit(totalVertCount, 1u, memory_order_relaxed);
+    domainTessCoord[base] = packed_float3(gl_TessCoordIn.x, gl_TessCoordIn.y, 0.0);
+    domainPrimID[base]    = gl_PrimitiveID;
+}
+
+[[patch(triangle, 0)]] vertex void spvTessDomainCaptureTri(
+    float3 gl_TessCoordIn [[position_in_patch]],
+    uint   gl_PrimitiveID [[patch_id]],
+    device atomic_uint*   totalVertCount  [[buffer(23)]],
+    device uint*          domainPrimID    [[buffer(24)]],
+    device packed_float3* domainTessCoord [[buffer(25)]])
+{
+    uint base = atomic_fetch_add_explicit(totalVertCount, 1u, memory_order_relaxed);
+    domainTessCoord[base] = packed_float3(gl_TessCoordIn);
+    domainPrimID[base]    = gl_PrimitiveID;
+}
+)MSL";
+        NSError* error = nil;
+        tessDomainCaptureLibrary =
+            [device newLibraryWithSource:source options:nil error:&error];
+        if (tessDomainCaptureLibrary == nil) {
+            FG_TRACE(@"ensureTessDomainCaptureLibrary: newLibraryWithSource failed: %@",
+                      error ? error.localizedDescription : @"(no err)");
+            return false;
+        }
+        return true;
+    }
+
+    // Phase 3C [metal-tess-TF] — build (and cache) a PSO that captures
+    // tessellator output for the given patchType / partition / winding.
+    // Cache key packs all three enum values into a uint32. Returns nil
+    // on build failure — caller falls back to the compute-kernel path.
+    //
+    // The PSO uses rasterizationEnabled=NO + vertex void, which Metal
+    // permits. Without that combo Metal rejects with "RasterizationEnabled
+    // is false but the vertex shader's return type is not void".
+    id<MTLRenderPipelineState> ensureTessDomainCapturePSO(
+        MTLPatchType patchType,
+        MTLTessellationPartitionMode partition,
+        MTLWinding winding)
+    {
+        if (!ensureTessDomainCaptureLibrary()) return nil;
+        const std::uint32_t key =
+            (static_cast<std::uint32_t>(patchType) << 16) |
+            (static_cast<std::uint32_t>(partition) << 8) |
+             static_cast<std::uint32_t>(winding);
+        auto it = tessDomainCapturePSOCache.find(key);
+        if (it != tessDomainCapturePSOCache.end()) return it->second;
+
+        NSString* fnName = (patchType == MTLPatchTypeQuad)
+            ? @"spvTessDomainCaptureQuad"
+            : @"spvTessDomainCaptureTri";
+        id<MTLFunction> vfn = [tessDomainCaptureLibrary newFunctionWithName:fnName];
+        if (vfn == nil) {
+            FG_TRACE(@"ensureTessDomainCapturePSO: function %@ not found", fnName);
+            return nil;
+        }
+        MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = vfn;
+        pd.fragmentFunction = nil;
+        pd.rasterizationEnabled = NO;
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatInvalid;
+        pd.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+        pd.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+        pd.tessellationPartitionMode = partition;
+        pd.tessellationOutputWindingOrder = winding;
+        pd.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
+        pd.maxTessellationFactor = 64;
+        NSError* psoError = nil;
+        id<MTLRenderPipelineState> pso =
+            [device newRenderPipelineStateWithDescriptor:pd error:&psoError];
+        if (pso == nil) {
+            FG_TRACE(@"ensureTessDomainCapturePSO: PSO build failed (key=0x%x): %@",
+                      key,
+                      psoError ? psoError.localizedDescription : @"(no err)");
+            return nil;
+        }
+        tessDomainCapturePSOCache[key] = pso;
+        return pso;
+    }
+
     bool ensureSolidColorLibrary() {
         if (solidColorLibrary != nil) {
             return true;
@@ -5112,6 +5218,21 @@ private:
     id<MTLLibrary> tessDomainGenLibrary = nil;
     id<MTLComputePipelineState> tessDomainGenPipelineState = nil;
 
+    // Phase 3C [metal-tess-TF] — HW-tessellator domain-coord capture
+    // path. Alternative to the MSL-kernel path above: uses Metal's HW
+    // tessellator driven by a `vertex void` capture function with
+    // rasterization disabled, so the HW emits (tessCoord, primID) pairs
+    // into the same buffers `spvGenTessDomain` populates. Gate via env
+    // `APPGL_TESS_DOMAIN_USE_METAL_HW`. Scaffolding only — unwired in
+    // this commit; the three-pass encoder still uses the compute kernel.
+    // Validated by `phase5ProbeMetalNativeTess` — §11.2.2 spec-exact for
+    // quad rule4 levels (1046 unique verts = 30×4 edges − 4 corners +
+    // 31×30 interior) and symmetric for triangle rule4 (858 unique,
+    // 134 unique u, 134 unique v).
+    id<MTLLibrary> tessDomainCaptureLibrary = nil;
+    std::unordered_map<std::uint32_t, id<MTLRenderPipelineState>>
+        tessDomainCapturePSOCache;
+
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
     // shader library, two pipeline states, and a default sampler.
     // See `ensureImmediateModeLibrary` and `ensureImmediateModePipelines`
@@ -5519,9 +5640,215 @@ static void stopMetalCaptureIfActive() {
     NSLog(@"[GL] MTLCapture: stopped, trace flushed");
 }
 
+// Phase 5 PoC [metal-tess-TF]: probe Metal's HW tessellator directly
+// with a minimal capture vertex function. Dumps (tessCoord, primID)
+// for a given (primitive, spacing, inner, outer) — so we can compare
+// Metal's native output against CTS's spec-exact expectations
+// without reimplementing §11.2.2 from scratch.
+//
+// Gated on APPGL_TEST_METAL_TESS=1. Runs once per construction,
+// prints a table of all emitted tess coords to stderr. Output is
+// expected to match CTS's `isVertexDefined` bit-for-bit modulo the
+// tessDomainOriginLowerLeft flip (Y = 1 - Metal_Y for quads,
+// barycentric permutation for triangles).
+static void phase5ProbeMetalNativeTess(id<MTLDevice> device,
+                                        id<MTLCommandQueue> commandQueue)
+{
+    if (std::getenv("APPGL_TEST_METAL_TESS") == nullptr) return;
+    if (device == nil || commandQueue == nil) return;
+    static bool sProbeRan = false;
+    if (sProbeRan) return;
+    sProbeRan = true;
+    std::fprintf(stderr, "[APPGL probe] Metal HW-tess PoC starting\n");
+
+    NSString* msl = @R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+[[patch(quad, 0)]] vertex void spvProbeTessQuad(
+    float2 gl_TessCoordIn [[position_in_patch]],
+    uint gl_PrimitiveID [[patch_id]],
+    device atomic_uint* cursor [[buffer(0)]],
+    device packed_float3* coords [[buffer(1)]],
+    device uint* primIDs [[buffer(2)]])
+{
+    uint base = atomic_fetch_add_explicit(cursor, 1u, memory_order_relaxed);
+    coords[base] = packed_float3(gl_TessCoordIn.x, gl_TessCoordIn.y, 0.0);
+    primIDs[base] = gl_PrimitiveID;
+}
+
+[[patch(triangle, 0)]] vertex void spvProbeTessTriangle(
+    float3 gl_TessCoordIn [[position_in_patch]],
+    uint gl_PrimitiveID [[patch_id]],
+    device atomic_uint* cursor [[buffer(0)]],
+    device packed_float3* coords [[buffer(1)]],
+    device uint* primIDs [[buffer(2)]])
+{
+    uint base = atomic_fetch_add_explicit(cursor, 1u, memory_order_relaxed);
+    coords[base] = packed_float3(gl_TessCoordIn.x, gl_TessCoordIn.y, gl_TessCoordIn.z);
+    primIDs[base] = gl_PrimitiveID;
+}
+)MSL";
+
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:msl options:nil error:&err];
+    if (lib == nil) {
+        std::fprintf(stderr, "[APPGL probe] library build failed: %s\n",
+                     err.localizedDescription.UTF8String);
+        return;
+    }
+
+    auto buildPSO = ^id<MTLRenderPipelineState>(NSString* fn, MTLTessellationFactorFormat factorFormat,
+                                                 MTLPatchType patchType) {
+        id<MTLFunction> vfn = [lib newFunctionWithName:fn];
+        if (vfn == nil) return nil;
+        MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = vfn;
+        pd.fragmentFunction = nil;
+        pd.rasterizationEnabled = NO;
+        pd.tessellationFactorFormat = factorFormat;
+        pd.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+        pd.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
+        pd.tessellationOutputWindingOrder = MTLWindingCounterClockwise;
+        pd.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionConstant;
+        pd.maxTessellationFactor = 64;
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatInvalid;
+        NSError* perr = nil;
+        id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:pd error:&perr];
+        if (pso == nil) {
+            std::fprintf(stderr, "[APPGL probe] PSO %s failed: %s\n",
+                         fn.UTF8String,
+                         perr.localizedDescription.UTF8String ?: "(no err)");
+        }
+        return pso;
+    };
+
+    id<MTLRenderPipelineState> quadPSO = buildPSO(@"spvProbeTessQuad",
+        MTLTessellationFactorFormatHalf, MTLPatchTypeQuad);
+    id<MTLRenderPipelineState> triPSO = buildPSO(@"spvProbeTessTriangle",
+        MTLTessellationFactorFormatHalf, MTLPatchTypeTriangle);
+    if (quadPSO == nil && triPSO == nil) {
+        std::fprintf(stderr, "[APPGL probe] both PSO builds failed — aborting\n");
+        return;
+    }
+
+    // Test case: `invariance_rule4` iteration with inner=(32, 31),
+    // outer=(29,29,29,29), equal spacing. Expected: (0, 1/32)
+    // exists on u=0 edge. Set up factor buffer, dispatch, read back.
+    auto runProbe = ^(const char* label,
+                       id<MTLRenderPipelineState> pso,
+                       MTLPatchType patchType,
+                       bool isQuad,
+                       float i0, float i1,
+                       float o0, float o1, float o2, float o3) {
+        if (pso == nil) return;
+        auto toHalf = [](float f) -> uint16_t {
+            // Minimal float→half (IEEE 754 binary16). Round-to-nearest.
+            uint32_t bits = 0;
+            std::memcpy(&bits, &f, sizeof(bits));
+            uint32_t sign = (bits >> 31) & 0x1;
+            int32_t  exp  = (int32_t)((bits >> 23) & 0xff) - 127;
+            uint32_t mant = bits & 0x7fffff;
+            if (exp >= 16) return (uint16_t)((sign << 15) | 0x7c00); // inf
+            if (exp <= -15) return (uint16_t)(sign << 15);              // zero/denorm
+            return (uint16_t)((sign << 15) | (((exp + 15) & 0x1f) << 10) |
+                              (mant >> 13));
+        };
+        // Quad  layout: edges[0..3] = half[0..3], inside[0..1] = half[4..5] (12 bytes).
+        // Tri   layout: edges[0..2] = half[0..2], inside     = half[3]     (8 bytes).
+        uint16_t factorData[6] = {0};
+        std::size_t factorBufSize;
+        if (isQuad) {
+            factorData[0] = toHalf(o0);
+            factorData[1] = toHalf(o1);
+            factorData[2] = toHalf(o2);
+            factorData[3] = toHalf(o3);
+            factorData[4] = toHalf(i0);
+            factorData[5] = toHalf(i1);
+            factorBufSize = sizeof(MTLQuadTessellationFactorsHalf);
+        } else {
+            factorData[0] = toHalf(o0);
+            factorData[1] = toHalf(o1);
+            factorData[2] = toHalf(o2);
+            factorData[3] = toHalf(i0);
+            factorBufSize = sizeof(MTLTriangleTessellationFactorsHalf);
+        }
+        id<MTLBuffer> factorBuf = [device newBufferWithBytes:factorData
+                                                      length:factorBufSize
+                                                     options:MTLResourceStorageModeShared];
+
+        // Capture buffers.
+        const NSUInteger kMaxVerts = 100000;
+        uint32_t zero = 0;
+        id<MTLBuffer> cursorBuf = [device newBufferWithBytes:&zero length:sizeof(uint32_t)
+                                                     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> coordsBuf = [device newBufferWithLength:kMaxVerts * 12
+                                                     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> primIDsBuf = [device newBufferWithLength:kMaxVerts * sizeof(uint32_t)
+                                                      options:MTLResourceStorageModeShared];
+
+        MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor new];
+        rpd.renderTargetWidth = 1;
+        rpd.renderTargetHeight = 1;
+        rpd.defaultRasterSampleCount = 1;
+
+        id<MTLCommandBuffer> cb = [commandQueue commandBuffer];
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rpd];
+        [enc setRenderPipelineState:pso];
+        [enc setVertexBuffer:cursorBuf offset:0 atIndex:0];
+        [enc setVertexBuffer:coordsBuf offset:0 atIndex:1];
+        [enc setVertexBuffer:primIDsBuf offset:0 atIndex:2];
+        [enc setTessellationFactorBuffer:factorBuf offset:0 instanceStride:0];
+        [enc drawPatches:(isQuad ? 4u : 3u)  // points per patch
+              patchStart:0
+              patchCount:1
+        patchIndexBuffer:nil
+  patchIndexBufferOffset:0
+           instanceCount:1
+            baseInstance:0];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+
+        if (cb.error != nil) {
+            std::fprintf(stderr, "[APPGL probe] %s cmd err: %s\n",
+                         label, cb.error.localizedDescription.UTF8String);
+            return;
+        }
+
+        uint32_t n = *(const uint32_t*)cursorBuf.contents;
+        std::fprintf(stderr, "[APPGL probe] %s emitted %u verts\n", label, n);
+        if (n > kMaxVerts) n = (uint32_t)kMaxVerts;
+        const float* coords = (const float*)coordsBuf.contents;
+        // Sort + dedup so we can diff easily.
+        std::vector<std::array<float, 3>> pts;
+        pts.reserve(n);
+        for (uint32_t k = 0; k < n; ++k) {
+            pts.push_back({coords[k*3+0], coords[k*3+1], coords[k*3+2]});
+        }
+        std::sort(pts.begin(), pts.end());
+        pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
+        std::fprintf(stderr, "[APPGL probe] %s unique verts: %zu\n", label, pts.size());
+        for (const auto& p : pts) {
+            std::fprintf(stderr, "  (%.7g, %.7g, %.7g)\n", p[0], p[1], p[2]);
+        }
+    };
+
+    runProbe("quad rule4 i=(32,31) o=(29,29,29,29)",
+             quadPSO, MTLPatchTypeQuad, true,
+             32.0f, 31.0f, 29.0f, 29.0f, 29.0f, 29.0f);
+    runProbe("triangle rule4 i=(33,0) o=(30,30,30,0)",
+             triPSO, MTLPatchTypeTriangle, false,
+             33.0f, 0.0f, 30.0f, 30.0f, 30.0f, 0.0f);
+
+    std::fprintf(stderr, "[APPGL probe] done\n");
+}
+
 MetalFrameGraph::MetalFrameGraph(void* layer, void* device, void* commandQueue)
     : impl_(std::make_unique<Impl>(layer, device, commandQueue)) {
     startMetalCaptureIfRequested((__bridge id<MTLDevice>)device);
+    phase5ProbeMetalNativeTess((__bridge id<MTLDevice>)device,
+                                (__bridge id<MTLCommandQueue>)commandQueue);
 }
 
 MetalFrameGraph::~MetalFrameGraph() {
