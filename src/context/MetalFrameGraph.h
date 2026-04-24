@@ -539,6 +539,19 @@ struct MetalTessDrawInfo {
     // feeds the bound TF buffers. When null, the encoder uses the
     // existing TES-as-vertex-function render path.
     void* tessEvalComputePipelineState = nullptr;  // id<MTLComputePipelineState>
+
+    // Phase 3B.5 [metal-tess-TF]: encoder out-params used by the TF
+    // write path in `tryMetalTessellationDraw`. After the TES-compute
+    // dispatch the encoder writes the generated vertex count into
+    // `*outGeneratedVertCount` and an id<MTLBuffer> handle for the
+    // Shared-storage TES output buffer into `*outTesComputeOutBuf`.
+    // Caller reads the buffer bytes and deposits them into the bound
+    // GL_TRANSFORM_FEEDBACK_BUFFER per the program's TF layout. Both
+    // pointers are optional — null = no write-back (the encoder
+    // allocates everything locally and lets the compute dispatches
+    // run for observability only).
+    std::uint32_t* outGeneratedVertCount = nullptr;
+    void** outTesComputeOutBuf = nullptr;  // id<MTLBuffer>*
     // Cached MSL sources for rebuilding the render pipeline on FBO
     // format changes. Non-owning; must outlive the encode call.
     const std::string* tessEvalMSL = nullptr;

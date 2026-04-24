@@ -1,25 +1,291 @@
-Phase 3B.2 (in-progress) AppGL patch to SPIRV-Cross for TES-as-compute.
-The ragged diff form is intentional — each hunk is a self-contained
-feature so a rebase onto a different upstream SHA can merge pieces
-independently. See specs-worker-docs/phase3b-tf-capture-design.md for
-the full rationale.
-
-Current state: **kernel MSL compiles AND builds a live
-MTLComputePipelineState** on Apple Silicon. Verified with a
-standalone `newLibraryWithSource` + `newComputePipelineStateWithFunction`
-test harness. Kernel reads gl_TessCoord from
-`packed_float3* spvDomainTessCoord [[buffer(25)]]` and
-gl_PrimitiveID from `uint* spvDomainPrimID [[buffer(24)]]`,
-indexed by `[[thread_position_in_grid]].x`. Caller (AppGL encoder,
-Phase 3B.3+) allocates + populates those buffers and dispatches
-one thread per output vertex.
-
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index f98f84d..97ae240 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -266,7 +266,12 @@ void CompilerMSL::build_implicit_builtins()
+ 	bool need_dispatch_base =
+ 	    msl_options.dispatch_base && get_execution_model() == ExecutionModelGLCompute &&
+ 	    (active_input_builtins.get(BuiltInWorkgroupId) || active_input_builtins.get(BuiltInGlobalInvocationId));
+-	bool need_grid_params = get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation;
++	// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute also needs the
++	// grid-params synthesis so `builtin_invocation_id_id` gets a valid
++	// BuiltInGlobalInvocationId variable — the output index
++	// `spvOut[gl_GlobalInvocationID.x]` depends on this.
++	bool need_grid_params = (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation) ||
++	                         (get_execution_model() == ExecutionModelTessellationEvaluation && msl_options.tess_evaluation_as_compute);
+ 	bool need_vertex_base_params =
+ 	    need_grid_params &&
+ 	    (active_input_builtins.get(BuiltInVertexId) || active_input_builtins.get(BuiltInVertexIndex) ||
+@@ -3966,6 +3971,32 @@ void CompilerMSL::add_variable_to_interface_block(StorageClass storage, const st
+ 					is_builtin = is_member_builtin(var_type, mbr_idx, &builtin);
+ 					auto &mbr_type = get<SPIRType>(var_type.member_types[mbr_idx]);
+ 
++					// AppGL patch (phase-3-tess-struct-parity): for tess
++					// capture-buffer interfaces — VS output in
++					// `vertex_for_tessellation + capture_output_to_buffer`,
++					// TCS input in `multi_patch_workgroup`, TES input in
++					// `raw_buffer_tese_input` — force gl_PerVertex
++					// builtin members to be included regardless of
++					// `has_active_builtin`. Otherwise VS's main0_out can
++					// emit gl_PointSize (because VS writes it) while
++					// TCS's main0_in prunes it (because TCS doesn't read
++					// it), producing a struct-stride mismatch that
++					// breaks the typed `device main0_in*` pointer math
++					// inside the TCS MSL. Pad-inclusion keeps both sides
++					// in lockstep at the cost of a few unused bytes.
++					const bool tess_capture_buffer_interface =
++						(storage == StorageClassOutput &&
++						 ((get_execution_model() == ExecutionModelVertex &&
++						   msl_options.vertex_for_tessellation &&
++						   msl_options.capture_output_to_buffer) ||
++						  (is_tesc_shader() && msl_options.multi_patch_workgroup) ||
++						  (is_tese_shader() && msl_options.tess_evaluation_as_compute))) ||
++						(storage == StorageClassInput &&
++						 ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
++						  (is_tese_shader() && msl_options.raw_buffer_tese_input)));
++					const bool force_include_builtin =
++						tess_capture_buffer_interface && is_builtin;
++
+ 					if (storage == StorageClassOutput && is_stage_output_block_member_masked(var, mbr_idx, meta.strip_array))
+ 					{
+ 						location = UINT32_MAX; // Skip this member and resolve location again on next var member
+@@ -4001,7 +4032,7 @@ void CompilerMSL::add_variable_to_interface_block(StorageClass storage, const st
+ 							set_decoration(var_id, DecorationBuiltIn, builtin);
+ 						}
+ 					}
+-					else if (!is_builtin || has_active_builtin(builtin, storage))
++					else if (!is_builtin || has_active_builtin(builtin, storage) || force_include_builtin)
+ 					{
+ 						bool is_composite_type = is_matrix(mbr_type) || is_array(mbr_type) || mbr_type.basetype == SPIRType::Struct;
+ 						bool attribute_load_store =
+@@ -4416,9 +4447,12 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
+ 				entry_func.fixup_hooks_in.push_back(
+ 				    [=]()
+ 				    {
++					    uint32_t patch_cp = msl_options.tese_input_patch_vertices != 0
++					                            ? msl_options.tese_input_patch_vertices
++					                            : get_entry_point().output_vertices;
+ 					    statement("const device ", to_name(ir.default_entry_point), "_", ib_var_ref, "* gl_in = &",
+ 					              input_buffer_var_name, "[", to_expression(builtin_primitive_id_id), " * ",
+-					              get_entry_point().output_vertices, "];");
++					              patch_cp, "];");
+ 				    });
+ 			}
+ 			break;
+@@ -4476,6 +4510,16 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
+ 							          ".y * ", to_expression(builtin_stage_input_size_id), ".x + ",
+ 							          to_expression(builtin_invocation_id_id), ".x];");
+ 						}
++						// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute
++						// indexes spvOut by thread_position_in_grid.x — one
++						// output vertex per dispatched kernel thread.
++						else if (get_execution_model() == ExecutionModelTessellationEvaluation &&
++						         msl_options.tess_evaluation_as_compute)
++						{
++							statement("device ", to_name(ir.default_entry_point), "_", ib_var_ref, "& ", ib_var_ref,
++							          " = ", output_buffer_var_name, "[",
++							          to_expression(builtin_invocation_id_id), ".x];");
++						}
+ 						else if (msl_options.enable_base_index_zero)
+ 						{
+ 							statement("device ", to_name(ir.default_entry_point), "_", ib_var_ref, "& ", ib_var_ref,
+@@ -13862,7 +13906,13 @@ string CompilerMSL::member_attribute_qualifier(const SPIRType &type, uint32_t in
+ 			return string(" [[attribute(") + convert_to_string(locn) + ")]]";
+ 	}
+ 
+-	bool use_semantic_stage_output = is_mesh_shader() || is_tese_shader() ||
++	// AppGL fork: TES-as-compute captures output into a device buffer,
++	// so the "semantic stage output" path (which emits
++	// [[position]] / [[clip_distance]] / [[point_size]]) is wrong —
++	// those qualifiers are only valid on vertex-function output. Gate
++	// TES's participation on the compute form being off.
++	bool use_semantic_stage_output = is_mesh_shader() ||
++	                                 (is_tese_shader() && !msl_options.tess_evaluation_as_compute) ||
+ 	                                 (execution.model == ExecutionModelVertex && !msl_options.vertex_for_tessellation);
+ 
+ 	// Vertex, mesh and tessellation evaluation function outputs
+@@ -13921,6 +13971,19 @@ string CompilerMSL::member_attribute_qualifier(const SPIRType &type, uint32_t in
+ 		return "";
+ 	}
+ 
++	// AppGL fork: TES-as-compute capture buffer. Pipeline-stage
++	// attributes like [[position]] / [[clip_distance]] / [[point_size]]
++	// are only valid on vertex-function output — they're rejected by
++	// the MSL compiler when the entry point is `kernel`. For the
++	// compute-form TES the struct just lives in a buffer, so drop
++	// every qualifier.
++	if (is_tese_shader() && msl_options.tess_evaluation_as_compute && type.storage == StorageClassOutput)
++	{
++		if (is_builtin)
++			get_or_allocate_builtin_output_member_location(builtin, type.self, index);
++		return "";
++	}
++
+ 	// Tessellation control function inputs
+ 	if (is_tesc_shader() && type.storage == StorageClassInput)
+ 	{
+@@ -14321,6 +14384,12 @@ bool CompilerMSL::entry_point_returns_stage_output() const
+ {
+ 	if (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation)
+ 		return false;
++	// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute doesn't return
++	// its stage-out struct — the caller's TF-capture kernel writes output
++	// through a device buffer binding. Matches the vertex-for-tessellation
++	// sibling above.
++	if (get_execution_model() == ExecutionModelTessellationEvaluation && msl_options.tess_evaluation_as_compute)
++		return false;
+ 	bool ep_should_return_output = !get_is_rasterization_disabled();
+ 	return stage_out_var_id && ep_should_return_output;
+ }
+@@ -14358,7 +14427,12 @@ string CompilerMSL::func_type_decl(SPIRType &type)
+ 			SPIRV_CROSS_THROW("Tessellation requires Metal 1.2.");
+ 		if (execution.flags.get(ExecutionModeIsolines))
+ 			SPIRV_CROSS_THROW("Metal does not support isoline tessellation.");
+-		if (msl_options.is_ios())
++		// AppGL patch (phase-3B-metal-tess-TF): emit TES as a compute
++		// kernel when `tess_evaluation_as_compute` is set. The caller
++		// supplies domain coords + a TF-capture buffer.
++		if (msl_options.tess_evaluation_as_compute)
++			entry_type = "kernel";
++		else if (msl_options.is_ios())
+ 			entry_type = join("[[ patch(", is_tessellating_triangles() ? "triangle" : "quad", ") ]] vertex");
+ 		else
+ 			entry_type = join("[[ patch(", is_tessellating_triangles() ? "triangle" : "quad", ", ",
+@@ -14644,6 +14718,24 @@ string CompilerMSL::entry_point_arg_stage_in()
+ // and false for builtins that should be passed or calculated some other way.
+ bool CompilerMSL::is_direct_input_builtin(BuiltIn bi_type)
+ {
++	// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute doesn't expose
++	// Metal's tess intrinsics as entry-point args — the
++	// `[[position_in_patch]]` / `[[patch_id]]` qualifiers are illegal on
++	// compute kernels. gl_TessCoord and gl_PrimitiveID are instead
++	// seeded in the entry prologue from a host-supplied domain-coord
++	// buffer keyed by `[[thread_position_in_grid]]`.
++	if (get_execution_model() == ExecutionModelTessellationEvaluation &&
++	    msl_options.tess_evaluation_as_compute)
++	{
++		switch (bi_type)
++		{
++		case BuiltInTessCoord:
++		case BuiltInPrimitiveId:
++			return false;
++		default:
++			break;
++		}
++	}
+ 	switch (bi_type)
+ 	{
+ 	// Vertex function in
+@@ -14834,6 +14926,25 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
+ 			    join("device uint* spvIndirectParams [[buffer(", msl_options.indirect_params_buffer_index, ")]]");
+ 		}
+ 
++		// AppGL patch (phase-3B-metal-tess-TF): inject domain-coord buffer args
++		// for TES-as-compute. The caller (AppGL encoder) writes pre-tessellated
++		// (gl_TessCoord, gl_PrimitiveID) pairs into two buffers and dispatches
++		// one kernel thread per output vertex. The per-thread read happens in
++		// fixup_hooks_in for BuiltInTessCoord / BuiltInPrimitiveId (see below).
++		//
++		// Buffer slots 24 + 25 are chosen to sit just below the tess
++		// infrastructure slots (26-29) and above the stage-in inputs (20-22).
++		// If an AppGL argument-buffer mode collides with these, the tess-TF
++		// path stays off (different programs, different encoders).
++		if (get_execution_model() == ExecutionModelTessellationEvaluation &&
++		    msl_options.tess_evaluation_as_compute)
++		{
++			if (!ep_args.empty())
++				ep_args += ", ";
++			ep_args += "const device packed_float3* spvDomainTessCoord [[buffer(25)]]";
++			ep_args += ", const device uint* spvDomainPrimID [[buffer(24)]]";
++		}
++
+ 		if (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation &&
+ 		    (active_input_builtins.get(BuiltInVertexIndex) || active_input_builtins.get(BuiltInVertexId)) &&
+ 		    msl_options.vertex_index_type != Options::IndexType::None)
+@@ -15547,6 +15658,21 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
+ 			case BuiltInPrimitiveId:
+ 				// This is natively supported by fragment and tessellation evaluation shaders.
+ 				// In tessellation control shaders, this is direct-mapped without multi-patch workgroups.
++				// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute reads
++				// gl_PrimitiveID from `spvDomainPrimID [[buffer(24)]]`.
++				// Insert at front so other hooks (like the gl_in per-CP
++				// buffer indexing under raw_buffer_tese_input) can
++				// reference gl_PrimitiveID when they run.
++				if (is_tese_shader() && msl_options.tess_evaluation_as_compute)
++				{
++					string pid_name = to_expression(var_id);
++					entry_func.fixup_hooks_in.insert(
++						entry_func.fixup_hooks_in.begin(), [=]() {
++							statement("uint ", pid_name, " = spvDomainPrimID[",
++							          to_expression(builtin_invocation_id_id), ".x];");
++						});
++					break;
++				}
+ 				if (!is_tesc_shader() || !msl_options.multi_patch_workgroup)
+ 					break;
+ 
+@@ -15585,6 +15711,27 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
+ 				}
+ 				break;
+ 			case BuiltInTessCoord:
++				// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute
++				// reads gl_TessCoord from `spvDomainTessCoord [[buffer(25)]]`
++				// indexed by `[[thread_position_in_grid]].x`. Caller
++				// supplies coords already compensated for winding /
++				// spacing / domain origin — no per-thread fixup.
++				// Insert at the FRONT of fixup_hooks_in: the
++				// `raw_buffer_tese_input` per-CP-array hook references
++				// `gl_PrimitiveID`, and we need the domain-buffer reads
++				// to execute before any of SPIRV-Cross's own input hooks.
++				if (is_tese_shader() && msl_options.tess_evaluation_as_compute)
++				{
++					string tc_name = to_expression(var_id);
++					entry_func.fixup_hooks_in.insert(
++						entry_func.fixup_hooks_in.begin(), [=]() {
++							statement("float3 ", tc_name,
++							          " = float3(spvDomainTessCoord[",
++							          to_expression(builtin_invocation_id_id), ".x]);");
++						});
++					break;  // skip the quad-padding + domain-origin fixups;
++					        // the compute caller supplies coords in final form.
++				}
+ 				if (get_entry_point().flags.get(ExecutionModeQuads))
+ 				{
+ 					// The entry point will only have a float2 TessCoord variable.
+@@ -17549,6 +17696,25 @@ string CompilerMSL::image_type_glsl(const SPIRType &type, uint32_t id, bool memb
+ 
+ 				img_type_name += "write";
+ 			}
++			else if (p_var && has_decoration(p_var->self, DecorationNonWritable) &&
++			         !has_decoration(p_var->self, DecorationNonReadable))
++			{
++				// [appgl-local] emit `access::read` for readonly
++				// storage images (GLSL `readonly image2D`). Upstream
++				// defaults to no qualifier (â `access::sample` in
++				// MSL), which Metal's MTLArgumentEncoder doesn't
++				// expose as an argument-buffer slot without a paired
++				// sampler â breaks readonly-storage-image argbuf
++				// bindings on `compute_shader.pipeline-post-fs`.
++				// `access::read` is the correct type for a
++				// .read()-only storage image in an argument buffer.
++				// NOTE: `access::read` alone doesn't work — Metal's
++				// MTLArgumentEncoder seems to require a writable
++				// qualifier for argument-buffer slot reflection.
++				// Emit `access::read_write`; the shader body only
++				// calls .read() so the write capability is unused.
++				img_type_name += ", access::read_write";
++			}
+ 			else
+ 			{
+ 				has_access_qualifier = false;
+diff --git a/spirv_msl.hpp b/spirv_msl.hpp
+index 1a28e05..7f6b815 100644
 --- a/spirv_msl.hpp
 +++ b/spirv_msl.hpp
-@@ -429,6 +429,28 @@ public:
+@@ -428,6 +428,36 @@ public:
  		// to index the output buffer.
  		bool vertex_for_tessellation = false;
-
+ 
 +		// AppGL fork addition (phase-3B-metal-tess-TF): when set, a
 +		// tessellation evaluation shader is translated as a compute
 +		// kernel rather than a `[[patch(...)]] vertex` function.
@@ -41,117 +307,15 @@ one thread per output vertex.
 +		// happens on the AppGL side.
 +		bool tess_evaluation_as_compute = false;
 +
++		// AppGL fork: per-patch control-point count for TES compilation.
++		// The TES's own IR has no output_vertices; this value is the
++		// TCS's `layout(vertices = N) out;` and is needed to emit the
++		// correct stride in
++		//   gl_in = &spvIn[gl_PrimitiveID * N];
++		// (was `* 0` when unset, collapsing all patches to the origin).
++		// 0 = fall back to existing behaviour.
++		uint32_t tese_input_patch_vertices = 0;
++
  		// Assume that SubpassData images have multiple layers. Layered input attachments
  		// are addressed relative to the Layer output from the vertex pipeline. This option
  		// has no effect with multiview, since all input attachments are assumed to be layered
-
---- a/spirv_msl.cpp   (build_implicit_builtins: extend `need_grid_params`)
-+++ b/spirv_msl.cpp
-@@ -269,1 +269,6 @@
--	bool need_grid_params = get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation;
-+	// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute also needs the
-+	// grid-params synthesis so `builtin_invocation_id_id` gets a valid
-+	// BuiltInGlobalInvocationId variable — the output index
-+	// `spvOut[gl_GlobalInvocationID.x]` depends on this.
-+	bool need_grid_params = (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation) ||
-+	                         (get_execution_model() == ExecutionModelTessellationEvaluation && msl_options.tess_evaluation_as_compute);
-
---- a/spirv_msl.cpp   (add_variable_to_interface_block: TES-as-compute output index)
-+++ b/spirv_msl.cpp
-@@ -4502,0 +4503,11 @@
-+						// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute
-+						// indexes spvOut by thread_position_in_grid.x — one
-+						// output vertex per dispatched kernel thread.
-+						else if (get_execution_model() == ExecutionModelTessellationEvaluation &&
-+						         msl_options.tess_evaluation_as_compute)
-+						{
-+							statement("device ", to_name(ir.default_entry_point), "_", ib_var_ref, "& ", ib_var_ref,
-+							          " = ", output_buffer_var_name, "[",
-+							          to_expression(builtin_invocation_id_id), ".x];");
-+						}
-
---- a/spirv_msl.cpp   (entry_point_returns_stage_output: TES-as-compute returns void)
-+++ b/spirv_msl.cpp
-@@ -14347,0 +14348,6 @@
-+	// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute doesn't return
-+	// its stage-out struct — the caller's TF-capture kernel writes output
-+	// through a device buffer binding. Matches the vertex-for-tessellation
-+	// sibling above.
-+	if (get_execution_model() == ExecutionModelTessellationEvaluation && msl_options.tess_evaluation_as_compute)
-+		return false;
-
---- a/spirv_msl.cpp   (func_type_decl: TES-as-compute entry type is `kernel`)
-+++ b/spirv_msl.cpp
-@@ -14385,0 +14386,5 @@
-+		// AppGL patch (phase-3B-metal-tess-TF): emit TES as a compute
-+		// kernel when `tess_evaluation_as_compute` is set. The caller
-+		// supplies domain coords + a TF-capture buffer.
-+		if (msl_options.tess_evaluation_as_compute)
-+			entry_type = "kernel";
-+		else if (msl_options.is_ios())
-
---- a/spirv_msl.cpp   (entry_point_args: inject spvDomainTessCoord + spvDomainPrimID)
-+++ b/spirv_msl.cpp
-@@ (after spvIndirectParams injection inside `if (capture_output_to_buffer)`)
-+		// AppGL patch (phase-3B-metal-tess-TF): inject domain-coord buffer args
-+		// for TES-as-compute. Caller supplies per-thread (gl_TessCoord, gl_PrimitiveID)
-+		// in two buffers at slots 25 + 24.
-+		if (get_execution_model() == ExecutionModelTessellationEvaluation &&
-+		    msl_options.tess_evaluation_as_compute)
-+		{
-+			if (!ep_args.empty())
-+				ep_args += ", ";
-+			ep_args += "const device packed_float3* spvDomainTessCoord [[buffer(25)]]";
-+			ep_args += ", const device uint* spvDomainPrimID [[buffer(24)]]";
-+		}
-
---- a/spirv_msl.cpp   (BuiltInTessCoord / BuiltInPrimitiveId fixup hooks)
-+++ b/spirv_msl.cpp
-@@ (BuiltInTessCoord case, before the quad-padding branch)
-+			// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute reads
-+			// gl_TessCoord from `spvDomainTessCoord [[buffer(25)]]` indexed
-+			// by `[[thread_position_in_grid]].x`. Caller supplies coords
-+			// already compensated for winding / spacing / domain origin.
-+			if (is_tese_shader() && msl_options.tess_evaluation_as_compute)
-+			{
-+				string tc_name = to_expression(var_id);
-+				entry_func.fixup_hooks_in.push_back([=]() {
-+					statement("float3 ", tc_name,
-+					          " = float3(spvDomainTessCoord[",
-+					          to_expression(builtin_invocation_id_id), ".x]);");
-+				});
-+				break;
-+			}
-+
-@@ (BuiltInPrimitiveId case, before the tesc multi_patch branch)
-+			if (is_tese_shader() && msl_options.tess_evaluation_as_compute)
-+			{
-+				string pid_name = to_expression(var_id);
-+				entry_func.fixup_hooks_in.push_back([=]() {
-+					statement("uint ", pid_name, " = spvDomainPrimID[",
-+					          to_expression(builtin_invocation_id_id), ".x];");
-+				});
-+				break;
-+			}
-
---- a/spirv_msl.cpp   (is_direct_input_builtin: drop TessCoord + PrimitiveId for compute)
-+++ b/spirv_msl.cpp
-@@ -14681,0 +14682,17 @@
-+	// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute doesn't expose
-+	// Metal's tess intrinsics as entry-point args — the
-+	// `[[position_in_patch]]` / `[[patch_id]]` qualifiers are illegal on
-+	// compute kernels. gl_TessCoord and gl_PrimitiveID are instead
-+	// seeded in the entry prologue from a host-supplied domain-coord
-+	// buffer keyed by `[[thread_position_in_grid]]`.
-+	if (get_execution_model() == ExecutionModelTessellationEvaluation &&
-+	    msl_options.tess_evaluation_as_compute)
-+	{
-+		switch (bi_type)
-+		{
-+		case BuiltInTessCoord:
-+		case BuiltInPrimitiveId:
-+			return false;
-+		default:
-+			break;
-+		}
-+	}

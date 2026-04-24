@@ -2832,10 +2832,14 @@ struct QuadFactors {
 //   genMode:    0=Triangles, 1=Quads (2=Isolines deferred)
 //   genSpacing: 0=Equal, 1=FractionalEven, 2=FractionalOdd
 //   patchCount: number of patches to process
+//   pointMode:  1 if TES declared `layout(..., point_mode) in;` — emits
+//               unique tess-points (one vertex each) instead of triangle
+//               primitives. TF captures one entry per emitted vertex.
 struct TessGenParams {
     uint genMode;
     uint genSpacing;
     uint patchCount;
+    uint pointMode;
 };
 
 // Round factor value up to the nearest valid segment count for the
@@ -2874,16 +2878,33 @@ inline void emitTriangle(
     primIDs[base + 2] = primID;
 }
 
-kernel void spvGenTessDomain(
-    uint patchID [[thread_position_in_grid]],
-    constant TessGenParams& params [[buffer(0)]],
-    const device QuadFactors* factors [[buffer(26)]],
-    device packed_float3* domainTessCoord [[buffer(25)]],
-    device uint* domainPrimID [[buffer(24)]],
-    device atomic_uint* totalVertCount [[buffer(23)]])
+// Emit one point's worth (1 vert) for point_mode TES.
+inline void emitPoint(
+    float3 a,
+    uint primID,
+    device atomic_uint* cursor,
+    device packed_float3* coords,
+    device uint* primIDs)
 {
-    if (patchID >= params.patchCount) return;
+    uint base = atomic_fetch_add_explicit(cursor, 1u, memory_order_relaxed);
+    coords[base] = packed_float3(a);
+    primIDs[base] = primID;
+}
 
+// Per-patch inner worker. Emits this patch's tess-grid vertices via
+// atomic claim on `totalVertCount`. Called once per patchID by the
+// serial driver kernel below, so even though claims are atomic the
+// emission order matches patch order — CTS's
+//   expected = n_vertex / n_result_vertices_per_patch
+// reads from a buffer laid out that way.
+void genPatchDomain(
+    uint patchID,
+    constant TessGenParams& params,
+    const device QuadFactors* factors,
+    device packed_float3* domainTessCoord,
+    device uint* domainPrimID,
+    device atomic_uint* totalVertCount)
+{
     QuadFactors f = factors[patchID];
     float o0 = float(f.edgeTessellationFactor[0]);
     float o1 = float(f.edgeTessellationFactor[1]);
@@ -2898,29 +2919,44 @@ kernel void spvGenTessDomain(
         // vertices get the same primID (= patchID).
         uint N = segmentCount(max(max(o0, o1), max(o2, i0)), params.genSpacing);
         float fN = float(N);
-        for (uint j = 0; j + 1u <= N; ++j) {
-            uint row0Len = N + 1u - j;
-            uint row1Len = N - j;
-            float vj0 = float(j) / fN;
-            float vj1 = float(j + 1u) / fN;
-            for (uint i = 0u; i + 1u < row0Len; ++i) {
-                float ui0 = float(i) / fN;
-                float ui1 = float(i + 1u) / fN;
-                // Upward triangle (base on row j, apex on row j+1).
-                if (i < row1Len) {
-                    float3 a = float3(ui0, vj0, 1.0f - ui0 - vj0);
-                    float3 b = float3(ui1, vj0, 1.0f - ui1 - vj0);
-                    float3 c = float3(ui0, vj1, 1.0f - ui0 - vj1);
-                    emitTriangle(a, b, c, patchID,
-                                  totalVertCount, domainTessCoord, domainPrimID);
+        if (params.pointMode != 0u) {
+            // Point_mode: emit unique tess-grid points inside the
+            // barycentric triangle. For factor N the regular grid has
+            // (N+1)(N+2)/2 points. Each gets primID = patchID.
+            for (uint j = 0u; j <= N; ++j) {
+                float v = float(j) / fN;
+                for (uint i = 0u; i + j <= N; ++i) {
+                    float u = float(i) / fN;
+                    float w = 1.0f - u - v;
+                    emitPoint(float3(u, v, w), patchID,
+                              totalVertCount, domainTessCoord, domainPrimID);
                 }
-                // Downward triangle.
-                if (i + 1u < row1Len) {
-                    float3 a = float3(ui1, vj0, 1.0f - ui1 - vj0);
-                    float3 b = float3(ui1, vj1, 1.0f - ui1 - vj1);
-                    float3 c = float3(ui0, vj1, 1.0f - ui0 - vj1);
-                    emitTriangle(a, b, c, patchID,
-                                  totalVertCount, domainTessCoord, domainPrimID);
+            }
+        } else {
+            for (uint j = 0; j + 1u <= N; ++j) {
+                uint row0Len = N + 1u - j;
+                uint row1Len = N - j;
+                float vj0 = float(j) / fN;
+                float vj1 = float(j + 1u) / fN;
+                for (uint i = 0u; i + 1u < row0Len; ++i) {
+                    float ui0 = float(i) / fN;
+                    float ui1 = float(i + 1u) / fN;
+                    // Upward triangle (base on row j, apex on row j+1).
+                    if (i < row1Len) {
+                        float3 a = float3(ui0, vj0, 1.0f - ui0 - vj0);
+                        float3 b = float3(ui1, vj0, 1.0f - ui1 - vj0);
+                        float3 c = float3(ui0, vj1, 1.0f - ui0 - vj1);
+                        emitTriangle(a, b, c, patchID,
+                                      totalVertCount, domainTessCoord, domainPrimID);
+                    }
+                    // Downward triangle.
+                    if (i + 1u < row1Len) {
+                        float3 a = float3(ui1, vj0, 1.0f - ui1 - vj0);
+                        float3 b = float3(ui1, vj1, 1.0f - ui1 - vj1);
+                        float3 c = float3(ui0, vj1, 1.0f - ui0 - vj1);
+                        emitTriangle(a, b, c, patchID,
+                                      totalVertCount, domainTessCoord, domainPrimID);
+                    }
                 }
             }
         }
@@ -2932,24 +2968,54 @@ kernel void spvGenTessDomain(
         uint vN = segmentCount(max(max(o1, o3), i1), params.genSpacing);
         float fU = float(uN);
         float fV = float(vN);
-        for (uint j = 0u; j < vN; ++j) {
-            float vj0 = float(j) / fV;
-            float vj1 = float(j + 1u) / fV;
-            for (uint i = 0u; i < uN; ++i) {
-                float ui0 = float(i) / fU;
-                float ui1 = float(i + 1u) / fU;
-                float3 a = float3(ui0, vj0, 0.0f);
-                float3 b = float3(ui1, vj0, 0.0f);
-                float3 c = float3(ui0, vj1, 0.0f);
-                float3 d = float3(ui1, vj1, 0.0f);
-                emitTriangle(a, b, d, patchID,
+        if (params.pointMode != 0u) {
+            // Point_mode quads: (uN+1)(vN+1) unique grid points.
+            for (uint j = 0u; j <= vN; ++j) {
+                float v = float(j) / fV;
+                for (uint i = 0u; i <= uN; ++i) {
+                    float u = float(i) / fU;
+                    emitPoint(float3(u, v, 0.0f), patchID,
                               totalVertCount, domainTessCoord, domainPrimID);
-                emitTriangle(a, d, c, patchID,
-                              totalVertCount, domainTessCoord, domainPrimID);
+                }
+            }
+        } else {
+            for (uint j = 0u; j < vN; ++j) {
+                float vj0 = float(j) / fV;
+                float vj1 = float(j + 1u) / fV;
+                for (uint i = 0u; i < uN; ++i) {
+                    float ui0 = float(i) / fU;
+                    float ui1 = float(i + 1u) / fU;
+                    float3 a = float3(ui0, vj0, 0.0f);
+                    float3 b = float3(ui1, vj0, 0.0f);
+                    float3 c = float3(ui0, vj1, 0.0f);
+                    float3 d = float3(ui1, vj1, 0.0f);
+                    emitTriangle(a, b, d, patchID,
+                                  totalVertCount, domainTessCoord, domainPrimID);
+                    emitTriangle(a, d, c, patchID,
+                                  totalVertCount, domainTessCoord, domainPrimID);
+                }
             }
         }
     }
     // Isolines (genMode == 2u): Phase 4 work. Noop here for now.
+}
+
+// Serial driver: one thread, walks patches in order so emission order
+// matches patch order (atomic claims still work; single-thread removes
+// the inter-patch race).
+kernel void spvGenTessDomain(
+    uint gid [[thread_position_in_grid]],
+    constant TessGenParams& params [[buffer(0)]],
+    const device QuadFactors* factors [[buffer(26)]],
+    device packed_float3* domainTessCoord [[buffer(25)]],
+    device uint* domainPrimID [[buffer(24)]],
+    device atomic_uint* totalVertCount [[buffer(23)]])
+{
+    if (gid != 0u) return;
+    for (uint p = 0u; p < params.patchCount; ++p) {
+        genPatchDomain(p, params, factors,
+                        domainTessCoord, domainPrimID, totalVertCount);
+    }
 }
 )MSL";
         NSError* error = nil;
@@ -3966,11 +4032,14 @@ fragment float4 appgl_immediate_textured_fs(
 
         // spvIndirectParams: SPIRV-Cross `constant uint*` — element [0]
         // is gl_PatchVerticesIn (from glPatchParameteri, default 3),
-        // element [1] is patchesPerThreadgroup (1 in single-patch
-        // workgroup mode, which is what Phase 1's probe uses).
+        // element [1] is the TOTAL patch count in the dispatch. The
+        // TCS MSL uses it to clamp gl_PrimitiveID when gl_GlobalInvocationID
+        // exceeds the valid range (workgroup-size rounding). Setting it
+        // to 1 silently clamps every patch to index 0 — causing
+        // every patch to read VS slot 0 as its input.
         uint32_t indirectParams[2] = {
             (uint32_t)(info.patchVertices > 0 ? info.patchVertices : 3),
-            1u
+            (uint32_t)(info.patchCount > 0 ? info.patchCount : 1)
         };
         id<MTLBuffer> indirectBuf =
             [device newBufferWithBytes:indirectParams
@@ -3997,13 +4066,25 @@ fragment float4 appgl_immediate_textured_fs(
             [vsEnc setBuffer:vsOutBuf offset:0 atIndex:28];
             // For VS without stage_in inputs, the VS-compute MSL uses
             // `gl_GlobalInvocationID` as the per-vertex index (Y=0 for
-            // non-instanced). Dispatch vertexCount threads across any
-            // convenient threadgroup shape; Metal handles the grid-vs
-            // -workgroup split. We pick 1 thread per workgroup which
-            // is the simplest mapping — refine if a specific test
-            // hits perf issues.
-            [vsEnc dispatchThreadgroups:MTLSizeMake(vertexCount, 1, 1)
-                  threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+            // non-instanced). `dispatchThreads` maps 1:1 onto
+            // gl_GlobalInvocationID and sets `[[grid_size]]` to the
+            // dispatch count — which the SPIRV-Cross-emitted VS uses as
+            // a bounds-check via `if (any(gl_GlobalInvocationID >=
+            // spvStageInputSize)) return;`. Using dispatchThreadgroups
+            // with a 1-thread workgroup would set grid_size to
+            // (threadgroupCount*1, 1, 1) — same logical result, but
+            // with fewer entry points exercised on Apple's driver it's
+            // safer to stick to the form matching SPIRV-Cross's
+            // VS-for-tessellation convention.
+            {
+                const NSUInteger maxPerTg =
+                    vsPSO.maxTotalThreadsPerThreadgroup > 0
+                        ? vsPSO.maxTotalThreadsPerThreadgroup : 32;
+                const NSUInteger tgWidth =
+                    vertexCount > 0 && vertexCount < maxPerTg ? vertexCount : maxPerTg;
+                [vsEnc dispatchThreads:MTLSizeMake(vertexCount, 1, 1)
+                 threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
+            }
             [vsEnc endEncoding];
             [vsCmdBuf commit];
             [vsCmdBuf waitUntilCompleted];
@@ -4088,9 +4169,13 @@ fragment float4 appgl_immediate_textured_fs(
                 // struct). The MSL struct size is embedded in the TES
                 // compile; 256 bytes/vertex is the Phase 3 slot
                 // over-allocation we already use elsewhere.
+                // Shared storage: the TF-write path in
+                // `tryMetalTessellationDraw` reads the CPU-side bytes
+                // after the dispatch commits and deposits them into
+                // the bound GL_TRANSFORM_FEEDBACK_BUFFER.
                 tesComputeOutBuf = [device
                     newBufferWithLength:maxTotalVerts * 256
-                                options:MTLResourceStorageModePrivate];
+                                options:MTLResourceStorageModeShared];
                 if (!domainCoordBuf || !domainPrimIDBuf ||
                     !totalVertCountBuf || !tesComputeOutBuf) {
                     return false;
@@ -4107,6 +4192,7 @@ fragment float4 appgl_immediate_textured_fs(
                     uint32_t genMode;
                     uint32_t genSpacing;
                     uint32_t patchCount;
+                    uint32_t pointMode;
                 };
                 TessGenParamsCPU paramsCPU{};
                 switch (info.genMode) {
@@ -4122,6 +4208,7 @@ fragment float4 appgl_immediate_textured_fs(
                     default:                    paramsCPU.genSpacing = 0u; break;
                 }
                 paramsCPU.patchCount = (uint32_t)info.patchCount;
+                paramsCPU.pointMode = info.pointMode ? 1u : 0u;
                 id<MTLBuffer> domainGenParamsBuf = [device
                     newBufferWithBytes:&paramsCPU
                                 length:sizeof(paramsCPU)
@@ -4139,7 +4226,11 @@ fragment float4 appgl_immediate_textured_fs(
                 [dgEnc setBuffer:domainCoordBuf offset:0 atIndex:25];
                 [dgEnc setBuffer:domainPrimIDBuf offset:0 atIndex:24];
                 [dgEnc setBuffer:totalVertCountBuf offset:0 atIndex:23];
-                [dgEnc dispatchThreads:MTLSizeMake((NSUInteger)info.patchCount, 1, 1)
+                // Serial driver: 1 thread walks all patches in order
+                // (see `spvGenTessDomain` comment). Parallelization
+                // revisited once Phase 4/5 stabilize the TF capture
+                // protocol — the atomic cursor then becomes safe.
+                [dgEnc dispatchThreads:MTLSizeMake(1, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                 [dgEnc endEncoding];
                 [dgCmdBuf commit];
@@ -4197,11 +4288,21 @@ fragment float4 appgl_immediate_textured_fs(
                             (unsigned)tessTFGeneratedVerts);
                     }
                 }
-                // Phase 3B.5 will read `tesComputeOutBuf` and copy
-                // into the bound transform-feedback buffers per
-                // varying layout. For now the output lives in the
-                // buffer but isn't wired to TF.
-                (void)tesComputeOutBuf;
+                // Phase 3B.5 [metal-tess-TF]: hand off the TES-output
+                // buffer + generated-vertex count to the caller so
+                // `tryMetalTessellationDraw` can walk the bytes and
+                // deposit TF per the program's varying layout.
+                if (info.outGeneratedVertCount != nullptr) {
+                    *info.outGeneratedVertCount =
+                        (std::uint32_t)tessTFGeneratedVerts;
+                }
+                if (info.outTesComputeOutBuf != nullptr) {
+                    // Retain the buffer so it outlives this encoder
+                    // scope. Caller CFBridgingRelease's it after the
+                    // TF write completes.
+                    *info.outTesComputeOutBuf =
+                        (void*)CFBridgingRetain(tesComputeOutBuf);
+                }
             }
         }
 

@@ -629,6 +629,13 @@ struct GLProgramObject {
     // + draw gate can be extended without touching GLProgramObject
     // again.
     std::string tessEvalAsComputeMSL;
+    // Phase 3B.5 [metal-tess-TF]: reflected TES output struct layout
+    // (per-member name + byte offset + byte size). Used by the
+    // TF-capture encoder to locate each GL-declared TF varying by
+    // name in the emitted `main0_out` struct and copy the per-vertex
+    // bytes into the bound TF buffer at GL's interleaved/separate
+    // layout. Empty for non-tess / non-Phase-3B programs.
+    appgl::StageOutputLayout tessEvalOutputLayout;
     ShaderReflection vertexReflection;
     ShaderReflection fragmentReflection;
     // Reflection for the geometry stage, harvested from SPIRV-Cross

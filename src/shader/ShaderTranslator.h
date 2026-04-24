@@ -224,6 +224,37 @@ struct TranslatorOptions {
     // the emission is unchanged. Probing / pipeline-state build stays
     // optional and errors out cleanly downstream.
     bool forceTessEvalAsCompute = false;
+
+    // Phase 3B.5 [metal-tess-TF]: per-patch control-point count to plumb
+    // into SPIRV-Cross's TES compilation so the emitted
+    //   gl_in = &spvIn[gl_PrimitiveID * N];
+    // stride resolves to the linked TCS's `layout(vertices = N) out;`
+    // instead of defaulting to 0 (which collapses every patch to the
+    // buffer origin). Only meaningful for TES stages — ignored otherwise.
+    std::uint32_t tesePatchVertices = 0;
+};
+
+// Phase 3B.5 [metal-tess-TF]: stage-output struct layout. Populated for
+// TES-as-compute programs so the transform-feedback writer can locate
+// each GL-declared TF varying by name inside SPIRV-Cross's emitted
+// `main0_out` struct and deposit the bytes at the right TF-buffer
+// offset.
+struct StageOutputLayout {
+    // Byte size of the full struct in MSL memory layout. Matches the
+    // stride between consecutive per-vertex output slots in the
+    // TES-compute output buffer.
+    std::size_t structSize = 0;
+    struct Member {
+        std::string name;          // SPIRV-Cross-emitted member name
+                                   // (matches the GLSL out-variable name
+                                   // for user varyings; "gl_Position"
+                                   // for the position builtin).
+        std::size_t offset = 0;    // byte offset inside the struct
+        std::size_t size = 0;      // byte size of the member
+        bool isBuiltIn = false;
+        std::uint32_t builtIn = 0; // spv::BuiltIn enum when isBuiltIn
+    };
+    std::vector<Member> members;
 };
 
 class ShaderTranslator {
@@ -232,6 +263,11 @@ public:
     std::string spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const;
     std::string spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log, const TranslatorOptions& options) const;
     ShaderReflection reflect(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const;
+    // Phase 3B.5: reflect the TES output struct layout under the same
+    // MSL options used by the TES-as-compute translation. Returns
+    // `structSize == 0` + empty `members` on failure (or when the
+    // stage has no outputs to reflect).
+    StageOutputLayout reflectStageOutputLayout(const std::uint32_t* spirv, std::size_t wordCount, const TranslatorOptions& options) const;
 
     // Phase 8X Group 4d follow-up⁵ — link-time co-compile entry point.
     // Re-parses both vertex and fragment GLSL into a single

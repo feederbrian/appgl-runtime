@@ -466,6 +466,9 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             mslOpts.tess_evaluation_as_compute = true;
             mslOpts.capture_output_to_buffer = true;
         }
+        if (isTessEval && options.tesePatchVertices != 0) {
+            mslOpts.tese_input_patch_vertices = options.tesePatchVertices;
+        }
         // MSL 2.2 (macOS 10.15+, 2019) required for:
         //   - `[[primitive_id]]` in fragment shaders on macOS — without it
         //     SPIRV-Cross throws `PrimitiveId on macOS requires MSL 2.2`
@@ -2075,6 +2078,176 @@ TessellationModes extractTessellationModes(const std::uint32_t* spirv, std::size
     return modes;
 }
 
+// Phase 3B.5 [metal-tess-TF]: reflect the TES output struct layout
+// under the same SPIRV-Cross options that the TES-as-compute MSL
+// translation uses. Returns member names + byte offsets so the
+// transform-feedback writer can locate each GL-declared TF varying
+// by name in the emitted `main0_out` struct and copy the per-vertex
+// bytes to the bound TF buffer.
+StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
+    const std::uint32_t* spirv, std::size_t wordCount,
+    const TranslatorOptions& options) const
+{
+    StageOutputLayout out;
+    if (spirv == nullptr || wordCount < 5) return out;
+    try {
+        spirv_cross::CompilerMSL compiler(spirv, wordCount);
+        // Mirror the MSL options the TES-as-compute translation uses,
+        // so member offsets match the layout of the emitted kernel's
+        // writes. Only the options that affect struct packing matter.
+        spirv_cross::CompilerMSL::Options mslOpts = compiler.get_msl_options();
+        mslOpts.set_msl_version(2, 2);
+        const auto execModel = compiler.get_execution_model();
+        const bool isTessEval = (execModel == spv::ExecutionModelTessellationEvaluation);
+        if (options.forceTessellation && isTessEval) {
+            mslOpts.raw_buffer_tese_input = true;
+            mslOpts.tess_domain_origin_lower_left = true;
+        }
+        if (options.forceTessEvalAsCompute && isTessEval) {
+            mslOpts.tess_evaluation_as_compute = true;
+            mslOpts.capture_output_to_buffer = true;
+        }
+        compiler.set_msl_options(mslOpts);
+        // Compile once so SPIRV-Cross's stage-out struct type is
+        // materialised with the proper member decorations. We discard
+        // the emitted text.
+        (void)compiler.compile();
+
+        auto resources = compiler.get_shader_resources();
+        if (std::getenv("APPGL_TRACE_TESS")) {
+            std::fprintf(stderr,
+                "[APPGL] reflectStageOutputLayout: stage_outputs=%zu tesAsCompute=%d\n",
+                resources.stage_outputs.size(),
+                mslOpts.tess_evaluation_as_compute ? 1 : 0);
+        }
+        if (resources.stage_outputs.empty()) return out;
+
+        // SPIRV-Cross presents each declared `out` variable as a
+        // separate resource entry — there's no aggregated struct type
+        // we can query directly (the synthetic `main0_out` struct lives
+        // in the compiler's internals). Reconstruct the struct layout
+        // here by sorting the outputs into SPIRV-Cross's emission
+        // order and computing byte offsets per MSL alignment rules.
+        //
+        // Emission order (matches the CompilerMSL struct builder):
+        //   1. User outputs sorted by SPIRV Location decoration.
+        //   2. Builtin outputs (gl_Position, gl_PointSize,
+        //      gl_ClipDistance, gl_CullDistance) at the end in the
+        //      gl_PerVertex member order.
+        struct EntryDraft {
+            StageOutputLayout::Member member;
+            std::uint32_t location = 0xFFFFFFFFu;
+            bool hasLocation = false;
+            std::uint32_t builtInEnum = 0;
+            const spirv_cross::SPIRType* type = nullptr;
+        };
+        std::vector<EntryDraft> drafts;
+        drafts.reserve(resources.stage_outputs.size());
+        for (auto& res : resources.stage_outputs) {
+            EntryDraft e;
+            e.member.name = compiler.get_name(res.id);
+            if (e.member.name.empty()) {
+                e.member.name = res.name;
+            }
+            e.type = &compiler.get_type(res.base_type_id);
+            e.member.isBuiltIn = compiler.has_decoration(res.id, spv::DecorationBuiltIn);
+            if (e.member.isBuiltIn) {
+                e.member.builtIn = compiler.get_decoration(res.id, spv::DecorationBuiltIn);
+                e.builtInEnum = e.member.builtIn;
+            }
+            if (compiler.has_decoration(res.id, spv::DecorationLocation)) {
+                e.location = compiler.get_decoration(res.id, spv::DecorationLocation);
+                e.hasLocation = true;
+            }
+            drafts.push_back(std::move(e));
+        }
+        // Sort: user outputs by location first, then builtins in
+        // gl_PerVertex order (Position=0, PointSize=1, ClipDistance=3,
+        // CullDistance=4).
+        auto builtinRank = [](std::uint32_t bi) -> int {
+            switch (bi) {
+                case spv::BuiltInPosition:     return 1001;
+                case spv::BuiltInPointSize:    return 1002;
+                case spv::BuiltInClipDistance: return 1003;
+                case spv::BuiltInCullDistance: return 1004;
+                default:                       return 1999;
+            }
+        };
+        std::sort(drafts.begin(), drafts.end(),
+            [&](const EntryDraft& a, const EntryDraft& b) {
+                int ka = a.member.isBuiltIn ? builtinRank(a.builtInEnum)
+                                             : (int)a.location;
+                int kb = b.member.isBuiltIn ? builtinRank(b.builtInEnum)
+                                             : (int)b.location;
+                return ka < kb;
+            });
+
+        std::size_t cursor = 0;
+        out.members.reserve(drafts.size());
+        for (const auto& d : drafts) {
+            const auto& mt = *d.type;
+            std::size_t scalar = 4;
+            switch (mt.basetype) {
+                case spirv_cross::SPIRType::Boolean:
+                case spirv_cross::SPIRType::Int:
+                case spirv_cross::SPIRType::UInt:
+                case spirv_cross::SPIRType::Float:
+                    scalar = 4; break;
+                case spirv_cross::SPIRType::Half:
+                case spirv_cross::SPIRType::Short:
+                case spirv_cross::SPIRType::UShort:
+                    scalar = 2; break;
+                case spirv_cross::SPIRType::Double:
+                case spirv_cross::SPIRType::Int64:
+                case spirv_cross::SPIRType::UInt64:
+                    scalar = 8; break;
+                default:
+                    scalar = 4; break;
+            }
+            const std::uint32_t vec = mt.vecsize > 0 ? mt.vecsize : 1;
+            const std::uint32_t cols = mt.columns > 0 ? mt.columns : 1;
+            std::size_t memberAlign = scalar;
+            if (vec == 2) memberAlign = 2 * scalar;
+            else if (vec == 3 || vec == 4) memberAlign = 4 * scalar;
+            std::size_t columnSize = scalar * vec;
+            if (vec == 3) columnSize = scalar * 4;
+            std::size_t memberSize = columnSize * cols;
+            // Array outputs (e.g. gl_ClipDistance[N]) take N element
+            // slots, element padded to column size.
+            if (!mt.array.empty()) {
+                std::uint32_t arraySize = mt.array[0];
+                if (arraySize == 0) arraySize = 1;
+                memberSize *= arraySize;
+            }
+            if (memberAlign > 0 && (cursor % memberAlign) != 0) {
+                cursor = ((cursor / memberAlign) + 1) * memberAlign;
+            }
+            StageOutputLayout::Member m = d.member;
+            m.offset = cursor;
+            m.size = memberSize;
+            out.members.push_back(std::move(m));
+            cursor += memberSize;
+        }
+        out.structSize = cursor;
+        if (std::getenv("APPGL_TRACE_TESS")) {
+            std::fprintf(stderr,
+                "[APPGL] reflectStageOutputLayout: structSize=%zu members=%zu\n",
+                out.structSize, out.members.size());
+            for (const auto& m : out.members) {
+                std::fprintf(stderr,
+                    "[APPGL]   member '%s' offset=%zu size=%zu builtin=%d\n",
+                    m.name.c_str(), m.offset, m.size,
+                    m.isBuiltIn ? (int)m.builtIn : -1);
+            }
+        }
+    } catch (const std::exception&) {
+        out = {};
+    } catch (...) {
+        out = {};
+    }
+    return out;
+}
+
 }  // namespace appgl
 
 #else  // !APPGL_HAS_SHADER_COMPILER
@@ -2120,6 +2293,12 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
     if (log != nullptr) {
         *log = "Shader reflection is not enabled in the bootstrap build yet.";
     }
+    return {};
+}
+
+StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
+    const std::uint32_t*, std::size_t, const TranslatorOptions&) const
+{
     return {};
 }
 

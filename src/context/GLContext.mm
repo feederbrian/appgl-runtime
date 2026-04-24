@@ -7200,6 +7200,19 @@ struct GLContext::Impl {
                                    GLsizei instanceCount = 1,
                                    GLuint baseInstance = 0);
 
+    // Phase 3B.5 [metal-tess-TF]: after the Metal tess encoder runs the
+    // TES-as-compute dispatch, walk the resulting per-vertex output
+    // bytes and deposit them into the bound GL_TRANSFORM_FEEDBACK_BUFFER
+    // per the program's TF-varying layout. Also bumps
+    // PRIMITIVES_GENERATED / TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN
+    // counters + respects GL 4.6 §13.2 primitive-fit truncation.
+    void writeTessTFAndUpdateCounters(
+        GLProgramObject& program,
+        const std::uint8_t* tesOutBytes,
+        std::uint32_t totalVerts,
+        std::size_t perVertexSlotBytes,
+        GLenum topology);
+
     // Resolve the program the GS emulator should read from, handling
     // the separable-pipeline case. When `currentProgramName` is
     // non-zero (user called glUseProgram), returns that program
@@ -13434,6 +13447,207 @@ GLsizei GLContext::Impl::countRestartIndices(GLenum type, const void* indices,
     return occurrences;
 }
 
+// Phase 3B.5 [metal-tess-TF]: TF writer + counter bump for the Metal
+// tess-as-compute path. Sibling to `writeGsXfbAndCheckDiscard` (the
+// CPU-interpreter equivalent) but sources its per-vertex bytes from
+// the Metal compute-dispatch output buffer + `program.tessEvalOutputLayout`
+// rather than the CPU interpreter's flat-float vector.
+//
+// Called unconditionally after a Phase-3B-tier Metal tess encode —
+// the caller passes `totalVerts > 0` only when TF is actually active
+// and the dispatch chain produced output.
+void GLContext::Impl::writeTessTFAndUpdateCounters(
+    GLProgramObject& program,
+    const std::uint8_t* tesOutBytes,
+    std::uint32_t totalVerts,
+    std::size_t perVertexSlotBytes,
+    GLenum topology)
+{
+    // Primitive count derived from topology + vertex count.
+    auto vertsPerPrim = [](GLenum topo) -> std::size_t {
+        switch (topo) {
+            case GL_POINTS:    return 1;
+            case GL_LINES:
+            case GL_LINE_STRIP:
+            case GL_LINE_LOOP: return 2;
+            case GL_TRIANGLES:
+            case GL_TRIANGLE_STRIP:
+            case GL_TRIANGLE_FAN: return 3;
+            default:           return 3;  // tess default = triangles
+        }
+    };
+    const std::size_t vpp = vertsPerPrim(topology);
+    const std::size_t primsGenerated = (vpp > 0) ? (totalVerts / vpp) : 0;
+    std::size_t primsWritten = 0;
+
+    // Helper: write `bytes` length bytes to (buffer, bufOffset).
+    // Mirrors writeToBuffer in writeGsXfbAndCheckDiscard.
+    auto writeToBuffer = [this](GLuint bufferName, std::size_t bufOffset,
+                                const std::uint8_t* src, std::size_t bytes) {
+        if (bufferName == 0 || bytes == 0) return;
+        GLBufferObject* buf = objects->buffers().get(bufferName);
+        if (buf == nullptr) return;
+        if (bufOffset + bytes > buf->shadowBytes.size()) return;
+        std::memcpy(buf->shadowBytes.data() + bufOffset, src, bytes);
+        if (buf->metalBuffer != nullptr) {
+            id<MTLBuffer> mb = (__bridge id<MTLBuffer>)buf->metalBuffer;
+            std::uint8_t* mc = static_cast<std::uint8_t*>([mb contents]);
+            if (mc != nullptr) {
+                std::memcpy(mc + bufOffset, src, bytes);
+            }
+        }
+    };
+
+    // TF plumbing only runs when the program has varyings recorded
+    // and TF is active. Counter updates always run (PRIMITIVES_
+    // GENERATED tracks every draw regardless).
+    const bool doTF = transformFeedbackActive &&
+                      !program.transformFeedbackVaryingNames.empty() &&
+                      tesOutBytes != nullptr &&
+                      totalVerts > 0 &&
+                      program.tessEvalOutputLayout.structSize > 0;
+
+    if (doTF) {
+        const bool interleaved =
+            (program.transformFeedbackBufferMode == GL_INTERLEAVED_ATTRIBS);
+        const auto& tfNames = program.transformFeedbackVaryingNames;
+        const auto& layout = program.tessEvalOutputLayout;
+
+        // Resolve each TF varying to a (struct-offset, byte-size) pair
+        // inside the TES output struct. Names must match the SPIRV-
+        // Cross-emitted member names. `gl_Position` special-cases.
+        struct TfSource { std::size_t offset = 0; std::size_t bytes = 0; };
+        std::vector<TfSource> sources(tfNames.size());
+        for (std::size_t i = 0; i < tfNames.size(); ++i) {
+            const std::string& name = tfNames[i];
+            for (const auto& m : layout.members) {
+                if (m.name == name ||
+                    (name == "gl_Position" && m.isBuiltIn &&
+                     m.builtIn == spv::BuiltInPosition)) {
+                    sources[i] = {m.offset, m.size};
+                    break;
+                }
+            }
+        }
+
+        if (interleaved) {
+            auto binding = state->indexedBufferBinding(
+                GL_TRANSFORM_FEEDBACK_BUFFER, 0u);
+            std::size_t cursor = static_cast<std::size_t>(binding.offset);
+            const std::size_t rangeSize =
+                static_cast<std::size_t>(binding.size);
+            const std::size_t nPrim = (vpp > 0) ? (totalVerts / vpp) : 0;
+            // Per-primitive bytes = sum of varying sizes × vpp.
+            std::size_t perVertexBytes = 0;
+            for (const auto& s : sources) perVertexBytes += s.bytes;
+            const std::size_t perPrimBytes = perVertexBytes * vpp;
+            for (std::size_t p = 0; p < nPrim; ++p) {
+                GLBufferObject* buf = binding.buffer != 0
+                    ? objects->buffers().get(binding.buffer) : nullptr;
+                const std::size_t capacity = buf == nullptr
+                    ? 0
+                    : ((rangeSize > 0)
+                        ? (static_cast<std::size_t>(binding.offset) + rangeSize)
+                        : buf->shadowBytes.size());
+                if (cursor + perPrimBytes > capacity) {
+                    break;  // GL 4.6 §13.2: drop this + remaining
+                }
+                for (std::size_t vi = 0; vi < vpp; ++vi) {
+                    const std::size_t vIdx = p * vpp + vi;
+                    const std::uint8_t* vertBase =
+                        tesOutBytes + vIdx * perVertexSlotBytes;
+                    for (const auto& s : sources) {
+                        writeToBuffer(binding.buffer, cursor,
+                                      vertBase + s.offset, s.bytes);
+                        cursor += s.bytes;
+                    }
+                }
+                ++primsWritten;
+            }
+        } else {
+            // GL_SEPARATE_ATTRIBS — one varying per TF binding.
+            struct SepBinding {
+                GLuint buffer = 0;
+                std::size_t baseOffset = 0;
+                std::size_t rangeSize = 0;
+                std::size_t cursor = 0;
+                std::size_t perVertexBytes = 0;
+                std::size_t perPrimBytes = 0;
+                bool truncated = false;
+            };
+            std::vector<SepBinding> binds(sources.size());
+            for (std::size_t i = 0; i < sources.size(); ++i) {
+                auto b = state->indexedBufferBinding(
+                    GL_TRANSFORM_FEEDBACK_BUFFER, static_cast<GLuint>(i));
+                binds[i].buffer     = b.buffer;
+                binds[i].baseOffset = static_cast<std::size_t>(b.offset);
+                binds[i].rangeSize  = static_cast<std::size_t>(b.size);
+                binds[i].cursor     = binds[i].baseOffset;
+                binds[i].perVertexBytes = sources[i].bytes;
+                binds[i].perPrimBytes   = sources[i].bytes * vpp;
+            }
+            const std::size_t nPrim = (vpp > 0) ? (totalVerts / vpp) : 0;
+            for (std::size_t p = 0; p < nPrim; ++p) {
+                bool allFit = true;
+                for (std::size_t i = 0; i < sources.size(); ++i) {
+                    GLBufferObject* buf = binds[i].buffer != 0
+                        ? objects->buffers().get(binds[i].buffer) : nullptr;
+                    const std::size_t capacity = buf == nullptr
+                        ? 0
+                        : ((binds[i].rangeSize > 0)
+                            ? (binds[i].baseOffset + binds[i].rangeSize)
+                            : buf->shadowBytes.size());
+                    if (binds[i].truncated ||
+                        binds[i].cursor + binds[i].perPrimBytes > capacity) {
+                        allFit = false;
+                        break;
+                    }
+                }
+                if (!allFit) {
+                    for (auto& b : binds) b.truncated = true;
+                    continue;
+                }
+                for (std::size_t i = 0; i < sources.size(); ++i) {
+                    for (std::size_t vi = 0; vi < vpp; ++vi) {
+                        const std::size_t vIdx = p * vpp + vi;
+                        const std::uint8_t* vertBase =
+                            tesOutBytes + vIdx * perVertexSlotBytes;
+                        writeToBuffer(binds[i].buffer, binds[i].cursor,
+                                      vertBase + sources[i].offset,
+                                      sources[i].bytes);
+                        binds[i].cursor += binds[i].perVertexBytes;
+                    }
+                }
+                ++primsWritten;
+            }
+        }
+    } else if (transformFeedbackActive) {
+        primsWritten = primsGenerated;
+    }
+
+    // Accumulate counts — mirror the writeGsXfbAndCheckDiscard path.
+    objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
+        if (!q.active) return;
+        switch (q.target) {
+            case GL_PRIMITIVES_GENERATED:
+                q.result += static_cast<GLuint64>(primsGenerated);
+                break;
+            case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+                if (transformFeedbackActive) {
+                    q.result += static_cast<GLuint64>(primsWritten);
+                }
+                break;
+            default: break;
+        }
+    });
+    (void)primsWritten;  // transform-feedback-object aggregate is
+                          // tracked via the queries loop above; the
+                          // GLTransformFeedbackObject has no direct
+                          // `primitivesWritten` field we need to
+                          // update here. Queries + writeToBuffer are
+                          // the side effects.
+}
+
 bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     GLProgramObject& program, const appgl::EmulatedDraw& ed)
 {
@@ -18824,6 +19038,39 @@ bool GLContext::linkProgram(GLuint program) {
                 vertexShader->source,
                 programObject->tessVertexAsComputeMSL, vsComputeRefl,
                 vsComputeOpts);
+            // SPIRV-Cross inserts a `[[grid_size]]`-based early-return
+            // in VS-for-tessellation to guard against out-of-range
+            // threads. On macOS Apple Silicon with `dispatchThreads`
+            // the attribute reads as (0,0,0) for reasons I haven't yet
+            // tracked — the whole kernel early-returns and nothing is
+            // written. We dispatch exactly vertexCount threads so the
+            // bounds check is redundant; strip it post-emit.
+            if (!programObject->tessVertexAsComputeMSL.empty()) {
+                std::string& mslRef = programObject->tessVertexAsComputeMSL;
+                const std::string needle =
+                    "if (any(gl_GlobalInvocationID >= spvStageInputSize))\n"
+                    "        return;";
+                const std::size_t pos = mslRef.find(needle);
+                if (pos != std::string::npos) {
+                    mslRef.replace(pos, needle.size(),
+                                   "/* AppGL: grid_size early-return stripped */");
+                }
+            }
+            // Extract TCS output_vertices now (before TES-compute
+            // translation) so we can plumb the per-patch CP count into
+            // SPIRV-Cross — the TES's own SPIR-V has no
+            // `output_vertices` execution mode, so without this the
+            // emitted `gl_in` stride defaults to `gl_PrimitiveID * 0`
+            // and every patch collapses to the TCS-output origin.
+            programObject->hasTessellation = true;
+            std::uint32_t tcsOutputVertices = 0;
+            if (tessControlShader && !tessControlShader->spirv.empty()) {
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(), tessControlShader->spirv.size());
+                programObject->tessControlOutputVertices = static_cast<GLint>(tcModes.outputVertices);
+                tcsOutputVertices = tcModes.outputVertices;
+            }
+
             // Phase 3B [metal-tess-TF] groundwork: also translate TES
             // with `forceTessEvalAsCompute` so the call path is wired
             // for the follow-up SPIRV-Cross patch that actually emits
@@ -18834,18 +19081,22 @@ bool GLContext::linkProgram(GLuint program) {
             appgl::TranslatorOptions tesComputeOpts;
             tesComputeOpts.forceTessellation = true;
             tesComputeOpts.forceTessEvalAsCompute = true;
+            tesComputeOpts.tesePatchVertices = tcsOutputVertices;
             ShaderReflection tesComputeRefl;
             (void)translateCachedStage(
                 "tess-eval-as-compute", tessEvalShader,
                 programObject->tessEvalAsComputeMSL, tesComputeRefl,
                 tesComputeOpts);
-
-            // Extract tessellation execution modes from SPIR-V.
-            programObject->hasTessellation = true;
-            if (tessControlShader && !tessControlShader->spirv.empty()) {
-                auto tcModes = extractTessellationModes(
-                    tessControlShader->spirv.data(), tessControlShader->spirv.size());
-                programObject->tessControlOutputVertices = static_cast<GLint>(tcModes.outputVertices);
+            // Phase 3B.5 [metal-tess-TF]: reflect the TES output
+            // struct layout under the same translator options so the
+            // TF-capture encoder can locate each GL-declared TF
+            // varying by name at draw time.
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                programObject->tessEvalOutputLayout =
+                    translator.reflectStageOutputLayout(
+                        tessEvalShader->spirv.data(),
+                        tessEvalShader->spirv.size(),
+                        tesComputeOpts);
             }
             if (tessEvalShader && !tessEvalShader->spirv.empty()) {
                 auto teModes = extractTessellationModes(
@@ -18954,20 +19205,26 @@ bool GLContext::linkProgram(GLuint program) {
                         programObject->tessEvalMSL.find("spvPatchIn [[buffer(") != std::string::npos);
                 // Programs that declared TF varyings at link time
                 // must source TES output into the bound TF buffer at
-                // draw time. Our Metal tess encoder doesn't integrate
-                // with TF capture yet — refuse Metal here so the CPU
-                // tessellation interpreter handles the draw. This also
-                // downgrades programs where the VS-spacing tests' "how
-                // many vertices did the tessellator emit" sanity check
-                // goes through TF.
+                // draw time. Phase 3B.5 [metal-tess-TF] adds the
+                // TES-as-compute path that deposits TF bytes on
+                // CPU; it's opt-in via APPGL_ENABLE_METAL_TESS_TF.
+                // When the env is set AND the TES-compute PSO + the
+                // TES output layout both built successfully, programs
+                // with TF varyings route through Metal. Otherwise
+                // they fall back to the CPU tess interpreter.
                 const bool tessUsesTF =
                     !programObject->transformFeedbackVaryingNames.empty();
-                if (probe.computeOk && !needsPhase3 && !tessUsesTF) {
+                const bool tessTFReady =
+                    probe.tessEvalComputeOk &&
+                    programObject->tessEvalOutputLayout.structSize > 0 &&
+                    std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+                const bool tessBlockedByTF = tessUsesTF && !tessTFReady;
+                if (probe.computeOk && !needsPhase3 && !tessBlockedByTF) {
                     programObject->metalTessTier =
                         GLProgramObject::MetalTessTier::Phase2;
                     programObject->metalTessControlPipelineState =
                         probe.computePipelineState;
-                } else if (probe.computeOk && needsPhase3 && !tessUsesTF && probe.vertexComputeOk) {
+                } else if (probe.computeOk && needsPhase3 && !tessBlockedByTF && probe.vertexComputeOk) {
                     programObject->metalTessTier =
                         GLProgramObject::MetalTessTier::Phase3;
                     programObject->metalTessControlPipelineState =
@@ -18984,17 +19241,21 @@ bool GLContext::linkProgram(GLuint program) {
                 if (std::getenv("APPGL_TRACE_TESS")) {
                     std::fprintf(stderr,
                         "[APPGL] tess-probe program=%u computeOk=%d renderOk=%d"
-                        " genMode=0x%04X genSpacing=0x%04X genVertexOrder=0x%04X"
-                        " tcsMSL=%zub tesMSL=%zub fsMSL=%zub diag=%s\n",
+                        " vsComputeOk=%d tesComputeOk=%d tessTFReady=%d tier=%d"
+                        " tesStructSize=%zu tfVaryings=%zu"
+                        " genMode=0x%04X genSpacing=0x%04X"
+                        " diag=%s\n",
                         program,
                         probe.computeOk ? 1 : 0,
                         probe.renderOk ? 1 : 0,
+                        probe.vertexComputeOk ? 1 : 0,
+                        probe.tessEvalComputeOk ? 1 : 0,
+                        tessTFReady ? 1 : 0,
+                        (int)programObject->metalTessTier,
+                        programObject->tessEvalOutputLayout.structSize,
+                        programObject->transformFeedbackVaryingNames.size(),
                         programObject->tessGenMode,
                         programObject->tessGenSpacing,
-                        programObject->tessGenVertexOrder,
-                        programObject->tessControlMSL.size(),
-                        programObject->tessEvalMSL.size(),
-                        programObject->fragmentMSL.size(),
                         probe.diagnostic.c_str());
                 }
                 Runtime::shared().recordShaderTranslation({
@@ -21735,19 +21996,35 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     }
     if (program.tessControlOutputVertices <= 0) return false;
 
-    // Transform feedback on tess draws is unwired. Tests that activate
-    // TF (whether or not rasterizer-discard is on) need the CPU
-    // interpreter path to source TES output into the bound TF buffer;
-    // our Metal encoder runs the tessellator on-GPU but has no
-    // read-back-and-deposit step. Refusing here keeps TF tests
-    // regression-clean — the draw-path gate falls straight to the CPU
-    // interpreter.
-    if (transformFeedbackActive) {
+    // Phase 3B.5 [metal-tess-TF]: transform feedback on tess draws
+    // is wired when (a) the env flag is set, (b) the program has a
+    // built TES-compute PSO, and (c) the TES output layout was
+    // reflected. If those conditions hold, the Metal path runs the
+    // full compute chain + deposits TF bytes on CPU. Otherwise we
+    // defer to the CPU tessellation interpreter.
+    // Phase 3B.5 guard: my TF-capture path doesn't yet plumb default
+    // uniforms into the TCS/TES compute dispatches. If either stage's
+    // MSL references the uniform buffer slot, the compute kernels
+    // read garbage and emit wrong tess factors. Fall back to CPU tess
+    // in that case so the existing correctness is preserved.
+    const bool tessUsesUniforms =
+        program.tessControlMSL.find("_DefaultUniforms") != std::string::npos ||
+        program.tessEvalAsComputeMSL.find("_DefaultUniforms") != std::string::npos ||
+        program.tessVertexAsComputeMSL.find("_DefaultUniforms") != std::string::npos;
+    const bool tessTFActive =
+        transformFeedbackActive &&
+        program.metalTessEvalComputePipelineState != nullptr &&
+        program.tessEvalOutputLayout.structSize > 0 &&
+        !tessUsesUniforms &&
+        std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+    if (transformFeedbackActive && !tessTFActive) {
         return false;
     }
-    // Rasterizer-discard is usually paired with TF, but can be set
-    // alone. Same treatment — CPU handles the side-effect-only shape.
-    if (state->isEnabled(GL_RASTERIZER_DISCARD)) {
+    // Rasterizer-discard is usually paired with TF. When the TF-
+    // capture chain is wired, we still run it (the render pass
+    // below is skipped naturally because the test is side-effect
+    // only). When unwired, defer to CPU.
+    if (state->isEnabled(GL_RASTERIZER_DISCARD) && !tessTFActive) {
         return false;
     }
 
@@ -21818,7 +22095,50 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         info.fboDepthStencilTexture = fboDSTex;
     }
 
-    return frameGraph->encodeMetalTessellationDraw(info);
+    // Phase 3B.5 [metal-tess-TF]: when the Metal tess-TF path is
+    // active and the program has a TES-compute PSO, wire the
+    // encoder's out-params so we can walk the produced vertex
+    // buffer + deposit TF bytes after the encode completes.
+    std::uint32_t tfGeneratedVerts = 0;
+    void* tfRetainedOutBuf = nullptr;
+    const bool runTessTFWrite =
+        program.metalTessEvalComputePipelineState != nullptr &&
+        program.tessEvalOutputLayout.structSize > 0 &&
+        std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+    if (runTessTFWrite) {
+        info.outGeneratedVertCount = &tfGeneratedVerts;
+        info.outTesComputeOutBuf = &tfRetainedOutBuf;
+    }
+
+    const bool encodeOk = frameGraph->encodeMetalTessellationDraw(info);
+
+    if (runTessTFWrite && tfGeneratedVerts > 0 && tfRetainedOutBuf != nullptr) {
+        id<MTLBuffer> tesOut =
+            (id<MTLBuffer>)CFBridgingRelease(tfRetainedOutBuf);
+        const std::uint8_t* bytes =
+            static_cast<const std::uint8_t*>([tesOut contents]);
+        // Per-vertex slot size = reflected struct size. The TES
+        // compute kernel writes `spvOut[gl_GlobalInvocationID.x]`
+        // with this stride (Metal lays out arrays of structs packed
+        // at `sizeof(main0_out)`); the 256-byte over-allocation in
+        // the encoder just sizes the total buffer, not the stride.
+        const std::size_t kTesComputeSlotBytes =
+            program.tessEvalOutputLayout.structSize;
+        // Topology from TES genMode: point_mode→GL_POINTS,
+        // isolines→GL_LINES, else GL_TRIANGLES.
+        GLenum topo = GL_TRIANGLES;
+        if (program.tessGenPointMode == GL_TRUE) {
+            topo = GL_POINTS;
+        } else if (program.tessGenMode == GL_ISOLINES) {
+            topo = GL_LINES;
+        }
+        writeTessTFAndUpdateCounters(program, bytes,
+                                      tfGeneratedVerts,
+                                      kTesComputeSlotBytes, topo);
+        (void)tesOut;  // released by __bridge_transfer at scope exit
+    }
+
+    return encodeOk;
 }
 
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
