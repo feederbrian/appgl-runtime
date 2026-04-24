@@ -28638,6 +28638,15 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             return false;
         }
     }
+    // GL 4.6 §8.11.4 + Table 8.8: the (format, type) pair must be a
+    // spec-legal combination even at readback. Silent-accept of e.g.
+    // (GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT_5_6_5) surfaces as CTS's
+    // "Expected error but got no GL error" on every depth_component*
+    // test, since CTS's isFormatValid rejects packed-type mismatches.
+    if (!isFormatTypeCompatible_extern(format, type)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     if (!obj->instantiated || obj->metalTexture == nullptr) {
         // Re-upload shadow data to Metal texture (e.g. after copyImageSubData).
         if (!obj->levels.empty()) {
