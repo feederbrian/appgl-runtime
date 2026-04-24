@@ -526,6 +526,12 @@ struct MetalTessDrawInfo {
     // transfer). Set by the caller from
     // GLProgramObject::metalTessControlPipelineState.
     void* tessControlPipelineState = nullptr;  // id<MTLComputePipelineState>
+    // Phase 3: VS-as-compute pipeline state. When non-null, the
+    // encoder runs a VS compute dispatch before the TCS and binds
+    // per-CP / per-patch / VS-output buffers for the TCS + render
+    // encoders. When null, the encoder takes the Phase 2 path
+    // (factor + indirect only).
+    void* vertexComputePipelineState = nullptr;  // id<MTLComputePipelineState>
     // Cached MSL sources for rebuilding the render pipeline on FBO
     // format changes. Non-owning; must outlive the encode call.
     const std::string* tessEvalMSL = nullptr;

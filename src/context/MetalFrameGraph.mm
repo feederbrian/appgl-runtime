@@ -3725,6 +3725,44 @@ fragment float4 appgl_immediate_textured_fs(
         if (factorBuf == nil) return false;
         factorBuf.label = @"appgl-tess-factor";
 
+        // Phase 3: additional buffers for VS-compute + TCS user
+        // output. Conservative over-allocation: 256 bytes per struct
+        // slot covers up to 16 vec4 members. Refine via SPIRV-Cross
+        // `get_declared_struct_size` once the three-pass encode is
+        // proven to work end-to-end. Storage mode is Private because
+        // writes come from compute and reads go to the tessellator +
+        // vertex function — all GPU-side.
+        const bool isPhase3 = info.vertexComputePipelineState != nullptr;
+        const NSUInteger kPhase3SlotBytes = 256;
+        const NSUInteger vertexCount = isPhase3
+            ? (NSUInteger)(info.patchCount * info.patchVertices)
+            : 0;
+        const NSUInteger vsOutBytes =
+            isPhase3 ? vertexCount * kPhase3SlotBytes : 0;
+        const NSUInteger cpOutBytes = isPhase3
+            ? (NSUInteger)(info.patchCount * info.tessControlOutputVertices) * kPhase3SlotBytes
+            : 0;
+        const NSUInteger patchOutBytes = isPhase3
+            ? (NSUInteger)info.patchCount * kPhase3SlotBytes
+            : 0;
+        id<MTLBuffer> vsOutBuf = nil;
+        id<MTLBuffer> cpOutBuf = nil;
+        id<MTLBuffer> patchOutBuf = nil;
+        if (isPhase3) {
+            vsOutBuf = [device newBufferWithLength:vsOutBytes
+                                           options:MTLResourceStorageModePrivate];
+            cpOutBuf = [device newBufferWithLength:cpOutBytes
+                                           options:MTLResourceStorageModePrivate];
+            patchOutBuf = [device newBufferWithLength:patchOutBytes
+                                              options:MTLResourceStorageModePrivate];
+            if (vsOutBuf == nil || cpOutBuf == nil || patchOutBuf == nil) {
+                return false;
+            }
+            vsOutBuf.label = @"appgl-tess-vs-out";
+            cpOutBuf.label = @"appgl-tess-cp-out";
+            patchOutBuf.label = @"appgl-tess-patch-out";
+        }
+
         // spvIndirectParams: SPIRV-Cross `constant uint*` — element [0]
         // is gl_PatchVerticesIn (from glPatchParameteri, default 3),
         // element [1] is patchesPerThreadgroup (1 in single-patch
@@ -3740,7 +3778,37 @@ fragment float4 appgl_immediate_textured_fs(
         if (indirectBuf == nil) return false;
         indirectBuf.label = @"appgl-tess-indirect-params";
 
-        // (3) Compute-encode the TCS dispatch.
+        // (3a) Phase 3: VS-as-compute dispatch. Runs once per vertex
+        // in the draw range and writes per-vertex output into
+        // `vsOutBuf` at [[buffer(28)]]. TCS reads from this buffer via
+        // `spvIn [[buffer(22)]]` (no stage-input descriptor needed with
+        // `multi_patch_workgroup = true`).
+        if (isPhase3) {
+            id<MTLCommandBuffer> vsCmdBuf = [commandQueue commandBuffer];
+            if (vsCmdBuf == nil) return false;
+            vsCmdBuf.label = @"appgl-tess-vs-compute";
+            id<MTLComputeCommandEncoder> vsEnc =
+                [vsCmdBuf computeCommandEncoder];
+            if (vsEnc == nil) return false;
+            id<MTLComputePipelineState> vsPSO =
+                (__bridge id<MTLComputePipelineState>)info.vertexComputePipelineState;
+            [vsEnc setComputePipelineState:vsPSO];
+            [vsEnc setBuffer:vsOutBuf offset:0 atIndex:28];
+            // For VS without stage_in inputs, the VS-compute MSL uses
+            // `gl_GlobalInvocationID` as the per-vertex index (Y=0 for
+            // non-instanced). Dispatch vertexCount threads across any
+            // convenient threadgroup shape; Metal handles the grid-vs
+            // -workgroup split. We pick 1 thread per workgroup which
+            // is the simplest mapping — refine if a specific test
+            // hits perf issues.
+            [vsEnc dispatchThreadgroups:MTLSizeMake(vertexCount, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+            [vsEnc endEncoding];
+            [vsCmdBuf commit];
+            [vsCmdBuf waitUntilCompleted];
+        }
+
+        // (3b) Compute-encode the TCS dispatch.
         id<MTLCommandBuffer> computeCmdBuf = [commandQueue commandBuffer];
         if (computeCmdBuf == nil) return false;
         computeCmdBuf.label = @"appgl-tess-compute";
@@ -3751,6 +3819,11 @@ fragment float4 appgl_immediate_textured_fs(
         [cenc setComputePipelineState:tcsPSO];
         [cenc setBuffer:factorBuf offset:0 atIndex:26];
         [cenc setBuffer:indirectBuf offset:0 atIndex:29];
+        if (isPhase3) {
+            [cenc setBuffer:vsOutBuf offset:0 atIndex:22];
+            [cenc setBuffer:patchOutBuf offset:0 atIndex:27];
+            [cenc setBuffer:cpOutBuf offset:0 atIndex:28];
+        }
         const MTLSize groups = MTLSizeMake(
             (NSUInteger)info.patchCount, 1, 1);
         const MTLSize threads = MTLSizeMake(
@@ -4035,9 +4108,16 @@ fragment float4 appgl_immediate_textured_fs(
             [enc setDepthStencilState:ds];
         }
 
-        // (6) Bind tess factor buffer + issue drawPatches.
+        // (6) Bind tess factor buffer + issue drawPatches. Phase 3:
+        // also bind per-CP (buffer(22)) and per-patch (buffer(20))
+        // buffers as vertex-stage inputs so the TES can read them via
+        // `raw_buffer_tese_input=true`.
         [enc setRenderPipelineState:renderPSO];
         [enc setTessellationFactorBuffer:factorBuf offset:0 instanceStride:0];
+        if (isPhase3) {
+            [enc setVertexBuffer:cpOutBuf offset:0 atIndex:22];
+            [enc setVertexBuffer:patchOutBuf offset:0 atIndex:20];
+        }
         [enc drawPatches:(NSUInteger)info.patchVertices
               patchStart:0
               patchCount:(NSUInteger)info.patchCount

@@ -18899,38 +18899,48 @@ bool GLContext::linkProgram(GLuint program) {
                     programObject->metalTessVertexPipelineState =
                         probe.vertexComputePipelineState;
                 }
-                // Phase 2/3 handleability gate: Phase 2's encoder binds
-                // only the factor (26) + indirect params (29) buffers.
-                // Programs where the SPIRV-Cross-emitted TCS or TES
-                // declares any of the stage-data buffers — VS input
-                // (22 on TCS), per-CP output (28 on TCS), per-patch
-                // output (27 on TCS), per-CP input (22 on TES), or
-                // per-patch input (20 on TES) — need the Phase 3
-                // three-pass encode (VS-as-compute → TCS compute →
-                // drawPatches). Until Phase 3's encoder lands, leave
-                // `metalTessControlPipelineState` null for those
-                // programs so the draw-path gate falls through to the
-                // CPU tessellation interpreter. No regression risk:
-                // previously the gate ran the Metal encoder which
-                // silently produced garbage for any program needing
-                // these buffers.
-                const bool tcsNeedsPhase3 =
+                // Metal tess tier gate: classify the program against
+                // the encoder capability matrix.
+                //   Phase 2 — TCS MSL uses only factor (26) + indirect
+                //     (29) buffers; TES has no per-CP/per-patch
+                //     buffer inputs. Trivial VS (empty or no user
+                //     outputs). Encoded by `encodeMetalTessellationDraw`.
+                //   Phase 3 — TCS or TES declares VS-input
+                //     (`spvIn [[buffer(22)]]` on TCS), per-CP output
+                //     (`spvOut [[buffer(28)]]` on TCS), per-patch
+                //     output (`spvPatchOut [[buffer(27)]]` on TCS),
+                //     per-CP input (`spvIn [[buffer(22)]]` on TES), or
+                //     per-patch input (`spvPatchIn [[buffer(20)]]` on
+                //     TES). Requires VS-as-compute PSO from the probe.
+                //     Encoded by `encodeMetalTessellationDrawPhase3`.
+                //   None — probe failed OR Phase 3 needed but VS
+                //     compute PSO couldn't build (VS uses
+                //     [[stage_in]] without a descriptor). Falls
+                //     through to the CPU tessellation interpreter.
+                const bool needsPhase3 =
                     probe.computeOk && (
                         programObject->tessControlMSL.find("spvIn [[buffer(") != std::string::npos ||
                         programObject->tessControlMSL.find("spvOut [[buffer(") != std::string::npos ||
-                        programObject->tessControlMSL.find("spvPatchOut [[buffer(") != std::string::npos);
-                const bool tesNeedsPhase3 =
-                    probe.computeOk && (
+                        programObject->tessControlMSL.find("spvPatchOut [[buffer(") != std::string::npos ||
                         programObject->tessEvalMSL.find("spvIn [[buffer(") != std::string::npos ||
                         programObject->tessEvalMSL.find("spvPatchIn [[buffer(") != std::string::npos);
-                const bool phase2Handleable =
-                    probe.computeOk && !tcsNeedsPhase3 && !tesNeedsPhase3;
-                if (phase2Handleable) {
+                if (probe.computeOk && !needsPhase3) {
+                    programObject->metalTessTier =
+                        GLProgramObject::MetalTessTier::Phase2;
                     programObject->metalTessControlPipelineState =
                         probe.computePipelineState;
+                } else if (probe.computeOk && needsPhase3 && probe.vertexComputeOk) {
+                    programObject->metalTessTier =
+                        GLProgramObject::MetalTessTier::Phase3;
+                    programObject->metalTessControlPipelineState =
+                        probe.computePipelineState;
+                    // vertexComputePipelineState is already stashed
+                    // above when probe.vertexComputeOk was true.
                 } else if (probe.computeOk) {
-                    // Release the retained compute PSO — Phase 3 will
-                    // rebuild with its own probe when it needs it.
+                    // Phase 3 required (complex MSL) but VS-compute
+                    // PSO didn't build — most commonly VS with
+                    // [[stage_in]] attributes and no descriptor. CPU
+                    // fallback until Phase 3.3 wires the descriptor.
                     releaseRetainedMetalObject(probe.computePipelineState);
                 }
                 if (std::getenv("APPGL_TRACE_TESS")) {
@@ -21694,6 +21704,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
 
     MetalTessDrawInfo info;
     info.tessControlPipelineState = program.metalTessControlPipelineState;
+    if (program.metalTessTier == GLProgramObject::MetalTessTier::Phase3) {
+        info.vertexComputePipelineState = program.metalTessVertexPipelineState;
+    }
     info.tessEvalMSL = &program.tessEvalMSL;
     info.fragmentMSL = &program.fragmentMSL;
     info.patchCount = patchCount;
@@ -22239,18 +22252,27 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // GS+TES together: if a program has both emulable stages, skip
     // the tess path here and let the GS emulator run. Combining the
     // two is phase 6+ work.
-    // Metal-native tessellation path (Phase 2 of the metal-tess
-    // project). Prefer Metal when the link-time probe succeeded on this
-    // program (metalTessControlPipelineState non-null); fall through to
-    // the CPU interpreter on any encode failure so tests the Metal
-    // path doesn't yet handle keep working. No geometryEmulated gate
-    // yet — Phase 5 extends the Metal path to consume TES output
-    // through the GS emulator; until then, GS-after-tess programs fall
-    // straight through to the CPU interpreter.
-    if (program != nullptr &&
+    // Metal-native tessellation path. Tier is set at link time:
+    //   Phase2 — factor + indirect only (winding.* shape). Goes
+    //     through `encodeMetalTessellationDraw`.
+    //   Phase3 — VS-as-compute + TCS with per-CP / per-patch
+    //     buffers. Same encoder, Phase-3 code path. Gated behind
+    //     `APPGL_ENABLE_METAL_TESS_PHASE3=1` while buffer-sizing,
+    //     transform-feedback plumbing, and other Phase-3-complete
+    //     work stabilises; flipping default on closes Phase 3.
+    //   None   — CPU tessellation interpreter.
+    // No geometryEmulated gate yet — Phase 5 extends the Metal path
+    // to consume TES output through the GS emulator; until then,
+    // GS-after-tess programs fall straight through to the CPU
+    // interpreter.
+    const bool metalTessEligible =
+        program != nullptr &&
         program->hasTessellation &&
-        program->metalTessControlPipelineState != nullptr &&
-        !program->geometryEmulated) {
+        !program->geometryEmulated &&
+        (program->metalTessTier == GLProgramObject::MetalTessTier::Phase2 ||
+         (program->metalTessTier == GLProgramObject::MetalTessTier::Phase3 &&
+          std::getenv("APPGL_ENABLE_METAL_TESS_PHASE3") != nullptr));
+    if (metalTessEligible) {
         if (impl_->tryMetalTessellationDraw(
                 *program, programName, mode, count, first)) {
             APPGL_LOG(DRAW, @"drawArrays metal-tess ok: count=%d first=%d",

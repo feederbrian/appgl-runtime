@@ -795,6 +795,24 @@ struct GLProgramObject {
     // `vertex_for_tessellation + capture_output_to_buffer`). Built at
     // link time via the same probe path as the TCS compute PSO.
     void* metalTessVertexPipelineState = nullptr;
+
+    // Which Metal tess draw path the link probe has cleared this
+    // program for. Set at link time after the Phase-2-handleability
+    // substring scan + Phase-3 VS-compute PSO availability check.
+    // Drives the draw-path gate:
+    //   None        — fall through to CPU tessellation interpreter
+    //   Phase2      — encode via `encodeMetalTessellationDraw`
+    //                 (TCS compute → drawPatches, factor + indirect
+    //                  buffers only).
+    //   Phase3      — encode via `encodeMetalTessellationDrawPhase3`
+    //                 (VS-compute → TCS-compute → drawPatches;
+    //                  per-CP, per-patch, VS-output buffers plumbed).
+    enum class MetalTessTier : std::uint8_t {
+        None = 0,
+        Phase2 = 1,
+        Phase3 = 2,
+    };
+    MetalTessTier metalTessTier = MetalTessTier::None;
     // Step 7-3 compute follow-up: retained id<MTLFunction> for the
     // compute entry point, populated alongside the PSO when
     // APPGL_ENABLE_ARGUMENT_BUFFERS is set. `encodeComputeDispatch`
