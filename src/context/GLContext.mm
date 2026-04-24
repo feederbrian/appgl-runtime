@@ -18911,13 +18911,21 @@ bool GLContext::linkProgram(GLuint program) {
                         programObject->tessGenMode,
                         programObject->tessGenSpacing,
                         programObject->tessGenVertexOrder,
-                        programObject->tessVertexAsComputeMSL);
+                        programObject->tessVertexAsComputeMSL,
+                        programObject->tessEvalAsComputeMSL);
                 // Phase 3: stash the VS-as-compute PSO when the probe
                 // built it. Non-fatal if it didn't (the simpler Phase-2
                 // path still works for programs without VS→TCS flow).
                 if (probe.vertexComputeOk) {
                     programObject->metalTessVertexPipelineState =
                         probe.vertexComputePipelineState;
+                }
+                // Phase 3B.4 [metal-tess-TF]: stash the TES-as-compute
+                // PSO when the probe built it. Enables the 4-dispatch
+                // TF-capture chain at draw time.
+                if (probe.tessEvalComputeOk) {
+                    programObject->metalTessEvalComputePipelineState =
+                        probe.tessEvalComputePipelineState;
                 }
                 // Metal tess tier gate: classify the program against
                 // the encoder capability matrix.
@@ -21753,6 +21761,13 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     if (program.metalTessTier == GLProgramObject::MetalTessTier::Phase3) {
         info.vertexComputePipelineState = program.metalTessVertexPipelineState;
     }
+    // Phase 3B.4 [metal-tess-TF]: forward the TES-as-compute PSO if
+    // the link-time probe built one. The encoder only runs the
+    // domain-gen + TES-compute dispatches when
+    // `APPGL_ENABLE_METAL_TESS_TF` is set; without that env the PSO
+    // slot is ignored and the render path runs unchanged.
+    info.tessEvalComputePipelineState =
+        program.metalTessEvalComputePipelineState;
     info.tessEvalMSL = &program.tessEvalMSL;
     info.fragmentMSL = &program.fragmentMSL;
     info.patchCount = patchCount;

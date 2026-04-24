@@ -3711,7 +3711,8 @@ fragment float4 appgl_immediate_textured_fs(
         GLenum genMode,
         GLenum genSpacing,
         GLenum genVertexOrder,
-        const std::string& vsComputeMSL)
+        const std::string& vsComputeMSL,
+        const std::string& tesComputeMSL)
     {
         MetalFrameGraph::TessPipelineProbeResult result;
         if (device == nil) {
@@ -3754,6 +3755,25 @@ fragment float4 appgl_immediate_textured_fs(
                 // diagnostic so callers can decide whether to use the
                 // simpler no-VS path.
                 result.diagnostic = std::string("vs-compute (non-fatal): ") + vsError;
+            }
+        }
+
+        // Stage 1c (Phase 3B.4 [metal-tess-TF]) — TES-as-compute PSO.
+        // Caller opts in by passing the SPIRV-Cross-emitted kernel
+        // form of the TES MSL (the one produced when
+        // `forceTessEvalAsCompute=true`). Builds the compute PSO that
+        // the encoder's 4-dispatch TF-capture chain consumes.
+        // Non-fatal if it fails: the traditional render-PSO TES path
+        // stays available for non-TF draws.
+        if (!tesComputeMSL.empty()) {
+            std::string tesComputeError;
+            void* tesComputePSO = buildComputePipelineState(
+                tesComputeMSL, &tesComputeError, nullptr);
+            if (tesComputePSO != nullptr) {
+                result.tessEvalComputeOk = true;
+                result.tessEvalComputePipelineState = tesComputePSO;
+            } else if (result.diagnostic.empty()) {
+                result.diagnostic = std::string("tes-compute (non-fatal): ") + tesComputeError;
             }
         }
 
@@ -4013,6 +4033,177 @@ fragment float4 appgl_immediate_textured_fs(
         [cenc endEncoding];
         [computeCmdBuf commit];
         [computeCmdBuf waitUntilCompleted];
+
+        // (3c) Phase 3B.4 [metal-tess-TF]: domain-generator + TES-as-
+        // compute dispatch chain. Runs after TCS compute (which writes
+        // the factor buffer + per-CP / per-patch output) and produces
+        // per-output-vertex results in `tesComputeOutBuf`. Phase 3B.5
+        // reads those bytes into the bound transform-feedback buffers.
+        //
+        // Gated on `info.tessEvalComputePipelineState != nullptr`
+        // AND a runtime opt-in env so regressions stay zero while TF
+        // plumbing settles. Default-off = path is a no-op.
+        const bool isTessTF = (info.tessEvalComputePipelineState != nullptr) &&
+            (std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr);
+        id<MTLBuffer> domainCoordBuf = nil;
+        id<MTLBuffer> domainPrimIDBuf = nil;
+        id<MTLBuffer> totalVertCountBuf = nil;
+        id<MTLBuffer> tesComputeOutBuf = nil;
+        NSUInteger tessTFGeneratedVerts = 0;
+        if (isTessTF) {
+            if (!ensureTessDomainGenLibrary()) {
+                if (std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr, "[APPGL] tess-tf: domain-gen library build failed\n");
+                }
+                // Fall through without TF — the existing render path
+                // still runs; tests that rely on TF will fail their
+                // correctness check but nothing crashes.
+            } else {
+                // Worst-case output-slot allocation per patch. GL 4.6
+                // §23 caps tess levels at 64; worst case (quads,
+                // fractional_odd, max level) is ~6×64² = 24576 vertex
+                // slots per patch. Over-allocate to avoid a readback
+                // round-trip for sizing.
+                constexpr NSUInteger kMaxVertsPerPatch = 24576;
+                const NSUInteger maxTotalVerts =
+                    kMaxVertsPerPatch * (NSUInteger)info.patchCount;
+                // packed_float3 is 12 bytes in MSL; hard-code the size
+                // since simd.h's equivalent isn't always accessible here.
+                domainCoordBuf = [device
+                    newBufferWithLength:maxTotalVerts * 12
+                                options:MTLResourceStorageModePrivate];
+                domainPrimIDBuf = [device
+                    newBufferWithLength:maxTotalVerts * sizeof(uint32_t)
+                                options:MTLResourceStorageModePrivate];
+                // totalVertCount lives in shared storage so CPU can
+                // read it after the domain-gen dispatch to size the
+                // TES-compute threadgroup count exactly.
+                uint32_t zero = 0;
+                totalVertCountBuf = [device
+                    newBufferWithBytes:&zero
+                                length:sizeof(uint32_t)
+                               options:MTLResourceStorageModeShared];
+                // TES-compute output buffer — conservative size
+                // (same worst-case as coord buffer × per-vertex output
+                // struct). The MSL struct size is embedded in the TES
+                // compile; 256 bytes/vertex is the Phase 3 slot
+                // over-allocation we already use elsewhere.
+                tesComputeOutBuf = [device
+                    newBufferWithLength:maxTotalVerts * 256
+                                options:MTLResourceStorageModePrivate];
+                if (!domainCoordBuf || !domainPrimIDBuf ||
+                    !totalVertCountBuf || !tesComputeOutBuf) {
+                    return false;
+                }
+                domainCoordBuf.label = @"appgl-tess-domain-coord";
+                domainPrimIDBuf.label = @"appgl-tess-domain-primid";
+                totalVertCountBuf.label = @"appgl-tess-total-count";
+                tesComputeOutBuf.label = @"appgl-tess-compute-out";
+
+                // Domain-gen params struct. Layout mirrors the MSL
+                // `TessGenParams` definition in
+                // `ensureTessDomainGenLibrary`.
+                struct TessGenParamsCPU {
+                    uint32_t genMode;
+                    uint32_t genSpacing;
+                    uint32_t patchCount;
+                };
+                TessGenParamsCPU paramsCPU{};
+                switch (info.genMode) {
+                    case GL_TRIANGLES: paramsCPU.genMode = 0u; break;
+                    case GL_QUADS:     paramsCPU.genMode = 1u; break;
+                    case GL_ISOLINES:  paramsCPU.genMode = 2u; break;
+                    default:           paramsCPU.genMode = 0u; break;
+                }
+                switch (info.genSpacing) {
+                    case GL_EQUAL:             paramsCPU.genSpacing = 0u; break;
+                    case GL_FRACTIONAL_EVEN:   paramsCPU.genSpacing = 1u; break;
+                    case GL_FRACTIONAL_ODD:    paramsCPU.genSpacing = 2u; break;
+                    default:                    paramsCPU.genSpacing = 0u; break;
+                }
+                paramsCPU.patchCount = (uint32_t)info.patchCount;
+                id<MTLBuffer> domainGenParamsBuf = [device
+                    newBufferWithBytes:&paramsCPU
+                                length:sizeof(paramsCPU)
+                               options:MTLResourceStorageModeShared];
+
+                // Domain-gen dispatch: one thread per patch. Each
+                // thread atomically claims output-vertex slots.
+                id<MTLCommandBuffer> dgCmdBuf = [commandQueue commandBuffer];
+                dgCmdBuf.label = @"appgl-tess-domain-gen";
+                id<MTLComputeCommandEncoder> dgEnc =
+                    [dgCmdBuf computeCommandEncoder];
+                [dgEnc setComputePipelineState:tessDomainGenPipelineState];
+                [dgEnc setBuffer:domainGenParamsBuf offset:0 atIndex:0];
+                [dgEnc setBuffer:factorBuf offset:0 atIndex:26];
+                [dgEnc setBuffer:domainCoordBuf offset:0 atIndex:25];
+                [dgEnc setBuffer:domainPrimIDBuf offset:0 atIndex:24];
+                [dgEnc setBuffer:totalVertCountBuf offset:0 atIndex:23];
+                [dgEnc dispatchThreads:MTLSizeMake((NSUInteger)info.patchCount, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                [dgEnc endEncoding];
+                [dgCmdBuf commit];
+                [dgCmdBuf waitUntilCompleted];
+
+                // CPU-read the produced vertex count.
+                tessTFGeneratedVerts =
+                    *(const uint32_t*)totalVertCountBuf.contents;
+
+                if (std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "[APPGL] tess-tf domain-gen ok: %u verts for "
+                        "%d patches (mode=0x%04X spacing=0x%04X)\n",
+                        (unsigned)tessTFGeneratedVerts,
+                        (int)info.patchCount,
+                        info.genMode, info.genSpacing);
+                }
+
+                // TES-compute dispatch: one thread per generated vertex.
+                // Reads spvIn (per-CP) + spvPatchIn (per-patch) from
+                // the Phase-3 buffers, domain coord + primID from the
+                // just-generated buffers, writes spvOut into
+                // tesComputeOutBuf.
+                if (tessTFGeneratedVerts > 0) {
+                    id<MTLCommandBuffer> tesCmdBuf = [commandQueue commandBuffer];
+                    tesCmdBuf.label = @"appgl-tess-tes-compute";
+                    id<MTLComputeCommandEncoder> tesEnc =
+                        [tesCmdBuf computeCommandEncoder];
+                    id<MTLComputePipelineState> tesComputePSO =
+                        (__bridge id<MTLComputePipelineState>)info.tessEvalComputePipelineState;
+                    [tesEnc setComputePipelineState:tesComputePSO];
+                    // TES-compute output buffer (spvOut at buffer 28).
+                    [tesEnc setBuffer:tesComputeOutBuf offset:0 atIndex:28];
+                    // spvIndirectParams at 29 — reuse the one we built
+                    // for the TCS dispatch (shape matches).
+                    [tesEnc setBuffer:indirectBuf offset:0 atIndex:29];
+                    // Per-CP input at 22 (from TCS compute output).
+                    if (cpOutBuf != nil)
+                        [tesEnc setBuffer:cpOutBuf offset:0 atIndex:22];
+                    // Per-patch input at 20.
+                    if (patchOutBuf != nil)
+                        [tesEnc setBuffer:patchOutBuf offset:0 atIndex:20];
+                    // Domain coord + primID (our fork-patched bindings).
+                    [tesEnc setBuffer:domainCoordBuf offset:0 atIndex:25];
+                    [tesEnc setBuffer:domainPrimIDBuf offset:0 atIndex:24];
+                    [tesEnc dispatchThreads:MTLSizeMake((NSUInteger)tessTFGeneratedVerts, 1, 1)
+                      threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                    [tesEnc endEncoding];
+                    [tesCmdBuf commit];
+                    [tesCmdBuf waitUntilCompleted];
+
+                    if (std::getenv("APPGL_TRACE_TESS")) {
+                        std::fprintf(stderr,
+                            "[APPGL] tess-tf tes-compute dispatched %u threads\n",
+                            (unsigned)tessTFGeneratedVerts);
+                    }
+                }
+                // Phase 3B.5 will read `tesComputeOutBuf` and copy
+                // into the bound transform-feedback buffers per
+                // varying layout. For now the output lives in the
+                // buffer but isn't wired to TF.
+                (void)tesComputeOutBuf;
+            }
+        }
 
         // (4) Build tess-enabled render pipeline state. Key on the
         // color + depth formats so a program drawn to multiple FBOs
@@ -5214,11 +5405,12 @@ MetalFrameGraph::TessPipelineProbeResult MetalFrameGraph::probeTessellationPipel
     GLenum genMode,
     GLenum genSpacing,
     GLenum genVertexOrder,
-    const std::string& vsComputeMSL)
+    const std::string& vsComputeMSL,
+    const std::string& tesComputeMSL)
 {
     return impl_->probeTessellationPipeline(tcsMSL, tesMSL, fsMSL,
                                              genMode, genSpacing, genVertexOrder,
-                                             vsComputeMSL);
+                                             vsComputeMSL, tesComputeMSL);
 }
 
 bool MetalFrameGraph::encodeMetalTessellationDraw(const MetalTessDrawInfo& info) {

@@ -532,6 +532,13 @@ struct MetalTessDrawInfo {
     // encoders. When null, the encoder takes the Phase 2 path
     // (factor + indirect only).
     void* vertexComputePipelineState = nullptr;  // id<MTLComputePipelineState>
+    // Phase 3B.4 [metal-tess-TF]: TES-as-compute pipeline state.
+    // When non-null AND transform feedback is active on the draw,
+    // the encoder extends the compute chain with a domain-point
+    // generator dispatch + a TES-as-compute dispatch whose output
+    // feeds the bound TF buffers. When null, the encoder uses the
+    // existing TES-as-vertex-function render path.
+    void* tessEvalComputePipelineState = nullptr;  // id<MTLComputePipelineState>
     // Cached MSL sources for rebuilding the render pipeline on FBO
     // format changes. Non-owning; must outlive the encode call.
     const std::string* tessEvalMSL = nullptr;
@@ -694,9 +701,11 @@ public:
         bool vertexComputeOk = false;    // Phase 3 — true iff VS-as-compute
                                          // PSO built (only attempted when
                                          // vsComputeMSL is non-empty).
+        bool tessEvalComputeOk = false;  // Phase 3B.4 [metal-tess-TF]
         std::string diagnostic;          // empty on full success
-        void* computePipelineState = nullptr;        // TCS compute PSO (retained)
-        void* vertexComputePipelineState = nullptr;  // VS compute PSO (retained)
+        void* computePipelineState = nullptr;            // TCS compute PSO (retained)
+        void* vertexComputePipelineState = nullptr;      // VS compute PSO (retained)
+        void* tessEvalComputePipelineState = nullptr;    // TES-compute PSO (retained)
     };
     // Phase 3: `vsComputeMSL` (empty for non-Phase-3 probes) is the
     // VS-as-compute MSL emitted with `vertex_for_tessellation +
@@ -707,6 +716,11 @@ public:
     // will fail pipeline-state creation; they fall through to the CPU
     // interpreter path via the same handleability gate that catches TCS
     // buffer bindings.
+    //
+    // Phase 3B.4 [metal-tess-TF]: `tesComputeMSL` is the TES-as-compute
+    // MSL emitted with `tess_evaluation_as_compute = true`. When
+    // non-empty the probe also builds its PSO so the Phase-3B encode
+    // path can dispatch it.
     TessPipelineProbeResult probeTessellationPipeline(
         const std::string& tcsMSL,
         const std::string& tesMSL,
@@ -714,7 +728,8 @@ public:
         GLenum genMode,
         GLenum genSpacing,
         GLenum genVertexOrder,
-        const std::string& vsComputeMSL = "");
+        const std::string& vsComputeMSL = "",
+        const std::string& tesComputeMSL = "");
 
     // Metal-native tessellation draw encoder (Phase 2 of the metal-tess
     // project). Uses the currently-bound framebuffer (same as
