@@ -3651,6 +3651,391 @@ fragment float4 appgl_immediate_textured_fs(
         return result;
     }
 
+    // Metal-native tessellation draw encoder (Phase 2 of the metal-tess
+    // project). See the public declaration on MetalFrameGraph for the
+    // full contract. Flow:
+    //   (1) End any open render pass + drain the command buffer so
+    //       subsequent compute writes are visible.
+    //   (2) Allocate a factor buffer (private storage; written by the
+    //       TCS, read by Metal's fixed-function tessellator at
+    //       drawPatches time) + an indirect-params buffer (shared, filled
+    //       with [patchVerticesIn, patchesPerThreadgroup=1]).
+    //   (3) Compute-encode the TCS: setPipelineState, bind factor +
+    //       indirect params, dispatchThreadgroups(patchCount x 1 x 1,
+    //       threadsPerThreadgroup = tessControlOutputVertices x 1 x 1).
+    //       Commit + wait so the factor buffer is populated before the
+    //       subsequent render pass reads it.
+    //   (4) Build / cache a tess-enabled MTLRenderPipelineState keyed on
+    //       (tesMSL, fsMSL, colorFormat, depthFormat) — SPIRV-Cross's
+    //       TES is emitted with `[[ patch(<domain>, 0) ]]` which must
+    //       match the genMode.
+    //   (5) Begin a render pass on the FBO (or default framebuffer),
+    //       set viewport/scissor/cull/depth state, setRenderPipelineState,
+    //       setTessellationFactorBuffer, and drawPatches.
+    //   (6) End the render pass and commit.
+    bool encodeMetalTessellationDraw(const MetalTessDrawInfo& info) {
+        if (device == nil || commandQueue == nil) return false;
+        if (info.tessControlPipelineState == nullptr) return false;
+        if (info.tessEvalMSL == nullptr || info.tessEvalMSL->empty()) return false;
+        if (info.fragmentMSL == nullptr || info.fragmentMSL->empty()) return false;
+        if (info.patchCount <= 0 || info.tessControlOutputVertices <= 0) return false;
+
+        // (1) Drain any prior state so compute runs against a clean
+        // command buffer and subsequent render-pass reads see the
+        // factor-buffer writes.
+        endRenderPass();
+        if (currentCommandBuffer != nil) {
+            [currentCommandBuffer commit];
+            [currentCommandBuffer waitUntilCompleted];
+            currentCommandBuffer = nil;
+        }
+
+        // (2) Allocate factor buffer (over-size to quad for conservatism;
+        // SPIRV-Cross always emits the quad struct even for triangle
+        // TES and Metal reads the triangle subset).
+        const NSUInteger factorBytes =
+            sizeof(MTLQuadTessellationFactorsHalf) *
+            (NSUInteger)info.patchCount;
+        id<MTLBuffer> factorBuf =
+            [device newBufferWithLength:factorBytes
+                                options:MTLResourceStorageModePrivate];
+        if (factorBuf == nil) return false;
+        factorBuf.label = @"appgl-tess-factor";
+
+        // spvIndirectParams: SPIRV-Cross `constant uint*` — element [0]
+        // is gl_PatchVerticesIn (from glPatchParameteri, default 3),
+        // element [1] is patchesPerThreadgroup (1 in single-patch
+        // workgroup mode, which is what Phase 1's probe uses).
+        uint32_t indirectParams[2] = {
+            (uint32_t)(info.patchVertices > 0 ? info.patchVertices : 3),
+            1u
+        };
+        id<MTLBuffer> indirectBuf =
+            [device newBufferWithBytes:indirectParams
+                                length:sizeof(indirectParams)
+                               options:MTLResourceStorageModeShared];
+        if (indirectBuf == nil) return false;
+        indirectBuf.label = @"appgl-tess-indirect-params";
+
+        // (3) Compute-encode the TCS dispatch.
+        id<MTLCommandBuffer> computeCmdBuf = [commandQueue commandBuffer];
+        if (computeCmdBuf == nil) return false;
+        computeCmdBuf.label = @"appgl-tess-compute";
+        id<MTLComputeCommandEncoder> cenc = [computeCmdBuf computeCommandEncoder];
+        if (cenc == nil) return false;
+        id<MTLComputePipelineState> tcsPSO =
+            (__bridge id<MTLComputePipelineState>)info.tessControlPipelineState;
+        [cenc setComputePipelineState:tcsPSO];
+        [cenc setBuffer:factorBuf offset:0 atIndex:26];
+        [cenc setBuffer:indirectBuf offset:0 atIndex:29];
+        const MTLSize groups = MTLSizeMake(
+            (NSUInteger)info.patchCount, 1, 1);
+        const MTLSize threads = MTLSizeMake(
+            (NSUInteger)info.tessControlOutputVertices, 1, 1);
+        [cenc dispatchThreadgroups:groups threadsPerThreadgroup:threads];
+        [cenc endEncoding];
+        [computeCmdBuf commit];
+        [computeCmdBuf waitUntilCompleted];
+
+        // (4) Build tess-enabled render pipeline state. Key on the
+        // color + depth formats so a program drawn to multiple FBOs
+        // keeps per-format pipelines hot. The key also includes the
+        // TES+FS MSL text hashes implicitly (same program → same MSL).
+        //
+        // We could cache this on the program with a map, similar to
+        // `metalPipelineStateCache`, but Phase 2 builds fresh each
+        // draw — future phases add a cache keyed on the format tuple.
+        MTLPixelFormat colorFormat = MTLPixelFormatBGRA8Unorm;
+        MTLPixelFormat depthFormat = MTLPixelFormatInvalid;
+        if (info.fboColorTexture != nullptr) {
+            colorFormat =
+                ((__bridge id<MTLTexture>)info.fboColorTexture).pixelFormat;
+        } else if (usesOffscreenTarget && offscreenColorTexture != nil) {
+            colorFormat = offscreenColorTexture.pixelFormat;
+        } else if (currentDrawable != nil) {
+            colorFormat = currentDrawable.texture.pixelFormat;
+        }
+        if (info.fboDepthStencilTexture != nullptr) {
+            depthFormat =
+                ((__bridge id<MTLTexture>)info.fboDepthStencilTexture).pixelFormat;
+        } else if (depthStencilTexture != nil) {
+            depthFormat = depthStencilTexture.pixelFormat;
+        }
+
+        id<MTLLibrary> tesLib = getOrCompileLibrary(*info.tessEvalMSL);
+        if (tesLib == nil) return false;
+        id<MTLLibrary> fsLib = getOrCompileLibrary(*info.fragmentMSL);
+        if (fsLib == nil) return false;
+        MTLFunctionConstantValues* emptyConstants = [[MTLFunctionConstantValues alloc] init];
+        NSError* fnErr = nil;
+        id<MTLFunction> tesFn = [tesLib newFunctionWithName:@"main0"
+                                              constantValues:emptyConstants
+                                                       error:&fnErr];
+        if (tesFn == nil) return false;
+        id<MTLFunction> fsFn = [fsLib newFunctionWithName:@"main0"
+                                            constantValues:emptyConstants
+                                                     error:&fnErr];
+        if (fsFn == nil) return false;
+
+        MTLRenderPipelineDescriptor* pipeDesc =
+            [[MTLRenderPipelineDescriptor alloc] init];
+        pipeDesc.vertexFunction = tesFn;
+        pipeDesc.fragmentFunction = fsFn;
+        pipeDesc.colorAttachments[0].pixelFormat = colorFormat;
+        if (depthFormat != MTLPixelFormatInvalid) {
+            pipeDesc.depthAttachmentPixelFormat = depthFormat;
+            // macOS depth-stencil formats (Depth32Float_Stencil8,
+            // Depth24Unorm_Stencil8) carry both aspects.
+            if (depthFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+                depthFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                depthFormat == MTLPixelFormatX32_Stencil8 ||
+                depthFormat == MTLPixelFormatX24_Stencil8) {
+                pipeDesc.stencilAttachmentPixelFormat = depthFormat;
+            }
+        }
+
+        // Tess pipeline settings. Partition-mode mapping mirrors the
+        // Phase 1 probe helper. Maximum factor = 64 to cover
+        // GL_MAX_TESS_GEN_LEVEL.
+        switch (info.genSpacing) {
+            case GL_FRACTIONAL_EVEN:
+                pipeDesc.tessellationPartitionMode =
+                    MTLTessellationPartitionModeFractionalEven;
+                break;
+            case GL_FRACTIONAL_ODD:
+                pipeDesc.tessellationPartitionMode =
+                    MTLTessellationPartitionModeFractionalOdd;
+                break;
+            case GL_EQUAL:
+            default:
+                pipeDesc.tessellationPartitionMode =
+                    MTLTessellationPartitionModeInteger;
+                break;
+        }
+        // Winding: SPIRV-Cross's `tess_domain_origin_lower_left` option
+        // injects a `gl_TessCoord.y = 1.0 - gl_TessCoord.y` fixup inside
+        // the TES for QUADS (and isolines) — per the comment in
+        // spirv_msl.cpp:15600 "Don't do this for triangles; MoltenVK
+        // will just reverse the winding order instead." The Y-flip
+        // reverses the on-screen winding relative to what Metal's
+        // fixed-function tessellator emits into the domain. To match GL
+        // semantics (`layout(ccw|cw)` is the on-screen winding), invert
+        // the pipeline's `tessellationOutputWindingOrder` whenever the
+        // TES performs the Y-flip.
+        const bool tesYFlipped =
+            (info.genMode == GL_QUADS || info.genMode == GL_ISOLINES);
+        const bool windingIsCW =
+            (info.genVertexOrder == GL_CW) ^ tesYFlipped;
+        pipeDesc.tessellationOutputWindingOrder =
+            windingIsCW ? MTLWindingClockwise : MTLWindingCounterClockwise;
+        pipeDesc.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+        pipeDesc.tessellationFactorStepFunction =
+            MTLTessellationFactorStepFunctionConstant;
+        pipeDesc.tessellationControlPointIndexType =
+            MTLTessellationControlPointIndexTypeNone;
+        pipeDesc.maxTessellationFactor = 64;
+
+        NSError* psoErr = nil;
+        id<MTLRenderPipelineState> renderPSO =
+            [device newRenderPipelineStateWithDescriptor:pipeDesc
+                                                   error:&psoErr];
+        if (renderPSO == nil) {
+            APPGL_LOG(PIPELINE, @"[FG] tess render pipeline build failed: %@",
+                      psoErr ? psoErr.localizedDescription : @"(nil err)");
+            return false;
+        }
+
+        // (5) Begin a render pass. For FBO draws we build the pass
+        // descriptor inline (single color attachment; Phase 2 doesn't
+        // support MRT yet). For default-framebuffer draws we reuse the
+        // impl's beginRenderPass path by acquiring a drawable +
+        // attaching the swapchain texture directly.
+        if (currentCommandBuffer == nil) {
+            currentCommandBuffer = [commandQueue commandBuffer];
+            attachErrorHandler(currentCommandBuffer, @"tessellationDraw");
+            if (currentCommandBuffer == nil) return false;
+        }
+
+        id<MTLTexture> colorTex = nil;
+        id<MTLTexture> depthTex = nil;
+        if (info.fboColorTexture != nullptr) {
+            colorTex = (__bridge id<MTLTexture>)info.fboColorTexture;
+            depthTex = (__bridge id<MTLTexture>)info.fboDepthStencilTexture;
+        } else {
+            ensureDrawableResources();
+            if (!acquireDrawableIfNeeded()) return false;
+            colorTex = usesOffscreenTarget ? offscreenColorTexture
+                                           : currentDrawable.texture;
+            depthTex = depthStencilTexture;
+        }
+        if (colorTex == nil) return false;
+
+        MTLRenderPassDescriptor* pass =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = colorTex;
+        if (info.pendingClearColor) {
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(
+                info.clearColor[0], info.clearColor[1],
+                info.clearColor[2], info.clearColor[3]);
+        } else {
+            pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        }
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        if (depthTex != nil && depthFormat != MTLPixelFormatInvalid) {
+            pass.depthAttachment.texture = depthTex;
+            if (info.pendingClearDepth) {
+                pass.depthAttachment.loadAction = MTLLoadActionClear;
+                pass.depthAttachment.clearDepth = info.clearDepth;
+            } else {
+                pass.depthAttachment.loadAction = MTLLoadActionLoad;
+            }
+            pass.depthAttachment.storeAction = MTLStoreActionStore;
+            if (depthFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+                depthFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                depthFormat == MTLPixelFormatX32_Stencil8 ||
+                depthFormat == MTLPixelFormatX24_Stencil8) {
+                pass.stencilAttachment.texture = depthTex;
+                if (info.pendingClearStencil) {
+                    pass.stencilAttachment.loadAction = MTLLoadActionClear;
+                    pass.stencilAttachment.clearStencil =
+                        (uint32_t)info.clearStencil;
+                } else {
+                    pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+                }
+                pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            }
+        }
+
+        id<MTLRenderCommandEncoder> enc =
+            [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        if (enc == nil) return false;
+
+        // Viewport + scissor. Metal's viewport origin is top-left;
+        // GL's is bottom-left. The existing translated-draw path
+        // flips Y by computing (fboHeight - viewportY - viewportHeight)
+        // — replicate that here. For Phase 2 we treat the FBO height
+        // as the color texture's height.
+        const double fbHeight = (double)colorTex.height;
+        MTLViewport viewport = {
+            (double)info.viewportX,
+            fbHeight - (double)info.viewportY - (double)info.viewportHeight,
+            (double)info.viewportWidth,
+            (double)info.viewportHeight,
+            info.depthRangeNear,
+            info.depthRangeFar
+        };
+        [enc setViewport:viewport];
+
+        MTLScissorRect scissor;
+        if (info.scissorTestEnabled) {
+            scissor.x = (NSUInteger)std::max(info.scissorX, 0);
+            const GLint flippedY = (GLint)colorTex.height
+                                    - info.scissorY
+                                    - info.scissorHeight;
+            scissor.y = (NSUInteger)std::max(flippedY, 0);
+            scissor.width = (NSUInteger)std::max(info.scissorWidth, 0);
+            scissor.height = (NSUInteger)std::max(info.scissorHeight, 0);
+        } else {
+            scissor.x = 0;
+            scissor.y = 0;
+            scissor.width = colorTex.width;
+            scissor.height = colorTex.height;
+        }
+        // Clamp scissor to render target.
+        if (scissor.x + scissor.width > colorTex.width) {
+            scissor.width = scissor.x < colorTex.width
+                ? colorTex.width - scissor.x : 0;
+        }
+        if (scissor.y + scissor.height > colorTex.height) {
+            scissor.height = scissor.y < colorTex.height
+                ? colorTex.height - scissor.y : 0;
+        }
+        if (scissor.width == 0 || scissor.height == 0) {
+            scissor.x = colorTex.width;
+            scissor.y = colorTex.height;
+            scissor.width = 1;
+            scissor.height = 1;
+        }
+        [enc setScissorRect:scissor];
+
+        // Cull / front-face. GL and Metal both use a CCW/CW winding
+        // convention so the enum maps 1:1.
+        if (info.cullFaceEnabled) {
+            MTLCullMode cull = MTLCullModeBack;
+            switch (info.cullFaceMode) {
+                case GL_FRONT:          cull = MTLCullModeFront; break;
+                case GL_BACK:           cull = MTLCullModeBack;  break;
+                case GL_FRONT_AND_BACK: cull = MTLCullModeBack;
+                    // Metal has no FRONT_AND_BACK — approximate by
+                    // culling back + relying on the app to also
+                    // disable front-facing draws.
+                    break;
+                default: break;
+            }
+            [enc setCullMode:cull];
+        } else {
+            [enc setCullMode:MTLCullModeNone];
+        }
+        [enc setFrontFacingWinding:
+            (info.frontFace == GL_CW) ? MTLWindingClockwise
+                                       : MTLWindingCounterClockwise];
+
+        // Depth state — minimal Phase 2 path (no stencil write mask,
+        // no per-face stencil). Full depth/stencil plumbing is a Phase
+        // 2 follow-up if needed by a specific test.
+        if (depthTex != nil && info.depthTestEnabled) {
+            MTLDepthStencilDescriptor* dsDesc =
+                [[MTLDepthStencilDescriptor alloc] init];
+            switch (info.depthFunc) {
+                case GL_NEVER:    dsDesc.depthCompareFunction = MTLCompareFunctionNever; break;
+                case GL_LESS:     dsDesc.depthCompareFunction = MTLCompareFunctionLess; break;
+                case GL_EQUAL:    dsDesc.depthCompareFunction = MTLCompareFunctionEqual; break;
+                case GL_LEQUAL:   dsDesc.depthCompareFunction = MTLCompareFunctionLessEqual; break;
+                case GL_GREATER:  dsDesc.depthCompareFunction = MTLCompareFunctionGreater; break;
+                case GL_NOTEQUAL: dsDesc.depthCompareFunction = MTLCompareFunctionNotEqual; break;
+                case GL_GEQUAL:   dsDesc.depthCompareFunction = MTLCompareFunctionGreaterEqual; break;
+                case GL_ALWAYS:   dsDesc.depthCompareFunction = MTLCompareFunctionAlways; break;
+                default:          dsDesc.depthCompareFunction = MTLCompareFunctionLess; break;
+            }
+            dsDesc.depthWriteEnabled = info.depthWriteMask ? YES : NO;
+            id<MTLDepthStencilState> ds =
+                [device newDepthStencilStateWithDescriptor:dsDesc];
+            [enc setDepthStencilState:ds];
+        }
+
+        // (6) Bind tess factor buffer + issue drawPatches.
+        [enc setRenderPipelineState:renderPSO];
+        [enc setTessellationFactorBuffer:factorBuf offset:0 instanceStride:0];
+        [enc drawPatches:(NSUInteger)info.patchVertices
+              patchStart:0
+              patchCount:(NSUInteger)info.patchCount
+         patchIndexBuffer:nil
+   patchIndexBufferOffset:0
+           instanceCount:(NSUInteger)std::max(info.instanceCount, 1)
+            baseInstance:(NSUInteger)info.baseInstance];
+        [enc endEncoding];
+
+        // Commit + wait so subsequent readbacks / copies observe the
+        // tess draw's output. Matches compute-dispatch's sync semantics.
+        [currentCommandBuffer commit];
+        [currentCommandBuffer waitUntilCompleted];
+        currentCommandBuffer = nil;
+
+        if (std::getenv("APPGL_TRACE_TESS")) {
+            std::fprintf(stderr,
+                "[APPGL] tess-draw program=%u patches=%d cps=%d "
+                "patchVerticesIn=%d genMode=0x%04X spacing=0x%04X "
+                "winding=0x%04X colorFmt=%u depthFmt=%u\n",
+                info.program, (int)info.patchCount,
+                (int)info.tessControlOutputVertices,
+                (int)info.patchVertices,
+                info.genMode, info.genSpacing, info.genVertexOrder,
+                (unsigned)colorFormat, (unsigned)depthFormat);
+        }
+        return true;
+    }
+
     // Encode + commit + wait a single compute dispatch. The wait is
     // synchronous to match CTS's "dispatch, then map SSBO" pattern —
     // without it, the map'd bytes are stale compute-shader input
@@ -4532,6 +4917,10 @@ MetalFrameGraph::TessPipelineProbeResult MetalFrameGraph::probeTessellationPipel
 {
     return impl_->probeTessellationPipeline(tcsMSL, tesMSL, fsMSL,
                                              genMode, genSpacing, genVertexOrder);
+}
+
+bool MetalFrameGraph::encodeMetalTessellationDraw(const MetalTessDrawInfo& info) {
+    return impl_->encodeMetalTessellationDraw(info);
 }
 
 bool MetalFrameGraph::encodeComputeDispatch(const ComputeDispatchInfo& info) {

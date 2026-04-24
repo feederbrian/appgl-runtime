@@ -511,6 +511,86 @@ struct ComputeDispatchInfo {
     std::size_t indirectOffset = 0;
 };
 
+// Metal-native tessellation draw descriptor (Phase 2 of the metal-tess
+// project). Populated by the tess-capable drawArrays / drawElements path
+// in GLContext from (a) the linked program's cached MSL + TCS compute
+// PSO and (b) the current GL state snapshot. Consumed by
+// `encodeMetalTessellationDraw`, which owns the 3-encoder dance:
+//   compute(TCS) → tessellator (hardware) → render(drawPatches, TES+FS).
+//
+// Phase-2 scope: no VS outputs, no TCS user CP output, no TES user
+// varyings beyond gl_Position. Future phases extend this struct with
+// stage-input buffer descriptors + per-CP / per-patch output bindings.
+struct MetalTessDrawInfo {
+    // TCS compute pipeline state (retained by the program; not a
+    // transfer). Set by the caller from
+    // GLProgramObject::metalTessControlPipelineState.
+    void* tessControlPipelineState = nullptr;  // id<MTLComputePipelineState>
+    // Cached MSL sources for rebuilding the render pipeline on FBO
+    // format changes. Non-owning; must outlive the encode call.
+    const std::string* tessEvalMSL = nullptr;
+    const std::string* fragmentMSL = nullptr;
+
+    // Tessellation parameters from GL state + TES/TCS execution modes.
+    GLsizei patchCount = 0;                   // count / patchVertices
+    GLsizei patchVertices = 3;                // GL_PATCH_VERTICES
+    GLsizei tessControlOutputVertices = 0;    // TCS `layout(vertices=N)`
+    GLenum genMode = GL_TRIANGLES;            // TES gen mode (TRIANGLES/QUADS/ISOLINES)
+    GLenum genSpacing = GL_EQUAL;             // TES spacing
+    GLenum genVertexOrder = GL_CCW;           // TES vertex-order
+    bool pointMode = false;                   // TES point_mode (Phase 4)
+
+    GLsizei instanceCount = 1;
+    GLuint baseInstance = 0;
+
+    // Per-program identifier — diagnostic only.
+    GLuint program = 0;
+
+    // Pipeline state toggles (mirrors TranslatedDrawInfo's subset used
+    // for the tess render pipeline). Phase 2 wires just the essentials:
+    // viewport/scissor/cull/front-face/color+depth format.
+    bool cullFaceEnabled = false;
+    GLenum cullFaceMode = GL_BACK;
+    GLenum frontFace = GL_CCW;
+
+    bool depthTestEnabled = false;
+    GLenum depthFunc = GL_LESS;
+    bool depthWriteMask = true;
+
+    // Viewport / scissor.
+    GLint viewportX = 0;
+    GLint viewportY = 0;
+    GLsizei viewportWidth = 0;
+    GLsizei viewportHeight = 0;
+    GLdouble depthRangeNear = 0.0;
+    GLdouble depthRangeFar = 1.0;
+
+    bool scissorTestEnabled = false;
+    GLint scissorX = 0;
+    GLint scissorY = 0;
+    GLsizei scissorWidth = 0;
+    GLsizei scissorHeight = 0;
+
+    // Framebuffer attachments. Mirrors the FBO handling in
+    // TranslatedDrawInfo. When `fboColorTexture` is non-null the render
+    // pass targets that texture (FBO draw); otherwise it targets the
+    // default framebuffer (drawable or offscreen). Phase 2 supports
+    // single-color-attachment FBOs only; MRT lands in a later phase.
+    // Pixel formats are read from the MTLTextures inside the encoder.
+    void* fboColorTexture = nullptr;          // id<MTLTexture>
+    void* fboDepthStencilTexture = nullptr;   // id<MTLTexture>
+
+    // Clear-state propagation: when true, the render pass begins with
+    // LoadActionClear using these values. Matches the pending-clear
+    // plumb-through the standard translated draw path uses.
+    bool pendingClearColor = false;
+    GLfloat clearColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool pendingClearDepth = false;
+    GLfloat clearDepth = 1.0f;
+    bool pendingClearStencil = false;
+    GLint clearStencil = 0;
+};
+
 class MetalFrameGraph {
 public:
     MetalFrameGraph(void* layer, void* device, void* commandQueue);
@@ -615,6 +695,18 @@ public:
         GLenum genMode,
         GLenum genSpacing,
         GLenum genVertexOrder);
+
+    // Metal-native tessellation draw encoder (Phase 2 of the metal-tess
+    // project). Uses the currently-bound framebuffer (same as
+    // `encodeTranslatedDraw`), runs the TCS compute dispatch, then
+    // begins a render pass whose vertex function is the TES and whose
+    // fragment function is the program's FS, and issues `drawPatches`
+    // with a tess factor buffer populated by the TCS.
+    //
+    // Returns true on success; false on any encode failure (the caller
+    // falls through to the CPU tess interpreter path). On failure a
+    // diagnostic is recorded via `recordShaderTranslation`.
+    bool encodeMetalTessellationDraw(const MetalTessDrawInfo& info);
 
     // Encode + commit + wait a single compute dispatch. This creates a
     // fresh command buffer + compute encoder, binds the pipeline and

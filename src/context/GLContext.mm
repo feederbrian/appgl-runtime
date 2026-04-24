@@ -7176,6 +7176,30 @@ struct GLContext::Impl {
     bool encodeEmulatedGsDraw(GLProgramObject& program, GLuint programName,
                               const appgl::EmulatedDraw& ed);
 
+    // Metal-native tessellation draw path (Phase 2 of the metal-tess
+    // project). When the program has been identified as a tess program
+    // with a successful link-time pipeline probe, this path takes over
+    // from the CPU interpreter. Populates a MetalTessDrawInfo from the
+    // current GL state + bound FBO + program cache, then forwards to
+    // MetalFrameGraph::encodeMetalTessellationDraw. Returns true on
+    // success; false lets the caller fall through to the CPU tess
+    // interpreter path.
+    //
+    // `instanceCount` defaults to 1 and `baseInstance` to 0 for
+    // non-instanced variants; drawElements siblings can call the same
+    // helper with their specific counts. `elementIndices` is
+    // non-null only when the caller is routing a drawElements variant
+    // through this helper (Phase 2 accepts both for uniformity even
+    // though neither path is feature-rich yet — indexed tess support
+    // lands later).
+    bool tryMetalTessellationDraw(GLProgramObject& program,
+                                   GLuint programName,
+                                   GLenum mode,
+                                   GLsizei count,
+                                   GLint first,
+                                   GLsizei instanceCount = 1,
+                                   GLuint baseInstance = 0);
+
     // Resolve the program the GS emulator should read from, handling
     // the separable-pipeline case. When `currentProgramName` is
     // non-zero (user called glUseProgram), returns that program
@@ -21587,6 +21611,84 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
     return vsProg;
 }
 
+bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
+                                                GLuint programName,
+                                                GLenum mode,
+                                                GLsizei count,
+                                                GLint first,
+                                                GLsizei instanceCount,
+                                                GLuint baseInstance)
+{
+    (void)first;
+    if (mode != GL_PATCHES) return false;
+    if (program.metalTessControlPipelineState == nullptr) return false;
+    if (program.tessControlMSL.empty() ||
+        program.tessEvalMSL.empty() ||
+        program.fragmentMSL.empty()) {
+        return false;
+    }
+    if (program.tessControlOutputVertices <= 0) return false;
+
+    const GLint pv = state->tessellationState().patchVertices;
+    if (pv <= 0 || count < pv) return false;
+    const GLsizei patchCount = count / pv;
+    if (patchCount <= 0) return false;
+
+    MetalTessDrawInfo info;
+    info.tessControlPipelineState = program.metalTessControlPipelineState;
+    info.tessEvalMSL = &program.tessEvalMSL;
+    info.fragmentMSL = &program.fragmentMSL;
+    info.patchCount = patchCount;
+    info.patchVertices = pv;
+    info.tessControlOutputVertices = program.tessControlOutputVertices;
+    info.genMode = program.tessGenMode;
+    info.genSpacing = program.tessGenSpacing;
+    info.genVertexOrder = program.tessGenVertexOrder;
+    info.pointMode = (program.tessGenPointMode == GL_TRUE);
+    info.instanceCount = instanceCount > 0 ? instanceCount : 1;
+    info.baseInstance = baseInstance;
+    info.program = programName;
+
+    // Fixed-function state snapshot (mirrors
+    // populateTranslatedDrawFixedFunctionState but scoped to the
+    // minimum Phase 2 needs).
+    info.depthTestEnabled = state->isEnabled(GL_DEPTH_TEST);
+    info.depthFunc = state->depthState().func;
+    info.depthWriteMask = (state->depthState().writeMask != GL_FALSE);
+    info.cullFaceEnabled = state->isEnabled(GL_CULL_FACE);
+    info.cullFaceMode = state->rasterState().cullFaceMode;
+    info.frontFace = state->rasterState().frontFace;
+
+    const auto& vp = state->viewport();
+    info.viewportX = vp.x;
+    info.viewportY = vp.y;
+    info.viewportWidth = vp.width;
+    info.viewportHeight = vp.height;
+    const auto& dr = state->depthRange();
+    info.depthRangeNear = dr.nearValue;
+    info.depthRangeFar = dr.farValue;
+
+    info.scissorTestEnabled = state->isEnabled(GL_SCISSOR_TEST);
+    const auto& sc = state->scissor();
+    info.scissorX = sc.x;
+    info.scissorY = sc.y;
+    info.scissorWidth = sc.width;
+    info.scissorHeight = sc.height;
+
+    // FBO target resolution — reuse the same helper the translated
+    // draw path uses. Phase 2 ignores MRT + layered + slice state
+    // because winding.triangles_ccw draws to a single-attachment FBO.
+    GLsizei fboW = 0, fboH = 0;
+    void* fboDSTex = nullptr;
+    void* fboColTex = resolveFBOColorTarget(fboW, fboH, fboDSTex);
+    if (fboColTex != nullptr) {
+        info.fboColorTexture = fboColTex;
+        info.fboDepthStencilTexture = fboDSTex;
+    }
+
+    return frameGraph->encodeMetalTessellationDraw(info);
+}
+
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                                            GLuint programName,
                                            const appgl::EmulatedDraw& ed)
@@ -22079,6 +22181,27 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // GS+TES together: if a program has both emulable stages, skip
     // the tess path here and let the GS emulator run. Combining the
     // two is phase 6+ work.
+    // Metal-native tessellation path (Phase 2 of the metal-tess
+    // project). Prefer Metal when the link-time probe succeeded on this
+    // program (metalTessControlPipelineState non-null); fall through to
+    // the CPU interpreter on any encode failure so tests the Metal
+    // path doesn't yet handle keep working. No geometryEmulated gate
+    // yet — Phase 5 extends the Metal path to consume TES output
+    // through the GS emulator; until then, GS-after-tess programs fall
+    // straight through to the CPU interpreter.
+    if (program != nullptr &&
+        program->hasTessellation &&
+        program->metalTessControlPipelineState != nullptr &&
+        !program->geometryEmulated) {
+        if (impl_->tryMetalTessellationDraw(
+                *program, programName, mode, count, first)) {
+            APPGL_LOG(DRAW, @"drawArrays metal-tess ok: count=%d first=%d",
+                      count, first);
+            return true;
+        }
+        APPGL_LOG(SHADER, @"drawArrays metal-tess encode failed — falling back to CPU interpreter");
+    }
+
     if (program != nullptr &&
         (program->tessellationEmulated || program->tessellationInterpreted) &&
         !program->geometryEmulated) {
