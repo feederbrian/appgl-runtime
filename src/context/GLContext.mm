@@ -2306,6 +2306,18 @@ struct GLContext::Impl {
                             rgba8[destIndex + 2] = 0;
                             rgba8[destIndex + 3] = 255;
                         }
+                        // BGR/BGRA swizzle: packed extractors above read
+                        // 4 channels in format order (R,G,B,A for RGBA
+                        // format; B,G,R,A for BGRA). The destination is
+                        // always RGBA, so for BGR/BGRA formats swap the
+                        // first and third components. Without this,
+                        // `BGRA + UNSIGNED_SHORT_4_4_4_4` landed at dst
+                        // RGBA slot [B,G,R,A] and CTS's red_format_bgra
+                        // gradient compare flagged the shift.
+                        if (isBGR || isBGRA) {
+                            std::swap(rgba8[destIndex + 0],
+                                      rgba8[destIndex + 2]);
+                        }
                     } else if (isAlphaOnly || isIntensity) {
                         std::uint8_t c = readComponentAsU8(pixel, type, 0);
                         rgba8[destIndex + 0] = c;
