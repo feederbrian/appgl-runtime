@@ -9214,7 +9214,6 @@ bool GLContext::bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
 }
 
 bool GLContext::bindBufferBase(GLenum target, GLuint index, GLuint buffer) {
-    GLsizeiptr size = 0;
     if (buffer != 0) {
         GLBufferObject* object = impl_->objects->buffers().get(buffer);
         if (object == nullptr) {
@@ -9222,9 +9221,16 @@ bool GLContext::bindBufferBase(GLenum target, GLuint index, GLuint buffer) {
             return false;
         }
         object->instantiated = true;
-        size = object->size;
     }
-    impl_->state->bindIndexedBuffer(target, index, buffer, 0, size);
+    // GL 4.6 §6.1.1: bindBufferBase = bindBufferRange with offset=0
+    // and size = sizeof(buffer). The buffer size is resolved at
+    // draw time, not bind time — otherwise a subsequent bufferData
+    // resize leaves the binding reporting a stale length. Sentinel
+    // value 0 means "whole buffer, live size"; consumers
+    // (writeTessTFAndUpdateCounters, primFits, …) already fall back
+    // to the live `GLBufferObject::shadowBytes.size()` when
+    // rangeSize==0.
+    impl_->state->bindIndexedBuffer(target, index, buffer, 0, 0);
     // Spec (4.6 §6.1.1): BindBufferBase also binds buffer to the generic target.
     impl_->state->bindBuffer(target, buffer);
     return true;
@@ -13524,7 +13530,7 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                 if (m.name == name ||
                     (name == "gl_Position" && m.isBuiltIn &&
                      m.builtIn == spv::BuiltInPosition)) {
-                    sources[i] = {m.offset, m.size};
+                    sources[i] = {m.offset, m.glPackedBytes > 0 ? m.glPackedBytes : m.size};
                     break;
                 }
             }
@@ -22038,7 +22044,19 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // capture chain is wired, we still run it (the render pass
     // below is skipped naturally because the test is side-effect
     // only). When unwired, defer to CPU.
-    if (state->isEnabled(GL_RASTERIZER_DISCARD) && !tessTFActive) {
+    //
+    // Phase 5 probe: with APPGL_LIFT_TESS_UNIFORM_GUARD, the CTS
+    // tess vertex-counter program's probe drawArrays (DISCARD on,
+    // TF off, PRIMITIVES_GENERATED query active) needs to take the
+    // same Metal compute chain so its count matches the subsequent
+    // Metal TF-capture draw. Otherwise counter goes CPU, main goes
+    // Metal, buffer sized by CPU count, Metal overflow = TF_WRITTEN
+    // comes back 0.
+    const bool keepMetalForDiscardProbe = liftUniformGuard &&
+        program.metalTessEvalComputePipelineState != nullptr &&
+        std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+    if (state->isEnabled(GL_RASTERIZER_DISCARD) && !tessTFActive &&
+        !keepMetalForDiscardProbe) {
         return false;
     }
 
@@ -22084,7 +22102,16 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     thread_local std::vector<std::uint8_t> tcsUniformScratch;
     thread_local std::vector<std::uint8_t> vsComputeUniformScratch;
     thread_local std::vector<std::uint8_t> tesComputeUniformScratch;
-    if (liftUniformGuard && tessUsesUniforms && tessTFActive) {
+    // Phase 5 probe: pack uniforms for ANY Metal-routed tess draw
+    // when env lifted, not just TF-active ones. The CTS counter
+    // probe is non-TF but still needs accurate tess factors or its
+    // PRIMITIVES_GENERATED count won't match the subsequent TF
+    // draws.
+    const bool packUniformsForThisDraw = liftUniformGuard && tessUsesUniforms &&
+        program.metalTessEvalComputePipelineState != nullptr &&
+        program.tessEvalOutputLayout.structSize > 0 &&
+        std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+    if (packUniformsForThisDraw) {
         if (program.tessControlUniformLayout.empty() &&
             !program.tessControlReflection.uniformBlocks.empty()) {
             computeStageUniformLayout(program.tessControlUniformLayout,
