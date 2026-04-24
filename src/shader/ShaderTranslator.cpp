@@ -2229,6 +2229,7 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
             });
 
         std::size_t cursor = 0;
+        std::size_t maxAlign = 1;   // track struct's max-member alignment
         out.members.reserve(drafts.size());
         for (const auto& d : drafts) {
             std::size_t scalar = 4;
@@ -2283,12 +2284,21 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
             if (memberAlign > 0 && (cursor % memberAlign) != 0) {
                 cursor = ((cursor / memberAlign) + 1) * memberAlign;
             }
+            if (memberAlign > maxAlign) maxAlign = memberAlign;
             StageOutputLayout::Member m = d.member;
             m.offset = cursor;
             m.size = memberSize;
             m.glPackedBytes = glPacked;
             out.members.push_back(std::move(m));
             cursor += memberSize;
+        }
+        // Round struct size up to max-member alignment (C++/MSL
+        // struct-packing rule). Without this, arrays of structs
+        // have wrong stride — Metal's `spvOut[i]` indexing uses
+        // sizeof(Struct), so `spvOut[1]` lives at an offset that's
+        // larger than our unaligned `cursor` at struct end.
+        if (maxAlign > 0 && (cursor % maxAlign) != 0) {
+            cursor = ((cursor / maxAlign) + 1) * maxAlign;
         }
         out.structSize = cursor;
         if (std::getenv("APPGL_TRACE_TESS")) {
