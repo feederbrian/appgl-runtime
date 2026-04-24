@@ -2117,6 +2117,25 @@ struct GLContext::Impl {
         // BGR ordering: swap R and B channels
         const bool isBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
         const bool isBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
+        // Integer formats store raw integer values, not UNorm-scaled. The
+        // packed-type extractors below normalise by default (mask * 255
+        // / mask_max) — for _INTEGER upload formats the raw masked value
+        // must be kept so CTS's integer-comparison round-trip recovers
+        // the source byte. The shadow is still RGBA8, so values wider
+        // than 8 bits clamp — tests that actually exercise the wide range
+        // need a full-width shadow (separate follow-up).
+        const bool formatIsInteger =
+            (format == GL_RED_INTEGER || format == GL_GREEN_INTEGER
+             || format == GL_BLUE_INTEGER || format == GL_RG_INTEGER
+             || format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER
+             || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
+        auto packedToU8 = [&](std::uint32_t maskedVal, std::uint32_t maskMax) -> std::uint8_t {
+            if (formatIsInteger) {
+                return static_cast<std::uint8_t>(
+                    std::min<std::uint32_t>(maskedVal, 255));
+            }
+            return static_cast<std::uint8_t>(maskedVal * 255 / maskMax);
+        };
 
         // For packed pixel types, do a simplified conversion (extract and
         // normalize to RGBA8). For standard component types, read per-component.
@@ -2157,69 +2176,69 @@ struct GLContext::Impl {
                             std::uint16_t val;
                             std::memcpy(&val, pixel, 2);
                             if (type == GL_UNSIGNED_SHORT_5_6_5) {
-                                rgba8[destIndex + 0] = static_cast<std::uint8_t>(((val >> 11) & 0x1F) * 255 / 31);
-                                rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 5) & 0x3F) * 255 / 63);
-                                rgba8[destIndex + 2] = static_cast<std::uint8_t>((val & 0x1F) * 255 / 31);
+                                rgba8[destIndex + 0] = packedToU8((val >> 11) & 0x1F, 31);
+                                rgba8[destIndex + 1] = packedToU8((val >> 5) & 0x3F, 63);
+                                rgba8[destIndex + 2] = packedToU8(val & 0x1F, 31);
                             } else {
-                                rgba8[destIndex + 0] = static_cast<std::uint8_t>((val & 0x1F) * 255 / 31);
-                                rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 5) & 0x3F) * 255 / 63);
-                                rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 11) & 0x1F) * 255 / 31);
+                                rgba8[destIndex + 0] = packedToU8(val & 0x1F, 31);
+                                rgba8[destIndex + 1] = packedToU8((val >> 5) & 0x3F, 63);
+                                rgba8[destIndex + 2] = packedToU8((val >> 11) & 0x1F, 31);
                             }
                             rgba8[destIndex + 3] = 255;
                         } else if (type == GL_UNSIGNED_INT_2_10_10_10_REV) {
                             std::uint32_t val;
                             std::memcpy(&val, pixel, 4);
-                            rgba8[destIndex + 0] = static_cast<std::uint8_t>((val & 0x3FF) * 255 / 1023);
-                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 10) & 0x3FF) * 255 / 1023);
-                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 20) & 0x3FF) * 255 / 1023);
-                            rgba8[destIndex + 3] = static_cast<std::uint8_t>(((val >> 30) & 0x3) * 255 / 3);
+                            rgba8[destIndex + 0] = packedToU8(val & 0x3FF, 1023);
+                            rgba8[destIndex + 1] = packedToU8((val >> 10) & 0x3FF, 1023);
+                            rgba8[destIndex + 2] = packedToU8((val >> 20) & 0x3FF, 1023);
+                            rgba8[destIndex + 3] = packedToU8((val >> 30) & 0x3, 3);
                         } else if (type == GL_UNSIGNED_INT_10_10_10_2) {
                             std::uint32_t val;
                             std::memcpy(&val, pixel, 4);
-                            rgba8[destIndex + 0] = static_cast<std::uint8_t>(((val >> 22) & 0x3FF) * 255 / 1023);
-                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 12) & 0x3FF) * 255 / 1023);
-                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 2) & 0x3FF) * 255 / 1023);
-                            rgba8[destIndex + 3] = static_cast<std::uint8_t>((val & 0x3) * 255 / 3);
+                            rgba8[destIndex + 0] = packedToU8((val >> 22) & 0x3FF, 1023);
+                            rgba8[destIndex + 1] = packedToU8((val >> 12) & 0x3FF, 1023);
+                            rgba8[destIndex + 2] = packedToU8((val >> 2) & 0x3FF, 1023);
+                            rgba8[destIndex + 3] = packedToU8(val & 0x3, 3);
                         } else if (type == GL_UNSIGNED_BYTE_3_3_2) {
                             std::uint8_t val = pixel[0];
-                            rgba8[destIndex + 0] = static_cast<std::uint8_t>(((val >> 5) & 0x7) * 255 / 7);
-                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 2) & 0x7) * 255 / 7);
-                            rgba8[destIndex + 2] = static_cast<std::uint8_t>((val & 0x3) * 255 / 3);
+                            rgba8[destIndex + 0] = packedToU8((val >> 5) & 0x7, 7);
+                            rgba8[destIndex + 1] = packedToU8((val >> 2) & 0x7, 7);
+                            rgba8[destIndex + 2] = packedToU8(val & 0x3, 3);
                             rgba8[destIndex + 3] = 255;
                         } else if (type == GL_UNSIGNED_BYTE_2_3_3_REV) {
                             std::uint8_t val = pixel[0];
-                            rgba8[destIndex + 0] = static_cast<std::uint8_t>((val & 0x7) * 255 / 7);
-                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 3) & 0x7) * 255 / 7);
-                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 6) & 0x3) * 255 / 3);
+                            rgba8[destIndex + 0] = packedToU8(val & 0x7, 7);
+                            rgba8[destIndex + 1] = packedToU8((val >> 3) & 0x7, 7);
+                            rgba8[destIndex + 2] = packedToU8((val >> 6) & 0x3, 3);
                             rgba8[destIndex + 3] = 255;
                         } else if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
                             std::uint16_t val;
                             std::memcpy(&val, pixel, 2);
-                            rgba8[destIndex + 0] = static_cast<std::uint8_t>(((val >> 12) & 0xF) * 255 / 15);
-                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 8) & 0xF) * 255 / 15);
-                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 4) & 0xF) * 255 / 15);
-                            rgba8[destIndex + 3] = static_cast<std::uint8_t>((val & 0xF) * 255 / 15);
+                            rgba8[destIndex + 0] = packedToU8((val >> 12) & 0xF, 15);
+                            rgba8[destIndex + 1] = packedToU8((val >> 8) & 0xF, 15);
+                            rgba8[destIndex + 2] = packedToU8((val >> 4) & 0xF, 15);
+                            rgba8[destIndex + 3] = packedToU8(val & 0xF, 15);
                         } else if (type == GL_UNSIGNED_SHORT_4_4_4_4_REV) {
                             std::uint16_t val;
                             std::memcpy(&val, pixel, 2);
-                            rgba8[destIndex + 0] = static_cast<std::uint8_t>((val & 0xF) * 255 / 15);
-                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 4) & 0xF) * 255 / 15);
-                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 8) & 0xF) * 255 / 15);
-                            rgba8[destIndex + 3] = static_cast<std::uint8_t>(((val >> 12) & 0xF) * 255 / 15);
+                            rgba8[destIndex + 0] = packedToU8(val & 0xF, 15);
+                            rgba8[destIndex + 1] = packedToU8((val >> 4) & 0xF, 15);
+                            rgba8[destIndex + 2] = packedToU8((val >> 8) & 0xF, 15);
+                            rgba8[destIndex + 3] = packedToU8((val >> 12) & 0xF, 15);
                         } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
                             std::uint16_t val;
                             std::memcpy(&val, pixel, 2);
-                            rgba8[destIndex + 0] = static_cast<std::uint8_t>(((val >> 11) & 0x1F) * 255 / 31);
-                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 6) & 0x1F) * 255 / 31);
-                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 1) & 0x1F) * 255 / 31);
-                            rgba8[destIndex + 3] = static_cast<std::uint8_t>((val & 0x1) * 255);
+                            rgba8[destIndex + 0] = packedToU8((val >> 11) & 0x1F, 31);
+                            rgba8[destIndex + 1] = packedToU8((val >> 6) & 0x1F, 31);
+                            rgba8[destIndex + 2] = packedToU8((val >> 1) & 0x1F, 31);
+                            rgba8[destIndex + 3] = packedToU8(val & 0x1, 1);
                         } else if (type == GL_UNSIGNED_SHORT_1_5_5_5_REV) {
                             std::uint16_t val;
                             std::memcpy(&val, pixel, 2);
-                            rgba8[destIndex + 0] = static_cast<std::uint8_t>((val & 0x1F) * 255 / 31);
-                            rgba8[destIndex + 1] = static_cast<std::uint8_t>(((val >> 5) & 0x1F) * 255 / 31);
-                            rgba8[destIndex + 2] = static_cast<std::uint8_t>(((val >> 10) & 0x1F) * 255 / 31);
-                            rgba8[destIndex + 3] = static_cast<std::uint8_t>(((val >> 15) & 0x1) * 255);
+                            rgba8[destIndex + 0] = packedToU8(val & 0x1F, 31);
+                            rgba8[destIndex + 1] = packedToU8((val >> 5) & 0x1F, 31);
+                            rgba8[destIndex + 2] = packedToU8((val >> 10) & 0x1F, 31);
+                            rgba8[destIndex + 3] = packedToU8((val >> 15) & 0x1, 1);
                         } else if (type == GL_UNSIGNED_INT_10F_11F_11F_REV) {
                             // GL 4.6 §8.5.2 Table 8.13: packed 11/11/10
                             // float format, no sign bits. R and G are
