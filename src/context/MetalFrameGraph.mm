@@ -5962,6 +5962,72 @@ void spvPortGenTriangles(
     }
 }
 
+// Quad domain emission. Port of `tessellateQuads` — split subdivision:
+// uN = segmentCount(max(outer[0], outer[2], inner[0]), spacing) and
+// vN = segmentCount(max(outer[1], outer[3], inner[1]), spacing). Grid
+// of (uN+1) × (vN+1) points emitted row-major (v outer, u inner).
+// Non-indexed triangle list: 2 triangles per cell, 6 verts/cell.
+void spvPortGenQuads(
+    uint patchID,
+    constant TessPortParams& params,
+    const device QuadFactors* factors,
+    device packed_float3* coords,
+    device uint* primIDs,
+    device atomic_uint* cursor)
+{
+    QuadFactors f = factors[patchID];
+    float o0 = float(f.edgeTessellationFactor[0]);
+    float o1 = float(f.edgeTessellationFactor[1]);
+    float o2 = float(f.edgeTessellationFactor[2]);
+    float o3 = float(f.edgeTessellationFactor[3]);
+    float i0 = float(f.insideTessellationFactor[0]);
+    float i1 = float(f.insideTessellationFactor[1]);
+    uint uN = spvPortSegmentCount(max(max(o0, o2), i0), params.genSpacing);
+    uint vN = spvPortSegmentCount(max(max(o1, o3), i1), params.genSpacing);
+    float fuN = float(uN);
+    float fvN = float(vN);
+
+    if (params.pointMode != 0u) {
+        for (uint j = 0u; j <= vN; ++j) {
+            float v = precise::divide(float(j), fvN);
+            for (uint i = 0u; i <= uN; ++i) {
+                float u = precise::divide(float(i), fuN);
+                uint base = atomic_fetch_add_explicit(
+                    cursor, 1u, memory_order_relaxed);
+                coords[base] = packed_float3(u, v, 0.0f);
+                primIDs[base] = patchID;
+            }
+        }
+        return;
+    }
+
+    // Two triangles per cell. CPU emits indices (a, b, d) then (a, d, c)
+    // where a = j*(uN+1)+i, b = a+1, c = a+(uN+1), d = c+1. In
+    // (u, v, 0) coords that's:
+    //   Tri 1: (u0,v0), (u1,v0), (u1,v1)
+    //   Tri 2: (u0,v0), (u1,v1), (u0,v1)
+    for (uint j = 0u; j < vN; ++j) {
+        float v0 = precise::divide(float(j),        fvN);
+        float v1 = precise::divide(float(j + 1u),   fvN);
+        for (uint i = 0u; i < uN; ++i) {
+            float u0 = precise::divide(float(i),        fuN);
+            float u1 = precise::divide(float(i + 1u),   fuN);
+            spvPortEmitTriangle(
+                float3(u0, v0, 0.0f),
+                float3(u1, v0, 0.0f),
+                float3(u1, v1, 0.0f),
+                patchID, params.flipWinding,
+                cursor, coords, primIDs);
+            spvPortEmitTriangle(
+                float3(u0, v0, 0.0f),
+                float3(u1, v1, 0.0f),
+                float3(u0, v1, 0.0f),
+                patchID, params.flipWinding,
+                cursor, coords, primIDs);
+        }
+    }
+}
+
 kernel void spvGenTessDomainTrianglesPort(
     constant TessPortParams& params [[buffer(0)]],
     const device QuadFactors* factors [[buffer(26)]],
@@ -5975,6 +6041,20 @@ kernel void spvGenTessDomainTrianglesPort(
         spvPortGenTriangles(p, params, factors, coords, primIDs, cursor);
     }
 }
+
+kernel void spvGenTessDomainQuadsPort(
+    constant TessPortParams& params [[buffer(0)]],
+    const device QuadFactors* factors [[buffer(26)]],
+    device packed_float3* coords [[buffer(25)]],
+    device uint* primIDs [[buffer(24)]],
+    device atomic_uint* cursor [[buffer(23)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid != 0u) return;
+    for (uint p = 0u; p < params.patchCount; ++p) {
+        spvPortGenQuads(p, params, factors, coords, primIDs, cursor);
+    }
+}
 )MSL";
 
     NSError* libErr = nil;
@@ -5984,19 +6064,28 @@ kernel void spvGenTessDomainTrianglesPort(
                      libErr ? libErr.localizedDescription.UTF8String : "(no err)");
         return;
     }
-    id<MTLFunction> fn = [lib newFunctionWithName:@"spvGenTessDomainTrianglesPort"];
-    if (fn == nil) {
-        std::fprintf(stderr, "[APPGL domain-port] function not found\n");
-        return;
-    }
-    NSError* psoErr = nil;
-    id<MTLComputePipelineState> pso =
-        [device newComputePipelineStateWithFunction:fn error:&psoErr];
-    if (pso == nil) {
-        std::fprintf(stderr, "[APPGL domain-port] PSO build failed: %s\n",
-                     psoErr ? psoErr.localizedDescription.UTF8String : "(no err)");
-        return;
-    }
+    auto buildPSO = ^id<MTLComputePipelineState>(NSString* fnName) {
+        id<MTLFunction> f = [lib newFunctionWithName:fnName];
+        if (f == nil) {
+            std::fprintf(stderr, "[APPGL domain-port] function %s not found\n",
+                         fnName.UTF8String);
+            return nil;
+        }
+        NSError* perr = nil;
+        id<MTLComputePipelineState> p =
+            [device newComputePipelineStateWithFunction:f error:&perr];
+        if (p == nil) {
+            std::fprintf(stderr, "[APPGL domain-port] PSO %s failed: %s\n",
+                         fnName.UTF8String,
+                         perr ? perr.localizedDescription.UTF8String : "(no err)");
+        }
+        return p;
+    };
+    id<MTLComputePipelineState> trianglesPSO =
+        buildPSO(@"spvGenTessDomainTrianglesPort");
+    id<MTLComputePipelineState> quadsPSO =
+        buildPSO(@"spvGenTessDomainQuadsPort");
+    if (trianglesPSO == nil && quadsPSO == nil) return;
 
     auto toHalf = [](float fv) -> uint16_t {
         uint32_t bits = 0;
@@ -6011,24 +6100,38 @@ kernel void spvGenTessDomainTrianglesPort(
     };
 
     struct Case {
+        appgl::TessDomain domain;
         float outer[4];
         float inner[2];
         const char* name;
     };
     const Case cases[] = {
-        {{2.0f, 2.0f, 2.0f, 0.0f}, {2.0f, 0.0f}, "tri equal N=2"},
-        {{3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, "tri equal N=3"},
-        {{5.0f, 5.0f, 5.0f, 0.0f}, {5.0f, 0.0f}, "tri equal N=5"},
-        {{7.0f, 4.0f, 3.0f, 0.0f}, {6.0f, 0.0f}, "tri equal mixed"},
-        {{1.0f, 1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, "tri equal N=1 (min)"},
-        {{12.0f, 9.0f, 7.0f, 0.0f}, {10.0f, 0.0f}, "tri equal asym"},
+        // Triangles
+        {appgl::TessDomain::Triangles, {2.0f, 2.0f, 2.0f, 0.0f}, {2.0f, 0.0f}, "tri equal N=2"},
+        {appgl::TessDomain::Triangles, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, "tri equal N=3"},
+        {appgl::TessDomain::Triangles, {5.0f, 5.0f, 5.0f, 0.0f}, {5.0f, 0.0f}, "tri equal N=5"},
+        {appgl::TessDomain::Triangles, {7.0f, 4.0f, 3.0f, 0.0f}, {6.0f, 0.0f}, "tri equal mixed"},
+        {appgl::TessDomain::Triangles, {1.0f, 1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, "tri equal N=1 (min)"},
+        {appgl::TessDomain::Triangles, {12.0f, 9.0f, 7.0f, 0.0f}, {10.0f, 0.0f}, "tri equal asym"},
+        // Quads — split-axis uN/vN. Mixed inner tests asymmetric grids.
+        {appgl::TessDomain::Quads, {2.0f, 2.0f, 2.0f, 2.0f}, {2.0f, 2.0f}, "quad equal N=2"},
+        {appgl::TessDomain::Quads, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, "quad equal N=4"},
+        {appgl::TessDomain::Quads, {8.0f, 8.0f, 8.0f, 8.0f}, {8.0f, 8.0f}, "quad equal N=8"},
+        {appgl::TessDomain::Quads, {1.0f, 1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, "quad equal N=1 (min)"},
+        // Split-axis: inner[0] drives u, inner[1] drives v. CTS rule4 style.
+        {appgl::TessDomain::Quads, {29.0f, 29.0f, 29.0f, 29.0f}, {32.0f, 31.0f}, "quad equal rule4-ish"},
+        {appgl::TessDomain::Quads, {5.0f, 7.0f, 9.0f, 11.0f}, {13.0f, 17.0f}, "quad equal asym"},
     };
 
     uint32_t passCount = 0;
     uint32_t failCount = 0;
     for (const Case& tc : cases) {
+        id<MTLComputePipelineState> pso =
+            (tc.domain == appgl::TessDomain::Triangles)
+                ? trianglesPSO : quadsPSO;
+        if (pso == nil) continue;
         appgl::TessDomainOutput cpuOut = appgl::generateTessDomain(
-            appgl::TessDomain::Triangles, appgl::TessSpacing::Equal,
+            tc.domain, appgl::TessSpacing::Equal,
             tc.outer, tc.inner, /*pointMode=*/false, /*flipWinding=*/false);
 
         // Expand CPU's indexed output into non-indexed "one coord per
@@ -6060,7 +6163,10 @@ kernel void spvGenTessDomainTrianglesPort(
             uint32_t pointMode;
             uint32_t flipWinding;
         };
-        PortParams params{0u, 0u, 1u, 0u, 0u};
+        PortParams params{
+            tc.domain == appgl::TessDomain::Quads ? 1u : 0u,
+            0u, 1u, 0u, 0u
+        };
         id<MTLBuffer> paramsBuf = [device
             newBufferWithBytes:&params
                         length:sizeof(params)
