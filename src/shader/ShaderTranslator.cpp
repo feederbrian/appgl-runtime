@@ -2140,6 +2140,13 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
             bool hasLocation = false;
             std::uint32_t builtInEnum = 0;
             const spirv_cross::SPIRType* type = nullptr;
+            // Synthetic-entry overrides. When `useOverride` is true
+            // we ignore `type` and use these values directly.
+            bool useOverride = false;
+            std::uint32_t overrideScalar = 4;
+            std::uint32_t overrideVec = 1;
+            std::uint32_t overrideCols = 1;
+            std::uint32_t overrideArrSize = 0;
         };
         std::vector<EntryDraft> drafts;
         drafts.reserve(resources.stage_outputs.size());
@@ -2160,6 +2167,45 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
                 e.hasLocation = true;
             }
             drafts.push_back(std::move(e));
+        }
+        // Phase 5 [metal-tess-TF]: SPIRV-Cross's struct-parity patch
+        // forces gl_PerVertex builtins (gl_Position, gl_PointSize,
+        // gl_ClipDistance) into the TES-as-compute output struct
+        // even when the shader doesn't write them explicitly. The
+        // stage_outputs resource list can omit them (they live in
+        // the gl_PerVertex block), so the reflection under-reports
+        // the struct size. Synthesize the members here so the TF
+        // writer uses the right stride.
+        //
+        // We detect "tess-as-compute" via the is_tese_shader +
+        // tess_evaluation_as_compute option combo; if we're not in
+        // that mode the builtins may legitimately be absent.
+        if (mslOpts.tess_evaluation_as_compute && isTessEval) {
+            auto addSynthetic = [&drafts](const char* name,
+                                          std::uint32_t builtin,
+                                          std::uint32_t vec,
+                                          std::uint32_t arrSize) {
+                for (const auto& d : drafts) {
+                    if (d.member.isBuiltIn && d.member.builtIn == builtin) return;
+                }
+                EntryDraft e;
+                e.member.name = name;
+                e.member.isBuiltIn = true;
+                e.member.builtIn = builtin;
+                e.builtInEnum = builtin;
+                e.useOverride = true;
+                e.overrideScalar = 4;   // float
+                e.overrideVec = vec;
+                e.overrideCols = 1;
+                e.overrideArrSize = arrSize;
+                drafts.push_back(std::move(e));
+            };
+            // gl_Position (vec4), gl_PointSize (float),
+            // gl_ClipDistance (float[1]). gl_CullDistance
+            // intentionally omitted — our MSL doesn't emit it.
+            addSynthetic("gl_Position",    spv::BuiltInPosition,     4, 0);
+            addSynthetic("gl_PointSize",   spv::BuiltInPointSize,    1, 0);
+            addSynthetic("gl_ClipDistance",spv::BuiltInClipDistance, 1, 1);
         }
         // Sort: user outputs by location first, then builtins in
         // gl_PerVertex order (Position=0, PointSize=1, ClipDistance=3,
@@ -2185,27 +2231,40 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
         std::size_t cursor = 0;
         out.members.reserve(drafts.size());
         for (const auto& d : drafts) {
-            const auto& mt = *d.type;
             std::size_t scalar = 4;
-            switch (mt.basetype) {
-                case spirv_cross::SPIRType::Boolean:
-                case spirv_cross::SPIRType::Int:
-                case spirv_cross::SPIRType::UInt:
-                case spirv_cross::SPIRType::Float:
-                    scalar = 4; break;
-                case spirv_cross::SPIRType::Half:
-                case spirv_cross::SPIRType::Short:
-                case spirv_cross::SPIRType::UShort:
-                    scalar = 2; break;
-                case spirv_cross::SPIRType::Double:
-                case spirv_cross::SPIRType::Int64:
-                case spirv_cross::SPIRType::UInt64:
-                    scalar = 8; break;
-                default:
-                    scalar = 4; break;
+            std::uint32_t vec = 1;
+            std::uint32_t cols = 1;
+            std::uint32_t arraySize = 0;
+            if (d.useOverride) {
+                scalar = d.overrideScalar;
+                vec = d.overrideVec;
+                cols = d.overrideCols;
+                arraySize = d.overrideArrSize;
+            } else {
+                const auto& mt = *d.type;
+                switch (mt.basetype) {
+                    case spirv_cross::SPIRType::Boolean:
+                    case spirv_cross::SPIRType::Int:
+                    case spirv_cross::SPIRType::UInt:
+                    case spirv_cross::SPIRType::Float:
+                        scalar = 4; break;
+                    case spirv_cross::SPIRType::Half:
+                    case spirv_cross::SPIRType::Short:
+                    case spirv_cross::SPIRType::UShort:
+                        scalar = 2; break;
+                    case spirv_cross::SPIRType::Double:
+                    case spirv_cross::SPIRType::Int64:
+                    case spirv_cross::SPIRType::UInt64:
+                        scalar = 8; break;
+                    default:
+                        scalar = 4; break;
+                }
+                vec = mt.vecsize > 0 ? mt.vecsize : 1;
+                cols = mt.columns > 0 ? mt.columns : 1;
+                if (!mt.array.empty()) {
+                    arraySize = mt.array[0];
+                }
             }
-            const std::uint32_t vec = mt.vecsize > 0 ? mt.vecsize : 1;
-            const std::uint32_t cols = mt.columns > 0 ? mt.columns : 1;
             std::size_t memberAlign = scalar;
             if (vec == 2) memberAlign = 2 * scalar;
             else if (vec == 3 || vec == 4) memberAlign = 4 * scalar;
@@ -2217,9 +2276,7 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
             std::size_t glPacked = scalar * vec * cols;
             // Array outputs (e.g. gl_ClipDistance[N]) take N element
             // slots, element padded to column size.
-            if (!mt.array.empty()) {
-                std::uint32_t arraySize = mt.array[0];
-                if (arraySize == 0) arraySize = 1;
+            if (arraySize > 0) {
                 memberSize *= arraySize;
                 glPacked *= arraySize;
             }
