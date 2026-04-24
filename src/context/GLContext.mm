@@ -18267,6 +18267,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->tessControlMSL.clear();
     programObject->tessEvalMSL.clear();
     programObject->tessVertexAsComputeMSL.clear();
+    programObject->tessEvalAsComputeMSL.clear();
     programObject->computeMSL.clear();
     programObject->computeReflection = ShaderReflection{};
     // Zero default so glGetProgramiv(GL_COMPUTE_WORK_GROUP_SIZE) returns
@@ -18291,6 +18292,10 @@ bool GLContext::linkProgram(GLuint program) {
     // by probeTessellationPipeline (when the VS has outputs).
     releaseRetainedMetalObject(programObject->metalTessVertexPipelineState);
     programObject->metalTessVertexPipelineState = nullptr;
+    // Phase 3B [metal-tess-TF] groundwork: release the retained TES-as-
+    // compute PSO (populated once the SPIRV-Cross fork patch lands).
+    releaseRetainedMetalObject(programObject->metalTessEvalComputePipelineState);
+    programObject->metalTessEvalComputePipelineState = nullptr;
     // Step 7-4: release cached graphics-stage MTLFunctions on relink.
     releaseRetainedMetalObject(programObject->metalVertexFunction);
     programObject->metalVertexFunction = nullptr;
@@ -18819,6 +18824,21 @@ bool GLContext::linkProgram(GLuint program) {
                 vertexShader->source,
                 programObject->tessVertexAsComputeMSL, vsComputeRefl,
                 vsComputeOpts);
+            // Phase 3B [metal-tess-TF] groundwork: also translate TES
+            // with `forceTessEvalAsCompute` so the call path is wired
+            // for the follow-up SPIRV-Cross patch that actually emits
+            // a kernel. Today the output matches the render-path TES
+            // (same flag semantics as forceTessellation alone) — the
+            // resulting MSL is stashed but the probe doesn't yet build
+            // a TES-compute PSO from it.
+            appgl::TranslatorOptions tesComputeOpts;
+            tesComputeOpts.forceTessellation = true;
+            tesComputeOpts.forceTessEvalAsCompute = true;
+            ShaderReflection tesComputeRefl;
+            (void)translateCachedStage(
+                "tess-eval-as-compute", tessEvalShader,
+                programObject->tessEvalAsComputeMSL, tesComputeRefl,
+                tesComputeOpts);
 
             // Extract tessellation execution modes from SPIR-V.
             programObject->hasTessellation = true;

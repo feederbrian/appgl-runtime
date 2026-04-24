@@ -449,6 +449,22 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             mslOpts.vertex_for_tessellation = true;
             mslOpts.capture_output_to_buffer = true;
         }
+        // Phase 3B [metal-tess-TF] groundwork: stub for TES-as-compute.
+        // Upstream SPIRV-Cross has no option to emit TES as a kernel
+        // that reads pre-computed domain coords instead of the
+        // `[[position_in_patch]]` intrinsic. Today we set
+        // `raw_buffer_tese_input = true` (already set above by
+        // `forceTessellation`) so the buffer-based inputs are in
+        // place; the actual compute-kernel emission lands via a
+        // fork patch in Phase 3B.2. Until then this branch is a
+        // marker — the flag is honoured by the translator-caller
+        // side (link stashes the MSL) but the kernel-form emission
+        // is not yet performed. Keep quiet no-op here so a future
+        // grep for the flag lands on this comment.
+        if (options.forceTessEvalAsCompute && isTessEval) {
+            // Intentional no-op until the SPIRV-Cross TES-as-compute
+            // patch lands. See specs-worker-docs/phase3b-tf-capture-design.md.
+        }
         // MSL 2.2 (macOS 10.15+, 2019) required for:
         //   - `[[primitive_id]]` in fragment shaders on macOS — without it
         //     SPIRV-Cross throws `PrimitiveId on macOS requires MSL 2.2`

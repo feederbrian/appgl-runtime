@@ -621,6 +621,14 @@ struct GLProgramObject {
     // encodeTranslatedDraw when this program is bound to a non-tess
     // draw, which shouldn't happen — but the MSL is cheap to keep).
     std::string tessVertexAsComputeMSL;
+    // Phase 3B [metal-tess-TF] groundwork: TES emitted as a Metal
+    // compute kernel for the TF-capture draw path. Empty under
+    // Phase 3 groundwork (the SPIRV-Cross fork patch that actually
+    // changes emission lands in Phase 3B.2); the field + its
+    // retained pipeline state are in place so the link path + probe
+    // + draw gate can be extended without touching GLProgramObject
+    // again.
+    std::string tessEvalAsComputeMSL;
     ShaderReflection vertexReflection;
     ShaderReflection fragmentReflection;
     // Reflection for the geometry stage, harvested from SPIRV-Cross
@@ -795,6 +803,13 @@ struct GLProgramObject {
     // `vertex_for_tessellation + capture_output_to_buffer`). Built at
     // link time via the same probe path as the TCS compute PSO.
     void* metalTessVertexPipelineState = nullptr;
+    // Phase 3B [metal-tess-TF] groundwork: retained
+    // id<MTLComputePipelineState> for the TES-as-compute stage.
+    // Populated only once the SPIRV-Cross fork patch (Phase 3B.2)
+    // emits a kernel form of the TES; until then
+    // `tessEvalAsComputeMSL` is either empty or the same MSL as the
+    // existing render path, and the probe skips this PSO.
+    void* metalTessEvalComputePipelineState = nullptr;
 
     // Which Metal tess draw path the link probe has cleared this
     // program for. Set at link time after the Phase-2-handleability

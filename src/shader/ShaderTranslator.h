@@ -208,6 +208,22 @@ struct TranslatorOptions {
     // MetalFrameGraph as a pre-TCS compute dispatch that seeds the
     // TCS's `[[stage_in]]` descriptor.
     bool forceVertexForTessellation = false;
+
+    // Phase 3B groundwork [metal-tess-TF]: request a TES-as-compute
+    // emission so the MSL body can run in a compute dispatch instead of
+    // the Metal tessellator's `[[patch(...)]] vertex` function. The
+    // compute form produces output vertices from a pre-computed domain
+    // -coord buffer (written by a separate domain-point generator
+    // kernel) rather than from Metal's built-in `[[position_in_patch]]`.
+    // Consumers capture the output directly into the bound transform-
+    // feedback buffer.
+    //
+    // Until SPIRV-Cross is fork-patched to honour this flag (Phase
+    // 3B.2), setting it produces the same MSL as
+    // `forceTessellation=true` — the translation call is wired but
+    // the emission is unchanged. Probing / pipeline-state build stays
+    // optional and errors out cleanly downstream.
+    bool forceTessEvalAsCompute = false;
 };
 
 class ShaderTranslator {
