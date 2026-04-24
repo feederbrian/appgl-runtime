@@ -4408,27 +4408,108 @@ fragment float4 appgl_immediate_textured_fs(
                                 length:sizeof(paramsCPU)
                                options:MTLResourceStorageModeShared];
 
-                // Domain-gen dispatch: one thread per patch. Each
-                // thread atomically claims output-vertex slots.
-                id<MTLCommandBuffer> dgCmdBuf = [commandQueue commandBuffer];
-                dgCmdBuf.label = @"appgl-tess-domain-gen";
-                id<MTLComputeCommandEncoder> dgEnc =
-                    [dgCmdBuf computeCommandEncoder];
-                [dgEnc setComputePipelineState:tessDomainGenPipelineState];
-                [dgEnc setBuffer:domainGenParamsBuf offset:0 atIndex:0];
-                [dgEnc setBuffer:factorBuf offset:0 atIndex:26];
-                [dgEnc setBuffer:domainCoordBuf offset:0 atIndex:25];
-                [dgEnc setBuffer:domainPrimIDBuf offset:0 atIndex:24];
-                [dgEnc setBuffer:totalVertCountBuf offset:0 atIndex:23];
-                // Serial driver: 1 thread walks all patches in order
-                // (see `spvGenTessDomain` comment). Parallelization
-                // revisited once Phase 4/5 stabilize the TF capture
-                // protocol — the atomic cursor then becomes safe.
-                [dgEnc dispatchThreads:MTLSizeMake(1, 1, 1)
-                  threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-                [dgEnc endEncoding];
-                [dgCmdBuf commit];
-                [dgCmdBuf waitUntilCompleted];
+                // Phase 3C [metal-tess-TF] — when the env flag
+                // `APPGL_TESS_DOMAIN_USE_METAL_HW` is set and the
+                // genMode is TRIANGLES or QUADS (and not point_mode),
+                // route through Metal's HW tessellator as the
+                // domain-coord source instead of the MSL compute
+                // kernel. The capture PSO (built lazily by
+                // `ensureTessDomainCapturePSO`) runs a `vertex void`
+                // function with rasterizationEnabled=NO, writing into
+                // the exact same (totalVertCount, domainPrimID,
+                // domainTessCoord) buffers the compute kernel
+                // populates. Downstream TES-as-compute reads either
+                // interchangeably. Isolines and point_mode stay on the
+                // compute kernel (Metal has no isoline patch type, and
+                // Metal's HW always emits triangle/line topology — one
+                // capture coord per generated vertex is not equivalent
+                // to point_mode unique grid points).
+                const bool useHWDomain =
+                    (std::getenv("APPGL_TESS_DOMAIN_USE_METAL_HW") != nullptr) &&
+                    (info.genMode == GL_TRIANGLES || info.genMode == GL_QUADS) &&
+                    !info.pointMode;
+                id<MTLRenderPipelineState> hwCapturePSO = nil;
+                MTLPatchType hwPatchType = MTLPatchTypeTriangle;
+                if (useHWDomain) {
+                    hwPatchType = (info.genMode == GL_QUADS)
+                        ? MTLPatchTypeQuad : MTLPatchTypeTriangle;
+                    MTLTessellationPartitionMode hwPartition =
+                        MTLTessellationPartitionModeInteger;
+                    switch (info.genSpacing) {
+                        case GL_FRACTIONAL_EVEN:
+                            hwPartition = MTLTessellationPartitionModeFractionalEven;
+                            break;
+                        case GL_FRACTIONAL_ODD:
+                            hwPartition = MTLTessellationPartitionModeFractionalOdd;
+                            break;
+                        case GL_EQUAL:
+                        default:
+                            hwPartition = MTLTessellationPartitionModeInteger;
+                            break;
+                    }
+                    MTLWinding hwWinding = (info.genVertexOrder == GL_CW)
+                        ? MTLWindingClockwise
+                        : MTLWindingCounterClockwise;
+                    hwCapturePSO = ensureTessDomainCapturePSO(
+                        hwPatchType, hwPartition, hwWinding);
+                }
+
+                if (hwCapturePSO != nil) {
+                    // HW capture path. One draw, `info.patchCount`
+                    // patches. Metal's HW tessellator auto-indexes the
+                    // factor buffer per-patch based on the PSO's
+                    // declared patch type; `instanceStride:0` matches
+                    // the main Phase 3 tess draw convention.
+                    MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor new];
+                    rpd.renderTargetWidth = 1;
+                    rpd.renderTargetHeight = 1;
+                    rpd.defaultRasterSampleCount = 1;
+                    id<MTLCommandBuffer> dgCmdBuf = [commandQueue commandBuffer];
+                    dgCmdBuf.label = @"appgl-tess-domain-gen-hw";
+                    id<MTLRenderCommandEncoder> dgEnc =
+                        [dgCmdBuf renderCommandEncoderWithDescriptor:rpd];
+                    [dgEnc setRenderPipelineState:hwCapturePSO];
+                    [dgEnc setVertexBuffer:totalVertCountBuf offset:0 atIndex:23];
+                    [dgEnc setVertexBuffer:domainPrimIDBuf   offset:0 atIndex:24];
+                    [dgEnc setVertexBuffer:domainCoordBuf    offset:0 atIndex:25];
+                    [dgEnc setTessellationFactorBuffer:factorBuf
+                                                offset:0
+                                        instanceStride:0];
+                    [dgEnc drawPatches:(hwPatchType == MTLPatchTypeQuad ? 4u : 3u)
+                             patchStart:0
+                             patchCount:(NSUInteger)info.patchCount
+                        patchIndexBuffer:nil
+                  patchIndexBufferOffset:0
+                           instanceCount:1
+                            baseInstance:0];
+                    [dgEnc endEncoding];
+                    [dgCmdBuf commit];
+                    [dgCmdBuf waitUntilCompleted];
+                } else {
+                    // Compute-kernel path (default, and fallback when
+                    // HW PSO build fails or flag disabled).
+                    //
+                    // Serial driver: 1 thread walks all patches in
+                    // order (see `spvGenTessDomain` comment). Paralleli-
+                    // zation revisited once Phase 4/5 stabilize the TF
+                    // capture protocol — the atomic cursor then becomes
+                    // safe.
+                    id<MTLCommandBuffer> dgCmdBuf = [commandQueue commandBuffer];
+                    dgCmdBuf.label = @"appgl-tess-domain-gen";
+                    id<MTLComputeCommandEncoder> dgEnc =
+                        [dgCmdBuf computeCommandEncoder];
+                    [dgEnc setComputePipelineState:tessDomainGenPipelineState];
+                    [dgEnc setBuffer:domainGenParamsBuf offset:0 atIndex:0];
+                    [dgEnc setBuffer:factorBuf offset:0 atIndex:26];
+                    [dgEnc setBuffer:domainCoordBuf offset:0 atIndex:25];
+                    [dgEnc setBuffer:domainPrimIDBuf offset:0 atIndex:24];
+                    [dgEnc setBuffer:totalVertCountBuf offset:0 atIndex:23];
+                    [dgEnc dispatchThreads:MTLSizeMake(1, 1, 1)
+                      threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                    [dgEnc endEncoding];
+                    [dgCmdBuf commit];
+                    [dgCmdBuf waitUntilCompleted];
+                }
 
                 // CPU-read the produced vertex count.
                 tessTFGeneratedVerts =
