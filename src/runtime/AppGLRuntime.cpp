@@ -979,7 +979,9 @@ bool isFormatCompatibleWithInternalFormat(GLenum format, GLenum internalFormat) 
     const bool isDepthFormat = (format == GL_DEPTH_COMPONENT);
     const bool isDepthStencilFormat = (format == GL_DEPTH_STENCIL);
     const bool isStencilFormat = (format == GL_STENCIL_INDEX);
-    const bool isIntegerFormat = (format == GL_RED_INTEGER || format == GL_RG_INTEGER
+    const bool isIntegerFormat = (format == GL_RED_INTEGER
+        || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER
+        || format == GL_RG_INTEGER
         || format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER
         || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
     const bool isColorFormat = !isDepthFormat && !isDepthStencilFormat
@@ -1032,10 +1034,11 @@ bool isFormatTypeCompatible(GLenum format, GLenum type) {
     const bool isDepthFormat = (format == GL_DEPTH_COMPONENT);
     const bool isDepthStencilFormat = (format == GL_DEPTH_STENCIL);
     const bool isStencilFormat = (format == GL_STENCIL_INDEX);
-    const bool isIntegerFormat = (format == GL_RED_INTEGER || format == GL_RG_INTEGER
+    const bool isIntegerFormat = (format == GL_RED_INTEGER
+        || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER
+        || format == GL_RG_INTEGER
         || format == GL_RGB_INTEGER || format == GL_RGBA_INTEGER
-        || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER
-        || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER);
+        || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
     const bool isRGB = (format == GL_RGB || format == GL_RGB_INTEGER);
     const bool isBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
     const bool isRGBA_family = (format == GL_RGBA || format == GL_RGBA_INTEGER

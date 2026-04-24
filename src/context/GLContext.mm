@@ -559,7 +559,9 @@ std::size_t componentCountForFormat(GLenum format) {
         case GL_RED:
         case GL_RED_INTEGER:
         case GL_GREEN:
+        case GL_GREEN_INTEGER:
         case GL_BLUE:
+        case GL_BLUE_INTEGER:
         case GL_DEPTH_COMPONENT:
         case GL_STENCIL_INDEX:
             return 1;
@@ -6761,6 +6763,14 @@ struct GLContext::Impl {
         const bool formatIsBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
         const bool formatIsBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
 
+        // Single-channel non-red formats: GREEN / BLUE / ALPHA (and their
+        // _INTEGER variants) sample a specific RGBA source channel rather
+        // than channel 0. Without this, `readPixels(format=GREEN, type=*)`
+        // would silently return the R channel in slot 0 — CTS's gradient
+        // compare flags that as a mismatch.
+        const bool formatIsGreen = (format == GL_GREEN || format == GL_GREEN_INTEGER);
+        const bool formatIsBlue  = (format == GL_BLUE  || format == GL_BLUE_INTEGER);
+        const bool formatIsAlpha = (format == GL_ALPHA);
         // Helper: return the `i`-th GL component (per format's component
         // order) drawn from `vals[]` (which is in RGBA order). Used by
         // the packed-type encoders below.
@@ -6772,6 +6782,12 @@ struct GLContext::Impl {
             } else if (formatIsBGRA) {
                 static const int map[4] = {2, 1, 0, 3};
                 return glCompIndex < 4 ? vals4[map[glCompIndex]] : 1.0;
+            } else if (formatIsGreen) {
+                return glCompIndex == 0 ? vals4[1] : 0.0;
+            } else if (formatIsBlue) {
+                return glCompIndex == 0 ? vals4[2] : 0.0;
+            } else if (formatIsAlpha) {
+                return glCompIndex == 0 ? vals4[3] : 0.0;
             }
             return vals4[glCompIndex];
         };
@@ -7955,7 +7971,7 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             || format == GL_RG_INTEGER || format == GL_RGB_INTEGER
             || format == GL_RGBA_INTEGER
             || format == GL_BGR_INTEGER || format == GL_BGRA_INTEGER);
-        if (formatIsInteger && isColorReadback) {
+        if (isColorReadback) {
             const GLuint fbName = impl_->state->boundReadFramebuffer();
             const GLFramebufferObject* fb = impl_->objects->framebuffers().get(fbName);
             bool fboIsInteger = false;
@@ -7988,7 +8004,10 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                     default: break;
                 }
             }
-            if (!fboIsInteger) {
+            // GL 4.6 §18.3.2: format and the FBO's attachment must agree
+            // on integer-ness. Integer format needs integer FBO; non-
+            // integer format needs non-integer FBO.
+            if (formatIsInteger != fboIsInteger) {
                 pushError(GL_INVALID_OPERATION);
                 return false;
             }
@@ -28586,9 +28605,11 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         const bool formatIsStencil = (format == GL_STENCIL_INDEX);
         const bool formatIsDS = (format == GL_DEPTH_STENCIL);
         const bool formatIsIntegerChannel =
-            (format == GL_RED_INTEGER || format == GL_RG_INTEGER ||
-             format == GL_RGB_INTEGER || format == GL_BGR_INTEGER ||
-             format == GL_RGBA_INTEGER || format == GL_BGRA_INTEGER);
+            (format == GL_RED_INTEGER
+             || format == GL_GREEN_INTEGER || format == GL_BLUE_INTEGER
+             || format == GL_RG_INTEGER
+             || format == GL_RGB_INTEGER || format == GL_BGR_INTEGER
+             || format == GL_RGBA_INTEGER || format == GL_BGRA_INTEGER);
         const bool formatIsColor =
             !formatIsDepth && !formatIsStencil && !formatIsDS;
         const bool internalIsDepth = isDepthFormat(internalFmt);
