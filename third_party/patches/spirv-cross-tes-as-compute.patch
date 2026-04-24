@@ -1,0 +1,111 @@
+Phase 3B.2 (in-progress) AppGL patch to SPIRV-Cross for TES-as-compute.
+The ragged diff form is intentional — each hunk is a self-contained
+feature so a rebase onto a different upstream SHA can merge pieces
+independently. See specs-worker-docs/phase3b-tf-capture-design.md for
+the full rationale.
+
+INCOMPLETE: the kernel MSL produced by this patch is well-formed but
+references undeclared `gl_TessCoord` and `gl_PrimitiveID` locals. The
+remaining 3B.2.4 work adds a new entry-point-arg
+`spvDomainData [[buffer(25)]]` + a `fixup_hooks_in` hook that seeds
+those locals from the buffer before the body runs. Until that
+lands, the kernel won't pass `newLibraryWithSource` — but the MSL
+string is stashed only, not compiled; this patch is regression-free.
+
+--- a/spirv_msl.hpp
++++ b/spirv_msl.hpp
+@@ -429,6 +429,28 @@ public:
+ 		// to index the output buffer.
+ 		bool vertex_for_tessellation = false;
+
++		// AppGL fork addition (phase-3B-metal-tess-TF): when set, a
++		// tessellation evaluation shader is translated as a compute
++		// kernel rather than a `[[patch(...)]] vertex` function.
++		// Used by the AppGL transform-feedback capture path, which
++		// dispatches one TES kernel thread per tessellator-generated
++		// vertex (the caller supplies the domain coords in a buffer;
++		// the kernel writes per-vertex TF output into a user-bound
++		// buffer). Companion to `vertex_for_tessellation` but for
++		// the post-tessellator stage.
++		//
++		// Requires `raw_buffer_tese_input = true` so gl_in / per-patch
++		// inputs already live in buffers (buffer slots 22 / 20).
++		// Output is written through a new TF-capture struct at
++		// `shader_output_buffer_index` (buffer 28 by default).
++		//
++		// Orthogonal to isoline-tessellation support, which Metal
++		// does not implement natively — the compute form still
++		// throws on isolines. Domain-point generation for isolines
++		// happens on the AppGL side.
++		bool tess_evaluation_as_compute = false;
++
+ 		// Assume that SubpassData images have multiple layers. Layered input attachments
+ 		// are addressed relative to the Layer output from the vertex pipeline. This option
+ 		// has no effect with multiview, since all input attachments are assumed to be layered
+
+--- a/spirv_msl.cpp   (build_implicit_builtins: extend `need_grid_params`)
++++ b/spirv_msl.cpp
+@@ -269,1 +269,6 @@
+-	bool need_grid_params = get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation;
++	// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute also needs the
++	// grid-params synthesis so `builtin_invocation_id_id` gets a valid
++	// BuiltInGlobalInvocationId variable — the output index
++	// `spvOut[gl_GlobalInvocationID.x]` depends on this.
++	bool need_grid_params = (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation) ||
++	                         (get_execution_model() == ExecutionModelTessellationEvaluation && msl_options.tess_evaluation_as_compute);
+
+--- a/spirv_msl.cpp   (add_variable_to_interface_block: TES-as-compute output index)
++++ b/spirv_msl.cpp
+@@ -4502,0 +4503,11 @@
++						// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute
++						// indexes spvOut by thread_position_in_grid.x — one
++						// output vertex per dispatched kernel thread.
++						else if (get_execution_model() == ExecutionModelTessellationEvaluation &&
++						         msl_options.tess_evaluation_as_compute)
++						{
++							statement("device ", to_name(ir.default_entry_point), "_", ib_var_ref, "& ", ib_var_ref,
++							          " = ", output_buffer_var_name, "[",
++							          to_expression(builtin_invocation_id_id), ".x];");
++						}
+
+--- a/spirv_msl.cpp   (entry_point_returns_stage_output: TES-as-compute returns void)
++++ b/spirv_msl.cpp
+@@ -14347,0 +14348,6 @@
++	// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute doesn't return
++	// its stage-out struct — the caller's TF-capture kernel writes output
++	// through a device buffer binding. Matches the vertex-for-tessellation
++	// sibling above.
++	if (get_execution_model() == ExecutionModelTessellationEvaluation && msl_options.tess_evaluation_as_compute)
++		return false;
+
+--- a/spirv_msl.cpp   (func_type_decl: TES-as-compute entry type is `kernel`)
++++ b/spirv_msl.cpp
+@@ -14385,0 +14386,5 @@
++		// AppGL patch (phase-3B-metal-tess-TF): emit TES as a compute
++		// kernel when `tess_evaluation_as_compute` is set. The caller
++		// supplies domain coords + a TF-capture buffer.
++		if (msl_options.tess_evaluation_as_compute)
++			entry_type = "kernel";
++		else if (msl_options.is_ios())
+
+--- a/spirv_msl.cpp   (is_direct_input_builtin: drop TessCoord + PrimitiveId for compute)
++++ b/spirv_msl.cpp
+@@ -14681,0 +14682,17 @@
++	// AppGL patch (phase-3B-metal-tess-TF): TES-as-compute doesn't expose
++	// Metal's tess intrinsics as entry-point args — the
++	// `[[position_in_patch]]` / `[[patch_id]]` qualifiers are illegal on
++	// compute kernels. gl_TessCoord and gl_PrimitiveID are instead
++	// seeded in the entry prologue from a host-supplied domain-coord
++	// buffer keyed by `[[thread_position_in_grid]]`.
++	if (get_execution_model() == ExecutionModelTessellationEvaluation &&
++	    msl_options.tess_evaluation_as_compute)
++	{
++		switch (bi_type)
++		{
++		case BuiltInTessCoord:
++		case BuiltInPrimitiveId:
++			return false;
++		default:
++			break;
++		}
++	}

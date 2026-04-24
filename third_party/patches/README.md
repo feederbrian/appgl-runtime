@@ -38,6 +38,45 @@ git apply ../../third_party/patches/<patch-name>.patch
 
 ## Patches
 
+### `spirv-cross-tes-as-compute.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.{hpp,cpp}` —
+`msl_options` struct + five call sites.
+
+**Status:** IN PROGRESS (Phase 3B.2). MSL is well-formed at the
+signature / indexing level but still references undeclared
+`gl_TessCoord` / `gl_PrimitiveID` locals. 3B.2.4 follow-up adds
+the domain-coord buffer arg + fixup_hooks_in that seeds those
+locals from it. Patch is regression-free as-is because the
+resulting MSL is stashed only, never compiled to a PSO yet.
+
+**Summary:** Enables `msl_options.tess_evaluation_as_compute`. When
+set on a TES translation, SPIRV-Cross emits:
+
+- `kernel void main0(...)` entry point instead of
+  `[[patch(...)]] vertex main0_out main0(...)`.
+- `main0_out` is written through a `device main0_out& out =
+  spvOut[gl_GlobalInvocationID.x]` reference rather than returned.
+- `[[position_in_patch]]` + `[[patch_id]]` entry-point args are
+  dropped — downstream `fixup_hooks_in` seeds the equivalent locals
+  from a host-supplied domain-coord buffer (3B.2.4 work).
+- `BuiltInGlobalInvocationId` + `spvStageInputSize` are synthesised
+  (same path `vertex_for_tessellation` already used for VS-compute).
+
+**Why:** Phase 3B of the metal-tess project needs a compute path
+for TES so AppGL can capture TES output into the bound
+transform-feedback buffer. Metal's
+`[[patch(...)]] vertex` form goes to the rasterizer and the
+output isn't accessible to a host-side memcpy. Running the same
+TES logic from a compute kernel with explicit buffer IO gives us
+TF capture without CPU-side interpretation.
+
+**CTS tests unlocked:** none yet (work in progress). Completing
+3B.2.4 + 3B.3/4/5 downstream is expected to unlock the
+`tessellation_control_to_tessellation_evaluation.*` +
+`tessellation_invariance.*` + non-isoline `vertex_spacing.*`
+clusters — ~100 tests total.
+
 ### `spirv-cross-tess-struct-parity.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` —
