@@ -2840,6 +2840,7 @@ struct TessGenParams {
     uint genSpacing;
     uint patchCount;
     uint pointMode;
+    uint vertexOrder;  // 0=CCW, 1=CW — swap last two verts of each tri when CW
 };
 
 // Round factor value up to the nearest valid segment count for the
@@ -2865,14 +2866,20 @@ inline uint segmentCount(float level, uint spacing) {
 inline void emitTriangle(
     float3 a, float3 b, float3 c,
     uint primID,
+    uint vertexOrder,  // 0=CCW, 1=CW — swap last two verts
     device atomic_uint* cursor,
     device packed_float3* coords,
     device uint* primIDs)
 {
     uint base = atomic_fetch_add_explicit(cursor, 3u, memory_order_relaxed);
     coords[base + 0] = packed_float3(a);
-    coords[base + 1] = packed_float3(b);
-    coords[base + 2] = packed_float3(c);
+    if (vertexOrder == 1u) {
+        coords[base + 1] = packed_float3(c);
+        coords[base + 2] = packed_float3(b);
+    } else {
+        coords[base + 1] = packed_float3(b);
+        coords[base + 2] = packed_float3(c);
+    }
     primIDs[base + 0] = primID;
     primIDs[base + 1] = primID;
     primIDs[base + 2] = primID;
@@ -2955,14 +2962,14 @@ void genPatchDomain(
                         float3 a = float3(ui0, vj0, wa0);
                         float3 b = float3(ui1, vj0, wa1);
                         float3 c = float3(ui0, vj1, wb0);
-                        emitTriangle(a, b, c, patchID,
+                        emitTriangle(a, b, c, patchID, params.vertexOrder,
                                       totalVertCount, domainTessCoord, domainPrimID);
                     }
                     if (i + 1u < row1Len) {
                         float3 a = float3(ui1, vj0, wa1);
                         float3 b = float3(ui1, vj1, wb1);
                         float3 c = float3(ui0, vj1, wb0);
-                        emitTriangle(a, b, c, patchID,
+                        emitTriangle(a, b, c, patchID, params.vertexOrder,
                                       totalVertCount, domainTessCoord, domainPrimID);
                     }
                 }
@@ -3016,9 +3023,9 @@ void genPatchDomain(
                     float3 b = float3(ui1, vj0, 0.0f);
                     float3 c = float3(ui0, vj1, 0.0f);
                     float3 d = float3(ui1, vj1, 0.0f);
-                    emitTriangle(a, b, d, patchID,
+                    emitTriangle(a, b, d, patchID, params.vertexOrder,
                                   totalVertCount, domainTessCoord, domainPrimID);
-                    emitTriangle(a, d, c, patchID,
+                    emitTriangle(a, d, c, patchID, params.vertexOrder,
                                   totalVertCount, domainTessCoord, domainPrimID);
                 }
             }
@@ -4271,6 +4278,7 @@ fragment float4 appgl_immediate_textured_fs(
                     uint32_t genSpacing;
                     uint32_t patchCount;
                     uint32_t pointMode;
+                    uint32_t vertexOrder;  // 0=CCW, 1=CW
                 };
                 TessGenParamsCPU paramsCPU{};
                 switch (info.genMode) {
@@ -4287,6 +4295,8 @@ fragment float4 appgl_immediate_textured_fs(
                 }
                 paramsCPU.patchCount = (uint32_t)info.patchCount;
                 paramsCPU.pointMode = info.pointMode ? 1u : 0u;
+                paramsCPU.vertexOrder =
+                    (info.genVertexOrder == GL_CW) ? 1u : 0u;
                 id<MTLBuffer> domainGenParamsBuf = [device
                     newBufferWithBytes:&paramsCPU
                                 length:sizeof(paramsCPU)
