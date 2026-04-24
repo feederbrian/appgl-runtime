@@ -2914,20 +2914,23 @@ void genPatchDomain(
     float i1 = float(f.insideTessellationFactor[1]);
 
     if (params.genMode == 0u) {
-        // Triangles — barycentric (u, v, w=1-u-v). Simplified (single
-        // N from max factor) mirroring the CPU path. All primitive
-        // vertices get the same primID (= patchID).
+        // Triangles — barycentric (u, v, w) with u+v+w = 1.
+        //
+        // Single N = max(outer[0..2], inner[0]) matches the CPU
+        // interpreter. Compute w as (N-i-j)/N by direct division —
+        // `1.0f - u - v` produces ULP-different values vs direct
+        // division, and CTS's `isVertexDefined` uses EXACT == on
+        // vertex components, so any FP drift makes the symmetry
+        // counterpart search miss even though the output "is" the
+        // right vertex.
         uint N = segmentCount(max(max(o0, o1), max(o2, i0)), params.genSpacing);
         float fN = float(N);
         if (params.pointMode != 0u) {
-            // Point_mode: emit unique tess-grid points inside the
-            // barycentric triangle. For factor N the regular grid has
-            // (N+1)(N+2)/2 points. Each gets primID = patchID.
             for (uint j = 0u; j <= N; ++j) {
                 float v = float(j) / fN;
                 for (uint i = 0u; i + j <= N; ++i) {
                     float u = float(i) / fN;
-                    float w = 1.0f - u - v;
+                    float w = float(N - i - j) / fN;
                     emitPoint(float3(u, v, w), patchID,
                               totalVertCount, domainTessCoord, domainPrimID);
                 }
@@ -2941,19 +2944,24 @@ void genPatchDomain(
                 for (uint i = 0u; i + 1u < row0Len; ++i) {
                     float ui0 = float(i) / fN;
                     float ui1 = float(i + 1u) / fN;
-                    // Upward triangle (base on row j, apex on row j+1).
+                    // Direct-division barycentric w = (N-i-j)/N.
+                    // Apex row (j) coords:
+                    float wa0 = float(N - i     - j) / fN;
+                    float wa1 = float(N - (i+1) - j) / fN;
+                    // Lower row (j+1) coords:
+                    float wb0 = float(N - i     - (j+1)) / fN;
+                    float wb1 = float(N - (i+1) - (j+1)) / fN;
                     if (i < row1Len) {
-                        float3 a = float3(ui0, vj0, 1.0f - ui0 - vj0);
-                        float3 b = float3(ui1, vj0, 1.0f - ui1 - vj0);
-                        float3 c = float3(ui0, vj1, 1.0f - ui0 - vj1);
+                        float3 a = float3(ui0, vj0, wa0);
+                        float3 b = float3(ui1, vj0, wa1);
+                        float3 c = float3(ui0, vj1, wb0);
                         emitTriangle(a, b, c, patchID,
                                       totalVertCount, domainTessCoord, domainPrimID);
                     }
-                    // Downward triangle.
                     if (i + 1u < row1Len) {
-                        float3 a = float3(ui1, vj0, 1.0f - ui1 - vj0);
-                        float3 b = float3(ui1, vj1, 1.0f - ui1 - vj1);
-                        float3 c = float3(ui0, vj1, 1.0f - ui0 - vj1);
+                        float3 a = float3(ui1, vj0, wa1);
+                        float3 b = float3(ui1, vj1, wb1);
+                        float3 c = float3(ui0, vj1, wb0);
                         emitTriangle(a, b, c, patchID,
                                       totalVertCount, domainTessCoord, domainPrimID);
                     }
