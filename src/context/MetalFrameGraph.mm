@@ -5834,6 +5834,11 @@ static void phaseAProbeTessDomainPort(id<MTLDevice> device,
 #include <metal_stdlib>
 using namespace metal;
 
+// Bit-exact CPU parity — compiled with MTLMathModeSafe to disable
+// fp-contract fusion that would otherwise rewrite `1 - fu - fv` into
+// single-rounded ops and drift 1 ULP vs the CPU's left-to-right
+// IEEE evaluation.
+
 struct QuadFactors {
     half edgeTessellationFactor[4];
     half insideTessellationFactor[2];
@@ -5890,6 +5895,22 @@ inline void spvPortEmitTriangle(
     primIDs[base + 2] = primID;
 }
 
+// Emit one point-mode vertex. Takes `c` by value (matches the
+// structural pattern of `spvPortEmitTriangle` — function-call
+// boundary prevents the compiler from fusing the subtraction chain
+// used to compute `c.z` with surrounding ops).
+inline void spvPortEmitPoint(
+    float3 c,
+    uint primID,
+    device atomic_uint* cursor,
+    device packed_float3* coords,
+    device uint* primIDs)
+{
+    uint base = atomic_fetch_add_explicit(cursor, 1u, memory_order_relaxed);
+    coords[base] = packed_float3(c);
+    primIDs[base] = primID;
+}
+
 void spvPortGenTriangles(
     uint patchID,
     constant TessPortParams& params,
@@ -5909,16 +5930,20 @@ void spvPortGenTriangles(
 
     if (params.pointMode != 0u) {
         // Walk grid row-major, emit every vertex once.
+        //
+        // Route through `spvPortEmitPoint` so the compiler can't fuse
+        // the `1 - fu - fv` chain into `1 - (fu + fv)` (which differs
+        // by 1 ULP from the CPU's left-to-right eval for (fu = fv =
+        // 1/3) and other rational pairs). Inline store does fuse; the
+        // function-call barrier pins the order.
         for (uint j = 0u; j <= N; ++j) {
             uint rowLen = N + 1u - j;
             float fv = precise::divide(float(j), fN);
             for (uint i = 0u; i < rowLen; ++i) {
                 float fu = precise::divide(float(i), fN);
                 float fw = 1.0f - fu - fv;
-                uint base = atomic_fetch_add_explicit(
-                    cursor, 1u, memory_order_relaxed);
-                coords[base] = packed_float3(fu, fv, fw);
-                primIDs[base] = patchID;
+                spvPortEmitPoint(float3(fu, fv, fw), patchID,
+                                  cursor, coords, primIDs);
             }
         }
         return;
@@ -6058,7 +6083,17 @@ kernel void spvGenTessDomainQuadsPort(
 )MSL";
 
     NSError* libErr = nil;
-    id<MTLLibrary> lib = [device newLibraryWithSource:msl options:nil error:&libErr];
+    // Force IEEE-strict FP. Default compile options enable fp-contract
+    // (fuses `a - b - c` into single-rounded ops), which produces
+    // more-accurate-but-CPU-divergent results at boundary vertices
+    // (e.g. fu + fv = 1 exactly).
+    MTLCompileOptions* opts = [MTLCompileOptions new];
+    if (@available(macOS 15.0, *)) {
+        opts.mathMode = MTLMathModeSafe;
+    } else {
+        opts.fastMathEnabled = NO;
+    }
+    id<MTLLibrary> lib = [device newLibraryWithSource:msl options:opts error:&libErr];
     if (lib == nil) {
         std::fprintf(stderr, "[APPGL domain-port] library build failed: %s\n",
                      libErr ? libErr.localizedDescription.UTF8String : "(no err)");
@@ -6104,41 +6139,55 @@ kernel void spvGenTessDomainQuadsPort(
         appgl::TessSpacing spacing;
         float outer[4];
         float inner[2];
+        bool pointMode;
+        bool flipWinding;
         const char* name;
     };
     const Case cases[] = {
         // Triangles — Equal
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {2.0f, 2.0f, 2.0f, 0.0f}, {2.0f, 0.0f}, "tri eq N=2"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, "tri eq N=3"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {5.0f, 5.0f, 5.0f, 0.0f}, {5.0f, 0.0f}, "tri eq N=5"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {7.0f, 4.0f, 3.0f, 0.0f}, {6.0f, 0.0f}, "tri eq mixed"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {1.0f, 1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, "tri eq N=1 (min)"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {12.0f, 9.0f, 7.0f, 0.0f}, {10.0f, 0.0f}, "tri eq asym"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {2.0f, 2.0f, 2.0f, 0.0f}, {2.0f, 0.0f}, false, false, "tri eq N=2"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, false, false, "tri eq N=3"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {5.0f, 5.0f, 5.0f, 0.0f}, {5.0f, 0.0f}, false, false, "tri eq N=5"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {7.0f, 4.0f, 3.0f, 0.0f}, {6.0f, 0.0f}, false, false, "tri eq mixed"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {1.0f, 1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, false, false, "tri eq N=1 (min)"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {12.0f, 9.0f, 7.0f, 0.0f}, {10.0f, 0.0f}, false, false, "tri eq asym"},
         // Triangles — FractionalEven (rounds up to next even ≥ 2)
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {4.0f, 4.0f, 4.0f, 0.0f}, {4.0f, 0.0f}, "tri fEven N=4"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {4.5f, 4.5f, 4.5f, 0.0f}, {4.5f, 0.0f}, "tri fEven N=4.5 → 6"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {1.0f, 1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, "tri fEven min (→ 2)"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {8.0f, 6.0f, 4.0f, 0.0f}, {7.0f, 0.0f}, "tri fEven asym"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {4.0f, 4.0f, 4.0f, 0.0f}, {4.0f, 0.0f}, false, false, "tri fEven N=4"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {4.5f, 4.5f, 4.5f, 0.0f}, {4.5f, 0.0f}, false, false, "tri fEven N=4.5 → 6"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {1.0f, 1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, false, false, "tri fEven min (→ 2)"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalEven, {8.0f, 6.0f, 4.0f, 0.0f}, {7.0f, 0.0f}, false, false, "tri fEven asym"},
         // Triangles — FractionalOdd (rounds up to next odd ≥ 1)
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, "tri fOdd N=3"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {3.5f, 3.5f, 3.5f, 0.0f}, {3.5f, 0.0f}, "tri fOdd N=3.5 → 5"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {4.0f, 4.0f, 4.0f, 0.0f}, {4.0f, 0.0f}, "tri fOdd N=4 → 5"},
-        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {8.0f, 6.0f, 4.0f, 0.0f}, {7.0f, 0.0f}, "tri fOdd asym"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, false, false, "tri fOdd N=3"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {3.5f, 3.5f, 3.5f, 0.0f}, {3.5f, 0.0f}, false, false, "tri fOdd N=3.5 → 5"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {4.0f, 4.0f, 4.0f, 0.0f}, {4.0f, 0.0f}, false, false, "tri fOdd N=4 → 5"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {8.0f, 6.0f, 4.0f, 0.0f}, {7.0f, 0.0f}, false, false, "tri fOdd asym"},
         // Quads — Equal
-        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {2.0f, 2.0f, 2.0f, 2.0f}, {2.0f, 2.0f}, "quad eq N=2"},
-        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, "quad eq N=4"},
-        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {8.0f, 8.0f, 8.0f, 8.0f}, {8.0f, 8.0f}, "quad eq N=8"},
-        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {1.0f, 1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, "quad eq N=1 (min)"},
-        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {29.0f, 29.0f, 29.0f, 29.0f}, {32.0f, 31.0f}, "quad eq rule4-ish"},
-        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {5.0f, 7.0f, 9.0f, 11.0f}, {13.0f, 17.0f}, "quad eq asym"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {2.0f, 2.0f, 2.0f, 2.0f}, {2.0f, 2.0f}, false, false, "quad eq N=2"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, false, false, "quad eq N=4"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {8.0f, 8.0f, 8.0f, 8.0f}, {8.0f, 8.0f}, false, false, "quad eq N=8"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {1.0f, 1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, false, false, "quad eq N=1 (min)"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {29.0f, 29.0f, 29.0f, 29.0f}, {32.0f, 31.0f}, false, false, "quad eq rule4-ish"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {5.0f, 7.0f, 9.0f, 11.0f}, {13.0f, 17.0f}, false, false, "quad eq asym"},
         // Quads — FractionalEven
-        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, "quad fEven N=4"},
-        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {3.5f, 3.5f, 3.5f, 3.5f}, {3.5f, 3.5f}, "quad fEven N=3.5 → 4"},
-        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {8.0f, 6.0f, 4.0f, 2.0f}, {7.0f, 5.0f}, "quad fEven asym"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, false, false, "quad fEven N=4"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {3.5f, 3.5f, 3.5f, 3.5f}, {3.5f, 3.5f}, false, false, "quad fEven N=3.5 → 4"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {8.0f, 6.0f, 4.0f, 2.0f}, {7.0f, 5.0f}, false, false, "quad fEven asym"},
         // Quads — FractionalOdd
-        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {3.0f, 3.0f, 3.0f, 3.0f}, {3.0f, 3.0f}, "quad fOdd N=3"},
-        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, "quad fOdd N=4 → 5"},
-        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {8.0f, 6.0f, 4.0f, 2.0f}, {7.0f, 5.0f}, "quad fOdd asym"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {3.0f, 3.0f, 3.0f, 3.0f}, {3.0f, 3.0f}, false, false, "quad fOdd N=3"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, false, false, "quad fOdd N=4 → 5"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalOdd, {8.0f, 6.0f, 4.0f, 2.0f}, {7.0f, 5.0f}, false, false, "quad fOdd asym"},
+        // Winding flip (CW) — swap last two verts per triangle.
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, false, true, "tri eq N=3 CW"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {5.0f, 5.0f, 5.0f, 0.0f}, {5.0f, 0.0f}, false, true, "tri fOdd CW"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, false, true, "quad eq N=4 CW"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {6.0f, 6.0f, 6.0f, 6.0f}, {6.0f, 6.0f}, false, true, "quad fEven CW"},
+        // Point mode — emits unique grid points (no triangulation).
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {3.0f, 3.0f, 3.0f, 0.0f}, {3.0f, 0.0f}, true, false, "tri eq N=3 pts"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::FractionalOdd, {5.0f, 5.0f, 5.0f, 0.0f}, {5.0f, 0.0f}, true, false, "tri fOdd N=5 pts"},
+        {appgl::TessDomain::Triangles, appgl::TessSpacing::Equal, {7.0f, 4.0f, 3.0f, 0.0f}, {6.0f, 0.0f}, true, false, "tri eq asym pts"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {4.0f, 4.0f, 4.0f, 4.0f}, {4.0f, 4.0f}, true, false, "quad eq N=4 pts"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::FractionalEven, {6.0f, 6.0f, 6.0f, 6.0f}, {6.0f, 6.0f}, true, false, "quad fEven N=6 pts"},
+        {appgl::TessDomain::Quads, appgl::TessSpacing::Equal, {5.0f, 7.0f, 9.0f, 11.0f}, {13.0f, 17.0f}, true, false, "quad eq asym pts"},
     };
 
     uint32_t passCount = 0;
@@ -6150,16 +6199,26 @@ kernel void spvGenTessDomainQuadsPort(
         if (pso == nil) continue;
         appgl::TessDomainOutput cpuOut = appgl::generateTessDomain(
             tc.domain, tc.spacing,
-            tc.outer, tc.inner, /*pointMode=*/false, /*flipWinding=*/false);
+            tc.outer, tc.inner, tc.pointMode, tc.flipWinding);
 
-        // Expand CPU's indexed output into non-indexed "one coord per
-        // emitted vertex" shape — same layout the GPU kernel produces.
+        // CPU output shape differs by pointMode:
+        //  - pointMode=true  → `coords` holds one entry per unique
+        //    grid point, `indices` is empty. GPU kernel emits the
+        //    same set via its atomic-cursor pointMode branch.
+        //  - pointMode=false → `coords` holds unique grid points,
+        //    `indices` holds 3 per triangle. Expand to non-indexed
+        //    "one coord per emitted vertex" — what the GPU kernel
+        //    produces via `spvPortEmitTriangle`.
         std::vector<float> cpuExpanded;
-        cpuExpanded.reserve(cpuOut.indices.size() * 3);
-        for (std::uint32_t idx : cpuOut.indices) {
-            cpuExpanded.push_back(cpuOut.coords[idx * 3 + 0]);
-            cpuExpanded.push_back(cpuOut.coords[idx * 3 + 1]);
-            cpuExpanded.push_back(cpuOut.coords[idx * 3 + 2]);
+        if (tc.pointMode) {
+            cpuExpanded = cpuOut.coords;
+        } else {
+            cpuExpanded.reserve(cpuOut.indices.size() * 3);
+            for (std::uint32_t idx : cpuOut.indices) {
+                cpuExpanded.push_back(cpuOut.coords[idx * 3 + 0]);
+                cpuExpanded.push_back(cpuOut.coords[idx * 3 + 1]);
+                cpuExpanded.push_back(cpuOut.coords[idx * 3 + 2]);
+            }
         }
 
         uint16_t factorData[6] = {0};
@@ -6189,7 +6248,9 @@ kernel void spvGenTessDomainQuadsPort(
         }
         PortParams params{
             tc.domain == appgl::TessDomain::Quads ? 1u : 0u,
-            spacingEnum, 1u, 0u, 0u
+            spacingEnum, 1u,
+            tc.pointMode ? 1u : 0u,
+            tc.flipWinding ? 1u : 0u
         };
         id<MTLBuffer> paramsBuf = [device
             newBufferWithBytes:&params
@@ -6234,28 +6295,43 @@ kernel void spvGenTessDomainQuadsPort(
                 if (gpuCoords[k] != cpuExpanded[k]) { match = false; break; }
             }
         }
+        // Count ULP-level diffs (same count match, bitwise-different
+        // coords) to separate "wrong topology" (count mismatch) from
+        // "right topology, FP drift" (count matches, some coords ULP-off).
+        std::size_t diffVerts = 0;
         if (match) {
             std::fprintf(stderr, "[APPGL domain-port]   %-24s MATCH   (%zu verts)\n",
                          tc.name, cpuN);
             ++passCount;
-        } else {
-            std::fprintf(stderr, "[APPGL domain-port]   %-24s DIFFER  (CPU=%zu GPU=%u)\n",
+        } else if (gpuVerts != cpuN) {
+            std::fprintf(stderr, "[APPGL domain-port]   %-24s COUNT   (CPU=%zu GPU=%u)\n",
                          tc.name, cpuN, gpuVerts);
             ++failCount;
-            const std::size_t nShow = std::min<std::size_t>(cpuN, gpuVerts);
-            for (std::size_t k = 0; k < nShow; ++k) {
-                float cu = cpuExpanded[k*3+0];
-                float cv = cpuExpanded[k*3+1];
-                float cw = cpuExpanded[k*3+2];
-                float gu = gpuCoords[k*3+0];
-                float gv = gpuCoords[k*3+1];
-                float gw = gpuCoords[k*3+2];
-                if (cu != gu || cv != gv || cw != gw) {
+        } else {
+            for (std::size_t k = 0; k < cpuN; ++k) {
+                if (cpuExpanded[k*3+0] != gpuCoords[k*3+0] ||
+                    cpuExpanded[k*3+1] != gpuCoords[k*3+1] ||
+                    cpuExpanded[k*3+2] != gpuCoords[k*3+2]) {
+                    ++diffVerts;
+                }
+            }
+            std::fprintf(stderr,
+                "[APPGL domain-port]   %-24s DIFFER  (%zu verts, %zu ULP-off)\n",
+                tc.name, cpuN, diffVerts);
+            ++failCount;
+            // Show first 3 diffs
+            std::size_t shown = 0;
+            for (std::size_t k = 0; k < cpuN && shown < 3; ++k) {
+                if (cpuExpanded[k*3+0] != gpuCoords[k*3+0] ||
+                    cpuExpanded[k*3+1] != gpuCoords[k*3+1] ||
+                    cpuExpanded[k*3+2] != gpuCoords[k*3+2]) {
                     std::fprintf(stderr,
-                        "[APPGL domain-port]     first diff at vert %zu: "
+                        "[APPGL domain-port]     vert %zu: "
                         "CPU=(%.9g,%.9g,%.9g) GPU=(%.9g,%.9g,%.9g)\n",
-                        k, cu, cv, cw, gu, gv, gw);
-                    break;
+                        k,
+                        cpuExpanded[k*3+0], cpuExpanded[k*3+1], cpuExpanded[k*3+2],
+                        gpuCoords[k*3+0], gpuCoords[k*3+1], gpuCoords[k*3+2]);
+                    ++shown;
                 }
             }
         }
