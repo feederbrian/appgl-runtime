@@ -2996,8 +2996,45 @@ void genPatchDomain(
                 }
             }
         }
+    } else if (params.genMode == 2u) {
+        // Isolines (§11.2.2.4) — (u, v, 0) with u ∈ [0, 1], v half-
+        // open in [0, 1). outer[0] is the number of lines (always
+        // equal-spacing per spec), outer[1] is segments-per-line
+        // (honours the spacing mode). No inner levels.
+        uint vN = segmentCount(o0, 0u);                  // forced equal
+        uint uN = segmentCount(o1, params.genSpacing);
+        float fU = float(uN);
+        float fV = float(vN);
+        if (params.pointMode != 0u) {
+            // Point_mode: vN × (uN+1) unique points.
+            for (uint i = 0u; i < vN; ++i) {
+                float v = float(i) / fV;
+                for (uint j = 0u; j <= uN; ++j) {
+                    float u = float(j) / fU;
+                    emitPoint(float3(u, v, 0.0f), patchID,
+                              totalVertCount, domainTessCoord, domainPrimID);
+                }
+            }
+        } else {
+            // Line_mode: each line i at v = i/vN contributes
+            // uN segments = 2*uN verts. Output as pairs (p[j], p[j+1])
+            // so downstream GL_LINES topology reads cleanly.
+            for (uint i = 0u; i < vN; ++i) {
+                float v = float(i) / fV;
+                for (uint j = 0u; j < uN; ++j) {
+                    float u0 = float(j) / fU;
+                    float u1 = float(j + 1u) / fU;
+                    // Inline emitLine using a 2-slot atomic claim.
+                    uint base = atomic_fetch_add_explicit(
+                        totalVertCount, 2u, memory_order_relaxed);
+                    domainTessCoord[base + 0] = packed_float3(float3(u0, v, 0.0f));
+                    domainTessCoord[base + 1] = packed_float3(float3(u1, v, 0.0f));
+                    domainPrimID[base + 0] = patchID;
+                    domainPrimID[base + 1] = patchID;
+                }
+            }
+        }
     }
-    // Isolines (genMode == 2u): Phase 4 work. Noop here for now.
 }
 
 // Serial driver: one thread, walks patches in order so emission order

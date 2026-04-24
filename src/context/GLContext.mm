@@ -22005,16 +22005,12 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // reflected. If those conditions hold, the Metal path runs the
     // full compute chain + deposits TF bytes on CPU. Otherwise we
     // defer to the CPU tessellation interpreter.
-    // Phase 3B.5 guard: the Metal tess-TF path doesn't yet plumb
-    // default uniforms through to the TCS/TES-compute dispatches, so
-    // programs that reference `_DefaultUniforms` in their tess
-    // MSL read zero factors and produce wrong output. Fall back to
-    // the CPU tessellator in that case. Phase 3B.6 added the
-    // infrastructure (per-stage reflection, layout, uniform
-    // MetalTessDrawInfo fields) but keeps the path dormant until the
-    // isolines domain-gen kernel lands — otherwise iteration
-    // mismatches between Metal-serviced primitive modes and CPU-
-    // serviced isolines modes break invariance + vertex_spacing.
+    // Phase 4 [metal-tess-TF]: isolines domain-gen is live, but the
+    // invariance + vertex_spacing tests probe correctness beyond the
+    // per-patch vertex count (symmetry around axis, exact fractional
+    // spacing rounding, …). Our domain-gen isn't exact enough yet —
+    // keep uniform-using programs on the CPU tessellator to preserve
+    // 3B.5's wins until the tess correctness gap closes.
     const bool tessUsesUniforms =
         program.tessControlMSL.find("_DefaultUniforms") != std::string::npos ||
         program.tessEvalAsComputeMSL.find("_DefaultUniforms") != std::string::npos ||
@@ -22066,12 +22062,18 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     info.baseInstance = baseInstance;
     info.program = programName;
 
-    // Phase 3B.6 [metal-tess-TF] dormant infrastructure: the
-    // MetalTessDrawInfo now has fields for per-stage default-
-    // uniform bytes. Layout-compute + pack remain wired out until
-    // the isolines domain-gen kernel lands — until then, uniform
-    // programs fall back to CPU via the tessUsesUniforms guard
-    // above, so plumbing the bytes is dead code.
+    // Phase 4 [metal-tess-TF]: pack default uniforms for each tess
+    // compute stage so the TCS / VS-compute / TES-compute kernels
+    // read glUniform* values. Layout is computed lazily once per
+    // program. Only runs when the program actually references
+    // _DefaultUniforms in its compute MSL — otherwise we skip the
+    // per-draw pack cost.
+    // Phase 4 [metal-tess-TF] dormant: uniform plumbing is ready
+    // (see buildStageUniformBuffer / MetalTessDrawInfo slots), but
+    // `tessUsesUniforms` forces those programs to the CPU tess
+    // interpreter until our domain-gen output matches CTS's
+    // correctness probes. Packing is skipped here to keep this
+    // function side-effect-free for the CPU-fallback case.
 
     // Fixed-function state snapshot (mirrors
     // populateTranslatedDrawFixedFunctionState but scoped to the

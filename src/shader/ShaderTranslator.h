@@ -249,8 +249,16 @@ struct StageOutputLayout {
                                    // (matches the GLSL out-variable name
                                    // for user varyings; "gl_Position"
                                    // for the position builtin).
-        std::size_t offset = 0;    // byte offset inside the struct
-        std::size_t size = 0;      // byte size of the member
+        std::size_t offset = 0;    // byte offset inside the MSL struct
+        std::size_t size = 0;      // byte size in MSL memory (padded:
+                                   // vec3 → 16, the extra 4 bytes are
+                                   // padding that MSL reads but GL
+                                   // doesn't write to TF).
+        std::size_t glPackedBytes = 0; // byte size in GL's TF layout
+                                   // (tightly packed: vec3 → 12,
+                                   // float[4] → 16, etc.). What the TF
+                                   // writer copies to the GL-side
+                                   // GL_TRANSFORM_FEEDBACK_BUFFER.
         bool isBuiltIn = false;
         std::uint32_t builtIn = 0; // spv::BuiltIn enum when isBuiltIn
     };

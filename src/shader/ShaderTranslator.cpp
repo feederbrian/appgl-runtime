@@ -2212,12 +2212,16 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
             std::size_t columnSize = scalar * vec;
             if (vec == 3) columnSize = scalar * 4;
             std::size_t memberSize = columnSize * cols;
+            // GL-packed byte size (tight). TF layout expects vec3 = 12
+            // bytes (no pad), matrix columns packed end-to-end.
+            std::size_t glPacked = scalar * vec * cols;
             // Array outputs (e.g. gl_ClipDistance[N]) take N element
             // slots, element padded to column size.
             if (!mt.array.empty()) {
                 std::uint32_t arraySize = mt.array[0];
                 if (arraySize == 0) arraySize = 1;
                 memberSize *= arraySize;
+                glPacked *= arraySize;
             }
             if (memberAlign > 0 && (cursor % memberAlign) != 0) {
                 cursor = ((cursor / memberAlign) + 1) * memberAlign;
@@ -2225,6 +2229,7 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
             StageOutputLayout::Member m = d.member;
             m.offset = cursor;
             m.size = memberSize;
+            m.glPackedBytes = glPacked;
             out.members.push_back(std::move(m));
             cursor += memberSize;
         }
