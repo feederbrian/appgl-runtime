@@ -809,12 +809,22 @@ bool isValidLegacyUploadInternalFormat(GLenum internalFormat) {
         // sRGB
         case GL_SRGB8:
         case GL_SRGB8_ALPHA8:
-        // Depth / stencil
+        // Depth / stencil — sized and unsized base variants. GL 4.6 §8.5
+        // Table 8.11 lists the sized depth/stencil internal formats; the
+        // unsized base enums (GL_DEPTH_COMPONENT, GL_DEPTH_STENCIL, GL_-
+        // STENCIL_INDEX) are also permitted and let the implementation
+        // pick a sized format. CTS `packed_pixels.rectangle.depth_-
+        // component_format_*` exercises the unsized GL_DEPTH_COMPONENT
+        // path specifically.
+        case GL_DEPTH_COMPONENT:
         case GL_DEPTH_COMPONENT16:
         case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32:
         case GL_DEPTH_COMPONENT32F:
+        case GL_DEPTH_STENCIL:
         case GL_DEPTH24_STENCIL8:
         case GL_DEPTH32F_STENCIL8:
+        case GL_STENCIL_INDEX:
         case GL_STENCIL_INDEX8:
         // Legacy low-precision / packed sized formats (upcast to RGBA8 /
         // nearest Metal format in buildRGBA8Upload). CTS copy_image and a
@@ -973,17 +983,23 @@ bool isFormatCompatibleWithInternalFormat(GLenum format, GLenum internalFormat) 
 
     // Classify the internal format
     switch (internalFormat) {
-        // Depth internal formats
+        // Depth internal formats — accept DEPTH_COMPONENT (natural match)
+        // or DEPTH_STENCIL (CTS packed_pixels.rectangle.depth_componentN_-
+        // format_depth_stencil uploads DEPTH_STENCIL + UNSIGNED_INT_24_8
+        // into a depth-only texture and expects the stencil byte to be
+        // dropped on upload — the reference drivers accept this even
+        // though GL 4.6 §8.4.4.2 is stricter).
         case GL_DEPTH_COMPONENT:
         case GL_DEPTH_COMPONENT16:
         case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32:
         case GL_DEPTH_COMPONENT32F:
-            return isDepthFormat;
+            return isDepthFormat || isDepthStencilFormat;
         // Depth-stencil internal formats
         case GL_DEPTH_STENCIL:
         case GL_DEPTH24_STENCIL8:
         case GL_DEPTH32F_STENCIL8:
-            return isDepthStencilFormat;
+            return isDepthStencilFormat || isDepthFormat;
         // Stencil internal format
         case GL_STENCIL_INDEX:
         case GL_STENCIL_INDEX8:
@@ -1023,8 +1039,9 @@ bool isFormatTypeCompatible(GLenum format, GLenum type) {
 
     switch (type) {
         // Plain integer/float types accept any base color format, plus
-        // depth/stencil under narrow rules that CTS enforces via
-        // isFormatCompatibleWithInternalFormat rather than here.
+        // depth (DEPTH_COMPONENT) and stencil (STENCIL_INDEX). They are
+        // NOT valid for DEPTH_STENCIL — the spec and CTS both require
+        // UNSIGNED_INT_24_8 or FLOAT_32_UNSIGNED_INT_24_8_REV there.
         case GL_UNSIGNED_BYTE:
         case GL_BYTE:
         case GL_UNSIGNED_SHORT:
@@ -1033,6 +1050,9 @@ bool isFormatTypeCompatible(GLenum format, GLenum type) {
         case GL_INT:
         case GL_HALF_FLOAT:
         case GL_FLOAT:
+            if (isDepthStencilFormat) {
+                return false;
+            }
             // Float type with integer format is invalid (Table 8.7 "F"
             // column rejects *_INTEGER formats).
             if (type == GL_FLOAT || type == GL_HALF_FLOAT) {

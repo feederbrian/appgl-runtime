@@ -519,6 +519,13 @@ bool isSupportedInternalTextureFormat(const GLCapabilities& caps, GLenum interna
         case GL_RG:
         case GL_RGB:
         case GL_RGBA:
+        // Unsized depth / stencil base formats — GL 4.6 §8.5 Table 8.11
+        // lists these as valid internal formats; the driver chooses a
+        // sized counterpart (we pick DEPTH_COMPONENT24 / DEPTH24_-
+        // STENCIL8 / STENCIL_INDEX8 in metalRenderbufferFormat).
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_STENCIL:
+        case GL_STENCIL_INDEX:
             return true;
         // Generic "please compress this however you like" formats: GL 4.6
         // §8.5.3 permits the driver to choose any compression scheme *or
