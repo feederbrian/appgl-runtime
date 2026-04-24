@@ -611,6 +611,16 @@ struct GLProgramObject {
     // Empty for non-tess programs.
     std::string tessControlMSL;
     std::string tessEvalMSL;
+    // Phase 3 of metal-tess: VS emitted as a Metal compute kernel with
+    // `capture_output_to_buffer=true`. When a tess program has VS
+    // outputs the TCS reads, this kernel runs per-vertex and writes
+    // them into a buffer that the TCS compute dispatch consumes via
+    // its stage-input descriptor. Empty when no VS outputs exist or
+    // for non-tess programs. `vertexMSL` above keeps the traditional
+    // `vertex` shader form for non-tess paths (still used by
+    // encodeTranslatedDraw when this program is bound to a non-tess
+    // draw, which shouldn't happen — but the MSL is cheap to keep).
+    std::string tessVertexAsComputeMSL;
     ShaderReflection vertexReflection;
     ShaderReflection fragmentReflection;
     // Reflection for the geometry stage, harvested from SPIRV-Cross
@@ -779,6 +789,12 @@ struct GLProgramObject {
     // compute-encode TCS step; Phase 1 only validates the build.
     // Released at linkProgram reset and at program delete.
     void* metalTessControlPipelineState = nullptr;
+    // Metal tess Phase 3: retained id<MTLComputePipelineState> for
+    // the VS-as-compute stage. Non-null only when the tess program has
+    // a non-trivial VS whose outputs the TCS consumes (SPIRV-Cross
+    // `vertex_for_tessellation + capture_output_to_buffer`). Built at
+    // link time via the same probe path as the TCS compute PSO.
+    void* metalTessVertexPipelineState = nullptr;
     // Step 7-3 compute follow-up: retained id<MTLFunction> for the
     // compute entry point, populated alongside the PSO when
     // APPGL_ENABLE_ARGUMENT_BUFFERS is set. `encodeComputeDispatch`

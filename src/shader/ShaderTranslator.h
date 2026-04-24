@@ -196,6 +196,18 @@ struct TranslatorOptions {
     // only UPGRADES the decision from "off by default" to "on for this
     // call".
     bool forceTessellation = false;
+
+    // Phase 3 of the metal-tess project: when true, the VS translator
+    // emits the vertex shader as a Metal compute kernel that captures
+    // per-vertex output into a buffer at
+    // `msl_options.shader_output_buffer_index` (buffer 28 in the
+    // default layout). Requires the translated stage to be
+    // ExecutionModelVertex; no effect on other stages. Pairs with
+    // `forceTessellation` on the TCS / TES translation so the full
+    // pipeline can run on Metal's native tessellator. Encoded by
+    // MetalFrameGraph as a pre-TCS compute dispatch that seeds the
+    // TCS's `[[stage_in]]` descriptor.
+    bool forceVertexForTessellation = false;
 };
 
 class ShaderTranslator {

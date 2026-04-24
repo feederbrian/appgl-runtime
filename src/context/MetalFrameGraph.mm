@@ -3529,7 +3529,8 @@ fragment float4 appgl_immediate_textured_fs(
         const std::string& fsMSL,
         GLenum genMode,
         GLenum genSpacing,
-        GLenum genVertexOrder)
+        GLenum genVertexOrder,
+        const std::string& vsComputeMSL)
     {
         MetalFrameGraph::TessPipelineProbeResult result;
         if (device == nil) {
@@ -3552,6 +3553,28 @@ fragment float4 appgl_immediate_textured_fs(
         }
         result.computeOk = true;
         result.computePipelineState = tcsPSO;
+
+        // Stage 1b (Phase 3) — VS-as-compute PSO. Only attempted when
+        // the caller passed a non-empty MSL. Programs whose VS has no
+        // stage-input ([[stage_in]]) attributes can build directly;
+        // programs that need a MTLStageInputOutputDescriptor will fail
+        // here and drop to the CPU fallback via the program-side
+        // handleability gate. Diagnosed but not a hard failure — the
+        // caller may still use the TCS-only path for simple tess.
+        if (!vsComputeMSL.empty()) {
+            std::string vsError;
+            void* vsPSO = buildComputePipelineState(vsComputeMSL, &vsError, nullptr);
+            if (vsPSO != nullptr) {
+                result.vertexComputeOk = true;
+                result.vertexComputePipelineState = vsPSO;
+            } else {
+                // Keep going — a failed VS-compute PSO shouldn't mask
+                // the TCS + render PSO validation, but we stash the
+                // diagnostic so callers can decide whether to use the
+                // simpler no-VS path.
+                result.diagnostic = std::string("vs-compute (non-fatal): ") + vsError;
+            }
+        }
 
         // Stage 2 — TES + FS libraries + functions.
         NSError* tesLibErr = nil;
@@ -3782,16 +3805,27 @@ fragment float4 appgl_immediate_textured_fs(
         pipeDesc.vertexFunction = tesFn;
         pipeDesc.fragmentFunction = fsFn;
         pipeDesc.colorAttachments[0].pixelFormat = colorFormat;
-        if (depthFormat != MTLPixelFormatInvalid) {
+        // Classify the depth/stencil format: Metal's validator rejects
+        // setting `depthAttachmentPixelFormat` to a stencil-only format
+        // (e.g. MTLPixelFormatStencil8) and rejects setting
+        // `stencilAttachmentPixelFormat` to a depth-only format. Depth-
+        // plus-stencil combined formats go on BOTH slots.
+        const bool fmtHasDepth =
+            depthFormat == MTLPixelFormatDepth16Unorm ||
+            depthFormat == MTLPixelFormatDepth32Float ||
+            depthFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
+            depthFormat == MTLPixelFormatDepth32Float_Stencil8;
+        const bool fmtHasStencil =
+            depthFormat == MTLPixelFormatStencil8 ||
+            depthFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
+            depthFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+            depthFormat == MTLPixelFormatX24_Stencil8 ||
+            depthFormat == MTLPixelFormatX32_Stencil8;
+        if (fmtHasDepth) {
             pipeDesc.depthAttachmentPixelFormat = depthFormat;
-            // macOS depth-stencil formats (Depth32Float_Stencil8,
-            // Depth24Unorm_Stencil8) carry both aspects.
-            if (depthFormat == MTLPixelFormatDepth32Float_Stencil8 ||
-                depthFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
-                depthFormat == MTLPixelFormatX32_Stencil8 ||
-                depthFormat == MTLPixelFormatX24_Stencil8) {
-                pipeDesc.stencilAttachmentPixelFormat = depthFormat;
-            }
+        }
+        if (fmtHasStencil) {
+            pipeDesc.stencilAttachmentPixelFormat = depthFormat;
         }
 
         // Tess pipeline settings. Partition-mode mapping mirrors the
@@ -3882,7 +3916,7 @@ fragment float4 appgl_immediate_textured_fs(
             pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
         }
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        if (depthTex != nil && depthFormat != MTLPixelFormatInvalid) {
+        if (depthTex != nil && fmtHasDepth) {
             pass.depthAttachment.texture = depthTex;
             if (info.pendingClearDepth) {
                 pass.depthAttachment.loadAction = MTLLoadActionClear;
@@ -3891,20 +3925,17 @@ fragment float4 appgl_immediate_textured_fs(
                 pass.depthAttachment.loadAction = MTLLoadActionLoad;
             }
             pass.depthAttachment.storeAction = MTLStoreActionStore;
-            if (depthFormat == MTLPixelFormatDepth32Float_Stencil8 ||
-                depthFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
-                depthFormat == MTLPixelFormatX32_Stencil8 ||
-                depthFormat == MTLPixelFormatX24_Stencil8) {
-                pass.stencilAttachment.texture = depthTex;
-                if (info.pendingClearStencil) {
-                    pass.stencilAttachment.loadAction = MTLLoadActionClear;
-                    pass.stencilAttachment.clearStencil =
-                        (uint32_t)info.clearStencil;
-                } else {
-                    pass.stencilAttachment.loadAction = MTLLoadActionLoad;
-                }
-                pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        }
+        if (depthTex != nil && fmtHasStencil) {
+            pass.stencilAttachment.texture = depthTex;
+            if (info.pendingClearStencil) {
+                pass.stencilAttachment.loadAction = MTLLoadActionClear;
+                pass.stencilAttachment.clearStencil =
+                    (uint32_t)info.clearStencil;
+            } else {
+                pass.stencilAttachment.loadAction = MTLLoadActionLoad;
             }
+            pass.stencilAttachment.storeAction = MTLStoreActionStore;
         }
 
         id<MTLRenderCommandEncoder> enc =
@@ -3984,7 +4015,7 @@ fragment float4 appgl_immediate_textured_fs(
         // Depth state — minimal Phase 2 path (no stencil write mask,
         // no per-face stencil). Full depth/stencil plumbing is a Phase
         // 2 follow-up if needed by a specific test.
-        if (depthTex != nil && info.depthTestEnabled) {
+        if (depthTex != nil && fmtHasDepth && info.depthTestEnabled) {
             MTLDepthStencilDescriptor* dsDesc =
                 [[MTLDepthStencilDescriptor alloc] init];
             switch (info.depthFunc) {
@@ -4913,10 +4944,12 @@ MetalFrameGraph::TessPipelineProbeResult MetalFrameGraph::probeTessellationPipel
     const std::string& fsMSL,
     GLenum genMode,
     GLenum genSpacing,
-    GLenum genVertexOrder)
+    GLenum genVertexOrder,
+    const std::string& vsComputeMSL)
 {
     return impl_->probeTessellationPipeline(tcsMSL, tesMSL, fsMSL,
-                                             genMode, genSpacing, genVertexOrder);
+                                             genMode, genSpacing, genVertexOrder,
+                                             vsComputeMSL);
 }
 
 bool MetalFrameGraph::encodeMetalTessellationDraw(const MetalTessDrawInfo& info) {

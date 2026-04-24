@@ -685,16 +685,30 @@ public:
     struct TessPipelineProbeResult {
         bool computeOk = false;
         bool renderOk = false;
+        bool vertexComputeOk = false;    // Phase 3 — true iff VS-as-compute
+                                         // PSO built (only attempted when
+                                         // vsComputeMSL is non-empty).
         std::string diagnostic;          // empty on full success
-        void* computePipelineState = nullptr; // CFBridgingRetain'd on computeOk
+        void* computePipelineState = nullptr;        // TCS compute PSO (retained)
+        void* vertexComputePipelineState = nullptr;  // VS compute PSO (retained)
     };
+    // Phase 3: `vsComputeMSL` (empty for non-Phase-3 probes) is the
+    // VS-as-compute MSL emitted with `vertex_for_tessellation +
+    // capture_output_to_buffer`. When provided, the probe also builds a
+    // MTLComputePipelineState for it and retains it as
+    // `vertexComputePipelineState`. No MTLStageInputOutputDescriptor is
+    // attached yet — programs whose VS reads attributes ([[stage_in]])
+    // will fail pipeline-state creation; they fall through to the CPU
+    // interpreter path via the same handleability gate that catches TCS
+    // buffer bindings.
     TessPipelineProbeResult probeTessellationPipeline(
         const std::string& tcsMSL,
         const std::string& tesMSL,
         const std::string& fsMSL,
         GLenum genMode,
         GLenum genSpacing,
-        GLenum genVertexOrder);
+        GLenum genVertexOrder,
+        const std::string& vsComputeMSL = "");
 
     // Metal-native tessellation draw encoder (Phase 2 of the metal-tess
     // project). Uses the currently-bound framebuffer (same as

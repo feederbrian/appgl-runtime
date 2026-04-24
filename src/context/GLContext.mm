@@ -18266,6 +18266,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->fragmentMSL.clear();
     programObject->tessControlMSL.clear();
     programObject->tessEvalMSL.clear();
+    programObject->tessVertexAsComputeMSL.clear();
     programObject->computeMSL.clear();
     programObject->computeReflection = ShaderReflection{};
     // Zero default so glGetProgramiv(GL_COMPUTE_WORK_GROUP_SIZE) returns
@@ -18286,6 +18287,10 @@ bool GLContext::linkProgram(GLuint program) {
     // by probeTessellationPipeline on the previous link.
     releaseRetainedMetalObject(programObject->metalTessControlPipelineState);
     programObject->metalTessControlPipelineState = nullptr;
+    // Metal tess Phase 3: release the retained VS-as-compute PSO built
+    // by probeTessellationPipeline (when the VS has outputs).
+    releaseRetainedMetalObject(programObject->metalTessVertexPipelineState);
+    programObject->metalTessVertexPipelineState = nullptr;
     // Step 7-4: release cached graphics-stage MTLFunctions on relink.
     releaseRetainedMetalObject(programObject->metalVertexFunction);
     programObject->metalVertexFunction = nullptr;
@@ -18799,6 +18804,21 @@ bool GLContext::linkProgram(GLuint program) {
             (void)translateCachedStage("tess-eval", tessEvalShader,
                                        programObject->tessEvalMSL, teRefl,
                                        tessOpts);
+            // Metal tess Phase 3: compile VS as a compute kernel with
+            // `vertex_for_tessellation + capture_output_to_buffer` so
+            // the TCS compute dispatch can consume its outputs via
+            // stage-input. Emits alongside the traditional `vertex`
+            // form stored above — the Phase 3 pipeline probe + encode
+            // paths read `tessVertexAsComputeMSL`, leaving
+            // `vertexMSL` (the Phase-2 render path) untouched.
+            appgl::TranslatorOptions vsComputeOpts;
+            vsComputeOpts.forceVertexForTessellation = true;
+            ShaderReflection vsComputeRefl;
+            (void)translateStage(
+                "vertex-for-tess", vsSpirvData, vsSpirvWords,
+                vertexShader->source,
+                programObject->tessVertexAsComputeMSL, vsComputeRefl,
+                vsComputeOpts);
 
             // Extract tessellation execution modes from SPIR-V.
             programObject->hasTessellation = true;
@@ -18870,10 +18890,48 @@ bool GLContext::linkProgram(GLuint program) {
                         programObject->fragmentMSL,
                         programObject->tessGenMode,
                         programObject->tessGenSpacing,
-                        programObject->tessGenVertexOrder);
-                if (probe.computeOk) {
+                        programObject->tessGenVertexOrder,
+                        programObject->tessVertexAsComputeMSL);
+                // Phase 3: stash the VS-as-compute PSO when the probe
+                // built it. Non-fatal if it didn't (the simpler Phase-2
+                // path still works for programs without VS→TCS flow).
+                if (probe.vertexComputeOk) {
+                    programObject->metalTessVertexPipelineState =
+                        probe.vertexComputePipelineState;
+                }
+                // Phase 2/3 handleability gate: Phase 2's encoder binds
+                // only the factor (26) + indirect params (29) buffers.
+                // Programs where the SPIRV-Cross-emitted TCS or TES
+                // declares any of the stage-data buffers — VS input
+                // (22 on TCS), per-CP output (28 on TCS), per-patch
+                // output (27 on TCS), per-CP input (22 on TES), or
+                // per-patch input (20 on TES) — need the Phase 3
+                // three-pass encode (VS-as-compute → TCS compute →
+                // drawPatches). Until Phase 3's encoder lands, leave
+                // `metalTessControlPipelineState` null for those
+                // programs so the draw-path gate falls through to the
+                // CPU tessellation interpreter. No regression risk:
+                // previously the gate ran the Metal encoder which
+                // silently produced garbage for any program needing
+                // these buffers.
+                const bool tcsNeedsPhase3 =
+                    probe.computeOk && (
+                        programObject->tessControlMSL.find("spvIn [[buffer(") != std::string::npos ||
+                        programObject->tessControlMSL.find("spvOut [[buffer(") != std::string::npos ||
+                        programObject->tessControlMSL.find("spvPatchOut [[buffer(") != std::string::npos);
+                const bool tesNeedsPhase3 =
+                    probe.computeOk && (
+                        programObject->tessEvalMSL.find("spvIn [[buffer(") != std::string::npos ||
+                        programObject->tessEvalMSL.find("spvPatchIn [[buffer(") != std::string::npos);
+                const bool phase2Handleable =
+                    probe.computeOk && !tcsNeedsPhase3 && !tesNeedsPhase3;
+                if (phase2Handleable) {
                     programObject->metalTessControlPipelineState =
                         probe.computePipelineState;
+                } else if (probe.computeOk) {
+                    // Release the retained compute PSO — Phase 3 will
+                    // rebuild with its own probe when it needs it.
+                    releaseRetainedMetalObject(probe.computePipelineState);
                 }
                 if (std::getenv("APPGL_TRACE_TESS")) {
                     std::fprintf(stderr,

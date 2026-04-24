@@ -428,13 +428,27 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 mslOpts.raw_buffer_tese_input = true;
             }
             mslOpts.tess_domain_origin_lower_left = true;
+            // Phase 3: route TCS VS-input through a buffer rather than
+            // [[stage_in]] so Metal doesn't reject the kernel with
+            // "invalid type 'main0_in' of input declaration with
+            // attribute 'stage_in'". With `multi_patch_workgroup` on,
+            // SPIRV-Cross emits the TCS reading VS output directly from
+            // `input_buffer_var_name` rather than via a struct-typed
+            // stage-input, which sidesteps the MSL member-attribute
+            // requirement.
+            if (isTessControl) {
+                mslOpts.multi_patch_workgroup = true;
+            }
         }
-        // TODO(step 8-2): at link time, detect that a VS is paired with
-        // TCS/TES in the same program; plumb that down here as a
-        // translator flag and set
-        //    mslOpts.vertex_for_tessellation = true;
-        //    mslOpts.capture_output_to_buffer = true;
-        // on the VS so it emits as a compute kernel writing to buffer.
+        // Phase 3 of metal-tess: VS-as-compute for tess programs. When
+        // the caller opts in (tess program link time), emit the VS
+        // as a `kernel` with `capture_output_to_buffer=true` so the
+        // per-vertex outputs land in a Metal buffer the TCS compute
+        // dispatch can pull via its `[[stage_in]]` descriptor.
+        if (options.forceVertexForTessellation && isVertex) {
+            mslOpts.vertex_for_tessellation = true;
+            mslOpts.capture_output_to_buffer = true;
+        }
         // MSL 2.2 (macOS 10.15+, 2019) required for:
         //   - `[[primitive_id]]` in fragment shaders on macOS — without it
         //     SPIRV-Cross throws `PrimitiveId on macOS requires MSL 2.2`
