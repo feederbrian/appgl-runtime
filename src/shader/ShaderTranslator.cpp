@@ -386,6 +386,25 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 }
 
 std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log, const TranslatorOptions& options) const {
+    // T4D probe: dump the INPUT SPIR-V before SPIRV-Cross runs, so we
+    // capture it even when compile() throws or returns empty MSL.
+    // Useful for diagnosing translator failures (isolines TES landed
+    // here in 2026-04-26 while debugging tc2te.data_pass_through).
+    // Pairs with APPGL_DUMP_MSL via the same counter — but the counter
+    // bump happens later (post-compile) for the existing dump site, so
+    // this helper allocates its own.  When BOTH envs are set, we want
+    // ONE counter so spv/msl pair by index — moved to the top of the
+    // function and shared.
+    if (const char* spirvDumpPath = std::getenv("APPGL_DUMP_SPIRV_INPUT")) {
+        static std::atomic<int> spvInputCounter{0};
+        const int n = spvInputCounter.fetch_add(1);
+        char path[512];
+        std::snprintf(path, sizeof(path), "%s/spv_%04d.spv", spirvDumpPath, n);
+        if (FILE* f = std::fopen(path, "wb")) {
+            std::fwrite(spirv, sizeof(std::uint32_t), wordCount, f);
+            std::fclose(f);
+        }
+    }
     try {
         spirv_cross::CompilerMSL compiler(spirv, wordCount);
         const auto execModel = compiler.get_execution_model();
