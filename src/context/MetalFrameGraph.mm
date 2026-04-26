@@ -4662,12 +4662,21 @@ fragment float4 appgl_immediate_textured_fs(
                     kMaxVertsPerPatch * (NSUInteger)info.patchCount;
                 // packed_float3 is 12 bytes in MSL; hard-code the size
                 // since simd.h's equivalent isn't always accessible here.
+                // T4C diagnostic: when APPGL_DUMP_DOMAINGEN=<dir> is set,
+                // make domainPrimIDBuf + domainCoordBuf CPU-readable so
+                // we can dump them after domain-gen runs and verify the
+                // primID seeding pattern (Clerk's reprioritized #1
+                // priority for the data_pass_through repetition signature).
+                const MTLResourceOptions domainOpts =
+                    std::getenv("APPGL_DUMP_DOMAINGEN") != nullptr
+                        ? MTLResourceStorageModeShared
+                        : MTLResourceStorageModePrivate;
                 domainCoordBuf = [device
                     newBufferWithLength:maxTotalVerts * 12
-                                options:MTLResourceStorageModePrivate];
+                                options:domainOpts];
                 domainPrimIDBuf = [device
                     newBufferWithLength:maxTotalVerts * sizeof(uint32_t)
-                                options:MTLResourceStorageModePrivate];
+                                options:domainOpts];
                 // totalVertCount lives in shared storage so CPU can
                 // read it after the domain-gen dispatch to size the
                 // TES-compute threadgroup count exactly.
@@ -4930,6 +4939,42 @@ fragment float4 appgl_immediate_textured_fs(
                 // CPU-read the produced vertex count.
                 tessTFGeneratedVerts =
                     *(const uint32_t*)totalVertCountBuf.contents;
+
+                // T4C: dump domain-gen buffers when APPGL_DUMP_DOMAINGEN
+                // is set. Each dump is a (primid, coord) pair sized to the
+                // generated vertex count (not the over-allocation), letting
+                // a post-processor verify the primID distribution pattern.
+                if (const char* dumpDir = std::getenv("APPGL_DUMP_DOMAINGEN")) {
+                    static std::atomic<unsigned> seq{0};
+                    const unsigned n = seq.fetch_add(1);
+                    const NSUInteger primIDBytes =
+                        (NSUInteger)tessTFGeneratedVerts * sizeof(uint32_t);
+                    const NSUInteger coordBytes =
+                        (NSUInteger)tessTFGeneratedVerts * 12;
+                    char path[512];
+                    if (void* primContents = [domainPrimIDBuf contents]) {
+                        std::snprintf(path, sizeof(path),
+                            "%s/primid_%05u.bin", dumpDir, n);
+                        if (FILE* f = std::fopen(path, "wb")) {
+                            std::fwrite(primContents, 1, (size_t)primIDBytes, f);
+                            std::fclose(f);
+                        }
+                    }
+                    if (void* coordContents = [domainCoordBuf contents]) {
+                        std::snprintf(path, sizeof(path),
+                            "%s/coord_%05u.bin", dumpDir, n);
+                        if (FILE* f = std::fopen(path, "wb")) {
+                            std::fwrite(coordContents, 1, (size_t)coordBytes, f);
+                            std::fclose(f);
+                        }
+                    }
+                    std::fprintf(stderr,
+                        "APPGL_DETECTOR domain_dump seq=%u verts=%u patchCount=%d "
+                        "primIDBytes=%llu coordBytes=%llu\n",
+                        n, (unsigned)tessTFGeneratedVerts, (int)info.patchCount,
+                        (unsigned long long)primIDBytes,
+                        (unsigned long long)coordBytes);
+                }
 
                 if (std::getenv("APPGL_TRACE_TESS")) {
                     std::fprintf(stderr,
