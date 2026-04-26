@@ -38,6 +38,91 @@ git apply ../../third_party/patches/<patch-name>.patch
 
 ## Patches
 
+### `spirv-cross-msl-interface-introspection.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.{hpp,cpp}` — adds public
+struct `MSLInterfaceLayout` + member `MSLInterfaceMember`, and the
+`CompilerMSL::get_msl_interface_layout(StorageClass, bool patch=false)`
+method. Companion test program at `third_party/SPIRV-Cross/tools/msl-introspect-test.cpp`.
+
+**Summary:** Read-only post-`compile()` introspection of the actual MSL
+stage-interface struct. Returns each member's `name`, `location`,
+`builtin`, type info, plus computed Metal-C-ABI `offset` and `size`,
+plus the padded total `struct_size` and `struct_alignment`. AppGL's
+runtime reads the layout this returns and uses it directly instead of
+synthesizing a parallel layout from SPIR-V reflection.
+
+**Why:** AppGL's `reflectStageOutputLayout` had been synthesizing the
+expected MSL struct layout based on SPIR-V plus assumptions about
+`spirv-cross-tess-struct-parity.patch`'s insertion behavior. Drift
+between AppGL's mirror and SPIRV-Cross's actual emission corrupted TF
+buffer stride math (e.g. `data_pass_through` TES wrote a 5-member
+80-byte struct, AppGL assumed 7 members at 112 bytes → 32-byte
+drift/vertex). Exposing the canonical layout via a public method
+forecloses the entire class of mirror-decay bugs as future emission
+patches evolve.
+
+**Implementation notes:** Stage interface block members do **not**
+carry `DecorationOffset` (that decoration is set on UBO/SSBO members
+only), so offsets are computed manually using Metal C ABI alignment
+rules — the same rules the MSL emitter applies when laying out the
+struct in the emitted source. Sizes for non-array, non-struct members
+come from `bit_width × vecsize × columns`; for arrays, each element is
+padded up to the element type's alignment. A debug-build assertion
+checks that the running offset+size matches the padded total —
+emission changes that invalidate the introspected layout fail loudly
+in debug builds.
+
+**CTS tests unlocked / un-regressed:** none directly — this is a
+runtime-side dependency unblock. AppGL-W's downstream walker fix uses
+this method to size + write TF buffers correctly across the
+`tessellation_shader.*` cluster.
+
+### `spirv-cross-cli-tese-as-compute-flags.patch`
+
+**Target:** `third_party/SPIRV-Cross/main.cpp` (CLI arg parser + help)
+plus a new `third_party/SPIRV-Cross/tools/msl-tess-diff.sh`
+developer-side helper script.
+
+**Summary:** Exposes two `msl_options` fields through the
+`spirv-cross` CLI binary so they can be flipped from a shell:
+
+- `--msl-tess-evaluation-as-compute` → `msl_options.tess_evaluation_as_compute`
+- `--msl-tese-input-patch-vertices <count>` → `msl_options.tese_input_patch_vertices`
+
+These are the AppGL-specific flags introduced by
+`spirv-cross-tes-as-compute.patch`; the patch wires them up the same
+way upstream wires `--msl-vertex-for-tessellation` and
+`--msl-multi-patch-workgroup`, with `[AppGL fork]` markers in the help
+text so future maintainers can see they're not vanilla SPIRV-Cross.
+The companion `tools/msl-tess-diff.sh` wraps the binary to produce
+paired vertex-form / kernel-form MSL outputs and a unified diff for a
+given TES SPIR-V dump — the SPIRV-W MSL-diff study workflow per
+`SPIRV-W-CONTEXT.md` §5.2. The script also runs `xcrun -sdk macosx
+metal -c` on each form (per §7 invariant #4) and surfaces asymmetric
+validation results: a kernel form that compiles cleanly while the
+vertex form does (or vice versa) is itself diagnostic, distinguishing
+"SPIRV-Cross emits MSL Metal rejects" (codegen bug) from "MSL is
+valid but PSO creation fails on usage-level constraints" (runtime
+API bug). Skip via `NO_METAL_VALIDATE=1`. Empty / boilerplate-only
+MSL (where SPIRV-Cross silently bails on a program shape, e.g.
+entry-point detection failure) is flagged as `EMPTY_MSL` ahead of
+xcrun rather than passed through — `xcrun metal -c` trivially
+succeeds on near-empty files and would otherwise corrupt the
+diagnostic. Threshold is 100 bytes by default, tunable via
+`EMPTY_MSL_THRESHOLD`.
+
+**Why:** Without CLI exposure, exercising the kernel form requires
+either a custom C++ harness linked against `libspirv-cross.a` or
+running through the full AppGL runtime invocation. Both are heavier
+than the diff workflow needs. CLI flags let SPIRV-W and AppGL-W
+iterate on emission shape changes against captured SPIR-V dumps in
+seconds rather than full CTS-rebuild cycles.
+
+**CTS tests unlocked:** none directly — this is developer-tooling
+infrastructure. Indirectly enables faster iteration on the
+`tessellation_shader.*` debugging surface.
+
 ### `spirv-cross-tes-as-compute.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.{hpp,cpp}` —
