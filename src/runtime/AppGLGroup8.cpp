@@ -976,9 +976,13 @@ static void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
             const auto* ppo = ctx->objects().programPipelines().get(ppoId);
             if (ppo != nullptr) {
                 // Prefer the last-active-vertex-processing stage:
-                // GS first, then (in a future extension) TES, else VS.
+                // GS first, then TES, else VS. TCS is NOT a TF source —
+                // it produces per-CP / per-patch outputs consumed by TES,
+                // not stage-out varyings captured by TF.
                 if (ppo->geometryProgram != 0) {
                     prog = ppo->geometryProgram;
+                } else if (ppo->tessEvalProgram != 0) {
+                    prog = ppo->tessEvalProgram;
                 } else if (ppo->vertexProgram != 0) {
                     prog = ppo->vertexProgram;
                 }
