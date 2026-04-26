@@ -19100,6 +19100,17 @@ bool GLContext::linkProgram(GLuint program) {
             // program so MetalFrameGraph can build the pipeline states.
             appgl::TranslatorOptions tessOpts;
             tessOpts.forceTessellation = true;
+            // Phase 7 [metal-tess-TF] (Track 2 scaffold): pass the linked
+            // TES's SPIR-V to the TCS translation so spirvToMSL can call
+            // add_msl_shader_output for each TES user-varying input. Closes
+            // the per-CP buffer stride mismatch on shapes where TCS doesn't
+            // write all the user varyings TES reads (cluster A / C). The
+            // TES translation's spirvToMSL ignores this field — it's gated
+            // on isTessControl inside the translator.
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                tessOpts.siblingTesInputSpirv = tessEvalShader->spirv.data();
+                tessOpts.siblingTesInputWordCount = tessEvalShader->spirv.size();
+            }
             (void)translateCachedStage("tess-control", tessControlShader,
                                        programObject->tessControlMSL, tcRefl,
                                        tessOpts);

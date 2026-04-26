@@ -525,6 +525,95 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
         compiler.set_msl_options(mslOpts);
 
+        // Phase 7 [metal-tess-TF]: cross-stage wiring (Track 2 scaffold).
+        // When translating TCS-as-compute and the caller passed the linked
+        // TES's SPIR-V, walk TES's INPUT user varyings and call
+        // add_msl_shader_output on this (TCS) CompilerMSL for each. Tells
+        // SPIRV-Cross "the next stage reads slots N..M, ensure your
+        // main0_out includes them at matching locations." Filters out
+        // built-ins (gl_TessCoord, gl_PrimitiveID, gl_PatchVerticesIn,
+        // gl_Position, gl_PointSize, gl_ClipDistance) — those are handled
+        // by SPIRV-Cross's own gl_PerVertex propagation, and propagating
+        // them as user-named outputs would inject placeholder uint slots
+        // that displace the user-varying layout (observed in scaffold v1
+        // as a `uint m_111` field corrupting tc_position offsets).
+        // Filters out per-patch (`patch in`) varyings — TES's per-patch
+        // inputs come from the patch buffer (atIndex 20), not the per-CP
+        // buffer (atIndex 22).
+        if (isTessControl && options.siblingTesInputSpirv != nullptr &&
+            options.siblingTesInputWordCount > 0) {
+            try {
+                spirv_cross::Compiler tesSibling(
+                    options.siblingTesInputSpirv, options.siblingTesInputWordCount);
+                const auto activeIds = tesSibling.get_active_interface_variables();
+                std::size_t wired = 0;
+                std::size_t skippedBuiltin = 0;
+                std::size_t skippedPatch = 0;
+                for (auto id : activeIds) {
+                    const spv::StorageClass sc = tesSibling.get_storage_class(id);
+                    if (sc != spv::StorageClassInput) continue;
+                    // Direct-decorated builtins (rare for tess: gl_PrimitiveID
+                    // / gl_PatchVerticesIn might land here as standalone
+                    // variables) — skip.
+                    if (tesSibling.has_decoration(id, spv::DecorationBuiltIn)) {
+                        ++skippedBuiltin;
+                        continue;
+                    }
+                    // Block-typed variables (interface blocks like `in OUT_TC
+                    // { … } in_data[]` and gl_PerVertex) — the user-named
+                    // block is already coordinated across stages by
+                    // glslang's link+mapIO at the location level, so TCS-
+                    // out's emission already includes the matching block on
+                    // the symmetric output side. Calling add_msl_shader_output
+                    // with a block-typed variable causes SPIRV-Cross to
+                    // synthesize a placeholder `uint m_<id>` member that
+                    // displaces the user-varying layout (observed in scaffold
+                    // v1/v2 as `uint m_111` corrupting tc_position offsets).
+                    // Skip blocks entirely; only wire loose top-level
+                    // varyings — those are the ones that can mismatch
+                    // between sibling stages without coordination.
+                    const auto& varType = tesSibling.get_type_from_variable(id);
+                    const auto typeSelfId = varType.self;
+                    if (tesSibling.has_decoration(typeSelfId, spv::DecorationBlock) ||
+                        tesSibling.has_decoration(typeSelfId, spv::DecorationBufferBlock)) {
+                        ++skippedBuiltin;  // counter doubles for "block-skipped"
+                        continue;
+                    }
+                    if (!varType.member_types.empty() &&
+                        tesSibling.has_member_decoration(typeSelfId, 0, spv::DecorationBuiltIn)) {
+                        ++skippedBuiltin;
+                        continue;
+                    }
+                    if (tesSibling.has_decoration(id, spv::DecorationPatch)) {
+                        ++skippedPatch;
+                        continue;
+                    }
+                    spirv_cross::MSLShaderInterfaceVariable sib;
+                    sib.location = tesSibling.has_decoration(id, spv::DecorationLocation)
+                        ? tesSibling.get_decoration(id, spv::DecorationLocation) : 0;
+                    sib.component = tesSibling.has_decoration(id, spv::DecorationComponent)
+                        ? tesSibling.get_decoration(id, spv::DecorationComponent) : 0;
+                    sib.format = spirv_cross::MSL_SHADER_VARIABLE_FORMAT_OTHER;
+                    sib.builtin = spv::BuiltInMax;
+                    sib.vecsize = varType.vecsize > 0 ? varType.vecsize : 1;
+                    sib.rate = spirv_cross::MSL_SHADER_VARIABLE_RATE_PER_VERTEX;
+                    compiler.add_msl_shader_output(sib);
+                    ++wired;
+                }
+                if (std::getenv("APPGL_DETECTOR_TF") || std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "APPGL_DETECTOR lift_xstage stage=tcs sibling=tes-input "
+                        "active=%zu wired=%zu skipped_builtin=%zu skipped_patch=%zu\n",
+                        activeIds.size(), wired, skippedBuiltin, skippedPatch);
+                }
+            } catch (const std::exception& e) {
+                if (std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "[APPGL] cross-stage wiring (TCS←TES) failed: %s\n", e.what());
+                }
+            }
+        }
+
         spirv_cross::CompilerGLSL::Options glslOpts = compiler.get_common_options();
         glslOpts.vertex.fixup_clipspace = true;
         compiler.set_common_options(glslOpts);

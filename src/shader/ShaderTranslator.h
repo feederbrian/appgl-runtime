@@ -232,6 +232,19 @@ struct TranslatorOptions {
     // instead of defaulting to 0 (which collapses every patch to the
     // buffer origin). Only meaningful for TES stages — ignored otherwise.
     std::uint32_t tesePatchVertices = 0;
+
+    // Phase 7 [metal-tess-TF]: cross-stage interface wiring (Track 2,
+    // scaffold). When translating TCS-as-compute, set these to the
+    // linked TES's SPIR-V so spirvToMSL can walk TES's INPUT interface
+    // variables and call CompilerMSL::add_msl_shader_output for each
+    // USER VARYING. Tells SPIRV-Cross "the next stage reads these slots,
+    // ensure your main0_out includes them at matching locations." Closes
+    // the per-CP buffer stride mismatch on shapes where TCS doesn't write
+    // all the user varyings TES reads (cluster A / C from SPIRV-W's
+    // analysis). Builtins are filtered out — they're handled by SPIRV-
+    // Cross's own gl_PerVertex propagation. No effect on non-TCS stages.
+    const std::uint32_t* siblingTesInputSpirv = nullptr;
+    std::size_t siblingTesInputWordCount = 0;
 };
 
 // Phase 3B.5 [metal-tess-TF]: stage-output struct layout. Populated for
