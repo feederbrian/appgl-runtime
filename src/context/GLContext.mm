@@ -19254,9 +19254,12 @@ bool GLContext::linkProgram(GLuint program) {
             // TES MSL never gets generated, so this gate trips first.
             if (detectorEnabled() &&
                 (tessControlShader != nullptr || tessEvalShader != nullptr)) {
+                // Mirror the actual probe gate: accept either form of
+                // TES MSL (conventional vertex or as-compute kernel).
                 const bool gateOk = (impl_->frameGraph != nullptr &&
                     !programObject->tessControlMSL.empty() &&
-                    !programObject->tessEvalMSL.empty() &&
+                    (!programObject->tessEvalMSL.empty() ||
+                     !programObject->tessEvalAsComputeMSL.empty()) &&
                     !programObject->fragmentMSL.empty());
                 std::fprintf(stderr,
                     "APPGL_DETECTOR lift_translate program=%u "
@@ -19272,9 +19275,20 @@ bool GLContext::linkProgram(GLuint program) {
                     impl_->frameGraph != nullptr ? 1 : 0,
                     gateOk ? 1 : 0);
             }
+            // Probe gate: post-isolines-compute-bypass-patch (SPIRV-Cross
+            // commit 095c99c, 2026-04-26), TES isolines emits non-empty
+            // `tessEvalAsComputeMSL` while `tessEvalMSL` (conventional
+            // render-vertex form) stays empty because Metal's render
+            // pipeline doesn't support isoline tessellation. Allow the
+            // probe to run when EITHER form is available — the probe's
+            // internals already gate the conventional render-PSO build
+            // on `tesMSL` non-empty separately.
+            const bool tessEvalAvailable =
+                !programObject->tessEvalMSL.empty() ||
+                !programObject->tessEvalAsComputeMSL.empty();
             if (impl_->frameGraph != nullptr &&
                 !programObject->tessControlMSL.empty() &&
-                !programObject->tessEvalMSL.empty() &&
+                tessEvalAvailable &&
                 !programObject->fragmentMSL.empty()) {
                 MetalFrameGraph::TessPipelineProbeResult probe =
                     impl_->frameGraph->probeTessellationPipeline(
@@ -22153,8 +22167,14 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     (void)first;
     if (mode != GL_PATCHES) return false;
     if (program.metalTessControlPipelineState == nullptr) return false;
+    // Widened post-isolines-compute-bypass (SPIRV-Cross 095c99c): allow
+    // empty `tessEvalMSL` (conventional render-vertex form) when the
+    // as-compute form is present. Isolines TES emits valid kernel MSL
+    // but no render form because Metal doesn't support isoline tess in
+    // the render pipeline. The compute chain doesn't need the render
+    // form — it dispatches TES-as-compute directly into the TF buffer.
     if (program.tessControlMSL.empty() ||
-        program.tessEvalMSL.empty() ||
+        (program.tessEvalMSL.empty() && program.tessEvalAsComputeMSL.empty()) ||
         program.fragmentMSL.empty()) {
         return false;
     }

@@ -4283,7 +4283,16 @@ fragment float4 appgl_immediate_textured_fs(
             result.diagnostic = "no Metal device";
             return result;
         }
-        if (tcsMSL.empty() || tesMSL.empty() || fsMSL.empty()) {
+        // Allow `tesMSL` to be empty when the as-compute form is present
+        // — happens for isolines TES post-SPIRV-Cross-095c99c-bypass:
+        // `tess_evaluation_as_compute=true` emits valid kernel MSL while
+        // the conventional `--msl` path still throws "Metal does not
+        // support isoline tessellation." Stages 1c (TES-compute PSO),
+        // 1a (TCS-compute PSO), 1b (VS-compute PSO) cover the compute
+        // chain. Stages 2/3 (TES library + render PSO) are skipped below
+        // when tesMSL is empty so the function still returns with
+        // tessEvalComputeOk=true.
+        if (tcsMSL.empty() || (tesMSL.empty() && tesComputeMSL.empty()) || fsMSL.empty()) {
             result.diagnostic = "missing MSL for one or more stages (tcs/tes/fs)";
             return result;
         }
@@ -4339,6 +4348,20 @@ fragment float4 appgl_immediate_textured_fs(
             } else if (result.diagnostic.empty()) {
                 result.diagnostic = std::string("tes-compute (non-fatal): ") + tesComputeError;
             }
+        }
+
+        // Stages 2 + 3 build the conventional render-PSO path (TES as a
+        // vertex function feeding Metal's fixed-function tessellator +
+        // FS for rasterization). Skip entirely when `tesMSL` is empty —
+        // happens for isolines post-SPIRV-Cross-095c99c-bypass, where
+        // we have a valid tess-eval-as-compute kernel but no render
+        // form. The compute chain (TCS-compute → domain-gen → TES-
+        // compute) already handles the dispatch end-to-end without a
+        // render PSO. Probe returns with `tessEvalComputeOk=true`
+        // (set in stage 1c) and `renderOk=false`; the caller's tier
+        // selection branches on whether render PSO is needed.
+        if (tesMSL.empty()) {
+            return result;
         }
 
         // Stage 2 — TES + FS libraries + functions.
@@ -4464,7 +4487,13 @@ fragment float4 appgl_immediate_textured_fs(
     bool encodeMetalTessellationDraw(const MetalTessDrawInfo& info) {
         if (device == nil || commandQueue == nil) return false;
         if (info.tessControlPipelineState == nullptr) return false;
-        if (info.tessEvalMSL == nullptr || info.tessEvalMSL->empty()) return false;
+        // Allow `tessEvalMSL` to be empty when the as-compute kernel is
+        // present (isolines TES post-SPIRV-Cross-095c99c). Render pipeline
+        // build below is skipped when tessEvalMSL is empty — the compute
+        // chain handles the dispatch end-to-end and (with rasterizer-
+        // discard active or TF-only mode) we never need the render PSO.
+        if ((info.tessEvalMSL == nullptr || info.tessEvalMSL->empty()) &&
+            info.tessEvalComputePipelineState == nullptr) return false;
         if (info.fragmentMSL == nullptr || info.fragmentMSL->empty()) return false;
         if (info.patchCount <= 0 || info.tessControlOutputVertices <= 0) return false;
 
@@ -5086,6 +5115,16 @@ fragment float4 appgl_immediate_textured_fs(
             depthFormat = depthStencilTexture.pixelFormat;
         }
 
+        // Render-pipeline-build skip: when tessEvalMSL is empty, we're
+        // in compute-only mode (isolines + TF-write or
+        // rasterizer-discard). The compute chain above already deposited
+        // the TES output bytes to the TF buffer via
+        // writeTessTFAndUpdateCounters; no render pass needs to fire.
+        // Returning true here treats the compute chain as the complete
+        // draw — caller's encode succeeded, no fallback to CPU.
+        if (info.tessEvalMSL == nullptr || info.tessEvalMSL->empty()) {
+            return true;
+        }
         id<MTLLibrary> tesLib = getOrCompileLibrary(*info.tessEvalMSL);
         if (tesLib == nil) return false;
         id<MTLLibrary> fsLib = getOrCompileLibrary(*info.fragmentMSL);
