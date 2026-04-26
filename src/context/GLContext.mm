@@ -9419,6 +9419,8 @@ inline void logTFReadback(GLenum target,
                           GLsizeiptr length,
                           const std::uint8_t* bytes) {
     if (!detectorEnabled()) return;
+    static std::atomic<unsigned> seqCounter{0};
+    const unsigned seq = seqCounter.fetch_add(1, std::memory_order_relaxed);
     std::size_t nonzero = 0;
     std::ptrdiff_t firstNonzero = -1;
     if (bytes != nullptr) {
@@ -9430,14 +9432,31 @@ inline void logTFReadback(GLenum target,
         }
     }
     std::fprintf(stderr,
-        "APPGL_DETECTOR tf_read target=0x%X buf=%u offset=%lld length=%lld "
+        "APPGL_DETECTOR tf_read seq=%u target=0x%X buf=%u offset=%lld length=%lld "
         "nonzero_bytes=%zu first_nonzero_offset=%td\n",
+        seq,
         static_cast<unsigned int>(target),
         static_cast<unsigned int>(buffer),
         static_cast<long long>(offset),
         static_cast<long long>(length),
         nonzero,
         firstNonzero);
+    // T4C byte-decode helper: when APPGL_DETECTOR_TF_DUMP=<dir> is set,
+    // write the raw bytes of each TF read to <dir>/tf_<seq>.bin so a
+    // post-processor can decode against the expected varying layout
+    // (CTS test source) and pinpoint per-vertex / per-stride / per-type
+    // mismatches.  Cached path lookup so per-read cost is one strcmp.
+    if (bytes != nullptr && length > 0) {
+        const char* dumpDir = std::getenv("APPGL_DETECTOR_TF_DUMP");
+        if (dumpDir != nullptr && dumpDir[0] != '\0') {
+            char path[512];
+            std::snprintf(path, sizeof(path), "%s/tf_%05u.bin", dumpDir, seq);
+            if (FILE* f = std::fopen(path, "wb")) {
+                std::fwrite(bytes, 1, static_cast<std::size_t>(length), f);
+                std::fclose(f);
+            }
+        }
+    }
 }
 }  // namespace
 
