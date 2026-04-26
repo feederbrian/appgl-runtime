@@ -1,0 +1,23 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index f98f84d..37dfb04 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -14356,7 +14356,17 @@
+ 	case ExecutionModelTessellationEvaluation:
+ 		if (!msl_options.supports_msl_version(1, 2))
+ 			SPIRV_CROSS_THROW("Tessellation requires Metal 1.2.");
+-		if (execution.flags.get(ExecutionModeIsolines))
++		// AppGL patch (phase-3B-metal-tess-TF isolines bypass): the
++		// "Metal does not support isoline tessellation." restriction
++		// applies to Metal's HW [[patch(...)]] vertex tessellation
++		// pipeline. When `tess_evaluation_as_compute` is set, the TES
++		// is emitted as a compute kernel that consumes domain coords
++		// from a host-supplied buffer (AppGL's `spvGenTessDomain`),
++		// bypassing Metal's HW tessellator entirely. The throw is
++		// gated on `!tess_evaluation_as_compute` so the kernel-form
++		// emission proceeds for isolines under our compute-emulation
++		// path; Metal HW restrictions are irrelevant in that mode.
++		if (execution.flags.get(ExecutionModeIsolines) && !msl_options.tess_evaluation_as_compute)
+ 			SPIRV_CROSS_THROW("Metal does not support isoline tessellation.");
+ 		if (msl_options.is_ios())
+ 			entry_type = join("[[ patch(", is_tessellating_triangles() ? "triangle" : "quad", ") ]] vertex");

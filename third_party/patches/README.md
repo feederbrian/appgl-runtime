@@ -38,6 +38,55 @@ git apply ../../third_party/patches/<patch-name>.patch
 
 ## Patches
 
+### `spirv-cross-tess-isolines-compute-bypass.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` —
+`CompilerMSL::func_type_decl` (the `case ExecutionModelTessellationEvaluation:`
+arm).
+
+**Summary:** Gates the upstream
+`SPIRV_CROSS_THROW("Metal does not support isoline tessellation.")`
+inside the TES execution-model branch on
+`!msl_options.tess_evaluation_as_compute`. The throw still fires for
+the upstream `[[patch(...)]] vertex` form (Metal's HW tessellator
+genuinely does not support isolines); it no longer fires when AppGL is
+asking SPIRV-Cross to emit the TES as a compute kernel
+(`tess_evaluation_as_compute=true`). In that mode the TES is run from a
+compute dispatch that consumes domain coords from a host-supplied
+buffer — AppGL's `spvGenTessDomain` runtime kernel — so Metal's HW
+tessellator is bypassed entirely; its isolines limitation is irrelevant.
+
+**Why:** Without the gate, every `tessellation_invariance.*`,
+`primitive_coverage.*`, and `tc2te.*` test variant whose TES uses
+`layout(isolines, ...) in;` produces empty MSL on the program object
+(`tesAsComputeMSL_empty=1` in AppGL's lift_translate trace). The
+runtime falls back to CPU emulation, which emits wrong content for
+isolines + point_mode. The gate lets the compute path engage; correctness
+of the resulting output then depends on AppGL's `spvGenTessDomain`
+having the right per-primitive vertex-count formula for isolines (a
+separate runtime audit, not an emission concern).
+
+**CTS tests unlocked:** ~33 isolines-using TES tests across the
+`tessellation_shader.*` suite that were failing with empty kernel-form
+MSL. Emission verified clean across 10 representative isolines-variant
+SPIR-V dumps (Metal-validates via `xcrun -sdk macosx metal -c`,
+byte-identical to runtime invocation when `--msl-capture-output` +
+`--msl-multi-patch-workgroup` + `--msl-raw-buffer-tese-input` are
+paired with `--msl-tess-evaluation-as-compute`).
+
+**Regression-safe:** non-isolines TES emission is unchanged — verified
+byte-identical for `data_pass_through` (quad domain) and
+`invariance_rule6` (quad domain) before vs after the patch. The
+isolines vertex form (non-compute path) still throws as before; only
+the compute path changes behavior, and only for isolines TES.
+
+**TCS not affected:** the parallel `case ExecutionModelTessellationControl:`
+throw is left as-is. CTS isolines tests set `ExecutionModeIsolines` on
+the TES SPIR-V only; the paired TCS module does not carry that mode,
+so the TCS throw is not in the affected codepath. Verified empirically
+across the test corpus: `spirv-cross --msl-multi-patch-workgroup ...`
+on 10+ TCS dumps emitted cleanly.
+
 ### `spirv-cross-msl-interface-introspection.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.{hpp,cpp}` — adds public
