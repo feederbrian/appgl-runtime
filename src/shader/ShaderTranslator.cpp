@@ -2093,12 +2093,21 @@ TessellationModes extractTessellationModes(const std::uint32_t* spirv, std::size
     return modes;
 }
 
-// Phase 3B.5 [metal-tess-TF]: reflect the TES output struct layout
-// under the same SPIRV-Cross options that the TES-as-compute MSL
-// translation uses. Returns member names + byte offsets so the
-// transform-feedback writer can locate each GL-declared TF varying
-// by name in the emitted `main0_out` struct and copy the per-vertex
-// bytes to the bound TF buffer.
+// Phase 6 [metal-tess-TF]: reflect the TES output struct layout under
+// the same SPIRV-Cross options that the TES-as-compute MSL translation
+// uses. Returns member names + byte offsets so the transform-feedback
+// writer can locate each GL-declared TF varying by name in the emitted
+// `main0_out` struct and copy the per-vertex bytes to the bound TF
+// buffer.
+//
+// As of `6feb2fa` (third_party: SPIRV-Cross MSL introspection helper),
+// SPIRV-Cross exposes `CompilerMSL::get_msl_interface_layout(...)`
+// returning the canonical member list that the compiler actually emits.
+// This replaces the hand-rolled reconstruction (~225 lines previously)
+// with a direct query — eliminates the whole class of "AppGL mirrors
+// SPIRV-Cross logic and silently decays as patches evolve" bugs that
+// surfaced in T4C as the 32B-per-vertex stride drift on
+// data_pass_through-class shapes.
 StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
     const std::uint32_t* spirv, std::size_t wordCount,
     const TranslatorOptions& options) const
@@ -2108,8 +2117,7 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
     try {
         spirv_cross::CompilerMSL compiler(spirv, wordCount);
         // Mirror the MSL options the TES-as-compute translation uses,
-        // so member offsets match the layout of the emitted kernel's
-        // writes. Only the options that affect struct packing matter.
+        // so the helper reports the exact layout the kernel writes.
         spirv_cross::CompilerMSL::Options mslOpts = compiler.get_msl_options();
         mslOpts.set_msl_version(2, 2);
         const auto execModel = compiler.get_execution_model();
@@ -2123,226 +2131,43 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
             mslOpts.capture_output_to_buffer = true;
         }
         compiler.set_msl_options(mslOpts);
-        // Compile once so SPIRV-Cross's stage-out struct type is
-        // materialised with the proper member decorations. We discard
-        // the emitted text.
+        // Compile to materialize the emitted struct in SPIRV-Cross's
+        // internals. We discard the text — only the post-compile
+        // reflection state matters.
         (void)compiler.compile();
 
-        auto resources = compiler.get_shader_resources();
+        // Single-call query for the actual emitted main0_out layout.
+        // SPIRV-Cross knows what it wrote; we mirror, not re-derive.
+        const spirv_cross::MSLInterfaceLayout layout =
+            compiler.get_msl_interface_layout(spv::StorageClassOutput, /*patch=*/false);
+        if (layout.members.empty()) return out;
+
+        // Translate MSLInterfaceMember → StageOutputLayout::Member.
+        // The helper provides MSL-padded offset/size; we additionally
+        // compute glPackedBytes (tight GL packing: vec3=12B, no pad)
+        // for the TF writer's GL-side buffer copy.
+        out.members.reserve(layout.members.size());
+        for (const auto& m : layout.members) {
+            StageOutputLayout::Member dst;
+            dst.name = m.name;
+            dst.offset = m.offset;
+            dst.size = m.size;
+            dst.isBuiltIn = m.is_builtin;
+            dst.builtIn = static_cast<std::uint32_t>(m.builtin);
+            // GL-tight byte size: scalar * vecsize * columns * max(array_size, 1).
+            // (vec3 in MSL is padded to 16 bytes; in GL TF it's 12.)
+            const std::size_t scalarBytes = (m.bit_width + 7) / 8;
+            const std::size_t vec = m.vecsize > 0 ? m.vecsize : 1;
+            const std::size_t cols = m.columns > 0 ? m.columns : 1;
+            const std::size_t arr = m.array_size > 0 ? m.array_size : 1;
+            dst.glPackedBytes = scalarBytes * vec * cols * arr;
+            out.members.push_back(std::move(dst));
+        }
+        out.structSize = layout.struct_size;
+
         if (std::getenv("APPGL_TRACE_TESS")) {
             std::fprintf(stderr,
-                "[APPGL] reflectStageOutputLayout: stage_outputs=%zu tesAsCompute=%d\n",
-                resources.stage_outputs.size(),
-                mslOpts.tess_evaluation_as_compute ? 1 : 0);
-        }
-        if (resources.stage_outputs.empty()) return out;
-
-        // SPIRV-Cross presents each declared `out` variable as a
-        // separate resource entry — there's no aggregated struct type
-        // we can query directly (the synthetic `main0_out` struct lives
-        // in the compiler's internals). Reconstruct the struct layout
-        // here by sorting the outputs into SPIRV-Cross's emission
-        // order and computing byte offsets per MSL alignment rules.
-        //
-        // Emission order (matches the CompilerMSL struct builder):
-        //   1. User outputs sorted by SPIRV Location decoration.
-        //   2. Builtin outputs (gl_Position, gl_PointSize,
-        //      gl_ClipDistance, gl_CullDistance) at the end in the
-        //      gl_PerVertex member order.
-        struct EntryDraft {
-            StageOutputLayout::Member member;
-            std::uint32_t location = 0xFFFFFFFFu;
-            bool hasLocation = false;
-            std::uint32_t builtInEnum = 0;
-            const spirv_cross::SPIRType* type = nullptr;
-            // Synthetic-entry overrides. When `useOverride` is true
-            // we ignore `type` and use these values directly.
-            bool useOverride = false;
-            std::uint32_t overrideScalar = 4;
-            std::uint32_t overrideVec = 1;
-            std::uint32_t overrideCols = 1;
-            std::uint32_t overrideArrSize = 0;
-        };
-        std::vector<EntryDraft> drafts;
-        drafts.reserve(resources.stage_outputs.size());
-        for (auto& res : resources.stage_outputs) {
-            EntryDraft e;
-            e.member.name = compiler.get_name(res.id);
-            if (e.member.name.empty()) {
-                e.member.name = res.name;
-            }
-            e.type = &compiler.get_type(res.base_type_id);
-            e.member.isBuiltIn = compiler.has_decoration(res.id, spv::DecorationBuiltIn);
-            if (e.member.isBuiltIn) {
-                e.member.builtIn = compiler.get_decoration(res.id, spv::DecorationBuiltIn);
-                e.builtInEnum = e.member.builtIn;
-            }
-            if (compiler.has_decoration(res.id, spv::DecorationLocation)) {
-                e.location = compiler.get_decoration(res.id, spv::DecorationLocation);
-                e.hasLocation = true;
-            }
-            drafts.push_back(std::move(e));
-        }
-        // Phase 6 [metal-tess-TF]: SPIRV-Cross's struct-parity patch only
-        // force-includes gl_PerVertex members that already exist in the
-        // SPIR-V's interface block. For shaders whose GLSL declares
-        // standalone `out` variables and never writes the gl_PerVertex
-        // builtins (e.g. tc2te.data_pass_through, which captures
-        // `gl_in[0].gl_Position` into a user varying instead of writing
-        // `gl_Position`), glslang emits no gl_PerVertex output members,
-        // so the patch has nothing to insert and main0_out is just the
-        // user varyings. Synthesizing builtins unconditionally here
-        // over-reported stride by 32B, drifting the TF writer's per-
-        // vertex offset (T4C-data-pass-through-byte-decode-2026-04-25).
-        //
-        // Use SPIRV-Cross's existing `has_active_builtin` query (which
-        // SPIRV-W confirmed is equivalent to the patch's insertion
-        // condition for all CTS-faithful SPIR-V) to gate synthesis on
-        // whether the shader actually writes the builtin. When the Q2
-        // helper API (get_msl_interface_struct_members) lands, this
-        // whole synthesis block can be replaced by a direct query of
-        // SPIRV-Cross's emitted member list.
-        if (mslOpts.tess_evaluation_as_compute && isTessEval) {
-            // Populate active-builtin tracking so has_active_builtin
-            // returns accurate results below. compile() above already
-            // ran the analysis pass, but call explicitly for clarity.
-            compiler.update_active_builtins();
-            auto addSyntheticIfActive = [&drafts, &compiler](
-                const char* name,
-                spv::BuiltIn builtin,
-                std::uint32_t vec,
-                std::uint32_t arrSize) {
-                if (!compiler.has_active_builtin(builtin, spv::StorageClassOutput)) {
-                    return;
-                }
-                for (const auto& d : drafts) {
-                    if (d.member.isBuiltIn && d.member.builtIn == static_cast<std::uint32_t>(builtin)) return;
-                }
-                EntryDraft e;
-                e.member.name = name;
-                e.member.isBuiltIn = true;
-                e.member.builtIn = builtin;
-                e.builtInEnum = builtin;
-                e.useOverride = true;
-                e.overrideScalar = 4;   // float
-                e.overrideVec = vec;
-                e.overrideCols = 1;
-                e.overrideArrSize = arrSize;
-                drafts.push_back(std::move(e));
-            };
-            addSyntheticIfActive("gl_Position",     spv::BuiltInPosition,     4, 0);
-            addSyntheticIfActive("gl_PointSize",    spv::BuiltInPointSize,    1, 0);
-            addSyntheticIfActive("gl_ClipDistance", spv::BuiltInClipDistance, 1, 1);
-            // Validation harness — confirms the gate's per-builtin
-            // decision matches expectations for known-passing /
-            // known-failing tests. data_pass_through expects 0 0 0;
-            // invariance_rule6 expects 1 ? ? (writes gl_Position).
-            if (std::getenv("APPGL_DETECTOR_TF")) {
-                std::fprintf(stderr,
-                    "APPGL_DETECTOR lift_synth tess-as-compute "
-                    "active_position=%d active_pointsize=%d active_clip=%d\n",
-                    compiler.has_active_builtin(spv::BuiltInPosition,     spv::StorageClassOutput) ? 1 : 0,
-                    compiler.has_active_builtin(spv::BuiltInPointSize,    spv::StorageClassOutput) ? 1 : 0,
-                    compiler.has_active_builtin(spv::BuiltInClipDistance, spv::StorageClassOutput) ? 1 : 0);
-            }
-        }
-        // Sort: user outputs by location first, then builtins in
-        // gl_PerVertex order (Position=0, PointSize=1, ClipDistance=3,
-        // CullDistance=4).
-        auto builtinRank = [](std::uint32_t bi) -> int {
-            switch (bi) {
-                case spv::BuiltInPosition:     return 1001;
-                case spv::BuiltInPointSize:    return 1002;
-                case spv::BuiltInClipDistance: return 1003;
-                case spv::BuiltInCullDistance: return 1004;
-                default:                       return 1999;
-            }
-        };
-        std::sort(drafts.begin(), drafts.end(),
-            [&](const EntryDraft& a, const EntryDraft& b) {
-                int ka = a.member.isBuiltIn ? builtinRank(a.builtInEnum)
-                                             : (int)a.location;
-                int kb = b.member.isBuiltIn ? builtinRank(b.builtInEnum)
-                                             : (int)b.location;
-                return ka < kb;
-            });
-
-        std::size_t cursor = 0;
-        std::size_t maxAlign = 1;   // track struct's max-member alignment
-        out.members.reserve(drafts.size());
-        for (const auto& d : drafts) {
-            std::size_t scalar = 4;
-            std::uint32_t vec = 1;
-            std::uint32_t cols = 1;
-            std::uint32_t arraySize = 0;
-            if (d.useOverride) {
-                scalar = d.overrideScalar;
-                vec = d.overrideVec;
-                cols = d.overrideCols;
-                arraySize = d.overrideArrSize;
-            } else {
-                const auto& mt = *d.type;
-                switch (mt.basetype) {
-                    case spirv_cross::SPIRType::Boolean:
-                    case spirv_cross::SPIRType::Int:
-                    case spirv_cross::SPIRType::UInt:
-                    case spirv_cross::SPIRType::Float:
-                        scalar = 4; break;
-                    case spirv_cross::SPIRType::Half:
-                    case spirv_cross::SPIRType::Short:
-                    case spirv_cross::SPIRType::UShort:
-                        scalar = 2; break;
-                    case spirv_cross::SPIRType::Double:
-                    case spirv_cross::SPIRType::Int64:
-                    case spirv_cross::SPIRType::UInt64:
-                        scalar = 8; break;
-                    default:
-                        scalar = 4; break;
-                }
-                vec = mt.vecsize > 0 ? mt.vecsize : 1;
-                cols = mt.columns > 0 ? mt.columns : 1;
-                if (!mt.array.empty()) {
-                    arraySize = mt.array[0];
-                }
-            }
-            std::size_t memberAlign = scalar;
-            if (vec == 2) memberAlign = 2 * scalar;
-            else if (vec == 3 || vec == 4) memberAlign = 4 * scalar;
-            std::size_t columnSize = scalar * vec;
-            if (vec == 3) columnSize = scalar * 4;
-            std::size_t memberSize = columnSize * cols;
-            // GL-packed byte size (tight). TF layout expects vec3 = 12
-            // bytes (no pad), matrix columns packed end-to-end.
-            std::size_t glPacked = scalar * vec * cols;
-            // Array outputs (e.g. gl_ClipDistance[N]) take N element
-            // slots, element padded to column size.
-            if (arraySize > 0) {
-                memberSize *= arraySize;
-                glPacked *= arraySize;
-            }
-            if (memberAlign > 0 && (cursor % memberAlign) != 0) {
-                cursor = ((cursor / memberAlign) + 1) * memberAlign;
-            }
-            if (memberAlign > maxAlign) maxAlign = memberAlign;
-            StageOutputLayout::Member m = d.member;
-            m.offset = cursor;
-            m.size = memberSize;
-            m.glPackedBytes = glPacked;
-            out.members.push_back(std::move(m));
-            cursor += memberSize;
-        }
-        // Round struct size up to max-member alignment (C++/MSL
-        // struct-packing rule). Without this, arrays of structs
-        // have wrong stride — Metal's `spvOut[i]` indexing uses
-        // sizeof(Struct), so `spvOut[1]` lives at an offset that's
-        // larger than our unaligned `cursor` at struct end.
-        if (maxAlign > 0 && (cursor % maxAlign) != 0) {
-            cursor = ((cursor / maxAlign) + 1) * maxAlign;
-        }
-        out.structSize = cursor;
-        if (std::getenv("APPGL_TRACE_TESS")) {
-            std::fprintf(stderr,
-                "[APPGL] reflectStageOutputLayout: structSize=%zu members=%zu\n",
+                "[APPGL] reflectStageOutputLayout: structSize=%zu members=%zu (helper)\n",
                 out.structSize, out.members.size());
             for (const auto& m : out.members) {
                 std::fprintf(stderr,
