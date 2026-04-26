@@ -9391,6 +9391,56 @@ bool GLContext::copyBufferSubData(
     return true;
 }
 
+// --------------------------------------------------------------------------
+// Vacuous-pass detector — instrumentation for distinguishing GENUINE_PASS
+// from VACUOUS_PASS in CTS tessellation_shader.* runs. Activated by
+// APPGL_DETECTOR_TF=1. Logs a structured stderr line on every
+// GL_TRANSFORM_FEEDBACK_BUFFER read-back (mapBufferRange / getBufferSubData)
+// with a count of non-zero bytes in the data the caller will see.
+//
+// Pair with deqp-builtin `tcuTestSessionExecutor.cpp` "Test case '<name>'.."
+// stdout marker — combine streams via 2>&1 and feed `tools/detector_classify.py`
+// to bucket each test into GENUINE_PASS / VACUOUS_PASS / GENUINE_FAIL.
+namespace {
+struct VacuousPassDetector {
+    bool enabled = false;
+    VacuousPassDetector() {
+        const char* v = std::getenv("APPGL_DETECTOR_TF");
+        enabled = (v != nullptr && v[0] != '\0' && v[0] != '0');
+    }
+};
+inline bool detectorEnabled() {
+    static const VacuousPassDetector det;
+    return det.enabled;
+}
+inline void logTFReadback(GLenum target,
+                          GLuint buffer,
+                          GLintptr offset,
+                          GLsizeiptr length,
+                          const std::uint8_t* bytes) {
+    if (!detectorEnabled()) return;
+    std::size_t nonzero = 0;
+    std::ptrdiff_t firstNonzero = -1;
+    if (bytes != nullptr) {
+        for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(length); ++i) {
+            if (bytes[i] != 0) {
+                ++nonzero;
+                if (firstNonzero < 0) firstNonzero = i;
+            }
+        }
+    }
+    std::fprintf(stderr,
+        "APPGL_DETECTOR tf_read target=0x%X buf=%u offset=%lld length=%lld "
+        "nonzero_bytes=%zu first_nonzero_offset=%td\n",
+        static_cast<unsigned int>(target),
+        static_cast<unsigned int>(buffer),
+        static_cast<long long>(offset),
+        static_cast<long long>(length),
+        nonzero,
+        firstNonzero);
+}
+}  // namespace
+
 bool GLContext::getBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* data) {
     if (offset < 0 || size < 0 || (size > 0 && data == nullptr)) {
         pushError(GL_INVALID_VALUE);
@@ -9420,6 +9470,10 @@ bool GLContext::getBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size
             return false;
         }
         std::memcpy(data, bytes + static_cast<std::size_t>(offset), static_cast<std::size_t>(size));
+        if (target == GL_TRANSFORM_FEEDBACK_BUFFER) {
+            logTFReadback(target, name, offset, size,
+                          static_cast<const std::uint8_t*>(data));
+        }
     }
     return true;
 }
@@ -9514,6 +9568,10 @@ void* GLContext::mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
     object->mapOffset = offset;
     object->mapLength = length;
     object->mapPointer = contents + static_cast<std::size_t>(offset);
+    if (target == GL_TRANSFORM_FEEDBACK_BUFFER && (access & GL_MAP_READ_BIT)) {
+        logTFReadback(target, name, offset, length,
+                      static_cast<const std::uint8_t*>(object->mapPointer));
+    }
     return object->mapPointer;
 }
 
