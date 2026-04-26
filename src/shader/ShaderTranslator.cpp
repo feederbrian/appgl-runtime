@@ -2183,25 +2183,40 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
             }
             drafts.push_back(std::move(e));
         }
-        // Phase 5 [metal-tess-TF]: SPIRV-Cross's struct-parity patch
-        // forces gl_PerVertex builtins (gl_Position, gl_PointSize,
-        // gl_ClipDistance) into the TES-as-compute output struct
-        // even when the shader doesn't write them explicitly. The
-        // stage_outputs resource list can omit them (they live in
-        // the gl_PerVertex block), so the reflection under-reports
-        // the struct size. Synthesize the members here so the TF
-        // writer uses the right stride.
+        // Phase 6 [metal-tess-TF]: SPIRV-Cross's struct-parity patch only
+        // force-includes gl_PerVertex members that already exist in the
+        // SPIR-V's interface block. For shaders whose GLSL declares
+        // standalone `out` variables and never writes the gl_PerVertex
+        // builtins (e.g. tc2te.data_pass_through, which captures
+        // `gl_in[0].gl_Position` into a user varying instead of writing
+        // `gl_Position`), glslang emits no gl_PerVertex output members,
+        // so the patch has nothing to insert and main0_out is just the
+        // user varyings. Synthesizing builtins unconditionally here
+        // over-reported stride by 32B, drifting the TF writer's per-
+        // vertex offset (T4C-data-pass-through-byte-decode-2026-04-25).
         //
-        // We detect "tess-as-compute" via the is_tese_shader +
-        // tess_evaluation_as_compute option combo; if we're not in
-        // that mode the builtins may legitimately be absent.
+        // Use SPIRV-Cross's existing `has_active_builtin` query (which
+        // SPIRV-W confirmed is equivalent to the patch's insertion
+        // condition for all CTS-faithful SPIR-V) to gate synthesis on
+        // whether the shader actually writes the builtin. When the Q2
+        // helper API (get_msl_interface_struct_members) lands, this
+        // whole synthesis block can be replaced by a direct query of
+        // SPIRV-Cross's emitted member list.
         if (mslOpts.tess_evaluation_as_compute && isTessEval) {
-            auto addSynthetic = [&drafts](const char* name,
-                                          std::uint32_t builtin,
-                                          std::uint32_t vec,
-                                          std::uint32_t arrSize) {
+            // Populate active-builtin tracking so has_active_builtin
+            // returns accurate results below. compile() above already
+            // ran the analysis pass, but call explicitly for clarity.
+            compiler.update_active_builtins();
+            auto addSyntheticIfActive = [&drafts, &compiler](
+                const char* name,
+                spv::BuiltIn builtin,
+                std::uint32_t vec,
+                std::uint32_t arrSize) {
+                if (!compiler.has_active_builtin(builtin, spv::StorageClassOutput)) {
+                    return;
+                }
                 for (const auto& d : drafts) {
-                    if (d.member.isBuiltIn && d.member.builtIn == builtin) return;
+                    if (d.member.isBuiltIn && d.member.builtIn == static_cast<std::uint32_t>(builtin)) return;
                 }
                 EntryDraft e;
                 e.member.name = name;
@@ -2215,12 +2230,21 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
                 e.overrideArrSize = arrSize;
                 drafts.push_back(std::move(e));
             };
-            // gl_Position (vec4), gl_PointSize (float),
-            // gl_ClipDistance (float[1]). gl_CullDistance
-            // intentionally omitted — our MSL doesn't emit it.
-            addSynthetic("gl_Position",    spv::BuiltInPosition,     4, 0);
-            addSynthetic("gl_PointSize",   spv::BuiltInPointSize,    1, 0);
-            addSynthetic("gl_ClipDistance",spv::BuiltInClipDistance, 1, 1);
+            addSyntheticIfActive("gl_Position",     spv::BuiltInPosition,     4, 0);
+            addSyntheticIfActive("gl_PointSize",    spv::BuiltInPointSize,    1, 0);
+            addSyntheticIfActive("gl_ClipDistance", spv::BuiltInClipDistance, 1, 1);
+            // Validation harness — confirms the gate's per-builtin
+            // decision matches expectations for known-passing /
+            // known-failing tests. data_pass_through expects 0 0 0;
+            // invariance_rule6 expects 1 ? ? (writes gl_Position).
+            if (std::getenv("APPGL_DETECTOR_TF")) {
+                std::fprintf(stderr,
+                    "APPGL_DETECTOR lift_synth tess-as-compute "
+                    "active_position=%d active_pointsize=%d active_clip=%d\n",
+                    compiler.has_active_builtin(spv::BuiltInPosition,     spv::StorageClassOutput) ? 1 : 0,
+                    compiler.has_active_builtin(spv::BuiltInPointSize,    spv::StorageClassOutput) ? 1 : 0,
+                    compiler.has_active_builtin(spv::BuiltInClipDistance, spv::StorageClassOutput) ? 1 : 0);
+            }
         }
         // Sort: user outputs by location first, then builtins in
         // gl_PerVertex order (Position=0, PointSize=1, ClipDistance=3,
