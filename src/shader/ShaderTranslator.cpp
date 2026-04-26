@@ -1185,19 +1185,34 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (log != nullptr) {
             *log = "ok";
         }
-        // Diagnostic dump: if APPGL_DUMP_MSL is set to a directory path,
-        // write the generated MSL for every translated shader to
-        // msl_NNNN.metal. Used for debugging SPIRV-Cross output (std140
-        // matrix stride, runtime-array declarations, rasterizer-discard
-        // vertex-void shapes) against failing CTS tests.
-        if (const char* dumpPath = std::getenv("APPGL_DUMP_MSL")) {
+        // Diagnostic dumps: APPGL_DUMP_MSL writes the generated MSL to
+        // msl_NNNN.metal; APPGL_DUMP_SPIRV writes the *input* SPIR-V to
+        // spv_NNNN.spv. The pair shares a counter so msl_0007.metal and
+        // spv_0007.spv are produced from the same translator invocation,
+        // letting SPIRV-W round-trip the input SPIR-V through their local
+        // spirv-cross and compare emission against ours. SPIR-V execution
+        // model in word[2] of each OpEntryPoint identifies the stage —
+        // run `spirv-dis spv_NNNN.spv | head` to disambiguate VS / TCS /
+        // TES / FS / Compute.
+        const char* mslDumpPath = std::getenv("APPGL_DUMP_MSL");
+        const char* spirvDumpPath = std::getenv("APPGL_DUMP_SPIRV");
+        if (mslDumpPath != nullptr || spirvDumpPath != nullptr) {
             static std::atomic<int> counter{0};
             const int n = counter.fetch_add(1);
             char path[512];
-            std::snprintf(path, sizeof(path), "%s/msl_%04d.metal", dumpPath, n);
-            if (FILE* f = std::fopen(path, "w")) {
-                std::fwrite(msl.data(), 1, msl.size(), f);
-                std::fclose(f);
+            if (mslDumpPath != nullptr) {
+                std::snprintf(path, sizeof(path), "%s/msl_%04d.metal", mslDumpPath, n);
+                if (FILE* f = std::fopen(path, "w")) {
+                    std::fwrite(msl.data(), 1, msl.size(), f);
+                    std::fclose(f);
+                }
+            }
+            if (spirvDumpPath != nullptr) {
+                std::snprintf(path, sizeof(path), "%s/spv_%04d.spv", spirvDumpPath, n);
+                if (FILE* f = std::fopen(path, "wb")) {
+                    std::fwrite(spirv, sizeof(std::uint32_t), wordCount, f);
+                    std::fclose(f);
+                }
             }
         }
         return msl;

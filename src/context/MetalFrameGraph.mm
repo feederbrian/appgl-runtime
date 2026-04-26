@@ -4973,6 +4973,19 @@ fragment float4 appgl_immediate_textured_fs(
                     // Domain coord + primID (our fork-patched bindings).
                     [tesEnc setBuffer:domainCoordBuf offset:0 atIndex:25];
                     [tesEnc setBuffer:domainPrimIDBuf offset:0 atIndex:24];
+                    // Detector point C — dispatch-time instrumentation.
+                    // Pairs with link probe (A) and gate (B) so post-
+                    // processors can confirm the kernel actually fired.
+                    if (std::getenv("APPGL_DETECTOR_TF")) {
+                        std::fprintf(stderr,
+                            "APPGL_DETECTOR lift_dispatch threads=%u "
+                            "patchCount=%d patchVertices=%d "
+                            "tesOutBufBytes=%llu\n",
+                            (unsigned)tessTFGeneratedVerts,
+                            (int)info.patchCount,
+                            (int)info.patchVertices,
+                            (unsigned long long)tesComputeOutBuf.length);
+                    }
                     [tesEnc dispatchThreads:MTLSizeMake((NSUInteger)tessTFGeneratedVerts, 1, 1)
                       threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
                     [tesEnc endEncoding];

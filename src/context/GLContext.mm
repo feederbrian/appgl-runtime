@@ -19217,6 +19217,31 @@ bool GLContext::linkProgram(GLuint program) {
             // draw-time consumer yet; the CPU interpreter path still
             // handles every drawArrays(GL_PATCHES, ...) call. The
             // retained TCS compute PSO becomes Phase 2's input.
+            // Detector point pre-A — catches programs that have tess
+            // shaders but get skipped by the probe gate below. The
+            // existing point A (after the probe runs) is silent for
+            // gl_in-class shapes because the conventional vertex-form
+            // TES MSL never gets generated, so this gate trips first.
+            if (detectorEnabled() &&
+                (tessControlShader != nullptr || tessEvalShader != nullptr)) {
+                const bool gateOk = (impl_->frameGraph != nullptr &&
+                    !programObject->tessControlMSL.empty() &&
+                    !programObject->tessEvalMSL.empty() &&
+                    !programObject->fragmentMSL.empty());
+                std::fprintf(stderr,
+                    "APPGL_DETECTOR lift_translate program=%u "
+                    "tcsMSL_empty=%d tesMSL_empty=%d fsMSL_empty=%d "
+                    "tesAsComputeMSL_empty=%d vsAsComputeMSL_empty=%d "
+                    "frameGraph_present=%d -> probe_gate_ok=%d\n",
+                    program,
+                    programObject->tessControlMSL.empty() ? 1 : 0,
+                    programObject->tessEvalMSL.empty() ? 1 : 0,
+                    programObject->fragmentMSL.empty() ? 1 : 0,
+                    programObject->tessEvalAsComputeMSL.empty() ? 1 : 0,
+                    programObject->tessVertexAsComputeMSL.empty() ? 1 : 0,
+                    impl_->frameGraph != nullptr ? 1 : 0,
+                    gateOk ? 1 : 0);
+            }
             if (impl_->frameGraph != nullptr &&
                 !programObject->tessControlMSL.empty() &&
                 !programObject->tessEvalMSL.empty() &&
@@ -19270,15 +19295,35 @@ bool GLContext::linkProgram(GLuint program) {
                         programObject->tessControlMSL.find("spvPatchOut [[buffer(") != std::string::npos ||
                         programObject->tessEvalMSL.find("spvIn [[buffer(") != std::string::npos ||
                         programObject->tessEvalMSL.find("spvPatchIn [[buffer(") != std::string::npos);
-                // Programs that declared TF varyings at link time
-                // must source TES output into the bound TF buffer at
-                // draw time. Phase 3B.5 [metal-tess-TF] adds the
-                // TES-as-compute path that deposits TF bytes on
-                // CPU; it's opt-in via APPGL_ENABLE_METAL_TESS_TF.
-                // When the env is set AND the TES-compute PSO + the
-                // TES output layout both built successfully, programs
-                // with TF varyings route through Metal. Otherwise
-                // they fall back to the CPU tess interpreter.
+                // ----------------------------------------------------
+                // APPGL_ENABLE_METAL_TESS_TF — master enable for the
+                // Metal tess+TF compute chain. When set:
+                //   • This link-time block sets metalTessTier for tess
+                //     programs with TF varyings (Phase2 or Phase3) and
+                //     stashes metalTessEvalComputePipelineState. Without
+                //     it, tessBlockedByTF==true forces tier=None and
+                //     every drawArrays(GL_PATCHES) routes to the CPU
+                //     tess interpreter.
+                //   • tryMetalTessellationDraw and the rasterizer-
+                //     discard probe path also re-check this env (4
+                //     read sites in this file plus the dispatch site
+                //     in MetalFrameGraph.mm).
+                // It pairs with APPGL_LIFT_TESS_UNIFORM_GUARD: that var
+                // additionally relaxes the "tess uses uniforms → CPU
+                // fallback" guard, but on its own does NOTHING because
+                // the master enable above is required to even build the
+                // PSOs at link time. Both must be set for the Metal
+                // compute chain to engage on uniform-using tess shaders.
+                // Default off — enabling produces measurable forward
+                // motion (env-off→env-full vacuous→genuine transitions
+                // landed 11 GENUINE_PASS in the 2026-04-25 baseline)
+                // but also exposes byte-layout / kernel-emission gaps
+                // (data_pass_through-class still fails verification).
+                // Programs that declared TF varyings at link time must
+                // source TES output into the bound TF buffer at draw
+                // time. tessTFReady=true means: (a) probe built the TES
+                // compute PSO, (b) reflection produced a TES output
+                // layout, (c) APPGL_ENABLE_METAL_TESS_TF is set.
                 const bool tessUsesTF =
                     !programObject->transformFeedbackVaryingNames.empty();
                 const bool tessTFReady =
@@ -19315,6 +19360,28 @@ bool GLContext::linkProgram(GLuint program) {
                         program,
                         probe.computeOk ? 1 : 0,
                         probe.renderOk ? 1 : 0,
+                        probe.vertexComputeOk ? 1 : 0,
+                        probe.tessEvalComputeOk ? 1 : 0,
+                        tessTFReady ? 1 : 0,
+                        (int)programObject->metalTessTier,
+                        programObject->tessEvalOutputLayout.structSize,
+                        programObject->transformFeedbackVaryingNames.size(),
+                        programObject->tessGenMode,
+                        programObject->tessGenSpacing,
+                        probe.diagnostic.c_str());
+                }
+                // Detector point A — link-time probe outcome paired with the
+                // gate (B) and dispatch (C) lines so a single APPGL_DETECTOR_TF
+                // invocation tells the full story.  diag escaping: keep the
+                // string short (no newlines come from the probe diagnostic).
+                if (detectorEnabled()) {
+                    std::fprintf(stderr,
+                        "APPGL_DETECTOR lift_probe program=%u computeOk=%d "
+                        "vsComputeOk=%d tesComputeOk=%d tessTFReady=%d "
+                        "tier=%d tesStructSize=%zu tfVaryings=%zu "
+                        "genMode=0x%04X genSpacing=0x%04X diag=\"%s\"\n",
+                        program,
+                        probe.computeOk ? 1 : 0,
                         probe.vertexComputeOk ? 1 : 0,
                         probe.tessEvalComputeOk ? 1 : 0,
                         tessTFReady ? 1 : 0,
@@ -22095,6 +22162,29 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         program.tessEvalOutputLayout.structSize > 0 &&
         (liftUniformGuard || !tessUsesUniforms) &&
         std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+    // Detector point B — gate-evaluation instrumentation paired with link
+    // probe (A) and dispatch (C). Logs every reach of this gate plus the
+    // tier classification + rasterizer-discard state so post-processors
+    // can answer: "did the LIFT path actually engage, and if not, why?"
+    if (detectorEnabled()) {
+        std::fprintf(stderr,
+            "APPGL_DETECTOR lift_gate prog=%u mode=0x%04X count=%d tier=%d "
+            "tessUsesUniforms=%d liftGuard=%d enableMetalTF=%d "
+            "compPSO=%d tesOutSize=%zu tfActive=%d rasterDiscard=%d "
+            "-> tessTFActive=%d\n",
+            static_cast<unsigned int>(programName),
+            static_cast<unsigned int>(mode),
+            static_cast<int>(count),
+            static_cast<int>(program.metalTessTier),
+            tessUsesUniforms ? 1 : 0,
+            liftUniformGuard ? 1 : 0,
+            std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr ? 1 : 0,
+            program.metalTessEvalComputePipelineState != nullptr ? 1 : 0,
+            program.tessEvalOutputLayout.structSize,
+            transformFeedbackActive ? 1 : 0,
+            state->isEnabled(GL_RASTERIZER_DISCARD) ? 1 : 0,
+            tessTFActive ? 1 : 0);
+    }
     if (transformFeedbackActive && !tessTFActive) {
         return false;
     }
