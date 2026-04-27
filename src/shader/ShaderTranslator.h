@@ -262,6 +262,27 @@ struct TranslatorOptions {
     // reason as the TCS direction. No effect on non-TES stages.
     const std::uint32_t* siblingTcsOutputSpirv = nullptr;
     std::size_t siblingTcsOutputWordCount = 0;
+
+    // Sprint 3 [metal-mesh-GS]: when true, the geometry-shader
+    // translator path emits MSL targeting Metal's `[[mesh]]` stage
+    // (mesh-shader execution model) instead of the upstream's
+    // non-functional vertex-form GS emission. Pairs with the
+    // SPIRV-Cross fork patch
+    // `third_party/patches/spirv-cross-msl-geometry-shader-as-mesh.patch`
+    // which adds `msl_options.geometry_shader_as_mesh`. The patched
+    // emission routes `OpEmitVertex` / `OpEndPrimitive` / `OpStore`
+    // into mesh-shader infrastructure (`spvMesh.set_vertex` /
+    // `set_primitive` / `set_index` / `set_primitive_count`).
+    //
+    // Only meaningful when `ExecutionModelGeometry` is the current
+    // stage AND the device supports `MTLGPUFamilyMetal3` +
+    // `MTLGPUFamilyApple7` (probed via
+    // `GLCapabilities::meshShaderSupported()`). Caller resolves the
+    // gate at link time + sets this flag accordingly. Programs whose
+    // GS shape exceeds the patch's MVP coverage (adjacency, streams,
+    // max_vertices > 3) keep this false and fall back to the existing
+    // CPU GS interpreter path.
+    bool forceGeometryShaderAsMesh = false;
 };
 
 // Phase 3B.5 [metal-tess-TF]: stage-output struct layout. Populated for

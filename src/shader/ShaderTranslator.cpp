@@ -503,6 +503,17 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (isTessEval && options.tesePatchVertices != 0) {
             mslOpts.tese_input_patch_vertices = options.tesePatchVertices;
         }
+        // Sprint 3 [metal-mesh-GS]: route GS source into the
+        // mesh-shader emission path when the linked program's GS
+        // shape is supported by the SPIRV-Cross patch's MVP coverage
+        // and the device has mesh-shader capability. Only emitted on
+        // ExecutionModelGeometry — gated by isGeometry. Caller is
+        // responsible for the capability + shape gate (link-time).
+        const bool isGeometry =
+            (execModel == spv::ExecutionModelGeometry);
+        if (options.forceGeometryShaderAsMesh && isGeometry) {
+            mslOpts.geometry_shader_as_mesh = true;
+        }
         // MSL 2.2 (macOS 10.15+, 2019) required for:
         //   - `[[primitive_id]]` in fragment shaders on macOS — without it
         //     SPIRV-Cross throws `PrimitiveId on macOS requires MSL 2.2`

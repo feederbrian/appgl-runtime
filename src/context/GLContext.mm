@@ -19061,6 +19061,63 @@ bool GLContext::linkProgram(GLuint program) {
                 }
                 (void)appgl::detectGeometryEmulatable(*programObject);
             }
+            // Sprint 3 [metal-mesh-GS]: try the Metal mesh shader path
+            // for GS programs whose shape fits the SPIRV-Cross
+            // GS-as-mesh patch's MVP coverage. Gate is a 3-way
+            // conjunction:
+            //   (a) device supports mesh shaders
+            //       (`MTLGPUFamilyMetal3` + `MTLGPUFamilyApple7`)
+            //   (b) GS shape is mesh-MVP-supported (triangle/line/point
+            //       output, no adjacency input, max_vertices ≤ 3,
+            //       no streams)
+            //   (c) GS SPIR-V successfully translates with
+            //       `forceGeometryShaderAsMesh = true`
+            // When all three hold, set metalGSTier = MeshShader and
+            // stash the emitted MSL for later PSO build. Otherwise
+            // fall back to the existing CPU GS interpreter
+            // classification (`geometryEmulated`).
+            if (geometryShader != nullptr && !geometryShader->spirv.empty() &&
+                impl_->capabilities != nullptr &&
+                impl_->capabilities->meshShaderSupported()) {
+                // Shape gate: input topology, output topology,
+                // max_vertices. detectGeometryEmulatable already
+                // populated these fields on the program object.
+                const bool inputOK =
+                    programObject->gsInputTopology == GL_POINTS ||
+                    programObject->gsInputTopology == GL_LINES ||
+                    programObject->gsInputTopology == GL_TRIANGLES;
+                // Adjacency variants are deferred per the SPIRV-Cross
+                // patch's deferred-work list. CPU interpreter handles
+                // them; selective routing keeps adjacency on CPU.
+                const bool outputOK =
+                    programObject->gsOutputTopology == GL_TRIANGLE_STRIP ||
+                    programObject->gsOutputTopology == GL_LINE_STRIP ||
+                    programObject->gsOutputTopology == GL_POINTS;
+                const bool maxVerticesOK = programObject->gsMaxVertices <= 3u;
+                const bool shapeOK = inputOK && outputOK && maxVerticesOK;
+                if (shapeOK) {
+                    appgl::TranslatorOptions gsMeshOpts;
+                    gsMeshOpts.forceGeometryShaderAsMesh = true;
+                    appgl::ShaderReflection meshGsRefl;
+                    std::string meshGsMSL;
+                    const bool meshOk = translateStage(
+                        "geometry-as-mesh",
+                        geometryShader->spirv.data(),
+                        geometryShader->spirv.size(),
+                        geometryShader->source,
+                        meshGsMSL, meshGsRefl, gsMeshOpts);
+                    if (meshOk && !meshGsMSL.empty()) {
+                        programObject->geometryShaderAsMeshMSL = std::move(meshGsMSL);
+                        programObject->metalGSTier =
+                            GLProgramObject::MetalGSTier::MeshShader;
+                    }
+                }
+            }
+            if (programObject->metalGSTier == GLProgramObject::MetalGSTier::None &&
+                programObject->geometryEmulated) {
+                programObject->metalGSTier =
+                    GLProgramObject::MetalGSTier::CPUInterpreter;
+            }
             // Record the emulation outcome after the per-stage records
             // so BAR / trace logs see: [vertex:ok][fragment:ok][geometry:ok][gap-or-cpu-emulation].
             if (programObject->geometryEmulated) {

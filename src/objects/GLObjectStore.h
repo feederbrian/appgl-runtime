@@ -859,6 +859,37 @@ struct GLProgramObject {
         Phase3 = 2,
     };
     MetalTessTier metalTessTier = MetalTessTier::None;
+
+    // Sprint 3 [metal-mesh-GS]: which GS execution path the link
+    // probe has cleared this program for. Set at link time after
+    // (a) GS shader presence check, (b) device mesh-shader cap
+    // (`GLCapabilities::meshShaderSupported()`), and (c) GS shape
+    // compatibility with the SPIRV-Cross GS-as-mesh patch's MVP
+    // coverage (excludes adjacency, streams, max_vertices > 3).
+    //   None             — non-GS programs (no-op, falls through).
+    //   CPUInterpreter   — existing CPU GS interpreter path
+    //                      (`encodeEmulatedGsDraw`).
+    //   MeshShader       — Metal mesh shader path (this sprint's
+    //                      target). Encoded via the new
+    //                      `encodeMetalGSDraw` once it lands.
+    enum class MetalGSTier : std::uint8_t {
+        None = 0,
+        CPUInterpreter = 1,
+        MeshShader = 2,
+    };
+    MetalGSTier metalGSTier = MetalGSTier::None;
+    // Sprint 3 [metal-mesh-GS]: cached MSL emitted with
+    // `geometry_shader_as_mesh = true`. Populated when
+    // metalGSTier == MeshShader. Used for render-PSO build at link
+    // time + rebuild on FBO format changes.
+    std::string geometryShaderAsMeshMSL;
+    // Sprint 3 [metal-mesh-GS]: retained id<MTLRenderPipelineState>
+    // for the mesh render pipeline — built from
+    // MTLMeshRenderPipelineDescriptor at link time when
+    // `metalGSTier == MeshShader`. Color-format-keyed cache landed
+    // at draw time when Metal's render-PSO requirements demand
+    // per-FBO rebuild.
+    void* metalGSMeshPipelineState = nullptr;
     // Step 7-3 compute follow-up: retained id<MTLFunction> for the
     // compute entry point, populated alongside the PSO when
     // APPGL_ENABLE_ARGUMENT_BUFFERS is set. `encodeComputeDispatch`
