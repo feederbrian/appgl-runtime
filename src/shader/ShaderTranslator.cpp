@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <set>
+#include <utility>
 
 namespace appgl {
 namespace {
@@ -629,6 +631,99 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 if (std::getenv("APPGL_TRACE_TESS")) {
                     std::fprintf(stderr,
                         "[APPGL] cross-stage wiring (TCS←TES) failed: %s\n", e.what());
+                }
+            }
+        }
+
+        // tc_barriers cluster — inverse direction. When translating TES
+        // and the caller passed the linked TCS's SPIR-V, walk TCS's
+        // OUTPUT interface variables and call add_msl_shader_input on
+        // this (TES) CompilerMSL for each USER VARYING the TES doesn't
+        // already declare. The mismatch this closes: TCS uses some of
+        // its own outputs internally (read after barrier()), so SPIRV-
+        // Cross can't trim main0_out — the device per-CP buffer stride
+        // grows beyond what TES's main0_in covers, and TES reads at the
+        // wrong offset. By teaching TES "the previous stage put extra
+        // slots in your input struct," we re-align the per-CP stride.
+        // Filters mirror the TCS-direction block: builtins, blocks,
+        // and `patch out` are skipped.
+        const bool isTessEvalAny = isTessEval ||
+            (isVertex && options.forceTessEvalAsCompute);  // false-safe; TES path is iss isTessEval
+        if (isTessEvalAny && options.siblingTcsOutputSpirv != nullptr &&
+            options.siblingTcsOutputWordCount > 0) {
+            try {
+                spirv_cross::Compiler tcsSibling(
+                    options.siblingTcsOutputSpirv, options.siblingTcsOutputWordCount);
+                // Collect TES's already-declared input locations so we
+                // don't double-declare them via add_msl_shader_input.
+                std::set<std::pair<std::uint32_t,std::uint32_t>> tesInputLocs;
+                {
+                    const auto activeTes = compiler.get_active_interface_variables();
+                    for (auto id : activeTes) {
+                        if (compiler.get_storage_class(id) != spv::StorageClassInput) continue;
+                        if (!compiler.has_decoration(id, spv::DecorationLocation)) continue;
+                        const std::uint32_t loc = compiler.get_decoration(id, spv::DecorationLocation);
+                        const std::uint32_t comp = compiler.has_decoration(id, spv::DecorationComponent)
+                            ? compiler.get_decoration(id, spv::DecorationComponent) : 0;
+                        tesInputLocs.insert({loc, comp});
+                    }
+                }
+                const auto activeIds = tcsSibling.get_active_interface_variables();
+                std::size_t wired = 0;
+                std::size_t skippedBuiltin = 0;
+                std::size_t skippedPatch = 0;
+                std::size_t skippedExisting = 0;
+                for (auto id : activeIds) {
+                    const spv::StorageClass sc = tcsSibling.get_storage_class(id);
+                    if (sc != spv::StorageClassOutput) continue;
+                    if (tcsSibling.has_decoration(id, spv::DecorationBuiltIn)) {
+                        ++skippedBuiltin;
+                        continue;
+                    }
+                    const auto& varType = tcsSibling.get_type_from_variable(id);
+                    const auto typeSelfId = varType.self;
+                    if (tcsSibling.has_decoration(typeSelfId, spv::DecorationBlock) ||
+                        tcsSibling.has_decoration(typeSelfId, spv::DecorationBufferBlock)) {
+                        ++skippedBuiltin;
+                        continue;
+                    }
+                    if (!varType.member_types.empty() &&
+                        tcsSibling.has_member_decoration(typeSelfId, 0, spv::DecorationBuiltIn)) {
+                        ++skippedBuiltin;
+                        continue;
+                    }
+                    if (tcsSibling.has_decoration(id, spv::DecorationPatch)) {
+                        ++skippedPatch;
+                        continue;
+                    }
+                    const std::uint32_t loc = tcsSibling.has_decoration(id, spv::DecorationLocation)
+                        ? tcsSibling.get_decoration(id, spv::DecorationLocation) : 0;
+                    const std::uint32_t comp = tcsSibling.has_decoration(id, spv::DecorationComponent)
+                        ? tcsSibling.get_decoration(id, spv::DecorationComponent) : 0;
+                    if (tesInputLocs.count({loc, comp})) {
+                        ++skippedExisting;
+                        continue;
+                    }
+                    spirv_cross::MSLShaderInterfaceVariable sib;
+                    sib.location = loc;
+                    sib.component = comp;
+                    sib.format = spirv_cross::MSL_SHADER_VARIABLE_FORMAT_OTHER;
+                    sib.builtin = spv::BuiltInMax;
+                    sib.vecsize = varType.vecsize > 0 ? varType.vecsize : 1;
+                    sib.rate = spirv_cross::MSL_SHADER_VARIABLE_RATE_PER_VERTEX;
+                    compiler.add_msl_shader_input(sib);
+                    ++wired;
+                }
+                if (std::getenv("APPGL_DETECTOR_TF") || std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "APPGL_DETECTOR lift_xstage stage=tes sibling=tcs-output "
+                        "active=%zu wired=%zu skipped_builtin=%zu skipped_patch=%zu skipped_existing=%zu\n",
+                        activeIds.size(), wired, skippedBuiltin, skippedPatch, skippedExisting);
+                }
+            } catch (const std::exception& e) {
+                if (std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "[APPGL] cross-stage wiring (TES←TCS) failed: %s\n", e.what());
                 }
             }
         }

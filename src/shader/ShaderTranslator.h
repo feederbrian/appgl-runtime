@@ -245,6 +245,23 @@ struct TranslatorOptions {
     // Cross's own gl_PerVertex propagation. No effect on non-TCS stages.
     const std::uint32_t* siblingTesInputSpirv = nullptr;
     std::size_t siblingTesInputWordCount = 0;
+
+    // Inverse-direction sibling for the tc_barriers cluster: when
+    // translating TES (vertex form OR as-compute) and the caller passed
+    // the linked TCS's SPIR-V, walk TCS's OUTPUT interface variables
+    // (loose top-level non-builtin non-patch varyings) and call
+    // CompilerMSL::add_msl_shader_input for each USER VARYING the TES
+    // does NOT itself declare. Tells SPIRV-Cross "the previous stage
+    // emits extra slots at offsets X/Y/Z, pad your main0_in struct so
+    // device-buffer reads find your declared inputs at the same byte
+    // offsets the TCS wrote them." Closes the symmetric mismatch where
+    // TCS uses its own outputs internally (after barrier()) and so
+    // SPIRV-Cross can't trim main0_out down to just TES-relevant slots
+    // — the per-CP stride grows beyond what TES expects. Builtins,
+    // blocks, and `patch out` variables are filtered for the same
+    // reason as the TCS direction. No effect on non-TES stages.
+    const std::uint32_t* siblingTcsOutputSpirv = nullptr;
+    std::size_t siblingTcsOutputWordCount = 0;
 };
 
 // Phase 3B.5 [metal-tess-TF]: stage-output struct layout. Populated for

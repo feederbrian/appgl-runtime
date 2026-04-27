@@ -19135,6 +19135,16 @@ bool GLContext::linkProgram(GLuint program) {
                 tessOpts.siblingTesInputSpirv = tessEvalShader->spirv.data();
                 tessOpts.siblingTesInputWordCount = tessEvalShader->spirv.size();
             }
+            // tc_barriers cluster — inverse-direction sibling so the TES
+            // translation calls add_msl_shader_input for TCS outputs the
+            // TES doesn't itself declare. Closes the per-CP buffer
+            // stride mismatch when TCS uses its own outputs internally
+            // (after barrier()) so SPIRV-Cross emits 48 B/CP for TCS
+            // but 16 B/CP for TES → TES reads at the wrong offset.
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tessOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
+                tessOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
+            }
             (void)translateCachedStage("tess-control", tessControlShader,
                                        programObject->tessControlMSL, tcRefl,
                                        tessOpts);
@@ -19202,6 +19212,10 @@ bool GLContext::linkProgram(GLuint program) {
             tesComputeOpts.forceTessellation = true;
             tesComputeOpts.forceTessEvalAsCompute = true;
             tesComputeOpts.tesePatchVertices = tcsOutputVertices;
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tesComputeOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
+                tesComputeOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
+            }
             ShaderReflection tesComputeRefl;
             (void)translateCachedStage(
                 "tess-eval-as-compute", tessEvalShader,
@@ -22327,6 +22341,12 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     {
         TranslatorOptions opts;
         opts.forceTessellation = true;
+        // tc_barriers cluster: pad TES main0_in to mirror TCS main0_out
+        // when TCS uses internal-output reads after barrier(). Without
+        // this, per-CP buffer stride mismatches and TES reads at the
+        // wrong offset.
+        opts.siblingTcsOutputSpirv = tcsProg->tessControlSpirv.data();
+        opts.siblingTcsOutputWordCount = tcsProg->tessControlSpirv.size();
         try {
             synth->tessEvalMSL = translator.spirvToMSL(
                 tesProg->tessEvalSpirv.data(),
@@ -22382,6 +22402,10 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
         opts.forceTessellation = true;
         opts.forceTessEvalAsCompute = true;
         opts.tesePatchVertices = static_cast<std::uint32_t>(tcsModes.outputVertices);
+        // tc_barriers cluster: same per-CP stride alignment as the
+        // vertex-form translation above — applies to compute form too.
+        opts.siblingTcsOutputSpirv = tcsProg->tessControlSpirv.data();
+        opts.siblingTcsOutputWordCount = tcsProg->tessControlSpirv.size();
         try {
             synth->tessEvalAsComputeMSL = translator.spirvToMSL(
                 tesProg->tessEvalSpirv.data(),
