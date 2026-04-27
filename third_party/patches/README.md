@@ -38,6 +38,91 @@ git apply ../../third_party/patches/<patch-name>.patch
 
 ## Patches
 
+### `spirv-cross-msl-tcs-output-classification.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.{hpp,cpp}` — adds
+`msl_options.split_tcs_outputs_by_consumption`, an optional `name`
+field on `MSLShaderInterfaceVariable`, and the
+`CompilerMSL::classify_tcs_outputs_by_consumption()` method.
+
+**Summary:** When `split_tcs_outputs_by_consumption=true` on a TCS
+translation, classifies each user-varying output as TES-consumed (kept
+in the per-CP device buffer that the linked TES reads) or TCS-internal
+(routed to **threadgroup memory** instead, invisible to the TES). The
+classification is name-based: a TCS output is TES-consumed iff its
+name appears in the `outputs_by_location` / `outputs_by_builtin` maps
+that AppGL's β orchestrator populates via `add_msl_shader_output(tcs,
+{... name=<TES_input_name> ...})` for each TES input. Names are the
+stable cross-stage identifier — separable programs auto-assign
+locations per-stage independently, so location alone is unreliable.
+
+**Why:** Metal has no native tessellation control shader stage; TCS is
+emulated as a compute kernel with the per-CP output landing in a
+device buffer the linked TES then reads. SPIRV-Cross's existing
+emission stuffs ALL TCS outputs into that device buffer — including
+outputs the TCS uses purely for `barrier()`-mediated inter-invocation
+sync that the TES never reads. This bloats per-CP buffer stride with
+TCS-internal data and breaks byte-offset alignment between TCS-out and
+TES-in for non-block standalone outputs (e.g. `out ivec4
+test_vector[4]; barrier(); ... = test_vector[next].xyz`).
+
+Threadgroup memory is the natural Metal home for inter-invocation sync
+data: doesn't leak into the device buffer, doesn't bloat per-CP
+stride, exists for the lifetime of the workgroup which matches a TCS
+patch. The patch leverages SPIRV-Cross's existing `mask_stage_output_*`
+infrastructure plus the `variable_decl_is_remapped_storage(StorageClassWorkgroup)`
+plumbing to route TCS-internal outputs to threadgroup memory at
+emission time. No new emission code paths required — the classifier
+synthesizes a high-range Location decoration on each non-consumed
+output and calls `mask_stage_output_by_location`, which the existing
+`is_stage_output_variable_masked` checks at five emission sites
+(struct membership, address-space decoration, access-chain rewrite,
+function-parameter pass-through, etc.) all consult correctly.
+
+**Implementation note — synth-fake dedup:** the classifier also
+removes `outputs_by_location` entries whose name matches a natural TCS
+output. This prevents the synth-fake-variable loop at
+`spirv_msl.cpp:4682` from materializing opaque `uint4 m_<N>` padding
+members when AppGL's β passes a name that the TCS already writes
+under a different (auto-assigned) location. Without this dedup, the
+m_<N> members displace the natural-output struct layout (observed in
+the original failing tests as offset corruption — TES read
+`tc_primitive_id` finding `float-1.0-bits` from a synth-fake at
+offset 0).
+
+**Use case:** separable-program tess pipelines where the TCS uses
+`out` arrays + `barrier()` for inter-invocation coordination —
+specifically CTS `tessellation_shader_tessellation.{
+barrier_guarded_read_calls, barrier_guarded_read_write_calls,
+input_patch_discard }` cluster (3 tests). Without the option, these
+tests fail with byte-offset misalignment between TCS-out and TES-in;
+with the option, TCS main0_out shrinks from 48B (test_vector +
+test_vector2 + m_91 padding) to 16B (test_vector2 only) — exact match
+for TES main0_in.
+
+**CTS tests unlocked:** +3 (the tc_barriers + input_patch_discard
+cluster). Potentially also unblocks AppGL-W's previously-attempted
+discard-fix once the underlying byte-alignment is corrected.
+
+**Regression-safe:** when the option is off (default), classifier
+returns early at `if (!is_tesc_shader() ||
+!msl_options.split_tcs_outputs_by_consumption) return;` — no
+masked-output-locations modifications, no behavioural change. Verified
+byte-identical TCS emission for `data_pass_through` (cluster A, B, C
+representatives) before vs after the patch (modulo a pre-existing
+4-line buffer-slot-remapping difference between local CLI and AppGL
+runtime invocation, unrelated to this patch). The flag-on path only
+fires when AppGL passes consumed names via the new `name` field on
+`MSLShaderInterfaceVariable`; absent names, classifier returns early
+on `consumed_names.empty()` — defensive behaviour for transitional
+AppGL state.
+
+**Architectural narrative:** publication-track material — Metal
+doesn't have TCS, but it has threadgroup memory; this option teaches
+SPIRV-Cross to use the right Metal storage class per output usage
+rather than uniformly stuffing everything into the per-CP device
+buffer.
+
 ### `spirv-cross-tess-isolines-compute-bypass.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` —
