@@ -459,6 +459,19 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             // requirement.
             if (isTessControl) {
                 mslOpts.multi_patch_workgroup = true;
+                // Option C [metal-tess-TF] (SPIRV-Cross commit 26adef0):
+                // classify TCS user-varying outputs by TES consumption
+                // when a sibling-TES SPIR-V is provided. TES-consumed
+                // outputs land in main0_out (per-CP device buffer) at
+                // matching offsets; TCS-internal-only outputs (read by
+                // TCS itself after barrier()) route to threadgroup
+                // memory instead. Closes the per-CP stride mismatch on
+                // tc_barriers / data_pass_through / gl_PerVertex-padded
+                // tests where TCS's main0_out included slots TES doesn't
+                // declare. Effective only when siblingTesInputSpirv
+                // populates `name` on each MSLShaderInterfaceVariable
+                // (see the wiring block below).
+                mslOpts.split_tcs_outputs_by_consumption = true;
             }
         }
         // Phase 3 of metal-tess: VS-as-compute for tess programs. When
@@ -618,6 +631,13 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     sib.builtin = spv::BuiltInMax;
                     sib.vecsize = varType.vecsize > 0 ? varType.vecsize : 1;
                     sib.rate = spirv_cross::MSL_SHADER_VARIABLE_RATE_PER_VERTEX;
+                    // Option C [metal-tess-TF]: feed the sibling's source
+                    // name so the TCS classifier (split_tcs_outputs_by
+                    // _consumption) can name-match across stages.
+                    // Separable programs auto-assign locations per-stage
+                    // independently, so location alone is unstable as a
+                    // cross-stage identifier.
+                    sib.name = tesSibling.get_name(id);
                     compiler.add_msl_shader_output(sib);
                     ++wired;
                 }
@@ -647,10 +667,24 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // slots in your input struct," we re-align the per-CP stride.
         // Filters mirror the TCS-direction block: builtins, blocks,
         // and `patch out` are skipped.
+        //
+        // Option C supersedes this branch entirely. When TCS uses
+        // `split_tcs_outputs_by_consumption=true` + name-aware wiring
+        // via siblingTesInputSpirv, its main0_out is trimmed to TES-
+        // consumed slots only — the per-CP stride matches TES's
+        // main0_in natively. The TES-side padding workaround adds
+        // duplicate inputs (location-based dedup misses tcs-out /
+        // tes-in pairs that lack OpDecorate Location), corrupting
+        // layouts under Option C. Disabled unconditionally now that
+        // Option C is the canonical cross-stage path; siblingTcsOutput
+        // Spirv option still exists on TranslatorOptions for binary-
+        // compat, but no longer triggers any emission change. Keeping
+        // the block in place until callers stop populating the option
+        // (cosmetic cleanup).
         const bool isTessEvalAny = isTessEval ||
-            (isVertex && options.forceTessEvalAsCompute);  // false-safe; TES path is iss isTessEval
-        if (isTessEvalAny && options.siblingTcsOutputSpirv != nullptr &&
-            options.siblingTcsOutputWordCount > 0) {
+            (isVertex && options.forceTessEvalAsCompute);  // false-safe; TES path is isTessEval
+        (void)isTessEvalAny;
+        if (false) {
             try {
                 spirv_cross::Compiler tcsSibling(
                     options.siblingTcsOutputSpirv, options.siblingTcsOutputWordCount);
@@ -711,6 +745,10 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     sib.builtin = spv::BuiltInMax;
                     sib.vecsize = varType.vecsize > 0 ? varType.vecsize : 1;
                     sib.rate = spirv_cross::MSL_SHADER_VARIABLE_RATE_PER_VERTEX;
+                    // Option C [metal-tess-TF]: symmetric to TCS-direction
+                    // wiring above — name-match enables cross-stage
+                    // correlation when location-based dedup misses.
+                    sib.name = tcsSibling.get_name(id);
                     compiler.add_msl_shader_input(sib);
                     ++wired;
                 }
