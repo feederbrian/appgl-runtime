@@ -3046,9 +3046,18 @@ struct MetalFrameGraph::Impl {
 using namespace metal;
 
 // Must match MTLQuadTessellationFactorsHalf byte layout.
+//
+// Sprint 2 fix: Metal's MTLQuadTessellationFactorsHalf has
+// `edgeTessellationFactor[4]` FIRST (bytes 0..7) followed by
+// `insideTessellationFactor[2]` (bytes 8..11). Prior versions of this
+// struct had them reversed; the regular single-N codepath worked
+// accidentally because `axisMax = max(o0..o3, i0..i1)` is permutation-
+// invariant over the misaligned set, but per-edge logic exposed the
+// mis-read by reading individual fields. (kTessDomainPortMSL at line 41
+// already had the correct order — that path was unaffected.)
 struct QuadFactors {
-    half insideTessellationFactor[2];
     half edgeTessellationFactor[4];
+    half insideTessellationFactor[2];
 };
 
 // Runtime parameters for domain generation. Host packs before dispatch.
@@ -4995,6 +5004,47 @@ fragment float4 appgl_immediate_textured_fs(
                         if (FILE* f = std::fopen(path, "wb")) {
                             std::fwrite(coordContents, 1, (size_t)coordBytes, f);
                             std::fclose(f);
+                        }
+                    }
+                    // Sprint 2 Track 1 telemetry: read back the per-
+                    // patch tess factors (post-TCS-dispatch state of
+                    // factorBuf) so the bisect can correlate
+                    // (config → emitted_count). Each line emits
+                    // patch index + outer[0..3] + inner[0..1] +
+                    // post-domain-gen totalVerts. Reading from
+                    // [factorBuf contents] is safe because
+                    // factorBuf was created with
+                    // MTLResourceStorageModeShared earlier and
+                    // dgCmdBuf has waitUntilCompleted'd above.
+                    if (void* factorContents = [factorBuf contents]) {
+                        const auto* factors =
+                            static_cast<const MTLQuadTessellationFactorsHalf*>(
+                                factorContents);
+                        // edgeTessellationFactor is uint16_t (raw IEEE 754
+                        // binary16). Decode via memcpy into _Float16.
+                        auto halfBitsToFloat = [](uint16_t bits) -> float {
+                            __fp16 h;
+                            std::memcpy(&h, &bits, sizeof(uint16_t));
+                            return static_cast<float>(h);
+                        };
+                        const int patchCount = (int)info.patchCount;
+                        for (int p = 0; p < patchCount; ++p) {
+                            const auto& f = factors[p];
+                            std::fprintf(stderr,
+                                "APPGL_DETECTOR lift_domaingen seq=%u patch=%d "
+                                "o0=%.4f o1=%.4f o2=%.4f o3=%.4f "
+                                "i0=%.4f i1=%.4f totalVerts=%u "
+                                "mode=0x%04X spacing=0x%04X pointMode=%d\n",
+                                n, p,
+                                halfBitsToFloat((uint16_t)f.edgeTessellationFactor[0]),
+                                halfBitsToFloat((uint16_t)f.edgeTessellationFactor[1]),
+                                halfBitsToFloat((uint16_t)f.edgeTessellationFactor[2]),
+                                halfBitsToFloat((uint16_t)f.edgeTessellationFactor[3]),
+                                halfBitsToFloat((uint16_t)f.insideTessellationFactor[0]),
+                                halfBitsToFloat((uint16_t)f.insideTessellationFactor[1]),
+                                (unsigned)tessTFGeneratedVerts,
+                                info.genMode, info.genSpacing,
+                                info.pointMode ? 1 : 0);
                         }
                     }
                     std::fprintf(stderr,
