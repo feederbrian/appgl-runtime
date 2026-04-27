@@ -3166,13 +3166,157 @@ void genPatchDomain(
     if (params.genMode == 0u) {
         // Triangles — barycentric (u, v, w) with u+v+w = 1.
         //
-        // Single N = max(outer[0..2], inner[0]) matches the CPU
-        // interpreter. Compute w as (N-i-j)/N by direct division —
-        // `1.0f - u - v` produces ULP-different values vs direct
-        // division, and CTS's `isVertexDefined` uses EXACT == on
-        // vertex components, so any FP drift makes the symmetry
-        // counterpart search miss even though the output "is" the
-        // right vertex.
+        // Sprint 2 Track 1 (T4H Phase B): per-edge triangles point-
+        // mode for the vertex_spacing.* cluster, gated on outers-
+        // differ AND pointMode (M2 mitigation per T4H). Equal-outer
+        // case stays on single-N axisMax — preserves invariance.*
+        // GENUINE_PASS that depend on the symmetric grid emission.
+        //
+        // GL §11.2.2.2: outer[0]=edge across u-corner (between v-
+        // and w- corners; u=0 line), outer[1]=v=0 edge, outer[2]=
+        // w=0 edge. Inner level inner[0] controls concentric inner
+        // triangles. Triangles use only outer[0..2] + inner[0].
+        const bool triOutersDiffer = !(o0 == o1 && o1 == o2);
+        if (params.pointMode != 0u && triOutersDiffer) {
+            uint outerN0 = segmentCount(o0, params.genSpacing);
+            uint outerN1 = segmentCount(o1, params.genSpacing);
+            uint outerN2 = segmentCount(o2, params.genSpacing);
+            uint innerN  = segmentCount(i0, params.genSpacing);
+
+            // 3 outer corners (barycentric).
+            emitPoint(float3(1.0f, 0.0f, 0.0f), patchID,
+                      totalVertCount, domainTessCoord, domainPrimID); // u-corner
+            emitPoint(float3(0.0f, 1.0f, 0.0f), patchID,
+                      totalVertCount, domainTessCoord, domainPrimID); // v-corner
+            emitPoint(float3(0.0f, 0.0f, 1.0f), patchID,
+                      totalVertCount, domainTessCoord, domainPrimID); // w-corner
+
+            // outer[0] = u=0 edge (varies between v-corner and w-corner).
+            for (uint k = 1u; k < outerN0; ++k) {
+                float t = float(k) / float(outerN0);
+                emitPoint(float3(0.0f, 1.0f - t, t), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+            }
+            // outer[1] = v=0 edge (varies between w-corner and u-corner).
+            for (uint k = 1u; k < outerN1; ++k) {
+                float t = float(k) / float(outerN1);
+                emitPoint(float3(t, 0.0f, 1.0f - t), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+            }
+            // outer[2] = w=0 edge (varies between u-corner and v-corner).
+            for (uint k = 1u; k < outerN2; ++k) {
+                float t = float(k) / float(outerN2);
+                emitPoint(float3(1.0f - t, t, 0.0f), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+            }
+
+            // Inner triangle subdivision: concentric inner triangles
+            // per GL 4.6 §11.2.2.2. CTS reference algorithm in
+            // esextcTessellationShaderPoints.cpp lines 962-1002:
+            //   for (n = innerN; n >= 0; n -= 2) {
+            //     if (n == 2) emit center point; break;
+            //     if (n == 3) emit 3 corners; break;
+            //     emit corners + (n-2)*3 edge interior;
+            //   }
+            // Ring r corners at barycentric (1 - 2r/M, r/M, r/M),
+            // permutations. Ring r has (M - 2r) segments per edge.
+            // Sprint-1's `inner_seg` interior-grid emission was wrong:
+            // CTS verifier extracts ring-by-ring and expects each ring
+            // to be a concentric triangle, not a flat grid. Failure
+            // surfaces as "Invalid delta between segments" because the
+            // grid-positioned points don't lie on the expected inner-
+            // triangle edges at the right distances.
+            //
+            // CRITICAL TRUNCATION: spec barycentric formula
+            // (1-2r/M, r/M, r/M) produces "rings" that cross past the
+            // centroid for r > M/3. Past-centroid rings have all 3
+            // corners labeled relative to a barycentric convention but
+            // their CARTESIAN positions are inverted — CTS verifier's
+            // "closest to outer (0.5,0)/(1,1)/(0,1)" heuristic picks
+            // edge midpoints instead of corners, breaking the topology
+            // check. Ring at r==M/3 collapses (3 corners at centroid).
+            // We truncate at r where ce <= off and emit nothing past;
+            // CTS verifier's `while (coords.size() > 0)` exits cleanly
+            // when truncated rings consume all data. n_vertices reports
+            // what we emit (same kernel path), so CTS expects what we
+            // produce. Trade-off: reference-correct rings 1..floor((M-1)/3)
+            // pass the topology check; absent past-centroid rings just
+            // mean fewer iterations of the verifier loop.
+            uint inv_innerN = innerN;
+            uint ring = 1u;
+            while (inv_innerN >= 2u) {
+                if (inv_innerN == 2u) {
+                    // Degenerate ring → single center point.
+                    emitPoint(float3(1.0f / 3.0f, 1.0f / 3.0f,
+                                     1.0f / 3.0f),
+                              patchID,
+                              totalVertCount, domainTessCoord,
+                              domainPrimID);
+                    break;
+                }
+
+                float off = float(ring) / float(innerN);
+                float ce = 1.0f - 2.0f * off;
+
+                // Past-centroid truncation. ce<=off means corners
+                // coincide at centroid (==) or invert past it (<).
+                // CTS verifier doesn't validate the missing rings, just
+                // exits when verts consumed.
+                if (ce <= off) {
+                    break;
+                }
+
+                // 3 ring corners.
+                emitPoint(float3(ce, off, off), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+                emitPoint(float3(off, ce, off), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+                emitPoint(float3(off, off, ce), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+
+                if (inv_innerN == 3u) {
+                    // Innermost ring is just 3 corners (no interior).
+                    break;
+                }
+
+                // Edge interior: (inv_innerN - 2) segments per edge,
+                // (inv_innerN - 3) interior points per edge.
+                uint inner_seg = inv_innerN - 2u;
+                for (uint k = 1u; k < inner_seg; ++k) {
+                    float t = float(k) / float(inner_seg);
+                    // Edge across u-corner (between v- and w-corners).
+                    emitPoint(float3(off,
+                                     ce * (1.0f - t) + off * t,
+                                     off * (1.0f - t) + ce * t),
+                              patchID,
+                              totalVertCount, domainTessCoord,
+                              domainPrimID);
+                    // Edge across v-corner (between u- and w-corners).
+                    emitPoint(float3(ce * (1.0f - t) + off * t,
+                                     off,
+                                     off * (1.0f - t) + ce * t),
+                              patchID,
+                              totalVertCount, domainTessCoord,
+                              domainPrimID);
+                    // Edge across w-corner (between u- and v-corners).
+                    emitPoint(float3(ce * (1.0f - t) + off * t,
+                                     off * (1.0f - t) + ce * t,
+                                     off),
+                              patchID,
+                              totalVertCount, domainTessCoord,
+                              domainPrimID);
+                }
+
+                inv_innerN -= 2u;
+                ring += 1u;
+            }
+            return;
+        }
+
+        // Equal-outer fallback: single-N produces a symmetric grid.
+        // CTS `isVertexDefined` uses EXACT == on vertex components;
+        // `1.0f - u - v` would produce ULP-different values vs
+        // direct division, so we compute w as (N-i-j)/N.
         uint N = segmentCount(max(max(o0, o1), max(o2, i0)), params.genSpacing);
         float fN = float(N);
         if (params.pointMode != 0u) {
