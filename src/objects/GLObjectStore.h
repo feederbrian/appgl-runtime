@@ -1051,6 +1051,13 @@ struct GLTransformFeedbackObject {
 };
 
 struct GLProgramPipelineObject {
+    GLProgramPipelineObject();
+    ~GLProgramPipelineObject();
+    GLProgramPipelineObject(const GLProgramPipelineObject&) = delete;
+    GLProgramPipelineObject& operator=(const GLProgramPipelineObject&) = delete;
+    GLProgramPipelineObject(GLProgramPipelineObject&&) noexcept;
+    GLProgramPipelineObject& operator=(GLProgramPipelineObject&&) noexcept;
+
     GLuint vertexProgram = 0;
     GLuint fragmentProgram = 0;
     GLuint geometryProgram = 0;
@@ -1065,6 +1072,31 @@ struct GLProgramPipelineObject {
     // distinction for glIsProgramPipeline.
     bool instantiated = false;
     std::string infoLog;
+
+    // β [metal-tess-TF] — synthesised combined-stage program for
+    // pipeline-bound Metal tessellation. The link-time tess probe in
+    // GLContext::linkProgram requires TCS + TES + FS MSL to all live
+    // on a single GLProgramObject; for separable programs (one stage
+    // per program object) that gate fails and the Metal tess PSOs
+    // never build. The pipeline-time orchestrator (Impl::ensure
+    // PipelineTessSynthesizedProgram) gathers SPIR-V from the
+    // pipeline's separable VS+TCS+TES+FS programs, re-translates with
+    // cross-stage info (siblingTesInputSpirv on TCS, force
+    // VertexForTessellation on VS, force TessEvalAsCompute +
+    // tesePatchVertices on TES), runs the same probeTessellation
+    // Pipeline call linkProgram does, and stashes the assembled
+    // GLProgramObject here. Cached against the stage-program-name
+    // snapshot below so a useProgramStages swap invalidates cleanly.
+    std::unique_ptr<GLProgramObject> syntheticTessProgram;
+    GLuint syntheticTessVsSnapshot = 0;
+    GLuint syntheticTessTcsSnapshot = 0;
+    GLuint syntheticTessTesSnapshot = 0;
+    GLuint syntheticTessFsSnapshot = 0;
+    // Set once the orchestrator has attempted a probe for the current
+    // (vs, tcs, tes, fs) snapshot, regardless of success. Avoids
+    // re-running the (expensive) translation + probe on every draw.
+    // Cleared when the snapshot changes.
+    bool syntheticTessProbeAttempted = false;
 };
 
 class GLObjectStore {

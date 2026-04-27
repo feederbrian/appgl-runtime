@@ -7200,6 +7200,21 @@ struct GLContext::Impl {
                                    GLsizei instanceCount = 1,
                                    GLuint baseInstance = 0);
 
+    // β [metal-tess-TF] — synthesise a Metal-tess-ready combined
+    // GLProgramObject from the bound program-pipeline's separable
+    // VS+TCS+TES+FS programs, mirror the link-time tess probe across
+    // them, and cache the result on the pipeline. Returns:
+    //   - the cached/freshly-built synthetic program when the pipeline
+    //     has tess separable programs and the probe succeeds.
+    //   - nullptr when the pipeline lacks tess (no TCS+TES separable
+    //     pair), the probe failed, or required SPIR-V wasn't preserved
+    //     on the separable programs.
+    // Idempotent across calls with the same stage-program-name
+    // snapshot. Re-runs the translation + probe when any stage program
+    // is swapped via useProgramStages (detected by snapshot mismatch).
+    GLProgramObject* ensurePipelineTessSynthesizedProgram(
+        GLProgramPipelineObject& ppo);
+
     // Phase 3B.5 [metal-tess-TF]: after the Metal tess encoder runs the
     // TES-as-compute dispatch, walk the resulting per-vertex output
     // bytes and deposit them into the bound GL_TRANSFORM_FEEDBACK_BUFFER
@@ -18891,6 +18906,15 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->hasTranslatedPipeline = true;
                 rasterTranslationOk = true;
             }
+            // β [metal-tess-TF]: preserve VS SPIR-V on separable VS so
+            // a pipeline-bound tess draw can re-translate VS as compute
+            // (`vertex_for_tessellation + capture_output_to_buffer`) at
+            // pipeline-bind time. The link-time path here doesn't know
+            // a TCS will eventually consume this VS, so it can't emit
+            // the compute form alone; the orchestrator does it later.
+            if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                programObject->vertexSpirv = vertexShader->spirv;
+            }
             break;
         }
         case ProgramKind::FragmentOnly: {
@@ -19483,6 +19507,7 @@ bool GLContext::linkProgram(GLuint program) {
             (void)translateCachedStage("tess-control", tessControlShader,
                                        programObject->tessControlMSL, tcRefl,
                                        tessOpts);
+            programObject->tessControlReflection = tcRefl;
             // Extract tessellation execution modes from SPIR-V.
             programObject->hasTessellation = true;
             if (!tessControlShader->spirv.empty()) {
@@ -19491,6 +19516,14 @@ bool GLContext::linkProgram(GLuint program) {
                     tessControlShader->spirv.size());
                 programObject->tessControlOutputVertices =
                     static_cast<GLint>(tcModes.outputVertices);
+            }
+            // β [metal-tess-TF]: preserve TCS SPIR-V so the pipeline-time
+            // orchestrator can re-translate with cross-stage info
+            // (siblingTesInputSpirv) once a TES separable program is
+            // also bound to the pipeline.
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                programObject->tessControlSpirv = tessControlShader->spirv;
+                programObject->tessControlParsedModule.reset();
             }
             rasterTranslationOk = true;
             break;
@@ -19515,6 +19548,13 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->tessGenVertexOrder = teModes.genVertexOrder;
                 programObject->tessGenPointMode =
                     teModes.pointMode ? GL_TRUE : GL_FALSE;
+            }
+            // β [metal-tess-TF]: preserve TES SPIR-V so the pipeline-time
+            // orchestrator can re-translate the compute form with
+            // forceTessEvalAsCompute + tesePatchVertices plumbed.
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                programObject->tessEvalSpirv = tessEvalShader->spirv;
+                programObject->tessEvalParsedModule.reset();
             }
             rasterTranslationOk = true;
             break;
@@ -22156,6 +22196,342 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
     return vsProg;
 }
 
+GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
+    GLProgramPipelineObject& ppo) {
+    // β [metal-tess-TF] orchestrator. Mirrors the link-time tess flow
+    // in linkProgram (~line 19101-19228) but sources SPIR-V from the
+    // pipeline's separable VS+TCS+TES+FS programs and re-translates
+    // with cross-stage info (siblingTesInputSpirv on TCS, force
+    // VertexForTessellation on VS, force TessEvalAsCompute +
+    // tesePatchVertices on TES). Step 2 lands translation only; the
+    // probeTessellationPipeline call (which builds the Metal PSOs and
+    // sets metalTessTier) lands in step 3, gated behind a
+    // `frameGraph != nullptr` check there. Step-2-only return: a
+    // synth program with all MSL strings set but metalTessTier still
+    // None, so the caller's tier check fails and we fall through to
+    // the existing CPU emulator path — same behaviour as today, just
+    // with the translation step proven and instrumented.
+    const GLuint vsName = ppo.vertexProgram;
+    const GLuint tcsName = ppo.tessControlProgram;
+    const GLuint tesName = ppo.tessEvalProgram;
+    const GLuint fsName = ppo.fragmentProgram;
+
+    if (tcsName == 0 || tesName == 0) {
+        return nullptr;
+    }
+
+    const bool snapshotMatches =
+        ppo.syntheticTessVsSnapshot == vsName &&
+        ppo.syntheticTessTcsSnapshot == tcsName &&
+        ppo.syntheticTessTesSnapshot == tesName &&
+        ppo.syntheticTessFsSnapshot == fsName;
+    if (snapshotMatches && ppo.syntheticTessProbeAttempted) {
+        return ppo.syntheticTessProgram.get();
+    }
+
+    // Snapshot drift (or first visit). Release the previous synth's
+    // retained Metal PSOs before reset — same fields linkProgram
+    // releases on relink (~line 18594-18610). Without this, a
+    // useProgramStages swap leaks one set of MTLComputePipelineStates
+    // per swap.
+    if (ppo.syntheticTessProgram != nullptr) {
+        GLProgramObject* old = ppo.syntheticTessProgram.get();
+        releaseRetainedMetalObject(old->metalTessControlPipelineState);
+        old->metalTessControlPipelineState = nullptr;
+        releaseRetainedMetalObject(old->metalTessVertexPipelineState);
+        old->metalTessVertexPipelineState = nullptr;
+        releaseRetainedMetalObject(old->metalTessEvalComputePipelineState);
+        old->metalTessEvalComputePipelineState = nullptr;
+    }
+    ppo.syntheticTessProgram.reset();
+    ppo.syntheticTessVsSnapshot = vsName;
+    ppo.syntheticTessTcsSnapshot = tcsName;
+    ppo.syntheticTessTesSnapshot = tesName;
+    ppo.syntheticTessFsSnapshot = fsName;
+    ppo.syntheticTessProbeAttempted = true;
+
+    GLProgramObject* vsProg = (vsName != 0) ? objects->programs().get(vsName) : nullptr;
+    GLProgramObject* tcsProg = objects->programs().get(tcsName);
+    GLProgramObject* tesProg = objects->programs().get(tesName);
+    GLProgramObject* fsProg = (fsName != 0) ? objects->programs().get(fsName) : nullptr;
+
+    if (tcsProg == nullptr || tesProg == nullptr) {
+        if (detectorEnabled()) {
+            std::fprintf(stderr,
+                "APPGL_DETECTOR lift_pipe_synth abort_no_program "
+                "tcs=%u(prog=%p) tes=%u(prog=%p)\n",
+                tcsName, (void*)tcsProg, tesName, (void*)tesProg);
+        }
+        return nullptr;
+    }
+    if (tcsProg->tessControlSpirv.empty() || tesProg->tessEvalSpirv.empty()) {
+        // Separable programs linked before β was introduced (or via a
+        // path that didn't preserve SPIR-V). The translation can't
+        // proceed; fall back to the CPU path.
+        if (detectorEnabled()) {
+            std::fprintf(stderr,
+                "APPGL_DETECTOR lift_pipe_synth abort_no_spirv "
+                "tcs=%u(words=%zu) tes=%u(words=%zu)\n",
+                tcsName, tcsProg->tessControlSpirv.size(),
+                tesName, tesProg->tessEvalSpirv.size());
+        }
+        return nullptr;
+    }
+
+    // Plumb TCS output_vertices into the TES-as-compute translation
+    // (mirrors linkProgram's tcsOutputVertices extraction at
+    // ~line 19186). Without this the emitted gl_in stride is 0 and
+    // every patch collapses to the buffer origin.
+    auto tcsModes = extractTessellationModes(
+        tcsProg->tessControlSpirv.data(),
+        tcsProg->tessControlSpirv.size());
+
+    ShaderTranslator translator;
+    BindingMap bindings;  // graphics-stage default; tess stages live in this layout
+
+    auto synth = std::make_unique<GLProgramObject>();
+    synth->hasTessellation = true;
+    synth->tessControlOutputVertices = static_cast<GLint>(tcsModes.outputVertices);
+    synth->tessGenMode = tesProg->tessGenMode;
+    synth->tessGenSpacing = tesProg->tessGenSpacing;
+    synth->tessGenVertexOrder = tesProg->tessGenVertexOrder;
+    synth->tessGenPointMode = tesProg->tessGenPointMode;
+
+    // 1) TCS — compile with siblingTesInputSpirv so SPIRV-Cross's
+    //    helper-API closure walks TES's INPUT interface and
+    //    add_msl_shader_outputs the matching slots on TCS's main0_out.
+    //    Closes the per-CP buffer stride mismatch (Phase 7 / cluster A).
+    {
+        TranslatorOptions opts;
+        opts.forceTessellation = true;
+        opts.siblingTesInputSpirv = tesProg->tessEvalSpirv.data();
+        opts.siblingTesInputWordCount = tesProg->tessEvalSpirv.size();
+        try {
+            std::string log;
+            synth->tessControlMSL = translator.spirvToMSL(
+                tcsProg->tessControlSpirv.data(),
+                tcsProg->tessControlSpirv.size(),
+                bindings, &log, opts);
+            synth->tessControlReflection = translator.reflect(
+                tcsProg->tessControlSpirv.data(),
+                tcsProg->tessControlSpirv.size(),
+                bindings, nullptr);
+        } catch (...) {
+            synth->tessControlMSL.clear();
+        }
+    }
+
+    // 2) TES vertex form — kept for parity with the link-time path
+    //    even though the post-isolines-patch compute-only flow only
+    //    reads tessEvalAsComputeMSL.
+    {
+        TranslatorOptions opts;
+        opts.forceTessellation = true;
+        try {
+            synth->tessEvalMSL = translator.spirvToMSL(
+                tesProg->tessEvalSpirv.data(),
+                tesProg->tessEvalSpirv.size(),
+                bindings, nullptr, opts);
+        } catch (...) {
+            synth->tessEvalMSL.clear();
+        }
+    }
+
+    // 3) VS-as-compute. Required for Phase3 — captures per-vertex VS
+    //    output into a buffer the TCS dispatch reads via stage-input.
+    //    Skipped if the separable VS didn't preserve SPIR-V (e.g. it
+    //    was linked before β added the preservation in step 1a).
+    if (vsProg != nullptr && !vsProg->vertexSpirv.empty()) {
+        TranslatorOptions opts;
+        opts.forceVertexForTessellation = true;
+        try {
+            std::string log;
+            synth->tessVertexAsComputeMSL = translator.spirvToMSL(
+                vsProg->vertexSpirv.data(),
+                vsProg->vertexSpirv.size(),
+                bindings, &log, opts);
+            synth->tessVertexAsComputeReflection = translator.reflect(
+                vsProg->vertexSpirv.data(),
+                vsProg->vertexSpirv.size(),
+                bindings, nullptr);
+            // Strip the grid_size early-return — `dispatchThreads`
+            // produces (0,0,0) for spvStageInputSize on macOS Apple
+            // Silicon and the kernel would no-op every thread. Same
+            // patch the link-time path applies (~line 19167).
+            if (!synth->tessVertexAsComputeMSL.empty()) {
+                std::string& mslRef = synth->tessVertexAsComputeMSL;
+                const std::string needle =
+                    "if (any(gl_GlobalInvocationID >= spvStageInputSize))\n"
+                    "        return;";
+                const std::size_t pos = mslRef.find(needle);
+                if (pos != std::string::npos) {
+                    mslRef.replace(pos, needle.size(),
+                        "/* AppGL: grid_size early-return stripped */");
+                }
+            }
+        } catch (...) {
+            synth->tessVertexAsComputeMSL.clear();
+        }
+    }
+
+    // 4) TES-as-compute with tesePatchVertices. The compute kernel
+    //    consumes a domain-coord buffer + a per-CP VS-output buffer
+    //    and writes its output into a TF-capture buffer.
+    {
+        TranslatorOptions opts;
+        opts.forceTessellation = true;
+        opts.forceTessEvalAsCompute = true;
+        opts.tesePatchVertices = static_cast<std::uint32_t>(tcsModes.outputVertices);
+        try {
+            synth->tessEvalAsComputeMSL = translator.spirvToMSL(
+                tesProg->tessEvalSpirv.data(),
+                tesProg->tessEvalSpirv.size(),
+                bindings, nullptr, opts);
+            synth->tessEvalAsComputeReflection = translator.reflect(
+                tesProg->tessEvalSpirv.data(),
+                tesProg->tessEvalSpirv.size(),
+                bindings, nullptr);
+            // Reflect the TES output struct layout for the TF writer.
+            synth->tessEvalOutputLayout =
+                translator.reflectStageOutputLayout(
+                    tesProg->tessEvalSpirv.data(),
+                    tesProg->tessEvalSpirv.size(),
+                    opts);
+        } catch (...) {
+            synth->tessEvalAsComputeMSL.clear();
+        }
+    }
+
+    // 5) FS + VS render-form MSL — copy from separable programs (already
+    //    translated at separable-link time). Mirror the resolveDrawProgram
+    //    pattern for non-tess pipeline-bound draws.
+    if (fsProg != nullptr) {
+        synth->fragmentMSL = fsProg->fragmentMSL;
+        synth->fragmentReflection = fsProg->fragmentReflection;
+    }
+    if (vsProg != nullptr) {
+        synth->vertexMSL = vsProg->vertexMSL;
+        synth->vertexReflection = vsProg->vertexReflection;
+    }
+
+    // Carry SPIR-V onto the synth program so any downstream emulator
+    // path that wants it (TessellationEmulator parsed-module cache,
+    // CPU TF writer counter formulas) can find it without reaching
+    // back across separable program boundaries.
+    synth->vertexSpirv = vsProg ? vsProg->vertexSpirv : std::vector<std::uint32_t>{};
+    synth->tessControlSpirv = tcsProg->tessControlSpirv;
+    synth->tessEvalSpirv = tesProg->tessEvalSpirv;
+
+    // TF varying names live on the TES separable program (linked
+    // there via glTransformFeedbackVaryings or in-shader xfb_buffer
+    // qualifiers). The Metal TF writer reads this list to find each
+    // varying inside the TES output struct.
+    synth->transformFeedbackVaryingNames = tesProg->transformFeedbackVaryingNames;
+    synth->transformFeedbackBufferMode = tesProg->transformFeedbackBufferMode;
+
+    // Step 3 — run the same Metal tess probe linkProgram does, but
+    // against the synthesised cross-stage MSL. Stash retained PSOs +
+    // metalTessTier so the caller's gate (line ~23011) engages and
+    // `tryMetalTessellationDraw` runs the encoder against this synth
+    // program.
+    bool probeOk = false;
+    int probeVcOk = 0, probeTecOk = 0, probeRenderOk = 0;
+    std::string probeDiag;
+    if (frameGraph != nullptr &&
+        !synth->tessControlMSL.empty() &&
+        (!synth->tessEvalMSL.empty() ||
+         !synth->tessEvalAsComputeMSL.empty()) &&
+        !synth->fragmentMSL.empty()) {
+        MetalFrameGraph::TessPipelineProbeResult probe =
+            frameGraph->probeTessellationPipeline(
+                synth->tessControlMSL,
+                synth->tessEvalMSL,
+                synth->fragmentMSL,
+                synth->tessGenMode,
+                synth->tessGenSpacing,
+                synth->tessGenVertexOrder,
+                synth->tessVertexAsComputeMSL,
+                synth->tessEvalAsComputeMSL);
+        probeVcOk = probe.vertexComputeOk ? 1 : 0;
+        probeTecOk = probe.tessEvalComputeOk ? 1 : 0;
+        probeRenderOk = probe.renderOk ? 1 : 0;
+        probeDiag = probe.diagnostic;
+
+        if (probe.vertexComputeOk) {
+            synth->metalTessVertexPipelineState = probe.vertexComputePipelineState;
+        }
+        if (probe.tessEvalComputeOk) {
+            synth->metalTessEvalComputePipelineState = probe.tessEvalComputePipelineState;
+        }
+        // Mirror linkProgram's tier classification (line ~19378). The
+        // pipeline-bound tess path is always Phase3 — the test surface
+        // (gl_MaxPatchVertices / data_pass_through / etc.) declares
+        // VS-input, per-CP, or per-patch buffers that the Phase-2 code
+        // path can't carry. Use the same handleability scan as
+        // linkProgram.
+        const bool needsPhase3 =
+            probe.computeOk && (
+                synth->tessControlMSL.find("spvIn [[buffer(") != std::string::npos ||
+                synth->tessControlMSL.find("spvOut [[buffer(") != std::string::npos ||
+                synth->tessControlMSL.find("spvPatchOut [[buffer(") != std::string::npos ||
+                synth->tessEvalMSL.find("spvIn [[buffer(") != std::string::npos ||
+                synth->tessEvalMSL.find("spvPatchIn [[buffer(") != std::string::npos);
+
+        if (probe.computeOk && needsPhase3 && probe.vertexComputeOk) {
+            synth->metalTessTier = GLProgramObject::MetalTessTier::Phase3;
+            synth->metalTessControlPipelineState = probe.computePipelineState;
+            probeOk = true;
+        } else if (probe.computeOk && !needsPhase3) {
+            synth->metalTessTier = GLProgramObject::MetalTessTier::Phase2;
+            synth->metalTessControlPipelineState = probe.computePipelineState;
+            probeOk = true;
+        } else if (probe.computeOk) {
+            // Phase3 needed but VS-compute PSO didn't build. Release
+            // the orphan TCS PSO so we don't leak. Synth's
+            // metalTessTier stays None → caller's gate fails → CPU
+            // path runs (same as combined-program failure mode).
+            releaseRetainedMetalObject(probe.computePipelineState);
+        }
+    } else if (detectorEnabled()) {
+        std::fprintf(stderr,
+            "APPGL_DETECTOR lift_pipe_synth probe_skipped "
+            "frameGraph=%d tcsMSL=%d teMSL=%d teCompMSL=%d fsMSL=%d\n",
+            frameGraph != nullptr ? 1 : 0,
+            synth->tessControlMSL.empty() ? 0 : 1,
+            synth->tessEvalMSL.empty() ? 0 : 1,
+            synth->tessEvalAsComputeMSL.empty() ? 0 : 1,
+            synth->fragmentMSL.empty() ? 0 : 1);
+    }
+
+    if (detectorEnabled()) {
+        std::fprintf(stderr,
+            "APPGL_DETECTOR lift_pipe_synth translate "
+            "vs=%u tcs=%u tes=%u fs=%u "
+            "msl_sizes=[v=%zu,tc=%zu,te=%zu,fs=%zu,vc=%zu,tec=%zu] "
+            "tcs_outputVertices=%d tessGenMode=0x%04X "
+            "outLayout_struct=%zu tfVaryings=%zu "
+            "probe=[ok=%d vcOk=%d tecOk=%d renderOk=%d tier=%d] diag=\"%.120s\"\n",
+            vsName, tcsName, tesName, fsName,
+            synth->vertexMSL.size(),
+            synth->tessControlMSL.size(),
+            synth->tessEvalMSL.size(),
+            synth->fragmentMSL.size(),
+            synth->tessVertexAsComputeMSL.size(),
+            synth->tessEvalAsComputeMSL.size(),
+            (int)tcsModes.outputVertices,
+            (unsigned)synth->tessGenMode,
+            synth->tessEvalOutputLayout.structSize,
+            synth->transformFeedbackVaryingNames.size(),
+            probeOk ? 1 : 0,
+            probeVcOk, probeTecOk, probeRenderOk,
+            (int)synth->metalTessTier,
+            probeDiag.c_str());
+    }
+
+    ppo.syntheticTessProgram = std::move(synth);
+    return ppo.syntheticTessProgram.get();
+}
+
 bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                                                 GLuint programName,
                                                 GLenum mode,
@@ -22407,8 +22783,38 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         info.outGeneratedVertCount = &tfGeneratedVerts;
         info.outTesComputeOutBuf = &tfRetainedOutBuf;
     }
+    // T4F bail-trace: log the runTessTFWrite inputs at the gate so we
+    // can pinpoint where the pipeline-path main draw bails on its way
+    // from lift_gate to writeTessTFAndUpdateCounters. For pipeline-
+    // resolved program (resolveDrawProgram returns VS container), the
+    // tess metadata fields may be null/empty — runTessTFWrite collapses
+    // to false, encoder runs but writeTessTFAndUpdateCounters is never
+    // called → TF buffer stays at zero-init.
+    if (detectorEnabled()) {
+        std::fprintf(stderr,
+            "APPGL_DETECTOR lift_pre_encode prog=%u "
+            "metalTessEvalComputePSO_present=%d tesOutSize=%zu "
+            "enableMetalTF=%d -> runTessTFWrite=%d\n",
+            (unsigned)programName,
+            program.metalTessEvalComputePipelineState != nullptr ? 1 : 0,
+            program.tessEvalOutputLayout.structSize,
+            std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr ? 1 : 0,
+            runTessTFWrite ? 1 : 0);
+    }
 
     const bool encodeOk = frameGraph->encodeMetalTessellationDraw(info);
+
+    if (detectorEnabled()) {
+        std::fprintf(stderr,
+            "APPGL_DETECTOR lift_post_encode prog=%u encodeOk=%d "
+            "tfGeneratedVerts=%u tfRetainedOutBuf_present=%d "
+            "-> writeTess_will_fire=%d\n",
+            (unsigned)programName,
+            encodeOk ? 1 : 0,
+            (unsigned)tfGeneratedVerts,
+            tfRetainedOutBuf != nullptr ? 1 : 0,
+            (runTessTFWrite && tfGeneratedVerts > 0 && tfRetainedOutBuf != nullptr) ? 1 : 0);
+    }
 
     if (runTessTFWrite && tfGeneratedVerts > 0 && tfRetainedOutBuf != nullptr) {
         id<MTLBuffer> tesOut =
@@ -22943,12 +23349,45 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // guard in tryMetalTessellationDraw). GS-after-tess is also gated
     // off here; Phase 5 will extend the Metal path to consume TES
     // output through the GS emulator.
-    if (program != nullptr &&
-        program->hasTessellation &&
-        program->metalTessTier != GLProgramObject::MetalTessTier::None &&
-        !program->geometryEmulated) {
+    // T4F fix: when pipeline-bound (currentProgram=0 and
+    // resolveDrawProgram returned the VS container), tess metadata
+    // lives on the SEPARABLE TES program — not on the resolved VS
+    // container. Look up the pipeline's TES program (BeginTF chain:
+    // GS > TES > VS, same as 26d056a) and use it for the gate decision
+    // + tryMetalTessellationDraw. Without this, gl_MaxPatchVertices_*
+    // pipeline-path main draws bail at this gate (VS container has
+    // hasTessellation=false / metalTessTier=None) → fall through to
+    // CPU emulator → TF buffer remains zero → verifier fails on
+    // result_position_data.size() != 1.
+    // β [metal-tess-TF]: when a pipeline with separable VS+TCS+TES+FS
+    // is bound (currentProgram=0, resolveDrawProgram returned the VS
+    // container which lacks tess metadata), ask the pipeline-time
+    // orchestrator to synthesise a Metal-tess-ready combined program.
+    // For step-1 scaffold this returns nullptr and we fall through to
+    // the CPU emulator (existing behaviour) — step 2/3 fill in the
+    // cross-stage translation + probe so the synthesised program is
+    // tier=Phase3 with all PSOs built.
+    GLProgramObject* tessProgram = program;
+    GLuint tessProgramName = programName;
+    if (impl_->state->currentProgram() == 0) {
+        const GLuint ppoId = impl_->state->currentProgramPipeline();
+        if (ppoId != 0) {
+            if (GLProgramPipelineObject* ppo =
+                    impl_->objects->programPipelines().get(ppoId)) {
+                if (GLProgramObject* synth =
+                        impl_->ensurePipelineTessSynthesizedProgram(*ppo)) {
+                    tessProgram = synth;
+                    tessProgramName = 0;  // synthetic — no GL program name
+                }
+            }
+        }
+    }
+    if (tessProgram != nullptr &&
+        tessProgram->hasTessellation &&
+        tessProgram->metalTessTier != GLProgramObject::MetalTessTier::None &&
+        !tessProgram->geometryEmulated) {
         if (impl_->tryMetalTessellationDraw(
-                *program, programName, mode, count, first)) {
+                *tessProgram, tessProgramName, mode, count, first)) {
             APPGL_LOG(DRAW, @"drawArrays metal-tess ok: count=%d first=%d",
                       count, first);
             return true;

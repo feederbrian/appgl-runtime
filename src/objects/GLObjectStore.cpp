@@ -20,6 +20,16 @@ GLProgramObject::~GLProgramObject() = default;
 GLProgramObject::GLProgramObject(GLProgramObject&&) noexcept = default;
 GLProgramObject& GLProgramObject::operator=(GLProgramObject&&) noexcept = default;
 
+// β [metal-tess-TF] — same pattern as GLProgramObject above:
+// the `std::unique_ptr<GLProgramObject>` syntheticTessProgram field
+// requires GLProgramObject to be complete at the point of destruction.
+// Defining the special members here keeps any caller TU free of the
+// SpirvModule include + the GLProgramObject destructor body.
+GLProgramPipelineObject::GLProgramPipelineObject() = default;
+GLProgramPipelineObject::~GLProgramPipelineObject() = default;
+GLProgramPipelineObject::GLProgramPipelineObject(GLProgramPipelineObject&&) noexcept = default;
+GLProgramPipelineObject& GLProgramPipelineObject::operator=(GLProgramPipelineObject&&) noexcept = default;
+
 GLObjectStore::GLObjectStore(GLsizei maxVertexAttribs)
     : maxVertexAttribs_(maxVertexAttribs) {
 }

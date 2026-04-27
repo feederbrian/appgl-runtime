@@ -64,6 +64,7 @@ _STATUS_RE = re.compile(r'StatusCode="([^"]+)"')
 _TEST_BOUNDARY_RE = re.compile(r"^Test case '([^']+)'\.\.\s*$")
 _DETECTOR_RE = re.compile(
     r"^APPGL_DETECTOR tf_read "
+    r"(?:seq=\d+ )?"  # optional seq= prefix introduced in commit 57ef4d3
     r"target=0x([0-9A-Fa-f]+) "
     r"buf=(\d+) "
     r"offset=(-?\d+) "
