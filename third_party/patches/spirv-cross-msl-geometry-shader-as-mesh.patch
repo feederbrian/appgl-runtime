@@ -1,0 +1,675 @@
+diff --git a/main.cpp b/main.cpp
+--- a/main.cpp
++++ b/main.cpp
+@@ -667,6 +667,7 @@
+ 	bool msl_vertex_for_tessellation = false;
+ 	bool msl_tess_evaluation_as_compute = false;
+ 	uint32_t msl_tese_input_patch_vertices = 0;
++	bool msl_geometry_shader_as_mesh = false;
+ 	uint32_t msl_additional_fixed_sample_mask = 0xffffffff;
+ 	bool msl_arrayed_subpass_input = false;
+ 	uint32_t msl_r32ui_linear_texture_alignment = 4;
+@@ -949,6 +950,8 @@
+ 	                "\t\tEnables transform-feedback capture of TES output. Pair with --msl-tese-input-patch-vertices to set the per-patch input stride.\n"
+ 	                "\t[--msl-tese-input-patch-vertices <count>]:\n\t\t[AppGL fork] Override the per-patch input vertex count used when computing `gl_in = &spvIn[gl_PrimitiveID * count]` in TES-as-compute mode.\n"
+ 	                "\t\tDefault is the linked TCS's `layout(vertices = N) out;` value; setting this is required when SPIRV-Cross can't see the TCS.\n"
++	                "\t[--msl-geometry-shader-as-mesh]:\n\t\t[AppGL fork] Translate a geometry shader to a Metal `[[mesh]]` function instead of rejecting the source.\n"
++	                "\t\tDeclares `spvMesh_t` from the GS's input/output topology + `max_vertices`, captures `EmitVertex`/`EndPrimitive` into a function-local vertex/primitive buffer, and flushes via `spvMesh.set_vertex` / `set_primitive` / `set_primitive_count` at function exit.\n"
+ 	                "\t[--msl-additional-fixed-sample-mask <mask>]:\n"
+ 	                "\t\tSet an additional fixed sample mask. If the shader outputs a sample mask, then the final sample mask will be a bitwise AND of the two.\n"
+ 	                "\t[--msl-arrayed-subpass-input]:\n\t\tAssume that images of dimension SubpassData have multiple layers. Layered input attachments are accessed relative to BuiltInLayer.\n"
+@@ -1291,6 +1294,7 @@
+ 		msl_opts.vertex_for_tessellation = args.msl_vertex_for_tessellation;
+ 		msl_opts.tess_evaluation_as_compute = args.msl_tess_evaluation_as_compute;
+ 		msl_opts.tese_input_patch_vertices = args.msl_tese_input_patch_vertices;
++		msl_opts.geometry_shader_as_mesh = args.msl_geometry_shader_as_mesh;
+ 		msl_opts.additional_fixed_sample_mask = args.msl_additional_fixed_sample_mask;
+ 		msl_opts.arrayed_subpass_input = args.msl_arrayed_subpass_input;
+ 		msl_opts.r32ui_linear_texture_alignment = args.msl_r32ui_linear_texture_alignment;
+@@ -1884,6 +1888,8 @@
+ 	        [&args](CLIParser &) { args.msl_tess_evaluation_as_compute = true; });
+ 	cbs.add("--msl-tese-input-patch-vertices",
+ 	        [&args](CLIParser &parser) { args.msl_tese_input_patch_vertices = parser.next_uint(); });
++	cbs.add("--msl-geometry-shader-as-mesh",
++	        [&args](CLIParser &) { args.msl_geometry_shader_as_mesh = true; });
+ 	cbs.add("--msl-additional-fixed-sample-mask",
+ 	        [&args](CLIParser &parser) { args.msl_additional_fixed_sample_mask = parser.next_hex_uint(); });
+ 	cbs.add("--msl-arrayed-subpass-input", [&args](CLIParser &) { args.msl_arrayed_subpass_input = true; });
+diff --git a/spirv_msl.hpp b/spirv_msl.hpp
+--- a/spirv_msl.hpp
++++ b/spirv_msl.hpp
+@@ -540,6 +540,41 @@
+ 		// per-CP device buffer).
+ 		bool split_tcs_outputs_by_consumption = false;
+ 
++		// AppGL fork addition (msl-geometry-shader-as-mesh.patch): emit
++		// geometry shaders (`ExecutionModelGeometry`) as Metal mesh
++		// shaders (`[[mesh]] void main0(...)`) instead of the current
++		// non-functional vertex-form emission. Targets Metal devices
++		// with mesh shader support (Apple GPU family 7+ / Metal 3+);
++		// chips lacking support fall back to the AppGL CPU geometry
++		// shader interpreter via runtime capability detection.
++		//
++		// Emission strategy: each GS invocation maps to one mesh
++		// threadgroup with a single thread. `OpEmitVertex` becomes a
++		// member-by-member copy of the per-vertex output struct into
++		// `gl_MeshVerticesEXT[spvVertexIndex]` followed by `++spvVertexIndex`.
++		// `OpEndPrimitive` writes triangle/line/point indices into
++		// `gl_PrimitiveTriangleIndicesEXT` (or LineIndicesEXT /
++		// PointIndicesEXT) based on the GS output topology, captures
++		// per-primitive outputs (gl_Layer / gl_PrimitiveID / gl_ViewportIndex)
++		// from the latched per-primitive struct, and increments
++		// `spvPrimitiveIndex`. At function exit, `SetMeshOutputsEXT(
++		// spvVertexIndex, spvPrimitiveIndex)` emits the meshlet sizes.
++		//
++		// Out of scope (deferred per Sprint 3 narrowed plan):
++		//  - Streams (gl_StreamID 0-3): mesh shaders have no native
++		//    multi-stream output; would need multi-dispatch or stream-
++		//    tagged single-dispatch emulation.
++		//  - Adjacency input topologies (`triangle_adjacency`,
++		//    `line_adjacency`): no mesh shader equivalent; tests using
++		//    these stay on the AppGL CPU GS interpreter.
++		//  - GS-after-TES interaction (geometry shader running on TES
++		//    output): cross-pipeline coordination outside this option's
++		//    scope.
++		//
++		// Requires `msl_version >= 30000` (Metal 3.0); mesh shaders are
++		// not available in earlier Metal versions.
++		bool geometry_shader_as_mesh = false;
++
+ 		// Assume that SubpassData images have multiple layers. Layered input attachments
+ 		// are addressed relative to the Layer output from the vertex pipeline. This option
+ 		// has no effect with multiview, since all input attachments are assumed to be layered
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -1803,7 +1803,12 @@
+ 	}
+ 
+ 	// Holds SetMeshOutputsEXT information. Threadgroup since first thread wins.
+-	if (processing_entry_point && is_mesh_shader())
++	// GS-as-mesh tracks vertex/primitive counts via function-local
++	// spvVertexIndex/spvPrimitiveIndex incremented by EmitVertex/EndPrimitive,
++	// so spvMeshSizes is dead in that mode.
++	if (processing_entry_point && is_mesh_shader() &&
++	    !(msl_options.geometry_shader_as_mesh &&
++	      get_execution_model() == ExecutionModelGeometry))
+ 		statement("threadgroup uint2 spvMeshSizes;");
+ }
+ 
+@@ -1885,6 +1890,38 @@
+ 	// before any emission walks variables (so the mask is in place
+ 	// before is_stage_output_variable_masked is consulted).
+ 	classify_tcs_outputs_by_consumption();
++	// AppGL fork (msl-geometry-shader-as-mesh.patch): synthesize
++	// DecorationPerPrimitiveEXT on GS output builtins that are
++	// per-primitive in mesh shader form (gl_Layer, gl_ViewportIndex,
++	// gl_PrimitiveID-output). Without this, the existing meshlet block
++	// builder (`add_meshlet_block`) classifies them into spvPerVertex,
++	// which Metal then rejects with "invalid attribute
++	// 'render_target_array_index' for mesh vertex output declaration".
++	// Must run before build_implicit_builtins (which populates
++	// mesh_out_per_vertex / mesh_out_per_primitive struct types).
++	if (msl_options.geometry_shader_as_mesh && get_execution_model() == ExecutionModelGeometry)
++	{
++		// Force include of spvUnsafeArray template — the trailing emit
++		// uses `spvUnsafeArray<spvPerVertex, MAX_V>` for the local
++		// per-vertex output buffer, but if no other emission site
++		// triggers the include first, the template would be missing.
++		add_spv_func_and_recompile(SPVFuncImplUnsafeArray);
++
++		ir.for_each_typed_id<SPIRVariable>([&](uint32_t, SPIRVariable &var) {
++			if (var.storage != StorageClassOutput)
++				return;
++			if (!has_decoration(var.self, DecorationBuiltIn))
++				return;
++			BuiltIn builtin = BuiltIn(get_decoration(var.self, DecorationBuiltIn));
++			if (builtin == BuiltInLayer ||
++			    builtin == BuiltInViewportIndex ||
++			    builtin == BuiltInPrimitiveId)
++			{
++				if (!has_decoration(var.self, DecorationPerPrimitiveEXT))
++					set_decoration(var.self, DecorationPerPrimitiveEXT);
++			}
++		});
++	}
+ 	analyze_image_and_sampler_usage();
+ 	analyze_sampled_image_usage();
+ 	analyze_interlocked_resource_usage();
+@@ -8593,21 +8630,48 @@
+ 	emit_interface_block(stage_in_var_id);
+ 	emit_interface_block(patch_stage_in_var_id);
+ 
+-	if (get_execution_model() == ExecutionModelMeshEXT)
++	if (is_mesh_shader())
+ 	{
+ 		auto &execution = get_entry_point();
+ 		const char *topology = "";
+-		if (execution.flags.get(ExecutionModeOutputTrianglesEXT))
+-			topology = "topology::triangle";
+-		else if (execution.flags.get(ExecutionModeOutputLinesEXT))
+-			topology = "topology::line";
+-		else if (execution.flags.get(ExecutionModeOutputPoints))
+-			topology = "topology::point";
++		uint32_t max_primitives = execution.output_primitives;
++		if (get_execution_model() == ExecutionModelMeshEXT)
++		{
++			if (execution.flags.get(ExecutionModeOutputTrianglesEXT))
++				topology = "topology::triangle";
++			else if (execution.flags.get(ExecutionModeOutputLinesEXT))
++				topology = "topology::line";
++			else if (execution.flags.get(ExecutionModeOutputPoints))
++				topology = "topology::point";
++		}
++		else if (msl_options.geometry_shader_as_mesh && get_execution_model() == ExecutionModelGeometry)
++		{
++			// AppGL fork (msl-geometry-shader-as-mesh.patch): derive
++			// mesh topology from GS output mode. GS uses different
++			// SPIR-V execution modes than mesh shaders. max_primitives
++			// is computed from max_vertices because GS doesn't carry a
++			// dedicated max_primitives mode.
++			if (execution.flags.get(ExecutionModeOutputTriangleStrip))
++			{
++				topology = "topology::triangle";
++				max_primitives = execution.output_vertices > 2 ? execution.output_vertices - 2 : 1;
++			}
++			else if (execution.flags.get(ExecutionModeOutputLineStrip))
++			{
++				topology = "topology::line";
++				max_primitives = execution.output_vertices > 1 ? execution.output_vertices - 1 : 1;
++			}
++			else if (execution.flags.get(ExecutionModeOutputPoints))
++			{
++				topology = "topology::point";
++				max_primitives = execution.output_vertices;
++			}
++		}
+ 
+ 		const char *per_vertex = mesh_out_per_vertex ? "spvPerVertex" : "float4";
+ 		const char *per_primitive = mesh_out_per_primitive ? "spvPerPrimitive" : "void";
+ 		statement("using spvMesh_t = mesh<", per_vertex, ", ", per_primitive, ", ", execution.output_vertices, ", ",
+-		          execution.output_primitives, ", ", topology, ">;");
++		          max_primitives, ", ", topology, ">;");
+ 		statement("");
+ 	}
+ }
+@@ -10322,6 +10386,52 @@
+ 
+ 		if (is_out_of_bounds_tessellation_level(ops[0]))
+ 			break;
++
++		// AppGL fork (msl-geometry-shader-as-mesh.patch): when GS source
++		// is being emitted as a mesh shader, OpStore to a per-vertex /
++		// per-primitive output must redirect into the function-local
++		// spvVertices[spvVertexIndex].MEMBER or spvCurrentPrim.MEMBER,
++		// not the source-level global / SPIRV-Cross threadgroup
++		// variable which doesn't carry the mesh-output semantics.
++		//
++		// Approach: use to_pointer_expression(ops[0]) to get the LHS
++		// expression as SPIRV-Cross would normally emit (e.g.,
++		// "gl_out.gl_Position", "out_color", or
++		// "_RESERVED_IDENTIFIER_FIXUP_gl_Layer"), then rewrite the
++		// variable-prefix into the appropriate per-vertex / per-primitive
++		// target.
++		if (msl_options.geometry_shader_as_mesh &&
++		    get_execution_model() == ExecutionModelGeometry)
++		{
++			auto *target_var = maybe_get_backing_variable(ops[0]);
++			if (target_var && target_var->storage == StorageClassOutput)
++			{
++				const bool per_primitive = is_per_primitive_variable(*target_var);
++				// to_pointer_expression returns "&MEMBER" form for the
++				// pointer LHS (verified via APPGL_GS_AS_MESH_TRACE).
++				// e.g. "&gl_Position", "&out_color", "&gl_Layer".
++				// Strip the leading '&' to get the bare member name.
++				std::string member = to_pointer_expression(ops[0]);
++				if (!member.empty() && member.front() == '&')
++					member.erase(0, 1);
++				// Strip the SPIRV-Cross sanitization prefix if present
++				// (e.g. "_RESERVED_IDENTIFIER_FIXUP_gl_Layer" → "gl_Layer").
++				const std::string sanitize_prefix = "_RESERVED_IDENTIFIER_FIXUP_";
++				if (member.compare(0, sanitize_prefix.size(), sanitize_prefix) == 0)
++					member.erase(0, sanitize_prefix.size());
++
++				if (!member.empty())
++				{
++					if (per_primitive)
++						statement("spvCurrentPrim.", member, " = ",
++						          to_unpacked_expression(ops[1]), ";");
++					else
++						statement("spvVertices[spvVertexIndex].", member, " = ",
++						          to_unpacked_expression(ops[1]), ";");
++					break;
++				}
++			}
++		}
+ 
+ 		if (needs_frag_discard_checks() &&
+ 		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
+@@ -10884,6 +10994,67 @@
+ 		break;
+ 	}
+ 
++	// AppGL fork (msl-geometry-shader-as-mesh.patch): GS opcode translation
++	// when emitting GS source as Metal mesh shader form.
++	case OpEmitVertex:
++	{
++		if (msl_options.geometry_shader_as_mesh && get_execution_model() == ExecutionModelGeometry)
++		{
++			// The actual per-vertex output capture is handled by the
++			// OpStore intercept (Component 4) which redirects writes to
++			// per-vertex output globals into spvMesh.set_vertex(spvVertexIndex, ...).
++			// Here we just advance the vertex counter.
++			statement("++spvVertexIndex;");
++			break;
++		}
++		// Fall through to the inherited GLSL emission (which produces literal
++		// `EmitVertex();` — never Metal-valid, but preserves prior behaviour
++		// for callers without the option).
++		CompilerGLSL::emit_instruction(instruction);
++		break;
++	}
++
++	case OpEndPrimitive:
++	{
++		if (msl_options.geometry_shader_as_mesh && get_execution_model() == ExecutionModelGeometry)
++		{
++			// MVP scope: triangle_strip output with single primitive
++			// per EndPrimitive. For the synthetic test (max_vertices=3,
++			// 3 EmitVertex + 1 EndPrimitive), this produces one triangle
++			// from the last 3 vertices. Strip-pattern handling for
++			// max_vertices > 3 is deferred (would need strip-start
++			// tracking to emit (N-2) triangles from a strip of N vertices
++			// with proper winding alternation per GL spec).
++			auto &execution = get_entry_point();
++			if (execution.flags.get(ExecutionModeOutputTriangleStrip))
++			{
++				statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 0u, spvVertexIndex - 3u);");
++				statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 1u, spvVertexIndex - 2u);");
++				statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 2u, spvVertexIndex - 1u);");
++			}
++			else if (execution.flags.get(ExecutionModeOutputLineStrip))
++			{
++				statement("spvMesh.set_index(spvPrimitiveIndex * 2u + 0u, spvVertexIndex - 2u);");
++				statement("spvMesh.set_index(spvPrimitiveIndex * 2u + 1u, spvVertexIndex - 1u);");
++			}
++			else if (execution.flags.get(ExecutionModeOutputPoints))
++			{
++				statement("spvMesh.set_index(spvPrimitiveIndex, spvVertexIndex - 1u);");
++			}
++			// Flush per-primitive outputs (gl_Layer, gl_ViewportIndex,
++			// gl_PrimitiveID) latched in spvCurrentPrim by the OpStore
++			// intercept. Without this call the per-primitive struct is
++			// silently dropped — the per-vertex set_vertex calls happen
++			// at function exit, but per-primitive data is per-EndPrimitive.
++			if (mesh_out_per_primitive != 0)
++				statement("spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);");
++			statement("++spvPrimitiveIndex;");
++			break;
++		}
++		CompilerGLSL::emit_instruction(instruction);
++		break;
++	}
++
+ 	case OpAssumeTrueKHR:
+ 	{
+ 		auto condition = ops[0];
+@@ -14616,6 +14787,20 @@
+ 	case ExecutionModelTaskEXT:
+ 		entry_type = "[[object]]";
+ 		break;
++	case ExecutionModelGeometry:
++		// AppGL fork (msl-geometry-shader-as-mesh.patch): under
++		// `geometry_shader_as_mesh`, GS source emits as Metal mesh
++		// shader form. Without the option set, no valid Metal entry
++		// type exists for GS source — fall through to `unknown` (the
++		// existing GS-as-MSL emission was already non-functional pre-
++		// patch, so this preserves the broken-by-design baseline).
++		if (msl_options.geometry_shader_as_mesh)
++		{
++			entry_type = "[[mesh]]";
++			break;
++		}
++		entry_type = "unknown";
++		break;
+ 	default:
+ 		entry_type = "unknown";
+ 		break;
+@@ -14636,7 +14821,17 @@
+ 
+ bool CompilerMSL::is_mesh_shader() const
+ {
+-	return get_execution_model() == ExecutionModelMeshEXT;
++	if (get_execution_model() == ExecutionModelMeshEXT)
++		return true;
++	// AppGL fork (msl-geometry-shader-as-mesh.patch): under
++	// `geometry_shader_as_mesh`, geometry-shader source SPIR-V emits as
++	// Metal mesh shader form. Threading the existing mesh-shader emission
++	// infrastructure (`emit_mesh_entry_point`, `add_meshlet_block`,
++	// `OpSetMeshOutputsEXT` handling, etc.) through this predicate is
++	// the cheapest route to reusing it for GS source.
++	if (msl_options.geometry_shader_as_mesh && get_execution_model() == ExecutionModelGeometry)
++		return true;
++	return false;
+ }
+ 
+ bool CompilerMSL::uses_explicit_early_fragment_test()
+@@ -15693,10 +15888,96 @@
+ 
+ 	if (is_mesh_shader())
+ 	{
+-		// If shader doesn't call SetMeshOutputsEXT, nothing should be rendered.
+-		// No need to barrier after this, because only thread 0 writes to this later.
+-		entry_func.fixup_hooks_in.push_back([this]() { statement("if (gl_LocalInvocationIndex == 0) spvMeshSizes.y = 0u;"); });
+-		entry_func.fixup_hooks_out.push_back([this]() { emit_mesh_outputs(); });
++		// AppGL fork (msl-geometry-shader-as-mesh.patch): GS-as-mesh
++		// uses a different trailing emit and entry-state setup than
++		// mesh-source SPIR-V. Differentiate here.
++		const bool gs_as_mesh = msl_options.geometry_shader_as_mesh &&
++		                        get_execution_model() == ExecutionModelGeometry;
++
++		if (gs_as_mesh)
++		{
++			// Counters + function-local output arrays for GS-as-mesh.
++			// spvVertices captures per-vertex outputs (EmitVertex sites);
++			// spvCurrentPrim captures per-primitive outputs (latched until
++			// EndPrimitive flushes to spvMesh). Both are function-scope,
++			// not threadgroup, because GS-as-mesh maps each GS invocation
++			// to one mesh threadgroup with a single thread.
++			//
++			// Component 6: input declarations — GS source code references
++			// per-input-vertex `gl_in[]` (implicit gl_PerVertex array) and
++			// any `in <type> name[];` user varyings declared at top level.
++			// Mesh shaders consume inputs via `[[payload]]` populated by an
++			// optional object stage; without an object stage this Step 2
++			// MVP zero-initializes the locals so MSL compiles cleanly.
++			// Real per-input-vertex data flow is a future-sprint integration
++			// (object stage that loads VS-output into payload).
++			entry_func.fixup_hooks_in.push_back([this]() {
++				auto &execution = get_entry_point();
++				statement("uint spvVertexIndex = 0u;");
++				statement("uint spvPrimitiveIndex = 0u;");
++				statement("spvUnsafeArray<spvPerVertex, ", execution.output_vertices, "> spvVertices = {};");
++				if (mesh_out_per_primitive != 0)
++					statement("spvPerPrimitive spvCurrentPrim = {};");
++				// Declare zero-init locals for each input variable. Walks
++				// the IR's Input-storage-class variables and emits a
++				// `spvUnsafeArray<ELEMENT_TYPE, N> NAME = {};` for arrayed
++				// inputs (the typical GS shape: `gl_in[]`, `in_color[]`)
++				// or `ELEMENT_TYPE NAME = {};` for scalars.
++				//
++				// Uses `get_variable_data_type` to peel the StorageClassInput
++				// pointer (avoiding `type_to_glsl`'s `thread T *` decoration)
++				// and `get_variable_element_type` to peel both pointer and
++				// array, so `type_to_glsl` returns the bare element-type name
++				// suitable as a `spvUnsafeArray` template parameter.
++				ir.for_each_typed_id<SPIRVariable>([&](uint32_t, SPIRVariable &var) {
++					if (var.storage != StorageClassInput)
++						return;
++					const auto &data_type = get_variable_data_type(var);
++					const bool is_block = has_decoration(data_type.self, DecorationBlock) ||
++					                      (!data_type.array.empty() &&
++					                       has_decoration(get<SPIRType>(data_type.parent_type).self,
++					                                      DecorationBlock));
++					// Skip pure builtins (e.g. gl_PrimitiveIDIn) since they
++					// have dedicated emission paths; gl_in (a builtin block
++					// variable) is *not* skipped — the body references it
++					// directly and needs a function-local declaration.
++					if (is_builtin_variable(var) && !is_block)
++						return;
++					const std::string &name = get_name(var.self);
++					if (name.empty())
++						return;
++					const auto &element_type = get_variable_element_type(var);
++					std::string type_str = type_to_glsl(element_type);
++					if (!data_type.array.empty())
++					{
++						uint32_t array_size = data_type.array.front();
++						statement("spvUnsafeArray<", type_str, ", ", array_size, "> ", name, " = {};");
++					}
++					else
++					{
++						statement(type_str, " ", name, " = {};");
++					}
++				});
++			});
++			entry_func.fixup_hooks_out.push_back([this]() {
++				// Trailing emit: copy local arrays into spvMesh outputs.
++				// Distinct from emit_mesh_outputs (which assumes
++				// mesh-source IR shape with array-typed output globals).
++				statement("spvMesh.set_primitive_count(spvPrimitiveIndex);");
++				statement("for (uint spvVI = 0u; spvVI < spvVertexIndex; ++spvVI)");
++				begin_scope();
++				statement("spvMesh.set_vertex(spvVI, spvVertices[spvVI]);");
++				end_scope();
++			});
++		}
++		else
++		{
++			// Mesh-source SPIR-V path — existing behaviour.
++			// If shader doesn't call SetMeshOutputsEXT, nothing should be rendered.
++			// No need to barrier after this, because only thread 0 writes to this later.
++			entry_func.fixup_hooks_in.push_back([this]() { statement("if (gl_LocalInvocationIndex == 0) spvMeshSizes.y = 0u;"); });
++			entry_func.fixup_hooks_out.push_back([this]() { emit_mesh_outputs(); });
++		}
+ 	}
+ 
+ 	// Look for sampled images and buffer. Add hooks to set up the swizzle constants or array lengths.
+diff --git a/tools/gs-as-mesh-input.geom b/tools/gs-as-mesh-input.geom
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tools/gs-as-mesh-input.geom
+@@ -0,0 +1,37 @@
++// Synthetic GS for SPIRV-W Sprint 3 Step 2 — `geometry_shader_as_mesh` validation.
++//
++// Spec features exercised:
++//   - Input topology:           triangles (3 input vertices per primitive)
++//   - Output topology:          triangle_strip (3 output vertices = 1 triangle)
++//   - max_vertices:             3
++//   - EmitVertex calls:         3 (one per input vertex pass-through)
++//   - EndPrimitive calls:       1 (closes the strip after the 3 emits)
++//   - Per-primitive output:     gl_Layer (assigned per-vertex in source, captured per-primitive in mesh form)
++//   - Streams:                  none (defer per Step 2 scope)
++//   - Adjacency input:          none (defer per Step 2 scope)
++//   - Output user varyings:     vec4 out_color (per-vertex)
++//   - gl_in array reads:        gl_in[i].gl_Position
++//
++// This is the minimum-viable GS test for the "easy + medium" Step 2 scope:
++// triangle in/out + EmitVertex/EndPrimitive + per-primitive gl_Layer.
++
++#version 450
++#extension GL_EXT_geometry_shader : require
++
++layout(triangles) in;
++layout(triangle_strip, max_vertices = 3) out;
++
++layout(location = 0) in vec4 in_color[];
++layout(location = 0) out vec4 out_color;
++
++void main()
++{
++    for (int i = 0; i < gl_in.length(); ++i)
++    {
++        gl_Position = gl_in[i].gl_Position;
++        out_color = in_color[i];
++        gl_Layer = i;
++        EmitVertex();
++    }
++    EndPrimitive();
++}
+diff --git a/tools/gs-as-mesh-hand-target.metal b/tools/gs-as-mesh-hand-target.metal
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tools/gs-as-mesh-hand-target.metal
+@@ -0,0 +1,67 @@
++// Hand-authored target MSL for the synthetic GS test.
++// Validates the design before implementing in SPIRV-Cross emission paths.
++#include <metal_stdlib>
++#include <simd/simd.h>
++using namespace metal;
++
++template<typename T, size_t Num>
++struct spvUnsafeArray
++{
++    T elements[Num ? Num : 1];
++    thread T& operator [] (size_t pos) thread { return elements[pos]; }
++    constexpr const thread T& operator [] (size_t pos) const thread { return elements[pos]; }
++    device T& operator [] (size_t pos) device { return elements[pos]; }
++    constexpr const device T& operator [] (size_t pos) const device { return elements[pos]; }
++    constexpr const constant T& operator [] (size_t pos) const constant { return elements[pos]; }
++    threadgroup T& operator [] (size_t pos) threadgroup { return elements[pos]; }
++    constexpr const threadgroup T& operator [] (size_t pos) const threadgroup { return elements[pos]; }
++};
++
++struct spvPerVertex {
++    float4 gl_Position [[position]];
++    float4 out_color [[user(locn0)]];
++};
++
++struct spvPerPrimitive {
++    uint gl_Layer [[render_target_array_index]];
++};
++
++using spvMesh_t = mesh<spvPerVertex, spvPerPrimitive, 3, 1, topology::triangle>;
++
++struct PayloadVertex {
++    float4 gl_Position;
++    float4 in_color;
++};
++
++struct Payload {
++    PayloadVertex verts[3];
++};
++
++[[mesh]] void main0(spvMesh_t spvMesh,
++                    const object_data Payload& payload [[payload]],
++                    uint gl_LocalInvocationIndex [[thread_index_in_threadgroup]])
++{
++    uint spvVertexIndex = 0;
++    uint spvPrimitiveIndex = 0;
++    spvUnsafeArray<spvPerVertex, 3> spvVertices = {};
++    spvPerPrimitive spvCurrentPrim = {};
++
++    for (int i = 0; i < 3; ++i) {
++        spvVertices[spvVertexIndex].gl_Position = payload.verts[i].gl_Position;
++        spvVertices[spvVertexIndex].out_color = payload.verts[i].in_color;
++        spvCurrentPrim.gl_Layer = uint(i);
++        ++spvVertexIndex;
++    }
++    // EndPrimitive: triangle indices + per-primitive output + counter increment
++    spvMesh.set_index(spvPrimitiveIndex * 3u + 0u, 0u);
++    spvMesh.set_index(spvPrimitiveIndex * 3u + 1u, 1u);
++    spvMesh.set_index(spvPrimitiveIndex * 3u + 2u, 2u);
++    spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);
++    ++spvPrimitiveIndex;
++
++    // SetMeshOutputsEXT: copy local arrays to spvMesh output
++    spvMesh.set_primitive_count(spvPrimitiveIndex);
++    for (uint vi = 0; vi < spvVertexIndex; ++vi) {
++        spvMesh.set_vertex(vi, spvVertices[vi]);
++    }
++}
+diff --git a/tools/msl-gs-as-mesh-test.cpp b/tools/msl-gs-as-mesh-test.cpp
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tools/msl-gs-as-mesh-test.cpp
+@@ -0,0 +1,96 @@
++// Test for geometry_shader_as_mesh.
++// Compiles a single GS .spv twice — once with the flag off (preserving
++// upstream GS emission, which leaves `EmitVertex();` etc. as literal
++// passthrough that won't Metal-validate) and once with the flag on
++// (translating to a Metal `[[mesh]]` function that captures
++// EmitVertex/EndPrimitive into a function-local spvVertices buffer
++// and flushes via spvMesh.set_vertex / set_primitive / set_primitive_count).
++//
++// Asserts:
++//   flag-OFF — output preserves `EmitVertex` / `EndPrimitive` literal
++//              passthrough (current upstream behaviour).
++//   flag-ON  — output contains `[[mesh]]`, `spvMesh`, `set_vertex`,
++//              `set_primitive_count`, and the OpEmitVertex/OpEndPrimitive
++//              opcodes are intercepted (no `EmitVertex(` literal).
++//
++// Usage: msl-gs-as-mesh-test <gs.spv>
++
++#include "spirv_msl.hpp"
++#include <cstdio>
++#include <cstring>
++#include <fstream>
++#include <iterator>
++#include <vector>
++
++using namespace spirv_cross;
++
++static std::vector<uint32_t> read_spirv(const char *path) {
++	std::ifstream f(path, std::ios::binary);
++	std::vector<char> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
++	std::vector<uint32_t> w(b.size() / 4);
++	std::memcpy(w.data(), b.data(), b.size());
++	return w;
++}
++
++static bool contains(const std::string &haystack, const char *needle) {
++	return haystack.find(needle) != std::string::npos;
++}
++
++static int check(const char *label, bool ok) {
++	printf("  [%s] %s\n", ok ? "PASS" : "FAIL", label);
++	return ok ? 0 : 1;
++}
++
++int main(int argc, char **argv) {
++	if (argc != 2) { fprintf(stderr, "usage: %s gs.spv\n", argv[0]); return 1; }
++	auto gs = read_spirv(argv[1]);
++
++	int fails = 0;
++
++	// Pass 1: flag OFF — upstream-preserving emission.
++	{
++		CompilerMSL c(gs.data(), gs.size());
++		CompilerMSL::Options o;
++		o.msl_version = 30000;
++		o.geometry_shader_as_mesh = false;
++		c.set_msl_options(o);
++		std::string msl = c.compile();
++
++		printf("# === flag-OFF (geometry_shader_as_mesh=false) ===\n");
++		fails += check("flag-OFF preserves `EmitVertex` literal (upstream behaviour)",
++		               contains(msl, "EmitVertex("));
++		fails += check("flag-OFF does NOT emit `[[mesh]]` entry",
++		               !contains(msl, "[[mesh]]"));
++		fails += check("flag-OFF does NOT emit spvMesh.set_vertex",
++		               !contains(msl, "spvMesh.set_vertex"));
++	}
++
++	// Pass 2: flag ON — GS-as-mesh translation.
++	{
++		CompilerMSL c(gs.data(), gs.size());
++		CompilerMSL::Options o;
++		o.msl_version = 30000;
++		o.geometry_shader_as_mesh = true;
++		c.set_msl_options(o);
++		std::string msl = c.compile();
++
++		printf("# === flag-ON  (geometry_shader_as_mesh=true)  ===\n");
++		fails += check("flag-ON emits `[[mesh]]` entry attribute",
++		               contains(msl, "[[mesh]]"));
++		fails += check("flag-ON declares spvMesh_t mesh<...> typedef",
++		               contains(msl, "using spvMesh_t = mesh<"));
++		fails += check("flag-ON declares spvVertices function-local buffer",
++		               contains(msl, "spvUnsafeArray<spvPerVertex,"));
++		fails += check("flag-ON intercepts EmitVertex (no `EmitVertex(` literal)",
++		               !contains(msl, "EmitVertex("));
++		fails += check("flag-ON emits spvMesh.set_vertex flush",
++		               contains(msl, "spvMesh.set_vertex"));
++		fails += check("flag-ON emits spvMesh.set_primitive_count flush",
++		               contains(msl, "spvMesh.set_primitive_count"));
++		fails += check("flag-ON emits spvMesh.set_index for triangle_strip",
++		               contains(msl, "spvMesh.set_index"));
++	}
++
++	printf("\n%s — %d failure(s)\n", fails == 0 ? "OK" : "FAIL", fails);
++	return fails == 0 ? 0 : 1;
++}

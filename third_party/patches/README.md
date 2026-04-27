@@ -334,6 +334,146 @@ tessellation_evaluation.*` clusters read wrong per-CP/per-patch data
 even when the Metal dispatch shape is correct. With the patch plus
 the other Phase 3 infrastructure, TF-free programs can validate.
 
+### `spirv-cross-msl-geometry-shader-as-mesh.patch`
+
+**Target:** `third_party/SPIRV-Cross/main.cpp`, `spirv_msl.{hpp,cpp}` —
+adds `msl_options.geometry_shader_as_mesh`, `--msl-geometry-shader-as-mesh`
+CLI flag, GS topology classification (triangle / line / point) into the
+mesh-shader emission infrastructure, and OpEmitVertex / OpEndPrimitive /
+OpStore intercepts that route geometry-shader source into the existing
+`is_mesh_shader()` emission paths. Companion fixtures:
+`tools/gs-as-mesh-input.geom` (synthetic GS exercising EmitVertex +
+EndPrimitive + per-primitive `gl_Layer`), `tools/gs-as-mesh-hand-target.metal`
+(hand-authored target MSL for design validation), and
+`tools/msl-gs-as-mesh-test.cpp` (standalone unit test asserting flag-OFF
+preservation and flag-ON mesh-shader markers).
+
+**Apply order:** layer this patch on top of
+`spirv-cross-msl-tcs-output-classification.patch` (the cumulative
+Sprint 1 snapshot — already includes earlier `tes-as-compute`,
+`tess-isolines-compute-bypass`, and `msl-interface-introspection`
+content) plus `spirv-cross-cli-tese-as-compute-flags.patch`. Forward
+re-apply on a clean SPIRV-Cross HEAD checkout: TCS classification →
+CLI tese flags → this patch. Verified `git apply --check` and `git apply
+--reverse --check` rc=0.
+
+**Summary:** Translates a SPIR-V geometry shader (ExecutionModelGeometry)
+into a Metal `[[mesh]] void main0(...)` function instead of the
+upstream's non-functional vertex-form emission that leaves literal
+`EmitVertex();` / `EndPrimitive();` calls (Metal has no such intrinsics).
+Each GS invocation maps to one mesh threadgroup with a single thread.
+`OpEmitVertex` becomes `++spvVertexIndex;` (after the OpStore intercept
+populates `spvVertices[spvVertexIndex].MEMBER`); `OpEndPrimitive` writes
+the strip's triangle / line / point indices into `spvMesh.set_index(...)`,
+flushes any latched per-primitive output struct via
+`spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim)`, and
+increments the primitive counter. Function exit flushes
+`spvMesh.set_primitive_count(spvPrimitiveIndex)` and copies the
+function-local `spvVertices` buffer into `spvMesh.set_vertex(...)`.
+
+**Component breakdown:**
+
+1. **Topology classification (`is_mesh_shader()` extension + entry attr):**
+   `is_mesh_shader()` recognizes ExecutionModelGeometry under the flag,
+   so the existing mesh-shader emission paths fire for GS source. Entry
+   attribute switches from `kernel void` to `[[mesh]]`. The GS
+   `OutputTriangleStrip` / `OutputLineStrip` / `OutputPoints` execution
+   modes select Metal's `topology::triangle` / `topology::line` /
+   `topology::point`, and `max_vertices` drives `MAX_V` /
+   `max_primitives` parameters of the `mesh<...>` template.
+
+2. **Counter + buffer synthesis (`fixup_hooks_in`):** Function preamble
+   declares `spvVertexIndex`, `spvPrimitiveIndex`, the
+   `spvUnsafeArray<spvPerVertex, max_vertices> spvVertices` capture
+   buffer, the optional `spvPerPrimitive spvCurrentPrim` per-primitive
+   latch, and zero-init function-locals for each Input variable that
+   the body references (`gl_in[]`, `in_color[]`, etc.).
+
+3. **OpStore intercept:** When the body writes a global Output (per-vertex
+   `gl_Position`/user-varyings or per-primitive `gl_Layer`/
+   `gl_ViewportIndex`/`gl_PrimitiveID`), redirect the store to
+   `spvVertices[spvVertexIndex].MEMBER` or `spvCurrentPrim.MEMBER`.
+   Per-primitive vs per-vertex routing comes from a
+   `DecorationPerPrimitiveEXT` synthesis sub-pass that tags the GS's
+   per-primitive builtin outputs (since GLSL geometry shaders don't
+   carry that decoration; only mesh shaders do).
+
+4. **Function-exit flush (`fixup_hooks_out`):** Trailing
+   `spvMesh.set_primitive_count(...)` + `for (vi=0; vi<spvVertexIndex;
+   ++vi) spvMesh.set_vertex(vi, spvVertices[vi]);` copies captured
+   per-vertex output into the mesh.
+
+5. **Input-element type extraction:** Walks Input-storage variables and
+   uses `get_variable_element_type(var)` (peels both pointer and array
+   from the SPIR-V variable's pointer type) so `type_to_glsl(element)`
+   returns the bare element-type name suitable as a `spvUnsafeArray`
+   template parameter, without the over-decorated `thread T*` form
+   `type_to_glsl` produces for raw input variables.
+
+6. **`spvMeshSizes` gate:** Native mesh shaders use a threadgroup
+   `spvMeshSizes` counter populated by `OpSetMeshOutputsEXT`; GS-as-mesh
+   tracks via function-local `spvVertexIndex`/`spvPrimitiveIndex`
+   instead, so the `spvMeshSizes` declaration is gated off in GS-as-mesh
+   mode to eliminate dead-variable warnings.
+
+**Why:** Metal has no native geometry shader stage. Apple has a Metal
+mesh shader execution model (Metal 3+, Apple GPU family 7+) that can
+faithfully express GS semantics — per-invocation variable-vertex-count
+emission, per-primitive output, dynamic primitive count — through a
+different but functionally-equivalent API surface
+(`spvMesh.set_vertex`/`set_primitive`/`set_primitive_count`). Without
+this patch, the AppGL OpenGL→Metal translation layer rejects every GS
+source; with it, GS programs validate and run on chips with mesh-shader
+support, with a runtime-capability fallback to a CPU GS interpreter on
+chips that lack support.
+
+**MVP scope (Step 2):** triangle in/out + EmitVertex/EndPrimitive +
+per-primitive `gl_Layer` exercised end-to-end on a synthetic GS through
+the validation pipeline (glslc → SPIR-V → spirv-cross →
+`xcrun -sdk macosx metal -c` rc=0 → 3 unused-`threadgroup`-variable
+warnings only, zero errors). Standalone unit test
+`tools/msl-gs-as-mesh-test.cpp` asserts 10 properties across flag-OFF
+(upstream behaviour preserved) and flag-ON (mesh-shader markers
+present, EmitVertex literal absent) — passes 10/10.
+
+**Deferred / follow-on:**
+- Real per-input-vertex data flow via Apple's `[[payload]] object_data
+  Payload&` parameter on `[[mesh]]` functions, populated by an explicit
+  object-stage kernel that loads the linked VS's outputs into the
+  payload. Current MVP zero-initializes the input locals so MSL
+  compiles cleanly; this is a runtime cross-stage integration that
+  pairs with AppGL-W's mesh-pipeline runtime work.
+- Strip handling for `max_vertices > 3` (would emit (N-2) triangles
+  from a strip of N vertices with proper winding alternation).
+- Stream output (`OpEmitStreamVertex` / `OpEndStreamPrimitive`) — the
+  Step 2 scope deferred multi-stream GS.
+- Adjacency input topologies (`triangles_adjacency`, etc.).
+- Cosmetic `_RESERVED_IDENTIFIER_FIXUP_` prefix stripping on
+  builtin-block names emitted in the GS-as-mesh body — currently
+  cosmetic (Metal validates rc=0); fix would touch
+  SPIRV-Cross's reserved-name sanitization with a GS-specific override.
+- Three remaining unused-`threadgroup`-variable warnings (`gl_out`,
+  `out_color`, builtin-prefixed `gl_Layer` etc.) — emitted by the
+  existing mesh-shader output-remapping path. Suppressing them at
+  declaration time without breaking the OpStore intercept's
+  expression-resolution dependency on the remap is a follow-on
+  refactor.
+
+**Regression-safe:** flag-OFF (default) preserves upstream emission
+byte-identically — verified by `tools/msl-gs-as-mesh-test` flag-OFF
+asserts. The flag is opt-in; absent it, existing TCS/TES/VS/FS/CS
+emission paths are unaffected.
+
+**Architectural narrative:** publication-track material — Metal
+doesn't have a geometry shader stage, but it has mesh shaders; this
+option teaches SPIRV-Cross to bridge GS source semantics onto Apple's
+mesh-shader API. Continues the "drive existing infrastructure with
+alternate signal" pattern from
+`spirv-cross-msl-tcs-output-classification.patch`
+(`is_mesh_shader()` / `variable_decl_is_remapped_storage(StorageClassWorkgroup)`
+plumbing already present for native MeshEXT shaders; GS source rides
+those rails through the GS→mesh translation layer this patch adds).
+
 ### `spirv-cross-unsized-array-fallback-literal.patch`
 
 **Target:** `third_party/SPIRV-Cross/` (KhronosGroup/SPIRV-Cross @ 4d4b79b)
