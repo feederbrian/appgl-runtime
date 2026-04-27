@@ -819,6 +819,21 @@ struct GLProgramObject {
     // `vertex_for_tessellation + capture_output_to_buffer`). Built at
     // link time via the same probe path as the TCS compute PSO.
     void* metalTessVertexPipelineState = nullptr;
+    // T4I [metal-tess-TF]: when true, the VS-as-compute MSL declares
+    // `[[stage_in]]` and the PSO must be built at draw time with a
+    // MTLStageInputOutputDescriptor derived from the bound VAO. The
+    // program is otherwise Phase-3-eligible (TCS, TES, FS all built);
+    // only the VS-compute PSO is deferred. The encoder consults this
+    // and the per-program PSO cache (keyed on VAO descriptor hash)
+    // before dispatch.
+    bool metalTessVertexNeedsDescriptor = false;
+    // T4I [metal-tess-TF]: cache of per-VAO-descriptor VS-compute
+    // PSOs keyed on the descriptor hash. Lookup-or-build at draw
+    // time so VAO swaps don't pay the PSO build cost twice. Released
+    // alongside the rest of the metal tess state at program delete /
+    // relink. Each entry is a CFBridgingRetain'd
+    // id<MTLComputePipelineState>.
+    std::unordered_map<std::string, void*> metalTessVertexPSOCache;
     // Phase 3B [metal-tess-TF] groundwork: retained
     // id<MTLComputePipelineState> for the TES-as-compute stage.
     // Populated only once the SPIRV-Cross fork patch (Phase 3B.2)

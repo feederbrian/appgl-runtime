@@ -18604,6 +18604,12 @@ bool GLContext::linkProgram(GLuint program) {
     // by probeTessellationPipeline (when the VS has outputs).
     releaseRetainedMetalObject(programObject->metalTessVertexPipelineState);
     programObject->metalTessVertexPipelineState = nullptr;
+    // T4I [metal-tess-TF]: release per-VAO cached VS-compute PSOs.
+    for (auto& entry : programObject->metalTessVertexPSOCache) {
+        releaseRetainedMetalObject(entry.second);
+    }
+    programObject->metalTessVertexPSOCache.clear();
+    programObject->metalTessVertexNeedsDescriptor = false;
     // Phase 3B [metal-tess-TF] groundwork: release the retained TES-as-
     // compute PSO (populated once the SPIRV-Cross fork patch lands).
     releaseRetainedMetalObject(programObject->metalTessEvalComputePipelineState);
@@ -19145,12 +19151,59 @@ bool GLContext::linkProgram(GLuint program) {
                 tessOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
                 tessOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
             }
+            // T4I [metal-tess-TF]: extract TCS `layout(vertices=N)`
+            // before TES translation so SPIRV-Cross can plumb the
+            // patch CP count into TES MSL's `[[ patch(quad, N) ]]`
+            // attribute and `gl_in = &spvIn[gl_PrimitiveID * N]`
+            // stride. Without this, MSL emits `* 0` and every patch
+            // reads spvIn[0..N-1] regardless of primitive id —
+            // covering only the first patch's pixels.
+            if (tessControlShader && !tessControlShader->spirv.empty()) {
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(), tessControlShader->spirv.size());
+                tessOpts.tesePatchVertices = tcModes.outputVertices;
+            }
             (void)translateCachedStage("tess-control", tessControlShader,
                                        programObject->tessControlMSL, tcRefl,
                                        tessOpts);
             (void)translateCachedStage("tess-eval", tessEvalShader,
                                        programObject->tessEvalMSL, teRefl,
                                        tessOpts);
+            // T4I [metal-tess-TF]: SPIRV-Cross emits the TES vertex
+            // function with `[[patch(domain, execution.output_vertices)]]`,
+            // but `execution.output_vertices` is 0 for TES (the
+            // OutputVertices execution mode is set on TCS, not TES).
+            // Metal needs the patch_control_point_count in the
+            // attribute; with 0 it silently mis-fetches CP data and
+            // every patch covers only the first control point's
+            // pixels. Post-process the emitted MSL to substitute the
+            // TCS output_vertices count.
+            if (tessOpts.tesePatchVertices != 0 && !programObject->tessEvalMSL.empty()) {
+                std::string& msl = programObject->tessEvalMSL;
+                std::string oldNeedle1 = "[[ patch(quad, 0) ]]";
+                std::string oldNeedle2 = "[[ patch(triangle, 0) ]]";
+                std::string newRepl1 = "[[ patch(quad, " + std::to_string(tessOpts.tesePatchVertices) + ") ]]";
+                std::string newRepl2 = "[[ patch(triangle, " + std::to_string(tessOpts.tesePatchVertices) + ") ]]";
+                std::size_t p = msl.find(oldNeedle1);
+                if (p != std::string::npos) {
+                    msl.replace(p, oldNeedle1.size(), newRepl1);
+                    if (std::getenv("APPGL_TRACE_TESS")) {
+                        std::fprintf(stderr,
+                            "[APPGL] T4I: TES patch_cp 0->%u (quad)\n",
+                            tessOpts.tesePatchVertices);
+                    }
+                } else {
+                    p = msl.find(oldNeedle2);
+                    if (p != std::string::npos) {
+                        msl.replace(p, oldNeedle2.size(), newRepl2);
+                        if (std::getenv("APPGL_TRACE_TESS")) {
+                            std::fprintf(stderr,
+                                "[APPGL] T4I: TES patch_cp 0->%u (triangle)\n",
+                                tessOpts.tesePatchVertices);
+                        }
+                    }
+                }
+            }
             programObject->tessControlReflection = tcRefl;
             // Metal tess Phase 3: compile VS as a compute kernel with
             // `vertex_for_tessellation + capture_output_to_buffer` so
@@ -19184,6 +19237,13 @@ bool GLContext::linkProgram(GLuint program) {
                 if (pos != std::string::npos) {
                     mslRef.replace(pos, needle.size(),
                                    "/* AppGL: grid_size early-return stripped */");
+                    if (std::getenv("APPGL_TRACE_TESS")) {
+                        std::fprintf(stderr,
+                            "[APPGL] T4I: stripped grid_size early-return from VS-compute MSL\n");
+                    }
+                } else if (std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "[APPGL] T4I: VS-compute MSL early-return needle NOT found\n");
                 }
             }
             // Extract TCS output_vertices now (before TES-compute
@@ -19345,6 +19405,14 @@ bool GLContext::linkProgram(GLuint program) {
                     programObject->metalTessVertexPipelineState =
                         probe.vertexComputePipelineState;
                 }
+                // T4I [metal-tess-TF]: when the VS-as-compute MSL
+                // declares `[[stage_in]]`, the PSO must be built at
+                // draw time from the bound VAO's
+                // MTLStageInputOutputDescriptor. Probe set the flag
+                // when it caught the stage_in compile error.
+                if (probe.vertexComputeNeedsDescriptor) {
+                    programObject->metalTessVertexNeedsDescriptor = true;
+                }
                 // Phase 3B.4 [metal-tess-TF]: stash the TES-as-compute
                 // PSO when the probe built it. Enables the 4-dispatch
                 // TF-capture chain at draw time.
@@ -19418,7 +19486,13 @@ bool GLContext::linkProgram(GLuint program) {
                         GLProgramObject::MetalTessTier::Phase2;
                     programObject->metalTessControlPipelineState =
                         probe.computePipelineState;
-                } else if (probe.computeOk && needsPhase3 && !tessBlockedByTF && probe.vertexComputeOk) {
+                } else if (probe.computeOk && needsPhase3 && !tessBlockedByTF &&
+                           (probe.vertexComputeOk || probe.vertexComputeNeedsDescriptor)) {
+                    // T4I [metal-tess-TF]: Phase 3 is reachable when
+                    // VS-compute either built directly (no stage_in)
+                    // OR needs a descriptor at draw time. The encoder
+                    // checks `metalTessVertexNeedsDescriptor` and
+                    // builds-or-reuses a per-VAO PSO before dispatch.
                     programObject->metalTessTier =
                         GLProgramObject::MetalTessTier::Phase3;
                     programObject->metalTessControlPipelineState =
@@ -22286,6 +22360,11 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
         old->metalTessControlPipelineState = nullptr;
         releaseRetainedMetalObject(old->metalTessVertexPipelineState);
         old->metalTessVertexPipelineState = nullptr;
+        for (auto& entry : old->metalTessVertexPSOCache) {
+            releaseRetainedMetalObject(entry.second);
+        }
+        old->metalTessVertexPSOCache.clear();
+        old->metalTessVertexNeedsDescriptor = false;
         releaseRetainedMetalObject(old->metalTessEvalComputePipelineState);
         old->metalTessEvalComputePipelineState = nullptr;
     }
@@ -22699,6 +22778,75 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     info.tessControlPipelineState = program.metalTessControlPipelineState;
     if (program.metalTessTier == GLProgramObject::MetalTessTier::Phase3) {
         info.vertexComputePipelineState = program.metalTessVertexPipelineState;
+    }
+
+    // T4I [metal-tess-TF]: when the VS-as-compute MSL declares
+    // `[[stage_in]]`, build/cache the PSO from the bound VAO's
+    // descriptor before encode. Per-program, per-VAO-hash cache so
+    // VAO swaps don't pay the build cost twice.
+    if (program.metalTessTier == GLProgramObject::MetalTessTier::Phase3 &&
+        program.metalTessVertexNeedsDescriptor &&
+        info.vertexComputePipelineState == nullptr) {
+        const GLuint vaoName = state->boundVertexArray();
+        GLVertexArrayObject* vao = objects->vertexArrays().get(vaoName);
+        if (vao == nullptr) {
+            return false;
+        }
+        appgl::MetalVertexDescriptorBuildResult buildResult =
+            appgl::buildMetalStageInputOutputDescriptor(*vao);
+        if (buildResult.descriptor == nullptr) {
+            return false;
+        }
+        void* vsPSO = nullptr;
+        auto cached = program.metalTessVertexPSOCache.find(buildResult.hash);
+        if (cached != program.metalTessVertexPSOCache.end()) {
+            vsPSO = cached->second;
+        } else {
+            std::string err;
+            vsPSO = frameGraph->buildComputePipelineState(
+                program.tessVertexAsComputeMSL, &err, nullptr,
+                buildResult.descriptor);
+            if (vsPSO != nullptr) {
+                program.metalTessVertexPSOCache[buildResult.hash] = vsPSO;
+            } else if (std::getenv("APPGL_TRACE_TESS")) {
+                std::fprintf(stderr,
+                    "[APPGL] T4I draw-time VS-compute PSO build failed: %s\n",
+                    err.c_str());
+            }
+        }
+        appgl::releaseMetalStageInputOutputDescriptor(buildResult.descriptor);
+        if (vsPSO == nullptr) {
+            return false;
+        }
+        info.vertexComputePipelineState = vsPSO;
+        // Resolve buffer bindings for the encoder.
+        for (const auto& binding : buildResult.vertexBufferBindings) {
+            GLBufferObject* vbo = objects->buffers().get(binding.glBuffer);
+            if (vbo == nullptr || vbo->metalBuffer == nullptr) {
+                if (std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "[APPGL] T4I draw-time VBO resolve failed: glBuffer=%u\n",
+                        binding.glBuffer);
+                }
+                return false;
+            }
+            MetalTessVertexBufferBinding ent;
+            ent.metalBuffer = vbo->metalBuffer;
+            ent.offset = 0;
+            ent.metalSlot = binding.metalSlot;
+            info.vertexComputeBufferBindings.push_back(ent);
+        }
+        if (std::getenv("APPGL_TRACE_TESS")) {
+            std::fprintf(stderr,
+                "[APPGL] T4I draw-time vsPSO=%p hash=%s bindings=%zu\n",
+                vsPSO, buildResult.hash.c_str(),
+                info.vertexComputeBufferBindings.size());
+            for (const auto& b : info.vertexComputeBufferBindings) {
+                std::fprintf(stderr,
+                    "[APPGL] T4I   binding slot=%u buf=%p\n",
+                    b.metalSlot, b.metalBuffer);
+            }
+        }
     }
     // Phase 3B.4 [metal-tess-TF]: forward the TES-as-compute PSO if
     // the link-time probe built one. The encoder only runs the

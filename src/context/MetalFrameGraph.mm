@@ -4482,7 +4482,8 @@ fragment float4 appgl_immediate_textured_fs(
     // who don't use argument buffers pass nullptr and only the PSO is
     // retained.
     void* buildComputePipelineState(const std::string& msl, std::string* outError,
-                                     void** outFunction = nullptr) {
+                                     void** outFunction = nullptr,
+                                     void* stageInputOutputDescriptor = nullptr) {
         if (outFunction != nullptr) *outFunction = nullptr;
         if (device == nil || msl.empty()) {
             if (outError) *outError = "no device or empty MSL";
@@ -4514,8 +4515,27 @@ fragment float4 appgl_immediate_textured_fs(
             return nullptr;
         }
         NSError* psoError = nil;
-        id<MTLComputePipelineState> pso = [device newComputePipelineStateWithFunction:fn
-                                                                                error:&psoError];
+        id<MTLComputePipelineState> pso = nil;
+        if (stageInputOutputDescriptor != nullptr) {
+            // VS-as-compute path: SPIRV-Cross with
+            // forceVertexForTessellation=true emits `main0(main0_in in
+            // [[stage_in]], ...)`; building this requires a
+            // MTLComputePipelineDescriptor with a populated
+            // `stageInputDescriptor`. The descriptor is built from the
+            // bound VAO (see `buildMetalStageInputOutputDescriptor`).
+            MTLComputePipelineDescriptor* psoDesc =
+                [[MTLComputePipelineDescriptor alloc] init];
+            psoDesc.computeFunction = fn;
+            psoDesc.stageInputDescriptor =
+                (__bridge MTLStageInputOutputDescriptor*)stageInputOutputDescriptor;
+            pso = [device newComputePipelineStateWithDescriptor:psoDesc
+                                                        options:MTLPipelineOptionNone
+                                                     reflection:nil
+                                                          error:&psoError];
+        } else {
+            pso = [device newComputePipelineStateWithFunction:fn
+                                                        error:&psoError];
+        }
         if (pso == nil) {
             if (outError) {
                 *outError = psoError.localizedDescription.UTF8String
@@ -4589,6 +4609,18 @@ fragment float4 appgl_immediate_textured_fs(
                 result.vertexComputeOk = true;
                 result.vertexComputePipelineState = vsPSO;
             } else {
+                // T4I [metal-tess-TF]: Metal returns "Function requires
+                // stage_in attributes but no descriptor was set." when
+                // the VS-as-compute MSL declares `[[stage_in]]`. That's
+                // not a fatal error — we just need to defer PSO build
+                // to draw time when the bound VAO is known. Set the
+                // `vertexComputeNeedsDescriptor` flag so the program
+                // side can build the PSO from the VAO descriptor at
+                // draw time. Other compile failures (syntax errors etc)
+                // remain non-fatal but won't trigger the deferred path.
+                if (vsError.find("stage_in") != std::string::npos) {
+                    result.vertexComputeNeedsDescriptor = true;
+                }
                 // Keep going — a failed VS-compute PSO shouldn't mask
                 // the TCS + render PSO validation, but we stash the
                 // diagnostic so callers can decide whether to use the
@@ -4863,6 +4895,20 @@ fragment float4 appgl_immediate_textured_fs(
                          length:info.tessVertexAsComputeUniformSize
                         atIndex:16];
             }
+            // T4I [metal-tess-TF]: bind VAO vertex buffers for VS
+            // compute when the PSO was built with a stage-input
+            // descriptor. The slots match the descriptor's
+            // `attributes[*].bufferIndex` (0..15 by default per
+            // BindingMap::vertexBufferBase). Empty for VS programs
+            // that read inputs via gl_VertexID-only paths.
+            for (const auto& binding : info.vertexComputeBufferBindings) {
+                if (binding.metalBuffer == nullptr) {
+                    continue;
+                }
+                [vsEnc setBuffer:(__bridge id<MTLBuffer>)binding.metalBuffer
+                          offset:(NSUInteger)binding.offset
+                         atIndex:(NSUInteger)binding.metalSlot];
+            }
             // For VS without stage_in inputs, the VS-compute MSL uses
             // `gl_GlobalInvocationID` as the per-vertex index (Y=0 for
             // non-instanced). `dispatchThreads` maps 1:1 onto
@@ -4881,6 +4927,13 @@ fragment float4 appgl_immediate_textured_fs(
                         ? vsPSO.maxTotalThreadsPerThreadgroup : 32;
                 const NSUInteger tgWidth =
                     vertexCount > 0 && vertexCount < maxPerTg ? vertexCount : maxPerTg;
+                // T4I bisect: when stage-in descriptor is in use,
+                // dispatchThreadgroups with explicit threadgroup count
+                // gives Metal a uniform grid shape that
+                // MTLStepFunctionThreadPositionInGridX advances on.
+                // The VS-as-compute path without stage_in keeps using
+                // dispatchThreads to preserve the SPIRV-Cross
+                // [[grid_size]] / spvStageInputSize early-return shape.
                 [vsEnc dispatchThreads:MTLSizeMake(vertexCount, 1, 1)
                  threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
             }
@@ -7124,8 +7177,9 @@ bool MetalFrameGraph::clearLayeredTextureColor(void* tex, std::uint32_t arrayLen
 }
 
 void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::string* outError,
-                                                  void** outFunction) {
-    return impl_->buildComputePipelineState(msl, outError, outFunction);
+                                                  void** outFunction,
+                                                  void* stageInputOutputDescriptor) {
+    return impl_->buildComputePipelineState(msl, outError, outFunction, stageInputOutputDescriptor);
 }
 
 MetalFrameGraph::TessPipelineProbeResult MetalFrameGraph::probeTessellationPipeline(

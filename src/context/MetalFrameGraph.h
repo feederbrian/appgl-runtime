@@ -521,6 +521,19 @@ struct ComputeDispatchInfo {
 // Phase-2 scope: no VS outputs, no TCS user CP output, no TES user
 // varyings beyond gl_Position. Future phases extend this struct with
 // stage-input buffer descriptors + per-CP / per-patch output bindings.
+// T4I [metal-tess-TF]: when the VS-as-compute MSL declares
+// `[[stage_in]]`, the caller resolves each VAO buffer slot to an
+// MTLBuffer + offset and passes the bindings here so the encoder
+// can call `setBuffer:offset:atIndex:` before the VS-compute
+// dispatch. `metalSlot` matches the descriptor's
+// `attributes[*].bufferIndex`; offset is the absolute byte offset
+// into the MTLBuffer.
+struct MetalTessVertexBufferBinding {
+    void* metalBuffer = nullptr;      // id<MTLBuffer>, non-owning
+    std::uint64_t offset = 0;
+    std::uint32_t metalSlot = 0;
+};
+
 struct MetalTessDrawInfo {
     // TCS compute pipeline state (retained by the program; not a
     // transfer). Set by the caller from
@@ -583,6 +596,15 @@ struct MetalTessDrawInfo {
 
     GLsizei instanceCount = 1;
     GLuint baseInstance = 0;
+
+    // T4I [metal-tess-TF]: per-VAO vertex buffer bindings for VS-as-
+    // compute when the PSO uses `[[stage_in]]`. Empty for the
+    // no-descriptor path (the encoder skips buffer binding when this
+    // is empty and `vertexComputePipelineState` is the program's
+    // unconditional one). Populated by `tryMetalTessellationDraw`
+    // after building the descriptor + lookup-or-building the cached
+    // VS-compute PSO from the bound VAO.
+    std::vector<MetalTessVertexBufferBinding> vertexComputeBufferBindings;
 
     // Per-program identifier — diagnostic only.
     GLuint program = 0;
@@ -697,7 +719,8 @@ public:
     // populates `outError` with the NSError localizedDescription if
     // provided.
     void* buildComputePipelineState(const std::string& msl, std::string* outError,
-                                     void** outFunction = nullptr);
+                                     void** outFunction = nullptr,
+                                     void* stageInputOutputDescriptor = nullptr);
 
     // Metal-native tessellation pipeline probe (Phase 1 of the metal-tess
     // project). Given SPIRV-Cross-emitted MSL for a tess program's three
@@ -730,6 +753,12 @@ public:
                                          // PSO built (only attempted when
                                          // vsComputeMSL is non-empty).
         bool tessEvalComputeOk = false;  // Phase 3B.4 [metal-tess-TF]
+        // T4I [metal-tess-TF]: when true, the VS-as-compute MSL needs
+        // a MTLStageInputOutputDescriptor to build (i.e. uses
+        // `[[stage_in]]`). Encoder builds the PSO at draw time from
+        // the bound VAO. Distinct from `vertexComputeOk` which
+        // indicates a no-descriptor PSO was already built here.
+        bool vertexComputeNeedsDescriptor = false;
         std::string diagnostic;          // empty on full success
         void* computePipelineState = nullptr;            // TCS compute PSO (retained)
         void* vertexComputePipelineState = nullptr;      // VS compute PSO (retained)

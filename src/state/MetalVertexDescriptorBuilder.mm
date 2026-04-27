@@ -341,4 +341,131 @@ void releaseMetalVertexDescriptor(void* descriptor) {
 #endif
 }
 
+namespace {
+
+void* retainStageDescriptor(MTLStageInputOutputDescriptor* descriptor) {
+    if (descriptor == nil) {
+        return nullptr;
+    }
+#if __has_feature(objc_arc)
+    return (__bridge_retained void*)descriptor;
+#else
+    return [descriptor retain];
+#endif
+}
+
+}  // namespace
+
+MetalVertexDescriptorBuildResult buildMetalStageInputOutputDescriptor(const GLVertexArrayObject& vertexArray) {
+    MetalVertexDescriptorBuildResult result;
+    MTLStageInputOutputDescriptor* descriptor = [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
+    if (descriptor == nil) {
+        result.error = "MTLStageInputOutputDescriptor allocation failed.";
+        return result;
+    }
+
+    std::uint64_t hash = kFnvOffset;
+
+    bool slotOverflow = false;
+    auto findOrAssignSlot = [&result, &slotOverflow](GLuint glBuffer, std::uint32_t stride, GLuint divisor) -> std::uint32_t {
+        for (const auto& binding : result.vertexBufferBindings) {
+            if (binding.glBuffer == glBuffer && binding.stride == stride) {
+                (void)divisor;
+                return binding.metalSlot;
+            }
+        }
+        const std::uint32_t slotIndex = static_cast<std::uint32_t>(result.vertexBufferBindings.size());
+        if (slotIndex >= kMaxVertexBufferSlots) {
+            slotOverflow = true;
+            return kVertexBufferBase;
+        }
+        const std::uint32_t slot = kVertexBufferBase + slotIndex;
+        result.vertexBufferBindings.push_back({glBuffer, slot, stride});
+        return slot;
+    };
+
+    for (std::size_t index = 0; index < vertexArray.attributes.size(); ++index) {
+        const auto& attribute = vertexArray.attributes[index];
+        if (!attribute.enabled) {
+            continue;
+        }
+
+        const MTLVertexFormat vformat = metalVertexFormat(attribute);
+        if (vformat == MTLVertexFormatInvalid) {
+            result.error = "Unsupported vertex attribute format at index " + std::to_string(index) + ".";
+            return result;
+        }
+        // MTLAttributeFormat values mirror MTLVertexFormat where they
+        // overlap (Float/Float2/.../UChar4Normalized/etc share enum
+        // values per Metal headers). Cast through the underlying type.
+        const MTLAttributeFormat aformat = static_cast<MTLAttributeFormat>(vformat);
+
+        GLuint bufferName = attribute.buffer;
+        std::uint32_t stride = 0;
+        NSUInteger vertexOffset = static_cast<NSUInteger>(attribute.pointer);
+        GLuint divisor = attribute.divisor;
+        const bool hasSeparatedBinding =
+            (attribute.bindingIndex < vertexArray.bindingPoints.size()) &&
+            (vertexArray.bindingPoints[attribute.bindingIndex].buffer != 0);
+        if (attribute.useSeparatedFormat || hasSeparatedBinding) {
+            const auto& bp = vertexArray.bindingPoints[attribute.bindingIndex];
+            bufferName = bp.buffer;
+            stride = static_cast<std::uint32_t>(
+                bp.stride > 0 ? static_cast<std::size_t>(bp.stride)
+                              : attributeByteSize(attribute));
+            vertexOffset = static_cast<NSUInteger>(
+                static_cast<std::size_t>(bp.offset) +
+                static_cast<std::size_t>(attribute.relativeOffset));
+            divisor = bp.divisor;
+        } else {
+            stride = static_cast<std::uint32_t>(
+                attribute.stride > 0 ? static_cast<std::size_t>(attribute.stride)
+                                     : attributeByteSize(attribute));
+        }
+        const std::uint32_t metalSlot = findOrAssignSlot(bufferName, stride, divisor);
+
+        descriptor.attributes[index].format = aformat;
+        descriptor.attributes[index].offset = vertexOffset;
+        descriptor.attributes[index].bufferIndex = static_cast<NSUInteger>(metalSlot);
+        descriptor.layouts[metalSlot].stride = static_cast<NSUInteger>(stride);
+        // For VS-as-compute the dispatch thread X position drives
+        // per-vertex attribute fetch. Instanced draws aren't routed
+        // through the tess compute path so divisor handling is moot
+        // here — but if we ever did, MTLStepFunctionThreadPositionInGridY
+        // could carry the instance axis.
+        descriptor.layouts[metalSlot].stepFunction = MTLStepFunctionThreadPositionInGridX;
+        descriptor.layouts[metalSlot].stepRate = 1;
+
+        hashValue(hash, static_cast<std::uint64_t>(index));
+        hashValue(hash, static_cast<std::uint64_t>(aformat));
+        hashValue(hash, static_cast<std::uint64_t>(vertexOffset));
+        hashValue(hash, static_cast<std::uint64_t>(stride));
+        hashValue(hash, static_cast<std::uint64_t>(divisor));
+        hashValue(hash, static_cast<std::uint64_t>(bufferName));
+        hashValue(hash, static_cast<std::uint64_t>(metalSlot));
+        hashValue(hash, attribute.integer ? 1u : 0u);
+    }
+
+    if (slotOverflow) {
+        result.error = "Vertex array uses more than " + std::to_string(kMaxVertexBufferSlots)
+            + " distinct vertex buffer slots; Metal supports at most 31 buffers per stage.";
+        return result;
+    }
+
+    result.hash = formatHash(hash);
+    result.descriptor = retainStageDescriptor(descriptor);
+    return result;
+}
+
+void releaseMetalStageInputOutputDescriptor(void* descriptor) {
+    if (descriptor == nullptr) {
+        return;
+    }
+#if __has_feature(objc_arc)
+    CFRelease(descriptor);
+#else
+    [(id)descriptor release];
+#endif
+}
+
 }  // namespace appgl
