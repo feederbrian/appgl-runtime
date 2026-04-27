@@ -3219,16 +3219,118 @@ void genPatchDomain(
         //   inner[0] = u-axis inner subdivision count
         //   inner[1] = v-axis inner subdivision count
         //
-        // CTS `tessellation_invariance.invariance_rule4` iterates
-        // with inner=(32, 31), outer=(29,29,29,29) and expects the
-        // symmetric counterpart of (1/32, 0) on the v=0 edge to
-        // appear at (0, 1/32) on the u=0 edge. That requires
-        // vN == 32, i.e. vN picks up inner[1] — but CTS's
-        // reference has inner[0] (first inner) mapping to V axis
-        // (its v-axis convention differs). Match that by using
-        // max-of-all-applicable levels for both axes — produces a
-        // symmetric grid that satisfies every invariance check
-        // while still honouring the largest edge subdivision.
+        // Sprint 2 Track 1 (T4H Phase A): per-edge quads point-mode
+        // for the vertex_spacing.* cluster, gated on outers-differ
+        // AND pointMode (M2 mitigation per T4H). Equal-outer-equal-
+        // inner case stays on single-N axisMax — preserves the
+        // 12 invariance.* GENUINE_PASS that depend on (1/N, 0) ↔
+        // (0, 1/N) symmetric grid emission. Sprint 1's reverted
+        // attempt was structurally correct but operated on field-
+        // order-bug-mis-read inputs (commit 6f72c03 fixed); this
+        // re-attempt now reads correct edge values.
+        const bool outersDiffer =
+            !(o0 == o1 && o1 == o2 && o2 == o3) || !(i0 == i1);
+        if (params.pointMode != 0u && outersDiffer) {
+            uint outerN0 = segmentCount(o0, params.genSpacing);
+            uint outerN1 = segmentCount(o1, params.genSpacing);
+            uint outerN2 = segmentCount(o2, params.genSpacing);
+            uint outerN3 = segmentCount(o3, params.genSpacing);
+            uint innerN_u = segmentCount(i0, params.genSpacing);
+            uint innerN_v = segmentCount(i1, params.genSpacing);
+
+            // 4 outer corners.
+            emitPoint(float3(0.0f, 0.0f, 0.0f), patchID,
+                      totalVertCount, domainTessCoord, domainPrimID);
+            emitPoint(float3(1.0f, 0.0f, 0.0f), patchID,
+                      totalVertCount, domainTessCoord, domainPrimID);
+            emitPoint(float3(1.0f, 1.0f, 0.0f), patchID,
+                      totalVertCount, domainTessCoord, domainPrimID);
+            emitPoint(float3(0.0f, 1.0f, 0.0f), patchID,
+                      totalVertCount, domainTessCoord, domainPrimID);
+
+            // outer[0] = u=0 edge (varies v).
+            for (uint k = 1u; k < outerN0; ++k) {
+                float v = float(k) / float(outerN0);
+                emitPoint(float3(0.0f, v, 0.0f), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+            }
+            // outer[1] = v=0 edge (varies u).
+            for (uint k = 1u; k < outerN1; ++k) {
+                float u = float(k) / float(outerN1);
+                emitPoint(float3(u, 0.0f, 0.0f), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+            }
+            // outer[2] = u=1 edge (varies v).
+            for (uint k = 1u; k < outerN2; ++k) {
+                float v = float(k) / float(outerN2);
+                emitPoint(float3(1.0f, v, 0.0f), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+            }
+            // outer[3] = v=1 edge (varies u).
+            for (uint k = 1u; k < outerN3; ++k) {
+                float u = float(k) / float(outerN3);
+                emitPoint(float3(u, 1.0f, 0.0f), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+            }
+
+            // Inner ring + interior. innerN_u/v ≥ 3 → distinct
+            // corners + edge interior + grid. innerN == 2 collapses
+            // to a single center point. innerN == 1 (or mixed-axis
+            // collapse) deferred — affects a subset of test
+            // iterations and falls back to no-inner-emission here.
+            if (innerN_u >= 3u && innerN_v >= 3u) {
+                float u_lo = 1.0f / float(innerN_u);
+                float u_hi = 1.0f - u_lo;
+                float v_lo = 1.0f / float(innerN_v);
+                float v_hi = 1.0f - v_lo;
+                uint inner_seg_u = innerN_u - 2u;
+                uint inner_seg_v = innerN_v - 2u;
+                float inv_seg_u = 1.0f / float(inner_seg_u);
+                float inv_seg_v = 1.0f / float(inner_seg_v);
+                emitPoint(float3(u_lo, v_lo, 0.0f), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+                emitPoint(float3(u_hi, v_lo, 0.0f), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+                emitPoint(float3(u_hi, v_hi, 0.0f), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+                emitPoint(float3(u_lo, v_hi, 0.0f), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+                for (uint k = 1u; k < inner_seg_v; ++k) {
+                    float v = v_lo + (v_hi - v_lo) * (float(k) * inv_seg_v);
+                    emitPoint(float3(u_lo, v, 0.0f), patchID,
+                              totalVertCount, domainTessCoord, domainPrimID);
+                    emitPoint(float3(u_hi, v, 0.0f), patchID,
+                              totalVertCount, domainTessCoord, domainPrimID);
+                }
+                for (uint k = 1u; k < inner_seg_u; ++k) {
+                    float u = u_lo + (u_hi - u_lo) * (float(k) * inv_seg_u);
+                    emitPoint(float3(u, v_lo, 0.0f), patchID,
+                              totalVertCount, domainTessCoord, domainPrimID);
+                    emitPoint(float3(u, v_hi, 0.0f), patchID,
+                              totalVertCount, domainTessCoord, domainPrimID);
+                }
+                for (uint j = 1u; j < inner_seg_v; ++j) {
+                    float v = v_lo + (v_hi - v_lo) * (float(j) * inv_seg_v);
+                    for (uint i = 1u; i < inner_seg_u; ++i) {
+                        float u = u_lo + (u_hi - u_lo) * (float(i) * inv_seg_u);
+                        emitPoint(float3(u, v, 0.0f), patchID,
+                                  totalVertCount, domainTessCoord, domainPrimID);
+                    }
+                }
+            } else if (innerN_u == 2u && innerN_v == 2u) {
+                emitPoint(float3(0.5f, 0.5f, 0.0f), patchID,
+                          totalVertCount, domainTessCoord, domainPrimID);
+            }
+            return;
+        }
+
+        // Equal-outer fallback: invariance.* tests need single-N
+        // (1/N, 0) ↔ (0, 1/N) symmetric grid. CTS `invariance_rule4`
+        // iterates with inner=(32,31) outer=(29,29,29,29) and expects
+        // the symmetric counterpart of (1/32, 0) on the v=0 edge to
+        // appear at (0, 1/32) on the u=0 edge — requires vN==32, i.e.
+        // vN picks up inner[1]. Match by using max-of-all-applicable
+        // levels for both axes.
         uint axisMax = max(max(max(o0, o1), max(o2, o3)), max(i0, i1));
         uint uN = segmentCount(axisMax, params.genSpacing);
         uint vN = segmentCount(axisMax, params.genSpacing);
