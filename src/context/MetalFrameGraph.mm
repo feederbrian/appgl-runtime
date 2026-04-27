@@ -5745,7 +5745,23 @@ fragment float4 appgl_immediate_textured_fs(
             [enc setVertexBuffer:cpOutBuf offset:0 atIndex:22];
             [enc setVertexBuffer:patchOutBuf offset:0 atIndex:20];
         }
-        [enc drawPatches:(NSUInteger)info.patchVertices
+        // Phase 3: drawPatches's `numberOfPatchControlPoints` is the
+        // count of control points per patch in the buffer feeding the
+        // post-tess vertex stage — i.e. cpOutBuf, which holds TCS
+        // output (one element per `layout(vertices=N)` invocation).
+        // Tests where glPatchParameteri(PATCH_VERTICES) and TCS
+        // output_vertices differ (e.g. `single.max_patch_vertices`
+        // uses PATCH_VERTICES=32 with `layout(vertices=2)`) hit a
+        // stride mismatch when drawPatches sees the input patch size
+        // — Metal reads cpOutBuf at the wrong stride and the TES
+        // pulls garbage CPs.  Use tessControlOutputVertices on the
+        // compute-pre-pass path; the existing Phase 2 path stays on
+        // patchVertices because there's no pre-pass producing
+        // a different-sized buffer.
+        const NSUInteger drawPatchesCPs = isPhase3 && info.tessControlOutputVertices > 0
+            ? (NSUInteger)info.tessControlOutputVertices
+            : (NSUInteger)info.patchVertices;
+        [enc drawPatches:drawPatchesCPs
               patchStart:0
               patchCount:(NSUInteger)info.patchCount
          patchIndexBuffer:nil
