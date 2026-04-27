@@ -800,6 +800,70 @@ public:
     // diagnostic is recorded via `recordShaderTranslation`.
     bool encodeMetalTessellationDraw(const MetalTessDrawInfo& info);
 
+    // -------------------------------------------------------------
+    // Sprint 3 [metal-mesh-GS] — DESIGN PRIMER (no impl yet)
+    // -------------------------------------------------------------
+    // Geometry shader execution via Metal's `[[mesh]]` / `[[object]]`
+    // stage pair. The CPU GS interpreter remains in tree as fallback
+    // for chips without mesh shader support (`Apple1-6`); chips with
+    // `MTLGPUFamilyMetal3` AND `MTLGPUFamilyApple7` route here.
+    //
+    // SPIRV-Cross emits the GS as an MSL `[[mesh, max_total_threads_per_threadgroup(N)]]`
+    // function that writes vertices/primitives into an `mesh<V, P,
+    // MaxV, MaxP, primitive_type> output` parameter via
+    // `output.set_vertex(i, v)`, `output.set_primitive(i, p)`,
+    // `output.set_index(i, idx)`, and `output.set_primitive_count(K)`
+    // for variable-count emission. GS's `EmitVertex` / `EndPrimitive`
+    // map to mesh-stage's per-threadgroup primitive emission;
+    // `gl_Layer` per primitive maps to `[[render_target_array_index]]`
+    // on the per-primitive output struct.
+    //
+    // `MTLMeshRenderPipelineDescriptor` (macOS 13+) holds:
+    //   - `objectFunction` (optional kickoff stage; non-null when GS
+    //     amplification needs a per-input-primitive object dispatch
+    //     before the mesh stage)
+    //   - `meshFunction` (the GS, post-SPIRV-Cross translation)
+    //   - `fragmentFunction` (the FS, unchanged from existing render
+    //     pipeline)
+    //   - `payloadMemoryLength` (bytes object→mesh data passing)
+    //   - `maxTotalThreadsPerObjectThreadgroup`,
+    //     `maxTotalThreadsPerMeshThreadgroup`,
+    //     `maxTotalThreadgroupsPerMeshGrid`
+    //   - Standard color/depth/stencil attachment descriptors
+    //
+    // Encoder API (on `id<MTLRenderCommandEncoder>`):
+    //   - `setObjectBuffer:offset:atIndex:` (object stage, optional)
+    //   - `setMeshBuffer:offset:atIndex:` (mesh stage)
+    //   - `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`
+    //     for count-based dispatch
+    //   - `drawMeshThreads:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`
+    //     for thread-based dispatch
+    //   - Indirect variants exist on both
+    //
+    // Translation problem mapping (GS → mesh):
+    //   - GS input topology (points/lines/triangles + adjacency) →
+    //     mesh stage reads VS-output buffer; adjacency primitives are
+    //     reconstructed per-threadgroup since Metal mesh shaders only
+    //     support `point/line/triangle` output topology natively
+    //     (no native adjacency variants — defer adjacency tests to
+    //     CPU GS interpreter via selective routing)
+    //   - GS `EmitVertex()` → `output.set_vertex(emitCount, struct)`;
+    //     emitCount counter incremented per call
+    //   - GS `EndPrimitive()` → `output.set_index(...)` finalizes the
+    //     primitive, primitiveCount incremented
+    //   - GS `gl_Layer` → `[[render_target_array_index]]` on
+    //     per-primitive output struct
+    //   - GS `gl_Position` → mesh stage's per-vertex output struct
+    //     `[[position]]` field
+    //   - GS streams 0-3 — Metal mesh shaders have ONE output stream;
+    //     no native streams support. CTS GS section has zero stream
+    //     tests (verified Phase 0), so this is moot for Sprint 3.
+    //
+    // No `encodeMetalGSDraw` declared yet — wire when SPIRV-W's first
+    // emission patch produces consumable MSL. See Sprint 3 phasing in
+    // `specs-worker-docs/SPRINT-3-KICKOFF.md` and Phase 0 findings in
+    // `specs-worker-docs/crossworker/SPRINT-3-PHASE-0-FINDINGS-2026-04-27.md`.
+
     // Encode + commit + wait a single compute dispatch. This creates a
     // fresh command buffer + compute encoder, binds the pipeline and
     // the caller-supplied buffer / texture bindings, issues

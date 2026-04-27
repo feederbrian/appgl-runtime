@@ -303,6 +303,18 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
     // report MTLGPUFamilyMac2 and historically support BC but not ETC.
     const bool supportsApple = device != nil && [device supportsFamily:MTLGPUFamilyApple1];
     bool supportsBC = device != nil && [device supportsFamily:MTLGPUFamilyMac2];
+
+    // Sprint 3 [metal-mesh-GS]: cache mesh shader capability at
+    // initialization time. Both `Metal3` (full feature set) and
+    // `Apple7` (tier-1 mesh) are required for the GS-via-mesh-shader
+    // translation path. Older Apple Silicon (Apple1-6) routes to the
+    // CPU GS interpreter fallback. M1 Max validated 2026-04-27 as
+    // having both capabilities.
+    if (device != nil) {
+        meshShaderSupported_ =
+            [device supportsFamily:MTLGPUFamilyMetal3] &&
+            [device supportsFamily:MTLGPUFamilyApple7];
+    }
     if (device != nil && [device respondsToSelector:@selector(supportsBCTextureCompression)]) {
         // supportsBCTextureCompression (macOS 11+) is the canonical probe
         // for BC format support, and it returns YES on Apple Silicon too

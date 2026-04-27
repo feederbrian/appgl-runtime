@@ -48,6 +48,21 @@ public:
     // table automatically unlocks the texture-allocation path.
     bool isSupportedInternalFormat(GLenum internalFormat) const;
 
+    // Sprint 3 [metal-mesh-GS]: device capability for Metal mesh
+    // shaders. True when the device supports both
+    // `MTLGPUFamilyMetal3` (full mesh shader feature set) and
+    // `MTLGPUFamilyApple7` (tier-1 mesh shader). The tier-2 mesh
+    // shader path is needed to translate GLSL geometry shaders to
+    // Metal's `[[mesh]]` / `[[object]]` stage pair: GS's `EmitVertex`
+    // / `EndPrimitive` map to mesh-stage's per-threadgroup primitive
+    // emission, and GS's `gl_Layer` maps to
+    // `[[render_target_array_index]]` per primitive.
+    //
+    // M1 Max (validated 2026-04-27): supports both Metal3 and Apple7.
+    // Older M1 variants and earlier Apple Silicon report Apple7 = false
+    // and route to the CPU GS interpreter fallback.
+    bool meshShaderSupported() const { return meshShaderSupported_; }
+
 private:
     void initializeFormatTable(void* metalDevice);
     void initializeLimits(void* metalDevice);
@@ -70,6 +85,10 @@ private:
 
     std::unordered_map<GLenum, GLFormatCapability> formats_;
     std::string extensions_;
+
+    // Sprint 3 [metal-mesh-GS]: cached at format-table init time so
+    // link-time GS tier classification doesn't repeat the family probe.
+    bool meshShaderSupported_ = false;
 };
 
 }  // namespace appgl
