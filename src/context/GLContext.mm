@@ -19859,6 +19859,22 @@ bool GLContext::linkProgram(GLuint program) {
         const std::string& fsSrc2 = fragmentShader ? fragmentShader->source : kEmptySrc;
         supplementFromReflection(programObject->vertexReflection, 0x01, vsSrc2);
         supplementFromReflection(programObject->fragmentReflection, 0x02, fsSrc2);
+        // Tess stages: source the reflection from whichever TES form
+        // got translated (compute form for combined VertexTessellation
+        // Fragment programs, vertex form would be similar but isn't
+        // stashed today). TCS reflection is always stashed when the
+        // stage was translated. Stage bits: TCS=0x08, TES=0x10
+        // (mirror of glProgramInterfaceiv / GL_REFERENCED_BY_*).
+        // Closes the
+        //   single.ext_program_interface_query_dependency
+        // failure where `glGetProgramResourceIndex(po, GL_UNIFORM,
+        // "tc_uniform1")` returned `GL_INVALID_INDEX` because the
+        // tess-stage default-block uniforms never made it into
+        // `resourceUniforms`.
+        const std::string& tcsSrc2 = tessControlShader ? tessControlShader->source : kEmptySrc;
+        const std::string& tesSrc2 = tessEvalShader ? tessEvalShader->source : kEmptySrc;
+        supplementFromReflection(programObject->tessControlReflection, 0x08, tcsSrc2);
+        supplementFromReflection(programObject->tessEvalAsComputeReflection, 0x10, tesSrc2);
     }
 
     // ── Merge SPIRV-Cross uniform block reflection into the program's
@@ -20083,6 +20099,14 @@ bool GLContext::linkProgram(GLuint program) {
         // `uni_colors` (expected TRUE: GS reads uni_colors.red) vs
         // `uni_matrices` (expected FALSE: declared but unused).
         mergeBlocks(programObject->geometryReflection.uniformBlocks, 0x04, gsSrc);  // geometry
+        // Tess stages — same gap as supplementFromReflection above:
+        // TCS uniform_block resources need to flow through this merge
+        // path so glGetProgramResourceIndex(po, GL_UNIFORM_BLOCK,
+        // "tc_uniform_block1") finds them.
+        const std::string& ubTcsSrc = tessControlShader ? tessControlShader->source : "";
+        const std::string& ubTesSrc = tessEvalShader ? tessEvalShader->source : "";
+        mergeBlocks(programObject->tessControlReflection.uniformBlocks, 0x08, ubTcsSrc);
+        mergeBlocks(programObject->tessEvalAsComputeReflection.uniformBlocks, 0x10, ubTesSrc);
         // Compute UBOs — CTS `compute_shader.resource-ubo` declares
         // `uniform InputBuffer { … } g_in_buffer[12];` and queries
         // `glGetUniformBlockIndex("InputBuffer[0]")` + expects
@@ -20253,6 +20277,14 @@ bool GLContext::linkProgram(GLuint program) {
         mergeStorageBlocks(programObject->fragmentReflection.storageBuffers, 0x02, ssboFsSrc);
         mergeStorageBlocks(programObject->geometryReflection.storageBuffers, 0x04, ssboGsSrc);
         mergeStorageBlocks(programObject->computeReflection.storageBuffers, 0x20, ssboCsSrc);
+        // Tess stages — symmetric to mergeBlocks above. TCS/TES SSBO
+        // resources need this path so glGetProgramResourceIndex(po,
+        // GL_SHADER_STORAGE_BLOCK, "tc_shader_storage_block1") finds
+        // them.
+        const std::string& ssboTcsSrc = tessControlShader ? tessControlShader->source : ssboEmptySrc;
+        const std::string& ssboTesSrc = tessEvalShader ? tessEvalShader->source : ssboEmptySrc;
+        mergeStorageBlocks(programObject->tessControlReflection.storageBuffers, 0x08, ssboTcsSrc);
+        mergeStorageBlocks(programObject->tessEvalAsComputeReflection.storageBuffers, 0x10, ssboTesSrc);
 
         // GS reflection: the geometry shader is CPU-emulated — we
         // don't yet run SPIRV-Cross on it to produce a MSL
