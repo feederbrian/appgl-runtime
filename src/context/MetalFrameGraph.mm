@@ -3076,9 +3076,20 @@ struct TessGenParams {
 };
 
 // Round factor value up to the nearest valid segment count for the
-// given spacing. Matches `segmentCount` in TessellationEmulator.cpp.
+// given spacing. Matches `getTessellationLevelAfterVertexSpacing` in
+// CTS's TessellationShaderUtils — including the FRAC_ODD MAX-1 cap.
+//
+// GL 4.6 §11.2.2 + CTS reference: FRAC_ODD clamps to [1, MAX-1]
+// (= [1, 63] with MAX=64). Without the MAX-1 cap, level=64 produced
+// rounded=65 (= CEIL(64) + odd-fix) but CTS expects 63 (= clamp(64,
+// 1, 63)). Closes the FRAC_ODD-at-MAX edge case for vertex_spacing
+// and inner-rounding tests (T4E §1 documented the divergence).
 inline uint segmentCount(float level, uint spacing) {
-    level = clamp(level, 1.0f, 64.0f);
+    if (spacing == 2u) {
+        level = clamp(level, 1.0f, 63.0f);     // FractionalOdd: [1, MAX-1]
+    } else {
+        level = clamp(level, 1.0f, 64.0f);
+    }
     int n = int(ceil(level));
     if (spacing == 1u) {               // FractionalEven: round up to even >= 2
         if (n < 2) n = 2;
