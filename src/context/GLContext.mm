@@ -19106,17 +19106,21 @@ bool GLContext::linkProgram(GLuint program) {
                     programObject->gsOutputTopology == GL_TRIANGLE_STRIP ||
                     programObject->gsOutputTopology == GL_LINE_STRIP ||
                     programObject->gsOutputTopology == GL_POINTS;
-                // Phase 2.5 [Gap B, fork d8259b0]: SPIRV-Cross can now
-                // expand strip → list for max_vertices > 3, but
-                // CKPT18 verification surfaced that widening the gate
-                // produces 2 regressions (`blending_support` and
-                // `nonarray_input` — both max_vertices > 3 programs
-                // that fail end-to-end at the mesh-shader path).
-                // Keep the MVP gate at ≤ 3 until the layered_rendering
-                // / >3-vertex conversion shape is characterized via
-                // pixel-diff. Phase 2.5 SPIRV-Cross emission is sound;
-                // the runtime gap is downstream of VS-compute.
-                const bool maxVerticesOK = programObject->gsMaxVertices <= 3u;
+                // CKPT20 [Sprint 3 close]: gate widened from ≤3 to ≤4
+                // to activate Path I (interface-block GS input
+                // member population, fork 2a85276) on
+                // `nonarray_input.nonarray_input` (max_vertices=4).
+                // CKPT20 cluster verification: gate ≤4 preserves the
+                // 121/136 default-on invariant with 0 regressions
+                // (nonarray_input was already passing via legacy CPU
+                // emul; now routes through mesh path with Path I
+                // unblocking the interface-block input flow). The
+                // layered_rendering family (max_vertices ≥ 16) +
+                // `blending_support` (max=64) still fail at the
+                // per-layer rasterization layer — separate gap class
+                // carried forward to Sprint 4. Gate ≥5 is deferred
+                // pending that cluster's diagnosis.
+                const bool maxVerticesOK = programObject->gsMaxVertices <= 4u;
                 const bool shapeOK = inputOK && outputOK && maxVerticesOK;
                 if (shapeOK) {
                     appgl::TranslatorOptions gsMeshOpts;
