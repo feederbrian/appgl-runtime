@@ -302,6 +302,21 @@ struct TranslatorOptions {
     // optimizer is contractually obligated to preserve writes through
     // volatile pointers. OFF by default; only set on mesh-GS path.
     bool forceComputeKernelDeviceVolatileWrites = false;
+    // Sprint 3 Phase 2 Checkpoint 11 escalation 3 [metal-tess-TF]:
+    // emit `atomic_store_explicit(..., memory_order_relaxed)` on every
+    // spvOut field write (fork commit 915d81c). Tier 3 of the
+    // strength-tier ladder — non-eliminable per Apple's atomic-op
+    // contract. Heaviest spec-defensible mitigation. Pairs with
+    // `forceComputeKernelEntryCounterProbe` for 2-bit signal decoding
+    // when atomic still doesn't deliver. OFF by default.
+    bool forceComputeKernelAtomicWritesOnSpvOut = false;
+    // Sprint 3 Phase 2 Checkpoint 11 diagnostic [metal-tess-TF]: emit
+    // a `device atomic_uint*` counter binding at slot 27 that the
+    // kernel atomically increments on entry. Distinguishes "kernel
+    // doesn't execute" (counter==0) from "kernel runs but writes are
+    // eliminated" (counter>0 but spvOut sentinel-preserved).
+    // Orthogonal to the strength-tier mitigations.
+    bool forceComputeKernelEntryCounterProbe = false;
 };
 
 // Phase 3B.5 [metal-tess-TF]: stage-output struct layout. Populated for

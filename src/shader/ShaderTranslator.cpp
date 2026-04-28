@@ -532,6 +532,17 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (options.forceComputeKernelDeviceVolatileWrites && isVertex) {
             mslOpts.force_compute_kernel_device_volatile_writes = true;
         }
+        // Path E+++ mitigation [Checkpoint 11 escalation 3, fork 915d81c]:
+        // atomic_store_explicit on spvOut field writes. Strength-tier
+        // ladder terminus for spec-defensible mitigations.
+        if (options.forceComputeKernelAtomicWritesOnSpvOut && isVertex) {
+            mslOpts.force_compute_kernel_atomic_writes_on_spvOut = true;
+        }
+        // Path E+++ diagnostic [orthogonal to strength tiers]: emit
+        // entry-counter atomic increment for 2-bit signal decoding.
+        if (options.forceComputeKernelEntryCounterProbe && isVertex) {
+            mslOpts.force_compute_kernel_entry_counter_probe = true;
+        }
         // MSL 2.2 (macOS 10.15+, 2019) required for:
         //   - `[[primitive_id]]` in fragment shaders on macOS — without it
         //     SPIRV-Cross throws `PrimitiveId on macOS requires MSL 2.2`

@@ -19170,6 +19170,18 @@ bool GLContext::linkProgram(GLuint program) {
                     // insufficient. Two-flag structure documents the
                     // empirical→spec-mandated escalation pattern.
                     vsComputeOpts.forceComputeKernelDeviceVolatileWrites = true;
+                    // Path E+++ mitigation [CKPT11 escalation 3, 915d81c]:
+                    // atomic_store_explicit on spvOut field writes
+                    // (memory_order_relaxed). Tier 3 / strength-tier
+                    // ladder terminus for spec-defensible mitigations.
+                    vsComputeOpts.forceComputeKernelAtomicWritesOnSpvOut = true;
+                    // Path E+++ diagnostic [orthogonal]: kernel-entry
+                    // atomic counter at slot 27. The encoder binds a
+                    // pre-zeroed Shared buffer so post-dispatch CPU
+                    // can decode the 2-bit signal: counter>0 +
+                    // spvOut populated, counter>0 + spvOut still
+                    // sentinel, counter==0 (kernel didn't execute).
+                    vsComputeOpts.forceComputeKernelEntryCounterProbe = true;
                     appgl::ShaderReflection vsComputeRefl;
                     std::string vsComputeMSL;
                     const bool vsTrOk = translateStage(
