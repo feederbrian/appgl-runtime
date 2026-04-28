@@ -242,10 +242,12 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
  		meta.strip_array = strip_array;
-@@ -5051,6 +5141,103 @@
- 	return next_id;
- }
+@@ -5049,6 +5139,103 @@
+ 		set_name(type.self, "spvPerVertex");
  
+ 	return next_id;
++}
++
 +// Path A++ gate 7: shared-struct layout parity for GS-as-mesh.
 +//
 +// The existing add_interface_block flatten loop emits gl_ClipDistance and
@@ -341,11 +343,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +
 +	inject(BuiltInClipDistance, "gl_ClipDistance");
 +	inject(BuiltInCullDistance, "gl_CullDistance");
-+}
-+
+ }
+ 
  // Ensure that the type is compatible with the builtin.
- // If it is, simply return the given type ID.
- // Otherwise, create a new type, and return it's ID.
 @@ -8593,21 +8780,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
@@ -456,10 +456,13 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
  		{
-@@ -10884,6 +11144,67 @@
- 		break;
- 	}
- 
+@@ -10881,6 +11141,67 @@
+ 		flush_variable_declaration(builtin_mesh_primitive_indices_id);
+ 		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
+ 		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
++		break;
++	}
++
 +	// AppGL fork (msl-geometry-shader-as-mesh.patch): GS opcode translation
 +	// when emitting GS source as Metal mesh shader form.
 +	case OpEmitVertex:
@@ -518,12 +521,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		CompilerGLSL::emit_instruction(instruction);
-+		break;
-+	}
-+
- 	case OpAssumeTrueKHR:
- 	{
- 		auto condition = ops[0];
+ 		break;
+ 	}
+ 
 @@ -13987,8 +14308,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
@@ -625,7 +625,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15693,10 +16072,170 @@
+@@ -15693,10 +16072,191 @@
  
  	if (is_mesh_shader())
  	{
@@ -785,6 +785,27 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				statement("spvMesh.set_primitive_count(spvPrimitiveIndex);");
 +				statement("for (uint spvVI = 0u; spvVI < spvVertexIndex; ++spvVI)");
 +				begin_scope();
++				// Path B (gate 8) — emit_fixup() side-effects for the
++				// GS-as-mesh path. The legacy `emit_fixup()` short-circuits
++				// when `capture_output_to_buffer == true` (set by VS-compute
++				// via vertex_for_tessellation), assuming a downstream vertex
++				// stage will re-apply these transforms. Mesh-GS has no such
++				// downstream stage — the mesh function IS the last vertex
++				// stage before rasterization. Replicate each of emit_fixup's
++				// three conditional transformations here, gated by the same
++				// option flags it consults, applied to each vertex's
++				// `spvVertices[spvVI]` before `spvMesh.set_vertex` flushes
++				// it to the rasterizer.
++				if (needs_point_size_output && !writes_to_point_size)
++					statement("spvVertices[spvVI].gl_PointSize = ",
++					          format_float(msl_options.default_point_size), ";");
++				if (options.vertex.fixup_clipspace)
++					statement("spvVertices[spvVI].gl_Position.z = "
++					          "(spvVertices[spvVI].gl_Position.z + "
++					          "spvVertices[spvVI].gl_Position.w) * 0.5;");
++				if (options.vertex.flip_vert_y)
++					statement("spvVertices[spvVI].gl_Position.y = "
++					          "-(spvVertices[spvVI].gl_Position.y);");
 +				statement("spvMesh.set_vertex(spvVI, spvVertices[spvVI]);");
 +				end_scope();
 +			});
@@ -937,7 +958,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,280 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -1087,6 +1108,69 @@ index 0000000..1111111
 +				printf("  metal -c output:\n%s\n", out_buf.c_str());
 +		} else {
 +			fails += check("flag-ON metal -c invocation possible", false);
++		}
++	}
++
++	// Pass 3 — rung 5: runtime semantic invariants (Path B).
++	// Each emit_fixup() conditional transformation must fire on the
++	// mesh function before spvMesh.set_vertex when its option is set;
++	// the legacy emit_fixup short-circuits for capture_output_to_buffer
++	// (set by VS-compute via vertex_for_tessellation), so mesh-GS has
++	// to replicate the transforms on its own. Asserts presence of each
++	// transformation string when enabled — catches the divergence class
++	// that triggered Path B (clipspace fix dropped, points rendered in
++	// GL clip space instead of Metal clip space).
++	{
++		printf("# === Path B rung-5 (runtime semantic invariants) ===\n");
++		// Subtest A: clipspace fixup
++		{
++			CompilerMSL c(gs.data(), gs.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.geometry_shader_as_mesh = true;
++			c.set_msl_options(o);
++			CompilerGLSL::Options g = c.get_common_options();
++			g.vertex.fixup_clipspace = true;
++			c.set_common_options(g);
++			std::string msl = c.compile();
++			fails += check("rung-5 clipspace fixup emits when fixup_clipspace=true",
++			               contains(msl, "spvVertices[spvVI].gl_Position.z = "));
++		}
++		// Subtest B: clipspace fixup absent when option off (default)
++		{
++			CompilerMSL c(gs.data(), gs.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.geometry_shader_as_mesh = true;
++			c.set_msl_options(o);
++			std::string msl = c.compile();
++			fails += check("rung-5 clipspace fixup ABSENT when fixup_clipspace=false (regression guard)",
++			               !contains(msl, "spvVertices[spvVI].gl_Position.z = "));
++		}
++		// Subtest C: y-flip
++		{
++			CompilerMSL c(gs.data(), gs.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.geometry_shader_as_mesh = true;
++			c.set_msl_options(o);
++			CompilerGLSL::Options g = c.get_common_options();
++			g.vertex.flip_vert_y = true;
++			c.set_common_options(g);
++			std::string msl = c.compile();
++			fails += check("rung-5 y-flip emits when flip_vert_y=true",
++			               contains(msl, "spvVertices[spvVI].gl_Position.y = -"));
++		}
++		// Subtest D: y-flip absent when option off
++		{
++			CompilerMSL c(gs.data(), gs.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.geometry_shader_as_mesh = true;
++			c.set_msl_options(o);
++			std::string msl = c.compile();
++			fails += check("rung-5 y-flip ABSENT when flip_vert_y=false (regression guard)",
++			               !contains(msl, "spvVertices[spvVI].gl_Position.y = -"));
 +		}
 +	}
 +

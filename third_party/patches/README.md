@@ -436,6 +436,38 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path B (gate 8 — emit_fixup() side-effects):** the legacy
+`CompilerMSL::emit_fixup()` short-circuits when
+`capture_output_to_buffer == true` (set by VS-compute via
+`vertex_for_tessellation`) on the assumption that a downstream vertex
+stage will re-apply its three conditional transforms. Mesh-GS has no
+such downstream stage — the mesh function IS the last vertex stage
+before rasterization. Each transform is replicated in the
+`fixup_hooks_out` trailing emit (in the same loop that calls
+`spvMesh.set_vertex`), gated by the same option flags emit_fixup
+consults:
+
+1. `needs_point_size_output && !writes_to_point_size` →
+   `spvVertices[spvVI].gl_PointSize = default_point_size;`
+2. `options.vertex.fixup_clipspace` →
+   `spvVertices[spvVI].gl_Position.z = (z+w) * 0.5;` (Metal clip space)
+3. `options.vertex.flip_vert_y` →
+   `spvVertices[spvVI].gl_Position.y = -y;`
+
+Without gate 8, points at near-plane render incorrectly because
+gl_Position arrives at Metal's rasterizer in GL clip space
+(z ∈ [-w, +w]) instead of Metal clip space (z ∈ [0, +w]). H6 in
+AppGL-W's Phase 2 Checkpoint 5 diagnostic.
+
+Test rig adds rung-5 runtime-semantic-invariant assertions (per
+publication-prep §3.6.4 ladder, rung 5) — for each transform, asserts
+presence when option enabled AND absence when option disabled
+(regression guard). 4 new asserts (clipspace + y-flip × on/off);
+point-size injection deferred to a follow-on per-pipeline test
+fixture (current synthetic doesn't trigger the
+`needs_point_size_output` path). Total rig: 22 assertions across
+5 ladder rungs.
+
 **Path A++ (gate 7 — shared-struct-layout parity):** the existing
 `add_interface_block` flatten loop emits gl_ClipDistance / gl_CullDistance
 for VS-Output (`vertex_for_tessellation + capture_output_to_buffer`)
