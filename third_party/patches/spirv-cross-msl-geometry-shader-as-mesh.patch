@@ -114,7 +114,7 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		// Requires `msl_version >= 30000` (Metal 3.0); mesh shaders are
 +		// not available in earlier Metal versions.
 +		bool geometry_shader_as_mesh = false;
- 
++
 +		// AppGL fork addition: emit `threadgroup_barrier(mem_flags::mem_device)`
 +		// at the end of a `vertex_for_tessellation`-mode VS-as-compute kernel.
 +		// Apple's AIR optimizer + Metal driver appear to silently eliminate
@@ -168,7 +168,7 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		// per-scalar atomic stores. Default off — tess→tess
 +		// unchanged.
 +		bool force_compute_kernel_atomic_writes_on_spvOut = false;
-+
+ 
 +		// AppGL fork addition (Path E+++ diagnostic): add a
 +		// `device atomic_uint* spvKernelEntryCounter [[buffer(N)]]`
 +		// parameter to VS-compute kernels and emit
@@ -222,7 +222,7 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
  		// Assume that SubpassData images have multiple layers. Layered input attachments
  		// are addressed relative to the Layer output from the vertex pipeline. This option
  		// has no effect with multiview, since all input attachments are assumed to be layered
-@@ -1132,6 +1271,14 @@
+@@ -1132,6 +1271,27 @@
  	uint32_t add_interface_block_pointer(uint32_t ib_var_id, StorageClass storage);
  	uint32_t add_meshlet_block(bool per_primitive);
  
@@ -232,6 +232,19 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +	// add_interface_block flow dropped, and injects them into main0_in
 +	// so its byte layout matches the linked-VS main0_out emission.
 +	void ensure_gs_as_mesh_gl_per_vertex_parity();
++
++	// Phase 2.5 Gap A (msl-geometry-shader-as-mesh.patch): synthesizes
++	// a `gl_Position` Output variable in IR for GS-as-mesh shaders that
++	// don't write one. Apple Metal mesh shader vertex types must declare
++	// a `[[position]]` member; GLSL geometry shaders that omit
++	// `gl_Position = ...` (TF-only / depth-only patterns) violate this
++	// requirement. Synthesizing a vec4 Output with BuiltInPosition
++	// decoration carries through the existing add_meshlet_block /
++	// spvPerVertex emission machinery without further changes — the
++	// body never writes it, the function-local `spvVertices = {}`
++	// zero-init carries the default value (0,0,0,0) through to
++	// set_vertex.
++	void ensure_gs_as_mesh_position_output();
 +
 +
  	struct InterfaceBlockMeta
@@ -254,7 +267,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("threadgroup uint2 spvMeshSizes;");
  }
  
-@@ -1885,6 +1890,38 @@
+@@ -1885,6 +1890,44 @@
  	// before any emission walks variables (so the mask is in place
  	// before is_stage_output_variable_masked is consulted).
  	classify_tcs_outputs_by_consumption();
@@ -289,11 +302,17 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +					set_decoration(var.self, DecorationPerPrimitiveEXT);
 +			}
 +		});
++
++		// Phase 2.5 Gap A: synthesize gl_Position Output if absent.
++		// Mesh shader vertex types must declare a [[position]] member;
++		// GS sources that don't write gl_Position (TF-only / depth-only)
++		// produce position-less spvPerVertex which Metal rejects.
++		ensure_gs_as_mesh_position_output();
 +	}
  	analyze_image_and_sampler_usage();
  	analyze_sampled_image_usage();
  	analyze_interlocked_resource_usage();
-@@ -1936,6 +1973,34 @@
+@@ -1936,6 +1979,34 @@
  	if (is_mesh_shader())
  	{
  		fixup_implicit_builtin_block_names(get_execution_model());
@@ -328,7 +347,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	}
  	else
  	{
-@@ -4142,7 +4207,9 @@
+@@ -4142,7 +4213,9 @@
  						  (is_tese_shader() && msl_options.tess_evaluation_as_compute))) ||
  						(storage == StorageClassInput &&
  						 ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -339,7 +358,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  					const bool force_include_builtin =
  						tess_capture_buffer_interface && is_builtin;
  
-@@ -4188,6 +4255,7 @@
+@@ -4188,6 +4261,7 @@
  								storage == StorageClassInput && get_execution_model() != ExecutionModelFragment;
  						bool storage_is_stage_io = variable_storage_requires_stage_io(storage);
  
@@ -347,7 +366,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  						// Clip/CullDistance always need to be declared as user attributes.
  						if (builtin == BuiltInClipDistance || builtin == BuiltInCullDistance)
  							is_builtin = false;
-@@ -4364,6 +4432,15 @@
+@@ -4364,6 +4438,15 @@
  	// Accumulate the variables that should appear in the interface struct.
  	SmallVector<SPIRVariable *> vars;
  	bool incl_builtins = storage == StorageClassOutput || is_tessellation_shader();
@@ -363,7 +382,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	bool has_seen_barycentric = false;
  
  	InterfaceBlockMeta meta;
-@@ -4654,7 +4731,14 @@
+@@ -4654,7 +4737,14 @@
  						// We zero-base the InstanceID & VertexID variables for HLSL emulation elsewhere, so don't do it twice
  						if (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation)
  						{
@@ -379,7 +398,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  							          " = ", output_buffer_var_name, "[", to_expression(builtin_invocation_id_id),
  							          ".y * ", to_expression(builtin_stage_input_size_id), ".x + ",
  							          to_expression(builtin_invocation_id_id), ".x];");
-@@ -4746,6 +4830,19 @@
+@@ -4746,6 +4836,19 @@
  	{
  		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
  
@@ -399,7 +418,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
  		meta.strip_array = strip_array;
-@@ -5049,6 +5146,103 @@
+@@ -5049,8 +5152,208 @@
  		set_name(type.self, "spvPerVertex");
  
  	return next_id;
@@ -502,8 +521,113 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	inject(BuiltInCullDistance, "gl_CullDistance");
  }
  
++// Phase 2.5 Gap A: synthesize a gl_Position Output variable for
++// GS-as-mesh shaders that don't write one.
++//
++// Apple Metal's mesh shader vertex output type must declare a member
++// with the `[[position]]` attribute. GLSL geometry shaders that omit
++// `gl_Position = ...` (TF-only / depth-only patterns, e.g. lines_adj
++// in / line_strip out exporting only user varyings) compile cleanly per
++// GL spec — gl_Position default is undefined when not written; rasterizer
++// reads garbage but the program is still well-formed. Mesh-pipeline
++// emission rejects this with `error: invalid type 'spvPerVertex' for
++// mesh vertex type / missing mesh output declaration with attribute
++// 'position'`.
++//
++// Fix: synthesize a vec4 OpVariable with `Output` storage class and
++// `BuiltIn Position` decoration in the IR before add_meshlet_block
++// runs. The existing meshlet-block builder picks it up via the
++// for_each_typed_id walk and adds it to spvPerVertex (with the
++// `[[position]]` attribute) automatically. The body never references
++// or writes the synthesized variable; the function-local
++// `spvVertices = {}` zero-init carries (0,0,0,0) through to
++// `spvMesh.set_vertex` at function exit.
++//
++// Uniform mirrors the gl_FragCoord synthesis pattern at line 681 area —
++// allocate type IDs via `ir.increase_bound_by`, set SPIRType + pointer
++// SPIRType, set SPIRVariable, decorate. Mark as implicit-builtin so
++// downstream passes (active-builtin tracking, etc.) recognize it.
++void CompilerMSL::ensure_gs_as_mesh_position_output()
++{
++	if (!is_mesh_shader() || get_execution_model() != ExecutionModelGeometry)
++		return;
++	if (!msl_options.geometry_shader_as_mesh)
++		return;
++
++	// Search Output vars for an existing BuiltIn Position. If present,
++	// nothing to synthesize. Position can appear two ways:
++	//   1. Top-level Output variable with `BuiltIn Position` decoration —
++	//      rare; usually only when GS author declared `out vec4 gl_Position`
++	//      explicitly without the gl_PerVertex block.
++	//   2. Member of a gl_PerVertex Output block (the typical GLSL form
++	//      `gl_Position = ...;`) where Position is a member-level builtin
++	//      decoration on the block struct, not on the variable itself.
++	bool has_position = false;
++	ir.for_each_typed_id<SPIRVariable>([&](uint32_t, SPIRVariable &var) {
++		if (var.storage != StorageClassOutput)
++			return;
++		if (has_decoration(var.self, DecorationBuiltIn) &&
++		    BuiltIn(get_decoration(var.self, DecorationBuiltIn)) == BuiltInPosition)
++		{
++			has_position = true;
++			return;
++		}
++		// Walk the variable's data type for builtin Position members.
++		const auto &data_type = get_variable_data_type(var);
++		// gl_PerVertex output is typically NOT array-typed (in mesh
++		// emission context the array is per-vertex iteration handled
++		// by spvVertices); a non-array struct or struct-pointer suffices.
++		const SPIRType *struct_type = &data_type;
++		if (!data_type.array.empty())
++			struct_type = &get<SPIRType>(data_type.parent_type);
++		if (struct_type->basetype != SPIRType::Struct)
++			return;
++		for (uint32_t i = 0; i < uint32_t(struct_type->member_types.size()); ++i)
++		{
++			if (has_member_decoration(struct_type->self, i, DecorationBuiltIn) &&
++			    BuiltIn(get_member_decoration(struct_type->self, i, DecorationBuiltIn)) ==
++			        BuiltInPosition)
++			{
++				has_position = true;
++				return;
++			}
++		}
++	});
++	if (has_position)
++		return;
++
++	// Synthesize the gl_Position output. Allocate 3 IDs: vec4 type,
++	// pointer-to-vec4 type, variable.
++	uint32_t offset = ir.increase_bound_by(3);
++	uint32_t type_id = offset;
++	uint32_t type_ptr_id = offset + 1;
++	uint32_t var_id = offset + 2;
++
++	SPIRType vec4_type { OpTypeVector };
++	vec4_type.basetype = SPIRType::Float;
++	vec4_type.width = 32;
++	vec4_type.vecsize = 4;
++	set<SPIRType>(type_id, vec4_type);
++
++	SPIRType vec4_type_ptr = vec4_type;
++	vec4_type_ptr.op = OpTypePointer;
++	vec4_type_ptr.pointer = true;
++	vec4_type_ptr.pointer_depth++;
++	vec4_type_ptr.parent_type = type_id;
++	vec4_type_ptr.storage = StorageClassOutput;
++	auto &ptr_type = set<SPIRType>(type_ptr_id, vec4_type_ptr);
++	ptr_type.self = type_id;
++
++	set<SPIRVariable>(var_id, type_ptr_id, StorageClassOutput);
++	set_decoration(var_id, DecorationBuiltIn, BuiltInPosition);
++	set_name(var_id, "gl_Position");
++	mark_implicit_builtin(StorageClassOutput, BuiltInPosition, var_id);
++}
++
  // Ensure that the type is compatible with the builtin.
-@@ -8593,21 +8787,48 @@
+ // If it is, simply return the given type ID.
+ // Otherwise, create a new type, and return it's ID.
+@@ -8593,21 +8896,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
  
@@ -560,11 +684,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10322,7 +10543,53 @@
- 
+@@ -10323,6 +10653,52 @@
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
-+
+ 
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): when GS source
 +		// is being emitted as a mesh shader, OpStore to a per-vertex /
 +		// per-primitive output must redirect into the function-local
@@ -597,7 +720,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				const std::string sanitize_prefix = "_RESERVED_IDENTIFIER_FIXUP_";
 +				if (member.compare(0, sanitize_prefix.size(), sanitize_prefix) == 0)
 +					member.erase(0, sanitize_prefix.size());
- 
++
 +				if (!member.empty())
 +				{
 +					if (per_primitive)
@@ -614,7 +737,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
  		{
-@@ -10881,9 +11148,77 @@
+@@ -10881,6 +11257,74 @@
  		flush_variable_declaration(builtin_mesh_primitive_indices_id);
  		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
  		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
@@ -641,9 +764,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +		// `EmitVertex();` — never Metal-valid, but preserves prior behaviour
 +		// for callers without the option).
 +		CompilerGLSL::emit_instruction(instruction);
- 		break;
- 	}
- 
++		break;
++	}
++
 +	case OpEndPrimitive:
 +	{
 +		if (msl_options.geometry_shader_as_mesh && get_execution_model() == ExecutionModelGeometry)
@@ -686,13 +809,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		CompilerGLSL::emit_instruction(instruction);
-+		break;
-+	}
-+
- 	case OpAssumeTrueKHR:
- 	{
- 		auto condition = ops[0];
-@@ -13987,8 +14322,20 @@
+ 		break;
+ 	}
+ 
+@@ -13987,8 +14431,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
  		{
@@ -715,7 +835,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	}
  
-@@ -14616,6 +14963,20 @@
+@@ -14616,6 +15072,20 @@
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
  		break;
@@ -736,7 +856,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	default:
  		entry_type = "unknown";
  		break;
-@@ -14636,7 +14997,17 @@
+@@ -14636,7 +15106,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
  {
@@ -755,7 +875,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  bool CompilerMSL::uses_explicit_early_fragment_test()
-@@ -14851,7 +15222,9 @@
+@@ -14851,7 +15331,9 @@
  	string decl;
  
  	if ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -766,7 +886,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		return decl;
  
  	// Stage-in structure
-@@ -15040,7 +15413,14 @@
+@@ -15040,7 +15522,14 @@
  			if (!ep_args.empty())
  				ep_args += ", ";
  
@@ -782,7 +902,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	});
  
-@@ -15065,10 +15445,32 @@
+@@ -15065,8 +15554,30 @@
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -796,8 +916,8 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				msl_options.force_compute_kernel_device_volatile_writes ? "volatile " : "";
 +			ep_args += join(vol_pfx, "device ", type_to_glsl(get_stage_out_struct_type()), "* ", output_buffer_var_name,
  			                " [[buffer(", msl_options.shader_output_buffer_index, ")]]");
- 		}
- 
++		}
++
 +		// Path E+++ diagnostic: entry-counter probe. Adds a
 +		// `device atomic_uint* spvKernelEntryCounter [[buffer(N)]]`
 +		// parameter that the kernel preamble atomically increments.
@@ -811,12 +931,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				ep_args += ", ";
 +			ep_args += join("device atomic_uint* spvKernelEntryCounter [[buffer(",
 +			                msl_options.entry_counter_buffer_index, ")]]");
-+		}
-+
+ 		}
+ 
  		if (is_tesc_shader())
- 		{
- 			if (!ep_args.empty())
-@@ -15248,6 +15650,26 @@
+@@ -15248,6 +15759,26 @@
  
  	if (is_mesh_shader())
  	{
@@ -843,7 +961,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15689,14 +16111,337 @@
+@@ -15689,14 +16220,337 @@
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
@@ -1317,12 +1435,42 @@ index 0000000..1111111
 +        spvMesh.set_vertex(vi, spvVertices[vi]);
 +    }
 +}
+diff --git a/tools/gs-as-mesh-no-position.geom b/tools/gs-as-mesh-no-position.geom
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tools/gs-as-mesh-no-position.geom
+@@ -0,0 +1,24 @@
++// Gap A target — GS that doesn't write gl_Position (TF-only / depth-only pattern).
++// Per GL 4.6 GS spec, gl_Position default is undefined when not written, but
++// the program is well-formed. Mesh-pipeline emission must include gl_Position
++// in spvPerVertex or Metal rejects the mesh<vertex_t,...> instantiation.
++// Synthesize gl_Position Output in IR when GS doesn't write one.
++#version 450
++#extension GL_EXT_geometry_shader : require
++
++layout(lines_adjacency)        in;
++layout(line_strip, max_vertices = 2) out;
++
++layout(location = 0) out vec4 out_adjacent_geometry;
++layout(location = 1) out vec4 out_geometry;
++
++void main()
++{
++    out_adjacent_geometry = gl_in[0].gl_Position;
++    out_geometry          = gl_in[1].gl_Position;
++    EmitVertex();
++    out_adjacent_geometry = gl_in[3].gl_Position;
++    out_geometry          = gl_in[2].gl_Position;
++    EmitVertex();
++    EndPrimitive();
++}
 diff --git a/tools/msl-gs-as-mesh-test.cpp b/tools/msl-gs-as-mesh-test.cpp
 new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,464 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -1442,6 +1590,25 @@ index 0000000..1111111
 +		               contains(msl, "spvNeedImplicitEndPrimitive = false;"));
 +		fails += check("flag-ON emits implicit-EndPrimitive runtime guard at function exit (Path H)",
 +		               contains(msl, "if (spvNeedImplicitEndPrimitive)"));
++		// Phase 2.5 Gap A: spvPerVertex must contain exactly one
++		// [[position]] member. The synthesizer should detect existing
++		// member-level Position decoration on gl_PerVertex Output blocks
++		// and skip injection — without member-level detection, the
++		// synthesizer would duplicate the [[position]] member, which
++		// Metal rejects ("multiple members with attribute 'position'").
++		// Inspect the spvPerVertex struct region only.
++		size_t spv_per_vertex_start = msl.find("struct spvPerVertex");
++		if (spv_per_vertex_start != std::string::npos) {
++			size_t spv_per_vertex_end = msl.find("};", spv_per_vertex_start);
++			std::string spv_per_vertex_body = msl.substr(
++			    spv_per_vertex_start, spv_per_vertex_end - spv_per_vertex_start);
++			size_t pos_count = 0, off = 0;
++			while ((off = spv_per_vertex_body.find("[[position]]", off)) != std::string::npos) {
++				pos_count++; off++;
++			}
++			fails += check("Gap A: exactly one [[position]] member in spvPerVertex when GS writes gl_Position (no synthesizer duplicate)",
++			               pos_count == 1);
++		}
 +		// Path A — VS-output buffer parameter + per-vertex population.
 +		// gl_in[] should be populated from `spvVsOutputs[primId * N + i]`,
 +		// not zero-init. Primary regression guard from AppGL-W's pre-PSO

@@ -436,6 +436,47 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Phase 2.5 Gap A (gate 12 — synthesize gl_Position Output for GS-as-mesh
+shaders that don't write one):** Apple Metal's mesh-shader vertex output
+type must declare a member with the `[[position]]` attribute. GLSL
+geometry shaders that omit `gl_Position = ...` (TF-only / depth-only
+patterns, e.g. `lines_adjacency in / line_strip out` exporting only user
+varyings) compile cleanly per GL spec — gl_Position default is undefined
+when not written; rasterizer reads garbage but the program is well-formed.
+Mesh-pipeline emission rejects this with `error: invalid type
+'spvPerVertex' for mesh vertex type / missing mesh output declaration with
+attribute 'position'`.
+
+**Fix:** new `ensure_gs_as_mesh_position_output()` helper called from the
+existing GS-as-mesh pre-pass in `compile()`. Walks Output variables
+checking for `BuiltIn Position` decoration at BOTH variable level
+(rare standalone `out vec4 gl_Position` form) AND member level (typical
+gl_PerVertex Output block form, where Position is decorated on the
+struct member, not the variable itself). If absent, synthesizes a
+vec4 OpVariable with `Output` storage class and `BuiltIn Position`
+decoration via the standard `ir.increase_bound_by(3)` + `set<SPIRType>`
++ `set<SPIRVariable>` + `set_decoration` + `mark_implicit_builtin`
+pattern (mirrors `gl_FragCoord` synthesis at line 681 area).
+
+The body never references the synthesized variable; the function-local
+`spvVertices = {}` zero-init carries (0, 0, 0, 0) through to
+`spvMesh.set_vertex` at function exit. Existing `add_meshlet_block`
+machinery picks up the synthesized variable via the
+`for_each_typed_id<SPIRVariable>` walk and adds it to `spvPerVertex`
+with the `[[position]]` attribute automatically — no further emission
+changes needed.
+
+Default-on under `geometry_shader_as_mesh` (no flag — option (b) per
+Path H precedent). This is GL spec-bridging, not an empirical
+mitigation. Member-level Position detection prevents duplicate
+synthesis when GS source already writes gl_Position via gl_PerVertex
+block (validated against the synthetic GS that DOES write gl_Position;
+no duplicate `[[position]]` member regression).
+
+Test rig adds a Gap A regression-guard assertion: spvPerVertex must
+contain exactly one `[[position]]` member when GS writes gl_Position.
+Total rig: 40 assertions across 7 ladder rungs (1, 2, 3, 4, 5, 7, 9).
+
 **Path H (gate 11 — implicit EndPrimitive at GS function exit):**
 implements GL 4.6 §11.3.4 spec compliance. When a GS source emits
 vertices (via `EmitVertex()`) but doesn't call `EndPrimitive()`
