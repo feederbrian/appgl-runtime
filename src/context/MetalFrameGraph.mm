@@ -4549,6 +4549,34 @@ fragment float4 appgl_immediate_textured_fs(
         return (void*)CFBridgingRetain(pso);
     }
 
+    // Sprint 3 [metal-mesh-GS]: compile MSL → retained MTLFunction.
+    // Mesh render PSOs are FBO-format-keyed so the PSO build itself
+    // happens at draw time, but the source-to-AIR compile is stable
+    // across draw invocations and stashed on the program object.
+    void* compileMSLFunction(const std::string& msl, std::string* outError) {
+        if (device == nil || msl.empty()) {
+            if (outError) *outError = "no device or empty MSL";
+            return nullptr;
+        }
+        NSError* libError = nil;
+        id<MTLLibrary> lib = [device newLibraryWithSource:
+            [NSString stringWithUTF8String:msl.c_str()]
+            options:nil error:&libError];
+        if (lib == nil) {
+            if (outError) {
+                *outError = libError.localizedDescription.UTF8String
+                    ? libError.localizedDescription.UTF8String : "newLibraryWithSource failed";
+            }
+            return nullptr;
+        }
+        id<MTLFunction> fn = [lib newFunctionWithName:@"main0"];
+        if (fn == nil) {
+            if (outError) *outError = "newFunctionWithName(main0) failed";
+            return nullptr;
+        }
+        return (void*)CFBridgingRetain(fn);
+    }
+
     // Metal tess Phase 1 probe — validates that the SPIRV-Cross-emitted
     // tess MSL compiles and the Metal tessellation pipeline descriptor
     // accepts the TES + FS function pair. See the public
@@ -7196,6 +7224,10 @@ void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::st
                                                   void** outFunction,
                                                   void* stageInputOutputDescriptor) {
     return impl_->buildComputePipelineState(msl, outError, outFunction, stageInputOutputDescriptor);
+}
+
+void* MetalFrameGraph::compileMSLFunction(const std::string& msl, std::string* outError) {
+    return impl_->compileMSLFunction(msl, outError);
 }
 
 MetalFrameGraph::TessPipelineProbeResult MetalFrameGraph::probeTessellationPipeline(

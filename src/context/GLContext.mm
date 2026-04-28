@@ -19113,6 +19113,79 @@ bool GLContext::linkProgram(GLuint program) {
                     }
                 }
             }
+            // Sprint 3 Phase 2 [metal-mesh-GS]: link-time PSO build.
+            // When tier=MeshShader, prepare the two pieces the draw-time
+            // encoder needs:
+            //   (1) VS-as-compute PSO — VS source re-translated with
+            //       `vertex_for_tessellation + capture_output_to_buffer`
+            //       so the per-vertex outputs land in a buffer the mesh
+            //       function reads at [[buffer(22)]] (Path A's
+            //       `spvVsOutputs`, ec354aa). Mirrors Phase-3 metal-tess
+            //       VS-compute path; reuses `forceVertexForTessellation`.
+            //   (2) Mesh function — the `geometryShaderAsMeshMSL`
+            //       compiled to a retained `id<MTLFunction>`. The render
+            //       PSO itself is FBO-format-keyed and built lazily at
+            //       draw time.
+            // Either (1) or (2) failing demotes tier back to None so the
+            // CPU-interpreter fallback below picks the program up. Programs
+            // whose VS uses [[stage_in]] would fail (1) here and fall back
+            // — same handleability gate as the tess path. The 6 MVP
+            // conversion targets are simple gl_VertexID-only VSes, well
+            // inside this gate.
+            if (programObject->metalGSTier ==
+                    GLProgramObject::MetalGSTier::MeshShader &&
+                impl_->frameGraph != nullptr) {
+                bool meshLinkOk = true;
+                // (1) VS-as-compute translation + PSO build.
+                if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                    appgl::TranslatorOptions vsComputeOpts;
+                    vsComputeOpts.forceVertexForTessellation = true;
+                    appgl::ShaderReflection vsComputeRefl;
+                    std::string vsComputeMSL;
+                    const bool vsTrOk = translateStage(
+                        "vertex-as-compute-for-mesh",
+                        vertexShader->spirv.data(),
+                        vertexShader->spirv.size(),
+                        vertexShader->source,
+                        vsComputeMSL, vsComputeRefl, vsComputeOpts);
+                    if (vsTrOk && !vsComputeMSL.empty()) {
+                        programObject->metalGSVsComputeMSL = vsComputeMSL;
+                        std::string vsPsoErr;
+                        void* vsPSO = impl_->frameGraph
+                            ->buildComputePipelineState(vsComputeMSL,
+                                                         &vsPsoErr,
+                                                         nullptr);
+                        if (vsPSO != nullptr) {
+                            programObject->metalGSVsComputePipelineState = vsPSO;
+                        } else {
+                            meshLinkOk = false;
+                        }
+                    } else {
+                        meshLinkOk = false;
+                    }
+                } else {
+                    meshLinkOk = false;
+                }
+                // (2) Compile mesh function.
+                if (meshLinkOk) {
+                    std::string meshFnErr;
+                    void* meshFn = impl_->frameGraph
+                        ->compileMSLFunction(
+                            programObject->geometryShaderAsMeshMSL,
+                            &meshFnErr);
+                    if (meshFn != nullptr) {
+                        programObject->metalGSMeshFunction = meshFn;
+                    } else {
+                        meshLinkOk = false;
+                    }
+                }
+                // Demote on any failure so the CPU-interpreter fallback
+                // picks the program up below.
+                if (!meshLinkOk) {
+                    programObject->metalGSTier =
+                        GLProgramObject::MetalGSTier::None;
+                }
+            }
             if (programObject->metalGSTier == GLProgramObject::MetalGSTier::None &&
                 programObject->geometryEmulated) {
                 programObject->metalGSTier =

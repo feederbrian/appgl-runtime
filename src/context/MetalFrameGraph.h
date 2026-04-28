@@ -722,6 +722,14 @@ public:
                                      void** outFunction = nullptr,
                                      void* stageInputOutputDescriptor = nullptr);
 
+    // Sprint 3 [metal-mesh-GS]: compile MSL source into a retained
+    // id<MTLFunction> (no pipeline state). Used for the mesh-shader
+    // path where the render PSO build is FBO-format-keyed and
+    // therefore deferred to draw time, but the function compile cost
+    // can be paid once at link time. Returns nullptr on failure;
+    // populates `outError` with the NSError description.
+    void* compileMSLFunction(const std::string& msl, std::string* outError);
+
     // Metal-native tessellation pipeline probe (Phase 1 of the metal-tess
     // project). Given SPIRV-Cross-emitted MSL for a tess program's three
     // stages (TCS compute kernel, TES vertex function with `[[patch(...)]]`

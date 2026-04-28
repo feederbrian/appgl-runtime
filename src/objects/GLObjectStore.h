@@ -890,6 +890,23 @@ struct GLProgramObject {
     // at draw time when Metal's render-PSO requirements demand
     // per-FBO rebuild.
     void* metalGSMeshPipelineState = nullptr;
+    // Sprint 3 Phase 2 [metal-mesh-GS]: VS-as-compute pre-pass for the
+    // mesh-GS path. SPIRV-Cross-emitted MSL with
+    // `vertex_for_tessellation + capture_output_to_buffer` writes per-
+    // vertex VS outputs into a buffer the mesh function reads at
+    // `[[buffer(22)]]` (matches Path A's `spvVsOutputs`). The PSO is
+    // built once at link time (no MTLStageInputOutputDescriptor — the
+    // 6 MVP conversion targets are all simple gl_VertexID-only VSes;
+    // descriptor-needing programs fall back to CPUInterpreter via the
+    // PSO-build-failure gate). Released on relink / program-delete.
+    std::string metalGSVsComputeMSL;
+    void* metalGSVsComputePipelineState = nullptr;
+    // Sprint 3 Phase 2: cached id<MTLFunction> for the mesh function.
+    // Built from `geometryShaderAsMeshMSL` at link time so the per-
+    // FBO-format render-PSO build at draw time only pays the
+    // newRenderPipelineStateWithMeshDescriptor cost, not the
+    // newLibraryWithSource compile cost.
+    void* metalGSMeshFunction = nullptr;
     // Step 7-3 compute follow-up: retained id<MTLFunction> for the
     // compute entry point, populated alongside the PSO when
     // APPGL_ENABLE_ARGUMENT_BUFFERS is set. `encodeComputeDispatch`
