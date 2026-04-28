@@ -6009,6 +6009,16 @@ fragment float4 appgl_immediate_textured_fs(
             rpd.colorAttachments[0].clearColor = pendingClearColor;
         }
         rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+        // Phase 2.5 — layered FBO routing. When the GS writes
+        // `gl_Layer`, SPIRV-W's Gap C emission propagates the value to
+        // `spvCurrentPrim.gl_Layer` which the mesh stage exposes as
+        // `[[render_target_array_index]]` on the per-primitive output.
+        // Metal requires `renderTargetArrayLength` set on the pass
+        // descriptor for the rasterizer to honour it. Mirrors legacy
+        // encodeTranslatedDraw at MetalFrameGraph.mm:2092.
+        if (info.fboColorArrayLength > 0) {
+            rpd.renderTargetArrayLength = info.fboColorArrayLength;
+        }
         if (info.fboDepthStencilTexture != nullptr) {
             id<MTLTexture> dsTex =
                 (__bridge id<MTLTexture>)info.fboDepthStencilTexture;

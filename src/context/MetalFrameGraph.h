@@ -893,9 +893,11 @@ public:
     //       per Apple's mesh shader sample patterns.
     //
     // Returns false on any encode failure so the caller can fall back
-    // to the existing CPU GS interpreter path. MVP envelope: input
+    // to the existing CPU GS interpreter path. Envelope: input
     // topology = points/lines/triangles (no adjacency), output
-    // topology = points/line_strip/triangle_strip, max_vertices ≤ 3.
+    // topology = points/line_strip/triangle_strip, max_vertices ≤ 3
+    // (Phase 2 MVP — Phase 2.5 widening gated pending pixel-diff
+    // characterization of layered_rendering conversion shape).
     // Programs outside this envelope have `metalGSTier != MeshShader`
     // (rejected at link-time gate, GLContext.mm:19097) and never
     // reach this encoder.
@@ -938,6 +940,12 @@ public:
         void* fboDepthStencilTexture = nullptr;
         std::uint32_t fboWidth = 0;
         std::uint32_t fboHeight = 0;
+        // Phase 2.5 — layered FBO support. When non-zero, the mesh
+        // function writes `gl_Layer` and the render pass routes per-
+        // primitive output to the matching attachment slice via
+        // `[[render_target_array_index]]`. Mirrors legacy
+        // encodeTranslatedDraw's fboColorArrayLength (line 2092).
+        std::uint32_t fboColorArrayLength = 0;
         // GL render state — mirrors TranslatedDrawInfo's pipeline
         // toggles. Applied to the mesh-render encoder before
         // drawMeshThreadgroups so the mesh-shader path produces

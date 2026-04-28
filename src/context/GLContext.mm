@@ -19106,6 +19106,16 @@ bool GLContext::linkProgram(GLuint program) {
                     programObject->gsOutputTopology == GL_TRIANGLE_STRIP ||
                     programObject->gsOutputTopology == GL_LINE_STRIP ||
                     programObject->gsOutputTopology == GL_POINTS;
+                // Phase 2.5 [Gap B, fork d8259b0]: SPIRV-Cross can now
+                // expand strip → list for max_vertices > 3, but
+                // CKPT18 verification surfaced that widening the gate
+                // produces 2 regressions (`blending_support` and
+                // `nonarray_input` — both max_vertices > 3 programs
+                // that fail end-to-end at the mesh-shader path).
+                // Keep the MVP gate at ≤ 3 until the layered_rendering
+                // / >3-vertex conversion shape is characterized via
+                // pixel-diff. Phase 2.5 SPIRV-Cross emission is sound;
+                // the runtime gap is downstream of VS-compute.
                 const bool maxVerticesOK = programObject->gsMaxVertices <= 3u;
                 const bool shapeOK = inputOK && outputOK && maxVerticesOK;
                 if (shapeOK) {
@@ -23249,7 +23259,8 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     // pattern used by encodeTranslatedDraw at the drawArrays call site.
     GLsizei fboW = 0, fboH = 0;
     void* fboDSTex = nullptr;
-    void* fboColTex = resolveFBOColorTarget(fboW, fboH, fboDSTex);
+    std::uint32_t fboArrayLen = 0;
+    void* fboColTex = resolveFBOColorTarget(fboW, fboH, fboDSTex, &fboArrayLen);
     if (fboColTex == nullptr) return false;
 
     appgl::MetalFrameGraph::MetalMeshGSDrawInfo info;
@@ -23266,6 +23277,7 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     info.fboDepthStencilTexture = fboDSTex;
     info.fboWidth = static_cast<std::uint32_t>(fboW);
     info.fboHeight = static_cast<std::uint32_t>(fboH);
+    info.fboColorArrayLength = fboArrayLen;
 
     // Per-stage default-uniform buffers. Compute the per-stage
     // layouts lazily (cached on the program) and write the current
