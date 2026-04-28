@@ -398,10 +398,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  							          " = ", output_buffer_var_name, "[", to_expression(builtin_invocation_id_id),
  							          ".y * ", to_expression(builtin_stage_input_size_id), ".x + ",
  							          to_expression(builtin_invocation_id_id), ".x];");
-@@ -4746,6 +4836,19 @@
+@@ -4745,6 +4835,19 @@
+ 	for (auto *p_var : vars)
  	{
  		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
- 
++
 +		// GS-as-mesh: strip the array dimension on input variables so the
 +		// generated main0_in struct is per-vertex (matches the linked VS's
 +		// per-vertex output struct shape). The mesh threadgroup reads
@@ -414,11 +415,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +		    get_execution_model() == ExecutionModelGeometry &&
 +		    storage == StorageClassInput)
 +			strip_array = true;
-+
+ 
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
- 		meta.strip_array = strip_array;
-@@ -5049,8 +5152,208 @@
+@@ -5049,6 +5152,206 @@
  		set_name(type.self, "spvPerVertex");
  
  	return next_id;
@@ -519,8 +519,8 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +
 +	inject(BuiltInClipDistance, "gl_ClipDistance");
 +	inject(BuiltInCullDistance, "gl_CullDistance");
- }
- 
++}
++
 +// Phase 2.5 Gap A: synthesize a gl_Position Output variable for
 +// GS-as-mesh shaders that don't write one.
 +//
@@ -622,11 +622,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	set_decoration(var_id, DecorationBuiltIn, BuiltInPosition);
 +	set_name(var_id, "gl_Position");
 +	mark_implicit_builtin(StorageClassOutput, BuiltInPosition, var_id);
-+}
-+
+ }
+ 
  // Ensure that the type is compatible with the builtin.
- // If it is, simply return the given type ID.
- // Otherwise, create a new type, and return it's ID.
 @@ -8593,21 +8896,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
@@ -684,10 +682,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10323,6 +10653,52 @@
+@@ -10322,6 +10652,63 @@
+ 
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
- 
++
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): when GS source
 +		// is being emitted as a mesh shader, OpStore to a per-vertex /
 +		// per-primitive output must redirect into the function-local
@@ -724,20 +723,30 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				if (!member.empty())
 +				{
 +					if (per_primitive)
-+						statement("spvCurrentPrim.", member, " = ",
++					{
++						// Phase 2.5 Gap C: write to function-local shadow
++						// FIRST (declared in fixup_hooks_in alongside
++						// spvCurrentPrim), THEN propagate to spvCurrentPrim
++						// from the shadow. Subsequent body OpLoads of the
++						// per-primitive identifier (e.g. `int(gl_Layer)`)
++						// resolve to the shadow.
++						statement(member, " = ",
 +						          to_unpacked_expression(ops[1]), ";");
++						statement("spvCurrentPrim.", member, " = ", member, ";");
++					}
 +					else
++					{
 +						statement("spvVertices[spvVertexIndex].", member, " = ",
 +						          to_unpacked_expression(ops[1]), ";");
++					}
 +					break;
 +				}
 +			}
 +		}
-+
+ 
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
- 		{
-@@ -10881,6 +11257,74 @@
+@@ -10881,6 +11268,74 @@
  		flush_variable_declaration(builtin_mesh_primitive_indices_id);
  		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
  		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
@@ -812,7 +821,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		break;
  	}
  
-@@ -13987,8 +14431,20 @@
+@@ -13987,8 +14442,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
  		{
@@ -835,10 +844,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	}
  
-@@ -14616,6 +15072,20 @@
+@@ -14615,6 +15082,20 @@
+ 		break;
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
- 		break;
++		break;
 +	case ExecutionModelGeometry:
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): under
 +		// `geometry_shader_as_mesh`, GS source emits as Metal mesh
@@ -852,11 +862,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		entry_type = "unknown";
-+		break;
+ 		break;
  	default:
  		entry_type = "unknown";
- 		break;
-@@ -14636,7 +15106,17 @@
+@@ -14636,7 +15117,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
  {
@@ -875,7 +884,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  bool CompilerMSL::uses_explicit_early_fragment_test()
-@@ -14851,7 +15331,9 @@
+@@ -14851,7 +15342,9 @@
  	string decl;
  
  	if ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -886,7 +895,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		return decl;
  
  	// Stage-in structure
-@@ -15040,7 +15522,14 @@
+@@ -15040,7 +15533,14 @@
  			if (!ep_args.empty())
  				ep_args += ", ";
  
@@ -902,7 +911,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	});
  
-@@ -15065,8 +15554,30 @@
+@@ -15065,8 +15565,30 @@
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -934,7 +943,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  
  		if (is_tesc_shader())
-@@ -15248,6 +15759,26 @@
+@@ -15248,6 +15770,26 @@
  
  	if (is_mesh_shader())
  	{
@@ -961,7 +970,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15689,14 +16220,337 @@
+@@ -15689,14 +16231,360 @@
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
@@ -1114,7 +1123,30 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				statement("bool spvNeedImplicitEndPrimitive = false;");
 +				statement("spvUnsafeArray<spvPerVertex, ", execution.output_vertices, "> spvVertices = {};");
 +				if (mesh_out_per_primitive != 0)
++				{
 +					statement("spvPerPrimitive spvCurrentPrim = {};");
++					// Phase 2.5 Gap C: declare function-local shadows of
++					// each per-primitive Output (gl_Layer, gl_ViewportIndex,
++					// gl_PrimitiveID — anything that landed in spvPerPrimitive
++					// via PerPrimitiveEXT decoration synthesis). GLSL GS
++					// source pattern for layered_rendering tests:
++					//   gl_Layer = i;         // OpStore — intercepted, see
++					//                         // OpStore handler below
++					//   layer_id = gl_Layer;  // OpLoad — emits bare
++					//                         // `gl_Layer` identifier
++					// Without function-local shadows, the read emits
++					// undeclared-identifier error at metal -c. With shadows,
++					// reads resolve naturally; OpStore intercept is updated
++					// to write to BOTH the shadow AND spvCurrentPrim so
++					// EndPrimitive flushes still see the latest value.
++					auto &pp_type = get<SPIRType>(mesh_out_per_primitive);
++					for (uint32_t m = 0; m < uint32_t(pp_type.member_types.size()); ++m)
++					{
++						auto &mbr_type = get<SPIRType>(pp_type.member_types[m]);
++						std::string mbr_name = to_member_name(pp_type, m);
++						statement(type_to_glsl(mbr_type), " ", mbr_name, " = {};");
++					}
++				}
 +				// Pass 1 declarations + Path A population state.
 +				uint32_t verticesPerPrim = 0;
 +				SmallVector<SPIRVariable *> input_vars;
@@ -1470,7 +1502,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,464 @@
+@@ -0,0 +1,477 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -1608,6 +1640,19 @@ index 0000000..1111111
 +			}
 +			fails += check("Gap A: exactly one [[position]] member in spvPerVertex when GS writes gl_Position (no synthesizer duplicate)",
 +			               pos_count == 1);
++		}
++
++		// Phase 2.5 Gap C: per-primitive output reads (e.g. body
++		// `int(gl_Layer)`) require function-local shadows; without them
++		// the body emits an undeclared identifier and metal -c fails.
++		// Asserts the write-propagation-from-shadow pattern when GS
++		// writes gl_Layer; skipped on fixtures that don't write it
++		// (the synthetic gs-as-mesh-input.geom exercises this; some
++		// other fixtures don't).
++		if (contains(msl, "gl_Layer ="))
++		{
++			fails += check("Gap C: spvCurrentPrim per-primitive write propagates from function-local shadow (gl_Layer pattern)",
++			               contains(msl, "spvCurrentPrim.gl_Layer = gl_Layer;"));
 +		}
 +		// Path A — VS-output buffer parameter + per-vertex population.
 +		// gl_in[] should be populated from `spvVsOutputs[primId * N + i]`,

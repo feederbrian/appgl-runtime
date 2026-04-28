@@ -436,6 +436,41 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Phase 2.5 Gap C (gate 13 — function-local shadows for per-primitive
+Output reads):** layered_rendering GS source pattern reads back its
+own per-primitive output mid-body — e.g.
+`gl_Layer = i; layer_id = gl_Layer; EmitVertex();`. Pre-Gap C, the
+GS-as-mesh OpStore intercept routed `gl_Layer = i;` to
+`spvCurrentPrim.gl_Layer = i;` correctly, but the subsequent
+`int(gl_Layer)` read emitted a bare undeclared identifier — Metal
+compile failed with `error: use of undeclared identifier
+'gl_Layer'`.
+
+**Fix:** declare a function-local shadow for each per-primitive
+Output member in `fixup_hooks_in` (alongside the existing
+`spvPerPrimitive spvCurrentPrim = {};` declaration). The OpStore
+intercept now writes to BOTH the shadow AND `spvCurrentPrim`:
+
+```cpp
+gl_Layer = i;                           // shadow write
+spvCurrentPrim.gl_Layer = gl_Layer;    // propagate to per-primitive
+```
+
+Body OpLoad of `gl_Layer` resolves naturally to the shadow (a
+function-local `uint gl_Layer = {};`). EndPrimitive flush still
+sees the latest value via spvCurrentPrim.
+
+Validated against all four `/tmp/spirv_lr/spv_{0002,0005,0008,0011}.spv`
+layered_rendering CTS dumps (`points in / triangle_strip out /
+max_vertices=64-96`) — all four xcrun rc=0 with Gap C. Pre-Gap C:
+4 errors per dump. Compile path unblocked; runtime semantic
+correctness for `max_vertices > 3` strips remains gated on Gap B
+(strip-to-list expansion).
+
+Test rig adds a Gap C regression-guard assertion (conditional on
+GS body containing `gl_Layer = ` write — fires on synthetic GS,
+skipped on fixtures without gl_Layer writes).
+
 **Phase 2.5 Gap A (gate 12 — synthesize gl_Position Output for GS-as-mesh
 shaders that don't write one):** Apple Metal's mesh-shader vertex output
 type must declare a member with the `[[position]]` attribute. GLSL
