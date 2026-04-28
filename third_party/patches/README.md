@@ -436,6 +436,43 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path H (gate 11 — implicit EndPrimitive at GS function exit):**
+implements GL 4.6 §11.3.4 spec compliance. When a GS source emits
+vertices (via `EmitVertex()`) but doesn't call `EndPrimitive()`
+explicitly before function exit, the spec mandates that an implicit
+EndPrimitive is honored. The current GS-as-mesh emission tracks
+this via a function-local boolean and emits the trailing primitive
+flush at the end of `fixup_hooks_out`:
+
+```cpp
+bool spvNeedImplicitEndPrimitive = false;        // declared in fixup_hooks_in
+// ...
+spvNeedImplicitEndPrimitive = true;              // after each ++spvVertexIndex (OpEmitVertex)
+// ...
+spvNeedImplicitEndPrimitive = false;             // after each ++spvPrimitiveIndex (OpEndPrimitive)
+// ...
+if (spvNeedImplicitEndPrimitive)                 // at function exit, before set_primitive_count
+{
+    spvMesh.set_index(...);                       // same shape as OpEndPrimitive emit
+    spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);  // if mesh_out_per_primitive
+    ++spvPrimitiveIndex;
+}
+spvMesh.set_primitive_count(spvPrimitiveIndex);  // reflects correct count
+```
+
+**Default-on under `geometry_shader_as_mesh`** (no flag) — this is
+GL spec compliance, not an empirical mitigation. The boolean
+tracker handles all combinations naturally:
+- Body has explicit EndPrimitive last → tracker is false at exit → no implicit emit (no double-flush)
+- Body has EmitVertex without trailing EndPrimitive → tracker is true at exit → implicit emit fires
+
+**Why this matters:** `KHR-GL46.geometry_shader.output.primite_end_done_for_single_primitive` (and similar tests) exercise the implicit-EndPrimitive semantic. Without Path H, mesh-GS emits `set_primitive_count(0)` because `spvPrimitiveIndex` is never incremented for the dangling vertex run — zero rasterized output. Path H fixes the regression that AppGL-W's CKPT16 pixel diff surfaced.
+
+Test rig adds 4 Path H structural-marker assertions (tracker
+declaration, set-on-EmitVertex, clear-on-EndPrimitive, runtime
+guard at function exit). Total rig: 39 assertions across 7 ladder
+rungs.
+
 **Path G (gate 10 — `[[grid_size]]` → `[[threads_per_grid]]` for VS-compute kernel-arg synthesis):**
 adds `msl_options.force_threads_per_grid_for_stage_input_size`
 (CLI: `--msl-force-threads-per-grid-for-stage-input-size`). When

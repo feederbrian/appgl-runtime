@@ -379,11 +379,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  							          " = ", output_buffer_var_name, "[", to_expression(builtin_invocation_id_id),
  							          ".y * ", to_expression(builtin_stage_input_size_id), ".x + ",
  							          to_expression(builtin_invocation_id_id), ".x];");
-@@ -4745,6 +4829,19 @@
- 	for (auto *p_var : vars)
+@@ -4746,6 +4830,19 @@
  	{
  		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
-+
+ 
 +		// GS-as-mesh: strip the array dimension on input variables so the
 +		// generated main0_in struct is per-vertex (matches the linked VS's
 +		// per-vertex output struct shape). The mesh threadgroup reads
@@ -396,9 +395,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +		    get_execution_model() == ExecutionModelGeometry &&
 +		    storage == StorageClassInput)
 +			strip_array = true;
- 
++
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
+ 		meta.strip_array = strip_array;
 @@ -5049,6 +5146,103 @@
  		set_name(type.self, "spvPerVertex");
  
@@ -560,10 +560,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10323,6 +10544,52 @@
+@@ -10322,7 +10543,53 @@
+ 
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
- 
++
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): when GS source
 +		// is being emitted as a mesh shader, OpStore to a per-vertex /
 +		// per-primitive output must redirect into the function-local
@@ -596,7 +597,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				const std::string sanitize_prefix = "_RESERVED_IDENTIFIER_FIXUP_";
 +				if (member.compare(0, sanitize_prefix.size(), sanitize_prefix) == 0)
 +					member.erase(0, sanitize_prefix.size());
-+
+ 
 +				if (!member.empty())
 +				{
 +					if (per_primitive)
@@ -613,7 +614,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
  		{
-@@ -10881,6 +11148,67 @@
+@@ -10881,9 +11148,77 @@
  		flush_variable_declaration(builtin_mesh_primitive_indices_id);
  		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
  		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
@@ -629,17 +630,20 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			// The actual per-vertex output capture is handled by the
 +			// OpStore intercept (Component 4) which redirects writes to
 +			// per-vertex output globals into spvMesh.set_vertex(spvVertexIndex, ...).
-+			// Here we just advance the vertex counter.
++			// Here we just advance the vertex counter and mark that an
++			// implicit EndPrimitive at function exit is owed (per GL 4.6
++			// §11.3.4 — Path H spec compliance).
 +			statement("++spvVertexIndex;");
++			statement("spvNeedImplicitEndPrimitive = true;");
 +			break;
 +		}
 +		// Fall through to the inherited GLSL emission (which produces literal
 +		// `EmitVertex();` — never Metal-valid, but preserves prior behaviour
 +		// for callers without the option).
 +		CompilerGLSL::emit_instruction(instruction);
-+		break;
-+	}
-+
+ 		break;
+ 	}
+ 
 +	case OpEndPrimitive:
 +	{
 +		if (msl_options.geometry_shader_as_mesh && get_execution_model() == ExecutionModelGeometry)
@@ -675,13 +679,20 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			if (mesh_out_per_primitive != 0)
 +				statement("spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);");
 +			statement("++spvPrimitiveIndex;");
++			// Path H: clear the implicit-EndPrimitive-owed flag — this
++			// EndPrimitive flushed the current strip/run, so the
++			// function-exit implicit emit doesn't need to fire.
++			statement("spvNeedImplicitEndPrimitive = false;");
 +			break;
 +		}
 +		CompilerGLSL::emit_instruction(instruction);
- 		break;
- 	}
- 
-@@ -13987,8 +14315,20 @@
++		break;
++	}
++
+ 	case OpAssumeTrueKHR:
+ 	{
+ 		auto condition = ops[0];
+@@ -13987,8 +14322,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
  		{
@@ -704,7 +715,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	}
  
-@@ -14616,6 +14956,20 @@
+@@ -14616,6 +14963,20 @@
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
  		break;
@@ -725,7 +736,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	default:
  		entry_type = "unknown";
  		break;
-@@ -14636,7 +14990,17 @@
+@@ -14636,7 +14997,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
  {
@@ -744,7 +755,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  bool CompilerMSL::uses_explicit_early_fragment_test()
-@@ -14851,7 +15215,9 @@
+@@ -14851,7 +15222,9 @@
  	string decl;
  
  	if ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -755,7 +766,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		return decl;
  
  	// Stage-in structure
-@@ -15040,7 +15406,14 @@
+@@ -15040,7 +15413,14 @@
  			if (!ep_args.empty())
  				ep_args += ", ";
  
@@ -771,7 +782,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	});
  
-@@ -15065,8 +15438,30 @@
+@@ -15065,10 +15445,32 @@
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -785,8 +796,8 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				msl_options.force_compute_kernel_device_volatile_writes ? "volatile " : "";
 +			ep_args += join(vol_pfx, "device ", type_to_glsl(get_stage_out_struct_type()), "* ", output_buffer_var_name,
  			                " [[buffer(", msl_options.shader_output_buffer_index, ")]]");
-+		}
-+
+ 		}
+ 
 +		// Path E+++ diagnostic: entry-counter probe. Adds a
 +		// `device atomic_uint* spvKernelEntryCounter [[buffer(N)]]`
 +		// parameter that the kernel preamble atomically increments.
@@ -800,10 +811,12 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				ep_args += ", ";
 +			ep_args += join("device atomic_uint* spvKernelEntryCounter [[buffer(",
 +			                msl_options.entry_counter_buffer_index, ")]]");
- 		}
- 
++		}
++
  		if (is_tesc_shader())
-@@ -15248,6 +15643,26 @@
+ 		{
+ 			if (!ep_args.empty())
+@@ -15248,6 +15650,26 @@
  
  	if (is_mesh_shader())
  	{
@@ -830,7 +843,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15689,14 +16104,300 @@
+@@ -15689,14 +16111,337 @@
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
@@ -974,6 +987,13 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				auto &execution = get_entry_point();
 +				statement("uint spvVertexIndex = 0u;");
 +				statement("uint spvPrimitiveIndex = 0u;");
++				// Path H: track whether the current GS run owes an
++				// implicit EndPrimitive at function exit (per GL 4.6
++				// §11.3.4). Set to true on each OpEmitVertex; cleared
++				// on each OpEndPrimitive. At function exit, if true,
++				// the trailing emit replays the EndPrimitive index/
++				// primitive flush sequence.
++				statement("bool spvNeedImplicitEndPrimitive = false;");
 +				statement("spvUnsafeArray<spvPerVertex, ", execution.output_vertices, "> spvVertices = {};");
 +				if (mesh_out_per_primitive != 0)
 +					statement("spvPerPrimitive spvCurrentPrim = {};");
@@ -1093,6 +1113,36 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				}
 +			});
 +			entry_func.fixup_hooks_out.push_back([this]() {
++				// Path H — implicit EndPrimitive at function exit (GL 4.6 §11.3.4).
++				// If vertices were emitted since the last explicit
++				// EndPrimitive (or no EndPrimitive ever called), flush the
++				// trailing primitive(s) before set_primitive_count locks
++				// in the count. Mirrors the OpEndPrimitive emit shape per
++				// output topology — only fires when the runtime flag
++				// indicates an unflushed run is owed.
++				auto &execution = get_entry_point();
++				statement("if (spvNeedImplicitEndPrimitive)");
++				begin_scope();
++				if (execution.flags.get(ExecutionModeOutputTriangleStrip))
++				{
++					statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 0u, spvVertexIndex - 3u);");
++					statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 1u, spvVertexIndex - 2u);");
++					statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 2u, spvVertexIndex - 1u);");
++				}
++				else if (execution.flags.get(ExecutionModeOutputLineStrip))
++				{
++					statement("spvMesh.set_index(spvPrimitiveIndex * 2u + 0u, spvVertexIndex - 2u);");
++					statement("spvMesh.set_index(spvPrimitiveIndex * 2u + 1u, spvVertexIndex - 1u);");
++				}
++				else if (execution.flags.get(ExecutionModeOutputPoints))
++				{
++					statement("spvMesh.set_index(spvPrimitiveIndex, spvVertexIndex - 1u);");
++				}
++				if (mesh_out_per_primitive != 0)
++					statement("spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);");
++				statement("++spvPrimitiveIndex;");
++				end_scope();
++
 +				// Trailing emit: copy local arrays into spvMesh outputs.
 +				// Distinct from emit_mesh_outputs (which assumes
 +				// mesh-source IR shape with array-typed output globals).
@@ -1272,7 +1322,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,445 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -1379,6 +1429,19 @@ index 0000000..1111111
 +		               contains(msl, "spvMesh.set_primitive_count"));
 +		fails += check("flag-ON emits spvMesh.set_index for triangle_strip",
 +		               contains(msl, "spvMesh.set_index"));
++		// Path H (gate 11) — implicit EndPrimitive per GL 4.6 §11.3.4.
++		// Default-on under geometry_shader_as_mesh: tracker bool +
++		// runtime guard at function exit. Synthetic fixture has
++		// explicit EndPrimitive so the runtime guard fires as false at
++		// execution; the structural emission is what we assert here.
++		fails += check("flag-ON declares spvNeedImplicitEndPrimitive tracker (Path H)",
++		               contains(msl, "bool spvNeedImplicitEndPrimitive = false;"));
++		fails += check("flag-ON sets tracker on EmitVertex (Path H)",
++		               contains(msl, "spvNeedImplicitEndPrimitive = true;"));
++		fails += check("flag-ON clears tracker on EndPrimitive (Path H)",
++		               contains(msl, "spvNeedImplicitEndPrimitive = false;"));
++		fails += check("flag-ON emits implicit-EndPrimitive runtime guard at function exit (Path H)",
++		               contains(msl, "if (spvNeedImplicitEndPrimitive)"));
 +		// Path A — VS-output buffer parameter + per-vertex population.
 +		// gl_in[] should be populated from `spvVsOutputs[primId * N + i]`,
 +		// not zero-init. Primary regression guard from AppGL-W's pre-PSO
