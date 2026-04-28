@@ -1,47 +1,55 @@
 diff --git a/main.cpp b/main.cpp
 --- a/main.cpp
 +++ b/main.cpp
-@@ -667,6 +667,7 @@
+@@ -667,6 +667,8 @@
  	bool msl_vertex_for_tessellation = false;
  	bool msl_tess_evaluation_as_compute = false;
  	uint32_t msl_tese_input_patch_vertices = 0;
 +	bool msl_geometry_shader_as_mesh = false;
++	bool msl_force_compute_kernel_device_barrier_at_exit = false;
  	uint32_t msl_additional_fixed_sample_mask = 0xffffffff;
  	bool msl_arrayed_subpass_input = false;
  	uint32_t msl_r32ui_linear_texture_alignment = 4;
-@@ -949,6 +950,8 @@
+@@ -949,6 +951,10 @@
  	                "\t\tEnables transform-feedback capture of TES output. Pair with --msl-tese-input-patch-vertices to set the per-patch input stride.\n"
  	                "\t[--msl-tese-input-patch-vertices <count>]:\n\t\t[AppGL fork] Override the per-patch input vertex count used when computing `gl_in = &spvIn[gl_PrimitiveID * count]` in TES-as-compute mode.\n"
  	                "\t\tDefault is the linked TCS's `layout(vertices = N) out;` value; setting this is required when SPIRV-Cross can't see the TCS.\n"
 +	                "\t[--msl-geometry-shader-as-mesh]:\n\t\t[AppGL fork] Translate a geometry shader to a Metal `[[mesh]]` function instead of rejecting the source.\n"
 +	                "\t\tDeclares `spvMesh_t` from the GS's input/output topology + `max_vertices`, captures `EmitVertex`/`EndPrimitive` into a function-local vertex/primitive buffer, and flushes via `spvMesh.set_vertex` / `set_primitive` / `set_primitive_count` at function exit.\n"
++	                "\t[--msl-force-compute-kernel-device-barrier-at-exit]:\n\t\t[AppGL fork] Emit `threadgroup_barrier(mem_flags::mem_device)` at the end of `--msl-vertex-for-tessellation` VS-compute kernels.\n"
++	                "\t\tWorks around an AIR-layer cross-encoder-family liveness gap where VS-compute writes to `device main0_out*` survive compute->compute consumers but vanish across compute->render (e.g. mesh-pipeline) consumers. Default off; tess->tess paths unchanged.\n"
  	                "\t[--msl-additional-fixed-sample-mask <mask>]:\n"
  	                "\t\tSet an additional fixed sample mask. If the shader outputs a sample mask, then the final sample mask will be a bitwise AND of the two.\n"
  	                "\t[--msl-arrayed-subpass-input]:\n\t\tAssume that images of dimension SubpassData have multiple layers. Layered input attachments are accessed relative to BuiltInLayer.\n"
-@@ -1291,6 +1294,7 @@
+@@ -1291,6 +1297,9 @@
  		msl_opts.vertex_for_tessellation = args.msl_vertex_for_tessellation;
  		msl_opts.tess_evaluation_as_compute = args.msl_tess_evaluation_as_compute;
  		msl_opts.tese_input_patch_vertices = args.msl_tese_input_patch_vertices;
 +		msl_opts.geometry_shader_as_mesh = args.msl_geometry_shader_as_mesh;
++		msl_opts.force_compute_kernel_device_barrier_at_exit =
++		    args.msl_force_compute_kernel_device_barrier_at_exit;
  		msl_opts.additional_fixed_sample_mask = args.msl_additional_fixed_sample_mask;
  		msl_opts.arrayed_subpass_input = args.msl_arrayed_subpass_input;
  		msl_opts.r32ui_linear_texture_alignment = args.msl_r32ui_linear_texture_alignment;
-@@ -1884,6 +1888,8 @@
+@@ -1884,6 +1893,10 @@
  	        [&args](CLIParser &) { args.msl_tess_evaluation_as_compute = true; });
  	cbs.add("--msl-tese-input-patch-vertices",
  	        [&args](CLIParser &parser) { args.msl_tese_input_patch_vertices = parser.next_uint(); });
 +	cbs.add("--msl-geometry-shader-as-mesh",
 +	        [&args](CLIParser &) { args.msl_geometry_shader_as_mesh = true; });
++	cbs.add("--msl-force-compute-kernel-device-barrier-at-exit",
++	        [&args](CLIParser &) { args.msl_force_compute_kernel_device_barrier_at_exit = true; });
  	cbs.add("--msl-additional-fixed-sample-mask",
  	        [&args](CLIParser &parser) { args.msl_additional_fixed_sample_mask = parser.next_hex_uint(); });
  	cbs.add("--msl-arrayed-subpass-input", [&args](CLIParser &) { args.msl_arrayed_subpass_input = true; });
 diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 --- a/spirv_msl.hpp
 +++ b/spirv_msl.hpp
-@@ -540,6 +540,41 @@
+@@ -539,7 +539,59 @@
+ 		// Default false (existing behaviour: all TCS outputs in the
  		// per-CP device buffer).
  		bool split_tcs_outputs_by_consumption = false;
- 
++
 +		// AppGL fork addition (msl-geometry-shader-as-mesh.patch): emit
 +		// geometry shaders (`ExecutionModelGeometry`) as Metal mesh
 +		// shaders (`[[mesh]] void main0(...)`) instead of the current
@@ -76,11 +84,28 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		// Requires `msl_version >= 30000` (Metal 3.0); mesh shaders are
 +		// not available in earlier Metal versions.
 +		bool geometry_shader_as_mesh = false;
+ 
++		// AppGL fork addition: emit `threadgroup_barrier(mem_flags::mem_device)`
++		// at the end of a `vertex_for_tessellation`-mode VS-as-compute kernel.
++		// Apple's AIR optimizer + Metal driver appear to silently eliminate
++		// `device main0_out* spvOut` writes when the consumer is in a different
++		// encoder family (compute → render mesh-pipeline) — writes survive
++		// the compute → compute path (Phase-3 metal-tess), vanish on
++		// compute → render (mesh-GS Phase 2). The end-of-kernel device-memory
++		// barrier signals that all device writes are ordered before kernel
++		// exit, blocking the AIR-layer elimination.
++		//
++		// Default off — preserves existing tess→tess byte-identical
++		// emission. AppGL-W enables for VS-compute targeting mesh-pipeline
++		// consumption; tess→tess remains unchanged. Uses
++		// `mem_flags::mem_device` (not `mem_device_and_threadgroup`)
++		// because no threadgroup memory is shared in this VS-compute path.
++		bool force_compute_kernel_device_barrier_at_exit = false;
 +
  		// Assume that SubpassData images have multiple layers. Layered input attachments
  		// are addressed relative to the Layer output from the vertex pipeline. This option
  		// has no effect with multiview, since all input attachments are assumed to be layered
-@@ -1131,7 +1166,15 @@
+@@ -1131,6 +1183,14 @@
  	uint32_t add_interface_block(StorageClass storage, bool patch = false);
  	uint32_t add_interface_block_pointer(uint32_t ib_var_id, StorageClass storage);
  	uint32_t add_meshlet_block(bool per_primitive);
@@ -91,11 +116,10 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +	// add_interface_block flow dropped, and injects them into main0_in
 +	// so its byte layout matches the linked-VS main0_out emission.
 +	void ensure_gs_as_mesh_gl_per_vertex_parity();
- 
 +
+ 
  	struct InterfaceBlockMeta
  	{
- 		struct LocationMeta
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
@@ -403,10 +427,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10323,6 +10537,52 @@
+@@ -10322,6 +10536,52 @@
+ 
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
- 
++
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): when GS source
 +		// is being emitted as a mesh shader, OpStore to a per-vertex /
 +		// per-primitive output must redirect into the function-local
@@ -452,10 +477,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				}
 +			}
 +		}
-+
+ 
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
- 		{
 @@ -10881,6 +11141,67 @@
  		flush_variable_declaration(builtin_mesh_primitive_indices_id);
  		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
@@ -547,10 +571,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	}
  
-@@ -14616,6 +14949,20 @@
+@@ -14615,6 +14948,20 @@
+ 		break;
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
- 		break;
++		break;
 +	case ExecutionModelGeometry:
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): under
 +		// `geometry_shader_as_mesh`, GS source emits as Metal mesh
@@ -564,10 +589,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		entry_type = "unknown";
-+		break;
+ 		break;
  	default:
  		entry_type = "unknown";
- 		break;
 @@ -14636,7 +14983,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
@@ -625,7 +649,35 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15693,10 +16072,191 @@
+@@ -15689,14 +16068,219 @@
+ 			          " >= ", to_expression(builtin_stage_input_size_id), "))");
+ 			statement("    return;");
+ 		});
++
++		// Path E (gate 9) — cross-encoder-family AIR liveness.
++		// AppGL-W's Phase 2 Checkpoint 9-10 diagnostic confirmed
++		// VS-compute writes to `device main0_out* spvOut [[buffer(28)]]`
++		// survive on compute→compute consumer paths (Phase-3 metal-tess
++		// VS→TCS) but silently vanish on compute→render consumer paths
++		// (mesh-GS Phase 2 VS→mesh function). Same MSL, same dispatch,
++		// same buffer slot — only consumer encoder family differs.
++		// Apple's AIR optimizer + Metal driver appear to eliminate the
++		// writes across the encoder boundary in the absence of an
++		// explicit memory ordering signal at kernel exit.
++		//
++		// Mitigation: emit `threadgroup_barrier(mem_flags::mem_device)`
++		// at function exit, gated by the new
++		// `force_compute_kernel_device_barrier_at_exit` flag. Default off
++		// preserves byte-identical emission for tess→tess. AppGL-W's
++		// runtime enables for VS-compute targeting mesh-pipeline
++		// consumption (the compute→render boundary case).
++		if (msl_options.force_compute_kernel_device_barrier_at_exit)
++		{
++			entry_func.fixup_hooks_out.push_back([this]() {
++				statement("threadgroup_barrier(mem_flags::mem_device);");
++			});
++		}
+ 	}
  
  	if (is_mesh_shader())
  	{
@@ -958,7 +1010,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,314 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -1234,6 +1286,40 @@ index 0000000..1111111
 +		               all_offsets_match);
 +		fails += check("rung-4 per-member size parity (VS main0_out vs mesh main0_in)",
 +		               all_sizes_match);
++
++		// Rung 7 — cross-encoder-family AIR liveness annotation (Path E).
++		// VS-compute writes vanish on compute→render consumer paths
++		// without an explicit kernel-exit device barrier. Assert presence
++		// when flag enabled and absence when disabled (regression guard).
++		// Distinct from rungs 1-5: this is *runtime behavior of clean
++		// translation under specific consumer-pipeline configurations*,
++		// not a translation-correctness check.
++		printf("# === Path E rung-7 (cross-encoder AIR liveness barrier) ===\n");
++		// Subtest A: barrier emits when flag enabled
++		{
++			CompilerMSL c(vs_spv.data(), vs_spv.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.vertex_for_tessellation = true;
++			o.capture_output_to_buffer = true;
++			o.force_compute_kernel_device_barrier_at_exit = true;
++			c.set_msl_options(o);
++			std::string vs_msl_with_barrier = c.compile();
++			fails += check("rung-7 mem_device barrier emits when flag enabled",
++			               contains(vs_msl_with_barrier, "threadgroup_barrier(mem_flags::mem_device)"));
++		}
++		// Subtest B: barrier absent in default (tess-default invariant)
++		{
++			CompilerMSL c(vs_spv.data(), vs_spv.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.vertex_for_tessellation = true;
++			o.capture_output_to_buffer = true;
++			c.set_msl_options(o);
++			std::string vs_msl_default = c.compile();
++			fails += check("rung-7 mem_device barrier ABSENT in tess-default (98 GENUINE_PASS invariant)",
++			               !contains(vs_msl_default, "threadgroup_barrier(mem_flags::mem_device)"));
++		}
 +	}
 +
 +	printf("\n%s — %d failure(s)\n", fails == 0 ? "OK" : "FAIL", fails);

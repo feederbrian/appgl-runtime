@@ -436,6 +436,32 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path E (gate 9 — cross-encoder-family AIR liveness barrier):**
+adds `msl_options.force_compute_kernel_device_barrier_at_exit` (CLI:
+`--msl-force-compute-kernel-device-barrier-at-exit`). When set on a
+`vertex_for_tessellation` VS-as-compute kernel, emits
+`threadgroup_barrier(mem_flags::mem_device);` at function exit before
+the implicit return. Default off — preserves byte-identical emission
+for the Phase-3 metal-tess (compute → compute) path.
+
+**Why:** AppGL-W's Phase 2 Checkpoint 9-10 diagnostic confirmed
+VS-compute writes to `device main0_out* spvOut [[buffer(28)]]`
+survive on the compute → compute consumer path (Phase-3 VS → TCS,
+both compute encoder family) but vanish on the compute → render
+consumer path (mesh-GS Phase 2 VS → mesh function). Same MSL, same
+dispatch shape, same buffer slot — only the consumer encoder family
+differs. Apple's AIR optimizer + Metal driver appear to eliminate
+the cross-encoder-family writes in the absence of an explicit memory
+ordering signal at kernel exit. The `mem_flags::mem_device` barrier
+forces all device writes to be ordered before kernel exit, which
+blocks the AIR-layer elimination.
+
+Test rig adds rung-7 cross-encoder AIR liveness assertion (per
+publication-prep §3.6.4 ladder, rung 7) — barrier presence when flag
+enabled AND barrier absence in tess-default (98 GENUINE_PASS
+invariant regression guard). 2 new asserts; total rig: 24
+assertions across 6 ladder rungs.
+
 **Path B (gate 8 — emit_fixup() side-effects):** the legacy
 `CompilerMSL::emit_fixup()` short-circuits when
 `capture_output_to_buffer == true` (set by VS-compute via
