@@ -436,6 +436,30 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path A++ (gate 7 — shared-struct-layout parity):** the existing
+`add_interface_block` flatten loop emits gl_ClipDistance / gl_CullDistance
+for VS-Output (`vertex_for_tessellation + capture_output_to_buffer`)
+but `emit_struct_member`'s "do not emit unused builtins in mesh-output
+blocks" filter dropped them from GS-as-mesh's main0_in. Result: VS
+writes 32 B/vertex while mesh reads 24 B/vertex — first vertex aligns
+by accident, subsequent vertices misalign and gl_Position lands at
+wrong byte offsets. Gate 7 narrows the filter to skip GS-as-mesh's
+main0_in (tracked by `type.self == get_stage_in_struct_type().self`)
+plus a post-pass `ensure_gs_as_mesh_gl_per_vertex_parity()` that walks
+the GS source's input gl_PerVertex block and injects any missing
+ClipDistance/CullDistance member into main0_in. Source of truth for
+array sizes is the SPIR-V input block — same shape the linked VS's
+main0_out is emitted from, so byte parity falls out automatically.
+
+Test rig adds rung-4 cross-stage struct-byte parity assertion (per
+publication-prep §3.6.4 false-confidence ladder) — given a 2nd
+`vs.spv` argument, compiles VS with `vertex_for_tessellation +
+capture_output_to_buffer` and asserts `sizeof(VS::main0_out) ==
+sizeof(mesh::main0_in)` with per-member offset+size compare. Catches
+the divergence class that triggered Path A++, which marker presence
++ compile validity + structural-runtime-flow markers all PASS for
+each stage independently.
+
 **Path A (gl_in[] population from VS-output buffer):** the function-local
 input arrays declared by Components 6 are populated from a
 `device const main0_in* spvVsOutputs [[buffer(22)]]` parameter at the

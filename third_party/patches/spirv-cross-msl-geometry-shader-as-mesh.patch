@@ -80,6 +80,22 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
  		// Assume that SubpassData images have multiple layers. Layered input attachments
  		// are addressed relative to the Layer output from the vertex pipeline. This option
  		// has no effect with multiview, since all input attachments are assumed to be layered
+@@ -1131,7 +1166,15 @@
+ 	uint32_t add_interface_block(StorageClass storage, bool patch = false);
+ 	uint32_t add_interface_block_pointer(uint32_t ib_var_id, StorageClass storage);
+ 	uint32_t add_meshlet_block(bool per_primitive);
++
++	// Path A++ gate 7 (msl-geometry-shader-as-mesh.patch): shared-struct
++	// layout parity. Walks the GS's input gl_PerVertex block in IR,
++	// finds gl_ClipDistance / gl_CullDistance members the existing
++	// add_interface_block flow dropped, and injects them into main0_in
++	// so its byte layout matches the linked-VS main0_out emission.
++	void ensure_gs_as_mesh_gl_per_vertex_parity();
+ 
++
+ 	struct InterfaceBlockMeta
+ 	{
+ 		struct LocationMeta
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
@@ -136,7 +152,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	analyze_image_and_sampler_usage();
  	analyze_sampled_image_usage();
  	analyze_interlocked_resource_usage();
-@@ -1936,6 +1973,16 @@
+@@ -1936,6 +1973,34 @@
  	if (is_mesh_shader())
  	{
  		fixup_implicit_builtin_block_names(get_execution_model());
@@ -149,22 +165,29 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +		// parameter + the per-vertex population in fixup_hooks_in.
 +		if (msl_options.geometry_shader_as_mesh &&
 +		    get_execution_model() == ExecutionModelGeometry)
++		{
 +			stage_in_var_id = add_interface_block(StorageClassInput);
++			// Path A++ gate 7: shared-struct-layout-parity primitive.
++			// Force gl_ClipDistance / gl_CullDistance into main0_in so it
++			// matches the linked-VS main0_out byte-for-byte even when the
++			// GS doesn't read those members. Without this, VS-compute
++			// writes 32 B per vertex (Position + PointSize +
++			// ClipDistance[1]) while mesh reads 24 B per vertex
++			// (Position + PointSize) — first vertex aligns, subsequent
++			// vertices misalign and the GS reads garbage.
++			//
++			// Source of truth for array size: the GS's input
++			// gl_PerVertex_0 block in SPIR-V (declared by the GLSL
++			// `in gl_PerVertex { ... } gl_in[];` interface). Mirrors
++			// VS's main0_out shape because both are emitted from the
++			// same gl_PerVertex SPIR-V block on the linked program.
++			if (stage_in_var_id)
++				ensure_gs_as_mesh_gl_per_vertex_parity();
++		}
  	}
  	else
  	{
-@@ -3932,7 +3979,9 @@
- 		return !capture_output_to_buffer;
- 	else if (storage == StorageClassInput)
- 		return !(is_tesc_shader() && msl_options.multi_patch_workgroup) &&
--		       !(is_tese_shader() && msl_options.raw_buffer_tese_input);
-+		       !(is_tese_shader() && msl_options.raw_buffer_tese_input) &&
-+		       !(msl_options.geometry_shader_as_mesh &&
-+		         get_execution_model() == ExecutionModelGeometry);
- 	else
- 		return false;
- }
-@@ -4142,7 +4191,9 @@
+@@ -4142,7 +4207,9 @@
  						  (is_tese_shader() && msl_options.tess_evaluation_as_compute))) ||
  						(storage == StorageClassInput &&
  						 ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -175,7 +198,15 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  					const bool force_include_builtin =
  						tess_capture_buffer_interface && is_builtin;
  
-@@ -4364,6 +4415,15 @@
+@@ -4188,6 +4255,7 @@
+ 								storage == StorageClassInput && get_execution_model() != ExecutionModelFragment;
+ 						bool storage_is_stage_io = variable_storage_requires_stage_io(storage);
+ 
++
+ 						// Clip/CullDistance always need to be declared as user attributes.
+ 						if (builtin == BuiltInClipDistance || builtin == BuiltInCullDistance)
+ 							is_builtin = false;
+@@ -4364,6 +4432,15 @@
  	// Accumulate the variables that should appear in the interface struct.
  	SmallVector<SPIRVariable *> vars;
  	bool incl_builtins = storage == StorageClassOutput || is_tessellation_shader();
@@ -191,7 +222,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	bool has_seen_barycentric = false;
  
  	InterfaceBlockMeta meta;
-@@ -4746,6 +4806,19 @@
+@@ -4746,6 +4823,19 @@
  	{
  		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
  
@@ -211,7 +242,111 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
  		meta.strip_array = strip_array;
-@@ -8593,21 +8666,48 @@
+@@ -5051,6 +5141,103 @@
+ 	return next_id;
+ }
+ 
++// Path A++ gate 7: shared-struct layout parity for GS-as-mesh.
++//
++// The existing add_interface_block flatten loop emits gl_ClipDistance and
++// gl_CullDistance for VS-Output (`vertex_for_tessellation +
++// capture_output_to_buffer`) but silently drops them for GS-Input
++// (`geometry_shader_as_mesh`) because the array-typed builtin path
++// behind the storage_is_stage_io+is_composite_type gate at
++// `add_variable_to_interface_block` doesn't follow through to the
++// member emit. Result: VS writes 32 B/vertex (Position+PointSize+
++// ClipDistance[1]), GS reads 24 B/vertex (Position+PointSize) — first
++// vertex aligns by accident, subsequent vertices land at wrong offsets.
++//
++// Post-pass: walk the GS's input gl_PerVertex block in IR, find the
++// gl_ClipDistance / gl_CullDistance member declarations and their
++// array sizes, and inject them into main0_in if absent. Source of
++// truth is the SPIR-V input block — same block shape the linked VS's
++// main0_out is emitted from, so byte parity falls out automatically.
++void CompilerMSL::ensure_gs_as_mesh_gl_per_vertex_parity()
++{
++	if (!stage_in_var_id)
++		return;
++
++	auto &ib_type = get_stage_in_struct_type();
++
++	auto has_member_with_builtin = [&](BuiltIn b) {
++		for (uint32_t i = 0; i < uint32_t(ib_type.member_types.size()); ++i)
++		{
++			if (has_member_decoration(ib_type.self, i, DecorationBuiltIn) &&
++			    BuiltIn(get_member_decoration(ib_type.self, i, DecorationBuiltIn)) == b)
++				return true;
++		}
++		return false;
++	};
++
++	// Find the GS's input gl_PerVertex block in IR — it's a Block-decorated
++	// struct that's the element type of an Input-storage-class array
++	// variable (gl_in). Iterate Input variables, peel pointer + array,
++	// find the one with DecorationBlock and gl_PerVertex builtin members.
++	const SPIRType *gl_per_vertex_in = nullptr;
++	ir.for_each_typed_id<SPIRVariable>([&](uint32_t, SPIRVariable &var) {
++		if (gl_per_vertex_in)
++			return;
++		if (var.storage != StorageClassInput)
++			return;
++		const auto &element_type = get_variable_element_type(var);
++		if (!has_decoration(element_type.self, DecorationBlock))
++			return;
++		// Confirm gl_PerVertex shape — at least one member with
++		// BuiltIn Position decoration.
++		bool has_position_member = false;
++		for (uint32_t i = 0; i < uint32_t(element_type.member_types.size()); ++i)
++		{
++			if (has_member_decoration(element_type.self, i, DecorationBuiltIn) &&
++			    BuiltIn(get_member_decoration(element_type.self, i, DecorationBuiltIn)) ==
++			        BuiltInPosition)
++			{
++				has_position_member = true;
++				break;
++			}
++		}
++		if (has_position_member)
++			gl_per_vertex_in = &element_type;
++	});
++
++	if (!gl_per_vertex_in)
++		return;
++
++	// For each clip/cull distance member in the source gl_PerVertex,
++	// inject into main0_in if absent. Carries name + array size
++	// from the IR member; member type is the same SPIRType ID so
++	// no fresh type creation needed.
++	auto inject = [&](BuiltIn b, const char *member_name) {
++		if (has_member_with_builtin(b))
++			return;
++		uint32_t src_mbr_idx = UINT32_MAX;
++		for (uint32_t i = 0; i < uint32_t(gl_per_vertex_in->member_types.size()); ++i)
++		{
++			if (has_member_decoration(gl_per_vertex_in->self, i, DecorationBuiltIn) &&
++			    BuiltIn(get_member_decoration(gl_per_vertex_in->self, i, DecorationBuiltIn)) == b)
++			{
++				src_mbr_idx = i;
++				break;
++			}
++		}
++		if (src_mbr_idx == UINT32_MAX)
++			return;
++		uint32_t mbr_type_id = gl_per_vertex_in->member_types[src_mbr_idx];
++		uint32_t new_idx = uint32_t(ib_type.member_types.size());
++		ib_type.member_types.push_back(mbr_type_id);
++		set_member_name(ib_type.self, new_idx, member_name);
++		set_member_decoration(ib_type.self, new_idx, DecorationBuiltIn, b);
++	};
++
++	inject(BuiltInClipDistance, "gl_ClipDistance");
++	inject(BuiltInCullDistance, "gl_CullDistance");
++}
++
+ // Ensure that the type is compatible with the builtin.
+ // If it is, simply return the given type ID.
+ // Otherwise, create a new type, and return it's ID.
+@@ -8593,21 +8780,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
  
@@ -268,11 +403,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10322,7 +10422,53 @@
- 
+@@ -10323,6 +10537,52 @@
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
-+
+ 
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): when GS source
 +		// is being emitted as a mesh shader, OpStore to a per-vertex /
 +		// per-primitive output must redirect into the function-local
@@ -305,7 +439,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				const std::string sanitize_prefix = "_RESERVED_IDENTIFIER_FIXUP_";
 +				if (member.compare(0, sanitize_prefix.size(), sanitize_prefix) == 0)
 +					member.erase(0, sanitize_prefix.size());
- 
++
 +				if (!member.empty())
 +				{
 +					if (per_primitive)
@@ -322,7 +456,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
  		{
-@@ -10884,6 +11030,67 @@
+@@ -10884,6 +11144,67 @@
  		break;
  	}
  
@@ -390,7 +524,30 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	case OpAssumeTrueKHR:
  	{
  		auto condition = ops[0];
-@@ -14616,6 +14823,20 @@
+@@ -13987,8 +14308,20 @@
+ 	{
+ 		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
+ 		{
+-			// Do not emit unused builtins in mesh-output blocks
+-			return;
++			// Do not emit unused builtins in mesh-output blocks.
++			// AppGL Path A++: exception for the GS-as-mesh main0_in
++			// struct — its builtins must be present for byte-stride
++			// parity with linked-VS main0_out, even when the GS body
++			// doesn't read them. Without this, gl_ClipDistance / etc.
++			// silently drop, VS writes 32B per vertex while mesh reads
++			// 24B per vertex, and subsequent vertices misalign.
++			const bool is_gs_as_mesh_main0_in =
++				msl_options.geometry_shader_as_mesh &&
++				get_execution_model() == ExecutionModelGeometry &&
++				stage_in_var_id &&
++				type.self == get_stage_in_struct_type().self;
++			if (!is_gs_as_mesh_main0_in)
++				return;
+ 		}
+ 	}
+ 
+@@ -14616,6 +14949,20 @@
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
  		break;
@@ -411,7 +568,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	default:
  		entry_type = "unknown";
  		break;
-@@ -14636,7 +14857,17 @@
+@@ -14636,7 +14983,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
  {
@@ -430,7 +587,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  bool CompilerMSL::uses_explicit_early_fragment_test()
-@@ -14851,7 +15082,9 @@
+@@ -14851,7 +15208,9 @@
  	string decl;
  
  	if ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -441,7 +598,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		return decl;
  
  	// Stage-in structure
-@@ -15248,6 +15481,26 @@
+@@ -15248,6 +15607,26 @@
  
  	if (is_mesh_shader())
  	{
@@ -468,7 +625,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15693,10 +15946,170 @@
+@@ -15693,10 +16072,170 @@
  
  	if (is_mesh_shader())
  	{
@@ -780,7 +937,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,217 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -831,8 +988,17 @@ index 0000000..1111111
 +}
 +
 +int main(int argc, char **argv) {
-+	if (argc != 2) { fprintf(stderr, "usage: %s gs.spv\n", argv[0]); return 1; }
++	if (argc != 2 && argc != 3) {
++		fprintf(stderr, "usage: %s gs.spv [vs.spv]\n", argv[0]);
++		fprintf(stderr, "  optional vs.spv enables Path A++ rung-4 struct-byte parity assertion\n");
++		fprintf(stderr, "  (compares VS main0_out vs mesh main0_in member layout)\n");
++		return 1;
++	}
 +	auto gs = read_spirv(argv[1]);
++	bool have_vs = argc == 3;
++	std::vector<uint32_t> vs_spv;
++	if (have_vs)
++		vs_spv = read_spirv(argv[2]);
 +
 +	int fails = 0;
 +
@@ -922,6 +1088,68 @@ index 0000000..1111111
 +		} else {
 +			fails += check("flag-ON metal -c invocation possible", false);
 +		}
++	}
++
++	// Rung 4 — cross-stage struct-byte parity assertion (Path A++).
++	// Compares VS-compute `main0_out` vs mesh `main0_in` member layout
++	// field-by-field. Catches the divergence class that triggered Path A++:
++	// VS-compute emits the full GLSL gl_PerVertex (force-include via
++	// vertex_for_tessellation+capture_output_to_buffer) while
++	// GS-as-mesh's main0_in previously dropped inactive builtins,
++	// silently misaligning subsequent vertices' reads from the
++	// VS-output buffer. Marker presence (rung 1) + compile validity
++	// (rung 2) + structural-runtime-flow markers (rung 3) all PASS
++	// independently for each stage; only cross-stage byte compare
++	// catches sibling-stage struct-shape divergence.
++	if (have_vs) {
++		printf("# === Path A++ rung-4 (cross-stage struct-byte parity) ===\n");
++		CompilerMSL vc(vs_spv.data(), vs_spv.size());
++		CompilerMSL::Options vo;
++		vo.msl_version = 30000;
++		vo.vertex_for_tessellation = true;
++		vo.capture_output_to_buffer = true;
++		vc.set_msl_options(vo);
++		std::string vs_msl = vc.compile();
++		auto vs_layout = vc.get_msl_interface_layout(StorageClassOutput, false);
++
++		CompilerMSL mc(gs.data(), gs.size());
++		CompilerMSL::Options mo;
++		mo.msl_version = 30000;
++		mo.geometry_shader_as_mesh = true;
++		mc.set_msl_options(mo);
++		std::string mesh_msl = mc.compile();
++		auto mesh_layout = mc.get_msl_interface_layout(StorageClassInput, false);
++
++		printf("# VS main0_out: %zu members, struct_size=%u\n",
++		       vs_layout.members.size(), vs_layout.struct_size);
++		for (auto &m : vs_layout.members)
++			printf("    %-30s off=%-3u sz=%-3u builtin=%d vecsize=%u\n",
++			       m.name.c_str(), m.offset, m.size, m.is_builtin, m.vecsize);
++		printf("# mesh main0_in: %zu members, struct_size=%u\n",
++		       mesh_layout.members.size(), mesh_layout.struct_size);
++		for (auto &m : mesh_layout.members)
++			printf("    %-30s off=%-3u sz=%-3u builtin=%d vecsize=%u\n",
++			       m.name.c_str(), m.offset, m.size, m.is_builtin, m.vecsize);
++
++		fails += check("rung-4 VS main0_out struct_size == mesh main0_in struct_size",
++		               vs_layout.struct_size == mesh_layout.struct_size);
++		fails += check("rung-4 VS main0_out member count == mesh main0_in member count",
++		               vs_layout.members.size() == mesh_layout.members.size());
++		// Per-member offset+size compare. Names may differ (gl_ClipDistance
++		// vs gl_ClipDistance_0); check the byte layout, not the names.
++		size_t common = std::min(vs_layout.members.size(), mesh_layout.members.size());
++		bool all_offsets_match = true;
++		bool all_sizes_match = true;
++		for (size_t i = 0; i < common; ++i) {
++			if (vs_layout.members[i].offset != mesh_layout.members[i].offset)
++				all_offsets_match = false;
++			if (vs_layout.members[i].size != mesh_layout.members[i].size)
++				all_sizes_match = false;
++		}
++		fails += check("rung-4 per-member offset parity (VS main0_out vs mesh main0_in)",
++		               all_offsets_match);
++		fails += check("rung-4 per-member size parity (VS main0_out vs mesh main0_in)",
++		               all_sizes_match);
 +	}
 +
 +	printf("\n%s — %d failure(s)\n", fails == 0 ? "OK" : "FAIL", fails);
