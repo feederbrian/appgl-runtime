@@ -19153,35 +19153,18 @@ bool GLContext::linkProgram(GLuint program) {
                 if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
                     appgl::TranslatorOptions vsComputeOpts;
                     vsComputeOpts.forceVertexForTessellation = true;
-                    // Path E mitigation [Checkpoint 11, e06f883]:
-                    // kernel-exit device-memory barrier so the AIR
-                    // optimizer keeps `device main0_out* spvOut`
-                    // writes alive across the compute→mesh-render
-                    // encoder-family boundary. Mesh-GS only — the
-                    // tess-side VS-compute consumption is compute→
-                    // compute and doesn't need the barrier (preserves
-                    // 98 GENUINE_PASS byte-identity invariant).
-                    vsComputeOpts.forceComputeKernelDeviceBarrierAtExit = true;
-                    // Path E++ mitigation [CKPT11 escalation, 76aacf7]:
-                    // `volatile device main0_out*` qualifier on the
-                    // spvOut buffer parameter + propagated reference
-                    // bindings. Spec-mandated rather than empirical —
-                    // load-bearing when the barrier alone is
-                    // insufficient. Two-flag structure documents the
-                    // empirical→spec-mandated escalation pattern.
-                    vsComputeOpts.forceComputeKernelDeviceVolatileWrites = true;
-                    // Path E+++ mitigation [CKPT11 escalation 3, 915d81c]:
-                    // atomic_store_explicit on spvOut field writes
-                    // (memory_order_relaxed). Tier 3 / strength-tier
-                    // ladder terminus for spec-defensible mitigations.
-                    vsComputeOpts.forceComputeKernelAtomicWritesOnSpvOut = true;
-                    // Path E+++ diagnostic [orthogonal]: kernel-entry
-                    // atomic counter at slot 27. The encoder binds a
-                    // pre-zeroed Shared buffer so post-dispatch CPU
-                    // can decode the 2-bit signal: counter>0 +
-                    // spvOut populated, counter>0 + spvOut still
-                    // sentinel, counter==0 (kernel didn't execute).
-                    vsComputeOpts.forceComputeKernelEntryCounterProbe = true;
+                    // Path G [Checkpoint 15, fork f19ce45]: ACTUAL fix
+                    // for the VS-as-compute kernel-doesn't-execute
+                    // symptom. Apple's [[grid_size]] returns (0,0,0)
+                    // on Apple Silicon — bounds check fires
+                    // universally, all threads early-return.
+                    // [[threads_per_grid]] returns the dispatched
+                    // size correctly. Path E/E++/E+++ flags
+                    // (barrier/volatile/atomic) preserved in the
+                    // TranslatorOptions struct as historical
+                    // record + optional defense-in-depth, but kept
+                    // OFF here — Path G alone is sufficient.
+                    vsComputeOpts.forceThreadsPerGridForStageInputSize = true;
                     appgl::ShaderReflection vsComputeRefl;
                     std::string vsComputeMSL;
                     const bool vsTrOk = translateStage(

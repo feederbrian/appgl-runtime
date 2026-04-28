@@ -543,6 +543,14 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (options.forceComputeKernelEntryCounterProbe && isVertex) {
             mslOpts.force_compute_kernel_entry_counter_probe = true;
         }
+        // Path G [Checkpoint 15, fork f19ce45]: ACTUAL fix for the
+        // VS-as-compute kernel-doesn't-execute symptom. Emits
+        // `[[threads_per_grid]]` for spvStageInputSize so the bounds
+        // check returns the dispatched grid size (not the broken
+        // [[grid_size]] which returns 0).
+        if (options.forceThreadsPerGridForStageInputSize && isVertex) {
+            mslOpts.force_threads_per_grid_for_stage_input_size = true;
+        }
         // MSL 2.2 (macOS 10.15+, 2019) required for:
         //   - `[[primitive_id]]` in fragment shaders on macOS — without it
         //     SPIRV-Cross throws `PrimitiveId on macOS requires MSL 2.2`

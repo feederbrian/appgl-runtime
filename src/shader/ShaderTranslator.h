@@ -317,6 +317,17 @@ struct TranslatorOptions {
     // eliminated" (counter>0 but spvOut sentinel-preserved).
     // Orthogonal to the strength-tier mitigations.
     bool forceComputeKernelEntryCounterProbe = false;
+    // Sprint 3 Phase 2 Checkpoint 14/15 [metal-tess-TF]: emit
+    // `[[threads_per_grid]]` instead of `[[grid_size]]` for the
+    // bounds-check size parameter (`spvStageInputSize`) on VS-as-
+    // compute kernels. Path G mitigation (fork commit f19ce45) — the
+    // ACTUAL fix for the kernel-doesn't-execute symptom CKPT11/12/13
+    // chased through the strength-tier ladder. Apple's [[grid_size]]
+    // returns (0,0,0) for compute kernels dispatched via either
+    // dispatchThreads or dispatchThreadgroups on M1 Max — the bounds
+    // check then fires for all threads → silent kernel skip.
+    // [[threads_per_grid]] returns the dispatched size correctly.
+    bool forceThreadsPerGridForStageInputSize = false;
 };
 
 // Phase 3B.5 [metal-tess-TF]: stage-output struct layout. Populated for
