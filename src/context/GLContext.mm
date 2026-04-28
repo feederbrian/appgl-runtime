@@ -23226,6 +23226,12 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
         program.metalGSFragmentFunction == nullptr) {
         return false;
     }
+    if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+        std::fprintf(stderr,
+            "[MESH_GS] tryMetalMeshGSDraw enter: prog=%u mode=0x%X count=%d\n",
+            programName, mode, count);
+        std::fflush(stderr);
+    }
 
     // Resolve current FBO color + depth/stencil targets. Mirrors the
     // pattern used by encodeTranslatedDraw at the drawArrays call site.
@@ -23240,32 +23246,94 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     info.fragmentFunction = program.metalGSFragmentFunction;
     info.meshPipelineStateInOut = &program.metalGSMeshPipelineState;
     info.vertexCount = static_cast<std::uint32_t>(count);
-    // GL_POINTS: 1 input vertex per primitive. primitiveCount equals
-    // vertexCount for points. Output topology mirrors input here
-    // because Phase-2 MVP only handles points → points GS shape.
     info.primitiveCount = static_cast<std::uint32_t>(count);
     info.inputVerticesPerPrimitive = 1;
     info.outputTopologyMTLPrimitiveType = MTLPrimitiveTypePoint;
-    // Conservative VS-output stride. SPIRV-Cross's main0_out for the
-    // 6 MVP conversion-target VSes is float4 + a few scalar varyings
-    // ≪ 256 bytes. Refine to exact stride in a follow-up once the
-    // SPIRV-Cross reflection's `output_struct_size` is plumbed
-    // through ShaderReflection.
     info.vsOutputStrideBytes = 256;
     info.fboColorTexture = fboColTex;
     info.fboDepthStencilTexture = fboDSTex;
     info.fboWidth = static_cast<std::uint32_t>(fboW);
     info.fboHeight = static_cast<std::uint32_t>(fboH);
-    // Default uniforms wiring deferred — the 6 MVP conversion targets
-    // either don't reference default uniforms in their VS/GS/FS or
-    // reference them through a path that the legacy translator already
-    // remapped. A draw-time push needs the same buffer-content wiring
-    // encodeTranslatedDraw uses; revisit once first-conversion-landed
-    // proves the encoder shape.
-    info.defaultUniformData = nullptr;
-    info.defaultUniformSize = 0;
 
-    return frameGraph->encodeMetalMeshGSDraw(info);
+    // Per-stage default-uniform buffers. Compute the per-stage
+    // layouts lazily (cached on the program) and write the current
+    // uniform values through `buildStageUniformBuffer` — same path
+    // the legacy translated-draw site uses (GLContext.mm:23992-23996).
+    // For Phase-2 MVP the 6 conversion-target GS bodies don't
+    // reference _DefaultUniforms (verified against the emitted mesh
+    // MSL: no `constant _DefaultUniforms&` parameter), so meshUniform*
+    // stays nullptr; if a future target does reference defaults from
+    // the GS the same plumbing extends to the geometry stage.
+    if (!program.uniformLayoutComputed) {
+        computeStageUniformLayout(program.vertexUniformLayout,
+            program.vertexReflection, program.uniforms);
+        computeStageUniformLayout(program.fragmentUniformLayout,
+            program.fragmentReflection, program.uniforms);
+        program.uniformLayoutComputed = true;
+    }
+    thread_local std::vector<std::uint8_t> meshGsVtxUniformScratch;
+    thread_local std::vector<std::uint8_t> meshGsFragUniformScratch;
+    pushSynthesizedMatrixUniforms(program, matrixState);
+    buildStageUniformBuffer(meshGsVtxUniformScratch,
+        program.vertexReflection, program.uniformValues,
+        program.vertexUniformLayout);
+    buildStageUniformBuffer(meshGsFragUniformScratch,
+        program.fragmentReflection, program.uniformValues,
+        program.fragmentUniformLayout);
+    info.vsUniformData = meshGsVtxUniformScratch.data();
+    info.vsUniformSize = meshGsVtxUniformScratch.size();
+    info.fsUniformData = meshGsFragUniformScratch.data();
+    info.fsUniformSize = meshGsFragUniformScratch.size();
+    info.meshUniformData = nullptr;
+    info.meshUniformSize = 0;
+
+    // GL render state — mirror encodeTranslatedDraw's tdi setup
+    // (GLContext.mm:22172-22217) for the fields the mesh-render
+    // encoder applies. Sourced from the same `state` (GLStateTracker)
+    // accessor the legacy path uses.
+    info.depthTestEnabled = state->isEnabled(GL_DEPTH_TEST);
+    info.depthFunc = state->depthState().func;
+    info.depthWriteMask = (state->depthState().writeMask != GL_FALSE);
+    info.cullFaceEnabled = state->isEnabled(GL_CULL_FACE);
+    info.cullFaceMode = state->rasterState().cullFaceMode;
+    info.frontFace = state->rasterState().frontFace;
+    info.wireframe = (state->rasterState().polygonFillMode == GL_LINE);
+    info.polygonOffsetEnabled =
+        state->isEnabled(GL_POLYGON_OFFSET_FILL) ||
+        state->isEnabled(GL_POLYGON_OFFSET_LINE) ||
+        state->isEnabled(GL_POLYGON_OFFSET_POINT);
+    info.polygonOffsetFactor = state->rasterState().polygonOffsetFactor;
+    info.polygonOffsetUnits = state->rasterState().polygonOffsetUnits;
+    info.polygonOffsetClamp = state->rasterState().polygonOffsetClamp;
+    {
+        const auto& vp = state->viewport();
+        info.viewportX = vp.x;
+        info.viewportY = vp.y;
+        info.viewportWidth = vp.width;
+        info.viewportHeight = vp.height;
+    }
+    {
+        const auto& dr = state->depthRange();
+        info.depthRangeNear = dr.nearValue;
+        info.depthRangeFar = dr.farValue;
+    }
+    info.scissorTestEnabled = state->isEnabled(GL_SCISSOR_TEST);
+    {
+        const auto& sc = state->scissor();
+        info.scissorX = sc.x;
+        info.scissorY = sc.y;
+        info.scissorWidth = sc.width;
+        info.scissorHeight = sc.height;
+    }
+
+    const bool ok = frameGraph->encodeMetalMeshGSDraw(info);
+    if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+        std::fprintf(stderr,
+            "[MESH_GS] encodeMetalMeshGSDraw rc=%d diag=\"%s\"\n",
+            ok ? 1 : 0, info.diagnostic.c_str());
+        std::fflush(stderr);
+    }
+    return ok;
 }
 
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,

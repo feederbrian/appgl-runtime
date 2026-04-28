@@ -921,16 +921,53 @@ public:
         // function reads matching main0_in struct (same struct from
         // SPIRV-Cross's perspective). Overallocation costs memory only.
         std::uint32_t vsOutputStrideBytes = 256;
-        // Default uniforms (push-constant equivalent) — bound at
-        // [[buffer(16)]] for both VS-compute and mesh stages.
-        const void* defaultUniformData = nullptr;
-        std::size_t defaultUniformSize = 0;
+        // Per-stage default-uniform-block bytes (push-constant
+        // equivalent). Each stage has an independently-translated MSL
+        // and SPIRV-Cross emits its own struct layout, so the same
+        // GL-side uniform values produce DIFFERENT bytes per stage.
+        // Bound at [[buffer(16)]] on each stage.
+        const void* vsUniformData = nullptr;
+        std::size_t vsUniformSize = 0;
+        const void* meshUniformData = nullptr;
+        std::size_t meshUniformSize = 0;
+        const void* fsUniformData = nullptr;
+        std::size_t fsUniformSize = 0;
         // FBO state (matches encodeTranslatedDraw's fboColorTexture /
         // fboDepthStencilTexture / etc.).
         void* fboColorTexture = nullptr;
         void* fboDepthStencilTexture = nullptr;
         std::uint32_t fboWidth = 0;
         std::uint32_t fboHeight = 0;
+        // GL render state — mirrors TranslatedDrawInfo's pipeline
+        // toggles. Applied to the mesh-render encoder before
+        // drawMeshThreadgroups so the mesh-shader path produces
+        // pixels at the same coordinates with the same masks /
+        // depth-test behavior as the legacy VS+FS path. Without
+        // these, viewport defaults to FBO-full-size and depth/blend
+        // state is whatever Metal defaults to (which may not match
+        // GL's current state).
+        bool depthTestEnabled = false;
+        std::uint32_t depthFunc = 0;        // GLenum
+        bool depthWriteMask = true;
+        bool cullFaceEnabled = false;
+        std::uint32_t cullFaceMode = 0;     // GLenum (GL_BACK default)
+        std::uint32_t frontFace = 0;        // GLenum (GL_CCW default)
+        bool wireframe = false;
+        bool polygonOffsetEnabled = false;
+        float polygonOffsetFactor = 0.0f;
+        float polygonOffsetUnits = 0.0f;
+        float polygonOffsetClamp = 0.0f;
+        std::int32_t viewportX = 0;
+        std::int32_t viewportY = 0;
+        std::int32_t viewportWidth = 0;
+        std::int32_t viewportHeight = 0;
+        double depthRangeNear = 0.0;
+        double depthRangeFar = 1.0;
+        bool scissorTestEnabled = false;
+        std::int32_t scissorX = 0;
+        std::int32_t scissorY = 0;
+        std::int32_t scissorWidth = 0;
+        std::int32_t scissorHeight = 0;
         // Diagnostic. Used by callers in error-path logging.
         std::string diagnostic;
     };

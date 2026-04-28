@@ -5876,10 +5876,9 @@ fragment float4 appgl_immediate_textured_fs(
                 (__bridge id<MTLComputePipelineState>)info.vertexComputePipelineState;
             [vsEnc setComputePipelineState:vsPSO];
             [vsEnc setBuffer:vsOutBuf offset:0 atIndex:28];
-            if (info.defaultUniformData != nullptr &&
-                info.defaultUniformSize > 0) {
-                [vsEnc setBytes:info.defaultUniformData
-                         length:info.defaultUniformSize
+            if (info.vsUniformData != nullptr && info.vsUniformSize > 0) {
+                [vsEnc setBytes:info.vsUniformData
+                         length:info.vsUniformSize
                         atIndex:16];
             }
             const NSUInteger maxPerTg =
@@ -5994,15 +5993,107 @@ fragment float4 appgl_immediate_textured_fs(
         }
         [renc setRenderPipelineState:meshPSO];
         [renc setMeshBuffer:vsOutBuf offset:0 atIndex:22];
-        if (info.defaultUniformData != nullptr &&
-            info.defaultUniformSize > 0) {
-            [renc setMeshBytes:info.defaultUniformData
-                        length:info.defaultUniformSize
+        if (info.meshUniformData != nullptr && info.meshUniformSize > 0) {
+            [renc setMeshBytes:info.meshUniformData
+                        length:info.meshUniformSize
                        atIndex:16];
-            [renc setFragmentBytes:info.defaultUniformData
-                            length:info.defaultUniformSize
+        }
+        if (info.fsUniformData != nullptr && info.fsUniformSize > 0) {
+            [renc setFragmentBytes:info.fsUniformData
+                            length:info.fsUniformSize
                            atIndex:16];
         }
+
+        // GL render-state plumbing — mirrors encodeTranslatedDraw's
+        // depth/cull/winding/fill/scissor/viewport sequence so the
+        // mesh-shader path produces pixels with the same masks /
+        // depth-test behavior the legacy path applies.
+        if (info.fboDepthStencilTexture != nullptr) {
+            MetalDrawInfo fakeInfo;
+            fakeInfo.depthTestEnabled = info.depthTestEnabled;
+            fakeInfo.depthFunc = static_cast<GLenum>(info.depthFunc);
+            fakeInfo.depthWriteMask = info.depthWriteMask;
+            id<MTLDepthStencilState> dsState =
+                depthStencilStateForDraw(fakeInfo);
+            if (dsState != nil) {
+                [renc setDepthStencilState:dsState];
+            }
+        }
+        const MTLCullMode desiredCull = info.cullFaceEnabled
+            ? (info.cullFaceMode == GL_FRONT ? MTLCullModeFront
+                                              : MTLCullModeBack)
+            : MTLCullModeNone;
+        [renc setCullMode:desiredCull];
+        [renc setFrontFacingWinding:info.frontFace == GL_CW
+            ? MTLWindingClockwise : MTLWindingCounterClockwise];
+        [renc setTriangleFillMode:info.wireframe
+            ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
+        {
+            const float bias = info.polygonOffsetEnabled
+                ? info.polygonOffsetUnits : 0.0f;
+            const float slope = info.polygonOffsetEnabled
+                ? info.polygonOffsetFactor : 0.0f;
+            const float clampV = info.polygonOffsetEnabled
+                ? info.polygonOffsetClamp : 0.0f;
+            [renc setDepthBias:bias slopeScale:slope clamp:clampV];
+        }
+        // Viewport. GL bottom-up → Metal top-down conversion.
+        if (info.viewportWidth > 0 && info.viewportHeight > 0) {
+            id<MTLTexture> colorTex =
+                (__bridge id<MTLTexture>)info.fboColorTexture;
+            const double rtHeight = static_cast<double>(colorTex.height);
+            MTLViewport vp;
+            vp.originX = static_cast<double>(info.viewportX);
+            vp.originY = rtHeight - static_cast<double>(info.viewportY)
+                       - static_cast<double>(info.viewportHeight);
+            vp.width   = static_cast<double>(info.viewportWidth);
+            vp.height  = static_cast<double>(info.viewportHeight);
+            vp.znear   = info.depthRangeNear;
+            vp.zfar    = info.depthRangeFar;
+            [renc setViewport:vp];
+        }
+        // Scissor. GL bottom-up → Metal top-down conversion + clamp.
+        // When disabled, set to full render-target rect.
+        {
+            id<MTLTexture> colorTex =
+                (__bridge id<MTLTexture>)info.fboColorTexture;
+            const NSUInteger rtW = colorTex.width;
+            const NSUInteger rtH = colorTex.height;
+            MTLScissorRect sr;
+            if (!info.scissorTestEnabled) {
+                sr.x = 0; sr.y = 0; sr.width = rtW; sr.height = rtH;
+            } else if (info.scissorWidth <= 0 ||
+                       info.scissorHeight <= 0) {
+                sr.x = 0; sr.y = 0; sr.width = 0; sr.height = 0;
+            } else {
+                std::int32_t metalY =
+                    static_cast<std::int32_t>(rtH)
+                    - info.scissorY - info.scissorHeight;
+                if (metalY < 0) metalY = 0;
+                std::int32_t metalX = info.scissorX < 0
+                    ? 0 : info.scissorX;
+                std::int32_t availW =
+                    static_cast<std::int32_t>(rtW) - metalX;
+                std::int32_t availH =
+                    static_cast<std::int32_t>(rtH) - metalY;
+                std::int32_t finalW =
+                    std::min(info.scissorWidth, std::max(0, availW));
+                std::int32_t finalH =
+                    std::min(info.scissorHeight, std::max(0, availH));
+                if (finalW <= 0 || finalH <= 0) {
+                    sr.x = rtW > 0 ? rtW - 1 : 0;
+                    sr.y = rtH > 0 ? rtH - 1 : 0;
+                    sr.width = 1; sr.height = 1;
+                } else {
+                    sr.x = static_cast<NSUInteger>(metalX);
+                    sr.y = static_cast<NSUInteger>(metalY);
+                    sr.width = static_cast<NSUInteger>(finalW);
+                    sr.height = static_cast<NSUInteger>(finalH);
+                }
+            }
+            [renc setScissorRect:sr];
+        }
+
         // One threadgroup per input primitive, 1 thread per group.
         // Mesh function reads spvPrimitiveID via
         // [[threadgroup_position_in_grid]] and indexes
