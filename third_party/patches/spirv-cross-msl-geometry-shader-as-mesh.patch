@@ -136,7 +136,82 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	analyze_image_and_sampler_usage();
  	analyze_sampled_image_usage();
  	analyze_interlocked_resource_usage();
-@@ -8593,21 +8630,48 @@
+@@ -1936,6 +1973,16 @@
+ 	if (is_mesh_shader())
+ 	{
+ 		fixup_implicit_builtin_block_names(get_execution_model());
++		// GS-as-mesh: build the input interface block too. The native
++		// MeshEXT path doesn't have stage inputs (object stage feeds
++		// payload instead), but a GS-as-mesh translation needs a
++		// device-buffer-typed VS-output input the [[mesh]] entry can
++		// read at threadgroup_position_in_grid * verticesPerPrimitive.
++		// Drives the `device const main0_in* spvVsOutputs [[buffer(K)]]`
++		// parameter + the per-vertex population in fixup_hooks_in.
++		if (msl_options.geometry_shader_as_mesh &&
++		    get_execution_model() == ExecutionModelGeometry)
++			stage_in_var_id = add_interface_block(StorageClassInput);
+ 	}
+ 	else
+ 	{
+@@ -3932,7 +3979,9 @@
+ 		return !capture_output_to_buffer;
+ 	else if (storage == StorageClassInput)
+ 		return !(is_tesc_shader() && msl_options.multi_patch_workgroup) &&
+-		       !(is_tese_shader() && msl_options.raw_buffer_tese_input);
++		       !(is_tese_shader() && msl_options.raw_buffer_tese_input) &&
++		       !(msl_options.geometry_shader_as_mesh &&
++		         get_execution_model() == ExecutionModelGeometry);
+ 	else
+ 		return false;
+ }
+@@ -4142,7 +4191,9 @@
+ 						  (is_tese_shader() && msl_options.tess_evaluation_as_compute))) ||
+ 						(storage == StorageClassInput &&
+ 						 ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
+-						  (is_tese_shader() && msl_options.raw_buffer_tese_input)));
++						  (is_tese_shader() && msl_options.raw_buffer_tese_input) ||
++						  (msl_options.geometry_shader_as_mesh &&
++						   get_execution_model() == ExecutionModelGeometry)));
+ 					const bool force_include_builtin =
+ 						tess_capture_buffer_interface && is_builtin;
+ 
+@@ -4364,6 +4415,15 @@
+ 	// Accumulate the variables that should appear in the interface struct.
+ 	SmallVector<SPIRVariable *> vars;
+ 	bool incl_builtins = storage == StorageClassOutput || is_tessellation_shader();
++	// GS-as-mesh: include builtin block inputs (gl_in) so their members
++	// flatten into main0_in for the device-buffer-typed VS-output read
++	// path. Without this, is_hidden_variable hides gl_in (since the GS
++	// gl_PerVertex block carries member-level builtin decorations) and
++	// gl_Position never reaches the interface struct.
++	if (msl_options.geometry_shader_as_mesh &&
++	    get_execution_model() == ExecutionModelGeometry &&
++	    storage == StorageClassInput)
++		incl_builtins = true;
+ 	bool has_seen_barycentric = false;
+ 
+ 	InterfaceBlockMeta meta;
+@@ -4746,6 +4806,19 @@
+ 	{
+ 		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
+ 
++		// GS-as-mesh: strip the array dimension on input variables so the
++		// generated main0_in struct is per-vertex (matches the linked VS's
++		// per-vertex output struct shape). The mesh threadgroup reads
++		// spvVsOutputs[primitiveID * verticesPerPrim + i] for each
++		// per-vertex input — without strip_array the struct flattens to
++		// `in_color_0`/`in_color_1`/... per-primitive, which is the wrong
++		// shape for VS→GS data flow. Mirrors `multi_patch_workgroup`
++		// strip_array=true for TCS input.
++		if (msl_options.geometry_shader_as_mesh &&
++		    get_execution_model() == ExecutionModelGeometry &&
++		    storage == StorageClassInput)
++			strip_array = true;
++
+ 		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
+ 		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
+ 		meta.strip_array = strip_array;
+@@ -8593,21 +8666,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
  
@@ -193,7 +268,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10322,6 +10386,52 @@
+@@ -10322,7 +10422,53 @@
  
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
@@ -230,7 +305,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				const std::string sanitize_prefix = "_RESERVED_IDENTIFIER_FIXUP_";
 +				if (member.compare(0, sanitize_prefix.size(), sanitize_prefix) == 0)
 +					member.erase(0, sanitize_prefix.size());
-+
+ 
 +				if (!member.empty())
 +				{
 +					if (per_primitive)
@@ -243,10 +318,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				}
 +			}
 +		}
- 
++
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
-@@ -10884,6 +10994,67 @@
+ 		{
+@@ -10884,6 +11030,67 @@
  		break;
  	}
  
@@ -314,7 +390,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	case OpAssumeTrueKHR:
  	{
  		auto condition = ops[0];
-@@ -14616,6 +14787,20 @@
+@@ -14616,6 +14823,20 @@
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
  		break;
@@ -335,7 +411,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	default:
  		entry_type = "unknown";
  		break;
-@@ -14636,7 +14821,17 @@
+@@ -14636,7 +14857,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
  {
@@ -354,7 +430,45 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  bool CompilerMSL::uses_explicit_early_fragment_test()
-@@ -15693,10 +15888,96 @@
+@@ -14851,7 +15082,9 @@
+ 	string decl;
+ 
+ 	if ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
+-	    (is_tese_shader() && msl_options.raw_buffer_tese_input))
++	    (is_tese_shader() && msl_options.raw_buffer_tese_input) ||
++	    (msl_options.geometry_shader_as_mesh &&
++	     get_execution_model() == ExecutionModelGeometry))
+ 		return decl;
+ 
+ 	// Stage-in structure
+@@ -15248,6 +15481,26 @@
+ 
+ 	if (is_mesh_shader())
+ 	{
++		// GS-as-mesh: replace `[[stage_in]]` with a device-buffer-typed
++		// VS-output parameter (one main0_in entry per linked-VS output
++		// vertex) plus a threadgroup-position parameter that gives the
++		// current GS primitive index. The runtime dispatches one mesh
++		// threadgroup per input primitive, so [[threadgroup_position_in_grid]]
++		// is the natural source for `gl_PrimitiveIDIn`-equivalent indexing
++		// into the VS-output buffer.
++		if (msl_options.geometry_shader_as_mesh &&
++		    get_execution_model() == ExecutionModelGeometry &&
++		    stage_in_var_id)
++		{
++			if (!ep_args.empty())
++				ep_args += ", ";
++			ep_args += join("const device ", type_to_glsl(get_stage_in_struct_type()),
++			                "* spvVsOutputs [[buffer(",
++			                convert_to_string(msl_options.shader_input_buffer_index), ")]]");
++			if (!ep_args.empty())
++				ep_args += ", ";
++			ep_args += "uint spvPrimitiveID [[threadgroup_position_in_grid]]";
++		}
+ 		if (!ep_args.empty())
+ 			ep_args += ", ";
+ 		ep_args += join("spvMesh_t spvMesh");
+@@ -15693,10 +15946,170 @@
  
  	if (is_mesh_shader())
  	{
@@ -392,11 +506,15 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				statement("spvUnsafeArray<spvPerVertex, ", execution.output_vertices, "> spvVertices = {};");
 +				if (mesh_out_per_primitive != 0)
 +					statement("spvPerPrimitive spvCurrentPrim = {};");
-+				// Declare zero-init locals for each input variable. Walks
-+				// the IR's Input-storage-class variables and emits a
-+				// `spvUnsafeArray<ELEMENT_TYPE, N> NAME = {};` for arrayed
++				// Pass 1 declarations + Path A population state.
++				uint32_t verticesPerPrim = 0;
++				SmallVector<SPIRVariable *> input_vars;
++				// Declare locals for each input variable. Walks the IR's
++				// Input-storage-class variables and emits a
++				// `spvUnsafeArray<ELEMENT_TYPE, N> NAME;` for arrayed
 +				// inputs (the typical GS shape: `gl_in[]`, `in_color[]`)
-+				// or `ELEMENT_TYPE NAME = {};` for scalars.
++				// or `ELEMENT_TYPE NAME = {};` for scalars. Pass 2 then
++				// populates each from the linked-VS output buffer.
 +				//
 +				// Uses `get_variable_data_type` to peel the StorageClassInput
 +				// pointer (avoiding `type_to_glsl`'s `thread T *` decoration)
@@ -425,13 +543,83 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +					if (!data_type.array.empty())
 +					{
 +						uint32_t array_size = data_type.array.front();
-+						statement("spvUnsafeArray<", type_str, ", ", array_size, "> ", name, " = {};");
++						statement("spvUnsafeArray<", type_str, ", ", array_size, "> ", name, ";");
++						if (verticesPerPrim == 0)
++							verticesPerPrim = array_size;
 +					}
 +					else
 +					{
 +						statement(type_str, " ", name, " = {};");
 +					}
++					input_vars.push_back(&var);
 +				});
++
++				// Path A: populate function-local input arrays from
++				// `spvVsOutputs[spvPrimitiveID * verticesPerPrim + i]`.
++				// main0_in is built earlier with strip_array=true so its
++				// members are per-vertex (matching linked-VS output struct
++				// shape). gl_PerVertex block inputs (gl_in) get per-builtin-
++				// member copy; user varyings get a single per-vertex copy.
++				if (stage_in_var_id && verticesPerPrim > 0)
++				{
++					statement("for (uint spvVI = 0u; spvVI < ", verticesPerPrim, "u; ++spvVI)");
++					begin_scope();
++					statement("const device main0_in& spvVsIn = spvVsOutputs[spvPrimitiveID * ",
++					          verticesPerPrim, "u + spvVI];");
++					auto &main0_in_type = get_stage_in_struct_type();
++					// member_present: filter against the EMITTED struct shape.
++					// SPIR-V IR carries gl_PerVertex with all 4 builtins
++					// (Position/PointSize/ClipDist/CullDist) but emission
++					// drops inactive ones — has_active_builtin is the
++					// authoritative "this member made it into main0_in"
++					// signal for builtins. User varyings are matched by
++					// their declared name in main0_in_type.
++					auto member_present_user_name = [&](const std::string &mbr_name) {
++						for (uint32_t i = 0; i < uint32_t(main0_in_type.member_types.size()); ++i)
++							if (to_member_name(main0_in_type, i) == mbr_name)
++								return true;
++						return false;
++					};
++					auto member_present_builtin = [&](BuiltIn bi) {
++						return has_active_builtin(bi, StorageClassInput);
++					};
++					for (auto *p_var : input_vars)
++					{
++						auto &var = *p_var;
++						const auto &data_type = get_variable_data_type(var);
++						if (data_type.array.empty())
++							continue;
++						const bool is_block =
++							has_decoration(data_type.self, DecorationBlock) ||
++							(!data_type.array.empty() &&
++							 has_decoration(get<SPIRType>(data_type.parent_type).self,
++							                DecorationBlock));
++						const std::string &name = get_name(var.self);
++						if (is_block)
++						{
++							const auto &element_type = get_variable_element_type(var);
++							for (uint32_t m = 0;
++							     m < uint32_t(element_type.member_types.size()); ++m)
++							{
++								BuiltIn bi = BuiltInMax;
++								if (!is_member_builtin(element_type, m, &bi))
++									continue;
++								if (!member_present_builtin(bi))
++									continue;
++								std::string mbr_name = builtin_to_glsl(bi, StorageClassInput);
++								statement(name, "[spvVI].", mbr_name,
++								          " = spvVsIn.", mbr_name, ";");
++							}
++						}
++						else
++						{
++							if (!member_present_user_name(name))
++								continue;
++							statement(name, "[spvVI] = spvVsIn.", name, ";");
++						}
++					}
++					end_scope();
++				}
 +			});
 +			entry_func.fixup_hooks_out.push_back([this]() {
 +				// Trailing emit: copy local arrays into spvMesh outputs.
@@ -503,9 +691,12 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/gs-as-mesh-hand-target.metal
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,83 @@
 +// Hand-authored target MSL for the synthetic GS test.
-+// Validates the design before implementing in SPIRV-Cross emission paths.
++// Demonstrates Path A: VS-output buffer parameter + per-vertex
++// population of `gl_in[]` from `spvVsOutputs[primId * verticesPerPrim + i]`.
++// Mirrors the actual SPIRV-Cross emission pattern for the synthetic
++// `triangles in / triangle_strip out, max_vertices=3` GS.
 +#include <metal_stdlib>
 +#include <simd/simd.h>
 +using namespace metal;
@@ -523,6 +714,10 @@ index 0000000..1111111
 +    constexpr const threadgroup T& operator [] (size_t pos) const threadgroup { return elements[pos]; }
 +};
 +
++struct gl_PerVertex_1 {
++    float4 gl_Position [[position]];
++};
++
 +struct spvPerVertex {
 +    float4 gl_Position [[position]];
 +    float4 out_color [[user(locn0)]];
@@ -534,27 +729,36 @@ index 0000000..1111111
 +
 +using spvMesh_t = mesh<spvPerVertex, spvPerPrimitive, 3, 1, topology::triangle>;
 +
-+struct PayloadVertex {
-+    float4 gl_Position;
-+    float4 in_color;
++// Path A: per-vertex VS-output struct. AppGL-W's runtime captures linked
++// VS output (one main0_in per VS invocation) into `spvVsOutputs[buffer(22)]`
++// and dispatches one mesh threadgroup per input primitive.
++struct main0_in {
++    float4 in_color [[user(locn0)]];
++    float4 gl_Position [[position]];
 +};
 +
-+struct Payload {
-+    PayloadVertex verts[3];
-+};
-+
-+[[mesh]] void main0(spvMesh_t spvMesh,
-+                    const object_data Payload& payload [[payload]],
-+                    uint gl_LocalInvocationIndex [[thread_index_in_threadgroup]])
++[[mesh]] void main0(uint gl_LocalInvocationIndex [[thread_index_in_threadgroup]],
++                    const device main0_in* spvVsOutputs [[buffer(22)]],
++                    uint spvPrimitiveID [[threadgroup_position_in_grid]],
++                    spvMesh_t spvMesh)
 +{
-+    uint spvVertexIndex = 0;
-+    uint spvPrimitiveIndex = 0;
++    uint spvVertexIndex = 0u;
++    uint spvPrimitiveIndex = 0u;
 +    spvUnsafeArray<spvPerVertex, 3> spvVertices = {};
 +    spvPerPrimitive spvCurrentPrim = {};
++    spvUnsafeArray<gl_PerVertex_1, 3> gl_in;
++    spvUnsafeArray<float4, 3> in_color;
++
++    // Path A population — copy each per-vertex input from the VS-output buffer.
++    for (uint spvVI = 0u; spvVI < 3u; ++spvVI) {
++        const device main0_in& spvVsIn = spvVsOutputs[spvPrimitiveID * 3u + spvVI];
++        gl_in[spvVI].gl_Position = spvVsIn.gl_Position;
++        in_color[spvVI] = spvVsIn.in_color;
++    }
 +
 +    for (int i = 0; i < 3; ++i) {
-+        spvVertices[spvVertexIndex].gl_Position = payload.verts[i].gl_Position;
-+        spvVertices[spvVertexIndex].out_color = payload.verts[i].in_color;
++        spvVertices[spvVertexIndex].gl_Position = gl_in[i].gl_Position;
++        spvVertices[spvVertexIndex].out_color = in_color[i];
 +        spvCurrentPrim.gl_Layer = uint(i);
 +        ++spvVertexIndex;
 +    }
@@ -565,7 +769,7 @@ index 0000000..1111111
 +    spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);
 +    ++spvPrimitiveIndex;
 +
-+    // SetMeshOutputsEXT: copy local arrays to spvMesh output
++    // SetMeshOutputsEXT-equivalent: copy local arrays to spvMesh output
 +    spvMesh.set_primitive_count(spvPrimitiveIndex);
 +    for (uint vi = 0; vi < spvVertexIndex; ++vi) {
 +        spvMesh.set_vertex(vi, spvVertices[vi]);
@@ -576,7 +780,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,146 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -674,6 +878,18 @@ index 0000000..1111111
 +		               contains(msl, "spvMesh.set_primitive_count"));
 +		fails += check("flag-ON emits spvMesh.set_index for triangle_strip",
 +		               contains(msl, "spvMesh.set_index"));
++		// Path A — VS-output buffer parameter + per-vertex population.
++		// gl_in[] should be populated from `spvVsOutputs[primId * N + i]`,
++		// not zero-init. Primary regression guard from AppGL-W's pre-PSO
++		// integration finding (102 GS programs would mass-regress with
++		// zero-init gl_in routing through mesh-shader path instead of
++		// CPU interpreter).
++		fails += check("flag-ON declares `const device main0_in* spvVsOutputs` buffer parameter (Path A)",
++		               contains(msl, "const device main0_in* spvVsOutputs"));
++		fails += check("flag-ON declares `[[threadgroup_position_in_grid]]` primitive id (Path A)",
++		               contains(msl, "[[threadgroup_position_in_grid]]"));
++		fails += check("flag-ON populates gl_in from spvVsOutputs (no zero-init Path A regression)",
++		               contains(msl, "spvVsOutputs[spvPrimitiveID"));
 +
 +		// Methodology gate: dump the emitted MSL and run `xcrun metal -c
 +		// -std=metal3.0`. Marker presence above is necessary but not

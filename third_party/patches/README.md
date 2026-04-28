@@ -436,13 +436,35 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path A (gl_in[] population from VS-output buffer):** the function-local
+input arrays declared by Components 6 are populated from a
+`device const main0_in* spvVsOutputs [[buffer(22)]]` parameter at the
+start of the `[[mesh]]` function. Each mesh threadgroup processes one
+input primitive (`[[threadgroup_position_in_grid]]` -> `spvPrimitiveID`),
+reading `spvVsOutputs[spvPrimitiveID * verticesPerPrim + i]` for each
+of the input primitive's vertices. `main0_in` is built by extending
+`add_interface_block(StorageClassInput)` to fire for GS-as-mesh with
+`strip_array=true` (one main0_in per VS output vertex, mirroring TES
+`raw_buffer_tese_input` shape) and re-using the existing
+phase-3-tess-struct-parity gate to force-include gl_PerVertex builtins
+(`gl_Position`, etc.) so VS main0_out and GS main0_in match
+byte-for-byte. The native `[[stage_in]]` parameter path is gated off
+for GS-as-mesh; AppGL-W's runtime configures the linked VS to write
+its output to the buffer, then dispatches the mesh as
+`drawMeshThreadgroups(numPrimitives, ...)`. Resolves the AppGL-W
+pre-PSO regression where 102 currently-passing GS programs would
+silently switch from the CPU GS interpreter (which populates gl_in)
+to the mesh-shader path (which previously zero-init'd it).
+
 **Deferred / follow-on:**
-- Real per-input-vertex data flow via Apple's `[[payload]] object_data
-  Payload&` parameter on `[[mesh]]` functions, populated by an explicit
-  object-stage kernel that loads the linked VS's outputs into the
-  payload. Current MVP zero-initializes the input locals so MSL
-  compiles cleanly; this is a runtime cross-stage integration that
-  pairs with AppGL-W's mesh-pipeline runtime work.
+- Phase 2.5 Gap A: GS that doesn't write `gl_Position` (e.g. TF-only
+  patterns) produces `spvPerVertex` without `[[position]]` -> Metal
+  rejects mesh vertex type. Spec'd in
+  [SPIRVC-MESH-PHASE-2.5-PREP-2026-04-27.md](../../specs-worker-docs/crossworker/SPIRVC-MESH-PHASE-2.5-PREP-2026-04-27.md).
+- Phase 2.5 Gap B: `max_vertices > 3` strip-to-list expansion with
+  proper winding alternation per GL spec.
+- Phase 2.5 Gap C: layered_rendering test verification of `gl_Layer`
+  per-primitive routing through `[[render_target_array_index]]`.
 - Strip handling for `max_vertices > 3` (would emit (N-2) triangles
   from a strip of N vertices with proper winding alternation).
 - Stream output (`OpEmitStreamVertex` / `OpEndStreamPrimitive`) — the
