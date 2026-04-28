@@ -1415,10 +1415,13 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // outputs (e.g. `out.gl_CullDistance_0 = culldistance_data[0];`),
         // so the reserved-identifier copy-back is a duplicate that only
         // fails because its source variable was optimized away. Strip
-        // any line containing that prefix — the earlier write is the
-        // real one and carries the user's intended value.
+        // any line where the marker appears as an access-chain member
+        // (`.{marker}`) — that's the dangling-RHS shape. Standalone
+        // uses (struct definitions, threadgroup/spvUnsafeArray locals
+        // for mesh-shader gl_PerVertex / gl_in / gl_out) lack the
+        // leading dot and are preserved.
         {
-            const std::string kMarker = "_RESERVED_IDENTIFIER_FIXUP_gl_";
+            const std::string kAccessMarker = "._RESERVED_IDENTIFIER_FIXUP_gl_";
             std::string out;
             out.reserve(msl.size());
             std::size_t pos = 0;
@@ -1426,7 +1429,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 const std::size_t nl = msl.find('\n', pos);
                 const std::size_t lineEnd = (nl == std::string::npos) ? msl.size() : nl + 1;
                 const std::string_view line(msl.data() + pos, lineEnd - pos);
-                if (line.find(kMarker) == std::string_view::npos) {
+                if (line.find(kAccessMarker) == std::string_view::npos) {
                     out.append(line);
                 }
                 pos = lineEnd;
