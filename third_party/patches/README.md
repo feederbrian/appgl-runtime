@@ -436,6 +436,39 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path E++ (gate 9 escalation — `volatile` qualifier on spvOut):**
+adds `msl_options.force_compute_kernel_device_volatile_writes` (CLI:
+`--msl-force-compute-kernel-device-volatile-writes`). When set on a
+`vertex_for_tessellation + capture_output_to_buffer` VS-as-compute
+kernel, emits `volatile device main0_out* spvOut [[buffer(28)]]`
+instead of `device main0_out*`, AND propagates `volatile` to the
+local reference declaration `volatile device main0_out& out = ...`
+(C++ disallows binding `device T&` to a `volatile device T` lvalue).
+Default off — preserves byte-identical emission for the Phase-3
+metal-tess (compute → compute) path.
+
+**Why E++ instead of E:** AppGL-W's Phase 2 Checkpoint 11 readback
+diagnostic (Private buffer pre-fill with `0xCC` sentinel before
+dispatch, blit-to-Shared after waitUntilCompleted) proved
+empirically that the Path E barrier alone is **insufficient**
+against Apple's AIR cross-encoder-family elimination. With the
+barrier emitted at kernel exit, every byte of the Private buffer
+preserved the `0xCC` sentinel — kernel writes never reached the
+buffer. The AIR optimizer can prove nothing reads spvOut within
+the kernel, so writes + the barrier they're meant to order get
+eliminated as a unit. Path E++ escalates to `volatile` per Apple's
+MSL spec contract: each write through a `volatile`-qualified pointer
+**must** be observable at its source location, blocking the
+elimination class. The Path E barrier flag is preserved for
+empirical-calibration value (and as future-proofing if Apple driver
+behavior changes).
+
+Test rig adds 3 additional rung-7 cross-encoder AIR liveness asserts
+(volatile parameter presence-when-on, volatile reference
+presence-when-on, volatile absence-in-tess-default). Total rung-7
+asserts: 5 (barrier on/off + volatile param/ref on + volatile off).
+Total rig: 27 assertions across 6 ladder rungs.
+
 **Path E (gate 9 — cross-encoder-family AIR liveness barrier):**
 adds `msl_options.force_compute_kernel_device_barrier_at_exit` (CLI:
 `--msl-force-compute-kernel-device-barrier-at-exit`). When set on a
