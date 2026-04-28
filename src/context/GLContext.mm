@@ -13484,6 +13484,17 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
         if (!q.active) return;
         switch (q.target) {
             case GL_PRIMITIVES_GENERATED:
+                q.result += static_cast<GLuint64>(prims);
+                if (std::getenv("APPGL_DUMP_TESOUT")) {
+                    std::fprintf(stderr,
+                        "APPGL_DETECTOR nongs_q_update PRIMITIVES_GENERATED "
+                        "+= %zu (mode=0x%04X vertexCount=%d patchVerts=%d) "
+                        "-> q.result=%llu\n",
+                        prims, mode, (int)vertexCount,
+                        state ? state->tessellationState().patchVertices : 0,
+                        (unsigned long long)q.result);
+                }
+                break;
             case GL_PRIMITIVES_SUBMITTED:
             case GL_CLIPPING_INPUT_PRIMITIVES:
             case GL_CLIPPING_OUTPUT_PRIMITIVES:
@@ -13742,6 +13753,15 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
         switch (q.target) {
             case GL_PRIMITIVES_GENERATED:
                 q.result += static_cast<GLuint64>(primsGenerated);
+                if (std::getenv("APPGL_DUMP_TESOUT")) {
+                    std::fprintf(stderr,
+                        "APPGL_DETECTOR tess_q_update PRIMITIVES_GENERATED "
+                        "+= %zu (totalVerts=%u vpp=%zu topology=0x%04X) "
+                        "-> q.result=%llu\n",
+                        primsGenerated, (unsigned)totalVerts, vpp,
+                        topology,
+                        (unsigned long long)q.result);
+                }
                 break;
             case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
                 if (transformFeedbackActive) {
@@ -23091,6 +23111,21 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                 program.tessControlUniformLayout);
             info.tessControlUniformData = tcsUniformScratch.data();
             info.tessControlUniformSize = tcsUniformScratch.size();
+            if (std::getenv("APPGL_DUMP_TESOUT")) {
+                std::fprintf(stderr,
+                    "APPGL_DETECTOR tcs_uniform_pack prog=%u size=%zu",
+                    (unsigned)programName, tcsUniformScratch.size());
+                const std::size_t kPrintBytes =
+                    tcsUniformScratch.size() < 64u
+                        ? tcsUniformScratch.size() : 64u;
+                std::fprintf(stderr, " bytes=");
+                for (std::size_t i = 0; i + 4 <= kPrintBytes; i += 4) {
+                    float f;
+                    std::memcpy(&f, tcsUniformScratch.data() + i, sizeof(f));
+                    std::fprintf(stderr, "%.4f ", f);
+                }
+                std::fprintf(stderr, "\n");
+            }
         }
         if (!program.tessVertexAsComputeUniformLayout.empty()) {
             buildStageUniformBuffer(vsComputeUniformScratch,

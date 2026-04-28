@@ -631,6 +631,28 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 std::size_t wired = 0;
                 std::size_t skippedBuiltin = 0;
                 std::size_t skippedPatch = 0;
+                // Sprint 4 Phase 1 fix: SPIRV-Cross's
+                // `add_msl_shader_output` keys `outputs_by_location` on
+                // (location, component). When TES has multiple loose
+                // top-level varyings without explicit
+                // `layout(location=N)` decorations, glslang's auto-
+                // assignment may not emit `OpDecorate Location` (for
+                // monolithic programs in particular), and our
+                // `has_decoration(... Location)` test returns false →
+                // all entries collapse to (0, 0) and only the last-
+                // added survives in the map. The downstream
+                // `classify_tcs_outputs_by_consumption` then sees
+                // only one name in `consumed_names`, the other TCS
+                // outputs land in threadgroup memory, and TES reads
+                // zero. Assign a unique synthetic location per wired
+                // entry. Critically, TCS's emitted main0_out struct
+                // field order is determined by location-sort, while
+                // TES's main0_in is laid out by SPIR-V variable ID.
+                // To keep the per-CP buffer stride / field offsets
+                // matched cross-stage, use the TES variable's ID as
+                // the synthetic location (offset to a high range so
+                // it doesn't collide with natural < 64 locations or
+                // the classifier's 0xF000_0000+ range).
                 for (auto id : activeIds) {
                     const spv::StorageClass sc = tesSibling.get_storage_class(id);
                     if (sc != spv::StorageClassInput) continue;
@@ -671,8 +693,16 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                         continue;
                     }
                     spirv_cross::MSLShaderInterfaceVariable sib;
+                    // When TES emits an explicit Location decoration,
+                    // honor it (separable programs path). Otherwise
+                    // synthesize from the TES variable's ID — IDs are
+                    // unique per module and ID-order matches TES's
+                    // main0_in field-emission order, so TCS's
+                    // location-sort emission of main0_out lands fields
+                    // at the same offsets TES reads from.
                     sib.location = tesSibling.has_decoration(id, spv::DecorationLocation)
-                        ? tesSibling.get_decoration(id, spv::DecorationLocation) : 0;
+                        ? tesSibling.get_decoration(id, spv::DecorationLocation)
+                        : (0xE0000000u + (std::uint32_t)id);
                     sib.component = tesSibling.has_decoration(id, spv::DecorationComponent)
                         ? tesSibling.get_decoration(id, spv::DecorationComponent) : 0;
                     sib.format = spirv_cross::MSL_SHADER_VARIABLE_FORMAT_OTHER;
@@ -688,6 +718,13 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     sib.name = tesSibling.get_name(id);
                     compiler.add_msl_shader_output(sib);
                     ++wired;
+                    if (std::getenv("APPGL_DUMP_TESOUT")) {
+                        std::fprintf(stderr,
+                            "APPGL_DETECTOR xstage_name id=%u name='%s' loc=%u "
+                            "vecsize=%u\n",
+                            (unsigned)id, sib.name.c_str(),
+                            (unsigned)sib.location, (unsigned)sib.vecsize);
+                    }
                 }
                 if (std::getenv("APPGL_DETECTOR_TF") || std::getenv("APPGL_TRACE_TESS")) {
                     std::fprintf(stderr,

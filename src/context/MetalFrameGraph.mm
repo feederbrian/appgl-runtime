@@ -5459,6 +5459,48 @@ fragment float4 appgl_immediate_textured_fs(
                             "[APPGL] tess-tf tes-compute dispatched %u threads\n",
                             (unsigned)tessTFGeneratedVerts);
                     }
+
+                    // Sprint 4 Phase 1 bisect: dump tesComputeOutBuf at
+                    // multiple strides to verify TES-compute kernel's
+                    // actual write layout vs `tessEvalOutputLayout
+                    // .structSize`. The host-side TF write-back walks the
+                    // buffer at structSize stride; if Metal MSL writes at
+                    // a different stride (e.g. due to padding) the TF
+                    // output is misaligned. Logs first N bytes interpreted
+                    // as float4 at fixed candidate strides; correlate with
+                    // host-side structSize from `lift_pre_encode`.
+                    if (std::getenv("APPGL_DUMP_TESOUT")) {
+                        static std::atomic<unsigned> seq{0};
+                        const unsigned n = seq.fetch_add(1);
+                        const std::uint8_t* bytes =
+                            static_cast<const std::uint8_t*>(
+                                [tesComputeOutBuf contents]);
+                        const NSUInteger bufLen = tesComputeOutBuf.length;
+                        std::fprintf(stderr,
+                            "APPGL_DETECTOR tesout_dump seq=%u "
+                            "verts=%u bufBytes=%llu\n",
+                            n, (unsigned)tessTFGeneratedVerts,
+                            (unsigned long long)bufLen);
+                        const std::size_t kStrides[] = {
+                            48, 64, 80, 96, 128, 256
+                        };
+                        const unsigned kVertsToShow =
+                            tessTFGeneratedVerts < 24u
+                                ? (unsigned)tessTFGeneratedVerts : 24u;
+                        for (std::size_t s : kStrides) {
+                            for (unsigned v = 0; v < kVertsToShow; ++v) {
+                                const std::size_t off = (std::size_t)v * s;
+                                if (off + sizeof(float) * 4 > bufLen) break;
+                                float f[4];
+                                std::memcpy(f, bytes + off, sizeof(f));
+                                std::fprintf(stderr,
+                                    "APPGL_DETECTOR tesout_dump seq=%u "
+                                    "stride=%zu v=%u off=%zu = "
+                                    "[%.4f, %.4f, %.4f, %.4f]\n",
+                                    n, s, v, off, f[0], f[1], f[2], f[3]);
+                            }
+                        }
+                    }
                 }
                 // Phase 3B.5 [metal-tess-TF]: hand off the TES-output
                 // buffer + generated-vertex count to the caller so
