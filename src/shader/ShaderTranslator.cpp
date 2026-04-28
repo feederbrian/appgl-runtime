@@ -514,6 +514,17 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (options.forceGeometryShaderAsMesh && isGeometry) {
             mslOpts.geometry_shader_as_mesh = true;
         }
+        // Path E mitigation [metal-tess-TF Checkpoint 11]: kernel-exit
+        // device-memory barrier on VS-as-compute targeting mesh-GS.
+        // Apple's AIR optimizer eliminates `device main0_out* spvOut`
+        // writes when the consumer is a different encoder family
+        // (mesh render pipeline) than the producer (compute encoder).
+        // The barrier provides the alternative signal that blocks
+        // elimination — see SPIRV-Cross fork commit e06f883 + AppGL-W
+        // Checkpoint 10 falsification of H11c.
+        if (options.forceComputeKernelDeviceBarrierAtExit && isVertex) {
+            mslOpts.force_compute_kernel_device_barrier_at_exit = true;
+        }
         // MSL 2.2 (macOS 10.15+, 2019) required for:
         //   - `[[primitive_id]]` in fragment shaders on macOS — without it
         //     SPIRV-Cross throws `PrimitiveId on macOS requires MSL 2.2`

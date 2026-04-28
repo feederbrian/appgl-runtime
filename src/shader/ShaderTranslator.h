@@ -283,6 +283,15 @@ struct TranslatorOptions {
     // max_vertices > 3) keep this false and fall back to the existing
     // CPU GS interpreter path.
     bool forceGeometryShaderAsMesh = false;
+    // Sprint 3 Phase 2 Checkpoint 11 [metal-tess-TF]: emit a kernel-exit
+    // `threadgroup_barrier(mem_flags::mem_device)` on VS-as-compute
+    // when the consumer is a different encoder family (mesh-render
+    // pipeline, NOT another compute kernel). Path E mitigation for the
+    // cross-encoder-family AIR liveness gap surfaced at Checkpoint 10.
+    // OFF by default — preserves byte-identity on tess→tess consumption
+    // (98 GENUINE_PASS invariant). Only set to true on the VS-compute
+    // translation that feeds mesh-GS.
+    bool forceComputeKernelDeviceBarrierAtExit = false;
 };
 
 // Phase 3B.5 [metal-tess-TF]: stage-output struct layout. Populated for

@@ -19153,6 +19153,15 @@ bool GLContext::linkProgram(GLuint program) {
                 if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
                     appgl::TranslatorOptions vsComputeOpts;
                     vsComputeOpts.forceVertexForTessellation = true;
+                    // Path E mitigation [Checkpoint 11, e06f883]:
+                    // kernel-exit device-memory barrier so the AIR
+                    // optimizer keeps `device main0_out* spvOut`
+                    // writes alive across the compute→mesh-render
+                    // encoder-family boundary. Mesh-GS only — the
+                    // tess-side VS-compute consumption is compute→
+                    // compute and doesn't need the barrier (preserves
+                    // 98 GENUINE_PASS byte-identity invariant).
+                    vsComputeOpts.forceComputeKernelDeviceBarrierAtExit = true;
                     appgl::ShaderReflection vsComputeRefl;
                     std::string vsComputeMSL;
                     const bool vsTrOk = translateStage(
