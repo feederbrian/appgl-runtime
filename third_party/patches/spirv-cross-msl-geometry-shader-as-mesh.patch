@@ -1,7 +1,7 @@
 diff --git a/main.cpp b/main.cpp
 --- a/main.cpp
 +++ b/main.cpp
-@@ -667,6 +667,11 @@
+@@ -667,6 +667,12 @@
  	bool msl_vertex_for_tessellation = false;
  	bool msl_tess_evaluation_as_compute = false;
  	uint32_t msl_tese_input_patch_vertices = 0;
@@ -10,10 +10,11 @@ diff --git a/main.cpp b/main.cpp
 +	bool msl_force_compute_kernel_device_volatile_writes = false;
 +	bool msl_force_compute_kernel_atomic_writes_on_spvOut = false;
 +	bool msl_force_compute_kernel_entry_counter_probe = false;
++	bool msl_force_threads_per_grid_for_stage_input_size = false;
  	uint32_t msl_additional_fixed_sample_mask = 0xffffffff;
  	bool msl_arrayed_subpass_input = false;
  	uint32_t msl_r32ui_linear_texture_alignment = 4;
-@@ -949,6 +954,18 @@
+@@ -949,6 +955,20 @@
  	                "\t\tEnables transform-feedback capture of TES output. Pair with --msl-tese-input-patch-vertices to set the per-patch input stride.\n"
  	                "\t[--msl-tese-input-patch-vertices <count>]:\n\t\t[AppGL fork] Override the per-patch input vertex count used when computing `gl_in = &spvIn[gl_PrimitiveID * count]` in TES-as-compute mode.\n"
  	                "\t\tDefault is the linked TCS's `layout(vertices = N) out;` value; setting this is required when SPIRV-Cross can't see the TCS.\n"
@@ -29,10 +30,12 @@ diff --git a/main.cpp b/main.cpp
 +	                "\t\tAtomic stores contractually cannot be eliminated by Apple's AIR optimizer — strongest mitigation in the Path E ladder. Default off; tess->tess paths unchanged.\n"
 +	                "\t[--msl-force-compute-kernel-entry-counter-probe]:\n\t\t[AppGL fork diagnostic] Add `device atomic_uint* spvKernelEntryCounter [[buffer(27)]]` parameter and `atomic_fetch_add_explicit` increment at kernel preamble.\n"
 +	                "\t\tDefinitively answers `did the kernel body execute` when downstream readback fails on the main spvOut buffer. Orthogonal to atomic_writes — can be enabled standalone.\n"
++	                "\t[--msl-force-threads-per-grid-for-stage-input-size]:\n\t\t[AppGL fork] Emit `[[threads_per_grid]]` instead of `[[grid_size]]` on the synthesized `spvStageInputSize` parameter for VS-compute kernels.\n"
++	                "\t\tFix for Apple Silicon `[[grid_size]]` returning (0,0,0) under dispatchThreads: / dispatchThreadgroups:, which causes every thread's bounds-check early-return to fire universally. Default off; tess->tess paths unchanged.\n"
  	                "\t[--msl-additional-fixed-sample-mask <mask>]:\n"
  	                "\t\tSet an additional fixed sample mask. If the shader outputs a sample mask, then the final sample mask will be a bitwise AND of the two.\n"
  	                "\t[--msl-arrayed-subpass-input]:\n\t\tAssume that images of dimension SubpassData have multiple layers. Layered input attachments are accessed relative to BuiltInLayer.\n"
-@@ -1291,6 +1308,15 @@
+@@ -1291,6 +1311,17 @@
  		msl_opts.vertex_for_tessellation = args.msl_vertex_for_tessellation;
  		msl_opts.tess_evaluation_as_compute = args.msl_tess_evaluation_as_compute;
  		msl_opts.tese_input_patch_vertices = args.msl_tese_input_patch_vertices;
@@ -45,10 +48,12 @@ diff --git a/main.cpp b/main.cpp
 +		    args.msl_force_compute_kernel_atomic_writes_on_spvOut;
 +		msl_opts.force_compute_kernel_entry_counter_probe =
 +		    args.msl_force_compute_kernel_entry_counter_probe;
++		msl_opts.force_threads_per_grid_for_stage_input_size =
++		    args.msl_force_threads_per_grid_for_stage_input_size;
  		msl_opts.additional_fixed_sample_mask = args.msl_additional_fixed_sample_mask;
  		msl_opts.arrayed_subpass_input = args.msl_arrayed_subpass_input;
  		msl_opts.r32ui_linear_texture_alignment = args.msl_r32ui_linear_texture_alignment;
-@@ -1884,6 +1910,16 @@
+@@ -1884,6 +1915,18 @@
  	        [&args](CLIParser &) { args.msl_tess_evaluation_as_compute = true; });
  	cbs.add("--msl-tese-input-patch-vertices",
  	        [&args](CLIParser &parser) { args.msl_tese_input_patch_vertices = parser.next_uint(); });
@@ -62,13 +67,15 @@ diff --git a/main.cpp b/main.cpp
 +	        [&args](CLIParser &) { args.msl_force_compute_kernel_atomic_writes_on_spvOut = true; });
 +	cbs.add("--msl-force-compute-kernel-entry-counter-probe",
 +	        [&args](CLIParser &) { args.msl_force_compute_kernel_entry_counter_probe = true; });
++	cbs.add("--msl-force-threads-per-grid-for-stage-input-size",
++	        [&args](CLIParser &) { args.msl_force_threads_per_grid_for_stage_input_size = true; });
  	cbs.add("--msl-additional-fixed-sample-mask",
  	        [&args](CLIParser &parser) { args.msl_additional_fixed_sample_mask = parser.next_hex_uint(); });
  	cbs.add("--msl-arrayed-subpass-input", [&args](CLIParser &) { args.msl_arrayed_subpass_input = true; });
 diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 --- a/spirv_msl.hpp
 +++ b/spirv_msl.hpp
-@@ -539,7 +539,113 @@
+@@ -539,7 +539,146 @@
  		// Default false (existing behaviour: all TCS outputs in the
  		// per-CP device buffer).
  		bool split_tcs_outputs_by_consumption = false;
@@ -107,7 +114,7 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		// Requires `msl_version >= 30000` (Metal 3.0); mesh shaders are
 +		// not available in earlier Metal versions.
 +		bool geometry_shader_as_mesh = false;
-+
+ 
 +		// AppGL fork addition: emit `threadgroup_barrier(mem_flags::mem_device)`
 +		// at the end of a `vertex_for_tessellation`-mode VS-as-compute kernel.
 +		// Apple's AIR optimizer + Metal driver appear to silently eliminate
@@ -161,7 +168,7 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		// per-scalar atomic stores. Default off — tess→tess
 +		// unchanged.
 +		bool force_compute_kernel_atomic_writes_on_spvOut = false;
- 
++
 +		// AppGL fork addition (Path E+++ diagnostic): add a
 +		// `device atomic_uint* spvKernelEntryCounter [[buffer(N)]]`
 +		// parameter to VS-compute kernels and emit
@@ -179,10 +186,43 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		bool force_compute_kernel_entry_counter_probe = false;
 +		uint32_t entry_counter_buffer_index = 27;
 +
++		// AppGL fork addition (Path G — kernel-arg attribute fix):
++		// emit `[[threads_per_grid]]` instead of `[[grid_size]]` for the
++		// implicit `spvStageInputSize` parameter on `vertex_for_tessellation`
++		// VS-compute kernels.
++		//
++		// `[[grid_size]]` is documented as the threadgroup grid dimensions
++		// (the number-of-threadgroups argument to dispatchThreadgroups:).
++		// On Apple Silicon under both `dispatchThreads:` and
++		// `dispatchThreadgroups:` it returns `(0, 0, 0)` for these
++		// kernel signatures — observed via kernel-internal probing
++		// (write each builtin attribute to a buffer from thread 0 +
++		// inspect from outside). Effect: every thread early-returns at
++		// `if (any(gl_GlobalInvocationID >= spvStageInputSize)) return;`
++		// because `any(>= 0)` is universally true. Kernel body never
++		// runs; cmdBuf reports Completed; all external diagnostics
++		// (capture inspector, PSO API queries, validation layers) show
++		// clean. Path E barrier / E++ volatile / E+++ atomic
++		// mitigations were all attempting to preserve writes from a
++		// kernel body that never executed.
++		//
++		// `[[threads_per_grid]]` is the actual thread count of the
++		// entire grid — what bounds checks should reference for
++		// `dispatchThreads:`-shaped dispatches. Changes the synthesized
++		// argument's attribute only; `gl_GlobalInvocationID` and
++		// downstream code keep their existing forms.
++		//
++		// Default off — preserves byte-identical emission for the
++		// Phase-3 metal-tess (compute → compute) path. AppGL-W's
++		// runtime enables for both VS-compute paths (mesh-GS AND tess)
++		// since the fix is more correct per Apple's MSL spec
++		// semantics.
++		bool force_threads_per_grid_for_stage_input_size = false;
++
  		// Assume that SubpassData images have multiple layers. Layered input attachments
  		// are addressed relative to the Layer output from the vertex pipeline. This option
  		// has no effect with multiview, since all input attachments are assumed to be layered
-@@ -1132,6 +1238,14 @@
+@@ -1132,6 +1271,14 @@
  	uint32_t add_interface_block_pointer(uint32_t ib_var_id, StorageClass storage);
  	uint32_t add_meshlet_block(bool per_primitive);
  
@@ -573,10 +613,13 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
  		{
-@@ -10884,6 +11151,67 @@
- 		break;
- 	}
- 
+@@ -10881,6 +11148,67 @@
+ 		flush_variable_declaration(builtin_mesh_primitive_indices_id);
+ 		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
+ 		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
++		break;
++	}
++
 +	// AppGL fork (msl-geometry-shader-as-mesh.patch): GS opcode translation
 +	// when emitting GS source as Metal mesh shader form.
 +	case OpEmitVertex:
@@ -635,12 +678,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		CompilerGLSL::emit_instruction(instruction);
-+		break;
-+	}
-+
- 	case OpAssumeTrueKHR:
- 	{
- 		auto condition = ops[0];
+ 		break;
+ 	}
+ 
 @@ -13987,8 +14315,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
@@ -664,11 +704,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	}
  
-@@ -14615,6 +14955,20 @@
- 		break;
+@@ -14616,6 +14956,20 @@
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
-+		break;
+ 		break;
 +	case ExecutionModelGeometry:
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): under
 +		// `geometry_shader_as_mesh`, GS source emits as Metal mesh
@@ -682,9 +721,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		entry_type = "unknown";
- 		break;
++		break;
  	default:
  		entry_type = "unknown";
+ 		break;
 @@ -14636,7 +14990,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
@@ -715,7 +755,23 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		return decl;
  
  	// Stage-in structure
-@@ -15065,10 +15431,32 @@
+@@ -15040,7 +15406,14 @@
+ 			if (!ep_args.empty())
+ 				ep_args += ", ";
+ 
+-			ep_args += type_to_glsl(get_variable_data_type(var)) + " " + to_expression(var_id) + " [[grid_size]]";
++			// Path G: `[[grid_size]]` is the threadgroup-grid dimensions
++			// (which on Apple Silicon returns `(0,0,0)` for these
++			// kernel signatures, causing every thread to early-return).
++			// `[[threads_per_grid]]` is the actual thread count.
++			const char *attr =
++				msl_options.force_threads_per_grid_for_stage_input_size
++				    ? "[[threads_per_grid]]" : "[[grid_size]]";
++			ep_args += type_to_glsl(get_variable_data_type(var)) + " " + to_expression(var_id) + " " + attr;
+ 		}
+ 	});
+ 
+@@ -15065,8 +15438,30 @@
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -729,8 +785,8 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				msl_options.force_compute_kernel_device_volatile_writes ? "volatile " : "";
 +			ep_args += join(vol_pfx, "device ", type_to_glsl(get_stage_out_struct_type()), "* ", output_buffer_var_name,
  			                " [[buffer(", msl_options.shader_output_buffer_index, ")]]");
- 		}
- 
++		}
++
 +		// Path E+++ diagnostic: entry-counter probe. Adds a
 +		// `device atomic_uint* spvKernelEntryCounter [[buffer(N)]]`
 +		// parameter that the kernel preamble atomically increments.
@@ -744,12 +800,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				ep_args += ", ";
 +			ep_args += join("device atomic_uint* spvKernelEntryCounter [[buffer(",
 +			                msl_options.entry_counter_buffer_index, ")]]");
-+		}
-+
+ 		}
+ 
  		if (is_tesc_shader())
- 		{
- 			if (!ep_args.empty())
-@@ -15248,6 +15636,26 @@
+@@ -15248,6 +15643,26 @@
  
  	if (is_mesh_shader())
  	{
@@ -776,7 +830,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15689,14 +16097,300 @@
+@@ -15689,14 +16104,300 @@
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
@@ -1218,7 +1272,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,432 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -1610,6 +1664,41 @@ index 0000000..1111111
 +			std::string vs_msl_default = c.compile();
 +			fails += check("rung-7 entry counter probe ABSENT in tess-default (98 GENUINE_PASS invariant)",
 +			               !contains(vs_msl_default, "spvKernelEntryCounter"));
++		}
++
++		// Path G — rung-9 silent attribute-value-zero failure mitigation.
++		// `[[grid_size]]` returns (0,0,0) on Apple Silicon under
++		// dispatchThreads:/dispatchThreadgroups: for these kernel
++		// signatures, causing every thread to early-return at the
++		// bounds-check guard. `[[threads_per_grid]]` is the spec-correct
++		// attribute for the actual thread count.
++		printf("# === Path G rung-9 (silent attribute-value-zero failure) ===\n");
++		// Subtest I: threads_per_grid emits when Path G flag enabled
++		{
++			CompilerMSL c(vs_spv.data(), vs_spv.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.vertex_for_tessellation = true;
++			o.capture_output_to_buffer = true;
++			o.force_threads_per_grid_for_stage_input_size = true;
++			c.set_msl_options(o);
++			std::string vs_msl_g = c.compile();
++			fails += check("rung-9 threads_per_grid attribute emits when Path G flag enabled",
++			               contains(vs_msl_g, "spvStageInputSize [[threads_per_grid]]"));
++			fails += check("rung-9 grid_size attribute ABSENT when Path G flag enabled (mutual exclusion)",
++			               !contains(vs_msl_g, "spvStageInputSize [[grid_size]]"));
++		}
++		// Subtest J: grid_size preserved in default (tess-default invariant)
++		{
++			CompilerMSL c(vs_spv.data(), vs_spv.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.vertex_for_tessellation = true;
++			o.capture_output_to_buffer = true;
++			c.set_msl_options(o);
++			std::string vs_msl_default = c.compile();
++			fails += check("rung-9 grid_size attribute preserved in tess-default (98 GENUINE_PASS invariant)",
++			               contains(vs_msl_default, "spvStageInputSize [[grid_size]]"));
 +		}
 +	}
 +

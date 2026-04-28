@@ -436,6 +436,58 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path G (gate 10 — `[[grid_size]]` → `[[threads_per_grid]]` for VS-compute kernel-arg synthesis):**
+adds `msl_options.force_threads_per_grid_for_stage_input_size`
+(CLI: `--msl-force-threads-per-grid-for-stage-input-size`). When
+set, emits `[[threads_per_grid]]` instead of `[[grid_size]]` on the
+synthesized `spvStageInputSize` kernel parameter for
+`vertex_for_tessellation` VS-compute kernels. Default off —
+preserves byte-identical emission for the Phase-3 metal-tess
+(compute → compute) path.
+
+**The breakthrough explanation:** `[[grid_size]]` is documented as
+the threadgroup-grid dimensions (the number-of-threadgroups
+argument to `dispatchThreadgroups:`). On Apple Silicon under both
+`dispatchThreads:` AND `dispatchThreadgroups:` it returns
+`(0, 0, 0)` for these kernel signatures. AppGL-W's H14c
+kernel-internal probe (write each builtin attribute to a buffer
+from thread 0; inspect from outside) surfaced the value
+empirically. Effect: every thread early-returns at:
+
+```cpp
+if (any(gl_GlobalInvocationID >= spvStageInputSize)) return;
+//     any(>= 0) is universally true ⇒ every thread returns
+```
+
+Kernel body never runs. `cmdBuf.status` reports Completed; PSO API
+queries report healthy; capture inspector shows no validation
+errors. Path E (barrier) / E++ (volatile) / E+++ (atomic) were all
+attempting to preserve writes from a kernel body that was never
+actually executing — the elimination class never existed.
+
+**`[[threads_per_grid]]`** is the actual thread count of the
+entire grid — what bounds checks should reference for
+`dispatchThreads:`-shaped dispatches. Single-attribute change;
+all downstream code (gl_GlobalInvocationID and the rest)
+unaffected.
+
+Test rig adds rung-9 silent-attribute-value-zero-failure
+assertions: presence-when-Path-G-on (`threads_per_grid`),
+absence-when-Path-G-on of `[[grid_size]]` (mutual exclusion), and
+presence-when-default of `[[grid_size]]` (tess-default invariant
+regression guard). 3 new asserts; total rig: 35 assertions across
+7 ladder rungs (1, 2, 3, 4, 5, 7, 9).
+
+**Methodology contribution (publication-prep §3.6.4 ladder, rung 9):**
+silent attribute-value-zero failures. When a Metal builtin
+attribute returns 0 instead of its expected value, every guard
+pattern referencing it fires universally and silently no-ops the
+kernel. External tools cannot see this failure mode; only
+kernel-internal probing reveals the broken attribute. The H14c
+diagnostic primitive — write each Metal builtin attribute to a
+buffer from thread 0 + inspect from outside — is the durable
+methodology artifact for this gap class.
+
 **Path E+++ (gate 9 escalation — `atomic_store` on spvOut + execution probe):**
 
 Two new flags that pair together (or run independently) for the
