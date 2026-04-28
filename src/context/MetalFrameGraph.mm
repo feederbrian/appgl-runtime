@@ -5952,16 +5952,62 @@ fragment float4 appgl_immediate_textured_fs(
         }
 
         // (3c) Render pass + drawMeshThreadgroups.
+        // Path D — currentRenderEncoder lifecycle cooperation. End any
+        // open legacy render encoder before the mesh pass takes over,
+        // so the encoder lifecycle is clean and the next legacy draw
+        // rebuilds. Mirrors the `currentRenderEncoder = nil` pattern at
+        // MetalFrameGraph.mm:854 (endRenderPass), but inline-scoped to
+        // this branch.
+        if (currentRenderEncoder != nil) {
+            [currentRenderEncoder endEncoding];
+            currentRenderEncoder = nil;
+        }
         id<MTLCommandBuffer> rcmd = [commandQueue commandBuffer];
         if (rcmd == nil) {
             info.diagnostic = "render cmdBuf alloc failed";
             return false;
         }
         rcmd.label = @"appgl-mesh-gs-draw";
+        // Path D — pending-clear consumption. AppGL defers glClear into
+        // hasPendingClear / pendingClearColor / pendingClearDepth /
+        // pendingClearStencil; the next render pass on the
+        // default-FB picks them up via MTLLoadActionClear. Mirrors the
+        // legacy gate at MetalFrameGraph.mm:2057-2062 (color),
+        // 2100-2108 (depth+stencil). Per the legacy gate, pending
+        // clears apply only to the default-FB draw path
+        // (`!isFBODraw`) — user-FBO clears are tracked separately and
+        // don't reach here.
+        const bool isFBODraw = (info.fboColorTexture != nullptr &&
+            info.fboColorTexture != (__bridge void*)offscreenColorTexture &&
+            info.fboColorTexture != (__bridge void*)(currentDrawable.texture));
+        const bool consumeColorClear =
+            !isFBODraw && hasPendingClear &&
+            (pendingClearMask & GL_COLOR_BUFFER_BIT);
+        const bool consumeDepthClear =
+            !isFBODraw && hasPendingClear &&
+            (pendingClearMask & GL_DEPTH_BUFFER_BIT);
+        const bool consumeStencilClear =
+            !isFBODraw && hasPendingClear &&
+            (pendingClearMask & GL_STENCIL_BUFFER_BIT);
+        if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+            std::fprintf(stderr,
+                "[MESH_GS] pass setup: isFBODraw=%d hasPendingClear=%d mask=0x%x "
+                "consumeColor=%d consumeDepth=%d consumeStencil=%d\n",
+                (int)isFBODraw, (int)hasPendingClear,
+                (unsigned)pendingClearMask,
+                (int)consumeColorClear, (int)consumeDepthClear,
+                (int)consumeStencilClear);
+            std::fflush(stderr);
+        }
+
         MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
         rpd.colorAttachments[0].texture =
             (__bridge id<MTLTexture>)info.fboColorTexture;
-        rpd.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rpd.colorAttachments[0].loadAction =
+            consumeColorClear ? MTLLoadActionClear : MTLLoadActionLoad;
+        if (consumeColorClear) {
+            rpd.colorAttachments[0].clearColor = pendingClearColor;
+        }
         rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
         if (info.fboDepthStencilTexture != nullptr) {
             id<MTLTexture> dsTex =
@@ -5972,7 +6018,11 @@ fragment float4 appgl_immediate_textured_fs(
                 pf == MTLPixelFormatDepth32Float_Stencil8 ||
                 pf == MTLPixelFormatDepth24Unorm_Stencil8) {
                 rpd.depthAttachment.texture = dsTex;
-                rpd.depthAttachment.loadAction = MTLLoadActionLoad;
+                rpd.depthAttachment.loadAction =
+                    consumeDepthClear ? MTLLoadActionClear : MTLLoadActionLoad;
+                if (consumeDepthClear) {
+                    rpd.depthAttachment.clearDepth = pendingClearDepth;
+                }
                 rpd.depthAttachment.storeAction = MTLStoreActionStore;
             }
             if (pf == MTLPixelFormatStencil8 ||
@@ -5981,7 +6031,11 @@ fragment float4 appgl_immediate_textured_fs(
                 pf == MTLPixelFormatX32_Stencil8 ||
                 pf == MTLPixelFormatX24_Stencil8) {
                 rpd.stencilAttachment.texture = dsTex;
-                rpd.stencilAttachment.loadAction = MTLLoadActionLoad;
+                rpd.stencilAttachment.loadAction =
+                    consumeStencilClear ? MTLLoadActionClear : MTLLoadActionLoad;
+                if (consumeStencilClear) {
+                    rpd.stencilAttachment.clearStencil = pendingClearStencil;
+                }
                 rpd.stencilAttachment.storeAction = MTLStoreActionStore;
             }
         }
@@ -6105,6 +6159,16 @@ fragment float4 appgl_immediate_textured_fs(
         [renc endEncoding];
         [rcmd commit];
         [rcmd waitUntilCompleted];
+
+        // Path D — clear the pending-clear flag now that the pass has
+        // consumed it (matches MetalFrameGraph.mm:984's `hasPendingClear
+        // = false` after the legacy draw fires). All three masks
+        // (color/depth/stencil) reset together — the legacy gate also
+        // resets after a draw regardless of which channels were
+        // actually consumed.
+        if (consumeColorClear || consumeDepthClear || consumeStencilClear) {
+            hasPendingClear = false;
+        }
 
         return true;
     }
