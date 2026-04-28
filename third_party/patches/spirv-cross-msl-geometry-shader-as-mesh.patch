@@ -1,7 +1,7 @@
 diff --git a/main.cpp b/main.cpp
 --- a/main.cpp
 +++ b/main.cpp
-@@ -667,6 +667,12 @@
+@@ -667,6 +667,14 @@
  	bool msl_vertex_for_tessellation = false;
  	bool msl_tess_evaluation_as_compute = false;
  	uint32_t msl_tese_input_patch_vertices = 0;
@@ -11,10 +11,12 @@ diff --git a/main.cpp b/main.cpp
 +	bool msl_force_compute_kernel_atomic_writes_on_spvOut = false;
 +	bool msl_force_compute_kernel_entry_counter_probe = false;
 +	bool msl_force_threads_per_grid_for_stage_input_size = false;
++	bool msl_use_full_precision_tess_level_buffer = false;
++	uint32_t msl_shader_tess_factor_buffer_full_index = 23;
  	uint32_t msl_additional_fixed_sample_mask = 0xffffffff;
  	bool msl_arrayed_subpass_input = false;
  	uint32_t msl_r32ui_linear_texture_alignment = 4;
-@@ -949,6 +955,20 @@
+@@ -949,6 +957,23 @@
  	                "\t\tEnables transform-feedback capture of TES output. Pair with --msl-tese-input-patch-vertices to set the per-patch input stride.\n"
  	                "\t[--msl-tese-input-patch-vertices <count>]:\n\t\t[AppGL fork] Override the per-patch input vertex count used when computing `gl_in = &spvIn[gl_PrimitiveID * count]` in TES-as-compute mode.\n"
  	                "\t\tDefault is the linked TCS's `layout(vertices = N) out;` value; setting this is required when SPIRV-Cross can't see the TCS.\n"
@@ -32,10 +34,13 @@ diff --git a/main.cpp b/main.cpp
 +	                "\t\tDefinitively answers `did the kernel body execute` when downstream readback fails on the main spvOut buffer. Orthogonal to atomic_writes — can be enabled standalone.\n"
 +	                "\t[--msl-force-threads-per-grid-for-stage-input-size]:\n\t\t[AppGL fork] Emit `[[threads_per_grid]]` instead of `[[grid_size]]` on the synthesized `spvStageInputSize` parameter for VS-compute kernels.\n"
 +	                "\t\tFix for Apple Silicon `[[grid_size]]` returning (0,0,0) under dispatchThreads: / dispatchThreadgroups:, which causes every thread's bounds-check early-return to fire universally. Default off; tess->tess paths unchanged.\n"
++	                "\t[--msl-use-full-precision-tess-level-buffer]:\n\t\t[AppGL fork] TES-as-compute reads gl_TessLevelOuter / gl_TessLevelInner from a full-precision `device const float*` shadow buffer instead of Metal's half-precision MTLQuadTessellationFactorsHalf API.\n"
++	                "\t\tPer GL 4.6 §11.2.2, tess level values are float; Metal's half-precision API truncates information at write time. Layout: outer levels first, then inner levels, per primitive (stride = 4 for triangles, 6 for quads, 2 for isolines). Default off.\n"
++	                "\t[--msl-tess-factor-buffer-full-index <index>]:\n\t\t[AppGL fork] Buffer slot for the full-precision tess factor shadow buffer. Default 23 (dynamic_offsets_buffer_index, unused at TES-compute dispatch).\n"
  	                "\t[--msl-additional-fixed-sample-mask <mask>]:\n"
  	                "\t\tSet an additional fixed sample mask. If the shader outputs a sample mask, then the final sample mask will be a bitwise AND of the two.\n"
  	                "\t[--msl-arrayed-subpass-input]:\n\t\tAssume that images of dimension SubpassData have multiple layers. Layered input attachments are accessed relative to BuiltInLayer.\n"
-@@ -1291,6 +1311,17 @@
+@@ -1291,6 +1316,21 @@
  		msl_opts.vertex_for_tessellation = args.msl_vertex_for_tessellation;
  		msl_opts.tess_evaluation_as_compute = args.msl_tess_evaluation_as_compute;
  		msl_opts.tese_input_patch_vertices = args.msl_tese_input_patch_vertices;
@@ -50,10 +55,14 @@ diff --git a/main.cpp b/main.cpp
 +		    args.msl_force_compute_kernel_entry_counter_probe;
 +		msl_opts.force_threads_per_grid_for_stage_input_size =
 +		    args.msl_force_threads_per_grid_for_stage_input_size;
++		msl_opts.use_full_precision_tess_level_buffer =
++		    args.msl_use_full_precision_tess_level_buffer;
++		msl_opts.shader_tess_factor_buffer_full_index =
++		    args.msl_shader_tess_factor_buffer_full_index;
  		msl_opts.additional_fixed_sample_mask = args.msl_additional_fixed_sample_mask;
  		msl_opts.arrayed_subpass_input = args.msl_arrayed_subpass_input;
  		msl_opts.r32ui_linear_texture_alignment = args.msl_r32ui_linear_texture_alignment;
-@@ -1884,6 +1915,18 @@
+@@ -1884,6 +1924,22 @@
  	        [&args](CLIParser &) { args.msl_tess_evaluation_as_compute = true; });
  	cbs.add("--msl-tese-input-patch-vertices",
  	        [&args](CLIParser &parser) { args.msl_tese_input_patch_vertices = parser.next_uint(); });
@@ -69,16 +78,21 @@ diff --git a/main.cpp b/main.cpp
 +	        [&args](CLIParser &) { args.msl_force_compute_kernel_entry_counter_probe = true; });
 +	cbs.add("--msl-force-threads-per-grid-for-stage-input-size",
 +	        [&args](CLIParser &) { args.msl_force_threads_per_grid_for_stage_input_size = true; });
++	cbs.add("--msl-use-full-precision-tess-level-buffer",
++	        [&args](CLIParser &) { args.msl_use_full_precision_tess_level_buffer = true; });
++	cbs.add("--msl-tess-factor-buffer-full-index",
++	        [&args](CLIParser &parser) { args.msl_shader_tess_factor_buffer_full_index = parser.next_uint(); });
  	cbs.add("--msl-additional-fixed-sample-mask",
  	        [&args](CLIParser &parser) { args.msl_additional_fixed_sample_mask = parser.next_hex_uint(); });
  	cbs.add("--msl-arrayed-subpass-input", [&args](CLIParser &) { args.msl_arrayed_subpass_input = true; });
 diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 --- a/spirv_msl.hpp
 +++ b/spirv_msl.hpp
-@@ -540,6 +540,145 @@
+@@ -539,7 +539,176 @@
+ 		// Default false (existing behaviour: all TCS outputs in the
  		// per-CP device buffer).
  		bool split_tcs_outputs_by_consumption = false;
- 
++
 +		// AppGL fork addition (msl-geometry-shader-as-mesh.patch): emit
 +		// geometry shaders (`ExecutionModelGeometry`) as Metal mesh
 +		// shaders (`[[mesh]] void main0(...)`) instead of the current
@@ -138,7 +152,7 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		// Apple driver behavior changes); the load-bearing mitigation is
 +		// `force_compute_kernel_device_volatile_writes` below.
 +		bool force_compute_kernel_device_barrier_at_exit = false;
-+
+ 
 +		// AppGL fork addition (Path E++): emit
 +		// `volatile device main0_out* spvOut [[buffer(28)]]` instead of
 +		// `device main0_out*` for `vertex_for_tessellation +
@@ -218,13 +232,44 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		// semantics.
 +		bool force_threads_per_grid_for_stage_input_size = false;
 +
++		// AppGL fork addition (Path L — Sprint 4 sub-cluster A): emit
++		// TES-as-compute reads of `gl_TessLevelOuter` / `gl_TessLevelInner`
++		// from a full-precision `device const float*` shadow buffer
++		// instead of from Metal's half-precision
++		// `MTLQuadTessellationFactorsHalf` / `MTLTriangleTessellationFactorsHalf`
++		// API (member access via `.edgeTessellationFactor[k]` /
++		// `.insideTessellationFactor[k]`).
++		//
++		// Per GL 4.6 §11.2.2, outer/inner tess level values are float;
++		// CTS validates with float precision. Metal's half-precision
++		// API truncates information at write time (CKPT25 Option B
++		// elimination demonstrated lossy-write). Full-precision shadow
++		// buffer preserves the float precision the CTS expects.
++		//
++		// Buffer layout (per primitive, stride depends on domain):
++		//   triangles: 4 floats = 3 outer + 1 inner
++		//   quads:     6 floats = 4 outer + 2 inner
++		//   isolines:  2 floats = 2 outer + 0 inner
++		// Outer levels first, then inner levels per primitive.
++		// Read pattern: `spvTessLevelFull[gl_PrimitiveID * stride + index]`.
++		//
++		// Flag-gated (not default-on) because consumers must provide the
++		// shadow buffer infrastructure at the documented slot. AppGL fork
++		// consumers + cross-project consumers (MoltenVK on Vulkan-on-Metal
++		// has the same Metal half-precision constraint) can opt in;
++		// default-off preserves byte-identical emission for existing
++		// consumers without shadow buffer infrastructure.
++		bool use_full_precision_tess_level_buffer = false;
++		uint32_t shader_tess_factor_buffer_full_index = 23;
++
  		// Assume that SubpassData images have multiple layers. Layered input attachments
  		// are addressed relative to the Layer output from the vertex pipeline. This option
  		// has no effect with multiview, since all input attachments are assumed to be layered
-@@ -1132,6 +1271,42 @@
+@@ -1131,6 +1300,42 @@
+ 	uint32_t add_interface_block(StorageClass storage, bool patch = false);
  	uint32_t add_interface_block_pointer(uint32_t ib_var_id, StorageClass storage);
  	uint32_t add_meshlet_block(bool per_primitive);
- 
++
 +	// Path A++ gate 7 (msl-geometry-shader-as-mesh.patch): shared-struct
 +	// layout parity. Walks the GS's input gl_PerVertex block in IR,
 +	// finds gl_ClipDistance / gl_CullDistance members the existing
@@ -260,10 +305,9 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +	// set_vertex.
 +	void ensure_gs_as_mesh_position_output();
 +
-+
+ 
  	struct InterfaceBlockMeta
  	{
- 		struct LocationMeta
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
@@ -361,7 +405,62 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	}
  	else
  	{
-@@ -4142,7 +4213,9 @@
+@@ -3895,11 +3966,31 @@
+ 	vars_needing_early_declaration.push_back(var.self);
+ 	bool triangles = is_tessellating_triangles();
+ 
++	// Path L: when the full-precision shadow buffer flag is on, route
++	// reads to `spvTessLevelFull[primId * stride + index]` instead of
++	// the half-precision struct member access. The buffer layout per
++	// primitive: outer levels first, then inner levels. Stride depends
++	// on domain (triangles=4, quads=6, isolines=2). Read pattern is
++	// uniform across builtins via the shared stride math.
++	bool use_full_precision = msl_options.use_full_precision_tess_level_buffer;
++	bool isolines = get_entry_point().flags.get(ExecutionModeIsolines);
++	uint32_t outer_count = isolines ? 2u : (triangles ? 3u : 4u);
++	uint32_t inner_count = isolines ? 0u : (triangles ? 1u : 2u);
++	uint32_t stride = outer_count + inner_count;
++	uint32_t var_self = var.self;
++
+ 	if (builtin == BuiltInTessLevelOuter)
+ 	{
+ 		entry_func.fixup_hooks_in.push_back(
+ 		    [=]()
+ 		    {
++			    if (use_full_precision)
++			    {
++				    for (uint32_t i = 0; i < outer_count; ++i)
++					    statement(var_name, "[", i, "] = spvTessLevelFull[",
++					              to_expression(builtin_primitive_id_id), " * ", stride, "u + ", i, "u];");
++				    return;
++			    }
+ 			    statement(var_name, "[0] = ", base_ref, ".", mbr_name, "[0];");
+ 			    statement(var_name, "[1] = ", base_ref, ".", mbr_name, "[1];");
+ 			    statement(var_name, "[2] = ", base_ref, ".", mbr_name, "[2];");
+@@ -3910,6 +4001,14 @@
+ 	else
+ 	{
+ 		entry_func.fixup_hooks_in.push_back([=]() {
++			if (use_full_precision)
++			{
++				for (uint32_t i = 0; i < inner_count; ++i)
++					statement(var_name, "[", i, "] = spvTessLevelFull[",
++					          to_expression(builtin_primitive_id_id), " * ", stride, "u + ",
++					          outer_count, "u + ", i, "u];");
++				return;
++			}
+ 			if (triangles)
+ 			{
+ 				if (msl_options.raw_buffer_tese_input)
+@@ -3924,6 +4023,7 @@
+ 			}
+ 		});
+ 	}
++	(void)var_self;
+ }
+ 
+ bool CompilerMSL::variable_storage_requires_stage_io(StorageClass storage) const
+@@ -4142,7 +4242,9 @@
  						  (is_tese_shader() && msl_options.tess_evaluation_as_compute))) ||
  						(storage == StorageClassInput &&
  						 ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -372,7 +471,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  					const bool force_include_builtin =
  						tess_capture_buffer_interface && is_builtin;
  
-@@ -4188,6 +4261,7 @@
+@@ -4188,6 +4290,7 @@
  								storage == StorageClassInput && get_execution_model() != ExecutionModelFragment;
  						bool storage_is_stage_io = variable_storage_requires_stage_io(storage);
  
@@ -380,7 +479,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  						// Clip/CullDistance always need to be declared as user attributes.
  						if (builtin == BuiltInClipDistance || builtin == BuiltInCullDistance)
  							is_builtin = false;
-@@ -4364,6 +4438,15 @@
+@@ -4364,6 +4467,15 @@
  	// Accumulate the variables that should appear in the interface struct.
  	SmallVector<SPIRVariable *> vars;
  	bool incl_builtins = storage == StorageClassOutput || is_tessellation_shader();
@@ -396,7 +495,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	bool has_seen_barycentric = false;
  
  	InterfaceBlockMeta meta;
-@@ -4654,7 +4737,14 @@
+@@ -4654,7 +4766,14 @@
  						// We zero-base the InstanceID & VertexID variables for HLSL emulation elsewhere, so don't do it twice
  						if (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation)
  						{
@@ -412,11 +511,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  							          " = ", output_buffer_var_name, "[", to_expression(builtin_invocation_id_id),
  							          ".y * ", to_expression(builtin_stage_input_size_id), ".x + ",
  							          to_expression(builtin_invocation_id_id), ".x];");
-@@ -4745,6 +4835,19 @@
- 	for (auto *p_var : vars)
+@@ -4746,6 +4865,19 @@
  	{
  		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
-+
+ 
 +		// GS-as-mesh: strip the array dimension on input variables so the
 +		// generated main0_in struct is per-vertex (matches the linked VS's
 +		// per-vertex output struct shape). The mesh threadgroup reads
@@ -429,10 +527,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +		    get_execution_model() == ExecutionModelGeometry &&
 +		    storage == StorageClassInput)
 +			strip_array = true;
- 
++
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
-@@ -5049,8 +5152,295 @@
+ 		meta.strip_array = strip_array;
+@@ -5049,6 +5181,293 @@
  		set_name(type.self, "spvPerVertex");
  
  	return next_id;
@@ -620,8 +719,8 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	}
 +	// Reset strip-start tracker for the next strip after this flush.
 +	statement("spvStripStart = spvVertexIndex;");
- }
- 
++}
++
 +// Phase 2.5 Gap A: synthesize a gl_Position Output variable for
 +// GS-as-mesh shaders that don't write one.
 +//
@@ -723,12 +822,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	set_decoration(var_id, DecorationBuiltIn, BuiltInPosition);
 +	set_name(var_id, "gl_Position");
 +	mark_implicit_builtin(StorageClassOutput, BuiltInPosition, var_id);
-+}
-+
+ }
+ 
  // Ensure that the type is compatible with the builtin.
- // If it is, simply return the given type ID.
- // Otherwise, create a new type, and return it's ID.
-@@ -8593,21 +8983,48 @@
+@@ -8593,21 +9012,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
  
@@ -785,11 +882,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10322,7 +10739,64 @@
- 
+@@ -10323,6 +10769,63 @@
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
-+
+ 
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): when GS source
 +		// is being emitted as a mesh shader, OpStore to a per-vertex /
 +		// per-primitive output must redirect into the function-local
@@ -822,7 +918,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				const std::string sanitize_prefix = "_RESERVED_IDENTIFIER_FIXUP_";
 +				if (member.compare(0, sanitize_prefix.size(), sanitize_prefix) == 0)
 +					member.erase(0, sanitize_prefix.size());
- 
++
 +				if (!member.empty())
 +				{
 +					if (per_primitive)
@@ -850,7 +946,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
  		{
-@@ -10881,6 +11355,50 @@
+@@ -10881,9 +11384,53 @@
  		flush_variable_declaration(builtin_mesh_primitive_indices_id);
  		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
  		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
@@ -877,9 +973,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +		// `EmitVertex();` — never Metal-valid, but preserves prior behaviour
 +		// for callers without the option).
 +		CompilerGLSL::emit_instruction(instruction);
-+		break;
-+	}
-+
+ 		break;
+ 	}
+ 
 +	case OpEndPrimitive:
 +	{
 +		if (msl_options.geometry_shader_as_mesh && get_execution_model() == ExecutionModelGeometry)
@@ -898,10 +994,13 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		CompilerGLSL::emit_instruction(instruction);
- 		break;
- 	}
- 
-@@ -13987,8 +14505,20 @@
++		break;
++	}
++
+ 	case OpAssumeTrueKHR:
+ 	{
+ 		auto condition = ops[0];
+@@ -13987,8 +14534,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
  		{
@@ -924,11 +1023,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	}
  
-@@ -14615,6 +15145,20 @@
- 		break;
+@@ -14616,6 +15175,20 @@
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
-+		break;
+ 		break;
 +	case ExecutionModelGeometry:
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): under
 +		// `geometry_shader_as_mesh`, GS source emits as Metal mesh
@@ -942,10 +1040,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		entry_type = "unknown";
- 		break;
++		break;
  	default:
  		entry_type = "unknown";
-@@ -14636,7 +15180,17 @@
+ 		break;
+@@ -14636,7 +15209,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
  {
@@ -964,7 +1063,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  bool CompilerMSL::uses_explicit_early_fragment_test()
-@@ -14851,7 +15405,9 @@
+@@ -14851,7 +15434,9 @@
  	string decl;
  
  	if ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -975,7 +1074,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		return decl;
  
  	// Stage-in structure
-@@ -15040,7 +15596,14 @@
+@@ -15040,7 +15625,14 @@
  			if (!ep_args.empty())
  				ep_args += ", ";
  
@@ -991,7 +1090,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	});
  
-@@ -15065,10 +15628,32 @@
+@@ -15065,10 +15657,32 @@
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -1025,7 +1124,29 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (is_tesc_shader())
  		{
  			if (!ep_args.empty())
-@@ -15248,6 +15833,26 @@
+@@ -15235,6 +15849,21 @@
+ 				ep_args += ", ";
+ 			ep_args += join("const device ", get_tess_factor_struct_name(), "* ", tess_factor_buffer_var_name,
+ 			                " [[buffer(", convert_to_string(msl_options.shader_tess_factor_buffer_index), ")]]");
++
++			// Path L: ALSO add the full-precision shadow buffer when
++			// flag is on. The half-precision parameter remains in the
++			// signature (preserves AppGL/MoltenVK runtime parameter-binding
++			// compatibility for callers that haven't migrated); reads in
++			// add_tess_level_input redirect to the full-precision buffer
++			// when the flag is on.
++			if (msl_options.use_full_precision_tess_level_buffer)
++			{
++				ep_args += ", ";
++				ep_args += join("const device float* spvTessLevelFull",
++				                " [[buffer(",
++				                convert_to_string(msl_options.shader_tess_factor_buffer_full_index),
++				                ")]]");
++			}
+ 		}
+ 
+ 		if (stage_in_var_id)
+@@ -15248,6 +15877,26 @@
  
  	if (is_mesh_shader())
  	{
@@ -1052,7 +1173,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15689,14 +16294,370 @@
+@@ -15689,14 +16338,370 @@
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
@@ -1427,7 +1548,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	}
  
  	// Look for sampled images and buffer. Add hooks to set up the swizzle constants or array lengths.
-@@ -15846,10 +16807,33 @@
+@@ -15846,10 +16851,33 @@
  				{
  					if (msl_options.raw_buffer_tese_input)
  					{
@@ -1661,7 +1782,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,496 @@
+@@ -0,0 +1,526 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -2152,6 +2273,36 @@ index 0000000..1111111
 +			std::string vs_msl_default = c.compile();
 +			fails += check("rung-9 grid_size attribute preserved in tess-default (98 GENUINE_PASS invariant)",
 +			               contains(vs_msl_default, "spvStageInputSize [[grid_size]]"));
++		}
++	}
++
++	// Path L: TES-as-compute full-precision tess level buffer
++	// (Sprint 4 sub-cluster A). Asserts presence of `spvTessLevelFull`
++	// substring + stride math when the flag is enabled and the GS
++	// fixture happens to be a TES (typical rig invocation passes a GS
++	// + VS pair, so this assertion is conditional on the second
++	// optional arg being a TES). Skipped otherwise.
++	if (have_vs)
++	{
++		printf("# === Path L (TES-as-compute full-precision tess factors) ===\n");
++		CompilerMSL c(vs_spv.data(), vs_spv.size());
++		CompilerMSL::Options o;
++		o.msl_version = 30000;
++		o.tess_evaluation_as_compute = true;
++		o.raw_buffer_tese_input = true;
++		o.multi_patch_workgroup = true;
++		o.capture_output_to_buffer = true;
++		o.use_full_precision_tess_level_buffer = true;
++		c.set_msl_options(o);
++		std::string vs_msl_l;
++		try { vs_msl_l = c.compile(); }
++		catch (...) { vs_msl_l = ""; }  // not a TES — skip
++		if (!vs_msl_l.empty() && contains(vs_msl_l, "spvTessLevelFull"))
++		{
++			fails += check("Path L: spvTessLevelFull buffer parameter emits when full-precision flag enabled",
++			               contains(vs_msl_l, "device float* spvTessLevelFull"));
++			fails += check("Path L: tess-level reads use spvTessLevelFull when full-precision flag enabled",
++			               contains(vs_msl_l, "= spvTessLevelFull["));
 +		}
 +	}
 +

@@ -436,6 +436,59 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path L (gate 17 — TES-as-compute full-precision tess level shadow buffer):**
+adds `msl_options.use_full_precision_tess_level_buffer` (CLI:
+`--msl-use-full-precision-tess-level-buffer`) +
+`msl_options.shader_tess_factor_buffer_full_index` (CLI:
+`--msl-tess-factor-buffer-full-index <N>`, default 23). When the
+flag is set, TES-as-compute emission for `gl_TessLevelOuter` /
+`gl_TessLevelInner` reads from a `device const float*` shadow
+buffer at the configured slot instead of from Metal's
+half-precision `MTLQuadTessellationFactorsHalf` /
+`MTLTriangleTessellationFactorsHalf` API (member access via
+`.edgeTessellationFactor[k]` / `.insideTessellationFactor[k]`).
+
+**Why:** per GL 4.6 §11.2.2, outer/inner tess level values are
+float; CTS validates with float precision. Metal's half-precision
+API truncates information at write time (CKPT25 Option B
+elimination demonstrated the lossy-write). Full-precision shadow
+buffer preserves the float precision the CTS expects.
+
+**Buffer layout** (per primitive, stride depends on domain):
+- triangles: 4 floats = 3 outer + 1 inner
+- quads: 6 floats = 4 outer + 2 inner
+- isolines: 2 floats = 2 outer + 0 inner
+
+Outer levels first, then inner levels per primitive. Read pattern:
+`spvTessLevelFull[gl_PrimitiveID * stride + index]`.
+
+**Flag-gated** (not default-on under `tess_evaluation_as_compute`)
+because consumers must provide the shadow buffer infrastructure
+at the documented slot. Default-off preserves byte-identical
+emission for existing consumers without shadow buffer support.
+
+**Half-precision parameter remains in the entry signature** when
+the flag is on — preserves AppGL/MoltenVK runtime parameter-binding
+compatibility for callers that haven't migrated. The reads in
+`add_tess_level_input` redirect to the full-precision buffer when
+the flag is on; the half-precision parameter becomes unused (Metal
+warns but compiles).
+
+**Cross-project upstream-ability** (per user's "public benefit"
+mandate): MoltenVK has the same Metal half-precision constraint
+on Vulkan tess factor precision. The patch shape is upstream-able
+to Khronos SPIRV-Cross — clean separation of concerns (Path L is
+purely TES-compute emission), spec citation
+(GL 4.6 §11.2.2 / VK_KHR_portability_subset analogous), test rig
+assertions demonstrate the documented contract being honored,
+buffer slot documented for consumer-side coordination.
+
+Test rig adds Path L conditional regression-guard assertion (fires
+when the optional second SPIR-V argument compiles as a TES with
+full-precision tess level reads — checks
+`device float* spvTessLevelFull` parameter presence + reads use
+that buffer).
+
 **Path K (gate 16 — TES-as-compute `gl_PatchVerticesIn` runtime parameter source):**
 TES emission for `tess_evaluation_as_compute + raw_buffer_tese_input`
 previously hardcoded `uint gl_PatchVerticesIn = N;` using
