@@ -7203,10 +7203,10 @@ struct GLContext::Impl {
     // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader
     // path for tier=MeshShader programs. Returns true on successful
     // encode + commit, false on any precondition / encode failure
-    // (caller falls through to CPU GS interpreter). Currently
-    // env-gated via APPGL_ENABLE_MESH_GS to allow incremental rollout
-    // before the path covers the full 102-program silent-conversion
-    // surface.
+    // (caller falls through to CPU GS interpreter). Default-on post
+    // Phase 2 close (CKPT17) — Path G + Path H verification cleared
+    // the regression and locked in `gl_pointsize_value` +1 conversion
+    // gain. The prior APPGL_ENABLE_MESH_GS env-gate is removed.
     bool tryMetalMeshGSDraw(GLProgramObject& program,
                             GLuint programName,
                             GLenum mode,
@@ -23963,15 +23963,15 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     GLProgramObject* emulProgram = impl_->resolvePipelineEmulationProgram(
         programName, emulProgramName);
     // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader path
-    // first when the program's tier classifies as MeshShader. Env-gated
-    // (APPGL_ENABLE_MESH_GS) so the path opts in incrementally — once
-    // the encoder covers the full 102-program silently-converted
-    // surface without regression, the gate flips to default-on.
-    // Returns false ⇒ existing CPU GS interpreter path runs (natural
-    // fallback).
+    // first when the program's tier classifies as MeshShader. Default-on
+    // post Path G+H verification (CKPT17 closed Phase 2 with +1 net gain
+    // `gl_pointsize_value`, zero regressions, default-off invariant
+    // 120/136 held, tess invariant 117/140 held). The previous
+    // APPGL_ENABLE_MESH_GS env-gate is removed — encoder failure still
+    // returns false → existing CPU GS interpreter path runs (natural
+    // fallback) for any program that can't be mesh-tier-handled.
     if (emulProgram != nullptr &&
-        emulProgram->metalGSTier == GLProgramObject::MetalGSTier::MeshShader &&
-        std::getenv("APPGL_ENABLE_MESH_GS") != nullptr) {
+        emulProgram->metalGSTier == GLProgramObject::MetalGSTier::MeshShader) {
         if (impl_->tryMetalMeshGSDraw(*emulProgram, emulProgramName,
                                        mode, count, first)) {
             APPGL_LOG(DRAW, @"drawArrays mesh-GS ok: count=%d", count);
