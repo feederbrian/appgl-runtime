@@ -576,7 +576,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,134 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -589,8 +589,14 @@ index 0000000..1111111
 +//   flag-OFF — output preserves `EmitVertex` / `EndPrimitive` literal
 +//              passthrough (current upstream behaviour).
 +//   flag-ON  — output contains `[[mesh]]`, `spvMesh`, `set_vertex`,
-+//              `set_primitive_count`, and the OpEmitVertex/OpEndPrimitive
-+//              opcodes are intercepted (no `EmitVertex(` literal).
++//              `set_primitive_count`, the OpEmitVertex/OpEndPrimitive
++//              opcodes are intercepted (no `EmitVertex(` literal),
++//              AND the emitted MSL `xcrun -sdk macosx metal -c
++//              -std=metal3.0` exits rc=0. The compile-validate assertion
++//              is load-bearing: marker presence ≠ Metal validity, and
++//              prior emission gaps (anonymous gl_PerVertex, undeclared
++//              gl_in) only surfaced when the resulting MSL was actually
++//              fed through `metal -c`.
 +//
 +// Usage: msl-gs-as-mesh-test <gs.spv>
 +
@@ -668,6 +674,38 @@ index 0000000..1111111
 +		               contains(msl, "spvMesh.set_primitive_count"));
 +		fails += check("flag-ON emits spvMesh.set_index for triangle_strip",
 +		               contains(msl, "spvMesh.set_index"));
++
++		// Methodology gate: dump the emitted MSL and run `xcrun metal -c
++		// -std=metal3.0`. Marker presence above is necessary but not
++		// sufficient — emission can pass markers and still fail Metal's
++		// compile (anonymous-struct sanitization gaps, undeclared
++		// references, unsanitized identifiers). Exposing the metal-c
++		// failure here turns AppGL-W-side regressions into local CI fails.
++		const char *dump_path = "/tmp/msl-gs-as-mesh-test.metal";
++		const char *air_path = "/tmp/msl-gs-as-mesh-test.air";
++		{
++			std::ofstream out(dump_path);
++			out << msl;
++		}
++		printf("# === flag-ON metal -c -std=metal3.0 (dumped to %s) ===\n", dump_path);
++		std::string cmd = "xcrun -sdk macosx metal -c -std=metal3.0 ";
++		cmd += dump_path;
++		cmd += " -o ";
++		cmd += air_path;
++		cmd += " 2>&1";
++		FILE *p = popen(cmd.c_str(), "r");
++		std::string out_buf;
++		if (p) {
++			char line[1024];
++			while (fgets(line, sizeof(line), p))
++				out_buf += line;
++			int rc = pclose(p);
++			fails += check("flag-ON `xcrun metal -c -std=metal3.0` exits rc=0", rc == 0);
++			if (rc != 0)
++				printf("  metal -c output:\n%s\n", out_buf.c_str());
++		} else {
++			fails += check("flag-ON metal -c invocation possible", false);
++		}
 +	}
 +
 +	printf("\n%s — %d failure(s)\n", fails == 0 ? "OK" : "FAIL", fails);
