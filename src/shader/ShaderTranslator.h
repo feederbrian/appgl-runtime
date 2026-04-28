@@ -292,6 +292,16 @@ struct TranslatorOptions {
     // (98 GENUINE_PASS invariant). Only set to true on the VS-compute
     // translation that feeds mesh-GS.
     bool forceComputeKernelDeviceBarrierAtExit = false;
+    // Sprint 3 Phase 2 Checkpoint 11 escalation [metal-tess-TF]: emit
+    // `volatile device main0_out*` for the spvOut buffer parameter (and
+    // the propagated reference bindings — SPIRV-W's audit, fork commit
+    // 76aacf7) on VS-as-compute targeting mesh-pipeline. Path E++
+    // mitigation; supersedes Path E barrier as the load-bearing
+    // mitigation when the barrier alone is insufficient (CKPT11 Step 1
+    // empirical finding). Spec-mandated rather than empirical: AIR
+    // optimizer is contractually obligated to preserve writes through
+    // volatile pointers. OFF by default; only set on mesh-GS path.
+    bool forceComputeKernelDeviceVolatileWrites = false;
 };
 
 // Phase 3B.5 [metal-tess-TF]: stage-output struct layout. Populated for

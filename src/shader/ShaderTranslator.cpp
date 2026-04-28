@@ -525,6 +525,13 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (options.forceComputeKernelDeviceBarrierAtExit && isVertex) {
             mslOpts.force_compute_kernel_device_barrier_at_exit = true;
         }
+        // Path E++ mitigation [Checkpoint 11 escalation, fork 76aacf7]:
+        // emit `volatile device main0_out*` for spvOut. Required when
+        // the barrier alone is insufficient — AIR optimizer is
+        // spec-obligated to preserve writes through volatile.
+        if (options.forceComputeKernelDeviceVolatileWrites && isVertex) {
+            mslOpts.force_compute_kernel_device_volatile_writes = true;
+        }
         // MSL 2.2 (macOS 10.15+, 2019) required for:
         //   - `[[primitive_id]]` in fragment shaders on macOS — without it
         //     SPIRV-Cross throws `PrimitiveId on macOS requires MSL 2.2`

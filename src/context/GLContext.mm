@@ -19162,6 +19162,14 @@ bool GLContext::linkProgram(GLuint program) {
                     // compute and doesn't need the barrier (preserves
                     // 98 GENUINE_PASS byte-identity invariant).
                     vsComputeOpts.forceComputeKernelDeviceBarrierAtExit = true;
+                    // Path E++ mitigation [CKPT11 escalation, 76aacf7]:
+                    // `volatile device main0_out*` qualifier on the
+                    // spvOut buffer parameter + propagated reference
+                    // bindings. Spec-mandated rather than empirical —
+                    // load-bearing when the barrier alone is
+                    // insufficient. Two-flag structure documents the
+                    // empirical→spec-mandated escalation pattern.
+                    vsComputeOpts.forceComputeKernelDeviceVolatileWrites = true;
                     appgl::ShaderReflection vsComputeRefl;
                     std::string vsComputeMSL;
                     const bool vsTrOk = translateStage(
