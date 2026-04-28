@@ -412,11 +412,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  							          " = ", output_buffer_var_name, "[", to_expression(builtin_invocation_id_id),
  							          ".y * ", to_expression(builtin_stage_input_size_id), ".x + ",
  							          to_expression(builtin_invocation_id_id), ".x];");
-@@ -4745,6 +4835,19 @@
- 	for (auto *p_var : vars)
+@@ -4746,6 +4836,19 @@
  	{
  		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
-+
+ 
 +		// GS-as-mesh: strip the array dimension on input variables so the
 +		// generated main0_in struct is per-vertex (matches the linked VS's
 +		// per-vertex output struct shape). The mesh threadgroup reads
@@ -429,10 +428,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +		    get_execution_model() == ExecutionModelGeometry &&
 +		    storage == StorageClassInput)
 +			strip_array = true;
- 
++
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
-@@ -5049,8 +5152,295 @@
+ 		meta.strip_array = strip_array;
+@@ -5049,6 +5152,293 @@
  		set_name(type.self, "spvPerVertex");
  
  	return next_id;
@@ -620,8 +620,8 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	}
 +	// Reset strip-start tracker for the next strip after this flush.
 +	statement("spvStripStart = spvVertexIndex;");
- }
- 
++}
++
 +// Phase 2.5 Gap A: synthesize a gl_Position Output variable for
 +// GS-as-mesh shaders that don't write one.
 +//
@@ -723,11 +723,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	set_decoration(var_id, DecorationBuiltIn, BuiltInPosition);
 +	set_name(var_id, "gl_Position");
 +	mark_implicit_builtin(StorageClassOutput, BuiltInPosition, var_id);
-+}
-+
+ }
+ 
  // Ensure that the type is compatible with the builtin.
- // If it is, simply return the given type ID.
- // Otherwise, create a new type, and return it's ID.
 @@ -8593,21 +8983,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
@@ -785,7 +783,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10322,6 +10739,63 @@
+@@ -10322,7 +10739,64 @@
  
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
@@ -822,7 +820,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				const std::string sanitize_prefix = "_RESERVED_IDENTIFIER_FIXUP_";
 +				if (member.compare(0, sanitize_prefix.size(), sanitize_prefix) == 0)
 +					member.erase(0, sanitize_prefix.size());
-+
+ 
 +				if (!member.empty())
 +				{
 +					if (per_primitive)
@@ -846,16 +844,14 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				}
 +			}
 +		}
- 
++
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
-@@ -10881,6 +11355,50 @@
- 		flush_variable_declaration(builtin_mesh_primitive_indices_id);
- 		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
- 		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
-+		break;
-+	}
-+
+ 		{
+@@ -10884,6 +11358,50 @@
+ 		break;
+ 	}
+ 
 +	// AppGL fork (msl-geometry-shader-as-mesh.patch): GS opcode translation
 +	// when emitting GS source as Metal mesh shader form.
 +	case OpEmitVertex:
@@ -897,9 +893,12 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		CompilerGLSL::emit_instruction(instruction);
- 		break;
- 	}
- 
++		break;
++	}
++
+ 	case OpAssumeTrueKHR:
+ 	{
+ 		auto condition = ops[0];
 @@ -13987,8 +14505,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
@@ -990,7 +989,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	});
  
-@@ -15065,8 +15628,30 @@
+@@ -15065,10 +15628,32 @@
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -1004,8 +1003,8 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				msl_options.force_compute_kernel_device_volatile_writes ? "volatile " : "";
 +			ep_args += join(vol_pfx, "device ", type_to_glsl(get_stage_out_struct_type()), "* ", output_buffer_var_name,
  			                " [[buffer(", msl_options.shader_output_buffer_index, ")]]");
-+		}
-+
+ 		}
+ 
 +		// Path E+++ diagnostic: entry-counter probe. Adds a
 +		// `device atomic_uint* spvKernelEntryCounter [[buffer(N)]]`
 +		// parameter that the kernel preamble atomically increments.
@@ -1019,9 +1018,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				ep_args += ", ";
 +			ep_args += join("device atomic_uint* spvKernelEntryCounter [[buffer(",
 +			                msl_options.entry_counter_buffer_index, ")]]");
- 		}
- 
++		}
++
  		if (is_tesc_shader())
+ 		{
+ 			if (!ep_args.empty())
 @@ -15248,6 +15833,26 @@
  
  	if (is_mesh_shader())
@@ -1049,7 +1050,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15689,14 +16294,349 @@
+@@ -15689,14 +16294,370 @@
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
@@ -1328,13 +1329,34 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +							     m < uint32_t(element_type.member_types.size()); ++m)
 +							{
 +								BuiltIn bi = BuiltInMax;
-+								if (!is_member_builtin(element_type, m, &bi))
-+									continue;
-+								if (!member_present_builtin(bi))
-+									continue;
-+								std::string mbr_name = builtin_to_glsl(bi, StorageClassInput);
-+								statement(name, "[spvVI].", mbr_name,
-+								          " = spvVsIn.", mbr_name, ";");
++								if (is_member_builtin(element_type, m, &bi))
++								{
++									// Builtin block member (gl_Position, gl_PointSize,
++									// etc.) — main0_in field name == builtin name.
++									if (!member_present_builtin(bi))
++										continue;
++									std::string mbr_name = builtin_to_glsl(bi, StorageClassInput);
++									statement(name, "[spvVI].", mbr_name,
++									          " = spvVsIn.", mbr_name, ";");
++								}
++								else
++								{
++									// Path I: user-defined interface-block member
++									// (e.g. `in VS_GS { vec4 v1; vec4 v2; } iface[];`
++									// → block_mbr_name = "v1", main0_in field name =
++									// "<var_name>_<block_mbr_name>" = "iface_v1").
++									// Without this branch, the function-local
++									// `iface[i].v1` would read from an
++									// uninitialized/zero-init array — body sees garbage,
++									// rasterization produces zero output despite clean
++									// xcrun + clean dispatch.
++									std::string block_mbr_name = to_member_name(element_type, m);
++									std::string main0_in_field = name + "_" + block_mbr_name;
++									if (!member_present_user_name(main0_in_field))
++										continue;
++									statement(name, "[spvVI].", block_mbr_name,
++									          " = spvVsIn.", main0_in_field, ";");
++								}
 +							}
 +						}
 +						else
@@ -1403,6 +1425,37 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	}
  
  	// Look for sampled images and buffer. Add hooks to set up the swizzle constants or array lengths.
+diff --git a/tools/gs-as-mesh-iface-block.geom b/tools/gs-as-mesh-iface-block.geom
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tools/gs-as-mesh-iface-block.geom
+@@ -0,0 +1,25 @@
++// Path I target — GS with interface-block-typed input.
++#version 450
++#extension GL_EXT_geometry_shader : require
++
++layout(triangles) in;
++layout(triangle_strip, max_vertices = 3) out;
++
++layout(location = 0) in VS_GS {
++    vec4 v1;
++    vec4 v2;
++} iface[];
++
++layout(location = 4) out vec4 out_v1;
++layout(location = 5) out vec4 out_v2;
++
++void main()
++{
++    for (int i = 0; i < 3; ++i) {
++        gl_Position = gl_in[i].gl_Position;
++        out_v1 = iface[i].v1;
++        out_v2 = iface[i].v2;
++        EmitVertex();
++    }
++    EndPrimitive();
++}
 diff --git a/tools/gs-as-mesh-input.geom b/tools/gs-as-mesh-input.geom
 new file mode 100644
 index 0000000..1111111
@@ -1570,7 +1623,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,496 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -1730,6 +1783,17 @@ index 0000000..1111111
 +		// exercise the strip-loop branch.
 +		fails += check("Gap B: spvStripStart tracker declared (Phase 2.5 strip-to-list expansion infrastructure)",
 +		               contains(msl, "uint spvStripStart = 0u;"));
++		// Path I: user-defined interface-block input members populate
++		// from `<var_name>_<block_mbr_name>` main0_in fields (mirrors
++		// SPIRV-Cross's interface-block-flattening naming convention
++		// `iface_v1` for `in VS_GS { vec4 v1; } iface[]`). Conditional
++		// on fixture having interface-block input — skipped for
++		// fixtures without one.
++		if (contains(msl, "_v1 [[user(") || contains(msl, "_v2 [[user("))
++		{
++			fails += check("Path I: interface-block input member population (e.g. iface[i].v1 = spvVsIn.iface_v1)",
++			               contains(msl, "].v1 = spvVsIn.") || contains(msl, "].v2 = spvVsIn."));
++		}
 +		// Path A — VS-output buffer parameter + per-vertex population.
 +		// gl_in[] should be populated from `spvVsOutputs[primId * N + i]`,
 +		// not zero-init. Primary regression guard from AppGL-W's pre-PSO

@@ -436,6 +436,56 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path I (gate 15 — interface-block GS input member population):**
+extends the Path A population loop to handle user-defined block
+member writes alongside the existing builtin block member handling.
+
+**Diagnosis (CKPT19):** GS source pattern with interface-block input
+
+```glsl
+layout(location = 0) in VS_GS {
+    vec4 v1;
+    vec4 v2;
+} iface[];
+```
+
+Pre-Path I, the population loop ONLY handled builtin block members
+(gl_Position/gl_PointSize/gl_ClipDistance/gl_CullDistance). The
+function-local `spvUnsafeArray<VS_GS, 3> iface;` was declared but
+NEVER populated for `iface[i].v1` / `iface[i].v2` reads — the body
+read uninitialized array values, producing garbage user varyings,
+which the rasterizer interpreted as degenerate or off-viewport
+triangles. Result: zero rasterized output despite clean xcrun rc=0
++ clean dispatch.
+
+**Fix:** add an else-branch in the block-member iteration that
+maps user-defined block members to their flattened main0_in field
+names. SPIRV-Cross's interface-block-flattening convention is
+`<var_name>_<block_member_name>`:
+
+```cpp
+else  // user-defined block member
+{
+    std::string block_mbr_name = to_member_name(element_type, m);  // "v1"
+    std::string main0_in_field = name + "_" + block_mbr_name;       // "iface_v1"
+    statement(name, "[spvVI].", block_mbr_name,
+              " = spvVsIn.", main0_in_field, ";");
+}
+```
+
+Result: `iface[spvVI].v1 = spvVsIn.iface_v1;` populates the
+function-local iface array correctly. Body reads
+`iface[i].v1` / `iface[i].v2` resolve to populated values.
+
+Default-on under `geometry_shader_as_mesh` (no flag — Class 2
+spec-compliance). Companion fixture `tools/gs-as-mesh-iface-block.geom`
+captures the GLSL pattern.
+
+Test rig adds Path I conditional regression-guard assertion
+(fires on fixtures with interface-block input — synthetic fixture
+exercises this; existing `gl_pointsize_value` and synthetic
+fixtures don't and skip the check).
+
 **Phase 2.5 Gap B (gate 14 — `max_vertices > 3` strip-to-list expansion):**
 extends the EndPrimitive flush emission with a strip-to-list
 expansion loop for `triangle_strip` and `line_strip` outputs with
