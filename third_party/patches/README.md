@@ -436,6 +436,40 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path K (gate 16 — TES-as-compute `gl_PatchVerticesIn` runtime parameter source):**
+TES emission for `tess_evaluation_as_compute + raw_buffer_tese_input`
+previously hardcoded `uint gl_PatchVerticesIn = N;` using
+`get_entry_point().output_vertices` as the literal — but
+`output_vertices` is the linked TCS's `layout(vertices = N) out;`
+declaration, which isn't encoded on the TES side of the link, so the
+literal evaluated to 0. Every gl_PatchVerticesIn read in the TES
+body returned 0; bounds-check / count-driven code paths universally
+short-circuited.
+
+**Fix:** read from `spvIndirectParams[0]` (the runtime indirect-
+parameters buffer slot 0), populated by the host with the linked
+TCS's `output_vertices` value at dispatch time. The
+spvIndirectParams parameter is already in the TES-as-compute entry
+signature (added at spirv_msl.cpp:15670 for
+`capture_output_to_buffer && !VS-for-tess`), so no new parameter
+plumbing required — just change the literal initialization to a
+runtime read.
+
+**Compile-time override path preserved:** if
+`msl_options.tese_input_patch_vertices` is set non-zero (Sprint 1
+override), emit it as a literal instead of the runtime read. AppGL
+fork callers can pin compile-time when the linked TCS's value is
+known statically; default 0 means runtime.
+
+Default-on under `tess_evaluation_as_compute + raw_buffer_tese_input`
+(Class 2 spec-compliance, no flag-gating). Spec citation:
+GL 4.6 §8.5.4 (gl_PatchVerticesIn) — value is the input patch
+vertex count from the linked TCS, not the TES's own declaration.
+
+Companion CLI flag `--msl-tese-input-patch-vertices <count>` (added
+in Sprint 1) provides the compile-time override for callers without
+a runtime indirect-parameters buffer.
+
 **Path I (gate 15 — interface-block GS input member population):**
 extends the Path A population loop to handle user-defined block
 member writes alongside the existing builtin block member handling.
