@@ -436,6 +436,77 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path E+++ (gate 9 escalation — `atomic_store` on spvOut + execution probe):**
+
+Two new flags that pair together (or run independently) for the
+post-volatile mitigation tier and the execution-flow diagnostic:
+
+1. **`force_compute_kernel_atomic_writes_on_spvOut`** (CLI:
+   `--msl-force-compute-kernel-atomic-writes-on-spvOut`). At kernel
+   exit, walks `main0_out`'s members and emits per-scalar
+   `atomic_store_explicit` re-stores via raw uint reinterpret:
+
+   ```cpp
+   atomic_store_explicit(
+       &((device atomic_uint*)&out.gl_Position)[0],
+       ((device uint*)&out.gl_Position)[0],
+       memory_order_relaxed);
+   ```
+
+   For vec/array container types, takes the address of the whole
+   container and offsets by uint slot — bypasses MSL's
+   address-of-vector-element restriction AND `spvUnsafeArray`'s
+   missing `volatile device` operator[] overload uniformly. Atomic
+   stores are contractually non-eliminable per Apple's MSL spec,
+   so this is the strongest mitigation in the Path E ladder.
+   `memory_order_relaxed` keeps overhead low (no cross-thread
+   ordering implied; only the non-eliminability property matters).
+
+2. **`force_compute_kernel_entry_counter_probe`** (CLI:
+   `--msl-force-compute-kernel-entry-counter-probe`, with
+   `entry_counter_buffer_index` defaulting to 27). Adds a
+   `device atomic_uint* spvKernelEntryCounter [[buffer(27)]]`
+   parameter and emits `atomic_fetch_add_explicit(...)` increment
+   in the kernel preamble. AppGL-W's runtime reads the counter
+   post-`waitUntilCompleted` to definitively answer "did the
+   kernel body execute" — distinguishing AIR-elimination
+   escalation territory (kernel runs, writes lost) from
+   different-layer characterization (kernel didn't run; binding
+   or resource issue at the encoder/driver layer).
+
+**Why E+++ instead of E++:** AppGL-W's Phase 2 Checkpoint 11pp
+readback diagnostic with both Path E + E++ flags ON proved
+empirically that `volatile` qualifier alone is insufficient against
+AIR cross-encoder-family elimination — every byte of the Private
+buffer preserved the `0xCC` pre-fill sentinel despite spec-mandated
+volatile preservation.
+
+**Strength-tier calibration table** (banked for §3.6.4 ladder):
+
+| Mitigation | Verdict |
+|---|---|
+| (none) | writes lost |
+| barrier (Path E) | writes lost |
+| barrier + volatile (Path E++) | **writes lost despite spec mandate** |
+| barrier + volatile + atomic (Path E+++) | tested pending AppGL-W readback |
+
+Each rung up the ladder corresponds to a stronger spec contract.
+The atomic rung is the last empirically-defensible mitigation —
+if it also proves insufficient, that's a publication-grade negative
+result on AIR optimizer's spec-conformance for cross-encoder-family
+scenarios. The counter probe routes the outcome:
+
+- counter > 0 + buffer populated → mitigation worked, Phase 2 unblocks
+- counter > 0 + buffer still `0xCC` → AIR eliminating spec-preserved
+  atomic writes (publication-grade negative result)
+- counter == 0 → kernel didn't execute, different-layer issue
+  (escalate; not an AIR optimizer issue)
+
+Test rig adds 6 additional rung-7 asserts (atomic emission +
+counter parameter + counter increment + 3 absent-in-tess-default
+regression guards). Total rung-7 asserts: 11. Total rig: 32
+assertions across 6 ladder rungs.
+
 **Path E++ (gate 9 escalation — `volatile` qualifier on spvOut):**
 adds `msl_options.force_compute_kernel_device_volatile_writes` (CLI:
 `--msl-force-compute-kernel-device-volatile-writes`). When set on a

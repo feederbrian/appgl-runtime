@@ -1,17 +1,19 @@
 diff --git a/main.cpp b/main.cpp
 --- a/main.cpp
 +++ b/main.cpp
-@@ -667,6 +667,9 @@
+@@ -667,6 +667,11 @@
  	bool msl_vertex_for_tessellation = false;
  	bool msl_tess_evaluation_as_compute = false;
  	uint32_t msl_tese_input_patch_vertices = 0;
 +	bool msl_geometry_shader_as_mesh = false;
 +	bool msl_force_compute_kernel_device_barrier_at_exit = false;
 +	bool msl_force_compute_kernel_device_volatile_writes = false;
++	bool msl_force_compute_kernel_atomic_writes_on_spvOut = false;
++	bool msl_force_compute_kernel_entry_counter_probe = false;
  	uint32_t msl_additional_fixed_sample_mask = 0xffffffff;
  	bool msl_arrayed_subpass_input = false;
  	uint32_t msl_r32ui_linear_texture_alignment = 4;
-@@ -949,6 +952,13 @@
+@@ -949,6 +954,18 @@
  	                "\t\tEnables transform-feedback capture of TES output. Pair with --msl-tese-input-patch-vertices to set the per-patch input stride.\n"
  	                "\t[--msl-tese-input-patch-vertices <count>]:\n\t\t[AppGL fork] Override the per-patch input vertex count used when computing `gl_in = &spvIn[gl_PrimitiveID * count]` in TES-as-compute mode.\n"
  	                "\t\tDefault is the linked TCS's `layout(vertices = N) out;` value; setting this is required when SPIRV-Cross can't see the TCS.\n"
@@ -22,10 +24,15 @@ diff --git a/main.cpp b/main.cpp
 +	                "\t\tNote: empirically tested INSUFFICIENT alone — pair with --msl-force-compute-kernel-device-volatile-writes to defeat AIR elimination.\n"
 +	                "\t[--msl-force-compute-kernel-device-volatile-writes]:\n\t\t[AppGL fork] Emit `volatile device main0_out*` instead of `device main0_out*` on the spvOut buffer parameter for `--msl-capture-output` paths.\n"
 +	                "\t\tApple's MSL spec contractually preserves writes through volatile-qualified pointers across optimizer passes; the load-bearing primitive against AIR cross-encoder-family elimination. Default off; tess->tess paths unchanged.\n"
++	                "\t\tNote: empirically tested INSUFFICIENT alone (Checkpoint 11pp readback) — pair with --msl-force-compute-kernel-atomic-writes-on-spvOut for the contractually non-eliminable mitigation.\n"
++	                "\t[--msl-force-compute-kernel-atomic-writes-on-spvOut]:\n\t\t[AppGL fork] At kernel exit, emit per-scalar `atomic_store_explicit` re-stores of every spvOut field with `as_type<uint>` reinterpret + `memory_order_relaxed`.\n"
++	                "\t\tAtomic stores contractually cannot be eliminated by Apple's AIR optimizer — strongest mitigation in the Path E ladder. Default off; tess->tess paths unchanged.\n"
++	                "\t[--msl-force-compute-kernel-entry-counter-probe]:\n\t\t[AppGL fork diagnostic] Add `device atomic_uint* spvKernelEntryCounter [[buffer(27)]]` parameter and `atomic_fetch_add_explicit` increment at kernel preamble.\n"
++	                "\t\tDefinitively answers `did the kernel body execute` when downstream readback fails on the main spvOut buffer. Orthogonal to atomic_writes — can be enabled standalone.\n"
  	                "\t[--msl-additional-fixed-sample-mask <mask>]:\n"
  	                "\t\tSet an additional fixed sample mask. If the shader outputs a sample mask, then the final sample mask will be a bitwise AND of the two.\n"
  	                "\t[--msl-arrayed-subpass-input]:\n\t\tAssume that images of dimension SubpassData have multiple layers. Layered input attachments are accessed relative to BuiltInLayer.\n"
-@@ -1291,6 +1301,11 @@
+@@ -1291,6 +1308,15 @@
  		msl_opts.vertex_for_tessellation = args.msl_vertex_for_tessellation;
  		msl_opts.tess_evaluation_as_compute = args.msl_tess_evaluation_as_compute;
  		msl_opts.tese_input_patch_vertices = args.msl_tese_input_patch_vertices;
@@ -34,10 +41,14 @@ diff --git a/main.cpp b/main.cpp
 +		    args.msl_force_compute_kernel_device_barrier_at_exit;
 +		msl_opts.force_compute_kernel_device_volatile_writes =
 +		    args.msl_force_compute_kernel_device_volatile_writes;
++		msl_opts.force_compute_kernel_atomic_writes_on_spvOut =
++		    args.msl_force_compute_kernel_atomic_writes_on_spvOut;
++		msl_opts.force_compute_kernel_entry_counter_probe =
++		    args.msl_force_compute_kernel_entry_counter_probe;
  		msl_opts.additional_fixed_sample_mask = args.msl_additional_fixed_sample_mask;
  		msl_opts.arrayed_subpass_input = args.msl_arrayed_subpass_input;
  		msl_opts.r32ui_linear_texture_alignment = args.msl_r32ui_linear_texture_alignment;
-@@ -1884,6 +1899,12 @@
+@@ -1884,6 +1910,16 @@
  	        [&args](CLIParser &) { args.msl_tess_evaluation_as_compute = true; });
  	cbs.add("--msl-tese-input-patch-vertices",
  	        [&args](CLIParser &parser) { args.msl_tese_input_patch_vertices = parser.next_uint(); });
@@ -47,13 +58,17 @@ diff --git a/main.cpp b/main.cpp
 +	        [&args](CLIParser &) { args.msl_force_compute_kernel_device_barrier_at_exit = true; });
 +	cbs.add("--msl-force-compute-kernel-device-volatile-writes",
 +	        [&args](CLIParser &) { args.msl_force_compute_kernel_device_volatile_writes = true; });
++	cbs.add("--msl-force-compute-kernel-atomic-writes-on-spvOut",
++	        [&args](CLIParser &) { args.msl_force_compute_kernel_atomic_writes_on_spvOut = true; });
++	cbs.add("--msl-force-compute-kernel-entry-counter-probe",
++	        [&args](CLIParser &) { args.msl_force_compute_kernel_entry_counter_probe = true; });
  	cbs.add("--msl-additional-fixed-sample-mask",
  	        [&args](CLIParser &parser) { args.msl_additional_fixed_sample_mask = parser.next_hex_uint(); });
  	cbs.add("--msl-arrayed-subpass-input", [&args](CLIParser &) { args.msl_arrayed_subpass_input = true; });
 diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 --- a/spirv_msl.hpp
 +++ b/spirv_msl.hpp
-@@ -539,7 +539,83 @@
+@@ -539,7 +539,113 @@
  		// Default false (existing behaviour: all TCS outputs in the
  		// per-CP device buffer).
  		bool split_tcs_outputs_by_consumption = false;
@@ -117,7 +132,7 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		// Apple driver behavior changes); the load-bearing mitigation is
 +		// `force_compute_kernel_device_volatile_writes` below.
 +		bool force_compute_kernel_device_barrier_at_exit = false;
- 
++
 +		// AppGL fork addition (Path E++): emit
 +		// `volatile device main0_out* spvOut [[buffer(28)]]` instead of
 +		// `device main0_out*` for `vertex_for_tessellation +
@@ -134,10 +149,40 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		// for VS-compute targeting mesh-pipeline consumption.
 +		bool force_compute_kernel_device_volatile_writes = false;
 +
++		// AppGL fork addition (Path E+++): convert each VS-compute write
++		// to spvOut into `atomic_store_explicit` with a per-scalar
++		// reinterpret to uint. Per Apple's MSL spec, atomic stores
++		// contractually cannot be eliminated by the AIR optimizer —
++		// the load-bearing strength tier escalation after barrier
++		// (Path E) and volatile (Path E++) were both empirically
++		// insufficient against AIR cross-encoder-family elimination.
++		// `memory_order_relaxed` keeps overhead low (no cross-thread
++		// ordering implied). Vec/array writes are decomposed into
++		// per-scalar atomic stores. Default off — tess→tess
++		// unchanged.
++		bool force_compute_kernel_atomic_writes_on_spvOut = false;
+ 
++		// AppGL fork addition (Path E+++ diagnostic): add a
++		// `device atomic_uint* spvKernelEntryCounter [[buffer(N)]]`
++		// parameter to VS-compute kernels and emit
++		// `atomic_fetch_add_explicit(spvKernelEntryCounter, 1u,
++		// memory_order_relaxed);` in the kernel preamble. Definitively
++		// answers "did the kernel body execute" — if AppGL-W's
++		// readback shows counter > 0 the kernel ran and any subsequent
++		// buffer-state divergence is AIR/optimizer behavior; if
++		// counter == 0 the dispatch was issued but the kernel body
++		// didn't run, indicating a different-layer issue (binding,
++		// resource tracking, etc.). Slot defaults to
++		// `entry_counter_buffer_index` (27 by default) — orthogonal to
++		// shader_output_buffer_index (28). Default off; orthogonal to
++		// the atomic_writes flag — the probe can be used standalone.
++		bool force_compute_kernel_entry_counter_probe = false;
++		uint32_t entry_counter_buffer_index = 27;
++
  		// Assume that SubpassData images have multiple layers. Layered input attachments
  		// are addressed relative to the Layer output from the vertex pipeline. This option
  		// has no effect with multiview, since all input attachments are assumed to be layered
-@@ -1132,6 +1208,14 @@
+@@ -1132,6 +1238,14 @@
  	uint32_t add_interface_block_pointer(uint32_t ib_var_id, StorageClass storage);
  	uint32_t add_meshlet_block(bool per_primitive);
  
@@ -294,10 +339,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  							          " = ", output_buffer_var_name, "[", to_expression(builtin_invocation_id_id),
  							          ".y * ", to_expression(builtin_stage_input_size_id), ".x + ",
  							          to_expression(builtin_invocation_id_id), ".x];");
-@@ -4746,6 +4830,19 @@
+@@ -4745,6 +4829,19 @@
+ 	for (auto *p_var : vars)
  	{
  		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
- 
++
 +		// GS-as-mesh: strip the array dimension on input variables so the
 +		// generated main0_in struct is per-vertex (matches the linked VS's
 +		// per-vertex output struct shape). The mesh threadgroup reads
@@ -310,14 +356,15 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +		    get_execution_model() == ExecutionModelGeometry &&
 +		    storage == StorageClassInput)
 +			strip_array = true;
-+
+ 
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
- 		meta.strip_array = strip_array;
-@@ -5051,6 +5148,103 @@
- 	return next_id;
- }
+@@ -5049,6 +5146,103 @@
+ 		set_name(type.self, "spvPerVertex");
  
+ 	return next_id;
++}
++
 +// Path A++ gate 7: shared-struct layout parity for GS-as-mesh.
 +//
 +// The existing add_interface_block flatten loop emits gl_ClipDistance and
@@ -413,11 +460,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +
 +	inject(BuiltInClipDistance, "gl_ClipDistance");
 +	inject(BuiltInCullDistance, "gl_CullDistance");
-+}
-+
+ }
+ 
  // Ensure that the type is compatible with the builtin.
- // If it is, simply return the given type ID.
- // Otherwise, create a new type, and return it's ID.
 @@ -8593,21 +8787,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
@@ -528,13 +573,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
  		{
-@@ -10881,6 +11148,67 @@
- 		flush_variable_declaration(builtin_mesh_primitive_indices_id);
- 		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
- 		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
-+		break;
-+	}
-+
+@@ -10884,6 +11151,67 @@
+ 		break;
+ 	}
+ 
 +	// AppGL fork (msl-geometry-shader-as-mesh.patch): GS opcode translation
 +	// when emitting GS source as Metal mesh shader form.
 +	case OpEmitVertex:
@@ -593,9 +635,12 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		CompilerGLSL::emit_instruction(instruction);
- 		break;
- 	}
- 
++		break;
++	}
++
+ 	case OpAssumeTrueKHR:
+ 	{
+ 		auto condition = ops[0];
 @@ -13987,8 +14315,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
@@ -670,7 +715,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		return decl;
  
  	// Stage-in structure
-@@ -15065,7 +15431,14 @@
+@@ -15065,10 +15431,32 @@
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -686,7 +731,25 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  			                " [[buffer(", msl_options.shader_output_buffer_index, ")]]");
  		}
  
-@@ -15248,6 +15621,26 @@
++		// Path E+++ diagnostic: entry-counter probe. Adds a
++		// `device atomic_uint* spvKernelEntryCounter [[buffer(N)]]`
++		// parameter that the kernel preamble atomically increments.
++		// Definitively answers "did the kernel body execute" when
++		// downstream readback fails on the main output buffer.
++		if (msl_options.force_compute_kernel_entry_counter_probe &&
++		    get_execution_model() == ExecutionModelVertex &&
++		    msl_options.vertex_for_tessellation)
++		{
++			if (!ep_args.empty())
++				ep_args += ", ";
++			ep_args += join("device atomic_uint* spvKernelEntryCounter [[buffer(",
++			                msl_options.entry_counter_buffer_index, ")]]");
++		}
++
+ 		if (is_tesc_shader())
+ 		{
+ 			if (!ep_args.empty())
+@@ -15248,6 +15636,26 @@
  
  	if (is_mesh_shader())
  	{
@@ -713,10 +776,91 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15689,14 +16082,219 @@
+@@ -15689,14 +16097,300 @@
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
++
++		// Path E+++ diagnostic — entry-counter probe.
++		// Increments a device atomic_uint at kernel preamble. AppGL-W's
++		// readback of the counter buffer post-dispatch confirms whether
++		// the kernel body actually executed (counter > 0) or the dispatch
++		// was issued but the kernel body skipped (counter == 0). The
++		// distinction routes between AIR-elimination escalation
++		// (kernel runs, writes lost) and a different-layer issue
++		// (kernel doesn't run; binding/encoder/resource problem).
++		if (msl_options.force_compute_kernel_entry_counter_probe)
++		{
++			entry_func.fixup_hooks_in.push_back([this]() {
++				statement("atomic_fetch_add_explicit(spvKernelEntryCounter, 1u, "
++				          "memory_order_relaxed);");
++			});
++		}
++
++		// Path E+++ — atomic_store on spvOut writes.
++		// Walks main0_out's members at kernel exit and emits per-scalar
++		// `atomic_store_explicit` re-stores. Each atomic_store is
++		// contractually non-eliminable per Apple's MSL spec; combined
++		// with the load required to compute the stored value (which
++		// reads through the prior write), this transitively forces the
++		// regular non-atomic writes to be preserved. memory_order_relaxed
++		// keeps the per-write overhead low. Decomposes vec/array types
++		// into per-component scalar atomic stores via component
++		// indexing on the spvOut struct.
++		if (msl_options.force_compute_kernel_atomic_writes_on_spvOut)
++		{
++			entry_func.fixup_hooks_out.push_back([this]() {
++				if (!stage_out_var_id)
++					return;
++				auto &out_type = get_stage_out_struct_type();
++				const std::string &out_ref = stage_out_var_name;
++				// Address-of on vector components (`&out.v.x`) is
++				// disallowed in MSL, and `spvUnsafeArray` lacks a
++				// `volatile device` operator[] overload. Bypass both
++				// restrictions by taking the address of the whole
++				// vec/array container, casting to a raw uint pointer,
++				// and indexing by uint slot — works uniformly across
++				// volatile and non-volatile contexts because raw
++				// pointer arithmetic doesn't dispatch through any
++				// operator overload. Each uint slot corresponds to
++				// one 4-byte scalar element of the underlying type.
++				auto emit_atomic_via_container = [&](
++				    const std::string &container_path, uint32_t uint_index) {
++					statement("atomic_store_explicit(",
++					          "&((device atomic_uint*)&", out_ref, ".", container_path, ")[", uint_index, "], ",
++					          "((device uint*)&", out_ref, ".", container_path, ")[", uint_index, "], ",
++					          "memory_order_relaxed);");
++				};
++				auto emit_atomic_scalar_direct = [&](const std::string &field_path) {
++					statement("atomic_store_explicit(",
++					          "(device atomic_uint*)&", out_ref, ".", field_path, ", ",
++					          "*(device uint*)&", out_ref, ".", field_path, ", ",
++					          "memory_order_relaxed);");
++				};
++				for (uint32_t m = 0; m < uint32_t(out_type.member_types.size()); ++m)
++				{
++					auto &mbr_type = get<SPIRType>(out_type.member_types[m]);
++					std::string mbr_name = to_member_name(out_type, m);
++					if (!mbr_type.array.empty())
++					{
++						uint32_t elems = mbr_type.array.front();
++						uint32_t vec = mbr_type.vecsize;
++						uint32_t total_uints = elems * (vec > 0 ? vec : 1);
++						for (uint32_t i = 0; i < total_uints; ++i)
++							emit_atomic_via_container(mbr_name, i);
++					}
++					else if (mbr_type.vecsize > 1)
++					{
++						for (uint32_t v = 0; v < mbr_type.vecsize; ++v)
++							emit_atomic_via_container(mbr_name, v);
++					}
++					else
++					{
++						emit_atomic_scalar_direct(mbr_name);
++					}
++				}
++			});
++		}
 +
 +		// Path E (gate 9) — cross-encoder-family AIR liveness.
 +		// AppGL-W's Phase 2 Checkpoint 9-10 diagnostic confirmed
@@ -1074,7 +1218,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,397 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -1414,6 +1558,58 @@ index 0000000..1111111
 +			std::string vs_msl_default = c.compile();
 +			fails += check("rung-7 volatile ABSENT in tess-default (98 GENUINE_PASS invariant)",
 +			               !contains(vs_msl_default, "volatile device main0_out"));
++		}
++		// Subtest E: atomic_store emits when atomic flag enabled (Path E+++)
++		{
++			CompilerMSL c(vs_spv.data(), vs_spv.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.vertex_for_tessellation = true;
++			o.capture_output_to_buffer = true;
++			o.force_compute_kernel_atomic_writes_on_spvOut = true;
++			c.set_msl_options(o);
++			std::string vs_msl_atomic = c.compile();
++			fails += check("rung-7 atomic_store_explicit emits when atomic flag enabled (Path E+++)",
++			               contains(vs_msl_atomic, "atomic_store_explicit"));
++		}
++		// Subtest F: atomic_store absent in default (tess-default invariant)
++		{
++			CompilerMSL c(vs_spv.data(), vs_spv.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.vertex_for_tessellation = true;
++			o.capture_output_to_buffer = true;
++			c.set_msl_options(o);
++			std::string vs_msl_default = c.compile();
++			fails += check("rung-7 atomic_store_explicit ABSENT in tess-default (98 GENUINE_PASS invariant)",
++			               !contains(vs_msl_default, "atomic_store_explicit"));
++		}
++		// Subtest G: entry counter probe emits when probe flag enabled
++		{
++			CompilerMSL c(vs_spv.data(), vs_spv.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.vertex_for_tessellation = true;
++			o.capture_output_to_buffer = true;
++			o.force_compute_kernel_entry_counter_probe = true;
++			c.set_msl_options(o);
++			std::string vs_msl_probe = c.compile();
++			fails += check("rung-7 entry counter parameter emits when probe flag enabled",
++			               contains(vs_msl_probe, "device atomic_uint* spvKernelEntryCounter"));
++			fails += check("rung-7 entry counter atomic_fetch_add emits when probe flag enabled",
++			               contains(vs_msl_probe, "atomic_fetch_add_explicit(spvKernelEntryCounter, 1u"));
++		}
++		// Subtest H: counter probe absent in default (tess-default invariant)
++		{
++			CompilerMSL c(vs_spv.data(), vs_spv.size());
++			CompilerMSL::Options o;
++			o.msl_version = 30000;
++			o.vertex_for_tessellation = true;
++			o.capture_output_to_buffer = true;
++			c.set_msl_options(o);
++			std::string vs_msl_default = c.compile();
++			fails += check("rung-7 entry counter probe ABSENT in tess-default (98 GENUINE_PASS invariant)",
++			               !contains(vs_msl_default, "spvKernelEntryCounter"));
 +		}
 +	}
 +
