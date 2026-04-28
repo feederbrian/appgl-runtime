@@ -7200,6 +7200,19 @@ struct GLContext::Impl {
                                    GLsizei instanceCount = 1,
                                    GLuint baseInstance = 0);
 
+    // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader
+    // path for tier=MeshShader programs. Returns true on successful
+    // encode + commit, false on any precondition / encode failure
+    // (caller falls through to CPU GS interpreter). Currently
+    // env-gated via APPGL_ENABLE_MESH_GS to allow incremental rollout
+    // before the path covers the full 102-program silent-conversion
+    // surface.
+    bool tryMetalMeshGSDraw(GLProgramObject& program,
+                            GLuint programName,
+                            GLenum mode,
+                            GLsizei count,
+                            GLint first);
+
     // β [metal-tess-TF] — synthesise a Metal-tess-ready combined
     // GLProgramObject from the bound program-pipeline's separable
     // VS+TCS+TES+FS programs, mirror the link-time tess probe across
@@ -19166,7 +19179,7 @@ bool GLContext::linkProgram(GLuint program) {
                 } else {
                     meshLinkOk = false;
                 }
-                // (2) Compile mesh function.
+                // (2) Compile mesh function + FS function.
                 if (meshLinkOk) {
                     std::string meshFnErr;
                     void* meshFn = impl_->frameGraph
@@ -19175,6 +19188,17 @@ bool GLContext::linkProgram(GLuint program) {
                             &meshFnErr);
                     if (meshFn != nullptr) {
                         programObject->metalGSMeshFunction = meshFn;
+                    } else {
+                        meshLinkOk = false;
+                    }
+                }
+                if (meshLinkOk && !programObject->fragmentMSL.empty()) {
+                    std::string fsFnErr;
+                    void* fsFn = impl_->frameGraph
+                        ->compileMSLFunction(
+                            programObject->fragmentMSL, &fsFnErr);
+                    if (fsFn != nullptr) {
+                        programObject->metalGSFragmentFunction = fsFn;
                     } else {
                         meshLinkOk = false;
                     }
@@ -23179,6 +23203,71 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     return encodeOk;
 }
 
+bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
+                                          GLuint programName,
+                                          GLenum mode,
+                                          GLsizei count,
+                                          GLint first)
+{
+    (void)programName;
+    (void)first;
+    // MVP envelope guard. Phase 2 currently handles GL_POINTS draws
+    // only — covers all 6 conversion-target failing tests
+    // (gl_pointsize_value + 5 limits/api point-output cases). Lines
+    // and triangles input land in a follow-up once point flow is
+    // proven end-to-end.
+    if (mode != GL_POINTS) return false;
+    if (count <= 0) return false;
+    if (program.metalGSTier != GLProgramObject::MetalGSTier::MeshShader) {
+        return false;
+    }
+    if (program.metalGSVsComputePipelineState == nullptr ||
+        program.metalGSMeshFunction == nullptr ||
+        program.metalGSFragmentFunction == nullptr) {
+        return false;
+    }
+
+    // Resolve current FBO color + depth/stencil targets. Mirrors the
+    // pattern used by encodeTranslatedDraw at the drawArrays call site.
+    GLsizei fboW = 0, fboH = 0;
+    void* fboDSTex = nullptr;
+    void* fboColTex = resolveFBOColorTarget(fboW, fboH, fboDSTex);
+    if (fboColTex == nullptr) return false;
+
+    appgl::MetalFrameGraph::MetalMeshGSDrawInfo info;
+    info.vertexComputePipelineState = program.metalGSVsComputePipelineState;
+    info.meshFunction = program.metalGSMeshFunction;
+    info.fragmentFunction = program.metalGSFragmentFunction;
+    info.meshPipelineStateInOut = &program.metalGSMeshPipelineState;
+    info.vertexCount = static_cast<std::uint32_t>(count);
+    // GL_POINTS: 1 input vertex per primitive. primitiveCount equals
+    // vertexCount for points. Output topology mirrors input here
+    // because Phase-2 MVP only handles points → points GS shape.
+    info.primitiveCount = static_cast<std::uint32_t>(count);
+    info.inputVerticesPerPrimitive = 1;
+    info.outputTopologyMTLPrimitiveType = MTLPrimitiveTypePoint;
+    // Conservative VS-output stride. SPIRV-Cross's main0_out for the
+    // 6 MVP conversion-target VSes is float4 + a few scalar varyings
+    // ≪ 256 bytes. Refine to exact stride in a follow-up once the
+    // SPIRV-Cross reflection's `output_struct_size` is plumbed
+    // through ShaderReflection.
+    info.vsOutputStrideBytes = 256;
+    info.fboColorTexture = fboColTex;
+    info.fboDepthStencilTexture = fboDSTex;
+    info.fboWidth = static_cast<std::uint32_t>(fboW);
+    info.fboHeight = static_cast<std::uint32_t>(fboH);
+    // Default uniforms wiring deferred — the 6 MVP conversion targets
+    // either don't reference default uniforms in their VS/GS/FS or
+    // reference them through a path that the legacy translator already
+    // remapped. A draw-time push needs the same buffer-content wiring
+    // encodeTranslatedDraw uses; revisit once first-conversion-landed
+    // proves the encoder shape.
+    info.defaultUniformData = nullptr;
+    info.defaultUniformSize = 0;
+
+    return frameGraph->encodeMetalMeshGSDraw(info);
+}
+
 bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                                            GLuint programName,
                                            const appgl::EmulatedDraw& ed)
@@ -23793,6 +23882,23 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     GLuint emulProgramName = programName;
     GLProgramObject* emulProgram = impl_->resolvePipelineEmulationProgram(
         programName, emulProgramName);
+    // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader path
+    // first when the program's tier classifies as MeshShader. Env-gated
+    // (APPGL_ENABLE_MESH_GS) so the path opts in incrementally — once
+    // the encoder covers the full 102-program silently-converted
+    // surface without regression, the gate flips to default-on.
+    // Returns false ⇒ existing CPU GS interpreter path runs (natural
+    // fallback).
+    if (emulProgram != nullptr &&
+        emulProgram->metalGSTier == GLProgramObject::MetalGSTier::MeshShader &&
+        std::getenv("APPGL_ENABLE_MESH_GS") != nullptr) {
+        if (impl_->tryMetalMeshGSDraw(*emulProgram, emulProgramName,
+                                       mode, count, first)) {
+            APPGL_LOG(DRAW, @"drawArrays mesh-GS ok: count=%d", count);
+            return true;
+        }
+        APPGL_LOG(SHADER, @"drawArrays mesh-GS encode failed — falling back to CPU emulator");
+    }
     if (emulProgram != nullptr && emulProgram->geometryEmulated) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;

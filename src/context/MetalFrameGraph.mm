@@ -5818,6 +5818,206 @@ fragment float4 appgl_immediate_textured_fs(
         return true;
     }
 
+    // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: mesh-shader draw encoder.
+    // See MetalFrameGraph::encodeMetalMeshGSDraw declaration for the
+    // contract. Three sub-steps mirror Phase-3 metal-tess (3a→3b):
+    //   (3a) VS-as-compute writes per-vertex outputs to vsOutBuf.
+    //   (3b) Mesh-render PSO build (or cache hit).
+    //   (3c) Render pass: bind vsOutBuf @ 22, drawMeshThreadgroups.
+    bool encodeMetalMeshGSDraw(MetalFrameGraph::MetalMeshGSDrawInfo& info) {
+        if (device == nil) {
+            info.diagnostic = "no Metal device";
+            return false;
+        }
+        if (info.vertexComputePipelineState == nullptr ||
+            info.meshFunction == nullptr ||
+            info.fragmentFunction == nullptr) {
+            info.diagnostic = "missing PSO/function inputs";
+            return false;
+        }
+        if (info.vertexCount == 0 || info.primitiveCount == 0) {
+            info.diagnostic = "zero-count draw";
+            return false;
+        }
+        if (info.fboColorTexture == nullptr) {
+            info.diagnostic = "no color attachment";
+            return false;
+        }
+
+        // (3a) VS-as-compute pre-pass. Allocate output buffer, dispatch
+        // VS one thread per vertex, write into vsOutBuf at slot 28
+        // (Phase-3 convention).
+        const NSUInteger vsOutBufSize =
+            (NSUInteger)info.vertexCount *
+            (NSUInteger)info.vsOutputStrideBytes;
+        id<MTLBuffer> vsOutBuf =
+            [device newBufferWithLength:vsOutBufSize
+                                options:MTLResourceStorageModePrivate];
+        if (vsOutBuf == nil) {
+            info.diagnostic = "vsOutBuf alloc failed";
+            return false;
+        }
+        vsOutBuf.label = @"appgl-mesh-gs-vs-output";
+
+        {
+            id<MTLCommandBuffer> vsCmdBuf = [commandQueue commandBuffer];
+            if (vsCmdBuf == nil) {
+                info.diagnostic = "vs cmdBuf alloc failed";
+                return false;
+            }
+            vsCmdBuf.label = @"appgl-mesh-gs-vs-compute";
+            id<MTLComputeCommandEncoder> vsEnc =
+                [vsCmdBuf computeCommandEncoder];
+            if (vsEnc == nil) {
+                info.diagnostic = "vs encoder alloc failed";
+                return false;
+            }
+            id<MTLComputePipelineState> vsPSO =
+                (__bridge id<MTLComputePipelineState>)info.vertexComputePipelineState;
+            [vsEnc setComputePipelineState:vsPSO];
+            [vsEnc setBuffer:vsOutBuf offset:0 atIndex:28];
+            if (info.defaultUniformData != nullptr &&
+                info.defaultUniformSize > 0) {
+                [vsEnc setBytes:info.defaultUniformData
+                         length:info.defaultUniformSize
+                        atIndex:16];
+            }
+            const NSUInteger maxPerTg =
+                vsPSO.maxTotalThreadsPerThreadgroup > 0
+                    ? vsPSO.maxTotalThreadsPerThreadgroup : 32;
+            const NSUInteger tgWidth =
+                info.vertexCount > 0 && info.vertexCount < maxPerTg
+                    ? info.vertexCount : maxPerTg;
+            [vsEnc dispatchThreads:MTLSizeMake(info.vertexCount, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
+            [vsEnc endEncoding];
+            [vsCmdBuf commit];
+            [vsCmdBuf waitUntilCompleted];
+        }
+
+        // (3b) Mesh-render PSO build / cache lookup.
+        id<MTLRenderPipelineState> meshPSO = nil;
+        if (info.meshPipelineStateInOut != nullptr &&
+            *info.meshPipelineStateInOut != nullptr) {
+            meshPSO = (__bridge id<MTLRenderPipelineState>)
+                *info.meshPipelineStateInOut;
+        } else {
+            id<MTLTexture> colorTex =
+                (__bridge id<MTLTexture>)info.fboColorTexture;
+            id<MTLTexture> dsTex = info.fboDepthStencilTexture != nullptr
+                ? (__bridge id<MTLTexture>)info.fboDepthStencilTexture
+                : nil;
+            MTLMeshRenderPipelineDescriptor* meshDesc =
+                [[MTLMeshRenderPipelineDescriptor alloc] init];
+            meshDesc.meshFunction =
+                (__bridge id<MTLFunction>)info.meshFunction;
+            meshDesc.fragmentFunction =
+                (__bridge id<MTLFunction>)info.fragmentFunction;
+            meshDesc.colorAttachments[0].pixelFormat = colorTex.pixelFormat;
+            if (dsTex != nil) {
+                const MTLPixelFormat pf = dsTex.pixelFormat;
+                if (pf == MTLPixelFormatDepth16Unorm ||
+                    pf == MTLPixelFormatDepth32Float ||
+                    pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                    pf == MTLPixelFormatDepth24Unorm_Stencil8) {
+                    meshDesc.depthAttachmentPixelFormat = pf;
+                }
+                if (pf == MTLPixelFormatStencil8 ||
+                    pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                    pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                    pf == MTLPixelFormatX32_Stencil8 ||
+                    pf == MTLPixelFormatX24_Stencil8) {
+                    meshDesc.stencilAttachmentPixelFormat = pf;
+                }
+            }
+            // One mesh threadgroup per input primitive. Object stage
+            // is unused (no amplification needed for the MVP envelope).
+            meshDesc.maxTotalThreadsPerObjectThreadgroup = 1;
+            meshDesc.maxTotalThreadsPerMeshThreadgroup = 1;
+            NSError* err = nil;
+            meshPSO = [device
+                newRenderPipelineStateWithMeshDescriptor:meshDesc
+                                                 options:MTLPipelineOptionNone
+                                              reflection:nil
+                                                   error:&err];
+            if (meshPSO == nil) {
+                info.diagnostic = err.localizedDescription.UTF8String
+                    ? err.localizedDescription.UTF8String
+                    : "newRenderPipelineStateWithMeshDescriptor failed";
+                return false;
+            }
+            if (info.meshPipelineStateInOut != nullptr) {
+                *info.meshPipelineStateInOut =
+                    (void*)CFBridgingRetain(meshPSO);
+            }
+        }
+
+        // (3c) Render pass + drawMeshThreadgroups.
+        id<MTLCommandBuffer> rcmd = [commandQueue commandBuffer];
+        if (rcmd == nil) {
+            info.diagnostic = "render cmdBuf alloc failed";
+            return false;
+        }
+        rcmd.label = @"appgl-mesh-gs-draw";
+        MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
+        rpd.colorAttachments[0].texture =
+            (__bridge id<MTLTexture>)info.fboColorTexture;
+        rpd.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+        if (info.fboDepthStencilTexture != nullptr) {
+            id<MTLTexture> dsTex =
+                (__bridge id<MTLTexture>)info.fboDepthStencilTexture;
+            const MTLPixelFormat pf = dsTex.pixelFormat;
+            if (pf == MTLPixelFormatDepth16Unorm ||
+                pf == MTLPixelFormatDepth32Float ||
+                pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                pf == MTLPixelFormatDepth24Unorm_Stencil8) {
+                rpd.depthAttachment.texture = dsTex;
+                rpd.depthAttachment.loadAction = MTLLoadActionLoad;
+                rpd.depthAttachment.storeAction = MTLStoreActionStore;
+            }
+            if (pf == MTLPixelFormatStencil8 ||
+                pf == MTLPixelFormatDepth32Float_Stencil8 ||
+                pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                pf == MTLPixelFormatX32_Stencil8 ||
+                pf == MTLPixelFormatX24_Stencil8) {
+                rpd.stencilAttachment.texture = dsTex;
+                rpd.stencilAttachment.loadAction = MTLLoadActionLoad;
+                rpd.stencilAttachment.storeAction = MTLStoreActionStore;
+            }
+        }
+        id<MTLRenderCommandEncoder> renc =
+            [rcmd renderCommandEncoderWithDescriptor:rpd];
+        if (renc == nil) {
+            info.diagnostic = "render encoder alloc failed";
+            return false;
+        }
+        [renc setRenderPipelineState:meshPSO];
+        [renc setMeshBuffer:vsOutBuf offset:0 atIndex:22];
+        if (info.defaultUniformData != nullptr &&
+            info.defaultUniformSize > 0) {
+            [renc setMeshBytes:info.defaultUniformData
+                        length:info.defaultUniformSize
+                       atIndex:16];
+            [renc setFragmentBytes:info.defaultUniformData
+                            length:info.defaultUniformSize
+                           atIndex:16];
+        }
+        // One threadgroup per input primitive, 1 thread per group.
+        // Mesh function reads spvPrimitiveID via
+        // [[threadgroup_position_in_grid]] and indexes
+        // spvVsOutputs[spvPrimitiveID * inputVerticesPerPrimitive +
+        // vI] for each input vertex.
+        [renc drawMeshThreadgroups:MTLSizeMake(info.primitiveCount, 1, 1)
+            threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+              threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
+        [renc endEncoding];
+        [rcmd commit];
+        [rcmd waitUntilCompleted];
+
+        return true;
+    }
+
     // Encode + commit + wait a single compute dispatch. The wait is
     // synchronous to match CTS's "dispatch, then map SSBO" pattern —
     // without it, the map'd bytes are stale compute-shader input
@@ -7247,6 +7447,10 @@ MetalFrameGraph::TessPipelineProbeResult MetalFrameGraph::probeTessellationPipel
 
 bool MetalFrameGraph::encodeMetalTessellationDraw(const MetalTessDrawInfo& info) {
     return impl_->encodeMetalTessellationDraw(info);
+}
+
+bool MetalFrameGraph::encodeMetalMeshGSDraw(MetalMeshGSDrawInfo& info) {
+    return impl_->encodeMetalMeshGSDraw(info);
 }
 
 bool MetalFrameGraph::encodeComputeDispatch(const ComputeDispatchInfo& info) {

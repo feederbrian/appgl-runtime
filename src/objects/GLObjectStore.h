@@ -907,6 +907,11 @@ struct GLProgramObject {
     // newRenderPipelineStateWithMeshDescriptor cost, not the
     // newLibraryWithSource compile cost.
     void* metalGSMeshFunction = nullptr;
+    // Sprint 3 Phase 2: cached id<MTLFunction> for the fragment shader
+    // when tier=MeshShader. Compiled from `fragmentMSL` at link time
+    // alongside the mesh function. Distinct from `metalFragmentFunction`
+    // (argbuf path) so the two caches don't collide.
+    void* metalGSFragmentFunction = nullptr;
     // Step 7-3 compute follow-up: retained id<MTLFunction> for the
     // compute entry point, populated alongside the PSO when
     // APPGL_ENABLE_ARGUMENT_BUFFERS is set. `encodeComputeDispatch`

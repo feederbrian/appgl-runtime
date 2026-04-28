@@ -872,6 +872,70 @@ public:
     // `specs-worker-docs/SPRINT-3-KICKOFF.md` and Phase 0 findings in
     // `specs-worker-docs/crossworker/SPRINT-3-PHASE-0-FINDINGS-2026-04-27.md`.
 
+    // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: mesh-shader draw encoder.
+    // Drives the GS-as-mesh path for programs with
+    // `metalGSTier == MeshShader`. The flow:
+    //
+    //   (1) VS-as-compute pre-pass — uses the program's cached
+    //       `metalGSVsComputePipelineState` (Phase 2 Checkpoint 1)
+    //       to dispatch one VS thread per draw vertex, writing the
+    //       per-vertex outputs into `vsOutputBuffer` at
+    //       `[[buffer(28)]]` (Phase-3 metal-tess slot convention).
+    //   (2) Mesh render-pipeline build — MTLMeshRenderPipelineDescriptor
+    //       with `meshFunction` (cached on program) +
+    //       `fragmentFunction` (translated from the program's FS) +
+    //       attachment formats from the bound FBO. Cached
+    //       FBO-format-keyed on the program object via
+    //       `metalGSMeshPipelineState`.
+    //   (3) Render-pass encode — bind `vsOutputBuffer` at
+    //       `[[buffer(22)]]` (matches Path A's `spvVsOutputs`),
+    //       call `drawMeshThreadgroups:primitiveCount object/mesh`
+    //       per Apple's mesh shader sample patterns.
+    //
+    // Returns false on any encode failure so the caller can fall back
+    // to the existing CPU GS interpreter path. MVP envelope: input
+    // topology = points/lines/triangles (no adjacency), output
+    // topology = points/line_strip/triangle_strip, max_vertices ≤ 3.
+    // Programs outside this envelope have `metalGSTier != MeshShader`
+    // (rejected at link-time gate, GLContext.mm:19097) and never
+    // reach this encoder.
+    struct MetalMeshGSDrawInfo {
+        // Stage PSOs / functions (retained void* — caller owns the
+        // refcount; encoder borrows for the duration of the call).
+        void* vertexComputePipelineState = nullptr;
+        void* meshFunction = nullptr;
+        void* fragmentFunction = nullptr;
+        // Cached mesh render pipeline (FBO-format-keyed) — read-then-
+        // write slot on the program object. nullptr ⇒ encoder builds
+        // and stores; non-null ⇒ encoder uses cached PSO.
+        void** meshPipelineStateInOut = nullptr;
+        // Draw shape.
+        std::uint32_t vertexCount = 0;            // VS dispatch range
+        std::uint32_t primitiveCount = 0;         // mesh threadgroup count
+        std::uint32_t inputVerticesPerPrimitive = 1;  // 1=points, 2=lines, 3=triangles
+        // Mesh-output topology (from GS layout). Populates the
+        // pipeline descriptor's `meshTopologyClass`.
+        std::uint32_t outputTopologyMTLPrimitiveType = 0;  // MTLPrimitiveTypePoint/Line/Triangle
+        // Per-vertex VS output stride. Conservative upper bound is
+        // fine — VS-compute writes its actual main0_out struct, mesh
+        // function reads matching main0_in struct (same struct from
+        // SPIRV-Cross's perspective). Overallocation costs memory only.
+        std::uint32_t vsOutputStrideBytes = 256;
+        // Default uniforms (push-constant equivalent) — bound at
+        // [[buffer(16)]] for both VS-compute and mesh stages.
+        const void* defaultUniformData = nullptr;
+        std::size_t defaultUniformSize = 0;
+        // FBO state (matches encodeTranslatedDraw's fboColorTexture /
+        // fboDepthStencilTexture / etc.).
+        void* fboColorTexture = nullptr;
+        void* fboDepthStencilTexture = nullptr;
+        std::uint32_t fboWidth = 0;
+        std::uint32_t fboHeight = 0;
+        // Diagnostic. Used by callers in error-path logging.
+        std::string diagnostic;
+    };
+    bool encodeMetalMeshGSDraw(MetalMeshGSDrawInfo& info);
+
     // Encode + commit + wait a single compute dispatch. This creates a
     // fresh command buffer + compute encoder, binds the pipeline and
     // the caller-supplied buffer / texture bindings, issues
