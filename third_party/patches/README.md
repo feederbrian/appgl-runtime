@@ -436,6 +436,64 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Phase 2.5 Gap B (gate 14 — `max_vertices > 3` strip-to-list expansion):**
+extends the EndPrimitive flush emission with a strip-to-list
+expansion loop for `triangle_strip` and `line_strip` outputs with
+`max_vertices` beyond the simple-case threshold. Per GL §10.1.13:
+
+- A triangle_strip of N vertices represents (N-2) triangles with
+  alternating winding — even-indexed triangles use (T, T+1, T+2);
+  odd-indexed use (T+1, T, T+2) so consecutive triangles share an
+  edge with consistent winding.
+- A line_strip of N vertices = (N-1) line segments using
+  consecutive vertex pairs.
+
+Pre-Gap B, the OpEndPrimitive emit hardcoded the simple "1 triangle
+from the last 3 vertices" / "1 line from the last 2 vertices" form,
+silently dropping any earlier vertices in strips of N > 3 (or N > 2
+for lines). For the Phase 2 `max_vertices=3` MVP envelope this
+worked. For Phase 2.5's layered_rendering tests
+(`max_vertices=64-96`), the GS would emit dozens of vertices and
+only the last 3 would form a triangle.
+
+Implementation:
+- New shared helper `CompilerMSL::emit_gs_as_mesh_endprimitive()`
+  at spirv_msl.cpp:5249. Branches on output topology +
+  `execution.output_vertices`:
+  - triangle_strip with max_vertices ≤ 3: simple emit (byte-identical
+    to pre-Gap B, preserves synthetic fixture rig assertions).
+  - triangle_strip with max_vertices > 3: strip-to-list loop with
+    even/odd winding alternation, increments spvPrimitiveIndex by
+    (N-2) per strip.
+  - line_strip with max_vertices ≤ 2: simple emit.
+  - line_strip with max_vertices > 2: (N-1)-line expansion loop.
+  - points: 1-point emit (max_vertices irrelevant).
+- New function-local `uint spvStripStart = 0u;` tracker declared in
+  `fixup_hooks_in` alongside `spvVertexIndex`/`spvPrimitiveIndex`.
+  Updated to `spvVertexIndex` at the end of each EndPrimitive flush
+  (both explicit OpEndPrimitive and Path H implicit). Strip-loop
+  uses it to compute per-strip indices independent of cumulative
+  vertex emission count.
+- OpEndPrimitive emit and Path H implicit emit both call the
+  shared helper — single source of truth for strip-to-list
+  expansion logic.
+
+Validated against all four `/tmp/spirv_lr/spv_{0002,0005,0008,0011}.spv`
+layered_rendering CTS dumps (`points in / triangle_strip out /
+max_vertices=64-96`) — all four xcrun rc=0 with strip expansion.
+Combined with Gap C (function-local shadows for per-primitive
+output reads), layered_rendering tests now have:
+- Compile-validate clean (Gap C unblocked the gl_Layer reads)
+- Strip-to-list expansion semantically correct per GL §10.1.13
+  (Gap B handles the (N-2) triangle expansion)
+
+Synthetic max_vertices=3 fixture: simple-case branch fires;
+byte-identical to pre-Gap B emission past the new
+`spvStripStart` tracker declaration.
+
+Test rig adds a Gap B regression-guard assertion for the
+`spvStripStart` tracker presence.
+
 **Phase 2.5 Gap C (gate 13 — function-local shadows for per-primitive
 Output reads):** layered_rendering GS source pattern reads back its
 own per-primitive output mid-body — e.g.

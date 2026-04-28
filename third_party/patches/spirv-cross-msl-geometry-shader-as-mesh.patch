@@ -75,11 +75,10 @@ diff --git a/main.cpp b/main.cpp
 diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 --- a/spirv_msl.hpp
 +++ b/spirv_msl.hpp
-@@ -539,7 +539,146 @@
- 		// Default false (existing behaviour: all TCS outputs in the
+@@ -540,6 +540,145 @@
  		// per-CP device buffer).
  		bool split_tcs_outputs_by_consumption = false;
-+
+ 
 +		// AppGL fork addition (msl-geometry-shader-as-mesh.patch): emit
 +		// geometry shaders (`ExecutionModelGeometry`) as Metal mesh
 +		// shaders (`[[mesh]] void main0(...)`) instead of the current
@@ -168,7 +167,7 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +		// per-scalar atomic stores. Default off — tess→tess
 +		// unchanged.
 +		bool force_compute_kernel_atomic_writes_on_spvOut = false;
- 
++
 +		// AppGL fork addition (Path E+++ diagnostic): add a
 +		// `device atomic_uint* spvKernelEntryCounter [[buffer(N)]]`
 +		// parameter to VS-compute kernels and emit
@@ -222,7 +221,7 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
  		// Assume that SubpassData images have multiple layers. Layered input attachments
  		// are addressed relative to the Layer output from the vertex pipeline. This option
  		// has no effect with multiview, since all input attachments are assumed to be layered
-@@ -1132,6 +1271,27 @@
+@@ -1132,6 +1271,42 @@
  	uint32_t add_interface_block_pointer(uint32_t ib_var_id, StorageClass storage);
  	uint32_t add_meshlet_block(bool per_primitive);
  
@@ -232,6 +231,21 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 +	// add_interface_block flow dropped, and injects them into main0_in
 +	// so its byte layout matches the linked-VS main0_out emission.
 +	void ensure_gs_as_mesh_gl_per_vertex_parity();
++
++	// Phase 2.5 Gap B (msl-geometry-shader-as-mesh.patch): emits the
++	// EndPrimitive flush sequence for the GS-as-mesh path. Shared
++	// between explicit `OpEndPrimitive` and Path H's implicit
++	// function-exit flush. Branches on output topology +
++	// max_vertices:
++	//   - triangle_strip with max_vertices ≤ 3: 1-triangle simple emit
++	//     (preserves byte-identical output for the synthetic / Phase 2
++	//     MVP envelope).
++	//   - triangle_strip with max_vertices > 3: strip-to-list expansion
++	//     loop with even/odd winding alternation per GL §10.1.13.
++	//   - line_strip with max_vertices ≤ 2: 1-line simple emit.
++	//   - line_strip with max_vertices > 2: (N-1)-line expansion loop.
++	//   - points: 1-point emit (max_vertices irrelevant).
++	void emit_gs_as_mesh_endprimitive();
 +
 +	// Phase 2.5 Gap A (msl-geometry-shader-as-mesh.patch): synthesizes
 +	// a `gl_Position` Output variable in IR for GS-as-mesh shaders that
@@ -418,7 +432,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
-@@ -5049,6 +5152,206 @@
+@@ -5049,8 +5152,295 @@
  		set_name(type.self, "spvPerVertex");
  
  	return next_id;
@@ -521,6 +535,93 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	inject(BuiltInCullDistance, "gl_CullDistance");
 +}
 +
++// Phase 2.5 Gap B: emit the EndPrimitive flush sequence for GS-as-mesh.
++// Shared between explicit OpEndPrimitive and Path H implicit
++// function-exit flush. For triangle_strip / line_strip with
++// max_vertices > simple-case-threshold, emits a strip-to-list
++// expansion loop with proper winding alternation per GL §10.1.13.
++// For max_vertices within the simple-case threshold (≤3 triangles,
++// ≤2 lines), emits the single-primitive simple form to preserve
++// byte-identical output for the existing rig fixtures.
++void CompilerMSL::emit_gs_as_mesh_endprimitive()
++{
++	auto &execution = get_entry_point();
++	uint32_t mv = execution.output_vertices;
++	if (execution.flags.get(ExecutionModeOutputTriangleStrip))
++	{
++		if (mv <= 3)
++		{
++			// Simple case: 1 triangle from the last 3 vertices in the
++			// current strip. Byte-identical to pre-Gap-B emission.
++			statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 0u, spvVertexIndex - 3u);");
++			statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 1u, spvVertexIndex - 2u);");
++			statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 2u, spvVertexIndex - 1u);");
++			if (mesh_out_per_primitive != 0)
++				statement("spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);");
++			statement("++spvPrimitiveIndex;");
++		}
++		else
++		{
++			// Strip-to-list expansion: a strip of N vertices represents
++			// (N-2) triangles with alternating winding per GL §10.1.13.
++			// Even-indexed triangles use (T, T+1, T+2); odd-indexed
++			// triangles use (T+1, T, T+2) so consecutive triangles
++			// share an edge with consistent winding.
++			statement("for (uint spvT = spvStripStart; spvT + 2u < spvVertexIndex; ++spvT)");
++			begin_scope();
++			statement("uint spvLocal = spvT - spvStripStart;");
++			statement("uint spvI0 = (spvLocal & 1u) == 0u ? spvT : spvT + 1u;");
++			statement("uint spvI1 = (spvLocal & 1u) == 0u ? spvT + 1u : spvT;");
++			statement("uint spvI2 = spvT + 2u;");
++			statement("spvMesh.set_index((spvPrimitiveIndex + spvLocal) * 3u + 0u, spvI0);");
++			statement("spvMesh.set_index((spvPrimitiveIndex + spvLocal) * 3u + 1u, spvI1);");
++			statement("spvMesh.set_index((spvPrimitiveIndex + spvLocal) * 3u + 2u, spvI2);");
++			if (mesh_out_per_primitive != 0)
++				statement("spvMesh.set_primitive(spvPrimitiveIndex + spvLocal, spvCurrentPrim);");
++			end_scope();
++			statement("spvPrimitiveIndex += (spvVertexIndex - spvStripStart >= 2u) ? "
++			          "(spvVertexIndex - spvStripStart - 2u) : 0u;");
++		}
++	}
++	else if (execution.flags.get(ExecutionModeOutputLineStrip))
++	{
++		if (mv <= 2)
++		{
++			// Simple case: 1 line from the last 2 vertices in the strip.
++			statement("spvMesh.set_index(spvPrimitiveIndex * 2u + 0u, spvVertexIndex - 2u);");
++			statement("spvMesh.set_index(spvPrimitiveIndex * 2u + 1u, spvVertexIndex - 1u);");
++			if (mesh_out_per_primitive != 0)
++				statement("spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);");
++			statement("++spvPrimitiveIndex;");
++		}
++		else
++		{
++			// Strip expansion: a line strip of N vertices = (N-1) line
++			// segments, each segment using consecutive vertices.
++			statement("for (uint spvT = spvStripStart; spvT + 1u < spvVertexIndex; ++spvT)");
++			begin_scope();
++			statement("uint spvLocal = spvT - spvStripStart;");
++			statement("spvMesh.set_index((spvPrimitiveIndex + spvLocal) * 2u + 0u, spvT);");
++			statement("spvMesh.set_index((spvPrimitiveIndex + spvLocal) * 2u + 1u, spvT + 1u);");
++			if (mesh_out_per_primitive != 0)
++				statement("spvMesh.set_primitive(spvPrimitiveIndex + spvLocal, spvCurrentPrim);");
++			end_scope();
++			statement("spvPrimitiveIndex += (spvVertexIndex - spvStripStart >= 1u) ? "
++			          "(spvVertexIndex - spvStripStart - 1u) : 0u;");
++		}
++	}
++	else if (execution.flags.get(ExecutionModeOutputPoints))
++	{
++		// Points: 1 vertex per primitive; max_vertices irrelevant.
++		statement("spvMesh.set_index(spvPrimitiveIndex, spvVertexIndex - 1u);");
++		if (mesh_out_per_primitive != 0)
++			statement("spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);");
++		statement("++spvPrimitiveIndex;");
++	}
++	// Reset strip-start tracker for the next strip after this flush.
++	statement("spvStripStart = spvVertexIndex;");
+ }
+ 
 +// Phase 2.5 Gap A: synthesize a gl_Position Output variable for
 +// GS-as-mesh shaders that don't write one.
 +//
@@ -622,10 +723,12 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	set_decoration(var_id, DecorationBuiltIn, BuiltInPosition);
 +	set_name(var_id, "gl_Position");
 +	mark_implicit_builtin(StorageClassOutput, BuiltInPosition, var_id);
- }
- 
++}
++
  // Ensure that the type is compatible with the builtin.
-@@ -8593,21 +8896,48 @@
+ // If it is, simply return the given type ID.
+ // Otherwise, create a new type, and return it's ID.
+@@ -8593,21 +8983,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
  
@@ -682,7 +785,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10322,6 +10652,63 @@
+@@ -10322,6 +10739,63 @@
  
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
@@ -746,7 +849,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
-@@ -10881,6 +11268,74 @@
+@@ -10881,6 +11355,50 @@
  		flush_variable_declaration(builtin_mesh_primitive_indices_id);
  		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
  		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
@@ -780,37 +883,13 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	{
 +		if (msl_options.geometry_shader_as_mesh && get_execution_model() == ExecutionModelGeometry)
 +		{
-+			// MVP scope: triangle_strip output with single primitive
-+			// per EndPrimitive. For the synthetic test (max_vertices=3,
-+			// 3 EmitVertex + 1 EndPrimitive), this produces one triangle
-+			// from the last 3 vertices. Strip-pattern handling for
-+			// max_vertices > 3 is deferred (would need strip-start
-+			// tracking to emit (N-2) triangles from a strip of N vertices
-+			// with proper winding alternation per GL spec).
-+			auto &execution = get_entry_point();
-+			if (execution.flags.get(ExecutionModeOutputTriangleStrip))
-+			{
-+				statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 0u, spvVertexIndex - 3u);");
-+				statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 1u, spvVertexIndex - 2u);");
-+				statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 2u, spvVertexIndex - 1u);");
-+			}
-+			else if (execution.flags.get(ExecutionModeOutputLineStrip))
-+			{
-+				statement("spvMesh.set_index(spvPrimitiveIndex * 2u + 0u, spvVertexIndex - 2u);");
-+				statement("spvMesh.set_index(spvPrimitiveIndex * 2u + 1u, spvVertexIndex - 1u);");
-+			}
-+			else if (execution.flags.get(ExecutionModeOutputPoints))
-+			{
-+				statement("spvMesh.set_index(spvPrimitiveIndex, spvVertexIndex - 1u);");
-+			}
-+			// Flush per-primitive outputs (gl_Layer, gl_ViewportIndex,
-+			// gl_PrimitiveID) latched in spvCurrentPrim by the OpStore
-+			// intercept. Without this call the per-primitive struct is
-+			// silently dropped — the per-vertex set_vertex calls happen
-+			// at function exit, but per-primitive data is per-EndPrimitive.
-+			if (mesh_out_per_primitive != 0)
-+				statement("spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);");
-+			statement("++spvPrimitiveIndex;");
++			// Phase 2.5 Gap B: emit the EndPrimitive flush via the
++			// shared helper, which selects between simple and
++			// strip-to-list expansion based on output topology +
++			// max_vertices. Per GL §10.1.13 a triangle_strip of N
++			// vertices represents (N-2) triangles with alternating
++			// winding; line_strip of N vertices = (N-1) line segments.
++			emit_gs_as_mesh_endprimitive();
 +			// Path H: clear the implicit-EndPrimitive-owed flag — this
 +			// EndPrimitive flushed the current strip/run, so the
 +			// function-exit implicit emit doesn't need to fire.
@@ -821,7 +900,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		break;
  	}
  
-@@ -13987,8 +14442,20 @@
+@@ -13987,8 +14505,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
  		{
@@ -844,11 +923,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	}
  
-@@ -14615,6 +15082,20 @@
- 		break;
+@@ -14616,6 +15146,20 @@
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
-+		break;
+ 		break;
 +	case ExecutionModelGeometry:
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): under
 +		// `geometry_shader_as_mesh`, GS source emits as Metal mesh
@@ -862,10 +940,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		entry_type = "unknown";
- 		break;
++		break;
  	default:
  		entry_type = "unknown";
-@@ -14636,7 +15117,17 @@
+ 		break;
+@@ -14636,7 +15180,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
  {
@@ -884,7 +963,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  bool CompilerMSL::uses_explicit_early_fragment_test()
-@@ -14851,7 +15342,9 @@
+@@ -14851,7 +15405,9 @@
  	string decl;
  
  	if ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -895,7 +974,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		return decl;
  
  	// Stage-in structure
-@@ -15040,7 +15533,14 @@
+@@ -15040,7 +15596,14 @@
  			if (!ep_args.empty())
  				ep_args += ", ";
  
@@ -911,7 +990,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	});
  
-@@ -15065,8 +15565,30 @@
+@@ -15065,8 +15628,30 @@
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -943,7 +1022,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  
  		if (is_tesc_shader())
-@@ -15248,6 +15770,26 @@
+@@ -15248,6 +15833,26 @@
  
  	if (is_mesh_shader())
  	{
@@ -970,7 +1049,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15689,14 +16231,360 @@
+@@ -15689,14 +16294,349 @@
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
@@ -1121,6 +1200,12 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				// the trailing emit replays the EndPrimitive index/
 +				// primitive flush sequence.
 +				statement("bool spvNeedImplicitEndPrimitive = false;");
++				// Phase 2.5 Gap B: track the spvVertexIndex value at the
++				// start of the current strip so the strip-to-list
++				// expansion in emit_gs_as_mesh_endprimitive can compute
++				// per-strip indices correctly. Updated to spvVertexIndex
++				// at the end of each EndPrimitive flush.
++				statement("uint spvStripStart = 0u;");
 +				statement("spvUnsafeArray<spvPerVertex, ", execution.output_vertices, "> spvVertices = {};");
 +				if (mesh_out_per_primitive != 0)
 +				{
@@ -1270,27 +1355,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +				// in the count. Mirrors the OpEndPrimitive emit shape per
 +				// output topology — only fires when the runtime flag
 +				// indicates an unflushed run is owed.
-+				auto &execution = get_entry_point();
 +				statement("if (spvNeedImplicitEndPrimitive)");
 +				begin_scope();
-+				if (execution.flags.get(ExecutionModeOutputTriangleStrip))
-+				{
-+					statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 0u, spvVertexIndex - 3u);");
-+					statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 1u, spvVertexIndex - 2u);");
-+					statement("spvMesh.set_index(spvPrimitiveIndex * 3u + 2u, spvVertexIndex - 1u);");
-+				}
-+				else if (execution.flags.get(ExecutionModeOutputLineStrip))
-+				{
-+					statement("spvMesh.set_index(spvPrimitiveIndex * 2u + 0u, spvVertexIndex - 2u);");
-+					statement("spvMesh.set_index(spvPrimitiveIndex * 2u + 1u, spvVertexIndex - 1u);");
-+				}
-+				else if (execution.flags.get(ExecutionModeOutputPoints))
-+				{
-+					statement("spvMesh.set_index(spvPrimitiveIndex, spvVertexIndex - 1u);");
-+				}
-+				if (mesh_out_per_primitive != 0)
-+					statement("spvMesh.set_primitive(spvPrimitiveIndex, spvCurrentPrim);");
-+				statement("++spvPrimitiveIndex;");
++				// Path H + Gap B: same emission shape as OpEndPrimitive.
++				emit_gs_as_mesh_endprimitive();
 +				end_scope();
 +
 +				// Trailing emit: copy local arrays into spvMesh outputs.
@@ -1502,7 +1570,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tools/msl-gs-as-mesh-test.cpp
-@@ -0,0 +1,477 @@
+@@ -0,0 +1,485 @@
 +// Test for geometry_shader_as_mesh.
 +// Compiles a single GS .spv twice — once with the flag off (preserving
 +// upstream GS emission, which leaves `EmitVertex();` etc. as literal
@@ -1654,6 +1722,14 @@ index 0000000..1111111
 +			fails += check("Gap C: spvCurrentPrim per-primitive write propagates from function-local shadow (gl_Layer pattern)",
 +			               contains(msl, "spvCurrentPrim.gl_Layer = gl_Layer;"));
 +		}
++		// Phase 2.5 Gap B: spvStripStart tracker emits unconditionally
++		// (under geometry_shader_as_mesh) for triangle_strip / line_strip
++		// outputs to support max_vertices > simple-case-threshold strip
++		// expansion. Synthetic max_vertices=3 keeps simple emit shape
++		// past the tracker declaration; layered_rendering fixtures
++		// exercise the strip-loop branch.
++		fails += check("Gap B: spvStripStart tracker declared (Phase 2.5 strip-to-list expansion infrastructure)",
++		               contains(msl, "uint spvStripStart = 0u;"));
 +		// Path A — VS-output buffer parameter + per-vertex population.
 +		// gl_in[] should be populated from `spvVsOutputs[primId * N + i]`,
 +		// not zero-init. Primary regression guard from AppGL-W's pre-PSO
