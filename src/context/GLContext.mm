@@ -22636,6 +22636,31 @@ static void populateTranslatedDrawFixedFunctionState(
     tdi.depthTestEnabled = state.isEnabled(GL_DEPTH_TEST);
     tdi.depthFunc = state.depthState().func;
     tdi.depthWriteMask = (state.depthState().writeMask != GL_FALSE);
+    // Sprint 7 Phase 1 #11 (CKPT57): mirror GL stencil state into the
+    // TDI so depthStencilStateForDraw can configure Metal's per-face
+    // stencil descriptors. Without this, GL stencil-test+ops were
+    // silently dropped at draw time (Metal default = Always + Keep,
+    // which masquerades as "stencil-test always passes" but never
+    // writes back, breaking primitive_coverage and any other test
+    // that depends on stencil correctness).
+    {
+        const auto& gs = state.stencilState();
+        tdi.stencilTestEnabled = state.isEnabled(GL_STENCIL_TEST);
+        tdi.stencilFrontFunc = gs.front.func;
+        tdi.stencilFrontRef = gs.front.ref;
+        tdi.stencilFrontValueMask = gs.front.valueMask;
+        tdi.stencilFrontFail = gs.front.fail;
+        tdi.stencilFrontDepthFail = gs.front.depthFail;
+        tdi.stencilFrontDepthPass = gs.front.depthPass;
+        tdi.stencilFrontWriteMask = gs.front.writeMask;
+        tdi.stencilBackFunc = gs.back.func;
+        tdi.stencilBackRef = gs.back.ref;
+        tdi.stencilBackValueMask = gs.back.valueMask;
+        tdi.stencilBackFail = gs.back.fail;
+        tdi.stencilBackDepthFail = gs.back.depthFail;
+        tdi.stencilBackDepthPass = gs.back.depthPass;
+        tdi.stencilBackWriteMask = gs.back.writeMask;
+    }
     tdi.cullFaceEnabled = state.isEnabled(GL_CULL_FACE);
     tdi.cullFaceMode = state.rasterState().cullFaceMode;
     tdi.frontFace = state.rasterState().frontFace;
@@ -22798,6 +22823,25 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStor
     setup.info.cullFaceMode = state.rasterState().cullFaceMode;
     setup.info.frontFace = state.rasterState().frontFace;
     setup.info.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
+    // Sprint 7 Phase 1 #11 (CKPT57): stencil state for solid-color path.
+    {
+        const auto& gs = state.stencilState();
+        setup.info.stencilTestEnabled = state.isEnabled(GL_STENCIL_TEST);
+        setup.info.stencilFrontFunc = gs.front.func;
+        setup.info.stencilFrontRef = gs.front.ref;
+        setup.info.stencilFrontValueMask = gs.front.valueMask;
+        setup.info.stencilFrontFail = gs.front.fail;
+        setup.info.stencilFrontDepthFail = gs.front.depthFail;
+        setup.info.stencilFrontDepthPass = gs.front.depthPass;
+        setup.info.stencilFrontWriteMask = gs.front.writeMask;
+        setup.info.stencilBackFunc = gs.back.func;
+        setup.info.stencilBackRef = gs.back.ref;
+        setup.info.stencilBackValueMask = gs.back.valueMask;
+        setup.info.stencilBackFail = gs.back.fail;
+        setup.info.stencilBackDepthFail = gs.back.depthFail;
+        setup.info.stencilBackDepthPass = gs.back.depthPass;
+        setup.info.stencilBackWriteMask = gs.back.writeMask;
+    }
     if (debugLabel != nullptr) {
         setup.info.debugLabel = debugLabel;
     }
@@ -23581,6 +23625,28 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     info.cullFaceEnabled = state->isEnabled(GL_CULL_FACE);
     info.cullFaceMode = state->rasterState().cullFaceMode;
     info.frontFace = state->rasterState().frontFace;
+    // Sprint 7 Phase 1 #11 (CKPT57): tess Phase-2 render encoder
+    // stencil state — required for primitive_coverage's two-phase
+    // stencil-replace + stencil-notequal pattern. Same shape as the
+    // translated-draw populator.
+    {
+        const auto& gs = state->stencilState();
+        info.stencilTestEnabled = state->isEnabled(GL_STENCIL_TEST);
+        info.stencilFrontFunc = gs.front.func;
+        info.stencilFrontRef = gs.front.ref;
+        info.stencilFrontValueMask = gs.front.valueMask;
+        info.stencilFrontFail = gs.front.fail;
+        info.stencilFrontDepthFail = gs.front.depthFail;
+        info.stencilFrontDepthPass = gs.front.depthPass;
+        info.stencilFrontWriteMask = gs.front.writeMask;
+        info.stencilBackFunc = gs.back.func;
+        info.stencilBackRef = gs.back.ref;
+        info.stencilBackValueMask = gs.back.valueMask;
+        info.stencilBackFail = gs.back.fail;
+        info.stencilBackDepthFail = gs.back.depthFail;
+        info.stencilBackDepthPass = gs.back.depthPass;
+        info.stencilBackWriteMask = gs.back.writeMask;
+    }
 
     const auto& vp = state->viewport();
     info.viewportX = vp.x;
@@ -23786,6 +23852,25 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     info.depthTestEnabled = state->isEnabled(GL_DEPTH_TEST);
     info.depthFunc = state->depthState().func;
     info.depthWriteMask = (state->depthState().writeMask != GL_FALSE);
+    // Sprint 7 Phase 1 #11 (CKPT57): stencil state for mesh-GS path.
+    {
+        const auto& gs = state->stencilState();
+        info.stencilTestEnabled = state->isEnabled(GL_STENCIL_TEST);
+        info.stencilFrontFunc = gs.front.func;
+        info.stencilFrontRef = gs.front.ref;
+        info.stencilFrontValueMask = gs.front.valueMask;
+        info.stencilFrontFail = gs.front.fail;
+        info.stencilFrontDepthFail = gs.front.depthFail;
+        info.stencilFrontDepthPass = gs.front.depthPass;
+        info.stencilFrontWriteMask = gs.front.writeMask;
+        info.stencilBackFunc = gs.back.func;
+        info.stencilBackRef = gs.back.ref;
+        info.stencilBackValueMask = gs.back.valueMask;
+        info.stencilBackFail = gs.back.fail;
+        info.stencilBackDepthFail = gs.back.depthFail;
+        info.stencilBackDepthPass = gs.back.depthPass;
+        info.stencilBackWriteMask = gs.back.writeMask;
+    }
     info.cullFaceEnabled = state->isEnabled(GL_CULL_FACE);
     info.cullFaceMode = state->rasterState().cullFaceMode;
     info.frontFace = state->rasterState().frontFace;

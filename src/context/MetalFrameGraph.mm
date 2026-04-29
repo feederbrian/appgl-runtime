@@ -2195,10 +2195,35 @@ struct MetalFrameGraph::Impl {
             fakeInfo.depthTestEnabled = info.depthTestEnabled;
             fakeInfo.depthFunc = info.depthFunc;
             fakeInfo.depthWriteMask = info.depthWriteMask;
+            // Sprint 7 Phase 1 #11 (CKPT57): copy stencil identity too.
+            fakeInfo.stencilTestEnabled = info.stencilTestEnabled;
+            fakeInfo.stencilFrontFunc = info.stencilFrontFunc;
+            fakeInfo.stencilFrontRef = info.stencilFrontRef;
+            fakeInfo.stencilFrontValueMask = info.stencilFrontValueMask;
+            fakeInfo.stencilFrontFail = info.stencilFrontFail;
+            fakeInfo.stencilFrontDepthFail = info.stencilFrontDepthFail;
+            fakeInfo.stencilFrontDepthPass = info.stencilFrontDepthPass;
+            fakeInfo.stencilFrontWriteMask = info.stencilFrontWriteMask;
+            fakeInfo.stencilBackFunc = info.stencilBackFunc;
+            fakeInfo.stencilBackRef = info.stencilBackRef;
+            fakeInfo.stencilBackValueMask = info.stencilBackValueMask;
+            fakeInfo.stencilBackFail = info.stencilBackFail;
+            fakeInfo.stencilBackDepthFail = info.stencilBackDepthFail;
+            fakeInfo.stencilBackDepthPass = info.stencilBackDepthPass;
+            fakeInfo.stencilBackWriteMask = info.stencilBackWriteMask;
             id<MTLDepthStencilState> dsState = depthStencilStateForDraw(fakeInfo);
             if (dsState != nil && dsState != cachedDepthStencilState) {
                 [currentRenderEncoder setDepthStencilState:dsState];
                 cachedDepthStencilState = dsState;
+            }
+            // Apply stencil reference value (descriptor doesn't carry
+            // it — Metal pulls it from the encoder per draw).
+            if (info.stencilTestEnabled) {
+                [currentRenderEncoder
+                    setStencilFrontReferenceValue:
+                        static_cast<uint32_t>(info.stencilFrontRef)
+                    backReferenceValue:
+                        static_cast<uint32_t>(info.stencilBackRef)];
             }
             if (std::getenv("APPGL_GS_DUMP_FBODEPTH") != nullptr) {
                 std::fprintf(stderr,
@@ -4275,13 +4300,88 @@ fragment float4 appgl_immediate_textured_fs(
         return true;
     }
 
+    // Sprint 7 Phase 1 #11 (CKPT57): GL stencil enum → Metal converter
+    // helpers. Pulled out as free functions so depthStencilStateForDraw
+    // and the tess-Phase-2 render path can both call them — the same
+    // GL→Metal mapping needs to apply identically across encode paths.
+    static MTLCompareFunction glStencilCompareToMetal(GLenum func) {
+        switch (func) {
+            case GL_NEVER:    return MTLCompareFunctionNever;
+            case GL_LESS:     return MTLCompareFunctionLess;
+            case GL_EQUAL:    return MTLCompareFunctionEqual;
+            case GL_LEQUAL:   return MTLCompareFunctionLessEqual;
+            case GL_GREATER:  return MTLCompareFunctionGreater;
+            case GL_NOTEQUAL: return MTLCompareFunctionNotEqual;
+            case GL_GEQUAL:   return MTLCompareFunctionGreaterEqual;
+            case GL_ALWAYS:   default: return MTLCompareFunctionAlways;
+        }
+    }
+    static MTLStencilOperation glStencilOpToMetal(GLenum op) {
+        switch (op) {
+            case GL_KEEP:        return MTLStencilOperationKeep;
+            case GL_ZERO:        return MTLStencilOperationZero;
+            case GL_REPLACE:     return MTLStencilOperationReplace;
+            case GL_INCR:        return MTLStencilOperationIncrementClamp;
+            case GL_DECR:        return MTLStencilOperationDecrementClamp;
+            case GL_INCR_WRAP:   return MTLStencilOperationIncrementWrap;
+            case GL_DECR_WRAP:   return MTLStencilOperationDecrementWrap;
+            case GL_INVERT:      return MTLStencilOperationInvert;
+            default:             return MTLStencilOperationKeep;
+        }
+    }
+
+    // Build per-face MTLStencilDescriptor from the GL face state. The
+    // `referenceValue` lives on the encoder (setStencilReferenceValue:),
+    // not the descriptor — callers handle that separately.
+    static MTLStencilDescriptor* buildMetalStencilFace(
+        GLenum func, GLuint valueMask,
+        GLenum sfail, GLenum dpfail, GLenum dppass,
+        GLuint writeMask)
+    {
+        MTLStencilDescriptor* sd = [[MTLStencilDescriptor alloc] init];
+        sd.stencilCompareFunction = glStencilCompareToMetal(func);
+        sd.readMask = valueMask;
+        sd.writeMask = writeMask;
+        sd.stencilFailureOperation = glStencilOpToMetal(sfail);
+        sd.depthFailureOperation = glStencilOpToMetal(dpfail);
+        sd.depthStencilPassOperation = glStencilOpToMetal(dppass);
+        return sd;
+    }
+
     id<MTLDepthStencilState> depthStencilStateForDraw(const MetalDrawInfo& info) {
-        // Cache key: pack (depthTestEnabled, depthFunc) into a single uint32.
-        // The state space is tiny (~16 combinations), so after the first frame
-        // this is a pure hash-table lookup with zero Metal allocations.
-        const std::uint32_t key = (info.depthTestEnabled ? 0x10000u : 0u)
-                                | (info.depthWriteMask ? 0x20000u : 0u)
-                                | (static_cast<std::uint32_t>(info.depthFunc) & 0xFFFFu);
+        // Cache key: pack (depth state) plus a stencil-state fingerprint
+        // into a 64-bit key. The depth half stays at low 32 bits for
+        // back-compat-shaped lookups; stencil identity hashes into the
+        // high 32 bits when stencilTestEnabled. State space is small per
+        // app (a handful of stencil configs typically), so post-first-
+        // frame hash-table lookup keeps allocations at zero.
+        std::uint64_t key = (info.depthTestEnabled ? 0x10000ull : 0ull)
+                          | (info.depthWriteMask ? 0x20000ull : 0ull)
+                          | (static_cast<std::uint64_t>(info.depthFunc) & 0xFFFFull);
+        if (info.stencilTestEnabled) {
+            // Compact stencil identity hash. Mix 14 GL enums + 2 ints
+            // into the upper 32 bits via a cheap FNV-1a-like fold.
+            std::uint64_t s = 0x40000000ull;   // disambiguator from depth-only key
+            auto mix = [&](std::uint64_t v) {
+                s ^= v;
+                s = s * 1099511628211ull;
+            };
+            mix(static_cast<std::uint64_t>(info.stencilFrontFunc));
+            mix(static_cast<std::uint64_t>(info.stencilFrontRef));
+            mix(static_cast<std::uint64_t>(info.stencilFrontValueMask));
+            mix(static_cast<std::uint64_t>(info.stencilFrontFail));
+            mix(static_cast<std::uint64_t>(info.stencilFrontDepthFail));
+            mix(static_cast<std::uint64_t>(info.stencilFrontDepthPass));
+            mix(static_cast<std::uint64_t>(info.stencilFrontWriteMask));
+            mix(static_cast<std::uint64_t>(info.stencilBackFunc));
+            mix(static_cast<std::uint64_t>(info.stencilBackRef));
+            mix(static_cast<std::uint64_t>(info.stencilBackValueMask));
+            mix(static_cast<std::uint64_t>(info.stencilBackFail));
+            mix(static_cast<std::uint64_t>(info.stencilBackDepthFail));
+            mix(static_cast<std::uint64_t>(info.stencilBackDepthPass));
+            mix(static_cast<std::uint64_t>(info.stencilBackWriteMask));
+            key |= (s << 32) & 0xFFFFFFFF00000000ull;
+        }
 
         auto it = depthStencilCache.find(key);
         if (it != depthStencilCache.end()) {
@@ -4303,6 +4403,20 @@ fragment float4 appgl_immediate_textured_fs(
             }
         } else {
             desc.depthCompareFunction = MTLCompareFunctionAlways;
+        }
+        // Sprint 7 Phase 1 #11 (CKPT57): apply per-face stencil state.
+        // When stencil test is disabled, leave defaults (Always + Keep,
+        // matching GL spec: "if the stencil test is not enabled, the
+        // stencil test always passes" — GL 4.6 §17.3.5).
+        if (info.stencilTestEnabled) {
+            desc.frontFaceStencil = buildMetalStencilFace(
+                info.stencilFrontFunc, info.stencilFrontValueMask,
+                info.stencilFrontFail, info.stencilFrontDepthFail,
+                info.stencilFrontDepthPass, info.stencilFrontWriteMask);
+            desc.backFaceStencil = buildMetalStencilFace(
+                info.stencilBackFunc, info.stencilBackValueMask,
+                info.stencilBackFail, info.stencilBackDepthFail,
+                info.stencilBackDepthPass, info.stencilBackWriteMask);
         }
 
         id<MTLDepthStencilState> state = [device newDepthStencilStateWithDescriptor:desc];
@@ -5927,27 +6041,50 @@ fragment float4 appgl_immediate_textured_fs(
             (info.frontFace == GL_CW) ? MTLWindingClockwise
                                        : MTLWindingCounterClockwise];
 
-        // Depth state — minimal Phase 2 path (no stencil write mask,
-        // no per-face stencil). Full depth/stencil plumbing is a Phase
-        // 2 follow-up if needed by a specific test.
-        if (depthTex != nil && fmtHasDepth && info.depthTestEnabled) {
+        // Depth/stencil state. Sprint 7 Phase 1 #11 (CKPT57) widened
+        // this from depth-only to full per-face stencil plumbing —
+        // primitive_coverage's two-phase stencil-replace + stencil-
+        // notequal pattern needed it. Configures the descriptor only
+        // when the corresponding GL state is actually enabled, so
+        // depth-only or stencil-only tests don't drag in irrelevant
+        // descriptor fields.
+        if (depthTex != nil && (fmtHasDepth || fmtHasStencil)
+            && (info.depthTestEnabled || info.stencilTestEnabled)) {
             MTLDepthStencilDescriptor* dsDesc =
                 [[MTLDepthStencilDescriptor alloc] init];
-            switch (info.depthFunc) {
-                case GL_NEVER:    dsDesc.depthCompareFunction = MTLCompareFunctionNever; break;
-                case GL_LESS:     dsDesc.depthCompareFunction = MTLCompareFunctionLess; break;
-                case GL_EQUAL:    dsDesc.depthCompareFunction = MTLCompareFunctionEqual; break;
-                case GL_LEQUAL:   dsDesc.depthCompareFunction = MTLCompareFunctionLessEqual; break;
-                case GL_GREATER:  dsDesc.depthCompareFunction = MTLCompareFunctionGreater; break;
-                case GL_NOTEQUAL: dsDesc.depthCompareFunction = MTLCompareFunctionNotEqual; break;
-                case GL_GEQUAL:   dsDesc.depthCompareFunction = MTLCompareFunctionGreaterEqual; break;
-                case GL_ALWAYS:   dsDesc.depthCompareFunction = MTLCompareFunctionAlways; break;
-                default:          dsDesc.depthCompareFunction = MTLCompareFunctionLess; break;
+            if (info.depthTestEnabled) {
+                switch (info.depthFunc) {
+                    case GL_NEVER:    dsDesc.depthCompareFunction = MTLCompareFunctionNever; break;
+                    case GL_LESS:     dsDesc.depthCompareFunction = MTLCompareFunctionLess; break;
+                    case GL_EQUAL:    dsDesc.depthCompareFunction = MTLCompareFunctionEqual; break;
+                    case GL_LEQUAL:   dsDesc.depthCompareFunction = MTLCompareFunctionLessEqual; break;
+                    case GL_GREATER:  dsDesc.depthCompareFunction = MTLCompareFunctionGreater; break;
+                    case GL_NOTEQUAL: dsDesc.depthCompareFunction = MTLCompareFunctionNotEqual; break;
+                    case GL_GEQUAL:   dsDesc.depthCompareFunction = MTLCompareFunctionGreaterEqual; break;
+                    case GL_ALWAYS:   dsDesc.depthCompareFunction = MTLCompareFunctionAlways; break;
+                    default:          dsDesc.depthCompareFunction = MTLCompareFunctionLess; break;
+                }
+                dsDesc.depthWriteEnabled = info.depthWriteMask ? YES : NO;
             }
-            dsDesc.depthWriteEnabled = info.depthWriteMask ? YES : NO;
+            if (info.stencilTestEnabled) {
+                dsDesc.frontFaceStencil = buildMetalStencilFace(
+                    info.stencilFrontFunc, info.stencilFrontValueMask,
+                    info.stencilFrontFail, info.stencilFrontDepthFail,
+                    info.stencilFrontDepthPass, info.stencilFrontWriteMask);
+                dsDesc.backFaceStencil = buildMetalStencilFace(
+                    info.stencilBackFunc, info.stencilBackValueMask,
+                    info.stencilBackFail, info.stencilBackDepthFail,
+                    info.stencilBackDepthPass, info.stencilBackWriteMask);
+            }
             id<MTLDepthStencilState> ds =
                 [device newDepthStencilStateWithDescriptor:dsDesc];
             [enc setDepthStencilState:ds];
+            if (info.stencilTestEnabled) {
+                [enc setStencilFrontReferenceValue:
+                         static_cast<uint32_t>(info.stencilFrontRef)
+                      backReferenceValue:
+                         static_cast<uint32_t>(info.stencilBackRef)];
+            }
         }
 
         // (6) Bind tess factor buffer + issue drawPatches. Phase 3:
@@ -6271,10 +6408,32 @@ fragment float4 appgl_immediate_textured_fs(
             fakeInfo.depthTestEnabled = info.depthTestEnabled;
             fakeInfo.depthFunc = static_cast<GLenum>(info.depthFunc);
             fakeInfo.depthWriteMask = info.depthWriteMask;
+            // Sprint 7 Phase 1 #11 (CKPT57): mesh-GS path stencil plumb.
+            fakeInfo.stencilTestEnabled = info.stencilTestEnabled;
+            fakeInfo.stencilFrontFunc = static_cast<GLenum>(info.stencilFrontFunc);
+            fakeInfo.stencilFrontRef = info.stencilFrontRef;
+            fakeInfo.stencilFrontValueMask = info.stencilFrontValueMask;
+            fakeInfo.stencilFrontFail = static_cast<GLenum>(info.stencilFrontFail);
+            fakeInfo.stencilFrontDepthFail = static_cast<GLenum>(info.stencilFrontDepthFail);
+            fakeInfo.stencilFrontDepthPass = static_cast<GLenum>(info.stencilFrontDepthPass);
+            fakeInfo.stencilFrontWriteMask = info.stencilFrontWriteMask;
+            fakeInfo.stencilBackFunc = static_cast<GLenum>(info.stencilBackFunc);
+            fakeInfo.stencilBackRef = info.stencilBackRef;
+            fakeInfo.stencilBackValueMask = info.stencilBackValueMask;
+            fakeInfo.stencilBackFail = static_cast<GLenum>(info.stencilBackFail);
+            fakeInfo.stencilBackDepthFail = static_cast<GLenum>(info.stencilBackDepthFail);
+            fakeInfo.stencilBackDepthPass = static_cast<GLenum>(info.stencilBackDepthPass);
+            fakeInfo.stencilBackWriteMask = info.stencilBackWriteMask;
             id<MTLDepthStencilState> dsState =
                 depthStencilStateForDraw(fakeInfo);
             if (dsState != nil) {
                 [renc setDepthStencilState:dsState];
+            }
+            if (info.stencilTestEnabled) {
+                [renc setStencilFrontReferenceValue:
+                          static_cast<uint32_t>(info.stencilFrontRef)
+                       backReferenceValue:
+                          static_cast<uint32_t>(info.stencilBackRef)];
             }
         }
         const MTLCullMode desiredCull = info.cullFaceEnabled
@@ -6900,7 +7059,10 @@ private:
     // Depth/stencil state cache — keyed by packed (depthTestEnabled, depthFunc).
     // The state space is tiny (~16 combinations); after warmup every draw is
     // a pure hash-table hit with zero Metal allocations.
-    std::unordered_map<std::uint32_t, id<MTLDepthStencilState>> depthStencilCache;
+    // Sprint 7 Phase 1 #11 (CKPT57): widened to uint64_t to fit the
+    // depth + stencil identity hash. Depth state in low 32 bits,
+    // stencil hash in high 32 bits.
+    std::unordered_map<std::uint64_t, id<MTLDepthStencilState>> depthStencilCache;
 
     // Phase 8X Group 4d follow-up⁸ — per-context dedup for the
     // first-draw-per-program binding diagnostic NSLog in

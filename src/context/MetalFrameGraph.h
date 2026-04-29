@@ -51,6 +51,31 @@ struct MetalDrawInfo {
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
     bool wireframe = false;
+    // Sprint 7 Phase 1 #11 (CKPT57): GL_STENCIL_TEST + glStencilFunc /
+    // glStencilOp / glStencilMask plumb-through. Default state matches
+    // GL spec: test disabled, ALWAYS compare, all-KEEP ops, full masks.
+    // Per-face: front/back drawn separately because GL allows asymmetric
+    // stencil state via glStencil*Separate. When stencilTestEnabled is
+    // false, depthStencilStateForDraw leaves the descriptor's
+    // frontFaceStencil/backFaceStencil at Metal defaults (Always +
+    // Keep), which is the correct behaviour per GL 4.6 §17.3.5
+    // ("if there is no stencil buffer, or if the stencil test is not
+    // enabled, the stencil test always passes").
+    bool stencilTestEnabled = false;
+    GLenum stencilFrontFunc = GL_ALWAYS;
+    GLint stencilFrontRef = 0;
+    GLuint stencilFrontValueMask = 0xFFFFFFFFu;
+    GLenum stencilFrontFail = GL_KEEP;
+    GLenum stencilFrontDepthFail = GL_KEEP;
+    GLenum stencilFrontDepthPass = GL_KEEP;
+    GLuint stencilFrontWriteMask = 0xFFFFFFFFu;
+    GLenum stencilBackFunc = GL_ALWAYS;
+    GLint stencilBackRef = 0;
+    GLuint stencilBackValueMask = 0xFFFFFFFFu;
+    GLenum stencilBackFail = GL_KEEP;
+    GLenum stencilBackDepthFail = GL_KEEP;
+    GLenum stencilBackDepthPass = GL_KEEP;
+    GLuint stencilBackWriteMask = 0xFFFFFFFFu;
     // Diagnostic string that identifies the caller for error messages.
     std::string debugLabel;
 };
@@ -200,6 +225,28 @@ struct TranslatedDrawInfo {
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
     bool wireframe = false;
+    // Sprint 7 Phase 1 #11 (CKPT57): per-draw stencil state mirroring
+    // GL_STENCIL_TEST + glStencil[Func|Op|Mask][Separate]. Threaded
+    // through populateTranslatedDrawFixedFunctionState and consumed by
+    // depthStencilStateForDraw at MetalFrameGraph.mm:4278. Enables
+    // KHR-GL46.tessellation_shader.single.primitive_coverage's two-
+    // phase stencil-replace + stencil-notequal pattern (and any other
+    // CTS test that depends on stencil-test correctness).
+    bool stencilTestEnabled = false;
+    GLenum stencilFrontFunc = GL_ALWAYS;
+    GLint stencilFrontRef = 0;
+    GLuint stencilFrontValueMask = 0xFFFFFFFFu;
+    GLenum stencilFrontFail = GL_KEEP;
+    GLenum stencilFrontDepthFail = GL_KEEP;
+    GLenum stencilFrontDepthPass = GL_KEEP;
+    GLuint stencilFrontWriteMask = 0xFFFFFFFFu;
+    GLenum stencilBackFunc = GL_ALWAYS;
+    GLint stencilBackRef = 0;
+    GLuint stencilBackValueMask = 0xFFFFFFFFu;
+    GLenum stencilBackFail = GL_KEEP;
+    GLenum stencilBackDepthFail = GL_KEEP;
+    GLenum stencilBackDepthPass = GL_KEEP;
+    GLuint stencilBackWriteMask = 0xFFFFFFFFu;
 
     // GL 4.6 §14.6.5 / GL_ARB_polygon_offset_clamp — depth bias for
     // polygon offset. Plumbed so the render encoder can call
@@ -632,6 +679,25 @@ struct MetalTessDrawInfo {
     GLenum depthFunc = GL_LESS;
     bool depthWriteMask = true;
 
+    // Sprint 7 Phase 1 #11 (CKPT57): per-draw stencil state for the
+    // tess-Phase-2 render encoder path. Same shape as TranslatedDrawInfo
+    // — per-face stencil func/ref/masks/ops + global enable.
+    bool stencilTestEnabled = false;
+    GLenum stencilFrontFunc = GL_ALWAYS;
+    GLint stencilFrontRef = 0;
+    GLuint stencilFrontValueMask = 0xFFFFFFFFu;
+    GLenum stencilFrontFail = GL_KEEP;
+    GLenum stencilFrontDepthFail = GL_KEEP;
+    GLenum stencilFrontDepthPass = GL_KEEP;
+    GLuint stencilFrontWriteMask = 0xFFFFFFFFu;
+    GLenum stencilBackFunc = GL_ALWAYS;
+    GLint stencilBackRef = 0;
+    GLuint stencilBackValueMask = 0xFFFFFFFFu;
+    GLenum stencilBackFail = GL_KEEP;
+    GLenum stencilBackDepthFail = GL_KEEP;
+    GLenum stencilBackDepthPass = GL_KEEP;
+    GLuint stencilBackWriteMask = 0xFFFFFFFFu;
+
     // Viewport / scissor.
     GLint viewportX = 0;
     GLint viewportY = 0;
@@ -969,6 +1035,25 @@ public:
         bool depthTestEnabled = false;
         std::uint32_t depthFunc = 0;        // GLenum
         bool depthWriteMask = true;
+        // Sprint 7 Phase 1 #11 (CKPT57): mesh-GS render encoder also
+        // honors GL stencil state. Same shape as TranslatedDrawInfo,
+        // sized as uint32 to match the rest of this struct's GLenum
+        // packing convention.
+        bool stencilTestEnabled = false;
+        std::uint32_t stencilFrontFunc = 0x0207;   // GL_ALWAYS
+        std::int32_t stencilFrontRef = 0;
+        std::uint32_t stencilFrontValueMask = 0xFFFFFFFFu;
+        std::uint32_t stencilFrontFail = 0x1E00;   // GL_KEEP
+        std::uint32_t stencilFrontDepthFail = 0x1E00;
+        std::uint32_t stencilFrontDepthPass = 0x1E00;
+        std::uint32_t stencilFrontWriteMask = 0xFFFFFFFFu;
+        std::uint32_t stencilBackFunc = 0x0207;
+        std::int32_t stencilBackRef = 0;
+        std::uint32_t stencilBackValueMask = 0xFFFFFFFFu;
+        std::uint32_t stencilBackFail = 0x1E00;
+        std::uint32_t stencilBackDepthFail = 0x1E00;
+        std::uint32_t stencilBackDepthPass = 0x1E00;
+        std::uint32_t stencilBackWriteMask = 0xFFFFFFFFu;
         bool cullFaceEnabled = false;
         std::uint32_t cullFaceMode = 0;     // GLenum (GL_BACK default)
         std::uint32_t frontFace = 0;        // GLenum (GL_CCW default)
