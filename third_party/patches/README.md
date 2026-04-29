@@ -436,6 +436,113 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path J' Option E.3 (gate 20 — orchestrator-driven main0_in emission order via MemberSorter):**
+extends the input-interface emission pipeline so the orchestrator's
+`add_msl_shader_input` call sequence becomes the authoritative
+cross-stage member layout. CKPT34 surfaced: monolithic-program TES
+emits `main0_in` members in TES-IR-walk order followed by a
+`MemberSorter::LocationThenBuiltInType` pass; the resulting struct
+order can disagree with TCS-out struct order even when both stages
+share natural locations, breaking byte alignment when TES reads
+the cross-stage buffer. Specifically, AppGL-W's β orchestrator
+observed `TCS out_uint(5)/out_struct(8) vs TES out_struct(5)/out_uint(6)`
+on `tc2te.gl_in` — TES's ad-hoc IR ordering placed `out_struct`
+before `out_uint`, but TCS-out had laid them out the opposite
+way, so a TES read at offset 5 hit struct bytes instead of the
+expected uint.
+
+**Implementation — single source of truth via MemberSorter:**
+
+A new persistent member `inputs_by_location_insertion_order` (a
+`std::vector<std::string>`) records names appended at
+`add_msl_shader_input` call time, gated on synthetic-range
+location (`>= 0xE0000000`). Recording happens BEFORE the Path J'
+Option A1 dedupe `return` so that even when a synthetic-range
+call dedupes against an existing natural entry, the orchestrator's
+intended emission position is captured.
+
+A new `MemberSorter::SortAspect`,
+`InsertionOrderThenLocationThenBuiltInType`, is selected by
+`add_interface_block` when `storage == StorageClassInput` and the
+insertion-order list is non-empty. The comparator orders builtins
+to the end (matching `LocationThenBuiltInType`), then non-builtins
+in three tiers:
+
+1. Both names appear in `insertion_order` → compare positions.
+2. Exactly one name appears → that one wins (orchestrator-tracked
+   members come before untracked).
+3. Neither appears → fall through to location-then-component
+   (preserves existing behavior for entries the orchestrator
+   didn't touch — typical for fragment-output mask members or
+   builtin-absorbed entries).
+
+**Why MemberSorter (not vars[] reorder):** an earlier draft applied
+a pre-sort vars[] reorder in the IR-walk path plus a
+supplementation-walk reorder. Both were correctly producing
+ordered vars[]/iteration sequences, but the post-emission
+`MemberSorter` pass at `spirv_msl.cpp:5150` re-sorted by Location
+ascending, undoing the pre-sort work. MemberSorter is the
+authoritative ordering pass; the clean fix is to extend
+MemberSorter rather than fight it. The `vars[]` and supplementation
+walks now run in their original (map-key/IR-ID) order; correct
+emission order is restored at the MemberSorter call site.
+
+**Class candidacy — paired Class 2A + 2C:**
+
+- **Class 2A side** (preamble-time uniform record): the
+  `add_msl_shader_input` call hook records EVERY synthetic-range
+  call regardless of whether the entry survives Option A1's
+  add-time dedupe. The orchestrator's intent is "emit this name
+  at this position" — which is independent of whether the
+  synthetic-keyed map entry itself sticks around or gets deduped
+  against a natural-loc entry.
+- **Class 2C side** (range-gated emission): the new SortAspect
+  fires only when `inputs_by_location_insertion_order` is
+  non-empty AND `storage == StorageClassInput`. Default-empty
+  consumers (anyone not calling `add_msl_shader_input` with
+  synthetic-range locations) see zero behavior change.
+
+The pair-class diagnosis follows the §3.6.6 "producer +
+consumer" pattern banked from earlier sprints (Path L paired
+2A + 2C, Path I synthesis paired 2A + 2C). Three-step decision
+tree:
+1. **Empirical vs spec?** Empirical — Metal struct layout drives
+   byte offset, no spec mandate on emission order.
+2. **Single sub-class vs paired?** Paired (registration side +
+   emission side both load-bearing, neither sufficient alone).
+3. **Identify complementary sub-classes:** 2A (uniform record at
+   `add_msl_shader_input`) + 2C (range-gated emission via
+   `MemberSorter`).
+
+**Methodology contribution — single-source-of-truth ordering:**
+when post-processing passes (sort, dedupe, normalize) re-establish
+canonical order downstream of intermediate work, mid-pipeline
+reorders are dead weight that a downstream pass undoes. The right
+intervention point is the canonical pass itself. Identifying the
+single source of truth before authoring multi-site fixes is the
+discipline. (For E.3, this realization came after a probe rig
+showed `vars[]` was correctly reordered yet emission still in
+location-ascending order — the diagnostic chain was: probe FAIL →
+add debug prints → confirm reorder applied → trace emission to
+MemberSorter → recognize MemberSorter as authority → discard
+mid-pipeline reorders → extend MemberSorter.)
+
+**Validation:** standalone test `tools/msl-cross-stage-order-test.cpp`
+asserts 7 properties via the CKPT34 fixture pair (TCS-out
+`{out_uint, out_vec3}`, TES with reverse declaration order). Two
+exercises: (a) register in TCS-out order → TES emission matches
+TCS-out order; (b) register in REVERSED order → TES emission
+permutes to match the reversed call sequence. The permutation
+test is load-bearing — it proves the orchestrator's call order
+can override IR-walk order in either direction. Existing GS
+fixtures (`gs-as-mesh-input.geom`, `gs-as-mesh-iface-block.geom`,
+`gs-as-mesh-no-position.geom`) and the cross-stage probe rigs
+(`msl-cross-stage-probe`, `msl-cross-stage-probe-tcs-to-tes`,
+`msl-split-tcs-test`) all run regression-clean — they don't call
+`add_msl_shader_input` with synthetic-range locations, so their
+insertion-order list stays empty and emission falls through to
+the original `LocationThenBuiltInType` aspect.
+
 **Path J' Option E.2 (gate 19 refinement — relax Pass 1 Location-decoration gate):**
 widens Option E's Pass 1 to capture natural Input variable NAMES
 regardless of OpDecorate Location presence. CKPT31 surfaced:
