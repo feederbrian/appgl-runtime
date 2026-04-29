@@ -4995,9 +4995,22 @@ fragment float4 appgl_immediate_textured_fs(
         const NSUInteger factorBytes =
             sizeof(MTLQuadTessellationFactorsHalf) *
             (NSUInteger)info.patchCount;
+        // Sprint 7 #1 (CKPT64) — synth TCS host-populate of half-precision
+        // tess factors requires CPU write access to factorBuf. For TES-only
+        // programs the synth TCS dual-writes 1.0 defaults; the host needs
+        // to override these with glPatchParameterfv state so the domain-gen
+        // kernel (which reads factorBuf @ slot 26 in half precision) sees
+        // the correct tessellation levels. Storage mode is Shared on Apple
+        // Silicon UMA where Private vs Shared has negligible perf delta —
+        // GPU readers (domain-gen, tessellator, TES) work identically; CPU
+        // writes only fire from synth_host_populate path below.
+        const MTLResourceOptions factorBufOpts =
+            info.tessControlSynthesized
+                ? MTLResourceStorageModeShared
+                : MTLResourceStorageModePrivate;
         id<MTLBuffer> factorBuf =
             [device newBufferWithLength:factorBytes
-                                options:MTLResourceStorageModePrivate];
+                                options:factorBufOpts];
         if (factorBuf == nil) return false;
         factorBuf.label = @"appgl-tess-factor";
 
@@ -5233,6 +5246,68 @@ fragment float4 appgl_immediate_textured_fs(
                     }
                     for (NSUInteger i = 0; i < nInner; ++i) {
                         base[nOuter + i] = info.defaultInnerLevel[i];
+                    }
+                }
+            }
+            // Sprint 7 #1 (CKPT64) — sister-write to factorBuf at half
+            // precision. The synth TCS dual-writes 1.0 defaults to BOTH
+            // factorBufFull (slot 23, full-precision read by TES kernel)
+            // AND factorBuf (slot 26, half-precision read by domain-gen
+            // kernel + Metal tessellator). Without this sister-write the
+            // domain-gen kernel reads 1.0s from factorBuf → emits only
+            // patch corners (4 verts in point_mode for quads) regardless
+            // of what TES reads from factorBufFull. Closes the
+            // gl_tessLevel TES-only path: domain-gen now sees the same
+            // patch-default tess levels TES does.
+            //
+            // Layout per MTLQuadTessellationFactorsHalf:
+            //   bytes 0..7  : edgeTessellationFactor[4]   (4 halves)
+            //   bytes 8..11 : insideTessellationFactor[2] (2 halves)
+            // Triangle subset is read from the same 12-byte slot —
+            // factor budget allocates quad-sized for conservatism per
+            // line ~5006 ("over-size to quad … Metal reads triangle
+            // subset"). For triangles we still write a full quad-sized
+            // record where the Metal-tessellator-relevant bytes (3 outer
+            // + 1 inner per Metal's MTLTriangleTessellationFactorsHalf)
+            // overlap with the quad-layout positions our SPIRV-Cross
+            // fork already writes via TCS dual-write. The domain-gen
+            // kernel reads as `QuadFactors` regardless.
+            if (factorBufOpts == MTLResourceStorageModeShared) {
+                std::uint8_t* hbytes = static_cast<std::uint8_t*>([factorBuf contents]);
+                if (hbytes != nullptr) {
+                    const NSUInteger perPatch = sizeof(MTLQuadTessellationFactorsHalf);
+                    auto toHalf = [](float f) -> std::uint16_t {
+                        // float→half via __fp16 (Apple Silicon native).
+                        const __fp16 h = static_cast<__fp16>(f);
+                        std::uint16_t bits;
+                        std::memcpy(&bits, &h, sizeof(bits));
+                        return bits;
+                    };
+                    for (int p = 0; p < info.patchCount; ++p) {
+                        std::uint16_t* hbase = reinterpret_cast<std::uint16_t*>(
+                            hbytes + (NSUInteger)p * perPatch);
+                        // Quad layout: edge[4] then inside[2]. For
+                        // triangles & isolines we write into the same
+                        // slots — only the GenMode-relevant subset is
+                        // read by the tessellator/domain-gen.
+                        const NSUInteger nOuterH =
+                            (info.genMode == GL_TRIANGLES) ? 3 :
+                            (info.genMode == GL_ISOLINES) ? 2 : 4;
+                        const NSUInteger nInnerH =
+                            (info.genMode == GL_TRIANGLES) ? 1 :
+                            (info.genMode == GL_ISOLINES) ? 0 : 2;
+                        // Initialize whole record to 1.0 (synth-default
+                        // sentinel) so unused slots have a defined value
+                        // matching what synth TCS would have written.
+                        const std::uint16_t oneHalf = toHalf(1.0f);
+                        for (NSUInteger i = 0; i < 4; ++i) hbase[i] = oneHalf;
+                        for (NSUInteger i = 0; i < 2; ++i) hbase[4 + i] = oneHalf;
+                        for (NSUInteger i = 0; i < nOuterH; ++i) {
+                            hbase[i] = toHalf(info.defaultOuterLevel[i]);
+                        }
+                        for (NSUInteger i = 0; i < nInnerH; ++i) {
+                            hbase[4 + i] = toHalf(info.defaultInnerLevel[i]);
+                        }
                     }
                 }
             }
