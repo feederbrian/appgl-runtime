@@ -19322,6 +19322,72 @@ bool GLContext::linkProgram(GLuint program) {
             const bool fsOk = translateStage(
                 "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
                 programObject->fragmentMSL, fsRefl);
+            // Sprint 5 Phase 1: Phase 3 gate widening via passthrough TCS
+            // synthesis at link time. When source program has TES + FS
+            // (no TCS) — GL spec §11.2.4: TES-only programs use VS outputs
+            // directly as TES inputs — synthesize a minimal passthrough
+            // GLSL TCS, compile via existing toolchain, and use as if a
+            // real TCS were attached. This unblocks the Phase 3 gate at
+            // tryMetalTessellationDraw which requires `tessControlMSL`
+            // non-empty. Affected tests: `tc2te.gl_PatchVerticesIn` iter 4
+            // (TES_4 variant), `single.max_patch_vertices` Case 2,
+            // `tc2te.gl_tessLevel` TES iters (3 of 6).
+            //
+            // Minimal TCS surface area for Sprint 5 Phase 1:
+            //   - layout(vertices = 32) — covers up to MAX_PATCH_VERTICES
+            //   - gl_Position passthrough
+            //   - default tess levels = 1.0 (matches glPatchParameterfv
+            //     default) — runtime override via uniforms TBD if test
+            //     exercises non-default tess levels
+            //
+            // User-varying passthrough is NOT synthesized in this minimal
+            // version. Tests that depend on per-CP user data (e.g.
+            // max_patch_vertices Case 2's `for (i; i<gl_PatchVerticesIn;
+            // i++) result_iv += inVertex[i].iv`) will still fail because
+            // synthesized TCS doesn't copy user varyings from VS outputs.
+            // Future iteration (post-CKPT29 follow-up) extends synthesis
+            // to walk TES SPIR-V Inputs and emit matching TCS Outputs.
+            std::vector<std::uint32_t> synthTcsSpirv;
+            std::string synthTcsSource;
+            GLShaderObject synthTcsShader;
+            if (tessEvalShader != nullptr && tessControlShader == nullptr &&
+                !tessEvalShader->spirv.empty()) {
+                synthTcsSource =
+                    "#version 410 core\n"
+                    "#extension GL_EXT_tessellation_shader : enable\n"
+                    "layout (vertices = 32) out;\n"
+                    "void main() {\n"
+                    "    gl_out[gl_InvocationID].gl_Position = "
+                    "gl_in[gl_InvocationID].gl_Position;\n"
+                    "    if (gl_InvocationID == 0) {\n"
+                    "        gl_TessLevelOuter[0] = 1.0;\n"
+                    "        gl_TessLevelOuter[1] = 1.0;\n"
+                    "        gl_TessLevelOuter[2] = 1.0;\n"
+                    "        gl_TessLevelOuter[3] = 1.0;\n"
+                    "        gl_TessLevelInner[0] = 1.0;\n"
+                    "        gl_TessLevelInner[1] = 1.0;\n"
+                    "    }\n"
+                    "}\n";
+                std::string compileLog;
+                synthTcsSpirv = translator.compileGLSL(
+                    synthTcsSource, GL_TESS_CONTROL_SHADER, 410, &compileLog);
+                if (!synthTcsSpirv.empty()) {
+                    synthTcsShader.stage = GL_TESS_CONTROL_SHADER;
+                    synthTcsShader.source = synthTcsSource;
+                    synthTcsShader.spirv = synthTcsSpirv;
+                    synthTcsShader.compiled = true;
+                    tessControlShader = &synthTcsShader;
+                    APPGL_LOG(SHADER,
+                        @"[GL] Sprint5 Phase 3 gate widening: synthesized "
+                        @"passthrough TCS for TES-only program (program=%u, "
+                        @"spirv_words=%zu)",
+                        program, synthTcsSpirv.size());
+                } else {
+                    APPGL_LOG(SHADER,
+                        @"[GL] Sprint5 Phase 3 gate widening: passthrough TCS "
+                        @"compile failed: %s", compileLog.c_str());
+                }
+            }
             // Metal tess Phase 1: force SPIRV-Cross tess options on for
             // TCS/TES translation regardless of APPGL_ENABLE_METAL_TESS
             // env. The emitted MSL shape matches what the Metal tess
@@ -19454,11 +19520,27 @@ bool GLContext::linkProgram(GLuint program) {
             // and every patch collapses to the TCS-output origin.
             programObject->hasTessellation = true;
             std::uint32_t tcsOutputVertices = 0;
+            // Sprint 5 Phase 3 gate widening: for synthesized passthrough
+            // TCS (TES-only programs), populate
+            // `programObject->tessControlOutputVertices` from the synth
+            // (so the Phase 3 gate passes) BUT force local
+            // `tcsOutputVertices = 0` so `tesComputeOpts.tesePatchVertices
+            // = 0` and Path K's runtime read of `spvIndirectParams[0]`
+            // kicks in for TES-compute MSL emission. TES-only mode's
+            // gl_PatchVerticesIn semantic is "PATCH_VERTICES from
+            // glPatchParameteri" (runtime), not "TCS output_vertices"
+            // (link-time bake from synth's `layout(vertices = 32)`).
+            const bool isSynthPassthroughTcs =
+                (tessControlShader == &synthTcsShader);
             if (tessControlShader && !tessControlShader->spirv.empty()) {
                 auto tcModes = extractTessellationModes(
                     tessControlShader->spirv.data(), tessControlShader->spirv.size());
                 programObject->tessControlOutputVertices = static_cast<GLint>(tcModes.outputVertices);
-                tcsOutputVertices = tcModes.outputVertices;
+                if (!isSynthPassthroughTcs) {
+                    tcsOutputVertices = tcModes.outputVertices;
+                }
+                // For synth case, tcsOutputVertices stays 0 → triggers
+                // Path K runtime read in TES MSL.
             }
 
             // Phase 3B [metal-tess-TF] groundwork: also translate TES
