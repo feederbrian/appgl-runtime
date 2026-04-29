@@ -436,6 +436,53 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path J' Option E (gate 19 — pre-populate `inputs_by_location` from natural emission):**
+walks SPIR-V Input variables at `compile()` preamble (before
+`add_interface_block(StorageClassInput)` consumes the map),
+populates `inputs_by_location` with each natural Input variable's
+`{location, component, name}`, then dedupes any synthetic-range
+entry (location ≥ `0xE0000000`) whose name matches a natural-range
+entry.
+
+**Why Option E in addition to Option A1:** Option A1 (`fce60f8`)
+fires the synthetic-range dedupe at `add_msl_shader_input` call
+time. But the typical flow is consumers register synthetic-range
+entries BEFORE compile() — at which point the map is empty (no
+natural entries yet) so Option A1's dedupe doesn't fire. CKPT30
+diagnosed this: "natural-emission pipeline does NOT pre-populate
+inputs_by_location from SPIR-V Input variables." Option E
+addresses the order issue: pre-populating at compile() time makes
+the map canonical, then the dedupe pass removes synthetic-range
+duplicates that Option A1 missed.
+
+The combined Option A1 + Option E covers both registration orders:
+- Consumer registers synthetic-range entries → compile() runs →
+  pre-populate natural + dedupe synthetic-range (Option E catches it).
+- Consumer compile() runs first (e.g., orchestrator inspecting the
+  IR), then registers synthetic-range entries → Option A1's
+  add-time dedupe sees the natural entries pre-populated by
+  Option E.
+
+**Implementation — 3-pass helper:**
+
+1. **Pass 1**: walk SPIR-V Input variables, gather natural-range
+   entries (location < 0xE0000000) with names. Skip builtins (handled
+   separately by `inputs_by_builtin`) and entries without
+   Location decoration.
+2. **Pass 2**: populate `inputs_by_location` with natural entries
+   (only if absent — preserves richer API-registered entries).
+3. **Pass 3**: dedupe synthetic-range entries whose names match
+   natural entries — natural is canonical.
+
+**Class 2A spec-compliance** — uniform-applicability default-on,
+no consumer coordination required. The `add_msl_shader_input` API
+surface is unchanged; consumers calling it get the same behavior;
+consumers not calling it now have natural entries populated for
+downstream coordination. Class 2A discipline (vs. Class 2C used
+by Option A1) reflects the broader applicability — Option A1 was
+gated on synthetic-range location at add-time; Option E
+unconditionally pre-populates natural entries.
+
 **Path J' Option A1 (gate 18 — synthetic-range dedupe by name in `add_msl_shader_input`):**
 extends `add_msl_shader_input` with a name-dedupe check gated on
 synthetic-range location keys. AppGL fork orchestrators (and other
