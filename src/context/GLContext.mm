@@ -24304,8 +24304,15 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // APPGL_ENABLE_MESH_GS env-gate is removed — encoder failure still
     // returns false → existing CPU GS interpreter path runs (natural
     // fallback) for any program that can't be mesh-tier-handled.
+    // Sprint 7 prep (CKPT52 fix-path A): condition mesh-GS on
+    // !transformFeedbackActive. The mesh-GS encoder writes to render
+    // targets, not TF buffers; routing TF-active draws through it
+    // silently zeros the TF capture. CPU GS-emul has full TF capture
+    // support via writeGsXfbAndCheckDiscard. With TF active, fall
+    // through to CPU emul.
     if (emulProgram != nullptr &&
-        emulProgram->metalGSTier == GLProgramObject::MetalGSTier::MeshShader) {
+        emulProgram->metalGSTier == GLProgramObject::MetalGSTier::MeshShader &&
+        !impl_->transformFeedbackActive) {
         if (impl_->tryMetalMeshGSDraw(*emulProgram, emulProgramName,
                                        mode, count, first)) {
             APPGL_LOG(DRAW, @"drawArrays mesh-GS ok: count=%d", count);
