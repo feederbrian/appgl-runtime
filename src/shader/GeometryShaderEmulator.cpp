@@ -256,6 +256,16 @@ public:
         sampledTextures_ = m;
     }
 
+    // Sprint 7 Phase 1 #4 (CKPT54): caller-supplied storage-image data
+    // for OpImageRead (imageLoad in GLSL). Same map shape as sampler
+    // textures; distinguished by the SampledImageHandle::isStorage flag
+    // set when OpAccessChain/OpLoad observes the image variable through
+    // this map. Bound via the GL image-unit namespace
+    // (glBindImageTexture), not sampler units.
+    void setStorageImages(const SampledTextureMap* m) {
+        storageImages_ = m;
+    }
+
     void setUniforms(const UniformValues* u) { uniforms_ = u; }
     void setVsInputs(const VertexAttribs* a, std::int32_t vertexID, std::int32_t instanceID) {
         vsAttribs_ = a;
@@ -382,6 +392,15 @@ private:
     // textureUnits + MTLTexture getBytes. Keyed by SPIR-V variable id.
     const SampledTextureMap* sampledTextures_ = nullptr;
 
+    // Sprint 7 Phase 1 #4 (CKPT54): storage-image counterpart to
+    // sampledTextures_. Caller (GLContext.mm buildStorageImageMap)
+    // walks the program's reflection.storageImages, looks up the
+    // imageBindings[] slot that the app set via glBindImageTexture,
+    // reads MTLTexture bytes, and packs into this map. Distinct from
+    // sampledTextures_ because the GL binding model is different —
+    // image units are a separate namespace from sampler units.
+    const SampledTextureMap* storageImages_ = nullptr;
+
     // Synthetic "sampled image handle" tracked through the SPIR-V
     // body walk. OpAccessChain on a sampler-array variable, OpLoad
     // on the access chain, and OpSampledImage all propagate this
@@ -395,6 +414,13 @@ private:
         // gl_VertexID-driven loops) are evaluated at OpAccessChain
         // time from the loaded index value.
         std::uint32_t elementIdx = 0;
+        // Sprint 7 Phase 1 #4 (CKPT54): true when this handle was
+        // minted from a storage-image variable (via storageImages_
+        // map). OpImageRead resolves slot data from storageImages_
+        // when set; false uses sampledTextures_. Determines which
+        // texture map the read goes through — the GL binding
+        // namespaces are distinct (image unit vs sampler unit).
+        bool isStorage = false;
     };
     std::unordered_map<std::uint32_t, SampledImageHandle> sampledImages_;
     struct StorageBufferVarMeta {
@@ -1093,7 +1119,25 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
              info.storageClass == spv::StorageClassUniformConstant) &&
             uniforms_ != nullptr) {
             const std::uint32_t pointeeType = tIt->second.pointeeType;
-            const auto& pT = module_.types.at(pointeeType);
+            // Sprint 7 Phase 1 #4 (CKPT54): UniformConstant variables
+            // pointing at OpTypeImage / OpTypeSampledImage have no
+            // entry in `module_.types` (the SPIR-V type parser only
+            // tracks scalar / vector / matrix / array / struct /
+            // pointer / function — opaque image types are out of
+            // band). Sampler tests sidestepped this because their
+            // sampler arrays happened to be wrapped in OpTypeArray,
+            // which IS parsed. The image-uniforms test declares
+            // bare `uniform iimage2D imgN` with no array wrapper, so
+            // pointeeType lands on the opaque OpTypeImage id and
+            // `module_.types.at` threw `key not found`. Skip uniform
+            // seeding for opaque-type pointees — image/sampler texel
+            // data is plumbed through sampledTextures_/storageImages_
+            // separately, not through the default-uniform values map.
+            auto pIt = module_.types.find(pointeeType);
+            if (pIt == module_.types.end()) {
+                continue;
+            }
+            const auto& pT = pIt->second;
             if (pT.kind == TypeInfo::Kind::Struct) {
                 // Block-decorated struct. Walk each member, find its
                 // name via OpMemberName + offset via DecorationOffset,
@@ -2293,6 +2337,21 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     SampledImageHandle h;
                     h.arrayVarId = w[2];
                     h.elementIdx = 0;
+                    h.isStorage = false;
+                    sampledImages_[w[1]] = h;
+                    pc += wc;
+                    break;
+                }
+                // Sprint 7 Phase 1 #4 (CKPT54): storage-image load.
+                // Same shape as the sampler-image case but mints a
+                // handle with isStorage=true so OpImageRead routes
+                // through storageImages_ rather than sampledTextures_.
+                if (storageImages_ != nullptr &&
+                    storageImages_->count(w[2]) != 0) {
+                    SampledImageHandle h;
+                    h.arrayVarId = w[2];
+                    h.elementIdx = 0;
+                    h.isStorage = true;
                     sampledImages_[w[1]] = h;
                     pc += wc;
                     break;
@@ -2408,10 +2467,18 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 // selection. If base is in sampledTextures_, the chain
                 // selects an array element by w[3] (constant or SSA
                 // value). Resolve to SampledImageHandle and store.
-                if (sampledTextures_ != nullptr &&
-                    sampledTextures_->count(w[2]) != 0 && wc >= 5) {
+                // Sprint 7 Phase 1 #4 (CKPT54): same path for storage-
+                // image arrays — mint a handle with isStorage=true.
+                const bool baseIsSampler =
+                    (sampledTextures_ != nullptr &&
+                     sampledTextures_->count(w[2]) != 0);
+                const bool baseIsStorageImg =
+                    (!baseIsSampler && storageImages_ != nullptr &&
+                     storageImages_->count(w[2]) != 0);
+                if ((baseIsSampler || baseIsStorageImg) && wc >= 5) {
                     SampledImageHandle h;
                     h.arrayVarId = w[2];
+                    h.isStorage = baseIsStorageImg;
                     // Index operand: try constant first, fall back to
                     // SSA value (e.g. loop counter).
                     auto cIt = module_.constants.find(w[3]);
@@ -2600,6 +2667,144 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     }
                 } else {
                     // OOB — return zeros.
+                    out.kind = Value::Kind::UInt4;
+                }
+                valueStore_[w[1]] = out;
+                pc += wc;
+                break;
+            }
+            // Sprint 7 Phase 1 #4 (CKPT54): OpImageRead = 98.
+            // GLSL `imageLoad(img, ivec2(u,v))` lowers to OpImageRead.
+            // Word layout: w[0]=resultType, w[1]=resultId, w[2]=image,
+            //              w[3]=coord, [w[4]=imageOperands, …].
+            // The image operand is the loaded Image value (NOT a
+            // SampledImage), so the propagated handle came from
+            // OpLoad on a UniformConstant `image*` variable. Coord
+            // is integer (no normalization, no wrap, no LOD).
+            // Resolves slot data via storageImages_ when the handle
+            // was minted there, else sampledTextures_ as a defensive
+            // fallback. Format decode mirrors OpImageSample*.
+            case spv::OpImageRead: {
+                auto sIt = sampledImages_.find(w[2]);
+                if (sIt == sampledImages_.end()) {
+                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
+                                              {0, 0, 0, 0},
+                                              {0, 0, 0, 0},
+                                              false};
+                    pc += wc;
+                    break;
+                }
+                const SampledImageHandle& h = sIt->second;
+                const SampledTextureMap* mapPtr = h.isStorage
+                    ? storageImages_ : sampledTextures_;
+                if (mapPtr == nullptr) {
+                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
+                                              {0, 0, 0, 0},
+                                              {0, 0, 0, 0},
+                                              false};
+                    pc += wc;
+                    break;
+                }
+                auto arrIt = mapPtr->find(h.arrayVarId);
+                if (arrIt == mapPtr->end() ||
+                    h.elementIdx >= arrIt->second.size()) {
+                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
+                                              {0, 0, 0, 0},
+                                              {0, 0, 0, 0},
+                                              false};
+                    pc += wc;
+                    break;
+                }
+                const SampledTextureSlot& slot =
+                    arrIt->second[h.elementIdx];
+                // Resolve coord → texel. OpImageRead coord is integer
+                // (clamp to texture extent on OOB; spec actually says
+                // OOB is undefined but returning zeros is the standard
+                // emulator pattern).
+                Value coord;
+                std::uint32_t u = 0, v = 0;
+                if (tryGetValue(w[3], coord)) {
+                    auto pickI = [&](int idx) -> std::int32_t {
+                        if (idx >= coord.componentCount()) return 0;
+                        if (coord.isIntKind() ||
+                            coord.kind == Value::Kind::UInt ||
+                            coord.kind == Value::Kind::UInt2 ||
+                            coord.kind == Value::Kind::UInt3 ||
+                            coord.kind == Value::Kind::UInt4) {
+                            return coord.i[idx];
+                        }
+                        // GLSL imageLoad takes ivec*, but defensively
+                        // accept float (truncates).
+                        return static_cast<std::int32_t>(coord.f[idx]);
+                    };
+                    const std::int32_t iu = pickI(0);
+                    const std::int32_t iv = pickI(1);
+                    if (iu >= 0 &&
+                        static_cast<std::uint32_t>(iu) < slot.width) {
+                        u = static_cast<std::uint32_t>(iu);
+                    }
+                    if (iv >= 0 &&
+                        static_cast<std::uint32_t>(iv) < slot.height) {
+                        v = static_cast<std::uint32_t>(iv);
+                    }
+                }
+                if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
+                    std::fprintf(stderr,
+                        "[GS-img] read: var=%u elem=%u uv=(%u,%u) "
+                        "fmt=0x%X dim=%ux%u datasz=%zu storage=%d\n",
+                        h.arrayVarId, h.elementIdx, u, v,
+                        slot.internalFormat, slot.width, slot.height,
+                        slot.data.size(), h.isStorage ? 1 : 0);
+                }
+                Value out{};
+                const std::uint32_t bpr =
+                    slot.bytesPerRow != 0 ? slot.bytesPerRow
+                                          : slot.width * 4u;
+                const std::size_t off =
+                    static_cast<std::size_t>(v) * bpr +
+                    static_cast<std::size_t>(u) * 4u;
+                if (off + 4 <= slot.data.size()) {
+                    std::uint32_t raw = 0;
+                    std::memcpy(&raw, slot.data.data() + off, 4);
+                    switch (slot.internalFormat) {
+                        case 0x8236: { // GL_R32UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(raw);
+                            out.i[1] = 0; out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8235: { // GL_R32I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(raw);
+                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+                            break;
+                        }
+                        case 0x822E: { // GL_R32F
+                            out.kind = Value::Kind::Float4;
+                            std::memcpy(&out.f[0], &raw, 4);
+                            out.f[1] = 0.0f; out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8058: { // GL_RGBA8 — UNORM decode
+                            out.kind = Value::Kind::Float4;
+                            const std::uint8_t* p =
+                                slot.data.data() + off;
+                            out.f[0] = p[0] / 255.0f;
+                            out.f[1] = p[1] / 255.0f;
+                            out.f[2] = p[2] / 255.0f;
+                            out.f[3] = p[3] / 255.0f;
+                            break;
+                        }
+                        default: {
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(raw);
+                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+                            break;
+                        }
+                    }
+                } else {
                     out.kind = Value::Kind::UInt4;
                 }
                 valueStore_[w[1]] = out;
@@ -3317,6 +3522,8 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpSampledImage:               // 86
         case spv::OpImageSampleImplicitLod:     // 87 (defensive)
         case spv::OpImageSampleExplicitLod:     // 88
+        // ─ Storage image load (Sprint 7 P1 #4, CKPT54) ─
+        case spv::OpImageRead:                  // 98
             return true;
         default:
             return false;
@@ -4100,7 +4307,9 @@ EmulatedDraw emulateGeometryDraw(
     GLsizei instanceCount,
     GLuint baseInstance,
     const SampledTextureMap* vsSampledTextures,
-    const SampledTextureMap* gsSampledTextures)
+    const SampledTextureMap* gsSampledTextures,
+    const SampledTextureMap* vsStorageImages,
+    const SampledTextureMap* gsStorageImages)
 {
     EmulatedDraw d;
 
@@ -4437,6 +4646,9 @@ EmulatedDraw emulateGeometryDraw(
                 if (vsSampledTextures != nullptr) {
                     vsInterp.setSampledTextures(vsSampledTextures);
                 }
+                if (vsStorageImages != nullptr) {
+                    vsInterp.setStorageImages(vsStorageImages);
+                }
                 EmulatedVertex vsOut;
                 vsOut.position[0] = vsOut.position[1] = vsOut.position[2] = 0.0f;
                 vsOut.position[3] = 1.0f;
@@ -4514,6 +4726,9 @@ EmulatedDraw emulateGeometryDraw(
                 interp.setGsInvocationId(static_cast<std::int32_t>(invId));
                 if (gsSampledTextures != nullptr) {
                     interp.setSampledTextures(gsSampledTextures);
+                }
+                if (gsStorageImages != nullptr) {
+                    interp.setStorageImages(gsStorageImages);
                 }
                 if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
                     std::fprintf(stderr,

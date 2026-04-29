@@ -4825,6 +4825,152 @@ struct GLContext::Impl {
         resolveStage(info.fragmentReflection, false, true);
     }
 
+    // Sprint 7 Phase 1 #4 (CKPT54): mirror of buildSampledTextureMap
+    // but for storage images (glBindImageTexture, distinct binding
+    // namespace from sampler units). The CPU GS emulator's OpImageRead
+    // handler resolves through this map. Keys: SPIR-V variable id of
+    // the `image*` UniformConstant variable (or array thereof). For
+    // each element we look up the GL image unit (via glUniform1i if
+    // the app has set one, else the layout binding default), pull the
+    // bound MTLTexture out of imageBindings[unit], and getBytes the
+    // texel data into the slot.
+    appgl::SampledTextureMap buildStorageImageMap(
+        const std::vector<std::uint32_t>& spirv,
+        const ShaderReflection* reflection,
+        GLProgramObject& program)
+    {
+        appgl::SampledTextureMap result;
+        const bool trace = (std::getenv("APPGL_TRACE_GS_EMUL_TEX") != nullptr);
+        if (spirv.empty() || reflection == nullptr ||
+            reflection->storageImages.empty()) {
+            return result;
+        }
+        const auto vars = appgl::collectSamplerVarsFromSpirv(
+            spirv.data(), spirv.size());
+        if (vars.empty()) return result;
+        for (const auto& v : vars) {
+            // Match SPIR-V variable name to a reflection storage-image
+            // entry by name (handle CompatShaderRewrite's `_appgl_`
+            // prefix the same way as sampled textures).
+            const ShaderReflection::ResourceBinding* imgRefl = nullptr;
+            for (const auto& si : reflection->storageImages) {
+                if (si.name == v.name) {
+                    imgRefl = &si;
+                    break;
+                }
+                constexpr const char* kAppglPrefix = "_appgl_";
+                constexpr std::size_t kAppglPrefixLen = 7;
+                if (v.name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0 &&
+                    si.name == v.name.substr(kAppglPrefixLen)) {
+                    imgRefl = &si;
+                    break;
+                }
+            }
+            if (imgRefl == nullptr) continue;
+            // Resolve effective image unit: layout binding default,
+            // override by glUniform1i if the app set one. GL 4.6 §7.6.
+            std::string lookupName = v.name;
+            constexpr const char* kAppglPrefix = "_appgl_";
+            constexpr std::size_t kAppglPrefixLen = 7;
+            if (lookupName.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                lookupName = lookupName.substr(kAppglPrefixLen);
+            }
+            const GLint imgArraySize = std::max<GLint>(
+                static_cast<GLint>(v.arrayCount), 1);
+            // Default per element: layout binding + element index
+            // (GL 4.6 §7.6 — image arrays consume consecutive units
+            // starting at the layout binding). Overridden per-element
+            // by glUniform1i / glUniform1iv when set.
+            std::vector<GLuint> imageUnits(imgArraySize);
+            for (GLint i = 0; i < imgArraySize; ++i) {
+                imageUnits[i] = imgRefl->glBinding +
+                                static_cast<GLuint>(i);
+            }
+            for (const auto& uinfo : program.uniforms) {
+                if (uinfo.name != lookupName) continue;
+                auto uvIt = program.uniformValues.find(uinfo.location);
+                if (uvIt == program.uniformValues.end()) break;
+                for (GLint i = 0;
+                     i < imgArraySize &&
+                     i < static_cast<GLint>(uvIt->second.ints.size()); ++i) {
+                    if (uvIt->second.ints[i] >= 0) {
+                        imageUnits[i] =
+                            static_cast<GLuint>(uvIt->second.ints[i]);
+                    }
+                }
+                break;
+            }
+            if (trace) {
+                std::fprintf(stderr,
+                    "[GS-img] map: var='%s' id=%u arr=%d binding=%u\n",
+                    v.name.c_str(), v.varId, imgArraySize,
+                    imgRefl->glBinding);
+            }
+            appgl::SampledTextureArray slots(imgArraySize);
+            for (GLint i = 0; i < imgArraySize; ++i) {
+                const GLuint effUnit = imageUnits[i];
+                if (effUnit >= Impl::kMaxImageUnits) continue;
+                const auto& ib = imageBindings[effUnit];
+                if (ib.texture == 0) continue;
+                GLTextureObject* texObj = objects->textures().get(ib.texture);
+                if (texObj == nullptr ||
+                    texObj->metalTexture == nullptr) continue;
+                id<MTLTexture> mtlTex =
+                    (__bridge id<MTLTexture>)texObj->metalTexture;
+                if (mtlTex.width == 0 || mtlTex.height == 0) continue;
+                const std::uint32_t intFmt =
+                    static_cast<std::uint32_t>(texObj->desc.internalFormat);
+                std::uint32_t bpp = 0;
+                switch (intFmt) {
+                    case GL_R32UI:
+                    case GL_R32I:
+                    case GL_R32F:
+                    case GL_RGBA8:
+                        bpp = 4;
+                        break;
+                    default:
+                        break;
+                }
+                if (bpp == 0) {
+                    if (trace) std::fprintf(stderr,
+                        "[GS-img]   element %d unit=%u tex=%u fmt=0x%X "
+                        "(unsupported format)\n",
+                        i, effUnit, ib.texture, intFmt);
+                    continue;
+                }
+                appgl::SampledTextureSlot& slot = slots[i];
+                slot.width = static_cast<std::uint32_t>(mtlTex.width);
+                slot.height = static_cast<std::uint32_t>(mtlTex.height);
+                slot.bytesPerRow = slot.width * bpp;
+                slot.internalFormat = intFmt;
+                slot.samplerType = 0;  // not applicable for storage images
+                slot.data.assign(slot.bytesPerRow * slot.height, 0u);
+                MTLRegion region = MTLRegionMake2D(0, 0, slot.width, slot.height);
+                @try {
+                    [mtlTex getBytes:slot.data.data()
+                         bytesPerRow:slot.bytesPerRow
+                          fromRegion:region
+                         mipmapLevel:0];
+                } @catch (NSException* exc) {
+                    // Private storage textures don't support getBytes.
+                    // Leave the slot data zero-filled; OpImageRead
+                    // returns 0 (test will fail value-check, but
+                    // doesn't crash).
+                    slot.data.clear();
+                    slot.width = 0;
+                    slot.height = 0;
+                }
+                if (trace) std::fprintf(stderr,
+                    "[GS-img]   element %d unit=%u tex=%u fmt=0x%X "
+                    "dim=%ux%u datasz=%zu\n",
+                    i, effUnit, ib.texture, intFmt, slot.width, slot.height,
+                    slot.data.size());
+            }
+            result[v.varId] = std::move(slots);
+        }
+        return result;
+    }
+
     // Graphics-stage storage-image binding (imageLoad/imageStore in VS/FS).
     // Mirrors the compute-dispatch storage-image path but appends to the
     // TranslatedDrawInfo texture lists so the render encoder picks up the
@@ -24333,12 +24479,22 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             const auto gsTexMap = impl_->buildSampledTextureMap(
                 emulProgram->geometrySpirv,
                 &emulProgram->geometryReflection, *emulProgram);
+            // Sprint 7 Phase 1 #4 (CKPT54): same shape, storage-image
+            // counterpart for OpImageRead in GS-emul.
+            const auto vsImgMap = impl_->buildStorageImageMap(
+                emulProgram->vertexSpirv,
+                &emulProgram->vertexReflection, *emulProgram);
+            const auto gsImgMap = impl_->buildStorageImageMap(
+                emulProgram->geometrySpirv,
+                &emulProgram->geometryReflection, *emulProgram);
             appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
                 *emulProgram, *vao, *impl_->objects, *impl_->state,
                 mode, count, first, /*elementIndices=*/nullptr,
                 /*instanceCount=*/1, /*baseInstance=*/0,
                 vsTexMap.empty() ? nullptr : &vsTexMap,
-                gsTexMap.empty() ? nullptr : &gsTexMap);
+                gsTexMap.empty() ? nullptr : &gsTexMap,
+                vsImgMap.empty() ? nullptr : &vsImgMap,
+                gsImgMap.empty() ? nullptr : &gsImgMap);
             if (ed.ok) {
                 // XFB capture + rasterDiscard early-out lives in a
                 // shared helper so drawElements can run the same path.

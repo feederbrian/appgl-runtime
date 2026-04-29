@@ -257,7 +257,15 @@ EmulatedDraw emulateGeometryDraw(
     // return zeros. With the map, OpImageSample[Implicit|Explicit]Lod
     // ops resolve to actual texel values.
     const SampledTextureMap* vsSampledTextures = nullptr,
-    const SampledTextureMap* gsSampledTextures = nullptr);
+    const SampledTextureMap* gsSampledTextures = nullptr,
+    // Sprint 7 Phase 1 #4 (CKPT54): caller-supplied storage-image data
+    // for VS+GS imageLoad() in CPU emul. Same SampledTextureMap shape
+    // (var_id → vector of texel slots) but bound via the image-unit
+    // namespace (glBindImageTexture(unit, tex)) rather than the sampler
+    // unit namespace. Null → CPU emul imageLoad returns zeros.
+    // OpImageRead opcode resolves through this map.
+    const SampledTextureMap* vsStorageImages = nullptr,
+    const SampledTextureMap* gsStorageImages = nullptr);
 
 // Run a single VS invocation on CPU for the vertex at `vboSlot`.
 // Exposed so the tess-CPU emulator can reuse the same interpreter
