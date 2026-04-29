@@ -436,6 +436,46 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path J' Option E.2 (gate 19 refinement — relax Pass 1 Location-decoration gate):**
+widens Option E's Pass 1 to capture natural Input variable NAMES
+regardless of OpDecorate Location presence. CKPT31 surfaced:
+monolithic-program TES inputs may have a name but lack
+OpDecorate Location — linkers don't always emit explicit Location
+decorations for inputs whose location is implicit from cross-stage
+linkage. Option E's narrow gating (`if (!has_decoration ...)
+return;`) skipped these entries, so Pass 3's dedupe iterated 0
+matches and synthetic-range duplicates survived into main0_in.
+
+**Refinement:** Pass 1 now tracks two structures —
+`natural_with_loc` (only Location-decorated entries, used by Pass 2
+for map population) and `natural_names` (full name set, used by
+Pass 3 for dedupe). Un-decorated natural entries can't form a
+valid `inputs_by_location` map key (no location), so Pass 2 still
+gates on Location decoration. But Pass 3's name-based dedupe now
+matches against the full name set, catching synthetic-range
+duplicates that share a name with un-decorated natural entries.
+
+**Implementation — chosen design (transient name-set):**
+
+Of the three options (variable-ID-as-location, separate
+`inputs_by_name` map, hash-synthesized location key), the chosen
+design uses a transient name-set local to the helper. Avoids:
+- Variable-ID collision risk (variable IDs aren't in the
+  synthetic-range convention; using them as location keys would
+  collide with natural locations).
+- Separate persistent map (more invasive plumbing through dedupe
+  logic).
+- Hash collision risk (synthesized keys could collide for
+  same-name-different-id natural entries).
+
+The transient set is local to `pre_populate_inputs_by_location_from_ir()`
+and disappears when the helper returns; persistent state in
+`inputs_by_location` is unchanged in shape.
+
+**Class 2A spec-compliance refinement** — same class as Option E
+(uniform applicability, no consumer coordination required). The
+`add_msl_shader_input` API surface is still unchanged.
+
 **Path J' Option E (gate 19 — pre-populate `inputs_by_location` from natural emission):**
 walks SPIR-V Input variables at `compile()` preamble (before
 `add_interface_block(StorageClassInput)` consumes the map),
