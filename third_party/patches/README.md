@@ -436,6 +436,51 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path J' Option A1 (gate 18 — synthetic-range dedupe by name in `add_msl_shader_input`):**
+extends `add_msl_shader_input` with a name-dedupe check gated on
+synthetic-range location keys. AppGL fork orchestrators (and other
+cross-stage emission consumers) use synthetic-range location values
+(`>= 0xE0000000`) to disambiguate type collisions on natural
+location — e.g., when multiple TES inputs naturally collide at
+location 0 component 0 because the linked TCS auto-allocates them.
+When the orchestrator passes the same NAME with both a natural-range
+location AND a synthetic-range location to drive cross-stage matching,
+the unguarded keying on `{location, component}` would create two
+map entries with identical names; main0_in would then emit
+duplicate-name members, violating GLSL/SPIR-V spec uniqueness
+constraints and breaking cross-stage linkage.
+
+**Fix:** when adding an entry whose location is in the synthetic-key
+range AND whose name matches any existing entry in
+`inputs_by_location` (regardless of that entry's location range),
+skip the add. The natural-range entry remains the canonical
+interface member. Synthetic-range entries with NEW names continue
+to add normally — only same-name dupes are filtered.
+
+**Class 2 spec-compliance, default-on**, no flag-gating. The
+synthetic-range gating provides the safety: non-synthetic-range
+entries are unaffected (preserves the `{loc, comp}`-keyed API
+behavior for consumers that don't use synthetic-range
+disambiguation). Inverse cases — different name in synthetic range,
+same name in natural range with same loc — are handled correctly:
+synthetic-different-name preserves new entry; natural-same-loc
+overwrites by `{loc, comp}` key as before.
+
+**Cross-project upstream-ability** (foresight side-benefit per
+user's Sprint 4 (c.1) discipline): the synthetic-range threshold
+(`0xE0000000u`) is a forking-fork-friendly convention; cross-project
+consumers using synthetic-range location keys for any
+disambiguation purpose get the dedupe automatically.
+
+Validation:
+- Default behavior unchanged for non-synthetic-range entries
+  (regression-safe — existing `{loc, comp}` keying preserved).
+- Existing fixtures (gs-as-mesh, gs-no-position, gs-iface-block,
+  spv_lr/, tcs-write-tess) all xcrun rc=0 post-patch.
+- `add_msl_shader_input` exhibits the dedupe behavior empirically:
+  passing same name with natural + synthetic-range locations
+  results in only the natural-range entry being kept.
+
 **Path L extension (gate 17 dual-write — TCS-side full-precision write):**
 extends Path L's TES-side reads with TCS-side writes. The TCS-compute
 kernel already computes full-precision tess factor values; with the

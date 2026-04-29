@@ -311,7 +311,40 @@ diff --git a/spirv_msl.hpp b/spirv_msl.hpp
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
-@@ -1803,7 +1803,12 @@
+@@ -58,6 +58,32 @@
+ 
+ void CompilerMSL::add_msl_shader_input(const MSLShaderInterfaceVariable &si)
+ {
++	// Path J' Option A1 (Sprint 5 Phase 1 — Class 2 spec-compliance):
++	// dedupe by name when the entry's location is in the synthetic-key
++	// range (0xE0000000+). AppGL fork orchestrator uses synthetic-range
++	// locations to disambiguate type collisions on natural location
++	// (e.g., multiple TES inputs all naturally at location 0 component 0
++	// because the linked TCS auto-allocates them). When the orchestrator
++	// passes the same name with BOTH a natural location AND a synthetic-
++	// range location to drive cross-stage matching, the unguarded keying
++	// on `{location, component}` would create two map entries with the
++	// same name — main0_in would then emit duplicate-name members,
++	// violating GLSL/SPIR-V spec uniqueness and breaking linkage.
++	//
++	// Synthetic-range gating (vs. always-dedupe-by-name) preserves API
++	// behavior for non-synthetic-range consumers — the `{loc, comp}`
++	// keying remains the source of truth for natural-range entries.
++	// Only synthetic-range adds are checked against existing entries by
++	// name; if a match exists at any location, the synthetic-range add
++	// is skipped (the natural-range entry is the canonical interface
++	// member).
++	static constexpr uint32_t synthetic_loc_threshold = 0xE0000000u;
++	if (!si.name.empty() && si.location >= synthetic_loc_threshold)
++	{
++		for (auto &kv : inputs_by_location)
++			if (kv.second.name == si.name)
++				return;
++	}
+ 	inputs_by_location[{si.location, si.component}] = si;
+ 	if (si.builtin != BuiltInMax && !inputs_by_builtin.count(si.builtin))
+ 		inputs_by_builtin[si.builtin] = si;
+@@ -1803,7 +1829,12 @@
  	}
  
  	// Holds SetMeshOutputsEXT information. Threadgroup since first thread wins.
@@ -325,7 +358,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("threadgroup uint2 spvMeshSizes;");
  }
  
-@@ -1885,6 +1890,44 @@
+@@ -1885,6 +1916,44 @@
  	// before any emission walks variables (so the mask is in place
  	// before is_stage_output_variable_masked is consulted).
  	classify_tcs_outputs_by_consumption();
@@ -370,7 +403,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	analyze_image_and_sampler_usage();
  	analyze_sampled_image_usage();
  	analyze_interlocked_resource_usage();
-@@ -1936,6 +1979,34 @@
+@@ -1936,6 +2005,34 @@
  	if (is_mesh_shader())
  	{
  		fixup_implicit_builtin_block_names(get_execution_model());
@@ -405,7 +438,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	}
  	else
  	{
-@@ -3894,12 +3965,32 @@
+@@ -3894,12 +3991,32 @@
  	entry_func.add_local_variable(var.self);
  	vars_needing_early_declaration.push_back(var.self);
  	bool triangles = is_tessellating_triangles();
@@ -438,7 +471,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  			    statement(var_name, "[0] = ", base_ref, ".", mbr_name, "[0];");
  			    statement(var_name, "[1] = ", base_ref, ".", mbr_name, "[1];");
  			    statement(var_name, "[2] = ", base_ref, ".", mbr_name, "[2];");
-@@ -3910,6 +4001,14 @@
+@@ -3910,6 +4027,14 @@
  	else
  	{
  		entry_func.fixup_hooks_in.push_back([=]() {
@@ -453,7 +486,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  			if (triangles)
  			{
  				if (msl_options.raw_buffer_tese_input)
-@@ -3924,6 +4023,7 @@
+@@ -3924,6 +4049,7 @@
  			}
  		});
  	}
@@ -461,7 +494,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  bool CompilerMSL::variable_storage_requires_stage_io(StorageClass storage) const
-@@ -4142,7 +4242,9 @@
+@@ -4142,7 +4268,9 @@
  						  (is_tese_shader() && msl_options.tess_evaluation_as_compute))) ||
  						(storage == StorageClassInput &&
  						 ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -472,7 +505,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  					const bool force_include_builtin =
  						tess_capture_buffer_interface && is_builtin;
  
-@@ -4188,6 +4290,7 @@
+@@ -4188,6 +4316,7 @@
  								storage == StorageClassInput && get_execution_model() != ExecutionModelFragment;
  						bool storage_is_stage_io = variable_storage_requires_stage_io(storage);
  
@@ -480,7 +513,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  						// Clip/CullDistance always need to be declared as user attributes.
  						if (builtin == BuiltInClipDistance || builtin == BuiltInCullDistance)
  							is_builtin = false;
-@@ -4364,6 +4467,15 @@
+@@ -4364,6 +4493,15 @@
  	// Accumulate the variables that should appear in the interface struct.
  	SmallVector<SPIRVariable *> vars;
  	bool incl_builtins = storage == StorageClassOutput || is_tessellation_shader();
@@ -496,7 +529,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	bool has_seen_barycentric = false;
  
  	InterfaceBlockMeta meta;
-@@ -4596,12 +4708,33 @@
+@@ -4596,12 +4734,33 @@
  				entry_func.fixup_hooks_in.push_back(
  				    [=]()
  				    {
@@ -534,7 +567,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  				    });
  			}
  			break;
-@@ -4654,7 +4787,14 @@
+@@ -4654,7 +4813,14 @@
  						// We zero-base the InstanceID & VertexID variables for HLSL emulation elsewhere, so don't do it twice
  						if (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation)
  						{
@@ -550,7 +583,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  							          " = ", output_buffer_var_name, "[", to_expression(builtin_invocation_id_id),
  							          ".y * ", to_expression(builtin_stage_input_size_id), ".x + ",
  							          to_expression(builtin_invocation_id_id), ".x];");
-@@ -4745,6 +4885,19 @@
+@@ -4745,6 +4911,19 @@
  	for (auto *p_var : vars)
  	{
  		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
@@ -570,12 +603,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
-@@ -5049,6 +5202,293 @@
- 		set_name(type.self, "spvPerVertex");
- 
+@@ -5051,6 +5230,293 @@
  	return next_id;
-+}
-+
+ }
+ 
 +// Path A++ gate 7: shared-struct layout parity for GS-as-mesh.
 +//
 +// The existing add_interface_block flatten loop emits gl_ClipDistance and
@@ -861,10 +892,12 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	set_decoration(var_id, DecorationBuiltIn, BuiltInPosition);
 +	set_name(var_id, "gl_Position");
 +	mark_implicit_builtin(StorageClassOutput, BuiltInPosition, var_id);
- }
- 
++}
++
  // Ensure that the type is compatible with the builtin.
-@@ -8593,21 +9033,48 @@
+ // If it is, simply return the given type ID.
+ // Otherwise, create a new type, and return it's ID.
+@@ -8593,21 +9059,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
  
@@ -921,7 +954,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10323,6 +10790,63 @@
+@@ -10323,6 +10816,63 @@
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
  
@@ -985,7 +1018,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
  		{
-@@ -10345,6 +10869,91 @@
+@@ -10345,6 +10895,91 @@
  			end_scope();
  		if (has_decoration(ops[0], DecorationBuiltIn) && get_decoration(ops[0], DecorationBuiltIn) == BuiltInPointSize)
  			writes_to_point_size = true;
@@ -1077,13 +1110,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  
  		break;
  	}
-@@ -10881,9 +11490,53 @@
- 		flush_variable_declaration(builtin_mesh_primitive_indices_id);
- 		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
- 		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
-+		break;
-+	}
-+
+@@ -10884,6 +11519,50 @@
+ 		break;
+ 	}
+ 
 +	// AppGL fork (msl-geometry-shader-as-mesh.patch): GS opcode translation
 +	// when emitting GS source as Metal mesh shader form.
 +	case OpEmitVertex:
@@ -1104,9 +1134,9 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +		// `EmitVertex();` — never Metal-valid, but preserves prior behaviour
 +		// for callers without the option).
 +		CompilerGLSL::emit_instruction(instruction);
- 		break;
- 	}
- 
++		break;
++	}
++
 +	case OpEndPrimitive:
 +	{
 +		if (msl_options.geometry_shader_as_mesh && get_execution_model() == ExecutionModelGeometry)
@@ -1131,7 +1161,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	case OpAssumeTrueKHR:
  	{
  		auto condition = ops[0];
-@@ -13987,8 +14640,20 @@
+@@ -13987,8 +14666,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
  		{
@@ -1154,7 +1184,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	}
  
-@@ -14615,6 +15280,20 @@
+@@ -14615,6 +15306,20 @@
  		break;
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
@@ -1175,7 +1205,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		break;
  	default:
  		entry_type = "unknown";
-@@ -14636,7 +15315,17 @@
+@@ -14636,7 +15341,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
  {
@@ -1194,7 +1224,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  bool CompilerMSL::uses_explicit_early_fragment_test()
-@@ -14851,7 +15540,9 @@
+@@ -14851,7 +15566,9 @@
  	string decl;
  
  	if ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -1205,7 +1235,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		return decl;
  
  	// Stage-in structure
-@@ -15040,7 +15731,14 @@
+@@ -15040,7 +15757,14 @@
  			if (!ep_args.empty())
  				ep_args += ", ";
  
@@ -1221,7 +1251,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	});
  
-@@ -15065,10 +15763,32 @@
+@@ -15065,10 +15789,32 @@
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -1255,7 +1285,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (is_tesc_shader())
  		{
  			if (!ep_args.empty())
-@@ -15145,6 +15865,20 @@
+@@ -15145,6 +15891,20 @@
  			ep_args += join("device ", get_tess_factor_struct_name(), "* ", tess_factor_buffer_var_name, " [[buffer(",
  			                convert_to_string(msl_options.shader_tess_factor_buffer_index), ")]]");
  
@@ -1276,7 +1306,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  			// Initializer for tess factors must be handled specially since it's never declared as a normal variable.
  			uint32_t outer_factor_initializer_id = 0;
  			uint32_t inner_factor_initializer_id = 0;
-@@ -15235,6 +15969,21 @@
+@@ -15235,6 +15995,21 @@
  				ep_args += ", ";
  			ep_args += join("const device ", get_tess_factor_struct_name(), "* ", tess_factor_buffer_var_name,
  			                " [[buffer(", convert_to_string(msl_options.shader_tess_factor_buffer_index), ")]]");
@@ -1298,7 +1328,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  
  		if (stage_in_var_id)
-@@ -15248,6 +15997,26 @@
+@@ -15248,6 +16023,26 @@
  
  	if (is_mesh_shader())
  	{
@@ -1325,7 +1355,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15689,14 +16458,370 @@
+@@ -15689,14 +16484,370 @@
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
@@ -1700,7 +1730,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	}
  
  	// Look for sampled images and buffer. Add hooks to set up the swizzle constants or array lengths.
-@@ -15846,10 +16971,33 @@
+@@ -15846,10 +16997,33 @@
  				{
  					if (msl_options.raw_buffer_tese_input)
  					{
