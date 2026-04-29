@@ -774,27 +774,40 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // compat, but no longer triggers any emission change. Keeping
         // the block in place until callers stop populating the option
         // (cosmetic cleanup).
+        // Sprint 6 Phase 1 sub-task 2: Path J' β orchestrator TES-input
+        // extension. Re-enabled now that SPIRV-Cross fork's Path J'
+        // Option E.2 (`01cfa15`) lands. Option E.2 widens Option E's
+        // Pass 1 gathering to capture all natural Input variable names
+        // (with OR without OpDecorate Location). Pass 3 dedupes
+        // synthetic-range entries against the widened natural-name set,
+        // covering monolithic programs (CKPT30 finding: TES inputs lack
+        // Location decoration in monolithic programs but have names).
         const bool isTessEvalAny = isTessEval ||
             (isVertex && options.forceTessEvalAsCompute);  // false-safe; TES path is isTessEval
-        (void)isTessEvalAny;
-        if (false) {
+        if (isTessEvalAny && options.siblingTcsOutputSpirv != nullptr &&
+            options.siblingTcsOutputWordCount > 0) {
             try {
                 spirv_cross::Compiler tcsSibling(
                     options.siblingTcsOutputSpirv, options.siblingTcsOutputWordCount);
-                // Collect TES's already-declared input locations so we
-                // don't double-declare them via add_msl_shader_input.
-                std::set<std::pair<std::uint32_t,std::uint32_t>> tesInputLocs;
+                // Collect TES's natural input NAMES — used to filter TCS
+                // outputs to "those that TES actually reads." TCS-internal
+                // outputs (like barrier_guarded_*'s test_vector) must NOT
+                // be added; SPIRV-Cross's Pass 3 dedupe only fires when
+                // names match natural entries. TCS-internal-only outputs
+                // (NOT in TES inputs) wouldn't have a natural counterpart,
+                // would be added as new entries → m_<N> placeholders.
+                std::set<std::string> tesInputNames;
                 {
                     const auto activeTes = compiler.get_active_interface_variables();
                     for (auto id : activeTes) {
                         if (compiler.get_storage_class(id) != spv::StorageClassInput) continue;
-                        if (!compiler.has_decoration(id, spv::DecorationLocation)) continue;
-                        const std::uint32_t loc = compiler.get_decoration(id, spv::DecorationLocation);
-                        const std::uint32_t comp = compiler.has_decoration(id, spv::DecorationComponent)
-                            ? compiler.get_decoration(id, spv::DecorationComponent) : 0;
-                        tesInputLocs.insert({loc, comp});
+                        const std::string& name = compiler.get_name(id);
+                        if (name.empty()) continue;
+                        tesInputNames.insert(name);
                     }
                 }
+                // Legacy alias for diagnostic line below.
+                std::set<std::pair<std::uint32_t,std::uint32_t>> tesInputLocs;
                 const auto activeIds = tcsSibling.get_active_interface_variables();
                 std::size_t wired = 0;
                 std::size_t skippedBuiltin = 0;
@@ -823,14 +836,28 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                         ++skippedPatch;
                         continue;
                     }
-                    const std::uint32_t loc = tcsSibling.has_decoration(id, spv::DecorationLocation)
-                        ? tcsSibling.get_decoration(id, spv::DecorationLocation) : 0;
-                    const std::uint32_t comp = tcsSibling.has_decoration(id, spv::DecorationComponent)
-                        ? tcsSibling.get_decoration(id, spv::DecorationComponent) : 0;
-                    if (tesInputLocs.count({loc, comp})) {
+                    // Skip TCS outputs that TES doesn't read — those are
+                    // TCS-internal varyings (like barrier_guarded_*'s
+                    // test_vector). Option E.2's Pass 3 only dedupes if
+                    // the synthetic-range name matches a natural entry;
+                    // TCS-internal outputs wouldn't match → added as new
+                    // entries → m_<N> placeholders → barrier regression.
+                    const std::string tcsName = tcsSibling.get_name(id);
+                    if (tcsName.empty() || !tesInputNames.count(tcsName)) {
                         ++skippedExisting;
                         continue;
                     }
+                    // Synthetic location (0xE0000000+id). Option E.2's
+                    // Pass 3 (`01cfa15`) dedupes synthetic-range entries
+                    // against natural names (with/without Location
+                    // decoration). Re-orders TES main0_in emission to
+                    // match TCS main0_out emission order — Path J'
+                    // field-order parity goal.
+                    const std::uint32_t loc = tcsSibling.has_decoration(id, spv::DecorationLocation)
+                        ? tcsSibling.get_decoration(id, spv::DecorationLocation)
+                        : (0xE0000000u + (std::uint32_t)id);
+                    const std::uint32_t comp = tcsSibling.has_decoration(id, spv::DecorationComponent)
+                        ? tcsSibling.get_decoration(id, spv::DecorationComponent) : 0;
                     spirv_cross::MSLShaderInterfaceVariable sib;
                     sib.location = loc;
                     sib.component = comp;
@@ -838,10 +865,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     sib.builtin = spv::BuiltInMax;
                     sib.vecsize = varType.vecsize > 0 ? varType.vecsize : 1;
                     sib.rate = spirv_cross::MSL_SHADER_VARIABLE_RATE_PER_VERTEX;
-                    // Option C [metal-tess-TF]: symmetric to TCS-direction
-                    // wiring above — name-match enables cross-stage
-                    // correlation when location-based dedup misses.
-                    sib.name = tcsSibling.get_name(id);
+                    sib.name = tcsName;
                     compiler.add_msl_shader_input(sib);
                     ++wired;
                 }
