@@ -11,6 +11,7 @@
 #include "GeometryShaderEmulator.h"
 
 #include "ShaderInterpreter.h"
+#include "TessellationEmulator.h"   // metalBufferContents — Sprint 7 #5 (CKPT56)
 #include "../objects/GLObjectStore.h"
 #include "../state/GLStateTracker.h"
 
@@ -4614,6 +4615,69 @@ EmulatedDraw emulateGeometryDraw(
     // between per-primitive GS invocations.
     std::vector<std::size_t> primEndsAll;
 
+    // Sprint 7 Phase 1 #5 (CKPT56): GS-stage SSBO binding-resolve.
+    // Walk the GS (and VS, when active) SPIR-V for StorageBuffer-class
+    // or `Uniform + isBufferBlock`-decorated variables, look up each
+    // one's GL_SHADER_STORAGE_BUFFER indexed binding via the state
+    // tracker, resolve to the host-visible MTLBuffer contents
+    // pointer, and build an Interpreter::StorageBufferMap keyed by
+    // SPIR-V binding number. The interpreter's existing
+    // resolveAccessChain / loadFromSSBO / storeToSSBO machinery
+    // (CKPT43, TES path) does the per-access offset arithmetic from
+    // there. Mirrors `addSsbosFromModule` at TessellationEmulator.cpp
+    // 1987 — same shape, same StorageBufferRegion type, just per-GS
+    // call site. Built once before the instance loop because GL
+    // bindings can't change mid-draw (glBindBuffer* handlers are
+    // never called while a draw is in flight).
+    Interpreter::StorageBufferMap gsSsboMap;
+    auto addSsbosFromGsModule = [&](const std::vector<std::uint32_t>& spirv) {
+        if (spirv.empty()) return;
+        SpirvModule sMod;
+        if (!sMod.parse(spirv.data(), spirv.size())) return;
+        for (const auto& [varId, info] : sMod.variables) {
+            bool isSSBO = false;
+            if (info.storageClass == spv::StorageClassStorageBuffer) {
+                isSSBO = true;
+            } else if (info.storageClass == spv::StorageClassUniform) {
+                auto tIt = sMod.types.find(info.typeId);
+                if (tIt != sMod.types.end()) {
+                    auto dIt = sMod.decorations.find(tIt->second.pointeeType);
+                    if (dIt != sMod.decorations.end() && dIt->second.isBufferBlock) {
+                        isSSBO = true;
+                    }
+                }
+            }
+            if (!isSSBO) continue;
+            auto dIt = sMod.decorations.find(varId);
+            if (dIt == sMod.decorations.end() || !dIt->second.hasBinding) continue;
+            const std::uint32_t binding = dIt->second.binding;
+            if (gsSsboMap.find(binding) != gsSsboMap.end()) continue;
+            const GLIndexedBufferBinding bb =
+                state.indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, binding);
+            if (bb.buffer == 0) continue;
+            GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
+            if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+            void* base = metalBufferContents(bufObj->metalBuffer);
+            if (base == nullptr) continue;
+            const std::size_t totalSize =
+                static_cast<std::size_t>(bufObj->size);
+            const std::size_t off =
+                static_cast<std::size_t>(bb.offset < 0 ? 0 : bb.offset);
+            // bb.size == 0 means BindBufferBase (whole buffer from off).
+            const std::size_t span = (bb.size > 0)
+                ? static_cast<std::size_t>(bb.size)
+                : (totalSize > off ? totalSize - off : 0);
+            Interpreter::StorageBufferRegion r;
+            r.ptr = static_cast<std::uint8_t*>(base) + off;
+            r.size = span;
+            gsSsboMap[binding] = r;
+        }
+    };
+    addSsbosFromGsModule(program.geometrySpirv);
+    addSsbosFromGsModule(program.vertexSpirv);
+    const Interpreter::StorageBufferMap* gsSsboMapPtr =
+        gsSsboMap.empty() ? nullptr : &gsSsboMap;
+
     const GLsizei effectiveInstances = std::max<GLsizei>(1, instanceCount);
     for (GLsizei instanceIdx = 0; instanceIdx < effectiveInstances; ++instanceIdx) {
         const std::int32_t glInstanceID = static_cast<std::int32_t>(instanceIdx);
@@ -4648,6 +4712,9 @@ EmulatedDraw emulateGeometryDraw(
                 }
                 if (vsStorageImages != nullptr) {
                     vsInterp.setStorageImages(vsStorageImages);
+                }
+                if (gsSsboMapPtr != nullptr) {
+                    vsInterp.setStorageBuffers(gsSsboMapPtr);
                 }
                 EmulatedVertex vsOut;
                 vsOut.position[0] = vsOut.position[1] = vsOut.position[2] = 0.0f;
@@ -4729,6 +4796,9 @@ EmulatedDraw emulateGeometryDraw(
                 }
                 if (gsStorageImages != nullptr) {
                     interp.setStorageImages(gsStorageImages);
+                }
+                if (gsSsboMapPtr != nullptr) {
+                    interp.setStorageBuffers(gsSsboMapPtr);
                 }
                 if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
                     std::fprintf(stderr,
