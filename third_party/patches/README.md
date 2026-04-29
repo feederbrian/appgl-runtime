@@ -436,6 +436,46 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path L extension (gate 17 dual-write — TCS-side full-precision write):**
+extends Path L's TES-side reads with TCS-side writes. The TCS-compute
+kernel already computes full-precision tess factor values; with the
+extension, those values are written to BOTH the existing
+half-precision `spvTessLevel` (Metal HW tessellator API) AND the
+new `spvTessLevelFull` shadow buffer (TES read source).
+
+**Why extension:** AppGL-W's deeper analysis revealed that
+host-side population of `spvTessLevelFull` from GL uniform state is
+fragile (test-specific uniform-name matching). TCS-side dual-write
+eliminates the host-side coordination — the TCS-compute kernel
+produces the full-precision values during its own computation;
+dual-writing them to the shadow buffer in addition to the
+half-precision API is the cleaner fix.
+
+Implementation:
+- TCS-compute entry signature: when flag set, also add
+  `device float* spvTessLevelFull [[buffer(N)]]` parameter
+  alongside the existing
+  `device MTLQuadTessellationFactorsHalf* spvTessLevel`. Same slot
+  for read/write coherence — TCS writes and TES reads use the same
+  buffer in the same pipeline cycle.
+- OpStore intercept (in `CompilerMSL::emit_instruction` after
+  the standard half-precision write): when target is
+  BuiltInTessLevelOuter or BuiltInTessLevelInner Output and the
+  flag is set, emit additional
+  `spvTessLevelFull[primId * stride + offset] = float_val;`. Index
+  extracted by string-parsing the resolved LHS expression for the
+  well-defined tess-level access patterns.
+- Same per-domain stride logic (4 / 6 / 2) and outer-then-inner
+  layout as TES-side reads.
+
+Validated:
+- Default-off TCS emission: byte-identical to pre-extension (no
+  `spvTessLevelFull` references when flag off).
+- Flag-on TCS emission: dual-writes for outer (4 quads), outer
+  (3 triangles), inner (2 quads or 1 triangle scalar). All paths
+  xcrun rc=0.
+- Flag-on TES read side: still works correctly (Path L original).
+
 **Path L (gate 17 — TES-as-compute full-precision tess level shadow buffer):**
 adds `msl_options.use_full_precision_tess_level_buffer` (CLI:
 `--msl-use-full-precision-tess-level-buffer`) +

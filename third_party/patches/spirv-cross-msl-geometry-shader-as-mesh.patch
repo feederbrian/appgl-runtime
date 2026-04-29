@@ -405,10 +405,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	}
  	else
  	{
-@@ -3895,11 +3966,31 @@
+@@ -3894,12 +3965,32 @@
+ 	entry_func.add_local_variable(var.self);
  	vars_needing_early_declaration.push_back(var.self);
  	bool triangles = is_tessellating_triangles();
- 
++
 +	// Path L: when the full-precision shadow buffer flag is on, route
 +	// reads to `spvTessLevelFull[primId * stride + index]` instead of
 +	// the half-precision struct member access. The buffer layout per
@@ -421,7 +422,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +	uint32_t inner_count = isolines ? 0u : (triangles ? 1u : 2u);
 +	uint32_t stride = outer_count + inner_count;
 +	uint32_t var_self = var.self;
-+
+ 
  	if (builtin == BuiltInTessLevelOuter)
  	{
  		entry_func.fixup_hooks_in.push_back(
@@ -495,7 +496,45 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	bool has_seen_barycentric = false;
  
  	InterfaceBlockMeta meta;
-@@ -4654,7 +4766,14 @@
+@@ -4596,12 +4708,33 @@
+ 				entry_func.fixup_hooks_in.push_back(
+ 				    [=]()
+ 				    {
++					    // Path K' (Sprint 4 Phase 1, sub-cluster A — extension):
++					    // gl_in array stride for raw_buffer_tese_input. When
++					    // `tese_input_patch_vertices` is 0 AND the TES has no
++					    // own `output_vertices` execution mode (TES-only
++					    // programs without a sibling TCS), fall through to
++					    // runtime read from `spvIndirectParams[0]` instead
++					    // of emitting a 0 stride. Parallels Path K's fix at
++					    // BuiltInPatchVertices emission — same root cause
++					    // (link-side TCS state isn't visible to TES SPIR-V),
++					    // same fix shape (runtime read).
++					    uint32_t output_verts = get_entry_point().output_vertices;
+ 					    uint32_t patch_cp = msl_options.tese_input_patch_vertices != 0
+ 					                            ? msl_options.tese_input_patch_vertices
+-					                            : get_entry_point().output_vertices;
+-					    statement("const device ", to_name(ir.default_entry_point), "_", ib_var_ref, "* gl_in = &",
+-					              input_buffer_var_name, "[", to_expression(builtin_primitive_id_id), " * ",
+-					              patch_cp, "];");
++					                            : output_verts;
++					    if (patch_cp != 0)
++					    {
++						    statement("const device ", to_name(ir.default_entry_point), "_", ib_var_ref, "* gl_in = &",
++						              input_buffer_var_name, "[", to_expression(builtin_primitive_id_id), " * ",
++						              patch_cp, "];");
++					    }
++					    else
++					    {
++						    // Runtime read — patch_cp known only at draw time.
++						    statement("const device ", to_name(ir.default_entry_point), "_", ib_var_ref, "* gl_in = &",
++						              input_buffer_var_name, "[", to_expression(builtin_primitive_id_id),
++						              " * spvIndirectParams[0]];");
++					    }
+ 				    });
+ 			}
+ 			break;
+@@ -4654,7 +4787,14 @@
  						// We zero-base the InstanceID & VertexID variables for HLSL emulation elsewhere, so don't do it twice
  						if (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation)
  						{
@@ -511,10 +550,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  							          " = ", output_buffer_var_name, "[", to_expression(builtin_invocation_id_id),
  							          ".y * ", to_expression(builtin_stage_input_size_id), ".x + ",
  							          to_expression(builtin_invocation_id_id), ".x];");
-@@ -4746,6 +4865,19 @@
+@@ -4745,6 +4885,19 @@
+ 	for (auto *p_var : vars)
  	{
  		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
- 
++
 +		// GS-as-mesh: strip the array dimension on input variables so the
 +		// generated main0_in struct is per-vertex (matches the linked VS's
 +		// per-vertex output struct shape). The mesh threadgroup reads
@@ -527,11 +567,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +		    get_execution_model() == ExecutionModelGeometry &&
 +		    storage == StorageClassInput)
 +			strip_array = true;
-+
+ 
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
- 		meta.strip_array = strip_array;
-@@ -5049,6 +5181,293 @@
+@@ -5049,6 +5202,293 @@
  		set_name(type.self, "spvPerVertex");
  
  	return next_id;
@@ -825,7 +864,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  // Ensure that the type is compatible with the builtin.
-@@ -8593,21 +9012,48 @@
+@@ -8593,21 +9033,48 @@
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
  
@@ -882,7 +921,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		statement("");
  	}
  }
-@@ -10323,6 +10769,63 @@
+@@ -10323,6 +10790,63 @@
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
  
@@ -946,7 +985,99 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
  		{
-@@ -10881,9 +11384,53 @@
+@@ -10345,6 +10869,91 @@
+ 			end_scope();
+ 		if (has_decoration(ops[0], DecorationBuiltIn) && get_decoration(ops[0], DecorationBuiltIn) == BuiltInPointSize)
+ 			writes_to_point_size = true;
++
++		// Path L extension (gate 17 dual-write): when the
++		// `use_full_precision_tess_level_buffer` flag is set on a
++		// TCS-compute target, emit an additional full-precision write
++		// to `spvTessLevelFull[primId * stride + idx]` alongside the
++		// existing `spvTessLevel[primId].edgeTessellationFactor[idx] =
++		// half(val)` half-precision write. The TCS-compute kernel
++		// already computes the full-precision values; dual-write
++		// eliminates the host-side packing fragility (consumer doesn't
++		// have to extract values from GL uniform state).
++		//
++		// Detection: target backing variable is BuiltInTessLevelOuter
++		// or BuiltInTessLevelInner with StorageClassOutput. Index
++		// extracted by string-parsing the resolved LHS expression
++		// (well-defined tess-level access patterns:
++		// `spvTessLevel[<primId>].edgeTessellationFactor[<idx>]`,
++		// `spvTessLevel[<primId>].insideTessellationFactor[<idx>]`,
++		// or `spvTessLevel[<primId>].insideTessellationFactor` (triangle
++		// inner scalar)).
++		if (msl_options.use_full_precision_tess_level_buffer && is_tesc_shader())
++		{
++			auto *target_var = maybe_get_backing_variable(ops[0]);
++			if (target_var && target_var->storage == StorageClassOutput &&
++			    has_decoration(target_var->self, DecorationBuiltIn))
++			{
++				BuiltIn bi = BuiltIn(get_decoration(target_var->self, DecorationBuiltIn));
++				if (bi == BuiltInTessLevelOuter || bi == BuiltInTessLevelInner)
++				{
++					bool isolines = get_entry_point().flags.get(ExecutionModeIsolines);
++					bool triangles = is_tessellating_triangles();
++					uint32_t outer_count = isolines ? 2u : (triangles ? 3u : 4u);
++					uint32_t inner_count = isolines ? 0u : (triangles ? 1u : 2u);
++					uint32_t stride = outer_count + inner_count;
++
++					// Extract index from the resolved LHS expression.
++					std::string lhs = to_expression(ops[0]);
++					std::string idx_expr;
++					std::string base_offset_expr;
++					if (bi == BuiltInTessLevelOuter)
++					{
++						const std::string marker = ".edgeTessellationFactor[";
++						size_t pos = lhs.find(marker);
++						if (pos != std::string::npos)
++						{
++							size_t open = pos + marker.size();
++							size_t close = lhs.find(']', open);
++							if (close != std::string::npos)
++							{
++								idx_expr = lhs.substr(open, close - open);
++								base_offset_expr = idx_expr;
++							}
++						}
++					}
++					else // BuiltInTessLevelInner
++					{
++						const std::string array_marker = ".insideTessellationFactor[";
++						size_t pos = lhs.find(array_marker);
++						if (pos != std::string::npos)
++						{
++							size_t open = pos + array_marker.size();
++							size_t close = lhs.find(']', open);
++							if (close != std::string::npos)
++							{
++								idx_expr = lhs.substr(open, close - open);
++								base_offset_expr = std::to_string(outer_count) + "u + " + idx_expr;
++							}
++						}
++						else if (lhs.find(".insideTessellationFactor") != std::string::npos)
++						{
++							// Triangle inner: scalar access (no [idx]).
++							idx_expr = "0";
++							base_offset_expr = std::to_string(outer_count) + "u";
++						}
++					}
++
++					if (!base_offset_expr.empty())
++					{
++						statement("spvTessLevelFull[",
++						          to_expression(builtin_primitive_id_id), " * ",
++						          stride, "u + ", base_offset_expr, "] = ",
++						          to_unpacked_expression(ops[1]), ";");
++					}
++				}
++			}
++		}
+ 
+ 		break;
+ 	}
+@@ -10881,9 +11490,53 @@
  		flush_variable_declaration(builtin_mesh_primitive_indices_id);
  		add_spv_func_and_recompile(SPVFuncImplSetMeshOutputsEXT);
  		statement("spvSetMeshOutputsEXT(gl_LocalInvocationIndex, spvMeshSizes, ", to_unpacked_expression(ops[0]), ", ", to_unpacked_expression(ops[1]), ");");
@@ -1000,7 +1131,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	case OpAssumeTrueKHR:
  	{
  		auto condition = ops[0];
-@@ -13987,8 +14534,20 @@
+@@ -13987,8 +14640,20 @@
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
  		{
@@ -1023,10 +1154,11 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	}
  
-@@ -14616,6 +15175,20 @@
+@@ -14615,6 +15280,20 @@
+ 		break;
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
- 		break;
++		break;
 +	case ExecutionModelGeometry:
 +		// AppGL fork (msl-geometry-shader-as-mesh.patch): under
 +		// `geometry_shader_as_mesh`, GS source emits as Metal mesh
@@ -1040,11 +1172,10 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 +			break;
 +		}
 +		entry_type = "unknown";
-+		break;
+ 		break;
  	default:
  		entry_type = "unknown";
- 		break;
-@@ -14636,7 +15209,17 @@
+@@ -14636,7 +15315,17 @@
  
  bool CompilerMSL::is_mesh_shader() const
  {
@@ -1063,7 +1194,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  }
  
  bool CompilerMSL::uses_explicit_early_fragment_test()
-@@ -14851,7 +15434,9 @@
+@@ -14851,7 +15540,9 @@
  	string decl;
  
  	if ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -1074,7 +1205,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		return decl;
  
  	// Stage-in structure
-@@ -15040,7 +15625,14 @@
+@@ -15040,7 +15731,14 @@
  			if (!ep_args.empty())
  				ep_args += ", ";
  
@@ -1090,7 +1221,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  	});
  
-@@ -15065,10 +15657,32 @@
+@@ -15065,10 +15763,32 @@
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -1124,7 +1255,28 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (is_tesc_shader())
  		{
  			if (!ep_args.empty())
-@@ -15235,6 +15849,21 @@
+@@ -15145,6 +15865,20 @@
+ 			ep_args += join("device ", get_tess_factor_struct_name(), "* ", tess_factor_buffer_var_name, " [[buffer(",
+ 			                convert_to_string(msl_options.shader_tess_factor_buffer_index), ")]]");
+ 
++			// Path L extension: dual-write requires the full-precision
++			// shadow buffer parameter on TCS-compute as well as on
++			// TES-compute. Same slot for read/write coherence; AppGL-W's
++			// runtime binds the buffer at the documented slot for both
++			// kernels in the same pipeline cycle.
++			if (msl_options.use_full_precision_tess_level_buffer)
++			{
++				ep_args += ", ";
++				ep_args += join("device float* spvTessLevelFull",
++				                " [[buffer(",
++				                convert_to_string(msl_options.shader_tess_factor_buffer_full_index),
++				                ")]]");
++			}
++
+ 			// Initializer for tess factors must be handled specially since it's never declared as a normal variable.
+ 			uint32_t outer_factor_initializer_id = 0;
+ 			uint32_t inner_factor_initializer_id = 0;
+@@ -15235,6 +15969,21 @@
  				ep_args += ", ";
  			ep_args += join("const device ", get_tess_factor_struct_name(), "* ", tess_factor_buffer_var_name,
  			                " [[buffer(", convert_to_string(msl_options.shader_tess_factor_buffer_index), ")]]");
@@ -1146,7 +1298,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		}
  
  		if (stage_in_var_id)
-@@ -15248,6 +15877,26 @@
+@@ -15248,6 +15997,26 @@
  
  	if (is_mesh_shader())
  	{
@@ -1173,7 +1325,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15689,14 +16338,370 @@
+@@ -15689,14 +16458,370 @@
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
@@ -1548,7 +1700,7 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
  	}
  
  	// Look for sampled images and buffer. Add hooks to set up the swizzle constants or array lengths.
-@@ -15846,10 +16851,33 @@
+@@ -15846,10 +16971,33 @@
  				{
  					if (msl_options.raw_buffer_tese_input)
  					{
