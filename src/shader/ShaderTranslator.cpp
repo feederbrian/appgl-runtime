@@ -503,6 +503,14 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (isTessEval && options.tesePatchVertices != 0) {
             mslOpts.tese_input_patch_vertices = options.tesePatchVertices;
         }
+        // Sprint 5 Phase 1: Path L Class 2A — full-precision tess level
+        // shadow buffer flag. Apply to BOTH TCS-compute (writes both half
+        // and full per Path L extension `635380d`) AND TES-compute (reads
+        // from full per Path L `4f626b9`).
+        if (options.useFullPrecisionTessLevelBuffer &&
+            (isTessControl || isTessEval)) {
+            mslOpts.use_full_precision_tess_level_buffer = true;
+        }
         // Sprint 3 [metal-mesh-GS]: route GS source into the
         // mesh-shader emission path when the linked program's GS
         // shape is supported by the SPIRV-Cross patch's MVP coverage

@@ -4883,6 +4883,27 @@ fragment float4 appgl_immediate_textured_fs(
             patchOutBuf.label = @"appgl-tess-patch-out";
         }
 
+        // Sprint 5 Phase 1 — Path L Class 2A: full-precision tess level
+        // shadow buffer at slot 23. Layout per primitive type:
+        //   triangles: stride 4 (3 outer + 1 inner)
+        //   quads:     stride 6 (4 outer + 2 inner)
+        //   isolines:  stride 2 (2 outer + 0 inner)
+        // Outer levels first, then inner. SPIRV-Cross fork's TCS-side
+        // dual-write (commit 635380d) populates this buffer alongside
+        // the half-precision spvTessLevel. TES-side reads from this
+        // buffer (commit 4f626b9). Avoids half-precision rounding error
+        // on `tc2te.gl_tessLevel`'s tess-level read-back checks.
+        NSUInteger fullStride = 6;  // default: quads
+        if (info.genMode == GL_TRIANGLES) fullStride = 4;
+        else if (info.genMode == GL_ISOLINES) fullStride = 2;
+        const NSUInteger fullFactorBytes =
+            sizeof(float) * fullStride * (NSUInteger)info.patchCount;
+        id<MTLBuffer> factorBufFull =
+            [device newBufferWithLength:(fullFactorBytes > 0 ? fullFactorBytes : 4)
+                                options:MTLResourceStorageModeShared];
+        if (factorBufFull == nil) return false;
+        factorBufFull.label = @"appgl-tess-factor-full";
+
         // spvIndirectParams: SPIRV-Cross `constant uint*` — element [0]
         // is gl_PatchVerticesIn (from glPatchParameteri, default 3),
         // element [1] is the TOTAL patch count in the dispatch. The
@@ -4980,6 +5001,9 @@ fragment float4 appgl_immediate_textured_fs(
             (__bridge id<MTLComputePipelineState>)info.tessControlPipelineState;
         [cenc setComputePipelineState:tcsPSO];
         [cenc setBuffer:factorBuf offset:0 atIndex:26];
+        // Sprint 5 Phase 1 — Path L: full-precision tess level shadow
+        // buffer at slot 23. TCS-compute dual-writes (half + full).
+        [cenc setBuffer:factorBufFull offset:0 atIndex:23];
         [cenc setBuffer:indirectBuf offset:0 atIndex:29];
         if (info.tessControlUniformData != nullptr &&
             info.tessControlUniformSize > 0) {
@@ -5435,6 +5459,13 @@ fragment float4 appgl_immediate_textured_fs(
                     // Domain coord + primID (our fork-patched bindings).
                     [tesEnc setBuffer:domainCoordBuf offset:0 atIndex:25];
                     [tesEnc setBuffer:domainPrimIDBuf offset:0 atIndex:24];
+                    // Sprint 5 Phase 1 — Path L: full-precision tess level
+                    // shadow buffer at slot 23. TES kernel reads
+                    // gl_TessLevelOuter/Inner from spvTessLevelFull
+                    // instead of half-precision spvTessLevel. Populated by
+                    // TCS-compute dual-write OR by host-populate path for
+                    // TES-only programs (Sprint 5 Phase 1 follow-up).
+                    [tesEnc setBuffer:factorBufFull offset:0 atIndex:23];
                     // Detector point C — dispatch-time instrumentation.
                     // Pairs with link probe (A) and gate (B) so post-
                     // processors can confirm the kernel actually fired.

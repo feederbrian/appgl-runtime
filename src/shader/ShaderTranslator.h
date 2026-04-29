@@ -233,6 +233,17 @@ struct TranslatorOptions {
     // buffer origin). Only meaningful for TES stages — ignored otherwise.
     std::uint32_t tesePatchVertices = 0;
 
+    // Sprint 5 Phase 1 [metal-tess-TF]: Path L Class 2A — use the
+    // full-precision tess level shadow buffer. When true, SPIRV-Cross's
+    // TES emission reads gl_TessLevelOuter/Inner from
+    // `spvTessLevelFull[primId * stride + idx]` (slot 23) instead of
+    // half-precision `spvTessLevel[*].edgeTessellationFactor[idx]` (slot
+    // 26). TCS emission ALSO writes to spvTessLevelFull alongside the
+    // existing half-precision write (Path L extension at SPIRV-Cross
+    // fork commit 635380d). Avoids half-precision rounding error on
+    // tess level read-back tests like `tc2te.gl_tessLevel`.
+    bool useFullPrecisionTessLevelBuffer = false;
+
     // Phase 7 [metal-tess-TF]: cross-stage interface wiring (Track 2,
     // scaffold). When translating TCS-as-compute, set these to the
     // linked TES's SPIR-V so spirvToMSL can walk TES's INPUT interface

@@ -19396,6 +19396,12 @@ bool GLContext::linkProgram(GLuint program) {
             // program so MetalFrameGraph can build the pipeline states.
             appgl::TranslatorOptions tessOpts;
             tessOpts.forceTessellation = true;
+            // Sprint 5 Phase 1 — Path L Class 2A: full-precision tess
+            // level shadow buffer. SPIRV-Cross fork emits TCS dual-write
+            // (half + full) and TES read from full-precision buffer.
+            // Avoids half-precision rounding error on tests like
+            // `tc2te.gl_tessLevel` which expects ~exact float read-back.
+            tessOpts.useFullPrecisionTessLevelBuffer = true;
             // Phase 7 [metal-tess-TF] (Track 2 scaffold): pass the linked
             // TES's SPIR-V to the TCS translation so spirvToMSL can call
             // add_msl_shader_output for each TES user-varying input. Closes
@@ -19554,6 +19560,11 @@ bool GLContext::linkProgram(GLuint program) {
             tesComputeOpts.forceTessellation = true;
             tesComputeOpts.forceTessEvalAsCompute = true;
             tesComputeOpts.tesePatchVertices = tcsOutputVertices;
+            // Sprint 5 Phase 1 — Path L Class 2A: also enable on TES-
+            // compute path so TES kernel reads gl_TessLevelOuter/Inner
+            // from spvTessLevelFull (full-precision) instead of half-
+            // precision spvTessLevel.
+            tesComputeOpts.useFullPrecisionTessLevelBuffer = true;
             if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
                 tesComputeOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
                 tesComputeOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
