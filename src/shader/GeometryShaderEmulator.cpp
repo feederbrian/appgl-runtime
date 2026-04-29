@@ -247,6 +247,15 @@ public:
     using StorageBufferMap = std::unordered_map<std::uint32_t, StorageBufferRegion>;
     void setStorageBuffers(const StorageBufferMap* m) { storageBuffers_ = m; }
 
+    // Sprint 6 Phase 1 sub-task 3 day 3 (CKPT43): caller-supplied
+    // sampler-array texture data for OpImageSampleImplicit/ExplicitLod.
+    // Non-null pointer → interpreter accepts OpSampledImage / OpImage*
+    // ops in the body walk. Null → those ops fail isSupportedGsOpcode
+    // and detection rejects the program (legacy fallback).
+    void setSampledTextures(const SampledTextureMap* m) {
+        sampledTextures_ = m;
+    }
+
     void setUniforms(const UniformValues* u) { uniforms_ = u; }
     void setVsInputs(const VertexAttribs* a, std::int32_t vertexID, std::int32_t instanceID) {
         vsAttribs_ = a;
@@ -366,6 +375,28 @@ private:
     // initVariables time (so storeSSBO/loadSSBO know which binding
     // and which element/member stride each root varId maps to).
     const StorageBufferMap* storageBuffers_ = nullptr;
+
+    // Sprint 6 P1 sub-task 3 day 3 (CKPT43): caller-supplied sampler-
+    // array texture data, populated by the runtime caller (e.g.
+    // emulateGeometryDraw) from program reflection + state's
+    // textureUnits + MTLTexture getBytes. Keyed by SPIR-V variable id.
+    const SampledTextureMap* sampledTextures_ = nullptr;
+
+    // Synthetic "sampled image handle" tracked through the SPIR-V
+    // body walk. OpAccessChain on a sampler-array variable, OpLoad
+    // on the access chain, and OpSampledImage all propagate this
+    // handle so OpImageSampleExplicitLod can resolve back to the
+    // (array_var_id, element_idx) pair to look up texture data.
+    struct SampledImageHandle {
+        std::uint32_t arrayVarId = 0;
+        // Element index — for non-array samplers always 0; for sampler
+        // arrays, the index from OpAccessChain. Constant indices are
+        // captured at compile time; non-constant indices (from
+        // gl_VertexID-driven loops) are evaluated at OpAccessChain
+        // time from the loaded index value.
+        std::uint32_t elementIdx = 0;
+    };
+    std::unordered_map<std::uint32_t, SampledImageHandle> sampledImages_;
     struct StorageBufferVarMeta {
         std::uint32_t binding = 0;
         // Optional top-level struct member offsets + inner array
@@ -2252,6 +2283,28 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpLoad: {
                 // w[0]=type, w[1]=resultId, w[2]=ptrId
+                // Sprint 6 P1 sub-task 3 day 3: sampler-image load.
+                // If ptrId is a non-array sampler variable in our
+                // sampledTextures_ map, propagate a handle (var_id, 0).
+                // If ptrId is itself a SampledImageHandle (came from
+                // OpAccessChain on a sampler array), forward the handle.
+                if (sampledTextures_ != nullptr &&
+                    sampledTextures_->count(w[2]) != 0) {
+                    SampledImageHandle h;
+                    h.arrayVarId = w[2];
+                    h.elementIdx = 0;
+                    sampledImages_[w[1]] = h;
+                    pc += wc;
+                    break;
+                }
+                {
+                    auto sImg = sampledImages_.find(w[2]);
+                    if (sImg != sampledImages_.end()) {
+                        sampledImages_[w[1]] = sImg->second;
+                        pc += wc;
+                        break;
+                    }
+                }
                 auto vIt = module_.variables.find(w[2]);
                 if (vIt != module_.variables.end()) {
                     // Direct load from a variable (common for scalars).
@@ -2351,9 +2404,205 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpAccessChain: {
                 // w[0]=type, w[1]=resultId, w[2]=base, w[3..]=indices
+                // Sprint 6 P1 sub-task 3 day 3: sampler-array element
+                // selection. If base is in sampledTextures_, the chain
+                // selects an array element by w[3] (constant or SSA
+                // value). Resolve to SampledImageHandle and store.
+                if (sampledTextures_ != nullptr &&
+                    sampledTextures_->count(w[2]) != 0 && wc >= 5) {
+                    SampledImageHandle h;
+                    h.arrayVarId = w[2];
+                    // Index operand: try constant first, fall back to
+                    // SSA value (e.g. loop counter).
+                    auto cIt = module_.constants.find(w[3]);
+                    if (cIt != module_.constants.end()) {
+                        h.elementIdx = static_cast<std::uint32_t>(cIt->second.i[0]);
+                    } else {
+                        Value idxV;
+                        if (tryGetValue(w[3], idxV)) {
+                            if (idxV.kind == Value::Kind::UInt ||
+                                idxV.kind == Value::Kind::Int) {
+                                h.elementIdx = static_cast<std::uint32_t>(idxV.i[0]);
+                            } else if (idxV.isFloatKind()) {
+                                h.elementIdx =
+                                    static_cast<std::uint32_t>(idxV.f[0]);
+                            }
+                        }
+                    }
+                    sampledImages_[w[1]] = h;
+                    pc += wc;
+                    break;
+                }
                 const std::uint32_t nIdx = wc - 4;
                 AccessChainResult r = resolveAccessChain(w[2], &w[3], nIdx);
                 if (r.ok) accessChains_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            // Sprint 6 P1 sub-task 3 day 3 (CKPT43): sampler ops.
+            //
+            // OpSampledImage = 86  : combine an image + sampler into a
+            //                       single sampled-image handle. For
+            //                       OpenGL combined sampler-textures we
+            //                       just propagate the image's handle —
+            //                       sampler state is implicit per GL.
+            //
+            // OpImageSampleImplicitLod = 87 : sample with implicit
+            //                       derivatives. Non-FS stages don't
+            //                       have derivatives, so we treat as
+            //                       Lod=0 sampling. Defensive — the
+            //                       test we're targeting emits the
+            //                       Explicit form.
+            //
+            // OpImageSampleExplicitLod = 88 : sample with explicit Lod.
+            //                       Common in VS/GS (`texture()` lowers
+            //                       to ExplicitLod when no derivatives).
+            //                       We support Lod=0 only.
+            case spv::OpSampledImage: {
+                // w[0]=type, w[1]=resultId, w[2]=image, w[3]=sampler
+                auto sIt = sampledImages_.find(w[2]);
+                if (sIt != sampledImages_.end()) {
+                    sampledImages_[w[1]] = sIt->second;
+                }
+                pc += wc;
+                break;
+            }
+            case spv::OpImageSampleImplicitLod:
+            case spv::OpImageSampleExplicitLod: {
+                // w[0]=resultType, w[1]=resultId, w[2]=sampledImage,
+                // w[3]=coord, w[4]=imageOperands (for Explicit), …
+                auto sIt = sampledImages_.find(w[2]);
+                if (sIt == sampledImages_.end() ||
+                    sampledTextures_ == nullptr) {
+                    // Sampler not bound or untracked — return zeros.
+                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
+                                              {0, 0, 0, 0},
+                                              {0, 0, 0, 0},
+                                              false};
+                    pc += wc;
+                    break;
+                }
+                const SampledImageHandle& h = sIt->second;
+                auto arrIt = sampledTextures_->find(h.arrayVarId);
+                if (arrIt == sampledTextures_->end() ||
+                    h.elementIdx >= arrIt->second.size()) {
+                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
+                                              {0, 0, 0, 0},
+                                              {0, 0, 0, 0},
+                                              false};
+                    pc += wc;
+                    break;
+                }
+                const SampledTextureSlot& slot =
+                    arrIt->second[h.elementIdx];
+                // Resolve coord → texel (NEAREST). For 2D, multiply
+                // normalized uv by dim and clamp. Coord can be vec2
+                // (regular sampler2D) or vec3 (cubeArr / 2DArr — we
+                // only handle 2D so trailing components are ignored).
+                Value coord;
+                std::uint32_t u = 0, v = 0;
+                if (tryGetValue(w[3], coord)) {
+                    float uF = coord.f[0];
+                    float vF = coord.componentCount() >= 2 ? coord.f[1] : 0.0f;
+                    // Wrap with REPEAT (default GL_TEXTURE_WRAP_*).
+                    auto wrap = [](float x) {
+                        x = x - std::floor(x);
+                        if (x < 0.0f) x += 1.0f;
+                        if (x >= 1.0f) x -= 1.0f;
+                        return x;
+                    };
+                    uF = wrap(uF);
+                    vF = wrap(vF);
+                    if (slot.width > 0) {
+                        int iu = static_cast<int>(uF * slot.width);
+                        if (iu < 0) iu = 0;
+                        if (iu >= static_cast<int>(slot.width))
+                            iu = static_cast<int>(slot.width) - 1;
+                        u = static_cast<std::uint32_t>(iu);
+                    }
+                    if (slot.height > 0) {
+                        int iv = static_cast<int>(vF * slot.height);
+                        if (iv < 0) iv = 0;
+                        if (iv >= static_cast<int>(slot.height))
+                            iv = static_cast<int>(slot.height) - 1;
+                        v = static_cast<std::uint32_t>(iv);
+                    }
+                }
+                // Decode texel based on internalFormat. Minimal set
+                // that covers initial CTS targets — extensible.
+                Value out{};
+                if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
+                    std::fprintf(stderr,
+                        "[GS-tex] sample: var=%u elem=%u uv=(%u,%u) "
+                        "fmt=0x%X dim=%ux%u datasz=%zu\n",
+                        h.arrayVarId, h.elementIdx, u, v,
+                        slot.internalFormat, slot.width, slot.height,
+                        slot.data.size());
+                }
+                const std::uint32_t bpr =
+                    slot.bytesPerRow != 0 ? slot.bytesPerRow
+                                          : slot.width *
+                                                (slot.internalFormat ==
+                                                         /*GL_R32UI*/ 0x8236 ||
+                                                 slot.internalFormat ==
+                                                         /*GL_R32F*/ 0x822E ||
+                                                 slot.internalFormat ==
+                                                         /*GL_R32I*/ 0x8235
+                                                     ? 4u
+                                                     : slot.internalFormat ==
+                                                                       /*GL_RGBA8*/ 0x8058
+                                                           ? 4u
+                                                           : 4u);
+                const std::size_t off =
+                    static_cast<std::size_t>(v) * bpr +
+                    static_cast<std::size_t>(u) * 4u;
+                if (off + 4 <= slot.data.size()) {
+                    std::uint32_t raw = 0;
+                    std::memcpy(&raw, slot.data.data() + off, 4);
+                    switch (slot.internalFormat) {
+                        case 0x8236: { // GL_R32UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(raw);
+                            out.i[1] = 0; out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8235: { // GL_R32I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(raw);
+                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+                            break;
+                        }
+                        case 0x822E: { // GL_R32F
+                            out.kind = Value::Kind::Float4;
+                            std::memcpy(&out.f[0], &raw, 4);
+                            out.f[1] = 0.0f; out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8058: { // GL_RGBA8 — UNORM decode
+                            out.kind = Value::Kind::Float4;
+                            const std::uint8_t* p =
+                                slot.data.data() + off;
+                            out.f[0] = p[0] / 255.0f;
+                            out.f[1] = p[1] / 255.0f;
+                            out.f[2] = p[2] / 255.0f;
+                            out.f[3] = p[3] / 255.0f;
+                            break;
+                        }
+                        default: {
+                            // Unknown format — return raw bits as UInt4.
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(raw);
+                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+                            break;
+                        }
+                    }
+                } else {
+                    // OOB — return zeros.
+                    out.kind = Value::Kind::UInt4;
+                }
+                valueStore_[w[1]] = out;
                 pc += wc;
                 break;
             }
@@ -3064,6 +3313,10 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpReturn:
         case spv::OpFunction:
         case spv::OpFunctionEnd:
+        // ─ Sampler / texture (Sprint 6 P1 sub-task 3 day 3, CKPT43) ─
+        case spv::OpSampledImage:               // 86
+        case spv::OpImageSampleImplicitLod:     // 87 (defensive)
+        case spv::OpImageSampleExplicitLod:     // 88
             return true;
         default:
             return false;
@@ -3788,6 +4041,55 @@ Value readVertexAttribFromVAO(
 }
 }  // namespace
 
+// Sprint 6 P1 sub-task 3 day 3 (CKPT43): expose sampler-variable
+// discovery so platform .mm callers can build SampledTextureMaps
+// without re-parsing SPIR-V. Walks the module's variables, picks
+// out UniformConstant-classed OpTypeImage / OpTypeSampledImage
+// (or OpTypeArray thereof), and returns name + arrayCount.
+std::vector<SamplerVarInfo> collectSamplerVarsFromSpirv(
+    const std::uint32_t* spirv, std::size_t wordCount)
+{
+    std::vector<SamplerVarInfo> result;
+    if (spirv == nullptr || wordCount < 5) return result;
+    SpirvModule mod;
+    if (!mod.parse(spirv, wordCount)) return result;
+    for (const auto& [varId, vinfo] : mod.variables) {
+        if (vinfo.storageClass != spv::StorageClassUniformConstant) continue;
+        // Type chain: variable's typeId → OpTypePointer pointee → either
+        // OpTypeArray (with element type that's image/sampledImage) OR
+        // OpTypeImage / OpTypeSampledImage directly.
+        auto ptrIt = mod.types.find(vinfo.typeId);
+        if (ptrIt == mod.types.end()) continue;
+        std::uint32_t pointee = ptrIt->second.pointeeType;
+        std::uint32_t arrayCount = 1;
+        auto innerIt = mod.types.find(pointee);
+        if (innerIt != mod.types.end() &&
+            innerIt->second.kind == TypeInfo::Kind::Array) {
+            // Array length stored on a constant referenced by
+            // arrayLengthConstId.
+            auto lenIt = mod.constants.find(innerIt->second.arrayLengthConstId);
+            if (lenIt != mod.constants.end()) {
+                arrayCount = static_cast<std::uint32_t>(lenIt->second.i[0]);
+            }
+            // For sampler arrays we don't need to drill further into
+            // the element type — the existence of UniformConstant +
+            // Array is enough. (Non-sampler UniformConstant arrays are
+            // rare and detection by the runtime caller — name match in
+            // reflection.sampledTextures — handles disambiguation.)
+        }
+        // Heuristic-light filter: rely on the runtime caller to
+        // confirm via name match against reflection.sampledTextures.
+        // We just hand back every UniformConstant variable's id +
+        // name + array count; the caller picks samplers from the set.
+        SamplerVarInfo info;
+        info.varId = varId;
+        info.name = vinfo.name;
+        info.arrayCount = arrayCount;
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
 EmulatedDraw emulateGeometryDraw(
     GLProgramObject& program,
     const GLVertexArrayObject& vao,
@@ -3796,7 +4098,9 @@ EmulatedDraw emulateGeometryDraw(
     GLenum drawMode, GLsizei count, GLint first,
     const std::uint32_t* elementIndices,
     GLsizei instanceCount,
-    GLuint baseInstance)
+    GLuint baseInstance,
+    const SampledTextureMap* vsSampledTextures,
+    const SampledTextureMap* gsSampledTextures)
 {
     EmulatedDraw d;
 
@@ -4130,6 +4434,9 @@ EmulatedDraw emulateGeometryDraw(
                 vsInterp.setUniforms(&uniforms);
                 vsInterp.setVsInputs(&vsAttribs,
                     static_cast<std::int32_t>(vboSlot), glInstanceID);
+                if (vsSampledTextures != nullptr) {
+                    vsInterp.setSampledTextures(vsSampledTextures);
+                }
                 EmulatedVertex vsOut;
                 vsOut.position[0] = vsOut.position[1] = vsOut.position[2] = 0.0f;
                 vsOut.position[3] = 1.0f;
@@ -4205,6 +4512,15 @@ EmulatedDraw emulateGeometryDraw(
                 interp.setUniforms(&uniforms);
                 interp.setGsPrimitiveId(static_cast<std::int32_t>(p));
                 interp.setGsInvocationId(static_cast<std::int32_t>(invId));
+                if (gsSampledTextures != nullptr) {
+                    interp.setSampledTextures(gsSampledTextures);
+                }
+                if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
+                    std::fprintf(stderr,
+                        "[GS-tex] gs interp.execute begin prim=%zu inv=%u "
+                        "gsTexMap=%p\n",
+                        p, invId, (const void*)gsSampledTextures);
+                }
                 std::vector<EmulatedVertex> emitted;
                 std::vector<std::size_t> primEnds;
                 if (!interp.execute(inputs, emitted, primEnds)) {
@@ -5058,7 +5374,8 @@ bool runVsForVertex(
     const std::vector<std::string>& outVaryingNames,
     const std::vector<std::uint32_t>& outVaryingWidths,
     EmulatedVertex& outVertex,
-    std::string* diagnostic)
+    std::string* diagnostic,
+    const SampledTextureMap* sampledTextures)
 {
     if (vsSpirv == nullptr || vsWordCount < 5) {
         if (diagnostic) *diagnostic = "runVsForVertex: empty SPIR-V";
@@ -5097,6 +5414,9 @@ bool runVsForVertex(
     vsInterp.setUniforms(&uniforms);
     vsInterp.setVsInputs(&vsAttribs,
                          static_cast<std::int32_t>(vboSlot), instanceID);
+    if (sampledTextures != nullptr) {
+        vsInterp.setSampledTextures(sampledTextures);
+    }
 
     outVertex.position[0] = outVertex.position[1] = outVertex.position[2] = 0.0f;
     outVertex.position[3] = 1.0f;

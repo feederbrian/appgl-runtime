@@ -4510,6 +4510,180 @@ struct GLContext::Impl {
         resolveStage("vert", info.vertexReflection, info.vertexTextures);
     }
 
+    // Sprint 6 Phase 1 sub-task 3 day 3 (CKPT43): build the
+    // SampledTextureMap that the CPU shader interpreter consumes for
+    // OpImageSampleExplicitLod / OpImageSampleImplicitLod. Reads the
+    // texel data out of bound MTLTextures (Shared/Managed mode) so
+    // the interpreter can sample without round-tripping through GPU.
+    //
+    // Currently supports: 2D textures (samplers' preferred target ==
+    // GL_TEXTURE_2D) of internal format R32UI / R32I / R32F / RGBA8.
+    // Other formats: slot left empty → interpreter returns 0 for
+    // those samples. This minimal set covers the
+    // `geometry_shader.limits.max_combined_texture_units` test
+    // (R32UI 1×1 textures) and is extensible via the format switch
+    // inside the loop.
+    appgl::SampledTextureMap buildSampledTextureMap(
+        const std::vector<std::uint32_t>& spirv,
+        const ShaderReflection* reflection,
+        GLProgramObject& program)
+    {
+        appgl::SampledTextureMap result;
+        const bool trace = (std::getenv("APPGL_TRACE_GS_EMUL_TEX") != nullptr);
+        if (spirv.empty() || reflection == nullptr ||
+            reflection->sampledTextures.empty()) {
+            if (trace) {
+                std::fprintf(stderr,
+                    "[GS-tex] buildSampledTextureMap: empty input "
+                    "(spirv=%zu refl=%d sampled=%zu)\n",
+                    spirv.size(), reflection != nullptr,
+                    reflection ? reflection->sampledTextures.size() : 0);
+            }
+            return result;
+        }
+        const auto vars = appgl::collectSamplerVarsFromSpirv(
+            spirv.data(), spirv.size());
+        if (trace) {
+            std::fprintf(stderr,
+                "[GS-tex] buildSampledTextureMap: spirv vars=%zu refl sampled=%zu\n",
+                vars.size(), reflection->sampledTextures.size());
+            for (const auto& v : vars) {
+                std::fprintf(stderr, "[GS-tex]   spirv var: id=%u name='%s' arr=%u\n",
+                    v.varId, v.name.c_str(), v.arrayCount);
+            }
+        }
+        if (vars.empty()) return result;
+        for (const auto& v : vars) {
+            // Match SPIR-V variable name to a reflection sampler entry
+            // by name (handle CompatShaderRewrite's `_appgl_` prefix).
+            const ShaderReflection::ResourceBinding* sampledTex = nullptr;
+            for (const auto& st : reflection->sampledTextures) {
+                if (st.name == v.name) {
+                    sampledTex = &st;
+                    break;
+                }
+                constexpr const char* kAppglPrefix = "_appgl_";
+                constexpr std::size_t kAppglPrefixLen = 7;
+                if (v.name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0 &&
+                    st.name == v.name.substr(kAppglPrefixLen)) {
+                    sampledTex = &st;
+                    break;
+                }
+            }
+            if (sampledTex == nullptr) {
+                if (trace) std::fprintf(stderr,
+                    "[GS-tex]   no reflection match for '%s'\n", v.name.c_str());
+                continue;
+            }
+            // Find the GL uniform's runtime ints[i] values (set by
+            // glUniform1i) — the texture-unit indices for each
+            // sampler-array element.
+            GLint uniformLocation = -1;
+            GLint samplerArraySize = static_cast<GLint>(v.arrayCount);
+            GLenum samplerGLType = 0;
+            std::string lookupName = v.name;
+            constexpr const char* kAppglPrefix = "_appgl_";
+            constexpr std::size_t kAppglPrefixLen = 7;
+            if (lookupName.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                lookupName = lookupName.substr(kAppglPrefixLen);
+            }
+            for (const auto& uinfo : program.uniforms) {
+                if (uinfo.name == lookupName) {
+                    uniformLocation = uinfo.location;
+                    if (uinfo.arraySize > 0) {
+                        samplerArraySize = uinfo.arraySize;
+                    }
+                    samplerGLType = uinfo.type;
+                    break;
+                }
+            }
+            if (uniformLocation < 0) {
+                if (trace) std::fprintf(stderr,
+                    "[GS-tex]   no uniform match for '%s'\n", lookupName.c_str());
+                continue;
+            }
+            if (trace) {
+                std::fprintf(stderr,
+                    "[GS-tex]   matched '%s' refl-arrSize=%u uniformLoc=%d arrSize=%d type=0x%X\n",
+                    v.name.c_str(), v.arrayCount, uniformLocation,
+                    samplerArraySize, samplerGLType);
+            }
+            // Pull `program.uniformValues[uniformLocation].ints` —
+            // each int is a texture unit index for that sampler-array
+            // element.
+            const auto uvIt = program.uniformValues.find(uniformLocation);
+            std::vector<int> textureUnits(samplerArraySize, 0);
+            if (uvIt != program.uniformValues.end()) {
+                for (GLint i = 0; i < samplerArraySize &&
+                     i < static_cast<GLint>(uvIt->second.ints.size()); ++i) {
+                    textureUnits[i] = uvIt->second.ints[i];
+                }
+            }
+            // Resolve the bound texture per element.
+            appgl::SampledTextureArray slots(samplerArraySize);
+            for (GLint i = 0; i < samplerArraySize; ++i) {
+                const int unit = textureUnits[i];
+                if (unit < 0) continue;
+                // Prefer GL_TEXTURE_2D (covers the test's 2D R32UI case).
+                const GLuint texName =
+                    state->boundTextureOnUnit(static_cast<GLuint>(unit), GL_TEXTURE_2D);
+                if (trace) {
+                    std::fprintf(stderr,
+                        "[GS-tex]   element %d unit=%d texName=%u\n",
+                        i, unit, texName);
+                }
+                if (texName == 0) continue;
+                GLTextureObject* texObject = objects->textures().get(texName);
+                if (texObject == nullptr ||
+                    texObject->metalTexture == nullptr) {
+                    continue;
+                }
+                id<MTLTexture> mtlTex =
+                    (__bridge id<MTLTexture>)texObject->metalTexture;
+                if (mtlTex.width == 0 || mtlTex.height == 0) continue;
+                // Format gating — minimal initial set.
+                const std::uint32_t intFmt =
+                    static_cast<std::uint32_t>(texObject->desc.internalFormat);
+                std::uint32_t bpp = 0;
+                switch (intFmt) {
+                    case GL_R32UI:
+                    case GL_R32I:
+                    case GL_R32F:
+                        bpp = 4;
+                        break;
+                    case GL_RGBA8:
+                        bpp = 4;
+                        break;
+                    default:
+                        break;
+                }
+                if (bpp == 0) continue;
+                appgl::SampledTextureSlot& slot = slots[i];
+                slot.width = static_cast<std::uint32_t>(mtlTex.width);
+                slot.height = static_cast<std::uint32_t>(mtlTex.height);
+                slot.bytesPerRow = slot.width * bpp;
+                slot.internalFormat = intFmt;
+                slot.samplerType = samplerGLType;
+                slot.data.assign(slot.bytesPerRow * slot.height, 0u);
+                MTLRegion region = MTLRegionMake2D(0, 0, slot.width, slot.height);
+                @try {
+                    [mtlTex getBytes:slot.data.data()
+                         bytesPerRow:slot.bytesPerRow
+                          fromRegion:region
+                         mipmapLevel:0];
+                } @catch (NSException* exc) {
+                    // Private storage textures don't support getBytes.
+                    // Leave the slot data zero-filled; interpreter returns 0.
+                    slot.data.clear();
+                    slot.width = 0;
+                    slot.height = 0;
+                }
+            }
+            result[v.varId] = std::move(slots);
+        }
+        return result;
+    }
+
     // Resolve Uniform Buffer Object bindings from the GL state and
     // populate tdi.uboBindings so encodeTranslatedDraw can bind them
     // to the Metal render encoder.
@@ -24143,9 +24317,21 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName != 0) ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         if (vao != nullptr) {
+            // Sprint 6 P1 sub-task 3 day 3 (CKPT43): build VS + GS
+            // sampler-texture maps so CPU emul can sample real texel
+            // values via OpImageSampleExplicitLod.
+            const auto vsTexMap = impl_->buildSampledTextureMap(
+                emulProgram->vertexSpirv,
+                &emulProgram->vertexReflection, *emulProgram);
+            const auto gsTexMap = impl_->buildSampledTextureMap(
+                emulProgram->geometrySpirv,
+                &emulProgram->geometryReflection, *emulProgram);
             appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
                 *emulProgram, *vao, *impl_->objects, *impl_->state,
-                mode, count, first, /*elementIndices=*/nullptr);
+                mode, count, first, /*elementIndices=*/nullptr,
+                /*instanceCount=*/1, /*baseInstance=*/0,
+                vsTexMap.empty() ? nullptr : &vsTexMap,
+                gsTexMap.empty() ? nullptr : &gsTexMap);
             if (ed.ok) {
                 // XFB capture + rasterDiscard early-out lives in a
                 // shared helper so drawElements can run the same path.

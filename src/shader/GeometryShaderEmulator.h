@@ -181,6 +181,51 @@ struct EmulatedDraw {
 // have to answer correctly even for programs we can't emulate.
 bool detectGeometryEmulatable(GLProgramObject& program);
 
+// Sprint 6 Phase 1 sub-task 3 day 3 (CKPT43): texture-sampling support
+// for the shared CPU shader interpreter. Each sampler-array element
+// holds CPU-readable texel data + metadata. The interpreter reads
+// from this map when handling OpImageSampleImplicitLod /
+// OpImageSampleExplicitLod against a sampler-array variable.
+//
+// Layout note: textures with non-default `bytesPerRow` (e.g. Metal-
+// padded readback) must set `bytesPerRow != 0`. For tightly-packed
+// layouts, leave `bytesPerRow = 0` and the interpreter computes
+// stride = width * texel_bytes.
+struct SampledTextureSlot {
+    std::vector<std::uint8_t> data;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t bytesPerRow = 0;
+    std::uint32_t internalFormat = 0;
+    std::uint32_t samplerType = 0;
+};
+
+// Per-sampler-array: vector of slots, one per element. For non-array
+// samplers, a 1-element vector. Empty vector means "sampler not
+// bound" — interpreter returns 0 for samples.
+using SampledTextureArray = std::vector<SampledTextureSlot>;
+
+// Keyed by the SPIR-V variable ID of the sampler-array OpVariable
+// (the UniformConstant variable). Caller resolves
+// program.<stage>Reflection.sampledTextures + program.uniforms +
+// state texture-unit bindings, reads MTLTexture.contents/getBytes,
+// and packs the slots in this map.
+using SampledTextureMap = std::unordered_map<std::uint32_t, SampledTextureArray>;
+
+// Helper exposed from GeometryShaderEmulator.cpp so platform-specific
+// callers (GLContext.mm) can find sampler variables in a SPIR-V
+// module without re-parsing it themselves. Returns the SPIR-V
+// variable ID, the OpName-decorated identifier (which may have the
+// `_appgl_` prefix from CompatShaderRewrite), and the array element
+// count (1 for non-array samplers).
+struct SamplerVarInfo {
+    std::uint32_t varId = 0;
+    std::string name;
+    std::uint32_t arrayCount = 1;
+};
+std::vector<SamplerVarInfo> collectSamplerVarsFromSpirv(
+    const std::uint32_t* spirv, std::size_t wordCount);
+
 // Emulate a single drawArrays/drawElements call for a program that
 // has a GS stage. Returns an `EmulatedDraw` whose `.ok` flag tells
 // the caller whether the CPU path produced a usable expanded-vertex
@@ -204,7 +249,15 @@ EmulatedDraw emulateGeometryDraw(
     GLint first,
     const std::uint32_t* elementIndices,
     GLsizei instanceCount = 1,
-    GLuint baseInstance = 0);
+    GLuint baseInstance = 0,
+    // Sprint 6 Phase 1 sub-task 3 day 3 (CKPT43): caller-supplied
+    // sampler-array texture data for VS+GS texture() in CPU emul.
+    // Caller (GLContext.mm) walks SPIR-V + reflection + state, reads
+    // MTLTexture bytes, and packs the map. Null → CPU emul samples
+    // return zeros. With the map, OpImageSample[Implicit|Explicit]Lod
+    // ops resolve to actual texel values.
+    const SampledTextureMap* vsSampledTextures = nullptr,
+    const SampledTextureMap* gsSampledTextures = nullptr);
 
 // Run a single VS invocation on CPU for the vertex at `vboSlot`.
 // Exposed so the tess-CPU emulator can reuse the same interpreter
@@ -238,7 +291,8 @@ bool runVsForVertex(
     const std::vector<std::string>& outVaryingNames,
     const std::vector<std::uint32_t>& outVaryingWidths,
     EmulatedVertex& outVertex,
-    std::string* diagnostic = nullptr);
+    std::string* diagnostic = nullptr,
+    const SampledTextureMap* sampledTextures = nullptr);
 
 // Run a single TES invocation on CPU for the vertex whose tess-space
 // barycentric / parametric coord is `tessCoord`. Exposed so the tess-
@@ -265,12 +319,17 @@ bool runVsForVertex(
 // entry point). Phase 3f-1: scaffolding only — call sites not yet
 // wired. Phase 3f-3+ adds SSBO storage-class plumbing so the side
 // effects actually reach the bound GL buffer.
+// (Sprint 6 Phase 1 sub-task 3 day 3 — CKPT43 — sampler-texture
+// types moved earlier in the file to predate runVsForVertex.)
+
 // Phase 3f-3: SSBO region handed to the interpreter. `ptr` is a host-
 // visible pointer into a Metal buffer's contents (MTLResourceStorage-
 // ModeShared guarantees CPU visibility on Apple Silicon), `size` is
 // the byte size available at that pointer (typically buffer.length -
 // bufferBinding.offset). Keyed by the SPIR-V binding number on the
 // SSBO's variable DecorationBinding.
+// (SampledTextureMap declarations moved up earlier in the header
+// to predate runVsForVertex's signature.)
 struct TesSsboRegion {
     void* ptr = nullptr;
     std::size_t size = 0;

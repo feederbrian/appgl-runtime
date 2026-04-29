@@ -1600,7 +1600,49 @@ struct MetalFrameGraph::Impl {
             // shader with two different blend modes builds two
             // distinct pipelines and keeps both hot.
             MTLRenderPipelineColorAttachmentDescriptor* colorDesc = desc.colorAttachments[0];
-            colorDesc.blendingEnabled = info.blend.enabled ? YES : NO;
+            // Sprint 6 P1 sub-task 3 day 4 (CKPT44 prep): Metal rejects
+            // pipelines with `blendingEnabled=YES` when the color
+            // attachment's pixelFormat is an integer format
+            // (R32Sint/Uint, RG32*, RGBA32*, etc.). GL allows the
+            // combination silently — blending bits are ignored on
+            // integer attachments per spec §17.3.6 — so apps and
+            // gluStateReset can leave GL_BLEND on while pointing the
+            // FBO at an R32UI / R32I / R32Sint render target. Surface
+            // discovery: `geometry_shader.limits.max_output_components`
+            // crashed Metal validation at draw time when GL_BLEND was
+            // enabled and the FBO color attachment format was R32Sint
+            // (CKPT43 cap-bump cascade). Force-disable blending for
+            // integer pipeline-color formats so the pipeline-state
+            // build matches GL's silent semantics.
+            auto isIntegerColorFormat = [](MTLPixelFormat fmt) -> bool {
+                switch (fmt) {
+                    case MTLPixelFormatR8Sint:
+                    case MTLPixelFormatR8Uint:
+                    case MTLPixelFormatR16Sint:
+                    case MTLPixelFormatR16Uint:
+                    case MTLPixelFormatR32Sint:
+                    case MTLPixelFormatR32Uint:
+                    case MTLPixelFormatRG8Sint:
+                    case MTLPixelFormatRG8Uint:
+                    case MTLPixelFormatRG16Sint:
+                    case MTLPixelFormatRG16Uint:
+                    case MTLPixelFormatRG32Sint:
+                    case MTLPixelFormatRG32Uint:
+                    case MTLPixelFormatRGBA8Sint:
+                    case MTLPixelFormatRGBA8Uint:
+                    case MTLPixelFormatRGBA16Sint:
+                    case MTLPixelFormatRGBA16Uint:
+                    case MTLPixelFormatRGBA32Sint:
+                    case MTLPixelFormatRGBA32Uint:
+                    case MTLPixelFormatRGB10A2Uint:
+                        return true;
+                    default:
+                        return false;
+                }
+            };
+            const bool integerColorTarget = isIntegerColorFormat(colorFormat);
+            colorDesc.blendingEnabled =
+                (info.blend.enabled && !integerColorTarget) ? YES : NO;
             colorDesc.sourceRGBBlendFactor        = glBlendFactorToMTL(info.blend.srcRGB);
             colorDesc.destinationRGBBlendFactor   = glBlendFactorToMTL(info.blend.dstRGB);
             colorDesc.sourceAlphaBlendFactor      = glBlendFactorToMTL(info.blend.srcAlpha);
