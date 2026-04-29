@@ -7,12 +7,14 @@
 #include <SPIRV/GlslangToSpv.h>
 #include <spirv_msl.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <set>
 #include <utility>
+#include <vector>
 
 namespace appgl {
 namespace {
@@ -447,6 +449,17 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (metalTessEnabled && (isTessControl || isTessEval)) {
             if (isTessEval) {
                 mslOpts.raw_buffer_tese_input = true;
+                // Path J' Option E.4 (`0ee35f2`): explicit-flag-gated
+                // emission opt-in for TES main0_in field order. When set,
+                // SPIRV-Cross's `add_interface_block` emits TES Input
+                // members in `inputs_by_location_insertion_order` order
+                // (the order in which add_msl_shader_input was called)
+                // instead of TES IR-walk order. The recorded order
+                // matches TCS main0_out emission once the β orchestrator
+                // iterates TCS active interface IDs in ascending order
+                // (sort below at line 811-823). Without this flag,
+                // E.4's recording is observably a no-op.
+                mslOpts.input_emission_in_call_order = true;
             }
             mslOpts.tess_domain_origin_lower_left = true;
             // Phase 3: route TCS VS-input through a buffer rather than
@@ -808,7 +821,29 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 }
                 // Legacy alias for diagnostic line below.
                 std::set<std::pair<std::uint32_t,std::uint32_t>> tesInputLocs;
-                const auto activeIds = tcsSibling.get_active_interface_variables();
+                // Path J' E.4 synchronized landing — paired with
+                // SPIRV-Cross `0ee35f2` flag-gated emission. CKPT42 A/B
+                // test confirmed Config B (flag + ID-ascending sort)
+                // PASSES while Config A (flag only) FAILS. E.4's
+                // emission aspect honors call order — and our call
+                // order is the iteration order of
+                // `get_active_interface_variables()` (an unordered_set
+                // returning non-deterministic iteration). Sorting
+                // active TCS interface IDs ascending reproduces TCS's
+                // natural main0_out emission walk (SPIR-V variable IDs
+                // ascend in declaration order). Without this sort,
+                // call order mismatches TCS emission and TES main0_in
+                // bytes don't align with TCS main0_out bytes.
+                std::vector<spirv_cross::ID> activeIds;
+                {
+                    const auto activeSet = tcsSibling.get_active_interface_variables();
+                    activeIds.assign(activeSet.begin(), activeSet.end());
+                    std::sort(activeIds.begin(), activeIds.end(),
+                        [](spirv_cross::ID a, spirv_cross::ID b) {
+                            return static_cast<std::uint32_t>(a) <
+                                   static_cast<std::uint32_t>(b);
+                        });
+                }
                 std::size_t wired = 0;
                 std::size_t skippedBuiltin = 0;
                 std::size_t skippedPatch = 0;
