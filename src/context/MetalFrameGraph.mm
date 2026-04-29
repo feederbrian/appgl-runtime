@@ -5903,6 +5903,13 @@ fragment float4 appgl_immediate_textured_fs(
             [enc setVertexBuffer:cpOutBuf offset:0 atIndex:22];
             [enc setVertexBuffer:patchOutBuf offset:0 atIndex:20];
         }
+        // Sprint 5 Phase 1 — Path L: bind factorBufFull at slot 23 for
+        // TES-as-vertex-function render encoder. Path L emission produces
+        // TES MSL that reads `gl_TessLevelOuter/Inner` from
+        // `spvTessLevelFull[primId * stride + idx]` regardless of which
+        // encoder runs the TES code; this binding closes the encoder-
+        // path coverage gap (per Clerk's §3.6.18 banking).
+        [enc setVertexBuffer:factorBufFull offset:0 atIndex:23];
         // Phase 3: drawPatches's `numberOfPatchControlPoints` is the
         // count of control points per patch in the buffer feeding the
         // post-tess vertex stage — i.e. cpOutBuf, which holds TCS
