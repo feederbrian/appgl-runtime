@@ -5235,38 +5235,38 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         src += std::to_string(cullBaseAttrib + i);
         src += ")]];\n";
     }
-    // Layer-index input slot. One int per vertex at the tail of
-    // the packed payload, only when the GS wrote gl_Layer. MSL
-    // `[[attribute]]` has no signed-int scalar form for stage_in
-    // from a packed float buffer, so we read as `int` — the
-    // vertex descriptor builder declares the matching attribute
-    // format `MTLVertexFormatInt`.
-    const std::uint32_t layerAttrib = cullBaseAttrib + draw.cullDistanceLen;
-    if (draw.hasLayer) {
-        src += "    int vsin_layer [[attribute(";
-        src += std::to_string(layerAttrib);
-        src += ")]];\n";
-    }
-    // gl_PointSize input slot. One float per vertex, only when the
-    // GS wrote gl_PointSize. Matches the trailing slot in the
-    // packed buffer (after layer if both are present).
-    const std::uint32_t psAttrib = layerAttrib + (draw.hasLayer ? 1u : 0u);
-    if (draw.hasPointSize) {
-        src += "    float vsin_pointsize [[attribute(";
-        src += std::to_string(psAttrib);
-        src += ")]];\n";
-    }
-    // gl_PrimitiveID (OUTPUT — GS-override) input slot. One int32
-    // per vertex after the point-size slot. The FS MSL post-
-    // processor redirects `gl_PrimitiveID` reads to this varying
-    // instead of Metal's rasteriser `[[primitive_id]]`.
-    const std::uint32_t primIdAttrib = psAttrib + (draw.hasPointSize ? 1u : 0u);
-    if (draw.hasPrimitiveID) {
-        src += "    int vsin_prim_id [[attribute(";
-        src += std::to_string(primIdAttrib);
-        src += ")]];\n";
-    }
+    // Sprint 7 Phase 1 #6 (CKPT58): trailing per-vertex slots
+    // (gl_Layer, gl_PointSize, gl_PrimitiveID) used to live as
+    // `[[attribute(N)]]` stage_in entries here, but Metal Apple7
+    // (M1 Max) caps stage_in at 31 attributes. With max GS output
+    // components = 128, the test surfaces 30 ivec4 varyings + position
+    // + pointSize = 32 attributes — slot 31 silently drops, breaking
+    // every test that maxes the geometry-output budget. Relocate
+    // these trailing slots OFF stage_in: the synth-VS reads them
+    // manually from the same packed buffer at slot 0 via a
+    // `device const float*` parameter + vertex_id arithmetic. Saves
+    // up to 3 attribute slots, fitting the 31-attribute budget for
+    // GL's spec-floor MAX_GEOMETRY_OUTPUT_COMPONENTS = 128.
     src += "};\n\n";
+
+    // Compute the per-vertex stride (in floats) and the offsets to
+    // each trailing slot. These match the encoder-side packing in
+    // `emulateGeometryDraw` (search for `dst[layerOff]`).
+    std::uint32_t totalVaryingWidth = 0;
+    for (auto w : draw.varyingWidths) totalVaryingWidth += w;
+    const std::uint32_t strideFloats =
+        4 + totalVaryingWidth + draw.clipDistanceLen + draw.cullDistanceLen
+        + (draw.hasLayer ? 1u : 0u)
+        + (draw.hasPointSize ? 1u : 0u)
+        + (draw.hasPrimitiveID ? 1u : 0u);
+    const std::uint32_t layerFloatOff = 4 + totalVaryingWidth
+        + draw.clipDistanceLen + draw.cullDistanceLen;
+    const std::uint32_t psFloatOff =
+        layerFloatOff + (draw.hasLayer ? 1u : 0u);
+    const std::uint32_t pidFloatOff =
+        psFloatOff + (draw.hasPointSize ? 1u : 0u);
+    const bool needsTrailingBuffer =
+        draw.hasLayer || draw.hasPointSize || draw.hasPrimitiveID;
 
     // ─ Vertex output struct.
     auto interpTag = [](std::uint8_t interp) -> const char* {
@@ -5348,8 +5348,19 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     }
     src += "};\n\n";
 
-    // ─ Entry.
-    src += "vertex VsOut main0(VsIn in [[stage_in]])\n";
+    // ─ Entry. The `device const float* gs_packed` parameter shares
+    // the same Metal buffer slot 0 as the stage_in vertex fetcher, so
+    // both views resolve to the same per-vertex data without an extra
+    // bind on the encoder side. `[[vertex_id]]` lets us index into
+    // gs_packed for the trailing slots that no longer have stage_in
+    // attributes (Sprint 7 #6 / CKPT58).
+    if (needsTrailingBuffer) {
+        src += "vertex VsOut main0(VsIn in [[stage_in]],\n";
+        src += "                   uint gs_vid [[vertex_id]],\n";
+        src += "                   device const float* gs_packed [[buffer(0)]])\n";
+    } else {
+        src += "vertex VsOut main0(VsIn in [[stage_in]])\n";
+    }
     src += "{\n";
     src += "    VsOut out = {};\n";
     src += "    out.gl_Position = in.vsin_position;\n";
@@ -5364,7 +5375,15 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         // point at NDC (-1,-1) — the fixed 1.0 previously made the
         // test fail on the bottom-left verifyPixel check.
         if (draw.hasPointSize) {
-            src += "    out.gl_PointSize = in.vsin_pointsize;\n";
+            // Read pointsize from the packed buffer at the right
+            // per-vertex offset (CKPT58: was [[stage_in]] attribute,
+            // now manual buffer access to avoid the 31-attribute
+            // hardware cap).
+            src += "    out.gl_PointSize = gs_packed[gs_vid * ";
+            src += std::to_string(strideFloats);
+            src += " + ";
+            src += std::to_string(psFloatOff);
+            src += "];\n";
         } else {
             src += "    out.gl_PointSize = 1.0;\n";
         }
@@ -5401,10 +5420,25 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     // Only when the FBO is layered — otherwise we'd write a slot
     // Metal doesn't accept given renderTargetArrayLength=0.
     if (emitRenderTargetArrayIndex) {
-        src += "    out.gl_Layer = uint(max(in.vsin_layer, 0));\n";
+        // CKPT58: read gl_Layer from packed buffer (was vsin_layer
+        // [[attribute(N)]] before the 31-attribute cap fix). The int
+        // value lives bit-cast in the float slot so we go through
+        // `as_type<int>(...)` to recover the signed integer.
+        src += "    out.gl_Layer = uint(max(as_type<int>(gs_packed[gs_vid * ";
+        src += std::to_string(strideFloats);
+        src += " + ";
+        src += std::to_string(layerFloatOff);
+        src += "]), 0));\n";
     }
     if (draw.hasPrimitiveID) {
-        src += "    out.vsout_prim_id = in.vsin_prim_id;\n";
+        // CKPT58: read gl_PrimitiveID from packed buffer (was
+        // vsin_prim_id [[attribute(N)]] before the cap fix). Same
+        // bit-cast pattern as gl_Layer.
+        src += "    out.vsout_prim_id = as_type<int>(gs_packed[gs_vid * ";
+        src += std::to_string(strideFloats);
+        src += " + ";
+        src += std::to_string(pidFloatOff);
+        src += "]);\n";
     }
     src += "    return out;\n";
     src += "}\n";

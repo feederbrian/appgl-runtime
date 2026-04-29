@@ -24026,42 +24026,19 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             vi.name = "vsin_cull" + std::to_string(i);
             program.gsPassThroughReflection.vertexInputs.push_back(vi);
         }
-        // Layered output: one int per vertex at the tail of the
-        // packed buffer. The synth VS reads this and emits it as
-        // `[[render_target_array_index]]`. Matches the packing in
-        // emulateGeometryDraw and the MSL synthesised by
-        // synthesisePassThroughVertexMSL.
-        const GLuint layerLoc = cullBaseLoc + ed.cullDistanceLen;
-        if (ed.hasLayer) {
-            ShaderReflection::VertexInput vi;
-            vi.location = layerLoc;
-            vi.type = GL_INT;
-            vi.name = "vsin_layer";
-            program.gsPassThroughReflection.vertexInputs.push_back(vi);
-        }
-        // gl_PointSize slot: one float per vertex after the layer
-        // (if any), only when the GS wrote gl_PointSize.
-        if (ed.hasPointSize) {
-            const GLuint psLoc = layerLoc + (ed.hasLayer ? 1u : 0u);
-            ShaderReflection::VertexInput vi;
-            vi.location = psLoc;
-            vi.type = GL_FLOAT;
-            vi.name = "vsin_pointsize";
-            program.gsPassThroughReflection.vertexInputs.push_back(vi);
-        }
-        // gl_PrimitiveID slot: one int per vertex after the layer +
-        // point-size slots. The synth VS pipes this into the flat
-        // `int vsout_prim_id` user varying at draw.primitiveIDLocation.
-        if (ed.hasPrimitiveID) {
-            const GLuint pidLoc = layerLoc
-                + (ed.hasLayer ? 1u : 0u)
-                + (ed.hasPointSize ? 1u : 0u);
-            ShaderReflection::VertexInput vi;
-            vi.location = pidLoc;
-            vi.type = GL_INT;
-            vi.name = "vsin_prim_id";
-            program.gsPassThroughReflection.vertexInputs.push_back(vi);
-        }
+        // Sprint 7 Phase 1 #6 (CKPT58): trailing per-vertex slots
+        // (gl_Layer, gl_PointSize, gl_PrimitiveID) used to be exposed
+        // as `[[attribute(N)]]` stage_in entries here, but Metal's
+        // 31-attribute hardware cap made the synth-VS pipeline
+        // silently drop the 32nd attribute when GS uses the GL spec-
+        // floor MAX_GEOMETRY_OUTPUT_COMPONENTS = 128 (30 ivec4 varyings
+        // + position + pointSize = 32 attributes). The synth-VS now
+        // reads these slots directly from the packed buffer at slot 0
+        // via `gs_packed[vid * stride + offset]`, which keeps the
+        // per-vertex byte layout unchanged but saves up to 3 stage_in
+        // attribute slots. We intentionally do NOT push reflection /
+        // attribute-layout entries for them here.
+        (void)cullBaseLoc;
     }
 
     TranslatedDrawInfo tdi;
@@ -24127,53 +24104,18 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             tdi.vertexAttributeLayouts.push_back(la);
             offset += sizeof(float);
         }
-        // gl_Layer attribute layout — one int per vertex at the
-        // tail when the GS wrote BuiltInLayer. Metal's vertex
-        // fetcher decodes the raw 32 bits as int per the attribute
-        // format; we set glType=GL_INT + glIsInteger=true so the
-        // vertex descriptor builder picks MTLVertexFormatInt.
-        const GLuint layerLoc2 = cullBaseLoc + ed.cullDistanceLen;
-        if (ed.hasLayer) {
-            TranslatedDrawInfo::VertexAttributeLayout la;
-            la.location = layerLoc2;
-            la.offset = offset;
-            la.glType = GL_INT;
-            la.glComponentCount = 1;
-            la.glIsInteger = true;
-            tdi.vertexAttributeLayouts.push_back(la);
-            offset += sizeof(std::int32_t);
-        }
-        // gl_PointSize attribute layout — one float per vertex at
-        // the tail (after the layer int if present). Only emitted
-        // for GS-written gl_PointSize; the synth VS's `[[point_
-        // size]]` wiring reads this when draw.hasPointSize.
-        if (ed.hasPointSize) {
-            const GLuint psLoc = layerLoc2 + (ed.hasLayer ? 1u : 0u);
-            TranslatedDrawInfo::VertexAttributeLayout la;
-            la.location = psLoc;
-            la.offset = offset;
-            la.glType = GL_FLOAT;
-            la.glComponentCount = 1;
-            tdi.vertexAttributeLayouts.push_back(la);
-            offset += sizeof(float);
-        }
-        // gl_PrimitiveID attribute layout — one int per vertex
-        // after any layer + pointSize slots, when the GS wrote
-        // BuiltInPrimitiveId on an OUTPUT. Same `glIsInteger =
-        // true` treatment as the layer int.
-        if (ed.hasPrimitiveID) {
-            const GLuint pidLoc = layerLoc2
-                + (ed.hasLayer ? 1u : 0u)
-                + (ed.hasPointSize ? 1u : 0u);
-            TranslatedDrawInfo::VertexAttributeLayout la;
-            la.location = pidLoc;
-            la.offset = offset;
-            la.glType = GL_INT;
-            la.glComponentCount = 1;
-            la.glIsInteger = true;
-            tdi.vertexAttributeLayouts.push_back(la);
-            offset += sizeof(std::int32_t);
-        }
+        // Sprint 7 Phase 1 #6 (CKPT58): no vertex attribute layouts
+        // for the trailing gl_Layer / gl_PointSize / gl_PrimitiveID
+        // slots — synth-VS reads them via direct buffer access. The
+        // per-vertex stride must STILL include their bytes (the
+        // packed buffer layout is unchanged), so advance `offset`
+        // through the trailing slots without pushing layouts. This
+        // keeps `tdi.vertexStride` matching the actual per-vertex
+        // byte count and the manual buffer reads point at the right
+        // position.
+        if (ed.hasLayer)        offset += sizeof(std::int32_t);
+        if (ed.hasPointSize)    offset += sizeof(float);
+        if (ed.hasPrimitiveID)  offset += sizeof(std::int32_t);
     }
 
     populateTranslatedDrawFixedFunctionState(tdi, *state);
