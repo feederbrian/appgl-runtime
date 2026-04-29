@@ -5508,8 +5508,23 @@ fragment float4 appgl_immediate_textured_fs(
                     // for the TCS dispatch (shape matches).
                     [tesEnc setBuffer:indirectBuf offset:0 atIndex:29];
                     // Per-CP input at 22 (from TCS compute output).
-                    if (cpOutBuf != nil)
+                    // Sprint 5 Phase 1 — synth TCS path: TES-only programs
+                    // have a synthesized passthrough TCS that doesn't copy
+                    // VS-output user varyings to cpOutBuf (synth only
+                    // writes gl_Position + tess level defaults). Per GL
+                    // spec §11.2.4, TES-only mode reads VS outputs
+                    // directly as per-CP inputs. Bind vsOutBuf instead of
+                    // cpOutBuf to provide the TES kernel with VS output
+                    // user data. The struct layouts of VS main0_out and
+                    // TES main0_in match because they're both compiled
+                    // from the same interface declarations (SPIRV-Cross
+                    // emits identical layouts when using
+                    // capture_output_to_buffer / raw_buffer_tese_input).
+                    if (info.tessControlSynthesized && vsOutBuf != nil) {
+                        [tesEnc setBuffer:vsOutBuf offset:0 atIndex:22];
+                    } else if (cpOutBuf != nil) {
                         [tesEnc setBuffer:cpOutBuf offset:0 atIndex:22];
+                    }
                     // Per-patch input at 20.
                     if (patchOutBuf != nil)
                         [tesEnc setBuffer:patchOutBuf offset:0 atIndex:20];
