@@ -24466,9 +24466,21 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // pipeline object has a GS program marked emulable, the helper
     // merges the pipeline's VS vertexSpirv + FS fragmentMSL onto
     // the GS program and returns it as the emulation target.
-    GLuint emulProgramName = programName;
+    // Sprint 7 Phase 2 #7 (CKPT59): pass `state->currentProgram()` (not
+    // the local `programName`, which `resolveDrawProgram` may have
+    // overwritten with the pipeline's VS program name) so the helper's
+    // glUseProgram-vs-pipeline disambiguation works correctly. Without
+    // this, the helper hit its `currentProgramName != 0` fast path with
+    // the resolved-VS name and returned the VS program, completely
+    // bypassing the GS-only separable program in the pipeline. The
+    // failing test for this path is `KHR-GL46.geometry_shader.api.
+    // program_pipeline_vs_gs_capture`, which builds a separable VS-only
+    // + GS-only pair joined via glUseProgramStages and calls
+    // glUseProgram(0) before drawing.
+    const GLuint glUseProgramName = impl_->state->currentProgram();
+    GLuint emulProgramName = (glUseProgramName != 0) ? programName : 0;
     GLProgramObject* emulProgram = impl_->resolvePipelineEmulationProgram(
-        programName, emulProgramName);
+        glUseProgramName, emulProgramName);
     // Sprint 3 Step 2 Phase 2 [metal-mesh-GS]: try the mesh-shader path
     // first when the program's tier classifies as MeshShader. Default-on
     // post Path G+H verification (CKPT17 closed Phase 2 with +1 net gain
@@ -24550,6 +24562,41 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 // drop the draw entirely.
             } else if (!ed.diagnostic.empty()) {
                 APPGL_LOG(SHADER, @"drawArrays GS-emul: %s", ed.diagnostic.c_str());
+            }
+        }
+    }
+
+    // Sprint 7 Phase 2 #7 (CKPT59): VS-only TF emulation. When TF is
+    // active, the program has TF varyings, no GS is in the pipeline,
+    // and no tess emulation applies, run the VS on CPU per vertex and
+    // write captures via the shared writeGsXfbAndCheckDiscard helper.
+    // Required for separable VS-only programs (CTS
+    // `program_pipeline_vs_gs_capture` pass 2 detaches the GS via
+    // glUseProgramStages(GS_BIT, 0) and expects subsequent draws to
+    // capture VS outputs to TF).
+    if (program != nullptr &&
+        impl_->transformFeedbackActive &&
+        !program->transformFeedbackVaryingNames.empty() &&
+        emulProgram == nullptr &&
+        !program->geometryEmulated &&
+        !program->tessellationEmulated &&
+        !program->tessellationInterpreted) {
+        const GLuint vaoName2 = impl_->state->boundVertexArray();
+        GLVertexArrayObject* vao = (vaoName2 != 0) ? impl_->objects->vertexArrays().get(vaoName2) : nullptr;
+        if (vao != nullptr && !program->vertexSpirv.empty()) {
+            appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, first);
+            if (ed.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                    return true;
+                }
+                // VS-only-TF without rasterizer-discard: fall through
+                // to the regular Metal-side draw so the FS still
+                // runs. The TF buffer was already populated.
+            } else if (!ed.diagnostic.empty()) {
+                APPGL_LOG(SHADER, @"drawArrays VS-only-TF: %s",
+                          ed.diagnostic.c_str());
             }
         }
     }

@@ -4298,6 +4298,169 @@ std::vector<SamplerVarInfo> collectSamplerVarsFromSpirv(
     return result;
 }
 
+// Sprint 7 Phase 2 #7 (CKPT59): public wrapper around the existing
+// `gatherOutputVaryings` (file-private). Walks a VS SPIR-V module
+// and returns each Output-class user varying's name + scalar width
+// + location + base type — the caller (drawArrays VS-only TF capture
+// path in GLContext.mm) needs this to size the per-vertex packed
+// buffer + match TF varying names against captured outputs.
+std::vector<VsOutputVaryingInfo> discoverVsOutputVaryings(
+    const std::uint32_t* spirv, std::size_t wordCount)
+{
+    std::vector<VsOutputVaryingInfo> result;
+    if (spirv == nullptr || wordCount < 5) return result;
+    SpirvModule mod;
+    if (!mod.parse(spirv, wordCount)) return result;
+    const std::vector<OutputVaryingDesc> raw = gatherOutputVaryings(mod);
+    result.reserve(raw.size());
+    for (const auto& v : raw) {
+        VsOutputVaryingInfo info;
+        info.name = v.name;
+        info.width = v.width;
+        info.location = v.location;
+        info.baseType = v.baseType;
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
+// Sprint 7 Phase 2 #7 (CKPT59): VS-only TF emulation. Runs the VS
+// interpreter once per draw vertex and produces an EmulatedDraw
+// shaped exactly like the GS-emul / tess-emul output (per-vertex
+// flat float buffer = position[4] + concatenated varyings). The
+// caller (drawArrays) feeds the result to `writeGsXfbAndCheckDiscard`
+// to land per-vertex bytes in the bound TF buffers + bump primitive
+// counters.
+//
+// Required for separable VS-only programs joined to a program-pipeline
+// whose GS is detached (CTS `program_pipeline_vs_gs_capture` pass 2)
+// AND for any other VS-only TF surface that doesn't route through GS
+// or tess emulation.
+EmulatedDraw emulateVsOnlyDrawForTf(
+    GLProgramObject& program,
+    const GLVertexArrayObject& vao,
+    GLObjectStore& objects,
+    const GLStateTracker& state,
+    GLenum drawMode,
+    GLsizei count,
+    GLint first,
+    GLsizei instanceCount,
+    GLuint baseInstance)
+{
+    EmulatedDraw d;
+    d.topology = drawMode;
+    d.ok = false;
+    if (program.vertexSpirv.empty()) {
+        d.diagnostic = "emulateVsOnlyDrawForTf: empty VS SPIR-V";
+        return d;
+    }
+    if (program.transformFeedbackVaryingNames.empty()) {
+        d.diagnostic = "emulateVsOnlyDrawForTf: no TF varyings recorded";
+        return d;
+    }
+    // Walk VS SPIR-V outputs once, then filter to TF-captured ones.
+    // Order matches `program.transformFeedbackVaryingNames` so the
+    // TF capture helper's offset arithmetic lands on the right bytes.
+    const std::vector<VsOutputVaryingInfo> allOutputs =
+        discoverVsOutputVaryings(program.vertexSpirv.data(),
+                                 program.vertexSpirv.size());
+    std::vector<VsOutputVaryingInfo> captured;
+    for (const auto& tfName : program.transformFeedbackVaryingNames) {
+        if (tfName == "gl_Position") continue;   // handled by position[4]
+        for (const auto& v : allOutputs) {
+            if (v.name == tfName) {
+                captured.push_back(v);
+                break;
+            }
+        }
+    }
+    // Sum total varying widths to size the per-vertex stride. Even
+    // captured.empty() is valid (e.g. only gl_Position) — in that case
+    // the per-vertex stride is just position[4].
+    std::uint32_t totalVaryingWidth = 0;
+    for (const auto& v : captured) totalVaryingWidth += v.width;
+    const std::size_t fpv = static_cast<std::size_t>(4) + totalVaryingWidth;
+
+    // Populate ed metadata so writeGsXfbAndCheckDiscard finds each TF
+    // varying at the right offset within fpv.
+    d.varyingNames.reserve(captured.size());
+    d.varyingWidths.reserve(captured.size());
+    d.varyingLocations.reserve(captured.size());
+    d.varyingInterp.reserve(captured.size());
+    d.varyingBaseType.reserve(captured.size());
+    for (const auto& v : captured) {
+        d.varyingNames.push_back(v.name);
+        d.varyingWidths.push_back(v.width);
+        d.varyingLocations.push_back(v.location);
+        d.varyingInterp.push_back(0);          // smooth (default; TF doesn't care)
+        d.varyingBaseType.push_back(v.baseType);
+    }
+    d.floatsPerVertex = fpv;
+
+    const GLsizei effectiveInstances = std::max<GLsizei>(1, instanceCount);
+    d.vertexCount = static_cast<std::size_t>(count) *
+                    static_cast<std::size_t>(effectiveInstances);
+    d.expandedVertexData.assign(d.vertexCount * fpv, 0.0f);
+
+    // Per-vertex VS interpretation. runVsForVertex captures position +
+    // named output varyings into an EmulatedVertex; we pack into the
+    // flat per-vertex slot in `expandedVertexData`.
+    EmulatedVertex outVertex;
+    std::string vsDiag;
+    for (GLsizei instanceIdx = 0; instanceIdx < effectiveInstances; ++instanceIdx) {
+        const std::int32_t glInstanceID = instanceIdx;
+        (void)baseInstance;   // VS sees gl_InstanceID = instanceIdx; baseInstance affects VBO fetch only.
+        for (GLsizei vi = 0; vi < count; ++vi) {
+            const std::size_t vboSlot = static_cast<std::size_t>(first + vi);
+            const std::size_t vIdx =
+                static_cast<std::size_t>(instanceIdx) *
+                    static_cast<std::size_t>(count) +
+                static_cast<std::size_t>(vi);
+            outVertex = EmulatedVertex{};
+            outVertex.position[0] = outVertex.position[1] = outVertex.position[2] = 0.0f;
+            outVertex.position[3] = 1.0f;
+            // Build the captured-varying name+width vectors that
+            // runVsForVertex needs; matches our layout so out.varyings
+            // packs in the same order.
+            std::vector<std::string> capturedNames;
+            std::vector<std::uint32_t> capturedWidths;
+            capturedNames.reserve(captured.size());
+            capturedWidths.reserve(captured.size());
+            for (const auto& v : captured) {
+                capturedNames.push_back(v.name);
+                capturedWidths.push_back(v.width);
+            }
+            const bool ok = runVsForVertex(
+                program.vertexSpirv.data(),
+                program.vertexSpirv.size(),
+                program, vao, objects, vboSlot,
+                glInstanceID,
+                capturedNames, capturedWidths,
+                outVertex, &vsDiag);
+            if (!ok) {
+                d.ok = false;
+                d.diagnostic = "VS-only-TF: " + vsDiag;
+                return d;
+            }
+            float* dst = d.expandedVertexData.data() + vIdx * fpv;
+            for (int k = 0; k < 4; ++k) dst[k] = outVertex.position[k];
+            std::size_t cursor = 4;
+            for (std::size_t k = 0; k < outVertex.varyings.size() && cursor < fpv; ++k) {
+                dst[cursor++] = outVertex.varyings[k];
+            }
+        }
+    }
+
+    // Strip-topology decomposition isn't relevant for VS-only TF —
+    // each output vertex is a final vertex, just like the GS POINTS
+    // case. writeGsXfbAndCheckDiscard's vertsPerPrim derives
+    // primitive count from the topology, so leave d.topology as the
+    // caller's drawMode (after we record the input-mode-dependent
+    // vertex count).
+    d.ok = true;
+    return d;
+}
+
 EmulatedDraw emulateGeometryDraw(
     GLProgramObject& program,
     const GLVertexArrayObject& vao,

@@ -226,6 +226,40 @@ struct SamplerVarInfo {
 std::vector<SamplerVarInfo> collectSamplerVarsFromSpirv(
     const std::uint32_t* spirv, std::size_t wordCount);
 
+// Sprint 7 Phase 2 #7 (CKPT59): per-output-varying descriptor for the
+// public `discoverVsOutputVaryings` helper. Lets non-GS callers
+// (drawArrays VS-only TF capture path) discover VS output names + widths
+// + locations without re-parsing SPIR-V themselves.
+struct VsOutputVaryingInfo {
+    std::string name;
+    std::uint32_t width = 0;     // flat scalar count
+    std::uint32_t location = 0;
+    std::uint8_t baseType = 0;   // 0=float, 1=int, 2=uint
+};
+std::vector<VsOutputVaryingInfo> discoverVsOutputVaryings(
+    const std::uint32_t* spirv, std::size_t wordCount);
+
+// Sprint 7 Phase 2 #7 (CKPT59): VS-only TF capture entry point.
+// Builds an EmulatedDraw whose `expandedVertexData` mirrors the VS's
+// per-vertex outputs (gl_Position + named varyings) packed flat. The
+// caller then feeds the result to writeGsXfbAndCheckDiscard for actual
+// TF buffer writes — same downstream pipeline as the GS-emul and tess-
+// emul paths. Required for separable VS-only programs joined to a
+// pipeline whose GS is detached (see CTS
+// `KHR-GL46.geometry_shader.api.program_pipeline_vs_gs_capture` pass 2)
+// AND for any future native-GL VS-only TF test that doesn't go through
+// GS or tess emulation.
+EmulatedDraw emulateVsOnlyDrawForTf(
+    GLProgramObject& program,
+    const GLVertexArrayObject& vao,
+    GLObjectStore& objects,
+    const GLStateTracker& state,
+    GLenum drawMode,
+    GLsizei count,
+    GLint first,
+    GLsizei instanceCount = 1,
+    GLuint baseInstance = 0);
+
 // Emulate a single drawArrays/drawElements call for a program that
 // has a GS stage. Returns an `EmulatedDraw` whose `.ok` flag tells
 // the caller whether the CPU path produced a usable expanded-vertex
