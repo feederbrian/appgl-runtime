@@ -1,8 +1,8 @@
 diff --git a/main.cpp b/main.cpp
-index 7dc5404d..27ebc477 100644
+index 7dc5404d..240aba6d 100644
 --- a/main.cpp
 +++ b/main.cpp
-@@ -665,6 +665,16 @@ struct CLIArguments
+@@ -665,6 +665,17 @@ struct CLIArguments
  	bool msl_raw_buffer_tese_input = false;
  	bool msl_multi_patch_workgroup = false;
  	bool msl_vertex_for_tessellation = false;
@@ -16,10 +16,11 @@ index 7dc5404d..27ebc477 100644
 +	bool msl_force_threads_per_grid_for_stage_input_size = false;
 +	bool msl_use_full_precision_tess_level_buffer = false;
 +	uint32_t msl_shader_tess_factor_buffer_full_index = 23;
++	bool msl_input_emission_in_call_order = false;
  	uint32_t msl_additional_fixed_sample_mask = 0xffffffff;
  	bool msl_arrayed_subpass_input = false;
  	uint32_t msl_r32ui_linear_texture_alignment = 4;
-@@ -943,6 +953,27 @@ static void print_help_msl()
+@@ -943,6 +954,29 @@ static void print_help_msl()
  	                "\t\tIn a future version of SPIRV-Cross, this will become the default.\n"
  	                "\t[--msl-vertex-for-tessellation]:\n\t\tWhen handling a vertex shader, marks it as one that will be used with a new-style tessellation control shader.\n"
  	                "\t\tThe vertex shader is output to MSL as a compute kernel which outputs vertices to the buffer in the order they are received, rather than in index order as with --msl-capture-output normally.\n"
@@ -44,10 +45,12 @@ index 7dc5404d..27ebc477 100644
 +	                "\t[--msl-use-full-precision-tess-level-buffer]:\n\t\t[AppGL fork] TES-as-compute reads gl_TessLevelOuter / gl_TessLevelInner from a full-precision `device const float*` shadow buffer instead of Metal's half-precision MTLQuadTessellationFactorsHalf API.\n"
 +	                "\t\tPer GL 4.6 §11.2.2, tess level values are float; Metal's half-precision API truncates information at write time. Layout: outer levels first, then inner levels, per primitive (stride = 4 for triangles, 6 for quads, 2 for isolines). Default off.\n"
 +	                "\t[--msl-tess-factor-buffer-full-index <index>]:\n\t\t[AppGL fork] Buffer slot for the full-precision tess factor shadow buffer. Default 23 (dynamic_offsets_buffer_index, unused at TES-compute dispatch).\n"
++	                "\t[--msl-input-emission-in-call-order]:\n\t\t[AppGL fork] Order `main0_in` struct members by the orchestrator's `add_msl_shader_input` call sequence rather than by Location ascending.\n"
++	                "\t\tFor cross-stage byte alignment between TCS-out and TES-in when their natural IR-walk orders disagree (Path J' Option E.4 — gate 21). Default off; non-AppGL consumers retain `LocationThenBuiltInType` emission.\n"
  	                "\t[--msl-additional-fixed-sample-mask <mask>]:\n"
  	                "\t\tSet an additional fixed sample mask. If the shader outputs a sample mask, then the final sample mask will be a bitwise AND of the two.\n"
  	                "\t[--msl-arrayed-subpass-input]:\n\t\tAssume that images of dimension SubpassData have multiple layers. Layered input attachments are accessed relative to BuiltInLayer.\n"
-@@ -1283,6 +1314,23 @@ static string compile_iteration(const CLIArguments &args, std::vector<uint32_t>
+@@ -1283,6 +1317,25 @@ static string compile_iteration(const CLIArguments &args, std::vector<uint32_t>
  		msl_opts.raw_buffer_tese_input = args.msl_raw_buffer_tese_input;
  		msl_opts.multi_patch_workgroup = args.msl_multi_patch_workgroup;
  		msl_opts.vertex_for_tessellation = args.msl_vertex_for_tessellation;
@@ -68,10 +71,12 @@ index 7dc5404d..27ebc477 100644
 +		    args.msl_use_full_precision_tess_level_buffer;
 +		msl_opts.shader_tess_factor_buffer_full_index =
 +		    args.msl_shader_tess_factor_buffer_full_index;
++		msl_opts.input_emission_in_call_order =
++		    args.msl_input_emission_in_call_order;
  		msl_opts.additional_fixed_sample_mask = args.msl_additional_fixed_sample_mask;
  		msl_opts.arrayed_subpass_input = args.msl_arrayed_subpass_input;
  		msl_opts.r32ui_linear_texture_alignment = args.msl_r32ui_linear_texture_alignment;
-@@ -1872,6 +1920,26 @@ static int main_inner(int argc, char *argv[])
+@@ -1872,6 +1925,28 @@ static int main_inner(int argc, char *argv[])
  	cbs.add("--msl-raw-buffer-tese-input", [&args](CLIParser &) { args.msl_raw_buffer_tese_input = true; });
  	cbs.add("--msl-multi-patch-workgroup", [&args](CLIParser &) { args.msl_multi_patch_workgroup = true; });
  	cbs.add("--msl-vertex-for-tessellation", [&args](CLIParser &) { args.msl_vertex_for_tessellation = true; });
@@ -95,14 +100,16 @@ index 7dc5404d..27ebc477 100644
 +	        [&args](CLIParser &) { args.msl_use_full_precision_tess_level_buffer = true; });
 +	cbs.add("--msl-tess-factor-buffer-full-index",
 +	        [&args](CLIParser &parser) { args.msl_shader_tess_factor_buffer_full_index = parser.next_uint(); });
++	cbs.add("--msl-input-emission-in-call-order",
++	        [&args](CLIParser &) { args.msl_input_emission_in_call_order = true; });
  	cbs.add("--msl-additional-fixed-sample-mask",
  	        [&args](CLIParser &parser) { args.msl_additional_fixed_sample_mask = parser.next_hex_uint(); });
  	cbs.add("--msl-arrayed-subpass-input", [&args](CLIParser &) { args.msl_arrayed_subpass_input = true; });
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
-index f98f84de..5e817019 100644
+index f98f84de..0e4bbcb7 100644
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
-@@ -58,7 +58,65 @@ CompilerMSL::CompilerMSL(ParsedIR &&ir_)
+@@ -58,7 +58,81 @@ CompilerMSL::CompilerMSL(ParsedIR &&ir_)
  
  void CompilerMSL::add_msl_shader_input(const MSLShaderInterfaceVariable &si)
  {
@@ -128,23 +135,39 @@ index f98f84de..5e817019 100644
 +	// member).
 +	static constexpr uint32_t synthetic_loc_threshold = 0xE0000000u;
 +
-+	// Path J' Option E.3 (Sprint 6 Phase 1 — paired Class 2A + 2C):
-+	// record insertion order BEFORE the Option A1 dedupe `return`.
++	// Path J' Option E.3 (Sprint 6 Phase 1 — paired Class 2A + 2C),
++	// widened by Option E.4 (CKPT39): record insertion order BEFORE
++	// the Option A1 dedupe `return`.
++	//
 +	// The orchestrator calls `add_msl_shader_input` in cross-stage
 +	// emission order (TCS-out struct field layout). For monolithic-
 +	// program TES, the natural-emission IR walk would otherwise lay
 +	// out main0_in members in TES IR-ID order, which can differ from
 +	// TCS-out struct order — leading to wrong byte offsets when TES
-+	// reads the cross-stage buffer (CKPT34 surfaced precisely this:
++	// reads the cross-stage buffer (CKPT34 surfaced this:
 +	// TCS out_uint(5)/out_struct(8) vs TES out_struct(5)/out_uint(6)).
 +	//
-+	// Recording happens for EVERY synthetic-range call regardless of
-+	// dedupe outcome — the orchestrator's intended layout position is
-+	// determined by call sequence, not by whether the synthetic-keyed
-+	// map entry survives Pass 3 dedupe. Uniqueness check on push
-+	// avoids accidental duplicates when an orchestrator reissues the
-+	// same registration during recompile dance.
-+	if (!si.name.empty() && si.location >= synthetic_loc_threshold)
++	// Option E.4 widens recording to ALL non-empty-name calls
++	// regardless of synthetic-range. CKPT39 found that the production
++	// β orchestrator passes natural-range locations when the source
++	// has explicit Location decoration (the typical case), and only
++	// escalates to synthetic-range when natural is absent. E.3's
++	// synthetic-range gate therefore captured 0% of typical production
++	// calls — standalone rig PASS, integration FAIL.
++	//
++	// Recording is now uniform (Class 2A discipline — preamble-time
++	// uniform record, no consumer coordination required for
++	// recording itself). Emission gating is the consumer-coordinated
++	// side: `msl_options.input_emission_in_call_order` opts in via
++	// the `MemberSorter::InsertionOrderThenLocationThenBuiltInType`
++	// aspect; default-off preserves `LocationThenBuiltInType` emission
++	// for the public C API consumers (MoltenVK, vkd3d-proton, etc.)
++	// who register inputs without expecting call-order emission.
++	//
++	// Recording widening is observably a no-op when the emission flag
++	// is unset: the list is populated but never consulted by
++	// MemberSorter.
++	if (!si.name.empty())
 +	{
 +		bool already_recorded = false;
 +		for (const auto &existing_name : inputs_by_location_insertion_order)
@@ -169,7 +192,7 @@ index f98f84de..5e817019 100644
  	if (si.builtin != BuiltInMax && !inputs_by_builtin.count(si.builtin))
  		inputs_by_builtin[si.builtin] = si;
  }
-@@ -70,6 +128,149 @@ void CompilerMSL::add_msl_shader_output(const MSLShaderInterfaceVariable &so)
+@@ -70,6 +144,149 @@ void CompilerMSL::add_msl_shader_output(const MSLShaderInterfaceVariable &so)
  		outputs_by_builtin[so.builtin] = so;
  }
  
@@ -319,7 +342,7 @@ index f98f84de..5e817019 100644
  void CompilerMSL::add_msl_resource_binding(const MSLResourceBinding &binding)
  {
  	StageSetBinding tuple = { binding.stage, binding.desc_set, binding.binding };
-@@ -266,7 +467,12 @@ void CompilerMSL::build_implicit_builtins()
+@@ -266,7 +483,12 @@ void CompilerMSL::build_implicit_builtins()
  	bool need_dispatch_base =
  	    msl_options.dispatch_base && get_execution_model() == ExecutionModelGLCompute &&
  	    (active_input_builtins.get(BuiltInWorkgroupId) || active_input_builtins.get(BuiltInGlobalInvocationId));
@@ -333,7 +356,7 @@ index f98f84de..5e817019 100644
  	bool need_vertex_base_params =
  	    need_grid_params &&
  	    (active_input_builtins.get(BuiltInVertexId) || active_input_builtins.get(BuiltInVertexIndex) ||
-@@ -1655,7 +1861,12 @@ void CompilerMSL::emit_entry_point_declarations()
+@@ -1655,7 +1877,12 @@ void CompilerMSL::emit_entry_point_declarations()
  	}
  
  	// Holds SetMeshOutputsEXT information. Threadgroup since first thread wins.
@@ -347,7 +370,7 @@ index f98f84de..5e817019 100644
  		statement("threadgroup uint2 spvMeshSizes;");
  }
  
-@@ -1731,6 +1942,50 @@ string CompilerMSL::compile()
+@@ -1731,6 +1958,50 @@ string CompilerMSL::compile()
  
  	build_function_control_flow_graphs_and_analyze();
  	update_active_builtins();
@@ -398,7 +421,7 @@ index f98f84de..5e817019 100644
  	analyze_image_and_sampler_usage();
  	analyze_sampled_image_usage();
  	analyze_interlocked_resource_usage();
-@@ -1776,12 +2031,46 @@ string CompilerMSL::compile()
+@@ -1776,12 +2047,46 @@ string CompilerMSL::compile()
  	if (builtin_frag_depth_id)
  		add_active_interface_variable(builtin_frag_depth_id);
  
@@ -445,7 +468,7 @@ index f98f84de..5e817019 100644
  	}
  	else
  	{
-@@ -3741,11 +4030,31 @@ void CompilerMSL::add_tess_level_input(const std::string &base_ref, const std::s
+@@ -3741,11 +4046,31 @@ void CompilerMSL::add_tess_level_input(const std::string &base_ref, const std::s
  	vars_needing_early_declaration.push_back(var.self);
  	bool triangles = is_tessellating_triangles();
  
@@ -477,7 +500,7 @@ index f98f84de..5e817019 100644
  			    statement(var_name, "[0] = ", base_ref, ".", mbr_name, "[0];");
  			    statement(var_name, "[1] = ", base_ref, ".", mbr_name, "[1];");
  			    statement(var_name, "[2] = ", base_ref, ".", mbr_name, "[2];");
-@@ -3756,6 +4065,14 @@ void CompilerMSL::add_tess_level_input(const std::string &base_ref, const std::s
+@@ -3756,6 +4081,14 @@ void CompilerMSL::add_tess_level_input(const std::string &base_ref, const std::s
  	else
  	{
  		entry_func.fixup_hooks_in.push_back([=]() {
@@ -492,7 +515,7 @@ index f98f84de..5e817019 100644
  			if (triangles)
  			{
  				if (msl_options.raw_buffer_tese_input)
-@@ -3770,6 +4087,7 @@ void CompilerMSL::add_tess_level_input(const std::string &base_ref, const std::s
+@@ -3770,6 +4103,7 @@ void CompilerMSL::add_tess_level_input(const std::string &base_ref, const std::s
  			}
  		});
  	}
@@ -500,7 +523,7 @@ index f98f84de..5e817019 100644
  }
  
  bool CompilerMSL::variable_storage_requires_stage_io(StorageClass storage) const
-@@ -3966,6 +4284,34 @@ void CompilerMSL::add_variable_to_interface_block(StorageClass storage, const st
+@@ -3966,6 +4300,34 @@ void CompilerMSL::add_variable_to_interface_block(StorageClass storage, const st
  					is_builtin = is_member_builtin(var_type, mbr_idx, &builtin);
  					auto &mbr_type = get<SPIRType>(var_type.member_types[mbr_idx]);
  
@@ -535,7 +558,7 @@ index f98f84de..5e817019 100644
  					if (storage == StorageClassOutput && is_stage_output_block_member_masked(var, mbr_idx, meta.strip_array))
  					{
  						location = UINT32_MAX; // Skip this member and resolve location again on next var member
-@@ -4001,13 +4347,14 @@ void CompilerMSL::add_variable_to_interface_block(StorageClass storage, const st
+@@ -4001,13 +4363,14 @@ void CompilerMSL::add_variable_to_interface_block(StorageClass storage, const st
  							set_decoration(var_id, DecorationBuiltIn, builtin);
  						}
  					}
@@ -551,7 +574,7 @@ index f98f84de..5e817019 100644
  						// Clip/CullDistance always need to be declared as user attributes.
  						if (builtin == BuiltInClipDistance || builtin == BuiltInCullDistance)
  							is_builtin = false;
-@@ -4184,6 +4531,15 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
+@@ -4184,6 +4547,15 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
  	// Accumulate the variables that should appear in the interface struct.
  	SmallVector<SPIRVariable *> vars;
  	bool incl_builtins = storage == StorageClassOutput || is_tessellation_shader();
@@ -567,7 +590,7 @@ index f98f84de..5e817019 100644
  	bool has_seen_barycentric = false;
  
  	InterfaceBlockMeta meta;
-@@ -4416,9 +4772,33 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
+@@ -4416,9 +4788,33 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
  				entry_func.fixup_hooks_in.push_back(
  				    [=]()
  				    {
@@ -604,7 +627,7 @@ index f98f84de..5e817019 100644
  				    });
  			}
  			break;
-@@ -4471,11 +4851,28 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
+@@ -4471,11 +4867,28 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
  						// We zero-base the InstanceID & VertexID variables for HLSL emulation elsewhere, so don't do it twice
  						if (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation)
  						{
@@ -634,7 +657,7 @@ index f98f84de..5e817019 100644
  						else if (msl_options.enable_base_index_zero)
  						{
  							statement("device ", to_name(ir.default_entry_point), "_", ib_var_ref, "& ", ib_var_ref,
-@@ -4553,6 +4950,19 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
+@@ -4553,6 +4966,19 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
  	{
  		bool strip_array = (is_tesc_shader() || (is_tese_shader() && storage == StorageClassInput)) && !patch;
  
@@ -654,7 +677,7 @@ index f98f84de..5e817019 100644
  		// Fixing up flattened stores in TESC is impossible since the memory is group shared either via
  		// device (not masked) or threadgroup (masked) storage classes and it's race condition city.
  		meta.strip_array = strip_array;
-@@ -4566,6 +4976,12 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
+@@ -4566,6 +4992,12 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
  	{
  		// For tessellation inputs, add all outputs from the previous stage to ensure
  		// the struct containing them is the correct size and layout.
@@ -667,7 +690,7 @@ index f98f84de..5e817019 100644
  		for (auto &input : inputs_by_location)
  		{
  			if (location_inputs_in_use.count(input.first.location) != 0)
-@@ -4730,8 +5146,26 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
+@@ -4730,8 +5162,32 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
  			set_member_decoration(ib_type.self, ib_mbr_idx, DecorationSample);
  	}
  
@@ -675,19 +698,25 @@ index f98f84de..5e817019 100644
 -	MemberSorter member_sorter(ib_type, ir.meta[ib_type_id], MemberSorter::LocationThenBuiltInType);
 +	// Sort the members of the structure by their locations (or by the
 +	// orchestrator's `add_msl_shader_input` call sequence when that
-+	// signal is present — see Path J' Option E.3).
++	// signal is present and explicitly opted in via
++	// `msl_options.input_emission_in_call_order` — see Path J'
++	// Option E.3 / Option E.4).
 +	//
-+	// Path J' Option E.3 (Sprint 6 Phase 1 — Class 2C range-gated):
-+	// when the orchestrator registered synthetic-range names via
-+	// `add_msl_shader_input`, the orchestrator's call sequence is the
-+	// authoritative cross-stage emission order (e.g., TCS-out struct
-+	// field layout that TES-in must match for byte alignment). The
-+	// `InsertionOrderThenLocationThenBuiltInType` aspect honors that
-+	// ordering for input interface blocks; for outputs and for inputs
-+	// without orchestrator wiring, fall through to the original
-+	// `LocationThenBuiltInType` aspect.
++	// Path J' Option E.4 (Sprint 6 Phase 1 — paired Class 2A + 2C
++	// extension after CKPT39 rig-vs-integration symmetry violation):
++	// gate the new sort aspect on an explicit option flag rather than
++	// the implicit "list non-empty" condition E.3 used. CKPT39 surfaced
++	// that recording widened by E.4 captures all add_msl_shader_input
++	// calls (both natural-range and synthetic-range), but emission must
++	// stay opt-in to preserve back-compat for public C API consumers
++	// (MoltenVK, vkd3d-proton) who register inputs via the same path
++	// without expecting call-order emission. AppGL fork orchestrators
++	// set `input_emission_in_call_order = true` to engage the new
++	// aspect; default-off preserves `LocationThenBuiltInType` emission.
 +	MemberSorter::SortAspect chosen_aspect = MemberSorter::LocationThenBuiltInType;
-+	if (storage == StorageClassInput && !inputs_by_location_insertion_order.empty())
++	if (msl_options.input_emission_in_call_order &&
++	    storage == StorageClassInput &&
++	    !inputs_by_location_insertion_order.empty())
 +		chosen_aspect = MemberSorter::InsertionOrderThenLocationThenBuiltInType;
 +
 +	MemberSorter member_sorter(ib_type, ir.meta[ib_type_id], chosen_aspect);
@@ -696,7 +725,7 @@ index f98f84de..5e817019 100644
  	member_sorter.sort();
  
  	// The member indices were saved to the original variables, but after the members
-@@ -4858,6 +5292,414 @@ uint32_t CompilerMSL::add_meshlet_block(bool per_primitive)
+@@ -4858,6 +5314,414 @@ uint32_t CompilerMSL::add_meshlet_block(bool per_primitive)
  	return next_id;
  }
  
@@ -1111,7 +1140,7 @@ index f98f84de..5e817019 100644
  // Ensure that the type is compatible with the builtin.
  // If it is, simply return the given type ID.
  // Otherwise, create a new type, and return it's ID.
-@@ -8400,21 +9242,48 @@ void CompilerMSL::emit_resources()
+@@ -8400,21 +9264,48 @@ void CompilerMSL::emit_resources()
  	emit_interface_block(stage_in_var_id);
  	emit_interface_block(patch_stage_in_var_id);
  
@@ -1168,7 +1197,7 @@ index f98f84de..5e817019 100644
  		statement("");
  	}
  }
-@@ -10130,6 +10999,63 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+@@ -10130,6 +11021,63 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
  		if (is_out_of_bounds_tessellation_level(ops[0]))
  			break;
  
@@ -1232,7 +1261,7 @@ index f98f84de..5e817019 100644
  		if (needs_frag_discard_checks() &&
  		    (type.storage == StorageClassStorageBuffer || type.storage == StorageClassUniform))
  		{
-@@ -10153,6 +11079,91 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+@@ -10153,6 +11101,91 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
  		if (has_decoration(ops[0], DecorationBuiltIn) && get_decoration(ops[0], DecorationBuiltIn) == BuiltInPointSize)
  			writes_to_point_size = true;
  
@@ -1324,7 +1353,7 @@ index f98f84de..5e817019 100644
  		break;
  	}
  
-@@ -10691,6 +11702,50 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+@@ -10691,6 +11724,50 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
  		break;
  	}
  
@@ -1375,7 +1404,7 @@ index f98f84de..5e817019 100644
  	case OpAssumeTrueKHR:
  	{
  		auto condition = ops[0];
-@@ -13794,8 +14849,20 @@ void CompilerMSL::emit_struct_member(const SPIRType &type, uint32_t member_type_
+@@ -13794,8 +14871,20 @@ void CompilerMSL::emit_struct_member(const SPIRType &type, uint32_t member_type_
  	{
  		if (!has_active_builtin(builtin, StorageClassOutput) && !has_active_builtin(builtin, StorageClassInput))
  		{
@@ -1398,7 +1427,7 @@ index f98f84de..5e817019 100644
  		}
  	}
  
-@@ -13862,7 +14929,13 @@ string CompilerMSL::member_attribute_qualifier(const SPIRType &type, uint32_t in
+@@ -13862,7 +14951,13 @@ string CompilerMSL::member_attribute_qualifier(const SPIRType &type, uint32_t in
  			return string(" [[attribute(") + convert_to_string(locn) + ")]]";
  	}
  
@@ -1413,7 +1442,7 @@ index f98f84de..5e817019 100644
  	                                 (execution.model == ExecutionModelVertex && !msl_options.vertex_for_tessellation);
  
  	// Vertex, mesh and tessellation evaluation function outputs
-@@ -13921,6 +14994,19 @@ string CompilerMSL::member_attribute_qualifier(const SPIRType &type, uint32_t in
+@@ -13921,6 +15016,19 @@ string CompilerMSL::member_attribute_qualifier(const SPIRType &type, uint32_t in
  		return "";
  	}
  
@@ -1433,7 +1462,7 @@ index f98f84de..5e817019 100644
  	// Tessellation control function inputs
  	if (is_tesc_shader() && type.storage == StorageClassInput)
  	{
-@@ -14321,6 +15407,12 @@ bool CompilerMSL::entry_point_returns_stage_output() const
+@@ -14321,6 +15429,12 @@ bool CompilerMSL::entry_point_returns_stage_output() const
  {
  	if (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation)
  		return false;
@@ -1446,7 +1475,7 @@ index f98f84de..5e817019 100644
  	bool ep_should_return_output = !get_is_rasterization_disabled();
  	return stage_out_var_id && ep_should_return_output;
  }
-@@ -14356,9 +15448,24 @@ string CompilerMSL::func_type_decl(SPIRType &type)
+@@ -14356,9 +15470,24 @@ string CompilerMSL::func_type_decl(SPIRType &type)
  	case ExecutionModelTessellationEvaluation:
  		if (!msl_options.supports_msl_version(1, 2))
  			SPIRV_CROSS_THROW("Tessellation requires Metal 1.2.");
@@ -1473,7 +1502,7 @@ index f98f84de..5e817019 100644
  			entry_type = join("[[ patch(", is_tessellating_triangles() ? "triangle" : "quad", ") ]] vertex");
  		else
  			entry_type = join("[[ patch(", is_tessellating_triangles() ? "triangle" : "quad", ", ",
-@@ -14383,6 +15490,20 @@ string CompilerMSL::func_type_decl(SPIRType &type)
+@@ -14383,6 +15512,20 @@ string CompilerMSL::func_type_decl(SPIRType &type)
  	case ExecutionModelTaskEXT:
  		entry_type = "[[object]]";
  		break;
@@ -1494,7 +1523,7 @@ index f98f84de..5e817019 100644
  	default:
  		entry_type = "unknown";
  		break;
-@@ -14403,7 +15524,17 @@ bool CompilerMSL::is_tese_shader() const
+@@ -14403,7 +15546,17 @@ bool CompilerMSL::is_tese_shader() const
  
  bool CompilerMSL::is_mesh_shader() const
  {
@@ -1513,7 +1542,7 @@ index f98f84de..5e817019 100644
  }
  
  bool CompilerMSL::uses_explicit_early_fragment_test()
-@@ -14618,7 +15749,9 @@ string CompilerMSL::entry_point_arg_stage_in()
+@@ -14618,7 +15771,9 @@ string CompilerMSL::entry_point_arg_stage_in()
  	string decl;
  
  	if ((is_tesc_shader() && msl_options.multi_patch_workgroup) ||
@@ -1524,7 +1553,7 @@ index f98f84de..5e817019 100644
  		return decl;
  
  	// Stage-in structure
-@@ -14644,6 +15777,24 @@ string CompilerMSL::entry_point_arg_stage_in()
+@@ -14644,6 +15799,24 @@ string CompilerMSL::entry_point_arg_stage_in()
  // and false for builtins that should be passed or calculated some other way.
  bool CompilerMSL::is_direct_input_builtin(BuiltIn bi_type)
  {
@@ -1549,7 +1578,7 @@ index f98f84de..5e817019 100644
  	switch (bi_type)
  	{
  	// Vertex function in
-@@ -14789,7 +15940,14 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
+@@ -14789,7 +15962,14 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
  			if (!ep_args.empty())
  				ep_args += ", ";
  
@@ -1565,7 +1594,7 @@ index f98f84de..5e817019 100644
  		}
  	});
  
-@@ -14814,10 +15972,32 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
+@@ -14814,10 +15994,32 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
  		{
  			if (!ep_args.empty())
  				ep_args += ", ";
@@ -1599,7 +1628,7 @@ index f98f84de..5e817019 100644
  		if (is_tesc_shader())
  		{
  			if (!ep_args.empty())
-@@ -14834,6 +16014,25 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
+@@ -14834,6 +16036,25 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
  			    join("device uint* spvIndirectParams [[buffer(", msl_options.indirect_params_buffer_index, ")]]");
  		}
  
@@ -1625,7 +1654,7 @@ index f98f84de..5e817019 100644
  		if (get_execution_model() == ExecutionModelVertex && msl_options.vertex_for_tessellation &&
  		    (active_input_builtins.get(BuiltInVertexIndex) || active_input_builtins.get(BuiltInVertexId)) &&
  		    msl_options.vertex_index_type != Options::IndexType::None)
-@@ -14875,6 +16074,20 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
+@@ -14875,6 +16096,20 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
  			ep_args += join("device ", get_tess_factor_struct_name(), "* ", tess_factor_buffer_var_name, " [[buffer(",
  			                convert_to_string(msl_options.shader_tess_factor_buffer_index), ")]]");
  
@@ -1646,7 +1675,7 @@ index f98f84de..5e817019 100644
  			// Initializer for tess factors must be handled specially since it's never declared as a normal variable.
  			uint32_t outer_factor_initializer_id = 0;
  			uint32_t inner_factor_initializer_id = 0;
-@@ -14965,6 +16178,21 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
+@@ -14965,6 +16200,21 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
  				ep_args += ", ";
  			ep_args += join("const device ", get_tess_factor_struct_name(), "* ", tess_factor_buffer_var_name,
  			                " [[buffer(", convert_to_string(msl_options.shader_tess_factor_buffer_index), ")]]");
@@ -1668,7 +1697,7 @@ index f98f84de..5e817019 100644
  		}
  
  		if (stage_in_var_id)
-@@ -14978,6 +16206,26 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
+@@ -14978,6 +16228,26 @@ void CompilerMSL::entry_point_args_builtin(string &ep_args)
  
  	if (is_mesh_shader())
  	{
@@ -1695,7 +1724,7 @@ index f98f84de..5e817019 100644
  		if (!ep_args.empty())
  			ep_args += ", ";
  		ep_args += join("spvMesh_t spvMesh");
-@@ -15419,14 +16667,370 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
+@@ -15419,14 +16689,370 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
  			          " >= ", to_expression(builtin_stage_input_size_id), "))");
  			statement("    return;");
  		});
@@ -2070,7 +2099,7 @@ index f98f84de..5e817019 100644
  	}
  
  	// Look for sampled images and buffer. Add hooks to set up the swizzle constants or array lengths.
-@@ -15547,6 +17151,21 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
+@@ -15547,6 +17173,21 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
  			case BuiltInPrimitiveId:
  				// This is natively supported by fragment and tessellation evaluation shaders.
  				// In tessellation control shaders, this is direct-mapped without multi-patch workgroups.
@@ -2092,7 +2121,7 @@ index f98f84de..5e817019 100644
  				if (!is_tesc_shader() || !msl_options.multi_patch_workgroup)
  					break;
  
-@@ -15561,10 +17180,33 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
+@@ -15561,10 +17202,33 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
  				{
  					if (msl_options.raw_buffer_tese_input)
  					{
@@ -2128,7 +2157,7 @@ index f98f84de..5e817019 100644
  						    });
  					}
  					else
-@@ -15585,6 +17227,27 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
+@@ -15585,6 +17249,27 @@ void CompilerMSL::fix_up_shader_inputs_outputs()
  				}
  				break;
  			case BuiltInTessCoord:
@@ -2156,7 +2185,7 @@ index f98f84de..5e817019 100644
  				if (get_entry_point().flags.get(ExecutionModeQuads))
  				{
  					// The entry point will only have a float2 TessCoord variable.
-@@ -17549,6 +19212,25 @@ string CompilerMSL::image_type_glsl(const SPIRType &type, uint32_t id, bool memb
+@@ -17549,6 +19234,25 @@ string CompilerMSL::image_type_glsl(const SPIRType &type, uint32_t id, bool memb
  
  				img_type_name += "write";
  			}
@@ -2182,7 +2211,7 @@ index f98f84de..5e817019 100644
  			else
  			{
  				has_access_qualifier = false;
-@@ -18938,6 +20620,138 @@ void CompilerMSL::analyze_sampled_image_usage()
+@@ -18938,6 +20642,138 @@ void CompilerMSL::analyze_sampled_image_usage()
  	}
  }
  
@@ -2321,7 +2350,7 @@ index f98f84de..5e817019 100644
  void CompilerMSL::analyze_workgroup_variables()
  {
  	ir.for_each_typed_id<SPIRVariable>([&](uint32_t, SPIRVariable &var) {
-@@ -19585,6 +21399,48 @@ bool CompilerMSL::MemberSorter::operator()(uint32_t mbr_idx1, uint32_t mbr_idx2)
+@@ -19585,6 +21421,48 @@ bool CompilerMSL::MemberSorter::operator()(uint32_t mbr_idx1, uint32_t mbr_idx2)
  		else
  			return mbr_meta1.location < mbr_meta2.location;
  	}
@@ -2371,7 +2400,7 @@ index f98f84de..5e817019 100644
  		return mbr_meta1.offset < mbr_meta2.offset;
  }
 diff --git a/spirv_msl.hpp b/spirv_msl.hpp
-index 1a28e058..df9af313 100644
+index 1a28e058..c207f32a 100644
 --- a/spirv_msl.hpp
 +++ b/spirv_msl.hpp
 @@ -82,6 +82,48 @@ struct MSLShaderInterfaceVariable
@@ -2423,7 +2452,7 @@ index 1a28e058..df9af313 100644
  };
  
  // Matches the binding index of a MSL resource for a binding within a descriptor set.
-@@ -428,6 +470,245 @@ public:
+@@ -428,6 +470,278 @@ public:
  		// to index the output buffer.
  		bool vertex_for_tessellation = false;
  
@@ -2666,10 +2695,43 @@ index 1a28e058..df9af313 100644
 +		bool use_full_precision_tess_level_buffer = false;
 +		uint32_t shader_tess_factor_buffer_full_index = 23;
 +
++		// Path J' Option E.4 (Sprint 6 Phase 1 — paired Class 2A + 2C
++		// extension after CKPT39 rig-vs-integration symmetry violation):
++		// when set, `add_interface_block(StorageClassInput)` orders
++		// `main0_in` members by the orchestrator's `add_msl_shader_input`
++		// call sequence rather than by Location ascending. The flag is
++		// the explicit opt-in gate for the
++		// `MemberSorter::InsertionOrderThenLocationThenBuiltInType`
++		// sort aspect introduced in Option E.3 (gate 20).
++		//
++		// Why a flag (vs unconditional widening): the public C API
++		// `spvc_compiler_msl_add_shader_input` is used by upstream
++		// consumers (MoltenVK, vkd3d-proton) who register their inputs
++		// via this path. Unconditional widening would change emission
++		// order for any such consumer. Default-off preserves
++		// `LocationThenBuiltInType` emission for existing consumers;
++		// AppGL fork orchestrators set this flag explicitly to opt
++		// into call-order emission.
++		//
++		// Why explicit flag (vs synthetic-range gate from E.3): CKPT39
++		// surfaced that AppGL-W's β orchestrator passes natural-range
++		// locations when the TCS sibling has explicit Location decoration
++		// (the typical case — `layout(location=N)` qualifiers, glslc-
++		// assigned locations in monolithic programs), and only escalates
++		// to synthetic-range (0xE0000000+id) when natural location is
++		// absent. E.3's synthetic-range-gated recording therefore captured
++		// 0% of typical production calls, leaving the insertion-order
++		// list empty and the new aspect dormant — standalone rig PASS,
++		// integration FAIL. The flag makes the gate explicit + caller-
++		// agnostic. Recording (Class 2A) widens to all non-empty-name
++		// calls regardless of range; emission (Class 2C) gates on the
++		// flag.
++		bool input_emission_in_call_order = false;
++
  		// Assume that SubpassData images have multiple layers. Layered input attachments
  		// are addressed relative to the Layer output from the vertex pipeline. This option
  		// has no effect with multiview, since all input attachments are assumed to be layered
-@@ -666,6 +947,29 @@ public:
+@@ -666,6 +980,29 @@ public:
  	// calling ::compile() if the location were used by the MSL code.
  	void add_msl_shader_output(const MSLShaderInterfaceVariable &output);
  
@@ -2699,7 +2761,7 @@ index 1a28e058..df9af313 100644
  	// resource is a resource binding to indicate the MSL buffer,
  	// texture or sampler index to use for a particular SPIR-V description set
  	// and binding. If resource bindings are provided,
-@@ -997,6 +1301,58 @@ protected:
+@@ -997,6 +1334,58 @@ protected:
  	uint32_t add_interface_block_pointer(uint32_t ib_var_id, StorageClass storage);
  	uint32_t add_meshlet_block(bool per_primitive);
  
@@ -2758,7 +2820,7 @@ index 1a28e058..df9af313 100644
  	struct InterfaceBlockMeta
  	{
  		struct LocationMeta
-@@ -1218,6 +1574,28 @@ protected:
+@@ -1218,6 +1607,28 @@ protected:
  	std::set<SPVFuncImpl> spv_function_implementations;
  	// Must be ordered to ensure declarations are in a specific order.
  	std::map<LocationComponentPair, MSLShaderInterfaceVariable> inputs_by_location;
@@ -2787,7 +2849,7 @@ index 1a28e058..df9af313 100644
  	std::unordered_map<uint32_t, MSLShaderInterfaceVariable> inputs_by_builtin;
  	std::map<LocationComponentPair, MSLShaderInterfaceVariable> outputs_by_location;
  	std::unordered_map<uint32_t, MSLShaderInterfaceVariable> outputs_by_builtin;
-@@ -1337,6 +1715,15 @@ protected:
+@@ -1337,6 +1748,15 @@ protected:
  	                                             const SPIRVariable &base_var);
  
  	void analyze_argument_buffers();
@@ -2803,7 +2865,7 @@ index 1a28e058..df9af313 100644
  	bool descriptor_set_is_argument_buffer(uint32_t desc_set) const;
  	const MSLResourceBinding &get_argument_buffer_resource(uint32_t desc_set, uint32_t arg_idx) const;
  	void add_argument_buffer_padding_buffer_type(SPIRType &struct_type, uint32_t &mbr_idx, uint32_t &arg_buff_index, MSLResourceBinding &rez_bind);
-@@ -1423,7 +1810,15 @@ protected:
+@@ -1423,7 +1843,15 @@ protected:
  		enum SortAspect
  		{
  			LocationThenBuiltInType,
@@ -2820,7 +2882,7 @@ index 1a28e058..df9af313 100644
  		};
  
  		void sort();
-@@ -1433,6 +1828,11 @@ protected:
+@@ -1433,6 +1861,11 @@ protected:
  		SPIRType &type;
  		Meta &meta;
  		SortAspect sort_aspect;

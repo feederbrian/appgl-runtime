@@ -436,6 +436,99 @@ warnings only, zero errors). Standalone unit test
 (upstream behaviour preserved) and flag-ON (mesh-shader markers
 present, EmitVertex literal absent) — passes 10/10.
 
+**Path J' Option E.4 (gate 21 — explicit-flag-gated emission opt-in after CKPT39 rig-vs-integration symmetry violation):**
+extends Option E.3's `MemberSorter::InsertionOrderThenLocationThenBuiltInType`
+aspect with a new option flag `msl_options.input_emission_in_call_order`
+that opts in to call-order emission, and widens E.3's recording side
+from synthetic-range-only to ALL non-empty-name `add_msl_shader_input`
+calls (Class 2A uniform discipline).
+
+**CKPT39 finding — rig-vs-integration symmetry violation:** E.3's
+standalone test rig (`tools/msl-cross-stage-order-test.cpp`) used
+`synth_loc = 0xE0000000u` uniformly to register every entry in
+synthetic range, demonstrating clean permutation behavior — but
+AppGL-W's β orchestrator (`src/shader/ShaderTranslator.cpp:856-858`)
+only escalates to synthetic-range when the TCS sibling LACKS a
+Location decoration. When TCS has explicit `layout(location=N)`
+qualifiers (the typical case — separable programs auto-assign
+locations, monolithic programs preserve them), the orchestrator
+passes natural-range locations. E.3's recording was synthetic-
+range-gated, so it captured 0% of typical production calls; the
+insertion-order list stayed empty, the new aspect never engaged,
+emission fell through to LocationThenBuiltInType — and the
+identical CKPT34 field-order mismatch persisted on the production
+`tc2te.gl_in` integration path despite E.3 standalone PASS.
+
+**Methodology contribution — §3.6 rig-vs-integration symmetry:**
+standalone rigs MUST cover the production caller's call shape as a
+GATING criterion, not as a separate confirmation step. Any
+divergence between rig call shape (range, options, sequence,
+pipeline stage) and integration call shape is a validation gap that
+will surface as integration failure regardless of how many rig
+permutations pass. E.4's rig adds explicit "natural-range +
+flag-ON" + "natural-range + flag-OFF" scenarios alongside the
+original synthetic-range scenarios, mirroring both the AppGL
+production caller (natural-range + flag-ON) and the back-compat
+public-API caller (natural-range + flag-OFF).
+
+**Why a flag (vs unconditional widening of emission):** the public
+C API `spvc_compiler_msl_add_shader_input` is used by upstream
+consumers (MoltenVK, vkd3d-proton). Unconditional widening of the
+emission aspect would change struct member order for every consumer
+that registers inputs via this path, regardless of whether they
+expected call-order emission. The flag makes the new behavior
+explicit opt-in. AppGL fork orchestrators set the flag; non-AppGL
+consumers don't, preserving `LocationThenBuiltInType` emission.
+
+**Recording-vs-emission split (Class 2A vs Class 2C):**
+- Recording (Class 2A — uniform): every non-empty-name
+  `add_msl_shader_input` call appends to
+  `inputs_by_location_insertion_order`, regardless of synthetic-
+  range or flag. Recording is observably a no-op when emission is
+  flag-gated off. The Class 2A discipline of "no consumer
+  coordination required for the uniform side" holds — the recording
+  itself doesn't change behavior.
+- Emission (Class 2C — flag-gated): the new sort aspect engages
+  only when `msl_options.input_emission_in_call_order == true`
+  AND `storage == StorageClassInput` AND list non-empty. The
+  flag is the explicit consumer-coordinated opt-in, replacing
+  E.3's implicit synthetic-range gate that turned out to be
+  non-representative of production callers.
+
+**AppGL-W integration coordination:** the β orchestrator at
+`src/shader/ShaderTranslator.cpp` needs to set
+`mslOpts.input_emission_in_call_order = true` before calling
+`compiler.set_msl_options(mslOpts)` on the TES compile path
+(canonical spot: alongside the existing `mslOpts.raw_buffer_tese_input
+= true` at line 449). The `add_msl_shader_input` calls that follow
+at line 889 then populate the insertion-order list during compile
+preamble; MemberSorter consults it at the `add_interface_block`
+sort step. No changes needed to the orchestrator's call-side
+logic — the natural-range + synthetic-range hybrid pattern at
+lines 856-858 is exactly what E.4 supports.
+
+**CLI flag:** `--msl-input-emission-in-call-order` for testability.
+Off by default; when set, the spirv-cross CLI passes
+`input_emission_in_call_order = true` through.
+
+**Validation matrix (rig-vs-integration symmetry baked in):**
+- `tools/msl-cross-stage-order-test.cpp` asserts 9 properties via
+  the CKPT34 fixture pair across 6 wiring scenarios:
+  1. synthetic-range + flag-ON, forward order → matches TCS-out
+  2. synthetic-range + flag-ON, REVERSED → tracks call sequence
+  3. natural-range + flag-ON, forward → matches TCS-out
+     **(PRODUCTION-CALLER SHAPE)**
+  4. natural-range + flag-ON, REVERSED → tracks call sequence
+     **(PRODUCTION-CALLER SHAPE)**
+  5. natural-range + flag-OFF, forward → LocationThenBuiltInType
+     emission (BACK-COMPAT for non-AppGL consumers)
+  6. natural-range + flag-OFF, REVERSED → STILL Location-ascending
+     (BACK-COMPAT — call order does NOT override flag-OFF emission)
+- GS standalone rig (`msl-gs-as-mesh-test`): 25/25 PASS × 3
+  fixtures unchanged
+- Cross-stage probe rigs unchanged (don't set the flag, no
+  behavior change)
+
 **Path J' Option E.3 (gate 20 — orchestrator-driven main0_in emission order via MemberSorter):**
 extends the input-interface emission pipeline so the orchestrator's
 `add_msl_shader_input` call sequence becomes the authoritative
