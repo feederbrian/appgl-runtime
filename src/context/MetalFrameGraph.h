@@ -597,6 +597,18 @@ struct MetalTessDrawInfo {
     GLsizei instanceCount = 1;
     GLuint baseInstance = 0;
 
+    // Sprint 5 Phase 1 — Phase 3 gate widening signal: TCS was
+    // synthesized at link time (TES-only program). Encoder uses this to
+    // host-populate `factorBufFull` from glPatchParameterfv state per
+    // draw, overriding synth TCS's 1.0 defaults. Without this override,
+    // gl_tessLevel TES iters fail because synth defaults don't match
+    // user-set glPatchParameterfv values.
+    bool tessControlSynthesized = false;
+    // glPatchParameterfv state snapshot at draw time. Used only when
+    // tessControlSynthesized is true. Layout: outer[0..3] + inner[0..1].
+    float defaultOuterLevel[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float defaultInnerLevel[2] = {1.0f, 1.0f};
+
     // T4I [metal-tess-TF]: per-VAO vertex buffer bindings for VS-as-
     // compute when the PSO uses `[[stage_in]]`. Empty for the
     // no-descriptor path (the encoder skips buffer binding when this

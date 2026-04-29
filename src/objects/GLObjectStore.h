@@ -611,6 +611,16 @@ struct GLProgramObject {
     // Empty for non-tess programs.
     std::string tessControlMSL;
     std::string tessEvalMSL;
+    // Sprint 5 Phase 1 — Phase 3 gate widening signal: this program had
+    // no real TCS at link time; the tessControlMSL above came from a
+    // synthesized passthrough TCS (GL spec §11.2.4 — TES-only programs
+    // use VS outputs directly + glPatchParameterfv defaults for tess
+    // levels). Encoder uses this signal to host-populate factorBufFull
+    // from `state->tessellationState().defaultOuter/InnerLevel` after
+    // TCS-compute runs (synth TCS writes 1.0 defaults to factorBufFull
+    // via Path L extension's TCS dual-write; host overwrite injects the
+    // user-set glPatchParameterfv values).
+    bool tessControlSynthesized = false;
     // Phase 3 of metal-tess: VS emitted as a Metal compute kernel with
     // `capture_output_to_buffer=true`. When a tess program has VS
     // outputs the TCS reads, this kernel runs per-vertex and writes

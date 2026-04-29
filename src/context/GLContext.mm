@@ -19377,6 +19377,11 @@ bool GLContext::linkProgram(GLuint program) {
                     synthTcsShader.spirv = synthTcsSpirv;
                     synthTcsShader.compiled = true;
                     tessControlShader = &synthTcsShader;
+                    // Sprint 5 Phase 1: signal to encoder that this
+                    // program's TCS was synthesized → host should
+                    // populate factorBufFull from glPatchParameterfv
+                    // state per draw to override synth's 1.0 defaults.
+                    programObject->tessControlSynthesized = true;
                     APPGL_LOG(SHADER,
                         @"[GL] Sprint5 Phase 3 gate widening: synthesized "
                         @"passthrough TCS for TES-only program (program=%u, "
@@ -23152,6 +23157,17 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     info.fragmentMSL = &program.fragmentMSL;
     info.patchCount = patchCount;
     info.patchVertices = pv;
+    // Sprint 5 Phase 1 — synth TCS host-populate signal: snapshot
+    // glPatchParameterfv state for the encoder to override synth TCS's
+    // 1.0 defaults in factorBufFull.
+    info.tessControlSynthesized = program.tessControlSynthesized;
+    if (program.tessControlSynthesized) {
+        const auto& tessState = state->tessellationState();
+        for (int i = 0; i < 4; ++i)
+            info.defaultOuterLevel[i] = tessState.defaultOuterLevel[i];
+        for (int i = 0; i < 2; ++i)
+            info.defaultInnerLevel[i] = tessState.defaultInnerLevel[i];
+    }
     info.tessControlOutputVertices = program.tessControlOutputVertices;
     info.genMode = program.tessGenMode;
     info.genSpacing = program.tessGenSpacing;

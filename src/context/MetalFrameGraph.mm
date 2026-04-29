@@ -5025,6 +5025,63 @@ fragment float4 appgl_immediate_textured_fs(
         [computeCmdBuf commit];
         [computeCmdBuf waitUntilCompleted];
 
+        if (std::getenv("APPGL_DUMP_TESOUT")) {
+            float* fbf = static_cast<float*>([factorBufFull contents]);
+            const NSUInteger len = factorBufFull.length;
+            const NSUInteger nfloats = len / sizeof(float);
+            std::fprintf(stderr,
+                "APPGL_DETECTOR factorBufFull_post_tcs synth=%d patchCount=%d "
+                "len=%llu nfloats=%llu values=",
+                info.tessControlSynthesized ? 1 : 0,
+                (int)info.patchCount,
+                (unsigned long long)len,
+                (unsigned long long)nfloats);
+            for (NSUInteger i = 0; i < nfloats && i < 12; ++i) {
+                std::fprintf(stderr, "%.4f ", fbf[i]);
+            }
+            std::fprintf(stderr, "\n");
+        }
+
+        // Sprint 5 Phase 1 — synth TCS host-populate of factorBufFull.
+        // For TES-only programs (synth TCS), the synth TCS dual-writes
+        // 1.0 defaults to factorBufFull via Path L extension. Override
+        // those defaults with glPatchParameterfv state snapshot so TES
+        // reads user-intended values instead. Replicate the same data
+        // for every patch (per-patch glPatchParameterfv applies
+        // uniformly).
+        if (info.tessControlSynthesized) {
+            if (std::getenv("APPGL_DUMP_TESOUT")) {
+                std::fprintf(stderr,
+                    "APPGL_DETECTOR synth_host_populate outer=[%.3f %.3f %.3f %.3f] "
+                    "inner=[%.3f %.3f] genMode=0x%04X patchCount=%d\n",
+                    info.defaultOuterLevel[0], info.defaultOuterLevel[1],
+                    info.defaultOuterLevel[2], info.defaultOuterLevel[3],
+                    info.defaultInnerLevel[0], info.defaultInnerLevel[1],
+                    info.genMode, (int)info.patchCount);
+            }
+            float* contents = static_cast<float*>([factorBufFull contents]);
+            if (contents != nullptr) {
+                NSUInteger localStride = 6;
+                if (info.genMode == GL_TRIANGLES) localStride = 4;
+                else if (info.genMode == GL_ISOLINES) localStride = 2;
+                const NSUInteger nOuter =
+                    (info.genMode == GL_TRIANGLES) ? 3 :
+                    (info.genMode == GL_ISOLINES) ? 2 : 4;
+                const NSUInteger nInner =
+                    (info.genMode == GL_TRIANGLES) ? 1 :
+                    (info.genMode == GL_ISOLINES) ? 0 : 2;
+                for (int p = 0; p < info.patchCount; ++p) {
+                    float* base = contents + (NSUInteger)p * localStride;
+                    for (NSUInteger i = 0; i < nOuter; ++i) {
+                        base[i] = info.defaultOuterLevel[i];
+                    }
+                    for (NSUInteger i = 0; i < nInner; ++i) {
+                        base[nOuter + i] = info.defaultInnerLevel[i];
+                    }
+                }
+            }
+        }
+
         // (3c) Phase 3B.4 [metal-tess-TF]: domain-generator + TES-as-
         // compute dispatch chain. Runs after TCS compute (which writes
         // the factor buffer + per-CP / per-patch output) and produces
