@@ -105,6 +105,16 @@ struct ShaderReflection {
         std::string name;               // block type name (always)
         bool hasInstanceName = false;    // true if GLSL had an instance name
         std::uint32_t blockArraySize = 0; // >0 for `uniform B { ... } b[N]` arrays
+        // Sprint 8 B Cluster F F1 Day 2 (CKPT74): tracks whether the
+        // GLSL source had an explicit `layout(binding=N)` qualifier on
+        // this block (true) vs glslang auto-assigned the binding
+        // value (false). Required for correct block-array binding
+        // semantics — explicit bindings consume consecutive slots
+        // (b[0]=N, b[1]=N+1, ...), implicit bindings default to 0
+        // for ALL instances. Pre-CKPT74: all instances of a block
+        // array got the same binding value. CTS layout_binding.
+        // block_layout_binding_block.binding_array_size hits this.
+        bool hasExplicitBinding = false;
         // True when SPIRV-Cross's `get_active_interface_variables()`
         // identifies this block's variable as live in the shader body
         // (an OpAccessChain / OpLoad reaches it). False for declared-

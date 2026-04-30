@@ -1742,6 +1742,13 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             ShaderReflection::ResourceBinding rb;
             rb.glBinding = entry.glBinding;
             rb.active = entry.active;
+            // Sprint 8 B Cluster F F1 Day 2 (CKPT74): track whether
+            // the GLSL had an explicit `layout(binding=N)` qualifier
+            // on this UBO. Required for block-array consecutive
+            // binding semantics — explicit bindings give b[i] = N+i,
+            // implicit bindings give b[i] = 0 (default) for all i.
+            rb.hasExplicitBinding =
+                compiler.has_decoration(ubo.id, spv::DecorationBinding);
             if (entry.active) {
                 rb.metalBinding = nextSlot;
                 nextSlot += entry.arraySize;
@@ -2147,6 +2154,10 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             auto& ssbo = *ssboEntry.second;
             ShaderReflection::ResourceBinding rb;
             rb.glBinding = ssboEntry.first;
+            // Sprint 8 B Cluster F F1 Day 2 (CKPT74): track explicit
+            // binding for SSBO block-array consecutive semantics.
+            rb.hasExplicitBinding =
+                compiler.has_decoration(ssbo.id, spv::DecorationBinding);
             // Step 7-3 follow-up: argbuf reflection mirror — see the
             // sampled_images block above for the full rationale. SSBOs
             // under argbuf live at [[id(192 + glBinding)]] inside

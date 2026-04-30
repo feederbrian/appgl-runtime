@@ -20767,7 +20767,19 @@ bool GLContext::linkProgram(GLuint program) {
                     GLProgramResourceEntry blockEntry;
                     blockEntry.name = entryName;
                     blockEntry.type = 0;  // blocks have no scalar type
-                    blockEntry.location = static_cast<GLint>(block.glBinding);
+                    // Sprint 8 B Cluster F F1 Day 2 (CKPT74):
+                    // explicit-binding block arrays consume consecutive
+                    // binding slots (b[0]=N, b[1]=N+1, ...). Implicit-
+                    // binding (no layout(binding=N)) defaults to 0 for
+                    // ALL instances. CTS layout_binding.block_layout_
+                    // binding_block.binding_array_size hits this:
+                    //   `layout(binding=81) uniform B { ... } b[2];`
+                    //   expects b[0]=81, b[1]=82.
+                    GLint instanceBinding = static_cast<GLint>(block.glBinding);
+                    if (block.hasExplicitBinding && isArray) {
+                        instanceBinding += inst;
+                    }
+                    blockEntry.location = instanceBinding;
                     blockEntry.offset = static_cast<GLint>(block.byteSize); // GL_UNIFORM_BLOCK_DATA_SIZE
                     blockEntry.arraySize = 1;
                     blockEntry.referencedBy = effStageBit;
@@ -20979,7 +20991,16 @@ bool GLContext::linkProgram(GLuint program) {
                     GLProgramResourceEntry entry;
                     entry.name = std::move(entryName);
                     entry.type = 0;
-                    entry.location = static_cast<GLint>(block.glBinding + inst);
+                    // Sprint 8 B Cluster F F1 Day 2 (CKPT74): same
+                    // explicit-binding gate as UBO above. Pre-CKPT74
+                    // the SSBO path UNCONDITIONALLY added `inst`,
+                    // which is correct for explicit binding (b[i]=N+i)
+                    // but wrong for implicit (all default to 0).
+                    GLint instanceBinding = static_cast<GLint>(block.glBinding);
+                    if (block.hasExplicitBinding && isBlockArray) {
+                        instanceBinding += inst;
+                    }
+                    entry.location = instanceBinding;
                     entry.offset = static_cast<GLint>(block.byteSize);
                     entry.arraySize = 1;
                     entry.referencedBy = effStageBit;
