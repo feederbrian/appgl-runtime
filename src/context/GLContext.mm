@@ -19362,8 +19362,44 @@ bool GLContext::linkProgram(GLuint program) {
         case ProgramKind::VertexFragment: {
             // Run the cross-stage link first. On success, both stages
             // share the linked TProgram's coordinated SPIR-V; on failure,
-            // each stage falls back to its per-stage cached SPIR-V.
+            // each stage falls back to its per-stage cached SPIR-V —
+            // EXCEPT for explicit GL-spec link-validation errors that
+            // glslang's TProgram::link() detects and the per-stage path
+            // can't recover from (cross-stage binding/location mismatch,
+            // type mismatch on shared uniforms, etc.). For those, fail
+            // glLinkProgram outright per GL 4.6 §7.3.
             LinkedProgramSpirv linked = compileLinkedVsFs(vertexShader, fragmentShader);
+            // Sprint 8 B Cluster F F1 Day 7 (CKPT79): cross-stage link-
+            // validation gating. When glslang's link() rejects with a
+            // GL-spec qualifier mismatch, propagate as a real
+            // glLinkProgram failure. The string-match below targets the
+            // canonical glslang error message strings emitted by
+            // mergeErrorCheck (linkValidate.cpp ~line 1497) so we don't
+            // accidentally fail on recoverable mapIO inconsistencies.
+            //
+            // Required by KHR-GL46.layout_binding.*.binding_link_errors
+            // sub-section: VS+FS declare same sampler name with
+            // conflicting `layout(binding=N)` values; spec mandates
+            // link failure.
+            if (!linked.linkSucceeded && !linked.linkLog.empty()) {
+                const auto& lg = linked.linkLog;
+                const bool hasSpecMismatch =
+                    lg.find("Layout binding qualifier must match") != std::string::npos ||
+                    lg.find("Layout location qualifier must match") != std::string::npos ||
+                    lg.find("Layout offset qualifier must match")   != std::string::npos ||
+                    lg.find("Layout component qualifier must match") != std::string::npos ||
+                    lg.find("Layout index qualifier must match")    != std::string::npos;
+                if (hasSpecMismatch) {
+                    APPGL_LOG(SHADER, @"[GL] linkProgram-fail program=%u reason=cross-stage-spec-mismatch log=%s",
+                          program, lg.c_str());
+                    programObject->linkLog = lg;
+                    programObject->linked = false;
+                    Runtime::shared().recordShaderTranslation({
+                        programTag, "link", "", "", "", lg, "", false
+                    });
+                    return false;
+                }
+            }
             const std::uint32_t* vsSpirvData;
             std::size_t vsSpirvWords;
             const std::uint32_t* fsSpirvData;

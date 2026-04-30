@@ -174,6 +174,13 @@ struct LinkedProgramSpirv {
     std::vector<std::uint32_t> vertexSpirv;
     std::vector<std::uint32_t> fragmentSpirv;
     bool linkSucceeded = false;
+    // Sprint 8 B Cluster F F1 Day 7 (CKPT79): link error log captured
+    // for fail-propagation decisions. When `program.link()` fails with
+    // a GL-spec-violation error (cross-stage binding mismatch, location
+    // mismatch, etc.), the caller (GLContext::linkProgram) inspects
+    // this log to decide whether to fail glLinkProgram outright or
+    // fall back to per-stage SPIR-V translation. Empty on success.
+    std::string linkLog;
 };
 
 // Tessellation execution mode properties extracted from SPIR-V.

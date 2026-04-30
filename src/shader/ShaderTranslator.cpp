@@ -335,9 +335,11 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
     program.addShader(&fsShader);
 
     if (!program.link(messages)) {
+        const std::string linkLog = std::string("link: ") + program.getInfoLog();
         if (log != nullptr) {
-            *log = std::string("link: ") + program.getInfoLog();
+            *log = linkLog;
         }
+        result.linkLog = linkLog;  // CKPT79: propagate so caller can decide fail-vs-fallback
         return result;
     }
 
@@ -354,9 +356,11 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
     // attributes — which Metal rejects at `MTLRenderPipelineState`
     // creation time with a varying-mismatch error.
     if (!program.mapIO()) {
+        const std::string mapIOLog = std::string("mapIO: ") + program.getInfoLog();
         if (log != nullptr) {
-            *log = std::string("mapIO: ") + program.getInfoLog();
+            *log = mapIOLog;
         }
+        result.linkLog = mapIOLog;  // CKPT79: propagate (mapIO failures are typically recoverable via per-stage fallback, but caller decides)
         return result;
     }
 
