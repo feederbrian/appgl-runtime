@@ -15590,6 +15590,48 @@ parseExplicitSamplerBindings(const std::string& rawSource) {
     auto isIdentChar = [](char c) -> bool {
         return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
     };
+
+    // Sprint 8 B Cluster F F1 (CKPT73): scan for `#define NAME VALUE`
+    // directives (integer-constant style only) so `layout(binding=NAME)`
+    // can be resolved against the macro table. CTS layout_binding.*
+    // binding_integer_constant tests use exactly this shape:
+    //   #define INT_CONST 7
+    //   layout(binding=INT_CONST) uniform sampler2D s;
+    // Pre-fix: parser saw 'INT_CONST' as non-numeric → bail → no binding.
+    // Limited to integer-literal #defines (no expression evaluation;
+    // no nested macro substitution) — covers CTS shape.
+    std::unordered_map<std::string, long> defineTable;
+    {
+        std::size_t p = 0;
+        while (p < s.size()) {
+            const auto hashPos = s.find('#', p);
+            if (hashPos == std::string::npos) break;
+            // Word-boundary on left.
+            if (hashPos > 0 && isIdentChar(s[hashPos - 1])) {
+                p = hashPos + 1;
+                continue;
+            }
+            std::size_t after = hashPos + 1;
+            while (after < s.size() && (s[after] == ' ' || s[after] == '\t')) ++after;
+            if (after + 6 <= s.size() && s.compare(after, 6, "define") == 0 &&
+                (after + 6 >= s.size() || !isIdentChar(s[after + 6]))) {
+                std::size_t cur = after + 6;
+                while (cur < s.size() && (s[cur] == ' ' || s[cur] == '\t')) ++cur;
+                const std::size_t nameStart = cur;
+                while (cur < s.size() && isIdentChar(s[cur])) ++cur;
+                if (cur > nameStart) {
+                    std::string name = s.substr(nameStart, cur - nameStart);
+                    while (cur < s.size() && (s[cur] == ' ' || s[cur] == '\t')) ++cur;
+                    char* endp = nullptr;
+                    const long val = std::strtol(s.c_str() + cur, &endp, 0);
+                    if (endp != s.c_str() + cur && val >= 0) {
+                        defineTable[name] = val;
+                    }
+                }
+            }
+            p = hashPos + 1;
+        }
+    }
     auto skipWhitespace = [&](std::size_t& i) {
         while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
     };
@@ -15641,9 +15683,31 @@ parseExplicitSamplerBindings(const std::string& rawSource) {
                 ++eqPos;
                 while (eqPos < body.size() && std::isspace(static_cast<unsigned char>(body[eqPos]))) ++eqPos;
                 char* endp = nullptr;
-                const long val = std::strtol(body.c_str() + eqPos, &endp, 10);
+                // Sprint 8 B Cluster F F1 (CKPT73): GLSL §4.3 integer
+                // literal syntax follows C — `0` prefix = octal, `0x`
+                // prefix = hex, otherwise decimal. CTS layout_binding.*
+                // exercises `layout(binding=047)` (octal 047 = decimal
+                // 39). Use strtol base 0 to auto-detect octal/hex/dec
+                // per the GLSL spec. Pre-fix: decimal-only parse turned
+                // 047 into 47, breaking `layout_binding.sampler2D_*` etc.
+                const long val = std::strtol(body.c_str() + eqPos, &endp, 0);
                 if (endp != body.c_str() + eqPos && val >= 0) {
                     binding = static_cast<int>(val);
+                } else {
+                    // Try resolving as a #define identifier (CTS
+                    // binding_integer_constant tests use this shape).
+                    std::size_t idStart = eqPos;
+                    while (idStart < body.size() &&
+                           std::isspace(static_cast<unsigned char>(body[idStart]))) ++idStart;
+                    std::size_t idEnd = idStart;
+                    while (idEnd < body.size() && isIdentChar(body[idEnd])) ++idEnd;
+                    if (idEnd > idStart) {
+                        std::string ident = body.substr(idStart, idEnd - idStart);
+                        auto dIt = defineTable.find(ident);
+                        if (dIt != defineTable.end()) {
+                            binding = static_cast<int>(dIt->second);
+                        }
+                    }
                 }
             }
             break;
@@ -15674,11 +15738,18 @@ parseExplicitSamplerBindings(const std::string& rawSource) {
             const std::size_t typeStart = cur;
             while (cur < s.size() && isIdentChar(s[cur])) ++cur;
             const std::string typeName = s.substr(typeStart, cur - typeStart);
+            // Sprint 8 B Cluster F F1 (CKPT73): also recognise
+            // `atomic_uint` as an opaque uniform type for binding
+            // resolution. CTS layout_binding.atomic_uint_* exercises
+            // `layout(binding=N) uniform atomic_uint cnt;` which the
+            // GL 4.2 §7.6 spec puts in the same `layout(binding=N)`
+            // family as samplers and images.
             const bool isOpaqueType =
                 typeName.find("sampler") != std::string::npos ||
                 typeName.find("Sampler") != std::string::npos ||
                 typeName.find("image") != std::string::npos ||
-                typeName.find("Image") != std::string::npos;
+                typeName.find("Image") != std::string::npos ||
+                typeName == "atomic_uint";
             if (isOpaqueType) {
                 skipWhitespace(cur);
                 const std::size_t nameStart = cur;
