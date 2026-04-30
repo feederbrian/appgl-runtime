@@ -116,6 +116,7 @@ enum GLSLstd450 : std::uint32_t {
     GLSLstd450InverseSqrt = 32,
     GLSLstd450FMin = 37, GLSLstd450FMax = 40, GLSLstd450FClamp = 43,
     GLSLstd450FMix = 46, GLSLstd450Step = 48, GLSLstd450SmoothStep = 49,
+    GLSLstd450Fma = 50,
     GLSLstd450Length = 66, GLSLstd450Distance = 67, GLSLstd450Cross = 68,
     GLSLstd450Normalize = 69, GLSLstd450Reflect = 71,
 };
@@ -2280,6 +2281,24 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
             }
             return r;
         }
+        case ::GLSLstd450Fma: {
+            // Sprint 8 SCOUT-W (f) regression-fix (CKPT72): fma(a, b, c) =
+            // a * b + c. SPIR-V Fma = 3 operands. Required for VS-only-TF
+            // CPU emul on programs that use the GLSL `fma()` built-in
+            // (e.g. CTS gpu_shader5.fma_accuracy). Pre-CKPT72 the
+            // unsupported GLSLstd450 op 50 caused interpreter bail →
+            // VS-only-TF returned ok=false → fall-through-to-legacy path
+            // didn't capture TF for VS-only programs → test got zeros.
+            // CKPT68's VS-only-TF gate relaxation (`emulProgram == nullptr
+            // → !emulProgram->geometryEmulated`) widened the population
+            // of programs hitting this path; CKPT72 closes the
+            // missing-op gap with a faithful Fma evaluator.
+            Value r = a;
+            for (int k = 0; k < a.componentCount(); ++k) {
+                r.f[k] = a.f[k] * b.f[k] + c.f[k];
+            }
+            return r;
+        }
 
         default:
             bail("OpExtInst: unsupported GLSL.std.450 op " + std::to_string(glslOp));
@@ -4391,13 +4410,44 @@ Value readVertexAttribFromVAO(
     if (attrIdx >= vao.attributes.size()) return v;
     const auto& attr = vao.attributes[attrIdx];
     if (!attr.enabled) return v;
-    // Resolve buffer. Separated-format bindings aren't handled yet —
-    // MVP uses the classic glVertexAttribPointer path.
+    // Sprint 8 SCOUT-W (f) regression-fix (CKPT72): honour
+    // glVertexArrayAttribBinding (GL 4.3 §10.3 separated-format
+    // routing). The attribute's bindingIndex selects which binding
+    // point the buffer + offset + stride come from. For attributes
+    // set via the LEGACY glVertexAttrib*Pointer path, the bindingPoint
+    // is implicitly populated at index == attrIndex with the same
+    // buffer/offset/stride (see GLContext::vertexAttribIPointer
+    // around line 10251 — bindingPoints[index] mirrors the attr
+    // fields). After a subsequent glVertexArrayAttribBinding swap,
+    // `attribute.bindingIndex` changes but `attribute.buffer/pointer/
+    // stride` stay at the original values — reading from those
+    // legacy fields would IGNORE the binding swap. Use the
+    // bindingPoint-keyed values when valid, falling back to legacy
+    // attribute fields when bindingPoint is unset (defensive).
+    //
+    // CTS `direct_state_access.vertex_arrays_attribute_binding`
+    // exercises exactly this: vertexArrayAttribBinding swaps attribs
+    // 0↔1, expecting result[0]=array[1] and result[1]=array[0].
+    // Pre-CKPT72 the VS-only-TF interpreter (engaged for this test
+    // post-CKPT68's VS-only-TF gate relaxation) read from the legacy
+    // attr fields and produced wrong results. Post-CKPT72: honour
+    // bindingPoint[bindingIndex] for the buffer source.
     GLuint bufferName = attr.buffer;
-    std::size_t relativeOffset = 0;
+    std::size_t baseOffset = attr.pointer;
     std::size_t stride = attr.stride > 0 ? static_cast<std::size_t>(attr.stride)
                                          : static_cast<std::size_t>(attr.size * 4);
-    std::size_t baseOffset = attr.pointer;
+    if (attr.bindingIndex < vao.bindingPoints.size()) {
+        const auto& bp = vao.bindingPoints[attr.bindingIndex];
+        if (bp.buffer != 0) {
+            bufferName = bp.buffer;
+            baseOffset = static_cast<std::size_t>(bp.offset) +
+                         static_cast<std::size_t>(attr.relativeOffset);
+            if (bp.stride > 0) {
+                stride = static_cast<std::size_t>(bp.stride);
+            }
+        }
+    }
+    std::size_t relativeOffset = 0;
     if (bufferName == 0) return v;
     GLBufferObject* buf = objects.buffers().get(bufferName);
     if (buf == nullptr || buf->shadowBytes.empty()) return v;
