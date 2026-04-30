@@ -1475,3 +1475,15 @@ distinction is made at the SPIR-V decoration level, not the text.
 **CTS tests advanced (sub-section progress):** `KHR-GL46.shading_language_420pack.binding_samplers_texture_type_2D_rectangle` — pipeline build now succeeds (output transitions from `Invalid texel: 00000000` / silent pipeline failure to `Invalid texel: ff0000ff` / shader runs but sampling returns wrong data — distinct downstream residual deferred to next dispatch). No whole-test flip yet because the sample-correctness gap is a separate fix surface.
 
 **Regression-safe:** the new arm fires only on `image_type.dim == DimRect`. `default:` arm preserved for any future SPIR-V Dim values. Section sweep verified zero regression: 272/297 P, 22 F, 3 NS on `tessellation_shader.* + geometry_shader.* + transform_feedback.*`.
+
+### `spirv-cross-msl-dim-rect-skip-level.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — `CompilerMSL::to_function_args()` LOD/bias/gradient option emission.
+
+**Summary:** Extends the existing `Dim1D` skip-gates in the bias / lod / gradient option emission to also skip `Dim::Rect`. Pre-patch, samples on `sampler2DRect` emitted `goku.sample(s, c, level(0.0))` (or `bias(...)`, `gradient(...)`) — which Metal's specification forbids when the sampler is configured with `normalizedCoordinates=NO`. Quote from the Metal Shading Language specification: *"These overloads are only valid if normalizedCoordinates property of the sampler is true."* Pre-patch, our CKPT83 rect sampler (which sets `normalizedCoordinates=NO` per GL 4.6 §8.10) silently returned undefined values for any sampling that included an LOD argument.
+
+**Why:** Sister patch to `spirv-cross-msl-dim-rect-as-texture2d.patch` (CKPT82B). That patch closed the pipeline-build gap by mapping `Dim::Rect` to `texture2d<T>` in MSL emit. CKPT83 closed the runtime sampler-state gap (`normalizedCoordinates=NO` + Metal-validation coercions on mipFilter/addressMode/min==mag). CKPT84 closes the third gap: bias/lod/gradient overloads must be skipped on rect sample emit because the underlying sampler can't honour them without violating Metal's non-normalized-coords constraints.
+
+**CTS tests advanced (sub-section progress):** Multi-stage iterations of `KHR-GL46.shading_language_420pack.binding_samplers_texture_type_2D_rectangle` no longer emit `sample(s, c, level(0.0))` from VS-stage compilation. Whole-test pass still blocked by an independent VS-reflection gap (sampCount=0 for VS in the multi-stage iteration, distinct fix surface deferred). No whole-test flip yet.
+
+**Regression-safe:** the new arms add `imgtype.image.dim != DimRect` to existing skip gates that already exclude `Dim1D`. Non-rect samplers retain their original LOD/bias/gradient emission. Section sweep verified zero regression: 272/297 P, 22 F, 3 NS on `tessellation_shader.* + geometry_shader.* + transform_feedback.*`.
