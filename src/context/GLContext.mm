@@ -3740,6 +3740,52 @@ struct GLContext::Impl {
         // the texture-local sampler path).
         descriptor.supportArgumentBuffers = YES;
 
+        // Sprint 8 B Cluster F F1 Day 11 (CKPT83 γ.1): rectangle textures
+        // (GL_TEXTURE_RECTANGLE / sampler2DRect) use UNNORMALIZED texel
+        // coordinates per GL 4.6 §8.10 — texel index in [0..W)×[0..H).
+        // Metal's default sampler uses NORMALIZED coords [0..1]. Setting
+        // normalizedCoordinates=NO routes sample() through the pixel-coord
+        // path. CKPT82(B) closed the SPIRV-Cross emit (DimRect→texture2d,
+        // which built the pipeline); CKPT83(γ.1) closes the runtime
+        // sampler-state coordination.
+        //
+        // Metal validation imposes three additional constraints when
+        // normalizedCoordinates is NO (validateMTLSamplerDescriptor
+        // assertions):
+        //   (1) mipFilter must be MTLSamplerMipFilterNotMipmapped
+        //   (2) addressMode must be ClampToEdge / ClampToZero /
+        //       ClampToBorderColor (no REPEAT-family modes)
+        //   (3) minFilter == magFilter, both Nearest or Linear (no
+        //       mixed filter pairs)
+        // GL_TEXTURE_RECTANGLE per spec disallows mipmapping and
+        // REPEAT wrap modes, so coercing to those Metal-valid choices
+        // is consistent with the GL semantics. For (3), we coerce by
+        // making magFilter follow minFilter (Linear vs Nearest) since
+        // RECTANGLE textures are typically nearest-sampled and the
+        // GL spec doesn't mandate independent min/mag.
+        if (object.target == GL_TEXTURE_RECTANGLE) {
+            descriptor.normalizedCoordinates = NO;
+            descriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+            // Coerce REPEAT-family wrap modes to ClampToEdge.
+            auto coerceAddress = [](MTLSamplerAddressMode m) {
+                switch (m) {
+                    case MTLSamplerAddressModeClampToEdge:
+                    case MTLSamplerAddressModeClampToZero:
+                    case MTLSamplerAddressModeClampToBorderColor:
+                        return m;
+                    default:
+                        return MTLSamplerAddressModeClampToEdge;
+                }
+            };
+            descriptor.sAddressMode = coerceAddress(descriptor.sAddressMode);
+            descriptor.tAddressMode = coerceAddress(descriptor.tAddressMode);
+            descriptor.rAddressMode = coerceAddress(descriptor.rAddressMode);
+            // Coerce min/mag to match. minFilter wins (the GL test sets
+            // both to NEAREST anyway; this is defensive for any legacy
+            // path that might leave them mismatched).
+            descriptor.magFilter = descriptor.minFilter;
+        }
+
         id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:descriptor];
         if (sampler == nil) {
             return false;
