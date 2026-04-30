@@ -25420,12 +25420,26 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     }
     // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for non-GS
     // indexed draws. GS path is handled by writeGsXfbAndCheckDiscard.
+    // Sprint 8 #9-A (CKPT67): VS-only TF capture path (CKPT59 helper)
+    // also calls writeGsXfbAndCheckDiscard which advances queries
+    // with TF-buffer-bounded primsWritten. Skip the unconditional
+    // pre-update when the VS-only-TF helper will engage downstream
+    // (transformFeedbackActive + TF varyings + no GS/tess emul) so
+    // the bounded primsWritten doesn't double-count atop the
+    // unbounded `count`-based pre-update.
     {
         const GLuint progName = impl_->state->currentProgram();
         const GLProgramObject* p = progName != 0
             ? impl_->objects->programs().get(progName)
             : nullptr;
-        if (p == nullptr || !p->gsPresent) {
+        const bool willHitVsOnlyTf =
+            p != nullptr &&
+            impl_->transformFeedbackActive &&
+            !p->transformFeedbackVaryingNames.empty() &&
+            !p->geometryEmulated &&
+            !p->tessellationEmulated &&
+            !p->tessellationInterpreted;
+        if ((p == nullptr || !p->gsPresent) && !willHitVsOnlyTf) {
             const GLsizei restartSkip = impl_->countRestartIndices(type, indices, count);
             impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1, restartSkip);
         }
@@ -25739,6 +25753,123 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         }
     }
 
+    // Sprint 8 #9-A (CKPT67): attribute-less drawElements path. Mirror
+    // of the drawArrays attribute-less path at line ~24670. CTS
+    // `transform_feedback.{capture,query}_vertex_*` tests use a VS
+    // that reads only `gl_VertexID` (no per-vertex inputs) and call
+    // glDrawElements with client-side index arrays. Without this
+    // hook the existing `vao->attributes.empty()` branch in the
+    // hasTranslatedPipeline block records a fallback diagnostic and
+    // skips the encode entirely — pixels stay at zero-init.
+    // Gate mirrors drawArrays attributeless path at line ~24670:
+    // shader-reflection-based, not VAO-attributes-based. Our VAO
+    // initialization resizes `attributes` to `count` default-
+    // constructed (disabled) entries, so `vao->attributes.empty()`
+    // returns false even when nothing is actually bound. The shader
+    // reflection's `vertexInputs.empty()` is the correct indicator
+    // for an attribute-less draw.
+    if (program != nullptr && program->hasTranslatedPipeline &&
+        vao != nullptr &&
+        program->vertexReflection.vertexInputs.empty() &&
+        count > 0 && effectivePtr != nullptr) {
+        TranslatedDrawInfo tdi;
+        tdi.mode = mode;
+        tdi.vertexCount = count;
+        tdi.vertexData = nullptr;
+        tdi.vertexDataByteCount = 0;
+        tdi.vertexStride = 0;
+        // Index data — CPU-side scratch from client-side index array
+        // OR shadow-bytes from bound element buffer. encodeTranslated
+        // Draw's `info.indices != nullptr && info.indexCount > 0`
+        // gate stages it into a Metal ring buffer.
+        tdi.indices = effectivePtr;
+        tdi.indexCount = count;
+        tdi.indexType = effectiveType;
+        if (elementBuffer != nullptr && !elementIndexTypeNeedsExpansion(type) &&
+            elementBuffer->metalBuffer != nullptr) {
+            tdi.metalIndexBuffer = elementBuffer->metalBuffer;
+            tdi.metalIndexBufferOffset = indexOffset;
+        }
+        populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+        tdi.vertexMSL = &program->vertexMSL;
+        tdi.fragmentMSL = &program->fragmentMSL;
+        tdi.vertexReflection = &program->vertexReflection;
+        tdi.fragmentReflection = &program->fragmentReflection;
+        tdi.pipelineStateOut = &program->metalPipelineState;
+        tdi.pipelineColorFormatOut = &program->metalPipelineColorFormat;
+        tdi.pipelineStateCacheOut = &program->metalPipelineStateCache;
+        tdi.metalVertexFunction = program->metalVertexFunction;
+        tdi.metalFragmentFunction = program->metalFragmentFunction;
+        tdi.metalVertexFunctionOut = &program->metalVertexFunction;
+        tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
+        tdi.program = programName;
+
+        // Uniform layout (cached).
+        if (!program->uniformLayoutComputed) {
+            computeStageUniformLayout(program->vertexUniformLayout,
+                program->vertexReflection, program->uniforms);
+            computeStageUniformLayout(program->fragmentUniformLayout,
+                program->fragmentReflection, program->uniforms);
+            program->uniformLayoutComputed = true;
+        }
+        thread_local std::vector<std::uint8_t> vtxUniformScratchDE;
+        thread_local std::vector<std::uint8_t> fragUniformScratchDE;
+        pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+        buildStageUniformBuffer(vtxUniformScratchDE,
+            program->vertexReflection, program->uniformValues,
+            program->vertexUniformLayout);
+        buildStageUniformBuffer(fragUniformScratchDE,
+            program->fragmentReflection, program->uniformValues,
+            program->fragmentUniformLayout);
+        tdi.vertexUniformData = vtxUniformScratchDE.data();
+        tdi.vertexUniformSize = vtxUniformScratchDE.size();
+        tdi.fragmentUniformData = fragUniformScratchDE.data();
+        tdi.fragmentUniformSize = fragUniformScratchDE.size();
+
+        impl_->resolveSamplerBindings(*program, tdi);
+        impl_->resolveUBOBindings(*program, tdi);
+        impl_->resolveSSBOBindings(*program, tdi);
+        impl_->resolveImageBindings(*program, tdi);
+
+        // FBO render target.
+        {
+            GLsizei fboW = 0, fboH = 0;
+            void* fboDSTex = nullptr;
+            std::array<void*, 7> extraColTex = {};
+            std::array<std::uint32_t, 8> colSlices = {};
+            void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+            if (fboColTex != nullptr) {
+                tdi.fboColorTexture = fboColTex;
+                tdi.fboAdditionalColorTextures = extraColTex;
+                tdi.fboColorSlices = colSlices;
+                tdi.fboDepthStencilTexture = fboDSTex;
+                tdi.fboWidth = fboW;
+                tdi.fboHeight = fboH;
+            }
+        }
+
+        thread_local std::string pipelineBuildErrorDE;
+        pipelineBuildErrorDE.clear();
+        tdi.pipelineBuildErrorOut = &pipelineBuildErrorDE;
+
+        const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+        if (ok) {
+            // Sprint 8 #9-A (CKPT67): primitive counter update is
+            // handled by the VS-only-TF helper at the earlier hook
+            // point (line ~25655) when transform feedback is active.
+            // For non-TF draws on this attributeless path, mirror
+            // drawArrays' attributeless-success path: update counters
+            // here. CTS `query_vertex_*` tests have TF active during
+            // the query, so the VS-only-TF helper already advanced
+            // GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN; advancing
+            // here AGAIN would double-count. Gate accordingly.
+            if (!program->gsPresent && !impl_->transformFeedbackActive) {
+                impl_->updatePrimitiveCountersForNonGsDraw(mode, count, 1);
+            }
+            return true;
+        }
+        // Fall through to solid-color path on failure.
+    }
     if (program != nullptr && program->hasTranslatedPipeline) {
         // Phase 8X Group 4d follow-up³ — name each fall-through gate to BAR's log.
         if (vao->attributes.empty()) {
