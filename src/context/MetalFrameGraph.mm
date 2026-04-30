@@ -2789,27 +2789,43 @@ struct MetalFrameGraph::Impl {
                                   info.vertexUniformData, info.vertexUniformSize,
                                   /*isVertex=*/true, MTLRenderStageVertex);
         } else {
+            // Sprint 8 B Cluster F F1 Day 9 (CKPT81): the per-binding
+            // skip used to require BOTH metalTexture AND metalSamplerState
+            // to be non-null, which silently dropped storage-image
+            // bindings (resolveImageBindings deliberately leaves
+            // metalSamplerState=nullptr because imageLoad/Store doesn't
+            // need a sampler). Skip only on missing texture; bind the
+            // sampler conditionally on its own. Required by
+            // KHR-GL46.layout_binding.image2D_layout_binding_imageLoad_*
+            // FS/VS variants — the test calls glBindImageTexture(N, ...),
+            // resolveImageBindings populates fragmentTextures with
+            // {tex, sampler=null, slot=N}, but the binding was being
+            // dropped here so imageLoad in the FS read undefined.
             for (const auto& binding : info.fragmentTextures) {
-                if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+                if (binding.metalTexture == nullptr) {
                     continue;
                 }
                 id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
-                id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
                 [currentRenderEncoder setFragmentTexture:tex
                                                  atIndex:static_cast<NSUInteger>(binding.metalSlot)];
-                [currentRenderEncoder setFragmentSamplerState:smp
-                                                      atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                if (binding.metalSamplerState != nullptr) {
+                    id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                    [currentRenderEncoder setFragmentSamplerState:smp
+                                                          atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                }
             }
             for (const auto& binding : info.vertexTextures) {
-                if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+                if (binding.metalTexture == nullptr) {
                     continue;
                 }
                 id<MTLTexture> tex = (__bridge id<MTLTexture>)binding.metalTexture;
-                id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
                 [currentRenderEncoder setVertexTexture:tex
                                                atIndex:static_cast<NSUInteger>(binding.metalSlot)];
-                [currentRenderEncoder setVertexSamplerState:smp
-                                                    atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                if (binding.metalSamplerState != nullptr) {
+                    id<MTLSamplerState> smp = (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                    [currentRenderEncoder setVertexSamplerState:smp
+                                                        atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+                }
             }
         }
 

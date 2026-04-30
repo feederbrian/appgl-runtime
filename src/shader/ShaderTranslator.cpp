@@ -1178,6 +1178,26 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             }
         }
 
+        // Sprint 8 B Cluster F F1 Day 9 (CKPT81): unified sequential
+        // allocator across sampled + storage images. Both occupy the
+        // same Metal texture slot pool per stage; on Apple Silicon
+        // outside argument-buffer mode, that pool is capped at 31 per
+        // stage. CKPT77 fixed sampled images by collapsing GL bindings
+        // 0..47 into [0, sampled_count). CKPT81 extends the same shape
+        // to storage images: they're allocated AFTER the sampled
+        // images at `nextSampledSlot..` rather than from the global
+        // `storageImageBase=48` (which sat past Metal's 31-texture
+        // limit and silently failed pipeline build, mirroring CKPT76's
+        // sampled-binding-at-39 diagnostic, this time for image
+        // uniforms).
+        //
+        // Apple-Silicon-31-resource-cap-cluster pattern, 3rd instance
+        // (CKPT58 vertex attrs + CKPT76 sampled textures + CKPT81
+        // storage images). The pool partition `sampled at 0..47,
+        // storage at 48..55` was correct for the GL-spec advertised
+        // limits but wrong for the underlying Metal hardware cap.
+        std::uint32_t unifiedNextTextureSlot = bindings.textureBase;
+
         // Remap sampled images (combined image samplers).
         //
         // Step 7-2: with argument_buffers enabled, Image and Sampler
@@ -1253,7 +1273,6 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                           if (a.glBinding != b.glBinding) return a.glBinding < b.glBinding;
                           return a.id < b.id;
                       });
-            std::uint32_t nextSampledSlot = bindings.textureBase;
             for (auto& entry : sortedSampled) {
                 spirv_cross::MSLResourceBinding binding;
                 binding.stage = compiler.get_execution_model();
@@ -1263,9 +1282,9 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     binding.msl_texture = bindings.textureBase + 2 * entry.glBinding;
                     binding.msl_sampler = bindings.samplerBase + 2 * entry.glBinding + 1;
                 } else {
-                    binding.msl_texture = nextSampledSlot;
-                    binding.msl_sampler = nextSampledSlot;
-                    nextSampledSlot += entry.arraySize;
+                    binding.msl_texture = unifiedNextTextureSlot;
+                    binding.msl_sampler = unifiedNextTextureSlot;
+                    unifiedNextTextureSlot += entry.arraySize;
                 }
                 compiler.add_msl_resource_binding(binding);
             }
@@ -1384,7 +1403,14 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                         spv::DecorationBinding, static_cast<std::uint32_t>(i));
                     binding.desc_set = kStorageImageDescSet;
                     binding.binding = static_cast<std::uint32_t>(i);
-                    binding.msl_texture = bindings.storageImageBase + static_cast<std::uint32_t>(i);
+                    // CKPT81: allocate after the sampled-image
+                    // sequential pool, not from the legacy
+                    // `storageImageBase=48` constant. Same pool as
+                    // sampled (Metal has one texture slot pool per
+                    // stage), capped at 31 on Apple Silicon outside
+                    // argbuf mode. Reflection mirrors below.
+                    binding.msl_texture = unifiedNextTextureSlot;
+                    unifiedNextTextureSlot += 1;
                 }
                 compiler.add_msl_resource_binding(binding);
             }
@@ -2122,6 +2148,12 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // running counter that advances by each entry's array size.
         // See the matching block in spirvToMSL above for the full
         // rationale. Argument-buffer mode keeps its 2*glBinding mapping.
+        //
+        // Day 9 (CKPT81): unified counter with storage-images so both
+        // share Metal's per-stage texture slot pool (Apple Silicon
+        // 31-cap). Walks sampled first, then storage, in lockstep with
+        // spirvToMSL's `unifiedNextTextureSlot`.
+        std::uint32_t unifiedNextTextureSlotR = bindings.textureBase;
         {
             struct SampledRefR {
                 std::uint32_t glBinding;
@@ -2146,15 +2178,14 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                           if (a.glBinding != b.glBinding) return a.glBinding < b.glBinding;
                           return a.id < b.id;
                       });
-            std::uint32_t nextSampledSlot = bindings.textureBase;
             for (auto& entry : sortedSampled) {
                 ShaderReflection::ResourceBinding rb;
                 rb.glBinding = entry.glBinding;
                 if (useArgBufReflection) {
                     rb.metalBinding = 2 * entry.glBinding;
                 } else {
-                    rb.metalBinding = nextSampledSlot;
-                    nextSampledSlot += entry.arraySize;
+                    rb.metalBinding = unifiedNextTextureSlotR;
+                    unifiedNextTextureSlotR += entry.arraySize;
                 }
                 rb.name = entry.res->name;
                 result.sampledTextures.push_back(std::move(rb));
@@ -2225,8 +2256,9 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 if (useArgBufReflection) {
                     rb.metalBinding = 128 + entry.glBinding;
                 } else {
-                    rb.metalBinding =
-                        bindings.storageImageBase + static_cast<std::uint32_t>(i);
+                    // CKPT81: shared pool with sampled images.
+                    rb.metalBinding = unifiedNextTextureSlotR;
+                    unifiedNextTextureSlotR += 1;
                 }
                 rb.name = entry.res->name;
                 result.storageImages.push_back(std::move(rb));
