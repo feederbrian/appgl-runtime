@@ -4173,11 +4173,35 @@ struct GLContext::Impl {
             APPGL_LOG(SHADER, @"[GL] msl-dump program=%u END", info.program);
         }
 
+        // Sprint 8 B Cluster F F1 Day 4 (CKPT76): persistent
+        // trace infrastructure for the sampler resolver. Env-gated
+        // (APPGL_LOG_LB) so it stays in tree without runtime cost
+        // when disabled. Used to localize the runtime sampler
+        // binding cascade gap surfaced in CKPT75 (drawTest fails
+        // with declared layout(binding=N) but renders default unit).
+        // Bank: persistent-trace-infrastructure pattern (sister to
+        // spike-instrumentation-cleanup at the opposite end —
+        // env-gated traces stay in tree as load-bearing for future
+        // iteration; non-env-gated debug code follows cleanup
+        // discipline).
+        static const bool g_lbLog = (std::getenv("APPGL_LOG_LB") != nullptr);
+
         auto resolveStage = [&](const char* stageTag,
                                 const ShaderReflection* reflection,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outBindings) {
             if (reflection == nullptr || reflection->sampledTextures.empty()) {
+                if (g_lbLog) {
+                    std::fprintf(stderr,
+                        "[LB] stage=%s SKIP reason=no-sampled-textures (refl=%p sampCount=%zu)\n",
+                        stageTag, reflection,
+                        reflection ? reflection->sampledTextures.size() : 0);
+                }
                 return;
+            }
+            if (g_lbLog) {
+                std::fprintf(stderr,
+                    "[LB] stage=%s ENTER sampCount=%zu\n",
+                    stageTag, reflection->sampledTextures.size());
             }
             for (const auto& sampledTex : reflection->sampledTextures) {
                 // Step 1: find the GL sampler uniform by name. For sampler
@@ -4337,6 +4361,16 @@ struct GLContext::Impl {
                         glUnit = samplerValue->ints[arrayElement];
                         uniformValueWasSet = true;
                     }
+                    if (g_lbLog) {
+                        std::fprintf(stderr,
+                            "[LB-PRE] stage=%s sampler='%s' uniformLoc=%d valueSet=%d "
+                            "glUnit=%d arrayElement=%d/%d preferredTarget=0x%X "
+                            "samplerGLType=0x%X metalBinding=%u\n",
+                            stageTag, sampledTex.name.c_str(),
+                            uniformLocation, uniformValueWasSet ? 1 : 0,
+                            glUnit, arrayElement, samplerArraySize, preferredTarget,
+                            samplerGLType, sampledTex.metalBinding);
+                    }
                     // Note: GL 4.2 layout(binding=N) default-unit is
                     // baked into `samplerValue->ints[arrayElement]`
                     // at link time (see the samplerExplicitBindings
@@ -4372,15 +4406,30 @@ struct GLContext::Impl {
                 if (preferredTarget != 0 && preferredTarget != GL_TEXTURE_2D) {
                     texName = state->boundTextureOnUnit(
                         static_cast<GLuint>(glUnit), preferredTarget);
+                    if (g_lbLog) {
+                        std::fprintf(stderr,
+                            "[LB-PROBE-PREFERRED] glUnit=%d target=0x%X → texName=%u\n",
+                            glUnit, preferredTarget, texName);
+                    }
                 }
                 if (texName == 0) {
                     texName = state->boundTextureOnUnit(
                         static_cast<GLuint>(glUnit), GL_TEXTURE_2D);
+                    if (g_lbLog) {
+                        std::fprintf(stderr,
+                            "[LB-PROBE-2D] glUnit=%d target=GL_TEXTURE_2D → texName=%u\n",
+                            glUnit, texName);
+                    }
                 }
                 if (texName == 0) {
                     GLenum discoveredTarget = 0;
                     texName = state->boundTextureOnUnitAny(
                         static_cast<GLuint>(glUnit), &discoveredTarget);
+                    if (g_lbLog) {
+                        std::fprintf(stderr,
+                            "[LB-PROBE-ANY] glUnit=%d → texName=%u (discovered target=0x%X)\n",
+                            glUnit, texName, discoveredTarget);
+                    }
                     (void)discoveredTarget;
                 }
                 if (texName == 0) {
@@ -4451,6 +4500,15 @@ struct GLContext::Impl {
                 binding.metalTexture = resolveSwizzledTexture(*texObject);
                 binding.metalSamplerState = metalSamplerState;
                 outBindings.push_back(binding);
+                if (g_lbLog) {
+                    std::fprintf(stderr,
+                        "[LB-BOUND] stage=%s sampler='%s' glUnit=%d metalSlot=%u "
+                        "texName=%u metalTex=%p mtlSampler=%p samplerName=%u\n",
+                        stageTag, sampledTex.name.c_str(),
+                        glUnit, binding.metalSlot, texName,
+                        binding.metalTexture, binding.metalSamplerState,
+                        samplerName);
+                }
 
                 if (logThisCall) {
                     // Phase 8X Group 4d follow-up⁹ — first-bind
