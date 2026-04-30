@@ -7076,9 +7076,15 @@ void APIENTRY glDrawTransformFeedback(GLenum mode, GLuint id) {
                               "EndTransformFeedback has never been called for this object");
         return;
     }
-    (void)mode;
-    // Stub: no vertex capture → 0 primitives drawn.
-    markStateFunction(FunctionId::glDrawTransformFeedback, "DrawTransformFeedback stub (0 primitives, no TF capture).");
+    // Sprint 8 #9-B (CKPT85): glDrawTransformFeedback(mode, id) is
+    // equivalent to glDrawTransformFeedbackInstanced(mode, id, 1) per
+    // GL 4.6 §10.5. Pre-CKPT85 was a stub that drew 0 primitives —
+    // CTS `transform_feedback.draw_xfb_test` calls this entry to
+    // verify the captured vertex stream rasterizes correctly.
+    if (!ctx->drawTransformFeedbackInstanced(mode, id, 1)) {
+        return;
+    }
+    markDrawFunction(FunctionId::glDrawTransformFeedback, "DrawTransformFeedback delegates to Instanced(.., 1).");
     Runtime::shared().recordBootstrapTrace("glDrawTransformFeedback(mode=" + std::to_string(mode) + ", id=" + std::to_string(id) + ")");
 }
 

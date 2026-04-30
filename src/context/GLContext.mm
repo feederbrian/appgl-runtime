@@ -7910,10 +7910,25 @@ struct GLContext::Impl {
     std::unordered_map<const void*, std::string> pointerLabels;
     std::deque<GLenum> errors;
     // Transform feedback active state (CTS api_errors_test).
+    // Sprint 8 #9-B (CKPT85): the global transformFeedbackActive /
+    // transformFeedbackPaused flags are now the LEGACY mirror used only
+    // for the implicit default TF object (id=0). When a non-zero TF
+    // object is bound, the per-object `tf->active` / `tf->paused`
+    // fields are the source of truth — see GLContext::is*() getters.
+    // Use isTfActiveOnBoundImpl() / isTfPausedOnBoundImpl() helpers
+    // below from inside Impl methods to consult the right-per-object
+    // state.
     bool transformFeedbackActive = false;
     bool transformFeedbackPaused = false;
     GLenum transformFeedbackPrimitiveMode = GL_POINTS;
     GLuint boundTransformFeedbackId = 0;
+
+    // CKPT85 helpers — Impl methods can't call the public GLContext
+    // getters directly without a back-pointer dance, so these inlines
+    // duplicate the lookup. Default TF object (id=0) falls back to
+    // the legacy global flag; non-zero IDs read the per-object field.
+    bool isTfActiveOnBoundImpl() const;
+    bool isTfPausedOnBoundImpl() const;
 
     // GL 3.0 / GL 4.5 ARB_conditional_render_inverted — `glBeginConditional-
     // Render(id, mode)` makes subsequent draws conditional on the named
@@ -8888,12 +8903,16 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
     // returning GL_INVALID_ENUM here aborts the reset and bleeds state across
     // CTS tests (active/paused/binding all default to GL_FALSE/0 since we
     // don't yet support TF execution).
+    // CKPT85: route through per-bound-object getters so the
+    // glGetIntegerv result reflects the currently-bound TF object's
+    // state (the test inspectXFBState semantic). Pre-CKPT85 these
+    // read the global flag, which lagged behind glBindTransformFeedback.
     if (pname == GL_TRANSFORM_FEEDBACK_ACTIVE) {
-        *data = impl_->transformFeedbackActive ? GL_TRUE : GL_FALSE;
+        *data = isTransformFeedbackActive() ? GL_TRUE : GL_FALSE;
         return true;
     }
     if (pname == GL_TRANSFORM_FEEDBACK_PAUSED) {
-        *data = impl_->transformFeedbackPaused ? GL_TRUE : GL_FALSE;
+        *data = isTransformFeedbackPaused() ? GL_TRUE : GL_FALSE;
         return true;
     }
     if (pname == GL_TRANSFORM_FEEDBACK_BINDING) {
@@ -8962,11 +8981,12 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         return true;
     }
     if (pname == GL_TRANSFORM_FEEDBACK_ACTIVE) {
-        *data = impl_->transformFeedbackActive ? GL_TRUE : GL_FALSE;
+        // CKPT85: per-bound-object query (see queryBool path above).
+        *data = isTransformFeedbackActive() ? GL_TRUE : GL_FALSE;
         return true;
     }
     if (pname == GL_TRANSFORM_FEEDBACK_PAUSED) {
-        *data = impl_->transformFeedbackPaused ? GL_TRUE : GL_FALSE;
+        *data = isTransformFeedbackPaused() ? GL_TRUE : GL_FALSE;
         return true;
     }
     if (pname == GL_TRANSFORM_FEEDBACK_BINDING) {
@@ -13876,7 +13896,50 @@ std::uint64_t GLContext::metalAllocatedBytes() const {
 }
 
 bool GLContext::isTransformFeedbackActive() const {
+    // Sprint 8 #9-B (CKPT85): per-TF-object active-state tracking.
+    // GL 4.6 §13.2.2 mandates that begin/end/pause/resume validation is
+    // against the CURRENTLY-BOUND TF object's state, not a global flag.
+    // The global `impl_->transformFeedbackActive` is the legacy mirror
+    // that gets last-written by setTransformFeedbackActive — but when
+    // glBindTransformFeedback switches the bound object, the global
+    // flag still reflects the OLD object's state. Reading per-bound-
+    // object state correctly distinguishes "is THIS TF object active?"
+    // from "is ANY TF active?".
+    //
+    // Default object 0 (the implicit context-wide TF) has no backing
+    // GLTransformFeedbackObject — its state lives in the global flag.
+    // This is the single semantic the global flag still owns.
+    //
+    // CTS `transform_feedback.draw_xfb_test` exercises this exact
+    // scenario: bind(A), begin, pause, bind(B), begin should succeed
+    // (B is its own state, A is paused-active). Pre-CKPT85 the global
+    // flag returned A's active=true even after B was bound, blocking
+    // the begin on B with INVALID_OPERATION.
+    const GLuint tfId = impl_->boundTransformFeedbackId;
+    if (tfId != 0) {
+        if (auto* tf = impl_->objects->transformFeedbacks().get(tfId)) {
+            return tf->active;
+        }
+    }
     return impl_->transformFeedbackActive;
+}
+
+bool GLContext::Impl::isTfActiveOnBoundImpl() const {
+    if (boundTransformFeedbackId != 0) {
+        if (auto* tf = objects->transformFeedbacks().get(boundTransformFeedbackId)) {
+            return tf->active;
+        }
+    }
+    return transformFeedbackActive;
+}
+
+bool GLContext::Impl::isTfPausedOnBoundImpl() const {
+    if (boundTransformFeedbackId != 0) {
+        if (auto* tf = objects->transformFeedbacks().get(boundTransformFeedbackId)) {
+            return tf->paused;
+        }
+    }
+    return transformFeedbackPaused;
 }
 
 void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
@@ -14235,7 +14298,11 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
     // as the equivalent drawArrays `count` parameter (per GL 4.6
     // §10.5: "count is set to the number of vertices captured during
     // the most recent EndTransformFeedback").
-    if (transformFeedbackActive) {
+    //
+    // CKPT85: per-bound-object check. Pre-CKPT85 the global flag could
+    // be false even when the bound TF object was active (e.g. after a
+    // bind+end of a different object), causing the accumulator to skip.
+    if (isTfActiveOnBoundImpl()) {
         const GLuint tfName = boundTransformFeedbackId;
         if (tfName != 0) {
             if (auto* tf = objects->transformFeedbacks().get(tfName)) {
@@ -14505,7 +14572,8 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
 
     // Sprint 8 #9-C (CKPT68): accumulate vertex count on the bound TF
     // object — see writeTessTFAndUpdateCounters for full rationale.
-    if (transformFeedbackActive) {
+    // CKPT85: per-bound-object check (see writeTessTFAndUpdateCounters).
+    if (isTfActiveOnBoundImpl()) {
         const GLuint tfName = boundTransformFeedbackId;
         if (tfName != 0) {
             if (auto* tf = objects->transformFeedbacks().get(tfName)) {
@@ -14541,6 +14609,14 @@ void GLContext::setTransformFeedbackActive(bool active) {
 }
 
 bool GLContext::isTransformFeedbackPaused() const {
+    // CKPT85: same per-TF-object reading as isTransformFeedbackActive.
+    // Default object 0 still uses the global flag.
+    const GLuint tfId = impl_->boundTransformFeedbackId;
+    if (tfId != 0) {
+        if (auto* tf = impl_->objects->transformFeedbacks().get(tfId)) {
+            return tf->paused;
+        }
+    }
     return impl_->transformFeedbackPaused;
 }
 
@@ -24899,7 +24975,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // capturedVertexCount accumulation → glDrawTransformFeedbackInstanced
     // gets count=0 → test fails.
     if (program != nullptr &&
-        impl_->transformFeedbackActive &&
+        isTransformFeedbackActive() &&  // CKPT85: per-bound-object
         !program->transformFeedbackVaryingNames.empty() &&
         (emulProgram == nullptr || !emulProgram->geometryEmulated) &&
         !program->geometryEmulated &&
@@ -25747,7 +25823,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             : nullptr;
         const bool willHitVsOnlyTf =
             p != nullptr &&
-            impl_->transformFeedbackActive &&
+            isTransformFeedbackActive() &&  // CKPT85: per-bound-object
             !p->transformFeedbackVaryingNames.empty() &&
             !p->geometryEmulated &&
             !p->tessellationEmulated &&
@@ -25950,7 +26026,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // with `glDrawElements` to drive TF capture without a bound
     // GL_ELEMENT_ARRAY_BUFFER.
     if (program != nullptr &&
-        impl_->transformFeedbackActive &&
+        isTransformFeedbackActive() &&  // CKPT85: per-bound-object
         !program->transformFeedbackVaryingNames.empty() &&
         !program->geometryEmulated &&
         !program->tessellationEmulated &&
