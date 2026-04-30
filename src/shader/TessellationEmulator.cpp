@@ -507,19 +507,20 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
             out.diagnostic = "unsupported builtin input: " + std::to_string(bi);
             return out;
         }
-        // Phase 3f-14: accept `patch in` Input variables. Per-patch
-        // scalar/vec shape shared across all domain vertices. TCS-
-        // side capture + TES-side init (in initVariables' TES arm)
-        // feed the caller's TesPatchVaryingMap, keyed by Location.
-        // Arrays of scalars (e.g. `patch in float foo[4]`) are
-        // also covered — the flat-scalar storage convention means
-        // the whole array lives in a single vector<float>.
+        // Phase 3f-14 + Sprint 8 #8 Day 1 (CKPT66): accept `patch in`
+        // Input variables. Per-patch scalar/vec shape shared across
+        // all domain vertices. TCS-side capture + TES-side init feed
+        // the caller's TesPatchVaryingMap.
+        //
+        // CKPT66 relaxation: glslang doesn't emit Location on
+        // `patch in` variables without explicit `layout(location=N)`
+        // — cross-stage matching is by NAME (mirror of the interface
+        // block case below). CTS data_pass_through declares
+        // `patch in vec4 tc_patch_data;` with no explicit layout.
+        // Accept Location-less patch-in; the initVariables TES arm's
+        // patch-input lookup will need a name-keyed fallback (or the
+        // caller's TesPatchVaryingMap can hold name-keyed entries).
         if (dIt != module.decorations.end() && dIt->second.isPatch) {
-            if (!dIt->second.hasLocation) {
-                out.diagnostic = "TES patch-in Input without Location (id=" +
-                                 std::to_string(varId) + "): " + info.name;
-                return out;
-            }
             continue;
         }
         // Non-builtin, non-patch Input. Only the gl_in[] opt-in
@@ -550,21 +551,46 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
                              std::to_string(varId) + "): " + info.name;
             return out;
         }
-        // Require at least one member with BuiltIn decoration — that's
-        // the signature of a gl_PerVertex-style block.
+        // Sprint 8 #8 Day 1 (CKPT66): accept THREE array-of-struct
+        // shapes —
+        //   (a) gl_PerVertex block — at least one BuiltIn member
+        //       (gl_Position / gl_PointSize / gl_ClipDistance / etc).
+        //       Original Sprint 5 supported shape; gated by
+        //       APPGL_ENABLE_TESS_EMUL_GLIN.
+        //   (b) Interface block (GLSL `in BLOCK { ... } name[];`) —
+        //       struct is decorated `Block`. CTS data_pass_through-
+        //       class shape: `in OUT_TC { vec4 tc_position; ... }
+        //       in_data[];`. glslang emits NO Location decorations on
+        //       interface blocks without explicit `layout(location=N)`
+        //       — cross-stage matching is by member NAME instead.
+        //       initVariables reads per-vertex member values from
+        //       inputs[vi].varyings via member-name lookup (existing
+        //       branch at GeometryShaderEmulator.cpp:~1431-1452).
+        //   (c) Member-Location-decorated array — explicit
+        //       `layout(location=N) in TYPE name[];` per-member.
+        //       Reserved for shapes that explicitly use Location.
+        // Reject only if NONE of the three signatures match.
         bool sawBuiltInMember = false;
+        bool sawLocationMember = false;
         auto mdIt = module.memberDecorations.find(pIt->second.componentType);
         if (mdIt != module.memberDecorations.end()) {
             for (const auto& [midx, mdec] : mdIt->second.perMember) {
-                if (mdec.hasBuiltIn) { sawBuiltInMember = true; break; }
+                if (mdec.hasBuiltIn) sawBuiltInMember = true;
+                if (mdec.hasLocation) sawLocationMember = true;
             }
         }
-        if (!sawBuiltInMember) {
-            out.diagnostic = "Input array-of-struct has no BuiltIn members (id=" +
+        bool isBlockDecorated = false;
+        auto sdIt = module.decorations.find(pIt->second.componentType);
+        if (sdIt != module.decorations.end() && sdIt->second.isBlock) {
+            isBlockDecorated = true;
+        }
+        if (!sawBuiltInMember && !sawLocationMember && !isBlockDecorated) {
+            out.diagnostic = "Input array-of-struct has no BuiltIn / Location / Block decoration (id=" +
                              std::to_string(varId) + "): " + info.name;
             return out;
         }
-        // Accepted — gl_in[] gl_PerVertex block, opt-in enabled.
+        // Accepted — gl_in[] (BuiltIn) OR interface block (Block-
+        // decorated, name-matched) OR Location-decorated members.
     }
 
     // Upper bound on body size so a pathological shader can't hang
