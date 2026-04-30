@@ -1463,3 +1463,15 @@ distinction is made at the SPIR-V decoration level, not the text.
 - `KHR-GL46.layout_binding.sampler3D_layout_binding_texture_FragmentShader`
 
 **Regression-safe:** when `spvVersion.vulkan == 0` (pure OpenGL through glslang), the gate keeps its original true-for-GL semantics. When `vulkanRelaxed == false` (strict Vulkan target), no behaviour change. AppGL is the only known caller of `setEnvInputVulkanRulesRelaxed()` in the runtime, so the new check fires exclusively for our path. Section sweep verified zero regression: 272/297 P, 22 F, 3 NS on `tessellation_shader.* + geometry_shader.* + transform_feedback.*`.
+
+### `spirv-cross-msl-dim-rect-as-texture2d.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — `CompilerMSL::image_type_glsl()` non-depth texture switch.
+
+**Summary:** Adds a `case DimRect: img_type_name += "texture2d";` arm to the per-Dim switch that decides the MSL texture type emitted for a SPIR-V image. Pre-patch, the switch handled only `Dim1D / Dim2D / DimSubpassData / Dim3D / DimCube`; SPIR-V `Dim::Rect` fell into `default:` and emitted the literal token `unknown_texture_type<T>`, which is invalid MSL and silently broke pipeline state build for any shader declaring `sampler2DRect`.
+
+**Why:** Metal has no separate rectangle texture type. Both GL `sampler2DRect` and a regular `sampler2D` map to the same Metal `texture2d<T>` underlying object — the only runtime difference is normalized vs unnormalized texel coordinates, handled via the sampler's `coord::pixel` mode rather than a distinct texture type. Mapping `DimRect → texture2d` is the canonical and only correct emission.
+
+**CTS tests advanced (sub-section progress):** `KHR-GL46.shading_language_420pack.binding_samplers_texture_type_2D_rectangle` — pipeline build now succeeds (output transitions from `Invalid texel: 00000000` / silent pipeline failure to `Invalid texel: ff0000ff` / shader runs but sampling returns wrong data — distinct downstream residual deferred to next dispatch). No whole-test flip yet because the sample-correctness gap is a separate fix surface.
+
+**Regression-safe:** the new arm fires only on `image_type.dim == DimRect`. `default:` arm preserved for any future SPIR-V Dim values. Section sweep verified zero regression: 272/297 P, 22 F, 3 NS on `tessellation_shader.* + geometry_shader.* + transform_feedback.*`.

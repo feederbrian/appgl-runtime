@@ -2826,6 +2826,10 @@ struct GLContext::Impl {
                             }
                         }
                     } else if (object.target == GL_TEXTURE_1D_ARRAY) {
+                        // CKPT82: Metal requires bytesPerRow == 0 and
+                        // bytesPerImage == 0 for MTLTextureType1DArray
+                        // replaceRegion calls. Per-layer pointer math
+                        // still uses the actual row stride (rowStride).
                         const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.height));
                         const MTLRegion r = MTLRegionMake2D(0, 0,
                             static_cast<NSUInteger>(safeDimension(image.desc.width)), 1);
@@ -2837,22 +2841,25 @@ struct GLContext::Impl {
                             } else {
                                 [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
                                               withBytes:bytes + layer * rowStride
-                                            bytesPerRow:rowStride
-                                          bytesPerImage:rowStride];
+                                            bytesPerRow:0u
+                                          bytesPerImage:0u];
                             }
                         }
                     } else {
+                        // CKPT82: Metal requires bytesPerRow == 0 for
+                        // MTLTextureType1D replaceRegion calls.
+                        const bool is1D = (object.target == GL_TEXTURE_1D);
                         const MTLRegion r = MTLRegionMake2D(0, 0,
                             static_cast<NSUInteger>(safeDimension(image.desc.width)),
                             static_cast<NSUInteger>(
-                                object.target == GL_TEXTURE_1D ? 1 : safeDimension(image.desc.height)));
+                                is1D ? 1 : safeDimension(image.desc.height)));
                         if (fastPathNeedsBlit) {
                             fpBlitUpload2D(bytes, rowStride, imageStride, r,
                                            mipLevel, 0);
                         } else {
                             [existing replaceRegion:r mipmapLevel:mipLevel
                                           withBytes:bytes
-                                        bytesPerRow:rowStride];
+                                        bytesPerRow:(is1D ? 0u : rowStride)];
                         }
                     }
                 }
@@ -3078,8 +3085,31 @@ struct GLContext::Impl {
                 continue;
             }
             const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
-            const NSUInteger bytesPerRow = static_cast<NSUInteger>(safeDimension(image.desc.width) * bpp);
-            const NSUInteger bytesPerImage = bytesPerRow * static_cast<NSUInteger>(safeDimension(image.desc.height));
+            // Sprint 8 B Cluster F F1 Day 10 (CKPT82): Metal requires
+            // bytesPerRow == 0 (and bytesPerImage == 0 on the slice
+            // overload) for MTLTextureType1D and MTLTextureType1DArray
+            // (Apple docs on `MTLTexture::replaceRegion:...:bytesPerRow:`
+            // and the slice overload: "For MTLTextureType1D or
+            // MTLTextureType1DArray, set bytesPerRow [and bytesPerImage]
+            // to 0"). Passing the 2D row-stride to a 1D texture trips
+            // Metal's MTLDebugLayer validation and produces undefined
+            // sample results on Apple Silicon — CTS
+            // shading_language_420pack.binding_samplers_texture_type_1D
+            // sees `goku.sample(s, 0.0)` returning random data rather
+            // than the uploaded red(1,0,0,0).
+            //
+            // sourceRowStride keeps the actual byte width of one row
+            // for the per-layer pointer math in the 1D_ARRAY upload
+            // loop below (each layer's input bytes start at
+            // layerBytes = uploadBytes + layer * sourceRowStride).
+            const bool is1DLike =
+                (object.target == GL_TEXTURE_1D || object.target == GL_TEXTURE_1D_ARRAY);
+            const NSUInteger sourceRowStride =
+                static_cast<NSUInteger>(safeDimension(image.desc.width) * bpp);
+            const NSUInteger bytesPerRow = is1DLike ? 0u : sourceRowStride;
+            const NSUInteger bytesPerImage = is1DLike
+                ? 0u
+                : sourceRowStride * static_cast<NSUInteger>(safeDimension(image.desc.height));
             const MTLRegion region = MTLRegionMake3D(
                 0,
                 0,
@@ -3120,19 +3150,24 @@ struct GLContext::Impl {
                 // GL stores the 1D array layer count in `height`. Each layer
                 // is one row of `width` pixels; Metal expects height=1 with
                 // the layer index carried in `slice`.
+                //
+                // CKPT82: bytesPerRow == 0 for 1D_ARRAY per Metal docs,
+                // but the per-layer source pointer must still advance by
+                // the actual row width (sourceRowStride) — the input
+                // bytes are still laid out one row per layer.
                 const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.height));
                 const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, 1);
                 for (NSUInteger layer = 0; layer < layers; ++layer) {
-                    const auto* layerBytes = uploadBytes + static_cast<std::size_t>(layer * bytesPerRow);
+                    const auto* layerBytes = uploadBytes + static_cast<std::size_t>(layer * sourceRowStride);
                     if (needsBlitUpload) {
-                        blitUpload2D(layerBytes, bytesPerRow, bytesPerRow, layerRegion, mipLevel, layer);
+                        blitUpload2D(layerBytes, sourceRowStride, sourceRowStride, layerRegion, mipLevel, layer);
                     } else {
                         [texture replaceRegion:layerRegion
                                    mipmapLevel:mipLevel
                                          slice:layer
                                      withBytes:layerBytes
-                                   bytesPerRow:bytesPerRow
-                                 bytesPerImage:bytesPerRow];
+                                   bytesPerRow:0u
+                                 bytesPerImage:0u];
                     }
                 }
             } else {

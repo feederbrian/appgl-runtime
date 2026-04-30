@@ -1,0 +1,22 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -19185,6 +19185,18 @@ string CompilerMSL::image_type_glsl(const SPIRType &type, uint32_t id, bool memb
+ 			else
+ 				img_type_name += (img_type.arrayed ? "texture2d_array" : "texturecube");
+ 			break;
++		// AppGL CKPT82: Metal has no rectangle texture type — both
++		// GL `sampler2DRect` and a regular `sampler2D` map to the same
++		// MSL `texture2d<T>` underlying object (the only runtime
++		// difference is normalized vs unnormalized coords, handled
++		// via the sampler's `coord::pixel` mode). Without this case
++		// the SPIR-V `Dim` of `Rect` fell through to `default:` and
++		// emitted `unknown_texture_type<T>`, an invalid MSL token
++		// that silently failed pipeline build. Required by
++		// KHR-GL46.shading_language_420pack.binding_samplers_texture_type_2D_rectangle.
++		case DimRect:
++			img_type_name += "texture2d";
++			break;
+ 		default:
+ 			img_type_name += "unknown_texture_type";
+ 			break;
