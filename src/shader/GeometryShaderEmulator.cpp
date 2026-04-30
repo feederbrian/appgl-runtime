@@ -235,6 +235,19 @@ public:
           outputVaryingWidths_(std::move(outputVaryingWidths)),
           stage_(stage) {}
 
+    // Sprint 8 #8 β.2 (CKPT69): TCS/TES need to look up user-block input
+    // member names against the cross-stage interface (VS→TCS or
+    // TCS→TES) when seeding gl_in[].user_block.member from
+    // PerVertexInput.varyings. The 4-arg constructor only seeds the
+    // OUTPUT varying list; this setter back-fills the INPUT list so
+    // executeTes / executeVs / execute(GS) all share one entry point.
+    // Mirrors the GS constructor's input-varying init path.
+    void setInputVaryings(std::vector<std::string> names,
+                          std::vector<std::uint32_t> widths) {
+        inputVaryingNames_ = std::move(names);
+        inputVaryingWidths_ = std::move(widths);
+    }
+
     // Phase 3f-3: SSBO / shader-storage-buffer plumbing. Caller
     // supplies a binding → (host-pointer, size-in-bytes) map drawn
     // from the GL state (indexedBufferBinding(GL_SHADER_STORAGE_BUFFER,
@@ -1804,6 +1817,7 @@ bool Interpreter::captureTcsOutputForInvocation(std::int32_t invocationID,
     out.clipDistance.clear();
     out.cullDistance.clear();
 
+    bool foundBuiltInGlOut = false;
     for (const auto& [varId, info] : module_.variables) {
         if (info.storageClass != spv::StorageClassOutput) continue;
         auto tIt = module_.types.find(info.typeId);
@@ -1860,9 +1874,89 @@ bool Interpreter::captureTcsOutputForInvocation(std::int32_t invocationID,
             }
             runningOff += memW;
         }
-        return true;
+        foundBuiltInGlOut = true;
+        break;
     }
-    return false;
+
+    // Sprint 8 #8 β.2 (CKPT69): also capture USER-block per-vertex
+    // outputs. data_pass_through TCS writes
+    //   `out OUT_TC { vec4 tc_position; ... } out_data[];`
+    // alongside the gl_out[gl_PerVertex] block. Both are Output
+    // Array<Struct, N> shapes, but the user block's struct has NO
+    // BuiltIn-decorated members. We walk Outputs again, find one or
+    // more user-block-shaped variables, and resolve every name in
+    // `outputVaryingNames_` (= TCS user-output member names supplied
+    // by the caller) against any user block's member-name list. The
+    // matching member's invocationID slice is concatenated into
+    // out.varyings in outputVaryingNames_ order so downstream
+    // EmulatedVertex → PerVertexInput slicing (using the same widths
+    // array the caller supplied) reproduces the same ordering on the
+    // TES / GS side.
+    for (std::size_t k = 0; k < outputVaryingNames_.size(); ++k) {
+        const std::string& wantName = outputVaryingNames_[k];
+        const std::uint32_t expectedW =
+            (k < outputVaryingWidths_.size()) ? outputVaryingWidths_[k] : 0;
+        std::vector<float> v(expectedW, 0.0f);
+        bool resolved = false;
+        for (const auto& [varId, info] : module_.variables) {
+            if (resolved) break;
+            if (info.storageClass != spv::StorageClassOutput) continue;
+            auto tIt = module_.types.find(info.typeId);
+            if (tIt == module_.types.end()) continue;
+            auto pIt = module_.types.find(tIt->second.pointeeType);
+            if (pIt == module_.types.end() ||
+                pIt->second.kind != TypeInfo::Kind::Array) continue;
+            auto eIt = module_.types.find(pIt->second.componentType);
+            if (eIt == module_.types.end() ||
+                eIt->second.kind != TypeInfo::Kind::Struct) continue;
+            auto mnIt = module_.memberNames.find(pIt->second.componentType);
+            if (mnIt == module_.memberNames.end()) continue;
+            // Skip the gl_PerVertex block — its members are BuiltIns.
+            // The user block's struct has no BuiltIn member decorations
+            // (or has them but for other slots — we still allow a name
+            // match against any non-BuiltIn-only member).
+            auto mdIt = module_.memberDecorations.find(pIt->second.componentType);
+            auto sIt = varStorage_.find(varId);
+            if (sIt == varStorage_.end()) continue;
+            const auto& storage = sIt->second;
+            const std::uint32_t perVertexW =
+                module_.scalarWidth(pIt->second.componentType);
+            const std::uint32_t base =
+                static_cast<std::uint32_t>(invocationID) * perVertexW;
+            std::uint32_t runningOff = 0;
+            for (std::size_t m = 0; m < eIt->second.memberTypes.size(); ++m) {
+                const std::uint32_t memW =
+                    module_.scalarWidth(eIt->second.memberTypes[m]);
+                bool isBuiltInMember = false;
+                if (mdIt != module_.memberDecorations.end()) {
+                    auto mm = mdIt->second.perMember.find(
+                        static_cast<std::uint32_t>(m));
+                    if (mm != mdIt->second.perMember.end() &&
+                        mm->second.hasBuiltIn) {
+                        isBuiltInMember = true;
+                    }
+                }
+                if (!isBuiltInMember) {
+                    auto nIt = mnIt->second.find(static_cast<std::uint32_t>(m));
+                    if (nIt != mnIt->second.end() &&
+                        nIt->second == wantName) {
+                        const std::uint32_t copyW = std::min(memW, expectedW);
+                        for (std::uint32_t kk = 0;
+                             kk < copyW && base + runningOff + kk < storage.size();
+                             ++kk) {
+                            v[kk] = storage[base + runningOff + kk];
+                        }
+                        resolved = true;
+                        break;
+                    }
+                }
+                runningOff += memW;
+            }
+        }
+        out.varyings.insert(out.varyings.end(), v.begin(), v.end());
+    }
+
+    return foundBuiltInGlOut || !outputVaryingNames_.empty();
 }
 
 void Interpreter::captureTcsPatchOutputs(
@@ -5934,7 +6028,9 @@ bool runTesForVertex(
     EmulatedVertex& outVertex,
     const TesUniformMap* precomputedUniforms,
     const TesPatchVaryingMap* patchVaryings,
-    std::string* diagnostic)
+    std::string* diagnostic,
+    const std::vector<std::string>* inVaryingNames,
+    const std::vector<std::uint32_t>* inVaryingWidths)
 {
     if (tesSpirv == nullptr || tesWordCount < 5) {
         if (diagnostic) *diagnostic = "runTesForVertex: empty SPIR-V";
@@ -5982,6 +6078,16 @@ bool runTesForVertex(
     tesInterp.setUniforms(&uniforms);
     tesInterp.setTesInputs(tessCoord, primitiveID);
 
+    // Sprint 8 #8 β.2 (CKPT69): wire cross-stage input varying names
+    // (= TCS user-block-output member names, or VS user-block-output
+    // member names if there's no TCS) so the Interpreter's gl_in[]
+    // user-block-member arm at the bottom of initVariables can resolve
+    // `in OUT_TC { vec4 tc_position; ... } in_data[];` reads against
+    // the per-vertex slice of patchInputs[k].varyings.
+    if (inVaryingNames != nullptr && inVaryingWidths != nullptr) {
+        tesInterp.setInputVaryings(*inVaryingNames, *inVaryingWidths);
+    }
+
     // Phase 3f-3: convert public TesSsboMap → Interpreter::StorageBufferMap.
     // Same underlying shape (binding → ptr+size); separate types so the
     // Interpreter's public header doesn't leak through GSE.h.
@@ -6003,9 +6109,11 @@ bool runTesForVertex(
 
     // Phase 3f-5: convert per-patch EmulatedVertex inputs (position +
     // clip/cull) into PerVertexInput records the interpreter's
-    // gl_in[] init path consumes. User varyings are not plumbed for
-    // phase 3f-5 scope — the tess_shader.* tests we target use
-    // gl_Position only.
+    // gl_in[] init path consumes.
+    // Sprint 8 #8 β.2 (CKPT69): also slice the EmulatedVertex's
+    // concatenated `varyings` buffer into per-varying separate
+    // vectors using inVaryingWidths. The Interpreter's user-block
+    // member-name arm walks this list keyed by inVaryingNames index.
     std::vector<Interpreter::PerVertexInput> inputs;
     inputs.reserve(patchInputs.size());
     for (const auto& pv : patchInputs) {
@@ -6016,6 +6124,18 @@ bool runTesForVertex(
         pvi.position[3] = pv.position[3];
         pvi.clipDistance = pv.clipDistance;
         pvi.cullDistance = pv.cullDistance;
+        if (inVaryingWidths != nullptr && !inVaryingWidths->empty()) {
+            pvi.varyings.resize(inVaryingWidths->size());
+            std::size_t srcOff = 0;
+            for (std::size_t k = 0; k < inVaryingWidths->size(); ++k) {
+                const std::uint32_t w = (*inVaryingWidths)[k];
+                pvi.varyings[k].assign(w, 0.0f);
+                for (std::uint32_t j = 0; j < w && srcOff + j < pv.varyings.size(); ++j) {
+                    pvi.varyings[k][j] = pv.varyings[srcOff + j];
+                }
+                srcOff += w;
+            }
+        }
         inputs.push_back(std::move(pvi));
     }
 
@@ -6045,7 +6165,11 @@ bool runTcsForVertex(
     float* innerLevelsOut,
     const TesUniformMap* precomputedUniforms,
     TesPatchVaryingMap* patchVaryingsOut,
-    std::string* diagnostic)
+    std::string* diagnostic,
+    const std::vector<std::string>* inVaryingNames,
+    const std::vector<std::uint32_t>* inVaryingWidths,
+    const std::vector<std::string>* outVaryingNames,
+    const std::vector<std::uint32_t>* outVaryingWidths)
 {
     if (tcsSpirv == nullptr || tcsWordCount < 5) {
         if (diagnostic) *diagnostic = "runTcsForVertex: empty SPIR-V";
@@ -6077,17 +6201,29 @@ bool runTcsForVertex(
     }
     const Interpreter::UniformValues& uniforms = *uniformsPtr;
 
-    // TCS has no user output varyings to capture from the CPU emul's
-    // perspective — gl_out[] patch values feed the TES via
-    // captureTcsOutputForInvocation below; per-patch `patch out`
-    // varyings are phase 3f-11+ territory.
-    const std::vector<std::string>   noVaryingNames;
-    const std::vector<std::uint32_t> noVaryingWidths;
+    // Sprint 8 #8 β.2 (CKPT69): when caller supplies the TCS user-block
+    // output member names + widths, the Interpreter walks them after
+    // the body executes and `captureTcsOutputForInvocation` returns the
+    // captured per-vertex user-block payload alongside gl_PerVertex
+    // builtins. When unsupplied (default), TCS keeps the legacy
+    // builtin-only output capture (passthrough TCS path).
+    static const std::vector<std::string>   kEmptyNames;
+    static const std::vector<std::uint32_t> kEmptyWidths;
+    const std::vector<std::string>&   tcsOutNames =
+        (outVaryingNames != nullptr) ? *outVaryingNames : kEmptyNames;
+    const std::vector<std::uint32_t>& tcsOutWidths =
+        (outVaryingWidths != nullptr) ? *outVaryingWidths : kEmptyWidths;
 
     Interpreter tcsInterp(tcsMod, Interpreter::Stage::TessControl,
-                          noVaryingNames, noVaryingWidths);
+                          tcsOutNames, tcsOutWidths);
     tcsInterp.setUniforms(&uniforms);
     tcsInterp.setTcsInputs(primitiveID, invocationID, patchVertices);
+
+    // Sprint 8 #8 β.2 (CKPT69): cross-stage input varying interface for
+    // TCS gl_in[].user_block.member name resolution.
+    if (inVaryingNames != nullptr && inVaryingWidths != nullptr) {
+        tcsInterp.setInputVaryings(*inVaryingNames, *inVaryingWidths);
+    }
 
     Interpreter::StorageBufferMap ssboInterp;
     if (ssboMap != nullptr) {
@@ -6103,6 +6239,9 @@ bool runTcsForVertex(
     // Phase 3f-10: convert per-patch EmulatedVertex inputs (position +
     // clip/cull) into PerVertexInput so the interpreter's gl_in[]
     // init path seeds TCS's input array from the VS pre-pass.
+    // Sprint 8 #8 β.2 (CKPT69): also slice user varyings (concatenated
+    // in EmulatedVertex.varyings) into the per-varying separate
+    // PerVertexInput.varyings vector using inVaryingWidths.
     std::vector<Interpreter::PerVertexInput> inputs;
     inputs.reserve(patchInputs.size());
     for (const auto& pv : patchInputs) {
@@ -6113,6 +6252,18 @@ bool runTcsForVertex(
         pvi.position[3] = pv.position[3];
         pvi.clipDistance = pv.clipDistance;
         pvi.cullDistance = pv.cullDistance;
+        if (inVaryingWidths != nullptr && !inVaryingWidths->empty()) {
+            pvi.varyings.resize(inVaryingWidths->size());
+            std::size_t srcOff = 0;
+            for (std::size_t k = 0; k < inVaryingWidths->size(); ++k) {
+                const std::uint32_t w = (*inVaryingWidths)[k];
+                pvi.varyings[k].assign(w, 0.0f);
+                for (std::uint32_t j = 0; j < w && srcOff + j < pv.varyings.size(); ++j) {
+                    pvi.varyings[k][j] = pv.varyings[srcOff + j];
+                }
+                srcOff += w;
+            }
+        }
         inputs.push_back(std::move(pvi));
     }
 

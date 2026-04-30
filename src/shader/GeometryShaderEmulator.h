@@ -443,7 +443,16 @@ bool runTesForVertex(
     // from this map in their init. Nullptr keeps the legacy
     // behaviour of zero-initialising patch-in variables.
     const TesPatchVaryingMap* patchVaryings = nullptr,
-    std::string* diagnostic = nullptr);
+    std::string* diagnostic = nullptr,
+    // Sprint 8 #8 β.2 (CKPT69): cross-stage input-varying interface.
+    // For TES: these are the TCS-output user-block member names (or
+    // VS-output member names when no TCS is present). The interpreter
+    // reads `gl_in[k].user_block.member` by looking up the member
+    // name in this list. Widths are parallel — one per name. Empty
+    // (default) keeps the pre-CKPT69 behaviour of leaving user-block
+    // gl_in[] reads unresolved (zeroed).
+    const std::vector<std::string>* inVaryingNames = nullptr,
+    const std::vector<std::uint32_t>* inVaryingWidths = nullptr);
 
 // Run a single TCS invocation on CPU. One invocation per
 // (patch, invocationID) where invocationID ∈ [0, layout(vertices=N)).
@@ -487,7 +496,17 @@ bool runTcsForVertex(
     // per-Location. Callers that don't consume patch-out pass
     // nullptr.
     TesPatchVaryingMap* patchVaryingsOut = nullptr,
-    std::string* diagnostic = nullptr);
+    std::string* diagnostic = nullptr,
+    // Sprint 8 #8 β.2 (CKPT69): TCS cross-stage interface. inVarying*
+    // are the VS-output user-block member names that map onto TCS
+    // gl_in[].user_block.member; outVarying* are the TCS-output user-
+    // block member names captured per-invocation into outVertex's
+    // varying payload (and downstream consumed by TES gl_in[] reads
+    // and by the synthesised pass-through VS as cross-stage varyings).
+    const std::vector<std::string>* inVaryingNames = nullptr,
+    const std::vector<std::uint32_t>* inVaryingWidths = nullptr,
+    const std::vector<std::string>* outVaryingNames = nullptr,
+    const std::vector<std::uint32_t>* outVaryingWidths = nullptr);
 
 // Synthesise a pass-through vertex-shader MSL source that reads
 // the expanded per-vertex payload (one buffer slot with gl_Position

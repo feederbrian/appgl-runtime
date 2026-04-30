@@ -688,18 +688,34 @@ TessBodyInterpretabilityCheck classifyTessControlInterpretable(
                              std::to_string(varId) + "): " + info.name;
             return out;
         }
+        // Sprint 8 #8 β.2 (CKPT69): accept the same three array-of-
+        // struct shapes the TES classifier admits (CKPT66 mirror) —
+        //   (a) gl_PerVertex block — at least one BuiltIn member.
+        //   (b) GLSL interface block (`in OUT_VS { ... } in_vs_data[];`) —
+        //       struct decorated Block; cross-stage matching by NAME.
+        //       data_pass_through TCS uses this exact shape.
+        //   (c) Member-Location-decorated array — explicit per-member
+        //       layout(location=N).
         bool sawBuiltInMember = false;
+        bool sawLocationMember = false;
         auto mdIt = module.memberDecorations.find(pIt->second.componentType);
         if (mdIt != module.memberDecorations.end()) {
             for (const auto& [midx, mdec] : mdIt->second.perMember) {
-                if (mdec.hasBuiltIn) { sawBuiltInMember = true; break; }
+                if (mdec.hasBuiltIn) sawBuiltInMember = true;
+                if (mdec.hasLocation) sawLocationMember = true;
             }
         }
-        if (!sawBuiltInMember) {
-            out.diagnostic = "TCS Input array-of-struct has no BuiltIn members";
+        bool isBlockDecorated = false;
+        auto sdIt = module.decorations.find(pIt->second.componentType);
+        if (sdIt != module.decorations.end() && sdIt->second.isBlock) {
+            isBlockDecorated = true;
+        }
+        if (!sawBuiltInMember && !sawLocationMember && !isBlockDecorated) {
+            out.diagnostic = "TCS Input array-of-struct has no BuiltIn / Location / Block decoration";
             return out;
         }
-        // Accepted — gl_in[] gl_PerVertex block (opt-in enabled).
+        // Accepted — gl_in[] gl_PerVertex block, user interface block,
+        // or member-Location-decorated array (opt-in enabled).
     }
 
     // Same 4096-opcode body-size guard as the TES classifier.
@@ -2100,6 +2116,63 @@ EmulatedDraw emulateTessellationDraw(
     // Location variables are seeded with the right values.
     std::vector<TesPatchVaryingMap> tcsPatchVaryings;
 
+    // Sprint 8 #8 β.2 (CKPT69): cross-stage varying interface chain.
+    // Scan TCS interface to derive:
+    //   crossStageVsToTcs[k] = TCS-input user-block member names (= VS
+    //     output member names), widths parallel.
+    //   crossStageTcsToTes[k] = TCS-output user-block member names
+    //     (= TES input member names), widths parallel.
+    // Filter to per-vertex non-builtin user-block members; built-in
+    // gl_PerVertex slots (Position / ClipDistance / CullDistance) are
+    // routed through EmulatedVertex's dedicated fields, not the
+    // generic varyings list.
+    std::vector<std::string>   crossStageVsToTcs;
+    std::vector<std::uint32_t> crossStageVsToTcsWidths;
+    std::vector<std::string>   crossStageTcsToTes;
+    std::vector<std::uint32_t> crossStageTcsToTesWidths;
+    if (!program.tessControlSpirv.empty()) {
+        TessControlInterface tcIface = scanTessControlInterface(
+            program.tessControlSpirv.data(),
+            program.tessControlSpirv.size());
+        if (tcIface.parsed) {
+            for (const auto& iv : tcIface.inputs) {
+                if (iv.isBuiltIn) continue;
+                if (!iv.isPerVertex) continue;
+                if (iv.scalarCount == 0) continue;
+                crossStageVsToTcs.push_back(iv.name);
+                crossStageVsToTcsWidths.push_back(iv.scalarCount);
+            }
+            for (const auto& ov : tcIface.outputs) {
+                if (ov.isBuiltIn) continue;
+                if (!ov.isPerVertex) continue;
+                if (ov.scalarCount == 0) continue;
+                crossStageTcsToTes.push_back(ov.name);
+                crossStageTcsToTesWidths.push_back(ov.scalarCount);
+            }
+        }
+    }
+    // When there's no TCS, the VS-output → TES-input cross-stage runs
+    // directly. Scan TES inputs for the same user-block per-vertex
+    // shape to derive what the VS pre-pass should capture, and use the
+    // same list as the TES input map (since there's no intermediate
+    // TCS to relabel members).
+    if (program.tessControlSpirv.empty() && !program.tessEvalSpirv.empty()) {
+        TessEvalInterface teIface = scanTessEvalInterface(
+            program.tessEvalSpirv.data(),
+            program.tessEvalSpirv.size());
+        if (teIface.parsed) {
+            for (const auto& iv : teIface.inputs) {
+                if (iv.isBuiltIn) continue;
+                if (!iv.isPerVertex) continue;
+                if (iv.scalarCount == 0) continue;
+                crossStageVsToTcs.push_back(iv.name);
+                crossStageVsToTcsWidths.push_back(iv.scalarCount);
+                crossStageTcsToTes.push_back(iv.name);
+                crossStageTcsToTesWidths.push_back(iv.scalarCount);
+            }
+        }
+    }
+
     // Phase 3f-10: VS pre-pass now runs BEFORE the TCS pre-pass so
     // TCS's gl_in[] reads see real VS outputs. Runs whenever EITHER
     // `tessellationEmulated` (passthrough) or `tessellationInterpreted`
@@ -2111,8 +2184,6 @@ EmulatedDraw emulateTessellationDraw(
     if (needVsPrePass) {
         patchInputs.assign(numPatches,
             std::vector<EmulatedVertex>(static_cast<std::size_t>(patchVertices)));
-        const std::vector<std::string> noVaryingNames;
-        const std::vector<std::uint32_t> noVaryingWidths;
         for (std::size_t p = 0; p < numPatches; ++p) {
             const std::size_t patchBase = p * static_cast<std::size_t>(patchVertices);
             for (GLint pv = 0; pv < patchVertices; ++pv) {
@@ -2134,7 +2205,7 @@ EmulatedDraw emulateTessellationDraw(
                 const bool vsOk = runVsForVertex(
                     program.vertexSpirv.data(), program.vertexSpirv.size(),
                     program, vao, objects, vboSlot, 0 /*instanceID*/,
-                    noVaryingNames, noVaryingWidths,
+                    crossStageVsToTcs, crossStageVsToTcsWidths,
                     patchInputs[p][static_cast<std::size_t>(pv)], &vsDiag);
                 if (!vsOk) {
                     ++vsFailures;
@@ -2199,7 +2270,11 @@ EmulatedDraw emulateTessellationDraw(
                     /*innerLevelsOut=*/nullptr,
                     uniformMapPtr,
                     &tcsPatchVaryings[p],
-                    &diag);
+                    &diag,
+                    /*inVaryingNames=*/  &crossStageVsToTcs,
+                    /*inVaryingWidths=*/ &crossStageVsToTcsWidths,
+                    /*outVaryingNames=*/ &crossStageTcsToTes,
+                    /*outVaryingWidths=*/&crossStageTcsToTesWidths);
                 if (tcsDebug && !ok) {
                     std::fprintf(stderr, "[tess-emul] TCS bail (patch=%zu iv=%d): %s\n",
                         p, iv, diag.c_str());
@@ -2284,7 +2359,9 @@ EmulatedDraw emulateTessellationDraw(
             program, tessCoord, primID,
             interpVaryingNames, interpVaryingWidths,
             ssboMap, thisPatchInputs, outV,
-            uniformMapPtr, thisPatchVaryings, &diag);
+            uniformMapPtr, thisPatchVaryings, &diag,
+            /*inVaryingNames=*/  &crossStageTcsToTes,
+            /*inVaryingWidths=*/ &crossStageTcsToTesWidths);
         if (!ok && tesDebug && !diag.empty() &&
             tesBailSeen->insert(diag).second) {
             std::fprintf(stderr, "[tess-emul] TES bail: %s\n", diag.c_str());
