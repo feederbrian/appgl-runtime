@@ -1113,6 +1113,13 @@ struct GLTransformFeedbackObject {
     bool hasCompleted = false;  // set to true when EndTransformFeedback is called
     GLenum capturedPrimitiveMode = GL_POINTS;  // mode from beginTransformFeedback
     GLsizei capturedPrimitives = 0;  // for glDrawTransformFeedback
+    // Sprint 8 #9-C (CKPT68): vertex count captured during the most
+    // recent EndTransformFeedback. Equals primsWritten × verts-per-prim
+    // of the captured mode. Read by glDrawTransformFeedback{,Instanced}
+    // {,Stream} as the `count` for the equivalent drawArrays draw.
+    // Reset to 0 on each glBeginTransformFeedback; accumulated by
+    // writeGsXfbAndCheckDiscard / VS-only-TF helper TF-write paths.
+    GLsizei capturedVertexCount = 0;
     // Per-TF-object indexed buffer bindings recorded by the DSA
     // `glTransformFeedbackBufferBase` / `glTransformFeedbackBufferRange`
     // entries. Queried back via `glGetTransformFeedbacki_v` /

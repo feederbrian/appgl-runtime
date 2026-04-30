@@ -7536,16 +7536,19 @@ void APIENTRY glDrawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei i
                               "id is not a valid transform feedback object");
         return;
     }
-    // GL 4.6 §10.5: INVALID_OPERATION if mode is incompatible with the captured XFB mode.
-    {
-        auto* tfObj = ctx->objects().transformFeedbacks().get(id);
-        if (tfObj && tfObj->hasCompleted &&
-            !isDrawModeCompatibleWithXfb(mode, tfObj->capturedPrimitiveMode)) {
-            recordValidationError(ctx, "glDrawTransformFeedbackInstanced", GL_INVALID_OPERATION,
-                                  "draw mode incompatible with captured transform feedback primitive mode");
-            return;
-        }
-    }
+    // Sprint 8 #9-C (CKPT68): GL 4.6 §10.5 does NOT require draw `mode`
+    // to match the captured XFB primitive mode for glDrawTransformFeedback*.
+    // The captured-mode-compat check that lived here was over-strict —
+    // transferred from the glDrawArrays-while-TF-active rule (§13.3) where
+    // it does apply. For the DrawTransformFeedback* family, the captured
+    // vertices are reused as input to a NEW draw whose primitive mode is
+    // the `mode` parameter; no compat constraint between captured and
+    // new mode. Mirror with the non-Instanced glDrawTransformFeedback
+    // variants at lines 7062-7081 which never had this check (sister
+    // entry-point asymmetry confirms the check was a transplant from
+    // the wrong context). CTS draw_xfb_instanced_test captures GL_POINTS
+    // and re-draws as GL_TRIANGLE_STRIP — spec-allowed; our impl was
+    // rejecting.
     if (!ctx->drawTransformFeedbackInstanced(mode, id, instancecount)) {
         return;
     }
@@ -7579,13 +7582,8 @@ void APIENTRY glDrawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
                               "EndTransformFeedback has never been called for this object");
         return;
     }
-    // GL 4.6 §10.5: INVALID_OPERATION if mode is incompatible with captured XFB mode.
-    if (tfObj && tfObj->hasCompleted &&
-        !isDrawModeCompatibleWithXfb(mode, tfObj->capturedPrimitiveMode)) {
-        recordValidationError(ctx, "glDrawTransformFeedbackStreamInstanced", GL_INVALID_OPERATION,
-                              "draw mode incompatible with captured transform feedback primitive mode");
-        return;
-    }
+    // Sprint 8 #9-C (CKPT68) — see glDrawTransformFeedbackInstanced
+    // rationale above. Captured-mode-compat check removed.
     if (!ctx->drawTransformFeedbackStreamInstanced(mode, id, stream, instancecount)) {
         return;
     }

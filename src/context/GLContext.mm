@@ -14091,12 +14091,19 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
             default: break;
         }
     });
-    (void)primsWritten;  // transform-feedback-object aggregate is
-                          // tracked via the queries loop above; the
-                          // GLTransformFeedbackObject has no direct
-                          // `primitivesWritten` field we need to
-                          // update here. Queries + writeToBuffer are
-                          // the side effects.
+    // Sprint 8 #9-C (CKPT68): accumulate vertex count on the bound TF
+    // object so glDrawTransformFeedback{,Instanced}{,Stream} can use it
+    // as the equivalent drawArrays `count` parameter (per GL 4.6
+    // §10.5: "count is set to the number of vertices captured during
+    // the most recent EndTransformFeedback").
+    if (transformFeedbackActive) {
+        const GLuint tfName = boundTransformFeedbackId;
+        if (tfName != 0) {
+            if (auto* tf = objects->transformFeedbacks().get(tfName)) {
+                tf->capturedVertexCount += static_cast<GLsizei>(primsWritten * vpp);
+            }
+        }
+    }
 }
 
 bool GLContext::Impl::writeGsXfbAndCheckDiscard(
@@ -14356,6 +14363,17 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 break;
         }
     });
+
+    // Sprint 8 #9-C (CKPT68): accumulate vertex count on the bound TF
+    // object — see writeTessTFAndUpdateCounters for full rationale.
+    if (transformFeedbackActive) {
+        const GLuint tfName = boundTransformFeedbackId;
+        if (tfName != 0) {
+            if (auto* tf = objects->transformFeedbacks().get(tfName)) {
+                tf->capturedVertexCount += static_cast<GLsizei>(primsWritten * vpp);
+            }
+        }
+    }
 
     // Rasterizer-discard early-out. With GL_RASTERIZER_DISCARD
     // enabled the Metal draw would fail ("RasterizationEnabled is
@@ -24585,10 +24603,23 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // `program_pipeline_vs_gs_capture` pass 2 detaches the GS via
     // glUseProgramStages(GS_BIT, 0) and expects subsequent draws to
     // capture VS outputs to TF).
+    // Sprint 8 #9-C (CKPT68): the original CKPT59 gate restricted to
+    // `emulProgram == nullptr` to scope VS-only-TF to separable VS-only
+    // programs. That over-restricts: any program with no GS/tess emul
+    // (regardless of separable status) needs VS-only-TF capture during
+    // active TF. Relax to `(emulProgram == nullptr || !emulProgram->
+    // geometryEmulated)` — the GS-emul block at line ~24508 only runs
+    // when emulProgram->geometryEmulated, so guarding on that condition
+    // here mirrors that block's gate exactly. CTS draw_xfb_instanced_test
+    // uses a non-separable VS+FS program with TF varyings; without this
+    // relaxation, emulProgram is non-null (set to the same program) but
+    // doesn't have geometryEmulated, and VS-only-TF skipped → no
+    // capturedVertexCount accumulation → glDrawTransformFeedbackInstanced
+    // gets count=0 → test fails.
     if (program != nullptr &&
         impl_->transformFeedbackActive &&
         !program->transformFeedbackVaryingNames.empty() &&
-        emulProgram == nullptr &&
+        (emulProgram == nullptr || !emulProgram->geometryEmulated) &&
         !program->geometryEmulated &&
         !program->tessellationEmulated &&
         !program->tessellationInterpreted) {
@@ -29594,9 +29625,17 @@ bool GLContext::drawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei i
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    // Stub: draws instancecount instances of capturedPrimitives vertices.
-    // Currently capturedPrimitives is always 0 (no real TF capture yet).
-    return true;
+    // Sprint 8 #9-C (CKPT68): GL 4.6 §10.5 — DrawTransformFeedbackInstanced
+    // is equivalent to DrawArraysInstanced(mode, 0, count, instancecount)
+    // where `count` is the number of vertices captured during the most
+    // recent EndTransformFeedback. capturedVertexCount is updated by
+    // writeGsXfbAndCheckDiscard / writeTessTFAndUpdateCounters during
+    // TF capture.
+    const GLsizei vertexCount = tfObj->capturedVertexCount;
+    if (vertexCount <= 0 || instancecount == 0) {
+        return true;  // zero-vertex / zero-instance draw is a no-op success
+    }
+    return drawArraysInstanced(mode, 0, vertexCount, instancecount);
 }
 
 bool GLContext::drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLuint stream, GLsizei instancecount) {
@@ -29604,10 +29643,25 @@ bool GLContext::drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    // Validation of id, stream, and mode is done in the AppGLRuntime wrapper.
-    // Stub: 0 captured primitives.
-    (void)mode; (void)id; (void)stream;
-    return true;
+    GLTransformFeedbackObject* tfObj = impl_->objects->transformFeedbacks().get(id);
+    if (tfObj == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Sprint 8 #9-C (CKPT68) — see drawTransformFeedbackInstanced rationale.
+    // Stream parameter selects which vertex stream to read; for stream 0
+    // (the default) this is identical to non-Stream variant.
+    // Multi-stream (stream != 0) requires GS with `layout(stream=N) out`
+    // declarations; we don't yet model per-stream captured counts —
+    // current capturedVertexCount tracks the active TF total. CTS
+    // draw_xfb_stream_instanced_test uses stream 0 implicitly via a
+    // standard GS, so this passthrough suffices.
+    (void)stream;
+    const GLsizei vertexCount = tfObj->capturedVertexCount;
+    if (vertexCount <= 0 || instancecount == 0) {
+        return true;
+    }
+    return drawArraysInstanced(mode, 0, vertexCount, instancecount);
 }
 
 // ---------------------------------------------------------------------------

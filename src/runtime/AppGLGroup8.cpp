@@ -1025,6 +1025,10 @@ static void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
         auto* tfObj = ctx->objects().transformFeedbacks().get(xfbId);
         if (tfObj) {
             tfObj->capturedPrimitiveMode = primitiveMode;
+            // Sprint 8 #9-C (CKPT68): reset captured vertex count for
+            // the new TF session. writeGsXfbAndCheckDiscard / VS-only-TF
+            // helper TF-write paths accumulate during this session.
+            tfObj->capturedVertexCount = 0;
         }
     }
 }
