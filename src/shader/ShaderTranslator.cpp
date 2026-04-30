@@ -1181,28 +1181,90 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // buffer `[[id(N)]]` slots — SPIRV-Cross treats equal indices
         // as descriptor aliasing, which trips its fixup_hooks lambda
         // with a zero `overlapping_var_id` → Variant::get<SPIRVariable>
-        // at spirv_common.hpp:1644 throws "nullptr". The baseline
-        // (non-arg-buffer) direct-binding path uses independent Metal
-        // slot pools (setFragmentTexture + setFragmentSamplerState at
-        // the same numeric index), so colliding indices there are
-        // fine. The fix is scoped to the argument_buffers branch:
-        // give image and sampler separate id ranges (2*glBinding and
-        // 2*glBinding + 1). Outside the gate, keep the existing
-        // distinct-pool assignment unchanged — zero regression.
-        for (auto& img : resources.sampled_images) {
-            uint32_t glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
-            spirv_cross::MSLResourceBinding binding;
-            binding.stage = compiler.get_execution_model();
-            binding.desc_set = compiler.get_decoration(img.id, spv::DecorationDescriptorSet);
-            binding.binding = glBinding;
-            if (useArgBuf) {
-                binding.msl_texture = bindings.textureBase + 2 * glBinding;
-                binding.msl_sampler = bindings.samplerBase + 2 * glBinding + 1;
-            } else {
-                binding.msl_texture = bindings.textureBase + glBinding;
-                binding.msl_sampler = bindings.samplerBase + glBinding;
+        // at spirv_common.hpp:1644 throws "nullptr". The argbuf branch
+        // gives image and sampler separate id ranges (2*glBinding and
+        // 2*glBinding + 1).
+        //
+        // Sprint 8 B Cluster F F1 Day 5 (CKPT77): in the direct-binding
+        // path, allocate Metal texture/sampler slots SEQUENTIALLY in
+        // glBinding-sorted order — NOT `textureBase + glBinding`
+        // directly. GL advertises GL_MAX_TEXTURE_IMAGE_UNITS = 48 and
+        // CTS layout_binding tests legally declare
+        // `layout(binding=39) uniform sampler2D s;` (and binding values
+        // up to 47 across binding_array_size sub-tests). However Apple
+        // Silicon Metal silently fails pipeline state build when MSL
+        // declares `[[texture(N)]]` for N >= 31 in the fragment stage
+        // outside argument-buffer mode — `newRenderPipelineState…`
+        // returns nil, the draw is queued against a non-bound pipeline,
+        // no fragment runs, and the framebuffer stays at clear color.
+        // This shape was diagnosed in CKPT76 via the APPGL_LOG_LB
+        // trace: glUnit=39, metalSlot=39, texture pointer non-null,
+        // but rendered pixel = (0,0,0,1) instead of the expected
+        // green texture (0,1,0,1). The MSL dump showed
+        // `[[texture(39)]]` emitted directly from GL binding 39.
+        //
+        // Sequential allocation collapses the [0..47] GL binding range
+        // into the dense [0..N) Metal slot range where N is the count
+        // of sampled images actually used in the program — typically
+        // 1..16 for cluster F tests, well inside Metal's 31-texture
+        // budget. The runtime-side resolver still uses the original
+        // `glBinding` for the GL texture-unit lookup (via the GL
+        // sampler uniform value), and `metalBinding` for the Metal
+        // slot. Reflection mirrors the same sort + sequential index so
+        // dispatch-time `setFragmentTexture(tex, atIndex:metalBinding)`
+        // lines up with the MSL `[[texture(metalBinding)]]` slot.
+        //
+        // Sampler arrays (`uniform sampler2D arr[N]`) consume N
+        // consecutive Metal slots — the runtime adds `arrayElement` to
+        // `metalBinding` when binding each element (see
+        // GLContext.mm::resolveStage). Sequential allocator must
+        // advance `nextSlot` by the array size per entry so the next
+        // sampler doesn't collide with arr[N-1].
+        //
+        // Argument-buffer mode is unchanged (uses distinct
+        // 2*glBinding / 2*glBinding+1 ranges inside spvDescriptorSetBuffer0
+        // — argbuf programs sit on the deferred path and aren't part
+        // of the current cluster F failure mode).
+        {
+            struct SampledRef {
+                std::uint32_t glBinding;
+                std::uint32_t id;
+                std::uint32_t arraySize;  // 1 for scalar, N for `samplerXX arr[N]`
+                spirv_cross::Resource* res;
+            };
+            std::vector<SampledRef> sortedSampled;
+            for (auto& img : resources.sampled_images) {
+                SampledRef r;
+                r.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
+                r.id = img.id;
+                const auto& imgType = compiler.get_type(img.type_id);
+                r.arraySize = imgType.array.empty()
+                    ? 1u
+                    : (imgType.array[0] > 0 ? imgType.array[0] : 1u);
+                r.res = &img;
+                sortedSampled.push_back(r);
             }
-            compiler.add_msl_resource_binding(binding);
+            std::sort(sortedSampled.begin(), sortedSampled.end(),
+                      [](const SampledRef& a, const SampledRef& b) {
+                          if (a.glBinding != b.glBinding) return a.glBinding < b.glBinding;
+                          return a.id < b.id;
+                      });
+            std::uint32_t nextSampledSlot = bindings.textureBase;
+            for (auto& entry : sortedSampled) {
+                spirv_cross::MSLResourceBinding binding;
+                binding.stage = compiler.get_execution_model();
+                binding.desc_set = compiler.get_decoration(entry.res->id, spv::DecorationDescriptorSet);
+                binding.binding = entry.glBinding;
+                if (useArgBuf) {
+                    binding.msl_texture = bindings.textureBase + 2 * entry.glBinding;
+                    binding.msl_sampler = bindings.samplerBase + 2 * entry.glBinding + 1;
+                } else {
+                    binding.msl_texture = nextSampledSlot;
+                    binding.msl_sampler = nextSampledSlot;
+                    nextSampledSlot += entry.arraySize;
+                }
+                compiler.add_msl_resource_binding(binding);
+            }
         }
 
         // Remap storage images (imageLoad/imageStore — GL `image2D` etc.).
@@ -2049,16 +2111,50 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // linked programs retain their old mode until relinked.
         const bool useArgBufReflection =
             (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
-        for (auto& img : resources.sampled_images) {
-            ShaderReflection::ResourceBinding rb;
-            rb.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
-            if (useArgBufReflection) {
-                rb.metalBinding = 2 * rb.glBinding;
-            } else {
-                rb.metalBinding = bindings.textureBase + rb.glBinding;
+        // Sprint 8 B Cluster F F1 Day 5 (CKPT77): mirror spirvToMSL's
+        // sequential allocator for the direct-binding path so the
+        // reflected `metalBinding` matches the MSL-emitted
+        // `[[texture(N)]]` slot. Sort by (glBinding, id) and walk a
+        // running counter that advances by each entry's array size.
+        // See the matching block in spirvToMSL above for the full
+        // rationale. Argument-buffer mode keeps its 2*glBinding mapping.
+        {
+            struct SampledRefR {
+                std::uint32_t glBinding;
+                std::uint32_t id;
+                std::uint32_t arraySize;
+                spirv_cross::Resource* res;
+            };
+            std::vector<SampledRefR> sortedSampled;
+            for (auto& img : resources.sampled_images) {
+                SampledRefR r;
+                r.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
+                r.id = img.id;
+                const auto& imgType = compiler.get_type(img.type_id);
+                r.arraySize = imgType.array.empty()
+                    ? 1u
+                    : (imgType.array[0] > 0 ? imgType.array[0] : 1u);
+                r.res = &img;
+                sortedSampled.push_back(r);
             }
-            rb.name = img.name;
-            result.sampledTextures.push_back(std::move(rb));
+            std::sort(sortedSampled.begin(), sortedSampled.end(),
+                      [](const SampledRefR& a, const SampledRefR& b) {
+                          if (a.glBinding != b.glBinding) return a.glBinding < b.glBinding;
+                          return a.id < b.id;
+                      });
+            std::uint32_t nextSampledSlot = bindings.textureBase;
+            for (auto& entry : sortedSampled) {
+                ShaderReflection::ResourceBinding rb;
+                rb.glBinding = entry.glBinding;
+                if (useArgBufReflection) {
+                    rb.metalBinding = 2 * entry.glBinding;
+                } else {
+                    rb.metalBinding = nextSampledSlot;
+                    nextSampledSlot += entry.arraySize;
+                }
+                rb.name = entry.res->name;
+                result.sampledTextures.push_back(std::move(rb));
+            }
         }
 
         // Storage images (imageLoad/imageStore targets). Distinct from
