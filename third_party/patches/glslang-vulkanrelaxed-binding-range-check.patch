@@ -1,0 +1,44 @@
+diff --git a/glslang/MachineIndependent/ParseHelper.cpp b/glslang/MachineIndependent/ParseHelper.cpp
+index 99771e1..de05253 100644
+--- a/glslang/MachineIndependent/ParseHelper.cpp
++++ b/glslang/MachineIndependent/ParseHelper.cpp
+@@ -7813,10 +7813,36 @@ void TParseContext::layoutTypeCheck(const TSourceLoc& loc, const TType& type)
+                     }
+                 }
+             }
+-            if (spvVersion.vulkan == 0 && lastBinding >= resources.maxCombinedTextureImageUnits)
+-                error(loc, "sampler binding not less than gl_MaxCombinedTextureImageUnits", "binding", type.isArray() ? "(using array)" : "");
++            // AppGL CKPT78 patch: enforce GL 4.6 §4.4.4 sampler/image
++            // binding range under vulkanRelaxed mode (OpenGL emulation
++            // through glslang's Vulkan target). The original check is
++            // gated to `spvVersion.vulkan == 0` and would skip when the
++            // target is Vulkan-flavored SPIR-V — but vulkanRelaxed mode
++            // means we're writing OpenGL GLSL and emitting Vulkan-format
++            // SPIR-V for downstream consumers (SPIRV-Cross → Metal).
++            // The OpenGL semantic that `layout(binding=N)` must satisfy
++            // `N < gl_MaxCombinedTextureImageUnits` (samplers) or
++            // `N < gl_MaxImageUnits` (images) still applies.
++            // Required by KHR-GL46.layout_binding.*.binding_compilation_errors
++            // and shading_language_420pack.binding_image_invalid_case_*.
++            if (spvVersion.vulkan == 0 || spvVersion.vulkanRelaxed) {
++                const bool isImage = type.getSampler().isImage();
++                const int maxAllowed = isImage
++                    ? resources.maxImageUnits
++                    : resources.maxCombinedTextureImageUnits;
++                if (lastBinding >= maxAllowed) {
++                    error(loc,
++                          isImage ? "image binding not less than gl_MaxImageUnits"
++                                  : "sampler binding not less than gl_MaxCombinedTextureImageUnits",
++                          "binding", type.isArray() ? "(using array)" : "");
++                }
++            }
+         }
+-        if (type.isAtomic() && !spvVersion.vulkanRelaxed) {
++        // AppGL CKPT78 patch: matching range check for atomic_uint
++        // bindings under vulkanRelaxed (was gated to !vulkanRelaxed,
++        // skipping the GL spec check during OpenGL emulation).
++        // Required by KHR-GL46.layout_binding.atomic_uint_*.
++        if (type.isAtomic()) {
+             if (qualifier.layoutBinding >= (unsigned int)resources.maxAtomicCounterBindings) {
+                 error(loc, "atomic_uint binding is too large; see gl_MaxAtomicCounterBindings", "binding", "");
+                 return;

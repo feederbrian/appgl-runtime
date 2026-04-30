@@ -1444,3 +1444,22 @@ distinction is made at the SPIR-V decoration level, not the text.
 - `shader_storage_buffer_object.basic-std140Layout-case6-cs`
 - `es_31_compatibility.shader_storage_buffer_object.basic-std140Layout-case6-cs`
 - `shaders.uniform_block.random.all_per_block_buffers.18`
+
+### `glslang-vulkanrelaxed-binding-range-check.patch`
+
+**Target:** `third_party/glslang/glslang/MachineIndependent/ParseHelper.cpp` (KhronosGroup/glslang) — extends `TParseContext::layoutTypeCheck()` to enforce GL 4.6 §4.4.4 sampler/image/atomic-counter binding-range checks under `vulkanRelaxed` mode (OpenGL emulation through glslang's Vulkan target).
+
+**Summary:** Three small gate adjustments:
+1. Sampler binding-range check (was `if (spvVersion.vulkan == 0 && lastBinding >= maxCombinedTextureImageUnits)`) now also fires under `vulkanRelaxed`. Distinguishes images via `type.getSampler().isImage()` and uses `maxImageUnits` as the limit for those.
+2. Atomic-counter binding-range check (was `if (type.isAtomic() && !spvVersion.vulkanRelaxed)`) now fires regardless of `vulkanRelaxed` — the GL spec rule applies during OpenGL emulation.
+3. Error message split between sampler and image variants for diagnostic clarity.
+
+**Why:** AppGL's shader-translator pipes OpenGL GLSL through glslang's Vulkan target with `setEnvInputVulkanRulesRelaxed()` so SPIRV-Cross can downstream-convert the SPIR-V to MSL. The relaxed-Vulkan mode skips most Vulkan-strict requirements (like requiring `layout(binding=X)` on uniforms), but glslang's design also skips the OpenGL upper-bound binding-range checks under any non-zero Vulkan version — including the relaxed mode. CTS `KHR-GL46.layout_binding.*.binding_compilation_errors` exercises that the GL spec rule still applies (binding ≥ `gl_MaxCombinedTextureImageUnits` must produce a compile error), so the check needs to fire when we're emulating OpenGL semantics inside Vulkan-flavoured glslang.
+
+**CTS tests unlocked:** +4 on Cluster F (Sprint 8 B Cluster F F1 Day 6 / CKPT78):
+- `KHR-GL46.layout_binding.sampler2D_layout_binding_texture_FragmentShader`
+- `KHR-GL46.layout_binding.sampler2D_layout_binding_texture_ComputeShader`
+- `KHR-GL46.layout_binding.sampler2DArray_layout_binding_texture_FragmentShader`
+- `KHR-GL46.layout_binding.sampler3D_layout_binding_texture_FragmentShader`
+
+**Regression-safe:** when `spvVersion.vulkan == 0` (pure OpenGL through glslang), the gate keeps its original true-for-GL semantics. When `vulkanRelaxed == false` (strict Vulkan target), no behaviour change. AppGL is the only known caller of `setEnvInputVulkanRulesRelaxed()` in the runtime, so the new check fires exclusively for our path. Section sweep verified zero regression: 272/297 P, 22 F, 3 NS on `tessellation_shader.* + geometry_shader.* + transform_feedback.*`.
