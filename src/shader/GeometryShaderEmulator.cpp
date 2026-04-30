@@ -1455,11 +1455,22 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                                             storage[base + runningOff + k] = inputs[vi].position[k];
                                         }
                                     } else if (mm->second.builtIn == spv::BuiltInPointSize) {
-                                        // Sprint 8 #8 β.2 Day 2 (CKPT70): seed
+                                        // Sprint 8 #8 β.2 Day 3 (CKPT71): seed
                                         // gl_in[vi].gl_PointSize from VS pre-pass
                                         // PerVertexInput.pointSize. Required for
                                         // CTS data_pass_through pointsize variants.
-                                        if (memW > 0 && base + runningOff < storage.size()) {
+                                        // Day 2 found this combined with executeVs
+                                        // capturePointSize regresses tc_position
+                                        // in non-pointsize subruns. Day 3 isolates
+                                        // by gating on stage_: ONLY fire for TES
+                                        // input init (where the value is read by
+                                        // pointsize-variant TES bodies); SKIP for
+                                        // TCS / GS where the value can leak into
+                                        // glslang-emitted implicit gl_PerVertex
+                                        // copy paths and corrupt downstream
+                                        // gl_Position reads.
+                                        if (memW > 0 && base + runningOff < storage.size() &&
+                                            stage_ == Stage::TessEvaluation) {
                                             storage[base + runningOff] = inputs[vi].pointSize;
                                         }
                                     } else if (mm->second.builtIn == spv::BuiltInClipDistance) {
@@ -2426,6 +2437,15 @@ bool Interpreter::executeVs(EmulatedVertex& out) {
     // cull-distance values for the pre-GS primitive cull check
     // (GL 4.6 §13.6).
     captureClipCull(out.clipDistance, out.cullDistance);
+    // Sprint 8 #8 β.2 Day 3 (CKPT71): VS gl_PointSize capture for the
+    // tess pre-pass chain. capturePointSize walks Output variables
+    // looking for BuiltInPointSize (direct or struct member) and
+    // returns the stored value via the helper's checkStoredValue
+    // zero-sentinel filter (0.0 → nullopt). When the VS doesn't
+    // write gl_PointSize, EmulatedVertex.pointSize keeps default 1.0.
+    if (auto ps = capturePointSize(); ps.has_value()) {
+        out.pointSize = *ps;
+    }
     return !errored_;
 }
 
