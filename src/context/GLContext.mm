@@ -15772,23 +15772,38 @@ parseExplicitSamplerBindings(const std::string& rawSource) {
         }
 
         if (binding >= 0) {
-            // Scan post-`)` for `uniform? precision? sampler-type name`.
+            // Scan post-`)` for `[memory-qual]* [uniform]? [memory-qual]* [precision]? sampler-type name`.
+            //
+            // Sprint 8 B Cluster F F1 Day 8 (CKPT80): GL §4.10 image
+            // memory qualifiers (`readonly`, `writeonly`, `coherent`,
+            // `volatile`, `restrict`) can appear in any order around
+            // `uniform`. CTS layout_binding.image2D_* generates
+            // `layout(binding=3, rgba8) readonly uniform image2D image0;`
+            // — `readonly` is BEFORE `uniform`. Pre-CKPT80 parser only
+            // accepted `uniform [precision]? type name` and bailed when
+            // the next token after `)` was `readonly`. Now we loop
+            // skipping any combination of memory/precision/uniform
+            // qualifiers until we hit the actual type token.
             std::size_t cur = closeIdx + 1;
             skipWhitespace(cur);
-            // Optional "uniform" keyword.
-            if (s.compare(cur, 7, "uniform") == 0 &&
-                (cur + 7 >= s.size() || !isIdentChar(s[cur + 7]))) {
-                cur += 7;
-                skipWhitespace(cur);
-            }
-            // Optional precision qualifier.
-            for (const char* prec : {"highp", "mediump", "lowp"}) {
-                const std::size_t plen = std::strlen(prec);
-                if (s.compare(cur, plen, prec) == 0 &&
-                    (cur + plen >= s.size() || !isIdentChar(s[cur + plen]))) {
-                    cur += plen;
-                    skipWhitespace(cur);
-                    break;
+            const char* const skippableQualifiers[] = {
+                "uniform",
+                "highp", "mediump", "lowp",
+                "readonly", "writeonly", "coherent", "volatile", "restrict",
+            };
+            bool advanced = true;
+            while (advanced) {
+                advanced = false;
+                for (const char* kw : skippableQualifiers) {
+                    const std::size_t klen = std::strlen(kw);
+                    if (cur + klen <= s.size() &&
+                        s.compare(cur, klen, kw) == 0 &&
+                        (cur + klen >= s.size() || !isIdentChar(s[cur + klen]))) {
+                        cur += klen;
+                        skipWhitespace(cur);
+                        advanced = true;
+                        break;
+                    }
                 }
             }
             // Read the type name (must contain "sampler" / "image" /
