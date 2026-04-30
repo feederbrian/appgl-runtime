@@ -4345,7 +4345,8 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     GLsizei count,
     GLint first,
     GLsizei instanceCount,
-    GLuint baseInstance)
+    GLuint baseInstance,
+    const std::uint32_t* elementIndices)
 {
     EmulatedDraw d;
     d.topology = drawMode;
@@ -4411,7 +4412,11 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         const std::int32_t glInstanceID = instanceIdx;
         (void)baseInstance;   // VS sees gl_InstanceID = instanceIdx; baseInstance affects VBO fetch only.
         for (GLsizei vi = 0; vi < count; ++vi) {
-            const std::size_t vboSlot = static_cast<std::size_t>(first + vi);
+            // Sprint 7 #9 (CKPT65) — drawElements indexes via
+            // elementIndices[vi]; drawArrays uses sequential first+vi.
+            const std::size_t vboSlot = (elementIndices != nullptr)
+                ? static_cast<std::size_t>(elementIndices[vi])
+                : static_cast<std::size_t>(first + vi);
             const std::size_t vIdx =
                 static_cast<std::size_t>(instanceIdx) *
                     static_cast<std::size_t>(count) +

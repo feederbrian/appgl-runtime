@@ -19245,6 +19245,17 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->hasTranslatedPipeline = true;
                 rasterTranslationOk = true;
             }
+            // Sprint 7 #9 (CKPT65): preserve VS SPIR-V on the
+            // VertexFragment program kind so the VS-only TF emulation
+            // helper (drawArrays / drawElements) can run the VS on CPU
+            // for transform-feedback capture. Without this, programs
+            // with TF varyings + no GS/tess + non-separable VS+FS land
+            // with `vertexSpirv.empty()` and the helper bails — TF
+            // buffer stays at zero-init, breaking
+            // `transform_feedback.{capture,query,discard}_vertex_*`.
+            if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                programObject->vertexSpirv = vertexShader->spirv;
+            }
             break;
         }
         case ProgramKind::VertexOnly: {
@@ -25436,52 +25447,83 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         return false;
     }
     const GLuint elementBufferName = vao->elementArrayBuffer;
-    if (elementBufferName == 0) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    GLBufferObject* elementBuffer = impl_->objects->buffers().get(elementBufferName);
-    if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-
-    const std::size_t indexOffset = reinterpret_cast<std::uintptr_t>(indices);
-    if (indexOffset > elementBuffer->shadowBytes.size()) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
-
-    // GL_UNSIGNED_BYTE is not supported natively by Metal; expandElementIndices
-    // promotes to GL_UNSIGNED_SHORT. For UINT16/UINT32 we can pass through.
-    //
-    // ADV-10: cache the expanded index buffer on the GLBufferObject so
-    // repeated drawElements calls with the same element buffer don't
-    // re-allocate and re-widen on every draw.  The cache covers the
-    // entire shadowBytes range (not per-offset subsets) and is
-    // invalidated when the buffer data changes via glBufferData /
-    // glBufferSubData (generation counter bump).
     GLenum effectiveType = type;
-    const void* effectivePtr = indexPtr;
-    if (elementIndexTypeNeedsExpansion(type)) {
-        // Rebuild cache if stale or absent.
-        if (elementBuffer->cachedExpansionGeneration != elementBuffer->indexExpansionGeneration
-            || elementBuffer->cachedExpandedIndices.empty()) {
-            const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
-            IndexExpansionResult result = expandElementIndices(
-                totalIndices, type, elementBuffer->shadowBytes.data());
+    const void* effectivePtr = nullptr;
+    GLBufferObject* elementBuffer = nullptr;
+    std::size_t indexOffset = 0;
+
+    // Sprint 7 #9 (CKPT65): GL 2.x compatibility — when no
+    // GL_ELEMENT_ARRAY_BUFFER is bound, the `indices` parameter is a
+    // client-side pointer to `count` indices in CPU memory (not a
+    // buffer offset). Materialize the data into a thread-local scratch
+    // buffer, applying GL_UNSIGNED_BYTE→GL_UNSIGNED_SHORT promotion
+    // the same way the buffer-bound path does. CTS
+    // `transform_feedback.{capture,query,discard}_vertex_*` tests use
+    // this pattern with a stack-allocated GLuint[] passed directly to
+    // glDrawElements.
+    thread_local std::vector<std::uint8_t> clientIndexScratch;
+    if (elementBufferName == 0) {
+        if (count > 0 && indices == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (count > 0) {
+            IndexExpansionResult result = expandElementIndices(count, type, indices);
             if (!result.ok) {
                 pushError(result.error);
                 return false;
             }
-            elementBuffer->cachedExpandedIndices = std::move(result.bytes);
-            elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+            clientIndexScratch = std::move(result.bytes);
+            effectivePtr = clientIndexScratch.data();
+            effectiveType = result.outputType;
         }
-        effectiveType = GL_UNSIGNED_SHORT;
-        // Recompute offset: each source byte becomes 2 bytes (uint16).
-        const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
-        effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+        // elementBuffer stays nullptr; indexOffset stays 0. Downstream
+        // Metal-buffer-pass-through gates on `elementBuffer != nullptr`
+        // so the client-side path naturally falls into the
+        // CPU-staging-buffer branch.
+    } else {
+        elementBuffer = impl_->objects->buffers().get(elementBufferName);
+        if (elementBuffer == nullptr || elementBuffer->shadowBytes.empty()) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+
+        indexOffset = reinterpret_cast<std::uintptr_t>(indices);
+        if (indexOffset > elementBuffer->shadowBytes.size()) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        const void* indexPtr = elementBuffer->shadowBytes.data() + indexOffset;
+
+        // GL_UNSIGNED_BYTE is not supported natively by Metal; expandElementIndices
+        // promotes to GL_UNSIGNED_SHORT. For UINT16/UINT32 we can pass through.
+        //
+        // ADV-10: cache the expanded index buffer on the GLBufferObject so
+        // repeated drawElements calls with the same element buffer don't
+        // re-allocate and re-widen on every draw.  The cache covers the
+        // entire shadowBytes range (not per-offset subsets) and is
+        // invalidated when the buffer data changes via glBufferData /
+        // glBufferSubData (generation counter bump).
+        effectivePtr = indexPtr;
+        if (elementIndexTypeNeedsExpansion(type)) {
+            // Rebuild cache if stale or absent.
+            if (elementBuffer->cachedExpansionGeneration != elementBuffer->indexExpansionGeneration
+                || elementBuffer->cachedExpandedIndices.empty()) {
+                const GLsizei totalIndices = static_cast<GLsizei>(elementBuffer->shadowBytes.size());
+                IndexExpansionResult result = expandElementIndices(
+                    totalIndices, type, elementBuffer->shadowBytes.data());
+                if (!result.ok) {
+                    pushError(result.error);
+                    return false;
+                }
+                elementBuffer->cachedExpandedIndices = std::move(result.bytes);
+                elementBuffer->cachedExpansionGeneration = elementBuffer->indexExpansionGeneration;
+            }
+            effectiveType = GL_UNSIGNED_SHORT;
+            // Recompute offset: each source byte becomes 2 bytes (uint16).
+            const std::size_t expandedOffset = indexOffset * sizeof(GLushort);
+            effectivePtr = elementBuffer->cachedExpandedIndices.data() + expandedOffset;
+        }
     }
 
     // Try the translated shader pipeline first (GPU-side vertex processing).
@@ -25567,6 +25609,132 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) {
                     return true;
                 }
+            }
+        }
+    }
+
+    // Sprint 7 #9 (CKPT65): VS-only TF emulation for drawElements,
+    // mirroring the drawArrays hook at GLContext.mm:24590 (CKPT59).
+    // When TF is active, the program has TF varyings, no GS in pipeline,
+    // and no tess emulation applies, run the VS on CPU per indexed
+    // vertex and write captures via the shared writeGsXfbAndCheckDiscard
+    // helper. Required for CTS `transform_feedback.{capture,query,
+    // discard}_vertex_*` tests which use client-side index arrays
+    // with `glDrawElements` to drive TF capture without a bound
+    // GL_ELEMENT_ARRAY_BUFFER.
+    if (program != nullptr &&
+        impl_->transformFeedbackActive &&
+        !program->transformFeedbackVaryingNames.empty() &&
+        !program->geometryEmulated &&
+        !program->tessellationEmulated &&
+        !program->tessellationInterpreted &&
+        count > 0 &&
+        effectivePtr != nullptr) {
+        // Resolve effectivePtr (uint16 / uint32) into a uint32 vector
+        // matching the new emulateVsOnlyDrawForTf elementIndices param
+        // shape. Small allocation cost — CTS draws never exceed a few
+        // hundred indices for these tests.
+        std::vector<std::uint32_t> idx32(static_cast<std::size_t>(count));
+        if (effectiveType == GL_UNSIGNED_INT) {
+            std::memcpy(idx32.data(), effectivePtr, count * sizeof(std::uint32_t));
+        } else if (effectiveType == GL_UNSIGNED_SHORT) {
+            const std::uint16_t* src16 =
+                static_cast<const std::uint16_t*>(effectivePtr);
+            for (GLsizei i = 0; i < count; ++i) idx32[i] = src16[i];
+        } else {
+            idx32.clear();
+        }
+        // Sprint 7 #9 (CKPT65): topology-decompose strip / loop / fan
+        // input into discrete-primitive vertex streams for TF capture.
+        // GL 4.6 §13.2: TF captures one entry per re-assembled
+        // primitive vertex. So GL_LINE_LOOP with 4 indices captures
+        // 8 verts (4 segs × 2 endpoints), GL_LINE_STRIP with 4 captures
+        // 6, GL_TRIANGLE_STRIP / _FAN with 4 captures 6, etc. POINTS /
+        // LINES / TRIANGLES are already discrete and pass through.
+        std::vector<std::uint32_t> capIdx;
+        if (!idx32.empty()) {
+            const std::size_t n = idx32.size();
+            switch (mode) {
+                case GL_POINTS:
+                case GL_LINES:
+                case GL_TRIANGLES:
+                    capIdx = idx32;
+                    break;
+                case GL_LINE_STRIP:
+                    if (n >= 2) {
+                        capIdx.reserve(2 * (n - 1));
+                        for (std::size_t i = 0; i + 1 < n; ++i) {
+                            capIdx.push_back(idx32[i]);
+                            capIdx.push_back(idx32[i + 1]);
+                        }
+                    }
+                    break;
+                case GL_LINE_LOOP:
+                    if (n >= 2) {
+                        capIdx.reserve(2 * n);
+                        for (std::size_t i = 0; i < n; ++i) {
+                            capIdx.push_back(idx32[i]);
+                            capIdx.push_back(idx32[(i + 1) % n]);
+                        }
+                    }
+                    break;
+                case GL_TRIANGLE_STRIP:
+                    if (n >= 3) {
+                        capIdx.reserve(3 * (n - 2));
+                        for (std::size_t i = 0; i + 2 < n; ++i) {
+                            // GL 4.6 §10.1.12 strip alternation: even
+                            // tri (i, i+1, i+2); odd tri (i+1, i, i+2)
+                            // so consistent winding survives strip
+                            // decomposition.
+                            if ((i & 1u) == 0u) {
+                                capIdx.push_back(idx32[i]);
+                                capIdx.push_back(idx32[i + 1]);
+                                capIdx.push_back(idx32[i + 2]);
+                            } else {
+                                capIdx.push_back(idx32[i + 1]);
+                                capIdx.push_back(idx32[i]);
+                                capIdx.push_back(idx32[i + 2]);
+                            }
+                        }
+                    }
+                    break;
+                case GL_TRIANGLE_FAN:
+                    if (n >= 3) {
+                        capIdx.reserve(3 * (n - 2));
+                        for (std::size_t i = 1; i + 1 < n; ++i) {
+                            capIdx.push_back(idx32[0]);
+                            capIdx.push_back(idx32[i]);
+                            capIdx.push_back(idx32[i + 1]);
+                        }
+                    }
+                    break;
+                default:
+                    capIdx.clear();
+                    break;
+            }
+        }
+        if (!capIdx.empty() && !program->vertexSpirv.empty()) {
+            // The reassembled discrete-primitive topology fed to
+            // writeGsXfbAndCheckDiscard via EmulatedDraw.topology.
+            const GLenum capTopology =
+                (mode == GL_POINTS) ? GL_POINTS :
+                (mode == GL_LINES || mode == GL_LINE_STRIP || mode == GL_LINE_LOOP) ? GL_LINES :
+                GL_TRIANGLES;
+            appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
+                *program, *vao, *impl_->objects, *impl_->state,
+                capTopology, static_cast<GLsizei>(capIdx.size()), /*first=*/0,
+                /*instanceCount=*/1, /*baseInstance=*/0,
+                capIdx.data());
+            if (ed.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                    return true;
+                }
+                // VS-only-TF without rasterizer-discard: fall through
+                // to the regular Metal-side draw so the FS still runs.
+                // The TF buffer was already populated.
+            } else if (!ed.diagnostic.empty()) {
+                APPGL_LOG(SHADER, @"drawElements VS-only-TF: %s",
+                          ed.diagnostic.c_str());
             }
         }
     }

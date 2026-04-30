@@ -258,7 +258,13 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     GLsizei count,
     GLint first,
     GLsizei instanceCount = 1,
-    GLuint baseInstance = 0);
+    GLuint baseInstance = 0,
+    // Sprint 7 #9 (CKPT65) — drawElements call-site passes a
+    // pre-resolved uint32 index array (already type-promoted +
+    // offset-resolved). When non-null, the i-th vertex reads VBO slot
+    // elementIndices[i] instead of (first + i). drawArrays call-site:
+    // pass nullptr (default).
+    const std::uint32_t* elementIndices = nullptr);
 
 // Emulate a single drawArrays/drawElements call for a program that
 // has a GS stage. Returns an `EmulatedDraw` whose `.ok` flag tells
