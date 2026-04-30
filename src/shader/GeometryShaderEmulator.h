@@ -404,16 +404,24 @@ TesUniformMap buildTesUniformMap(const GLProgramObject& program);
 // Phase 3f-14: per-patch varying map shared across the TCS
 // invocations for a single patch AND the TES vertices generated
 // from that same patch. Shape matches `patch out vec<N>` /
-// `patch in vec<N>` / scalar-array interfaces: keyed by the
-// SPIR-V Location decoration, value is a flat scalar-per-element
-// float vector (same convention as TesUniformMap values).
+// `patch in vec<N>` / scalar-array interfaces.
+//
+// Sprint 8 #8 β.2 Day 2 (CKPT70): keyed by the variable NAME
+// (OpName on the SPIR-V variable, e.g. "tc_patch_data") rather
+// than the SPIR-V Location decoration. data_pass_through-class
+// shapes declare `patch out vec4 tc_patch_data;` without
+// explicit `layout(location=N)`; glslang emits NO Location
+// decoration on these. Cross-stage matching is by name (sister
+// to CKPT66/CKPT69 SPIR-V two-regime distinction). Located
+// variables also get keyed by name (OpName always present);
+// unlocated variables keep working identically.
 //
 // TCS captures into this map after each invocation's body run —
 // last-write-wins per GL 4.6 §11.2.2 (only one TCS invocation
 // should write any given per-patch output; if multiple write,
 // the spec lets implementations pick). TES seeds its Input
 // patch-in variables from this map at initVariables time.
-using TesPatchVaryingMap = std::unordered_map<std::uint32_t, std::vector<float>>;
+using TesPatchVaryingMap = std::unordered_map<std::string, std::vector<float>>;
 
 bool runTesForVertex(
     const std::uint32_t* tesSpirv,

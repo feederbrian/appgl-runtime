@@ -1722,25 +1722,43 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
                 "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — interpreter TES enabled";
 
             // Phase 3f-6: populate program.tessVaryings from the TES's
-            // location-decorated Output varyings so the interpreter
-            // path emits matching `[[user(locnN)]]` slots in the synth
-            // VS and the FS can read per-vertex interpolated values.
-            // scanTessEvalInterface walks the SPIR-V and returns one
-            // TessEvalVarying per output — we filter to non-builtin,
-            // non-per-vertex Outputs with a location decoration.
+            // Output varyings so the interpreter path emits matching
+            // `[[user(locnN)]]` slots in the synth VS and the FS can
+            // read per-vertex interpolated values, AND so XFB writes
+            // pick up tc_position / tc_value1 / etc. by name.
+            //
+            // Sprint 8 #8 β.2 Day 2 (CKPT70): drop the `hasLocation`
+            // filter that pre-CKPT70 rejected unlocated top-level
+            // outputs (glslang emits NO Location decoration on plain
+            // `out vec4 tc_position;` declarations without explicit
+            // `layout(location=N)`). data_pass_through-class TES bodies
+            // hit this exact shape — the XFB chain captures by name
+            // (transformFeedbackVaryingNames), so an unlocated output
+            // that has a name is captureable. Synthesise a sequential
+            // location for the synth VS varying-slot routing (reserved
+            // for non-XFB-only use; rasterizer-discard XFB path skips
+            // the synth VS).
             TessEvalInterface teIface = scanTessEvalInterface(
                 program.tessEvalSpirv.data(),
                 program.tessEvalSpirv.size());
             program.tessVaryings.clear();
+            std::uint32_t nextSyntheticLocation = 0;
             if (teIface.parsed) {
                 for (const auto& ov : teIface.outputs) {
                     if (ov.isBuiltIn) continue;
                     if (ov.isPerVertex) continue;
-                    if (!ov.hasLocation) continue;
                     if (ov.scalarCount == 0 || ov.scalarCount > 4) continue;
+                    if (ov.name.empty()) continue;
                     GLProgramObject::TessVaryingSlot slot;
                     slot.name = ov.name;
-                    slot.location = ov.location;
+                    if (ov.hasLocation) {
+                        slot.location = ov.location;
+                        if (ov.location >= nextSyntheticLocation) {
+                            nextSyntheticLocation = ov.location + 1;
+                        }
+                    } else {
+                        slot.location = nextSyntheticLocation++;
+                    }
                     slot.numComponents = ov.scalarCount;
                     // Interpreter path produces these values at runtime;
                     // the mapping/scale/offset/constant fields are unused

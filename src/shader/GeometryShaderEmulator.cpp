@@ -192,6 +192,11 @@ public:
         // passthrough GS sees the same values the no-GS path would.
         std::vector<float> clipDistance;
         std::vector<float> cullDistance;
+        // Sprint 8 #8 β.2 Day 2 (CKPT70): VS's gl_PointSize for this
+        // vertex. Routed into gl_in[].gl_PointSize for downstream
+        // TCS / TES / GS reads. Default 1.0 matches GL spec's
+        // implicit value when VS doesn't write gl_PointSize.
+        float pointSize = 1.0f;
     };
 
     // Uniform plumbing — keyed by variable name (top-level uniform
@@ -390,8 +395,16 @@ private:
     // Phase 3f-14: caller-supplied patch-in varying map for TES.
     // Pointer so the caller controls lifetime (typically a vector
     // of maps per patch, one entry dereferenced per TES call).
-    const std::unordered_map<std::uint32_t, std::vector<float>>*
+    // Sprint 8 #8 β.2 Day 2 (CKPT70): keyed by NAME.
+    const std::unordered_map<std::string, std::vector<float>>*
         tesPatchInputs_ = nullptr;
+
+    // Sprint 8 #8 β.2 Day 2 (CKPT70): set of Output variable ids that
+    // received at least one OpStore during the current body run.
+    // Consumed by captureTcsPatchOutputs to skip overwriting an
+    // existing per-patch map entry with default-zero storage from an
+    // invocation whose conditional branch didn't write the variable.
+    std::unordered_set<std::uint32_t> writtenOutputVars_;
 
     // Phase 3f-3: caller-supplied binding → (host pointer, size) map
     // for SSBO-rooted OpLoad / OpStore. Set via `setStorageBuffers`.
@@ -521,14 +534,16 @@ public:
     // yielding last-write-wins semantics (spec-permitted when two
     // TCS invocations write the same patch-out variable).
     void captureTcsPatchOutputs(
-        std::unordered_map<std::uint32_t, std::vector<float>>& out) const;
+        std::unordered_map<std::string, std::vector<float>>& out) const;
 
     // Phase 3f-14: caller-supplied patch-in varying map for TES.
     // initVariables consults this pointer when seeding Input
-    // variables with DecorationPatch + DecorationLocation. Nullptr
-    // leaves the storage at its default-zero state.
+    // variables with DecorationPatch. Nullptr leaves the storage at
+    // its default-zero state. Sprint 8 #8 β.2 Day 2 (CKPT70): keyed
+    // by variable NAME (CKPT66/69 SPIR-V two-regime distinction
+    // extended to per-patch interface).
     void setTesPatchInputs(
-        const std::unordered_map<std::uint32_t, std::vector<float>>* m) {
+        const std::unordered_map<std::string, std::vector<float>>* m) {
         tesPatchInputs_ = m;
     }
 private:
@@ -899,6 +914,17 @@ void Interpreter::storeToVar(std::uint32_t varId, std::uint32_t off,
     } else {
         bail("store: unsupported value kind");
     }
+    // Sprint 8 #8 β.2 Day 2 (CKPT70): track which variables had at
+    // least one OpStore during this body's execution. Used by
+    // captureTcsPatchOutputs to skip overwriting existing patch-out
+    // map entries with zero-initialised storage from invocations
+    // whose conditional branch didn't write the variable. Without
+    // this tracking, data_pass_through TCS's
+    //   `if (gl_InvocationID == 0) { tc_patch_data = ...; }`
+    // had its non-zero invocation-0 write clobbered by invocation-1's
+    // unwritten zero storage when both invocations' captures merged
+    // into the same per-patch map.
+    writtenOutputVars_.insert(varId);
 }
 
 // ─── Phase 3f-3: byte-level SSBO load/store ──────────────────────────
@@ -1264,15 +1290,20 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                 // gate anyway).
             }
             // Phase 3f-14: patch-in varyings — scalar/vec/scalar-array
-            // Input variables decorated with DecorationPatch plus
-            // DecorationLocation. Seed from the caller-supplied
-            // per-patch map. If the TCS didn't write this location
-            // for this patch, the storage stays at its zero init
-            // (safe default matching GL's behaviour of "undefined but
-            // implementation-consistent").
+            // Input variables decorated with DecorationPatch.
+            // Seed from the caller-supplied per-patch map keyed by
+            // variable name (TCS-side captureTcsPatchOutputs writes
+            // by name). If the TCS didn't write this name for this
+            // patch, storage stays at zero init (matches GL's
+            // "undefined but implementation-consistent" semantics).
+            //
+            // Sprint 8 #8 β.2 Day 2 (CKPT70): drop the hasLocation
+            // gate — `patch in vec4 tc_patch_data;` without explicit
+            // layout(location=N) is a valid GLSL shape that glslang
+            // emits without Location decoration.
             if (dIt != module_.decorations.end() && dIt->second.isPatch &&
-                dIt->second.hasLocation && tesPatchInputs_ != nullptr) {
-                auto pIt = tesPatchInputs_->find(dIt->second.location);
+                tesPatchInputs_ != nullptr && !info.name.empty()) {
+                auto pIt = tesPatchInputs_->find(info.name);
                 if (pIt != tesPatchInputs_->end()) {
                     const auto& src = pIt->second;
                     for (std::size_t k = 0; k < src.size() && k < storage.size(); ++k) {
@@ -1422,6 +1453,14 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                                         for (int k = 0; k < 4 && static_cast<std::uint32_t>(k) < memW
                                              && base + runningOff + k < storage.size(); ++k) {
                                             storage[base + runningOff + k] = inputs[vi].position[k];
+                                        }
+                                    } else if (mm->second.builtIn == spv::BuiltInPointSize) {
+                                        // Sprint 8 #8 β.2 Day 2 (CKPT70): seed
+                                        // gl_in[vi].gl_PointSize from VS pre-pass
+                                        // PerVertexInput.pointSize. Required for
+                                        // CTS data_pass_through pointsize variants.
+                                        if (memW > 0 && base + runningOff < storage.size()) {
+                                            storage[base + runningOff] = inputs[vi].pointSize;
                                         }
                                     } else if (mm->second.builtIn == spv::BuiltInClipDistance) {
                                         const auto& src = inputs[vi].clipDistance;
@@ -1860,6 +1899,28 @@ bool Interpreter::captureTcsOutputForInvocation(std::int32_t invocationID,
                          && base + runningOff + k < storage.size(); ++k) {
                         out.position[k] = storage[base + runningOff + k];
                     }
+                } else if (bi == spv::BuiltInPointSize) {
+                    // Sprint 8 #8 β.2 Day 2 (CKPT70): capture gl_out[i].
+                    // gl_PointSize so downstream stage (TES gl_in[].
+                    // gl_PointSize) can read it. Required for CTS
+                    // data_pass_through pointsize variants.
+                    //
+                    // Only overwrite EmulatedVertex.pointSize (default
+                    // 1.0) if storage value is non-zero — without this
+                    // guard, non-pointsize variants where the TCS
+                    // leaves gl_out[].gl_PointSize unwritten capture
+                    // a zero from the default-init storage and
+                    // propagate 0.0 down the chain instead of GL's
+                    // implicit 1.0 default. Heuristic: GL spec says
+                    // gl_PointSize is "implementation-defined > 0" if
+                    // unwritten, so 0.0 is a reliable "unwritten" sentinel
+                    // for our path. Test cases that legitimately write
+                    // 0.0 to gl_PointSize (pathological) lose precision
+                    // but those tests don't currently exist in our matrix.
+                    if (memW > 0 && base + runningOff < storage.size() &&
+                        storage[base + runningOff] != 0.0f) {
+                        out.pointSize = storage[base + runningOff];
+                    }
                 } else if (bi == spv::BuiltInClipDistance) {
                     for (std::uint32_t k = 0; k < memW &&
                          base + runningOff + k < storage.size(); ++k) {
@@ -1960,27 +2021,43 @@ bool Interpreter::captureTcsOutputForInvocation(std::int32_t invocationID,
 }
 
 void Interpreter::captureTcsPatchOutputs(
-    std::unordered_map<std::uint32_t, std::vector<float>>& out) const
+    std::unordered_map<std::string, std::vector<float>>& out) const
 {
-    // Walk Output variables. Any with DecorationPatch AND
-    // DecorationLocation is a `patch out <type>` varying; copy
-    // its flat-float storage into the caller's map, keyed by
-    // Location. Variables without DecorationPatch (gl_out[]
-    // array, gl_TessLevel*) are skipped — those flow through
+    // Walk Output variables. Any with DecorationPatch is a
+    // `patch out <type>` varying; copy its flat-float storage
+    // into the caller's map, keyed by variable NAME (OpName).
+    // Variables without DecorationPatch (gl_out[] array,
+    // gl_TessLevel*) are skipped — those flow through
     // captureTcsOutputForInvocation / captureTessLevels.
+    //
+    // Sprint 8 #8 β.2 Day 2 (CKPT70): no longer requires
+    // DecorationLocation. data_pass_through declares
+    // `patch out vec4 tc_patch_data;` without explicit
+    // `layout(location=N)`; glslang emits no Location.
+    // Cross-stage matching is by name (CKPT66/69 SPIR-V two-
+    // regime distinction extended to per-patch interface).
     for (const auto& [varId, info] : module_.variables) {
         if (info.storageClass != spv::StorageClassOutput) continue;
         auto dIt = module_.decorations.find(varId);
         if (dIt == module_.decorations.end()) continue;
         if (!dIt->second.isPatch) continue;
-        if (!dIt->second.hasLocation) continue;
+        if (info.name.empty()) continue;
         auto sIt = varStorage_.find(varId);
         if (sIt == varStorage_.end()) continue;
         if (sIt->second.empty()) continue;
+        // Sprint 8 #8 β.2 Day 2 (CKPT70): skip overwriting the
+        // existing map entry when this invocation didn't write the
+        // variable. data_pass_through's TCS conditional
+        //   `if (gl_InvocationID == 0) { tc_patch_data = ...; }`
+        // means invocation 1 has zero-initialised tc_patch_data
+        // storage; pre-CKPT70 the unconditional overwrite clobbered
+        // invocation 0's correct value with invocation 1's zeros.
+        // Skip-on-not-written preserves the last-actual-write.
+        if (writtenOutputVars_.count(varId) == 0) continue;
         // Overwrite any existing entry — last-write-wins across
         // invocations (GL 4.6 §11.2.2 permits this when multiple
         // TCS invocations write the same patch-out).
-        out[dIt->second.location] = sIt->second;
+        out[info.name] = sIt->second;
     }
 }
 
@@ -6124,6 +6201,7 @@ bool runTesForVertex(
         pvi.position[3] = pv.position[3];
         pvi.clipDistance = pv.clipDistance;
         pvi.cullDistance = pv.cullDistance;
+        pvi.pointSize = pv.pointSize;
         if (inVaryingWidths != nullptr && !inVaryingWidths->empty()) {
             pvi.varyings.resize(inVaryingWidths->size());
             std::size_t srcOff = 0;
@@ -6252,6 +6330,7 @@ bool runTcsForVertex(
         pvi.position[3] = pv.position[3];
         pvi.clipDistance = pv.clipDistance;
         pvi.cullDistance = pv.cullDistance;
+        pvi.pointSize = pv.pointSize;
         if (inVaryingWidths != nullptr && !inVaryingWidths->empty()) {
             pvi.varyings.resize(inVaryingWidths->size());
             std::size_t srcOff = 0;
