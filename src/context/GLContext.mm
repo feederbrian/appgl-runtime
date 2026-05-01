@@ -6078,6 +6078,37 @@ struct GLContext::Impl {
             if (level == texture->levels.end() || !level->second.defined) {
                 return false;
             }
+            // CKPT127 (Sprint 12 Phase 1 Day 1 — β4 root-cause fix): MS
+            // textures cannot be cleared via the rgba8-shadow + replaceMetalTexture
+            // path because (a) the CPU shadow only stores 1 sample's worth of data
+            // and Metal won't accept replaceRegion uploads on MS textures, and
+            // (b) replaceMetalTexture for MS recreates a *new* MTLTexture with
+            // UNDEFINED contents — so the pre-existing samples that the CTS
+            // expected to be cleared green are actually undefined. Issue an empty
+            // render pass with MTLLoadActionClear targeting the MS texture
+            // instead — Metal's native MS clear writes clearColor to ALL samples
+            // in one shot.
+            //
+            // CTS sample_variables.mask.rgba8.samples_{1,2,4}.mask_zero (and the
+            // mask_N where the random mask happens to clear bit 0 / bit 1 / etc.
+            // for one of the verifier samples) all hit this path: glClearBufferfv
+            // sets the MS attachment to green, the user fragment shader then
+            // gates all samples via gl_SampleMask=0, the resolve reads sample 0,
+            // and the verifier expects green for the cleared-and-not-overwritten
+            // samples. Pre-fix: undefined / red / random. Post-fix: cleared
+            // green.
+            if ((texture->target == GL_TEXTURE_2D_MULTISAMPLE ||
+                 texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) &&
+                texture->metalTexture != nullptr && frameGraph != nullptr) {
+                const float rgbaF[4] = { color[0], color[1], color[2], color[3] };
+                std::uint32_t arrayLength = 0;
+                if (texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY && attachment.layered) {
+                    const GLTextureImageLevel& image = level->second;
+                    arrayLength = static_cast<std::uint32_t>(std::max<GLsizei>(image.desc.depth, 1));
+                }
+                return frameGraph->clearLayeredTextureColor(
+                    texture->metalTexture, arrayLength, rgbaF);
+            }
             GLTextureImageLevel& image = level->second;
             const GLsizei sourceWidth = std::max<GLsizei>(image.desc.width, 1);
             const GLsizei sourceHeight = texture->target == GL_TEXTURE_1D ? 1 : std::max<GLsizei>(image.desc.height, 1);
