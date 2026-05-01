@@ -30429,6 +30429,77 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
                     std::memcpy(dstRGBA + dOff, srcRGBA + sOff, copyRow4);
                 }
             }
+            // Sync rgba8 → dst.nativeData for the copied region. Required
+            // when destination has both shadows (e.g. R8 / RGB12 / RGB32F /
+            // RGBA12 textures with native Metal pixel format), so that
+            // subsequent glGetTexImage / re-upload via replaceMetalTexture
+            // reads native shadow with the updated values. Without this,
+            // CTS copy_image RB-source-unique tests (r8, rgb10, rgb12,
+            // rgba12, rgb32f × 3 RB-source buckets = 15 tests) read stale
+            // zero-filled native shadow on the destination after copy.
+            // GL 4.6 §18.2.3: the copy is byte-level; we only need to
+            // re-encode the destination's native representation from the
+            // rgba8 values that the byte-level copy logically produced.
+            if (dstImg && dstImg->nativeBpp > 0 && !dstImg->nativeData.empty()) {
+                MTLPixelFormat dstNativeFmt = metalRenderbufferFormat(
+                    dstImg->desc.internalFormat != 0
+                        ? dstImg->desc.internalFormat
+                        : dstTex->desc.internalFormat);
+                auto info = Impl::nativeFormatInfo(dstNativeFmt);
+                if (info.channels > 0 && info.bytesPerPixel > 0) {
+                    const std::size_t natRowBytes = static_cast<std::size_t>(dstImgW) * info.bytesPerPixel;
+                    const std::size_t natSliceBytes = natRowBytes * static_cast<std::size_t>(dstImgH);
+                    for (GLsizei z = 0; z < srcDepth; ++z) {
+                        for (GLsizei row = 0; row < srcHeight; ++row) {
+                            for (GLsizei col = 0; col < srcWidth; ++col) {
+                                const std::size_t rgbaOff =
+                                    (static_cast<std::size_t>(dstZ + z) * dstSlice4)
+                                    + (static_cast<std::size_t>(dstY + row) * dstRow4)
+                                    + (static_cast<std::size_t>(dstX + col) * 4);
+                                const std::size_t natOff =
+                                    (static_cast<std::size_t>(dstZ + z) * natSliceBytes)
+                                    + (static_cast<std::size_t>(dstY + row) * natRowBytes)
+                                    + (static_cast<std::size_t>(dstX + col) * info.bytesPerPixel);
+                                const std::uint8_t* rgbaPx = dstRGBA + rgbaOff;
+                                std::uint8_t* natPx = dstImg->nativeData.data() + natOff;
+                                // For each native channel, compute the value
+                                // from the rgba8 value at that channel index
+                                // (R=0, G=1, B=2, A=3; missing channels read 0).
+                                for (int c = 0; c < info.channels; ++c) {
+                                    const std::uint8_t rgbaByte = rgbaPx[c];
+                                    double v;
+                                    switch (info.compType) {
+                                        case Impl::NativeFormatInfo::UNorm:
+                                            // rgba8 stores u8 unorm; scale to native bit width
+                                            v = rgbaByte / 255.0;
+                                            break;
+                                        case Impl::NativeFormatInfo::SNorm:
+                                            // rgba8 has no signed range — treat the byte as
+                                            // unsigned and re-center [0,255] → [-1,1]. Edge
+                                            // case rare in copy_image (no SNorm in failing pairs).
+                                            v = (rgbaByte / 255.0) * 2.0 - 1.0;
+                                            break;
+                                        case Impl::NativeFormatInfo::UInt:
+                                            v = static_cast<double>(rgbaByte);
+                                            break;
+                                        case Impl::NativeFormatInfo::SInt:
+                                            v = static_cast<double>(static_cast<std::int8_t>(rgbaByte));
+                                            break;
+                                        case Impl::NativeFormatInfo::Float:
+                                            v = rgbaByte / 255.0;
+                                            break;
+                                    }
+                                    Impl::writeNativeComponent(
+                                        natPx + c * info.bytesPerChannel,
+                                        info.compType,
+                                        info.bytesPerChannel,
+                                        v);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
