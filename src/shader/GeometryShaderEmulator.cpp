@@ -4782,7 +4782,8 @@ EmulatedDraw emulateGeometryDraw(
     const SampledTextureMap* vsSampledTextures,
     const SampledTextureMap* gsSampledTextures,
     const SampledTextureMap* vsStorageImages,
-    const SampledTextureMap* gsStorageImages)
+    const SampledTextureMap* gsStorageImages,
+    const EmulatedDraw* priorStageOutput)
 {
     EmulatedDraw d;
 
@@ -4790,6 +4791,28 @@ EmulatedDraw emulateGeometryDraw(
         d.ok = false;
         d.diagnostic = "emulateGeometryDraw called on non-emulated program";
         return d;
+    }
+
+    // Sprint 8 #8 β.3 (CKPT97): tess+GS path overrides drawMode and
+    // count from the prior stage's output. The post-tess vertex layout
+    // is already resolved sequentially; the GS sees each consecutive
+    // chunk of `vpp` vertices as one primitive matching its input
+    // topology (so use a discrete drawMode that maps 1:1 to vpp).
+    if (priorStageOutput != nullptr && priorStageOutput->ok) {
+        count = static_cast<GLsizei>(priorStageOutput->vertexCount);
+        first = 0;
+        elementIndices = nullptr;
+        // Override drawMode to the discrete equivalent of the GS input
+        // topology so the per-primitive indexing collapses cleanly to
+        // `vertex p*vpp+v`.
+        switch (program.gsInputTopology) {
+            case GL_POINTS:                drawMode = GL_POINTS; break;
+            case GL_LINES:                 drawMode = GL_LINES; break;
+            case GL_LINES_ADJACENCY:       drawMode = GL_LINES_ADJACENCY; break;
+            case GL_TRIANGLES:             drawMode = GL_TRIANGLES; break;
+            case GL_TRIANGLES_ADJACENCY:   drawMode = GL_TRIANGLES_ADJACENCY; break;
+            default: /* leave caller's mode */ break;
+        }
     }
 
     SpirvModule mod;
@@ -5166,7 +5189,38 @@ EmulatedDraw emulateGeometryDraw(
         // Per-instance VS pre-pass. Results live in a local vector
         // and flow into the per-primitive GS run for THIS instance.
         std::vector<Interpreter::PerVertexInput> allVertexInputs(count);
-        if (haveVs) {
+        if (priorStageOutput != nullptr && priorStageOutput->ok) {
+            // Sprint 8 #8 β.3 (CKPT97): tess→GS plumbing. Replace the VS
+            // pre-pass with the prior stage's per-vertex output. Each
+            // vertex of priorStageOutput->expandedVertexData becomes one
+            // entry in `allVertexInputs`, sliced into:
+            //   - position[4] from the leading 4 floats
+            //   - varyings[k] from priorStageOutput->varyingNames[k] /
+            //     varyingWidths[k] in their declared order
+            // Clip / cull distance arrays from the tess stage are
+            // currently dropped (β.3 minimum: GS reads from the named
+            // varyings or from gl_in[].gl_Position; gl_in[].gl_Clip/
+            // CullDistance pass-through from TES is a future
+            // refinement if a CTS test demands it).
+            const std::size_t fpv = priorStageOutput->floatsPerVertex;
+            const std::size_t vCnt = priorStageOutput->vertexCount;
+            const float* base = priorStageOutput->expandedVertexData.data();
+            for (std::size_t vi = 0; vi < vCnt && vi < allVertexInputs.size(); ++vi) {
+                const float* v = base + vi * fpv;
+                for (int k = 0; k < 4; ++k) allVertexInputs[vi].position[k] = v[k];
+                std::size_t cursor = 4;
+                allVertexInputs[vi].varyings.resize(priorStageOutput->varyingWidths.size());
+                for (std::size_t vk = 0; vk < priorStageOutput->varyingWidths.size(); ++vk) {
+                    const std::uint32_t w = priorStageOutput->varyingWidths[vk];
+                    auto& dst = allVertexInputs[vi].varyings[vk];
+                    dst.assign(w, 0.0f);
+                    for (std::uint32_t j = 0; j < w && cursor + j < fpv; ++j) {
+                        dst[j] = v[cursor + j];
+                    }
+                    cursor += w;
+                }
+            }
+        } else if (haveVs) {
             Interpreter::VertexAttribs vsAttribs;
             for (GLsizei vi = 0; vi < count; ++vi) {
                 const std::size_t vboSlot = (elementIndices != nullptr)
@@ -5264,7 +5318,16 @@ EmulatedDraw emulateGeometryDraw(
             // original single-run path.
             const std::uint32_t gsInvocations = std::max<std::uint32_t>(program.gsInvocations, 1);
             for (std::uint32_t invId = 0; invId < gsInvocations; ++invId) {
-                Interpreter interp(mod, vsOutNames, vsOutWidths,
+                // Sprint 8 #8 β.3 (CKPT97): tess+GS path uses the prior
+                // stage's varyingNames/Widths as the GS interpreter's
+                // input-side names so block-member lookups
+                // (`gl_in[N].tc_position` etc.) match TES-emitted names.
+                // Falls back to vsOutNames/Widths for legacy VS+GS path.
+                const auto& gsInNames = (priorStageOutput != nullptr && priorStageOutput->ok)
+                    ? priorStageOutput->varyingNames : vsOutNames;
+                const auto& gsInWidths = (priorStageOutput != nullptr && priorStageOutput->ok)
+                    ? priorStageOutput->varyingWidths : vsOutWidths;
+                Interpreter interp(mod, gsInNames, gsInWidths,
                                    outNames, outWidths);
                 interp.setUniforms(&uniforms);
                 interp.setGsPrimitiveId(static_cast<std::int32_t>(p));

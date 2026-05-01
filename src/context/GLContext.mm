@@ -19973,7 +19973,25 @@ bool GLContext::linkProgram(GLuint program) {
                 if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
                     programObject->vertexSpirv = vertexShader->spirv;
                 }
+                // Sprint 8 #8 β.3 (CKPT97): for 5-stage programs
+                // (VS+TCS+TES+GS+FS) the kind is VertexGeometryFragment
+                // — the same branch that handles 3-stage VS+GS+FS. Stash
+                // the tess SPIR-V too so detectTessellationEmulatable
+                // can run; without this, the tess detector never sees a
+                // tess-shader SPIR-V for tess+GS programs and the
+                // tess-emul path stays dormant at draw time.
+                if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                    programObject->tessControlSpirv = tessControlShader->spirv;
+                    programObject->tessControlParsedModule.reset();
+                }
+                if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                    programObject->tessEvalSpirv = tessEvalShader->spirv;
+                    programObject->tessEvalParsedModule.reset();
+                }
                 (void)appgl::detectGeometryEmulatable(*programObject);
+                if (programObject->hasTessellation) {
+                    (void)appgl::detectTessellationEmulatable(*programObject);
+                }
             }
             // Sprint 3 [metal-mesh-GS]: try the Metal mesh shader path
             // for GS programs whose shape fits the SPIRV-Cross
@@ -25108,6 +25126,27 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             const auto gsImgMap = impl_->buildStorageImageMap(
                 emulProgram->geometrySpirv,
                 &emulProgram->geometryReflection, *emulProgram);
+            // Sprint 8 #8 β.3 (CKPT97): tess+GS plumbing. When the
+            // program has BOTH tess and GS emulation enabled, run the
+            // tess-emul stage first to produce per-vertex post-tess
+            // output, then feed that into the GS-emul as
+            // priorStageOutput. Without this, the GS-emul's VS pre-pass
+            // bypasses tess entirely and the GS reads garbage from
+            // gl_in[].tc_position (CTS data_pass_through tests fail
+            // with "expected [1,1,1,1] found [0,0,0,0]" at odd indices
+            // where the GS's `+1` pass-through modification didn't run).
+            appgl::EmulatedDraw priorStage;
+            const bool hasTess = emulProgram->tessellationEmulated ||
+                                 emulProgram->tessellationInterpreted;
+            if (hasTess) {
+                priorStage = appgl::emulateTessellationDraw(
+                    *emulProgram, *vao, *impl_->objects, *impl_->state,
+                    mode, count, first, /*elementIndices=*/nullptr);
+                if (!priorStage.ok && !priorStage.diagnostic.empty()) {
+                    APPGL_LOG(SHADER, @"drawArrays tess+GS: tess-emul: %s",
+                              priorStage.diagnostic.c_str());
+                }
+            }
             appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
                 *emulProgram, *vao, *impl_->objects, *impl_->state,
                 mode, count, first, /*elementIndices=*/nullptr,
@@ -25115,7 +25154,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 vsTexMap.empty() ? nullptr : &vsTexMap,
                 gsTexMap.empty() ? nullptr : &gsTexMap,
                 vsImgMap.empty() ? nullptr : &vsImgMap,
-                gsImgMap.empty() ? nullptr : &gsImgMap);
+                gsImgMap.empty() ? nullptr : &gsImgMap,
+                (hasTess && priorStage.ok) ? &priorStage : nullptr);
             if (ed.ok) {
                 // XFB capture + rasterDiscard early-out lives in a
                 // shared helper so drawElements can run the same path.

@@ -1560,12 +1560,16 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
     // Must have a TES at minimum (§11.2.3: TCS is optional).
     if (program.tessEvalSpirv.empty()) return false;
 
-    // Full 5-stage (VS+TCS+TES+GS+FS) support deferred to a future
-    // infrastructure round.
-    if (!program.geometrySpirv.empty()) {
-        program.linkLog += "\n[tess-emul] TES+GS 5-stage pipeline not yet emulated";
-        return false;
-    }
+    // Sprint 8 #8 β.3 (CKPT97): the historical "TES+GS 5-stage pipeline
+    // not yet emulated" gate is dropped. The driver now supports the
+    // tess→GS plumbing path: tess-emul produces the post-tess vertex
+    // stream, then GLContext.mm passes it as `priorStageOutput` to
+    // `emulateGeometryDraw` (the GS interpreter consumes the prior
+    // stage's per-vertex output instead of running its own VS pre-pass).
+    // The detector still requires the TES body to match the same
+    // passthrough / interpretable subsets it requires for tess-only
+    // programs — the GS attachment doesn't change what the tess stage
+    // is allowed to do.
 
     // Validate the TES execution mode is one we know how to tessellate.
     // `extractTessellationModes` was originally built for the

@@ -335,7 +335,23 @@ EmulatedDraw emulateGeometryDraw(
     // unit namespace. Null → CPU emul imageLoad returns zeros.
     // OpImageRead opcode resolves through this map.
     const SampledTextureMap* vsStorageImages = nullptr,
-    const SampledTextureMap* gsStorageImages = nullptr);
+    const SampledTextureMap* gsStorageImages = nullptr,
+    // Sprint 8 #8 β.3 (CKPT97): tess→GS plumbing. When non-null, the GS
+    // emulator skips its VS pre-pass and instead consumes the previous
+    // stage's per-vertex output (typically the post-tessellation
+    // EmulatedDraw produced by `emulateTessellationDraw`). Each vertex
+    // of `priorStageOutput->expandedVertexData` becomes one entry in
+    // `allVertexInputs`, with `position` taken from the leading 4 floats
+    // and named varyings sliced per `priorStageOutput->varyingNames` /
+    // `varyingWidths`. The GS Interpreter is also constructed with
+    // those varyingNames as its input-side names, so block-member
+    // lookups (`gl_in[0].tc_position` etc.) match the TES-emitted
+    // names without requiring a VS pre-pass at all. When this is set,
+    // `count` is overridden by `priorStageOutput->vertexCount` and
+    // `drawMode` is overridden by the GS input topology (the post-
+    // tessellation primitive layout is already resolved into discrete
+    // sequential vertices).
+    const EmulatedDraw* priorStageOutput = nullptr);
 
 // Run a single VS invocation on CPU for the vertex at `vboSlot`.
 // Exposed so the tess-CPU emulator can reuse the same interpreter
