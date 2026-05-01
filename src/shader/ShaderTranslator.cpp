@@ -202,6 +202,30 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     int sourceLen = static_cast<int>(source.size());
     shader.setStringsWithLengths(&sourcePtr, &sourceLen, 1);
 
+    // Sprint 9 Phase 3 (CKPT103): glslang's strict version-based gating of
+    // ARB_sample_shading + OES_sample_variables built-ins (gl_NumSamples,
+    // gl_SampleID, gl_SamplePosition, gl_SampleMaskIn, gl_SampleMask)
+    // makes them undeclared at GLSL versions < 450 (core) without an
+    // explicit `#extension` directive. CTS sample_variables.* and
+    // shader_multisample_interpolation.render.* tests use #version 440
+    // without the extension declaration — real GL drivers accept this
+    // (the spec-strict behavior is unhelpful in practice). Inject the
+    // extension declarations as a preamble so the symbol table populates
+    // for these built-ins. Preamble runs after #version directive
+    // processing, so version-dependent gating already saw the user's
+    // #version pick.
+    static const char* kFragmentSamplePreamble =
+        "#extension GL_ARB_sample_shading : enable\n"
+        "#extension GL_OES_sample_variables : enable\n"
+        "#extension GL_OES_shader_multisample_interpolation : enable\n";
+    if (eshStage == EShLangFragment) {
+        shader.setPreamble(kFragmentSamplePreamble);
+        if (std::getenv("APPGL_TRACE_GLSLANG") != nullptr) {
+            std::fprintf(stderr, "[glslang-preamble] FS preamble set: %zu bytes\n",
+                std::strlen(kFragmentSamplePreamble));
+        }
+    }
+
     // Target Vulkan SPIR-V with relaxed rules so glslang accepts bare
     // uniforms from OpenGL GLSL. Bare uniforms are wrapped into a single
     // global uniform block (UBO) that SPIRV-Cross maps to a Metal buffer.

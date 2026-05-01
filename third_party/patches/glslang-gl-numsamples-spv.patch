@@ -1,0 +1,30 @@
+diff --git a/glslang/MachineIndependent/Initialize.cpp b/glslang/MachineIndependent/Initialize.cpp
+index d4f87a4..48af477 100644
+--- a/glslang/MachineIndependent/Initialize.cpp
++++ b/glslang/MachineIndependent/Initialize.cpp
+@@ -6754,11 +6754,20 @@ void TBuiltIns::initialize(int version, EProfile profile, const SpvVersion& spvV
+                 "     out int  gl_SampleMask[];"
+                 );
+ 
+-            if (spvVersion.spv == 0) {
+-                stageBuiltins[EShLangFragment].append(
+-                    "uniform int gl_NumSamples;"
+-                );
+-            }
++            // AppGL Sprint 9 Phase 3 (CKPT103): expose gl_NumSamples even
++            // when targeting SPIR-V. The original `spvVersion.spv == 0`
++            // gate suppressed this for Vulkan-flavoured SPIR-V (Vulkan
++            // doesn't have gl_NumSamples — it uses
++            // SubpassInput / SampleMask attribute instead). But AppGL
++            // emulates OpenGL via Vulkan-target SPIR-V, and CTS
++            // sample_variables.* / shader_multisample_interpolation.* tests
++            // require gl_NumSamples to compile. Declare it
++            // unconditionally at the GL fragment-stage built-ins level —
++            // SPIRV-Cross can map it to a Metal `[[sample_count]]` or
++            // equivalent at MSL emission time, or a runtime-fed uniform.
++            stageBuiltins[EShLangFragment].append(
++                "uniform int gl_NumSamples;"
++            );
+         }
+ 
+         if (version >= 150)
