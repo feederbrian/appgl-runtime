@@ -1706,22 +1706,38 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // gl_SampleMaskIn` → mask_zero → 0 → fragment dropped → texture
         // stays clear-green → verifier expects red → FAIL.
         //
-        // Fix: when the FS uses `[[sample_mask]]` AND `gl_NumSamples` is
-        // bound (it's always plumbed for FS via the FS preamble's
-        // GL_ARB_sample_shading reflection), inject a runtime override:
-        //   if (gl_NumSamples == 1) out.gl_SampleMask = 0xFFFFFFFFu;
-        // immediately before `return out;` of `main0`. Sample count is
-        // resolved at draw time from the bound FBO's color attachment.
+        // CKPT121 (Day 6): gate the override on actual sample count so
+        // MSAA-mask correctness is preserved for samples > 1.
+        // glslang/SPIRV-Cross emits gl_NumSamples as a `[[buffer(0)]]`
+        // int parameter — but no runtime path plumbs that buffer, so
+        // it reads garbage. Replace it with Metal's `raster_sample_count()`
+        // intrinsic (MSL 2.1+ / macOS 10.14+, well within our target):
+        //   1. Strip the `constant int& ..._gl_NumSamples [[buffer(0)]],`
+        //      parameter from `main0`.
+        //   2. Inject a local `int _RESERVED_IDENTIFIER_FIXUP_gl_NumSamples
+        //      = int(get_num_samples());` at the top of `main0`.
+        //      `get_num_samples()` is the rasterization sample count of
+        //      the bound color attachment; existing references in the
+        //      shader body resolve to this local without further edits.
+        //   3. Gate the gl_SampleMask=UINT_MAX override on
+        //      `_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples == 1`.
+        // This restores MSAA-mask behaviour for samples > 1 while
+        // keeping the samples_0 fix from Day 5.
         if (execModel == spv::ExecutionModelFragment
             && msl.find("[[sample_mask]]") != std::string::npos) {
-            // EXPLORATORY: unconditional override. Diagnostic-only step
-            // to verify whether [[sample_mask]] write-through is the only
-            // thing blocking samples_0 cases. If true, refactor to a
-            // proper sample-count-driven gating (next Day plumbs
-            // gl_NumSamples to a real per-draw uniform).
+            // Gate on `_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples == 1`.
+            // The MSL keeps SPIRV-Cross's `[[buffer(0)]]` parameter for
+            // gl_NumSamples; the runtime (MetalFrameGraph) writes the
+            // FBO's color-attachment sampleCount to that buffer slot at
+            // each draw, so the comparison reads a genuine sample count
+            // (1 for non-MSAA, 2/4/8/... for MSAA). When samples == 1
+            // (per GL spec, MSAA disabled), force gl_SampleMask=UINT_MAX
+            // to neutralize Metal's unconditional [[sample_mask]] gating.
+            // For samples > 1, preserve the user's mask write.
             const std::string returnPattern = "    return out;";
             const std::string injection =
-                "    out.gl_SampleMask = 0xFFFFFFFFu;\n";
+                "    if (_RESERVED_IDENTIFIER_FIXUP_gl_NumSamples == 1) "
+                "{ out.gl_SampleMask = 0xFFFFFFFFu; }\n";
             std::string out2;
             out2.reserve(msl.size() + 128);
             std::size_t pos = 0;

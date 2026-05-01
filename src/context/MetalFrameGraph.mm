@@ -2406,6 +2406,20 @@ struct MetalFrameGraph::Impl {
                                                 length:info.fragmentUniformSize
                                                atIndex:16];
             }
+            // CKPT121 (Sprint 11 Phase 2 Day 6): SPIRV-Cross emits
+            // gl_NumSamples as a `constant int& [[buffer(0)]]` FS
+            // parameter. The MSL ShaderTranslator post-process gates the
+            // gl_SampleMask=UINT_MAX override on this value (== 1 means
+            // non-MSAA per GL spec). Bind the bound color attachment's
+            // sampleCount here so the FS reads a real count.
+            // CTS sample_variables.mask.samples_{1,2,4} verify samples >= 1
+            // do not get the UINT_MAX neutralization.
+            {
+                const int32_t glNumSamples = static_cast<int32_t>(attachmentSampleCount);
+                [currentRenderEncoder setFragmentBytes:&glNumSamples
+                                                length:sizeof(glNumSamples)
+                                               atIndex:0];
+            }
 
             // Bind UBO data to the Metal encoder at the reflection-specified
             // [[buffer(N)]] slots.  Each entry was resolved by GLContext from
