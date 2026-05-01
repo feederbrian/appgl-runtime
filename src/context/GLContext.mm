@@ -3616,6 +3616,39 @@ struct GLContext::Impl {
         const std::size_t texelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
         if (isColorFormat(internalFormat)) {
             object.rgba8.assign(texelCount * 4u, 0);
+            // CKPT117 (Sprint 11 Phase 1 1a): allocate a native-precision
+            // shadow alongside rgba8 when the internal format maps to a
+            // non-RGBA8 Metal pixel format. This unblocks copy_image
+            // round-trips that need >8-bit precision (rgb10 / rgb32f /
+            // RGBA32UI etc.) per CKPT109 carryover. nativeBpp = 0 for
+            // RGBA8-mapped formats (no native shadow needed; rgba8 IS
+            // the native shadow).
+            const MTLPixelFormat nativePixelFmt = metalRenderbufferFormat(internalFormat);
+            const auto nativeInfo = nativeFormatInfo(nativePixelFmt);
+            if (nativeInfo.bytesPerPixel > 0
+                && nativePixelFmt != MTLPixelFormatRGBA8Unorm
+                && nativePixelFmt != MTLPixelFormatRGBA8Unorm_sRGB
+                && nativePixelFmt != MTLPixelFormatRGBA8Snorm) {
+                object.nativeBpp = static_cast<std::size_t>(nativeInfo.bytesPerPixel);
+                object.nativeData.assign(texelCount * object.nativeBpp, 0);
+            } else {
+                // RGBA8-mapped (rgba8 shadow IS the native representation),
+                // OR packed Metal format with channels==0 (RGB10A2 /
+                // RG11B10F / RGB9E5 — bytesPerPixel=4 but channels=0). For
+                // packed, allocate nativeData as 4 bpp since pack/unpack
+                // happens in copy_image fast-path; for RGBA8 leave
+                // nativeBpp=0 to mark "rgba8 is canonical."
+                if (nativePixelFmt == MTLPixelFormatRGB10A2Unorm ||
+                    nativePixelFmt == MTLPixelFormatRGB10A2Uint ||
+                    nativePixelFmt == MTLPixelFormatRG11B10Float ||
+                    nativePixelFmt == MTLPixelFormatRGB9E5Float) {
+                    object.nativeBpp = 4;
+                    object.nativeData.assign(texelCount * 4u, 0);
+                } else {
+                    object.nativeBpp = 0;
+                    object.nativeData.clear();
+                }
+            }
         }
         if (isDepthFormat(internalFormat)) {
             object.depth32.assign(texelCount, 1.0f);
@@ -30380,7 +30413,16 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         srcImgW = srcRB->width;
         srcImgH = srcRB->height;
         srcImgD = 1;
-        if (!srcRB->rgba8.empty()) {
+        // CKPT117 (Sprint 11 Phase 1 1a): prefer RB.nativeData over rgba8
+        // when the RB has a native-precision shadow allocated (non-RGBA8
+        // internal formats per replaceRenderbufferStorage). This unblocks
+        // the rgb10/rgb32f RB-source residual classes from CKPT109 + the
+        // copy_image.smoke_test RGBA32UI 16-bpp case (smoke_test from 1c
+        // residual).
+        if (srcRB->nativeBpp > 0 && !srcRB->nativeData.empty()) {
+            srcPixels = srcRB->nativeData.data();
+            srcBpp = srcRB->nativeBpp;
+        } else if (!srcRB->rgba8.empty()) {
             srcPixels = srcRB->rgba8.data();
             srcBpp = 4;
         }
@@ -30460,11 +30502,18 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         dstImgW = dstRB->width;
         dstImgH = dstRB->height;
         const std::size_t totalPixels = static_cast<std::size_t>(dstImgW) * dstImgH;
-        if (dstRB->rgba8.size() < totalPixels * 4) {
-            dstRB->rgba8.resize(totalPixels * 4, 0);
+        // CKPT117: prefer RB.nativeData when allocated (non-RGBA8 internal
+        // formats); fall back to rgba8 for RGBA8-mapped formats.
+        if (dstRB->nativeBpp > 0 && !dstRB->nativeData.empty()) {
+            dstPixels = dstRB->nativeData.data();
+            dstBpp = dstRB->nativeBpp;
+        } else {
+            if (dstRB->rgba8.size() < totalPixels * 4) {
+                dstRB->rgba8.resize(totalPixels * 4, 0);
+            }
+            dstPixels = dstRB->rgba8.data();
+            dstBpp = 4;
         }
-        dstPixels = dstRB->rgba8.data();
-        dstBpp = 4;
     }
 
     // Bounds check destination region. CKPT116: include the depth/layer

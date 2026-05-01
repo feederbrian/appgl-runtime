@@ -213,6 +213,14 @@ struct GLRenderbufferObject {
     GLsizei height = 0;
     GLsizei samples = 0;
     std::vector<std::uint8_t> rgba8;
+    // CKPT117 (Sprint 11 Phase 1 1a — RB.nativeData refactor): mirror of
+    // GLTextureImageLevel::{nativeData,nativeBpp}. Allows RBs to carry a
+    // native-precision shadow for non-RGBA8 internal formats (RGB10_A2,
+    // RGBA32UI, RGB32F, etc.) so copyImageSubData / glReadPixels round-
+    // trips don't truncate to the 8-bit RGBA8 fallback. nativeBpp = 0
+    // means "no native shadow" (default for RGBA8-mapped formats).
+    std::vector<std::uint8_t> nativeData;
+    std::size_t nativeBpp = 0;
     std::vector<GLfloat> depth32;
     std::vector<std::uint8_t> stencil8;
     bool instantiated = false;
