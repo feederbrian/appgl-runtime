@@ -10411,7 +10411,29 @@ bool GLContext::vertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsi
         auto& bp = vertexArray->bindingPoints[index];
         bp.buffer = buffer;
         bp.offset = static_cast<GLintptr>(attribute.pointer);
-        bp.stride = stride > 0 ? stride : static_cast<GLsizei>(16);
+        // CKPT100 fix: glVertexAttribIPointer(stride=0) means "tight pack
+        // using size*sizeof(type)" per GL 4.6 §10.3.8 — not the
+        // VAO-default 16. The hardcoded 16 fallback caused
+        // KHR-GL46.direct_state_access.vertex_arrays_element_buffer to
+        // fail: 1-component GL_INT attribute with stride=0 should fetch
+        // every 4 bytes; with stride forced to 16, slot N reads
+        // out-of-range past the 12-byte buffer for N≥1, returning
+        // zeros. Mirror the byte-size compute already in
+        // glVertexAttribPointer for symmetry.
+        GLsizei effStride = stride;
+        if (effStride <= 0) {
+            auto byteSize = [](GLenum t) -> GLsizei {
+                switch (t) {
+                    case GL_BYTE: case GL_UNSIGNED_BYTE: return 1;
+                    case GL_SHORT: case GL_UNSIGNED_SHORT: return 2;
+                    case GL_INT: case GL_UNSIGNED_INT: return 4;
+                    default: return 4;
+                }
+            };
+            effStride = static_cast<GLsizei>(size) * byteSize(type);
+            if (effStride <= 0) effStride = 16;
+        }
+        bp.stride = effStride;
     }
     markVertexDescriptorDirty(*vertexArray);
     impl_->state->markDirty(DirtyBit::VertexInput);
