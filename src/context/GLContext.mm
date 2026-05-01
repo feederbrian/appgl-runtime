@@ -5367,6 +5367,17 @@ struct GLContext::Impl {
         return result;
     }
 
+    // CKPT119 forward declaration — full body follows ImageBinding struct
+    // definition. Routed through a parameter list (level + cache fields
+    // by reference) instead of taking ImageBinding directly so the
+    // helper can sit before ImageBinding's class-scope declaration.
+    void* resolveImageMetalTextureImpl(GLTextureObject* texObj,
+                                       GLuint texName,
+                                       GLint level,
+                                       void*& cachedView,
+                                       GLuint& cachedTex,
+                                       GLint& cachedLev);
+
     // Graphics-stage storage-image binding (imageLoad/imageStore in VS/FS).
     // Mirrors the compute-dispatch storage-image path but appends to the
     // TranslatedDrawInfo texture lists so the render encoder picks up the
@@ -5402,12 +5413,14 @@ struct GLContext::Impl {
                     }
                 }
                 if (effectiveUnit >= Impl::kMaxImageUnits) continue;
-                const auto& ib = imageBindings[effectiveUnit];
+                auto& ib = imageBindings[effectiveUnit];
                 if (ib.texture == 0) continue;
                 GLTextureObject* texObj = objects->textures().get(ib.texture);
                 if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
                 TranslatedDrawInfo::TextureBinding tb;
-                tb.metalTexture = texObj->metalTexture;
+                // CKPT119: prefer level-restricted view when ib.level > 0
+                // so imageSize() returns LEVEL-N dimensions.
+                tb.metalTexture = resolveImageMetalTexture(ib, texObj);
                 tb.metalSamplerState = nullptr;  // no sampler for storage images
                 tb.metalSlot = img.metalBinding;
                 outList.push_back(tb);
@@ -8257,7 +8270,30 @@ struct GLContext::Impl {
         // GL 4.6 §8.26 Table 23.43 — initial value is GL_R8 per spec.
         // CTS `shader_image_load_store.basic-api-bind` verifies this.
         GLenum format = GL_R8;
+        // CKPT119 (Sprint 11 Phase 1 1b — Cluster F shader_image_size):
+        // when `level > 0` (or `layered=false` selecting one slice of an
+        // array), Metal needs a TEXTURE VIEW restricted to just that
+        // mip+slice so `texture.get_width()` returns the LEVEL-N
+        // dimensions per GL 4.6 §11.1.3.2 / §15.3.6 (`imageSize()`
+        // returns the size of the bound mip level / slice). Without a
+        // per-binding view, `texture.get_width()` returns base level 0
+        // dimensions and CTS shader_image_size.* tests see (W, H) for
+        // every level instead of (W>>level, H>>level). Cached lazily
+        // by `resolveImageMetalTexture` and invalidated by `bindImageTexture`.
+        void* metalLevelView = nullptr;
+        GLuint cachedViewTexture = 0;  // texture name the view was created from
+        GLint cachedViewLevel = -1;    // level the view was created for
     };
+
+    // CKPT119 wrapper: type-aware adapter for resolveImageMetalTextureImpl
+    // that takes ImageBinding directly. Defined after ImageBinding so
+    // the type is in scope.
+    void* resolveImageMetalTexture(ImageBinding& ib, GLTextureObject* texObj) {
+        return resolveImageMetalTextureImpl(texObj, ib.texture, ib.level,
+                                            ib.metalLevelView,
+                                            ib.cachedViewTexture,
+                                            ib.cachedViewLevel);
+    }
     static constexpr std::size_t kMaxImageUnits = 8;
     std::array<ImageBinding, kMaxImageUnits> imageBindings{};
 
@@ -14241,6 +14277,60 @@ bool GLContext::isTransformFeedbackActive() const {
         }
     }
     return impl_->transformFeedbackActive;
+}
+
+// CKPT119 (Sprint 11 Phase 1 1b — Cluster F shader_image_size): create
+// a single-mip texture view at `level` and cache it on the binding.
+// See forward-declaration earlier in Impl class for rationale.
+void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
+                                                    GLuint texName,
+                                                    GLint level,
+                                                    void*& cachedView,
+                                                    GLuint& cachedTex,
+                                                    GLint& cachedLev) {
+    if (texObj == nullptr || texObj->metalTexture == nullptr) return nullptr;
+    if (level == 0) {
+        return texObj->metalTexture;
+    }
+    (void)texName;  // reserved for future per-binding diagnostics
+    if (cachedView != nullptr && cachedTex == texName && cachedLev == level) {
+        return cachedView;
+    }
+    id<MTLTexture> baseTex = (__bridge id<MTLTexture>)texObj->metalTexture;
+    if (baseTex == nil) return nullptr;
+    const NSUInteger maxLevels = baseTex.mipmapLevelCount;
+    if (static_cast<NSUInteger>(level) >= maxLevels) {
+        return texObj->metalTexture;
+    }
+    NSRange levelRange = NSMakeRange(static_cast<NSUInteger>(level), 1);
+    // CKPT119: per-textureType slice range. Metal asserts:
+    // - Cube / CubeArray: slice range must be multiple of 6
+    // - 2DArray / 1DArray: slice range = arrayLength
+    // - 2D / 2DMS / 3D / 1D: slice range = 1 (default)
+    NSUInteger sliceCount = std::max<NSUInteger>(baseTex.arrayLength, 1);
+    switch (baseTex.textureType) {
+        case MTLTextureTypeCube:
+            sliceCount = 6;
+            break;
+        case MTLTextureTypeCubeArray:
+            sliceCount = 6 * std::max<NSUInteger>(baseTex.arrayLength, 1);
+            break;
+        default:
+            break;
+    }
+    NSRange sliceRange = NSMakeRange(0, sliceCount);
+    id<MTLTexture> levelView = [baseTex newTextureViewWithPixelFormat:baseTex.pixelFormat
+                                                          textureType:baseTex.textureType
+                                                               levels:levelRange
+                                                               slices:sliceRange];
+    if (levelView == nil) return texObj->metalTexture;
+    if (cachedView != nullptr) {
+        releaseRetainedMetalObject(cachedView);
+    }
+    cachedView = transferRetainedMetalObject(levelView);
+    cachedTex = texName;
+    cachedLev = level;
+    return cachedView;
 }
 
 bool GLContext::Impl::isTfActiveOnBoundImpl() const {
@@ -27963,13 +28053,35 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     // — linkProgram only populates it for programs with ProgramKind
     // ::Compute. This surfaces the compute-shader.api-no-active-program
     // / api-program negative tests as spec-correct failures.
-    const GLuint progName = impl_->state->currentProgram();
+    //
+    // CKPT119: when the current program is 0 but a program pipeline is
+    // bound with a compute stage (glUseProgramStages(...,
+    // GL_COMPUTE_SHADER_BIT, prog)), use the pipeline's compute slot.
+    // CTS shader_image_size.basic-nonMS-cs-* relies on this path.
+    GLuint progName = impl_->state->currentProgram();
     GLProgramObject* programObject = progName == 0 ? nullptr
         : impl_->objects->programs().get(progName);
     if (programObject == nullptr || !programObject->linked
         || programObject->metalComputePipelineState == nullptr) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+        const GLuint pipelineName = impl_->state->currentProgramPipeline();
+        if (pipelineName != 0) {
+            GLProgramPipelineObject* ppo =
+                impl_->objects->programPipelines().get(pipelineName);
+            if (ppo != nullptr && ppo->computeProgram != 0) {
+                GLProgramObject* csProg =
+                    impl_->objects->programs().get(ppo->computeProgram);
+                if (csProg != nullptr && csProg->linked
+                    && csProg->metalComputePipelineState != nullptr) {
+                    programObject = csProg;
+                    progName = ppo->computeProgram;
+                }
+            }
+        }
+        if (programObject == nullptr || !programObject->linked
+            || programObject->metalComputePipelineState == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
     if (impl_->frameGraph == nullptr) {
         // Pipeline was built but the frame graph is torn down — no
@@ -28129,12 +28241,13 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             }
         }
         if (effectiveUnit >= Impl::kMaxImageUnits) continue;
-        const auto& ib = impl_->imageBindings[effectiveUnit];
+        auto& ib = impl_->imageBindings[effectiveUnit];
         if (ib.texture == 0) continue;
         GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
         if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
         ComputeDispatchInfo::TextureBinding tb;
-        tb.metalTexture = texObj->metalTexture;
+        // CKPT119: level-restricted view when ib.level > 0.
+        tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
         tb.metalSamplerState = nullptr;  // no sampler for storage images
         tb.metalSlot = img.metalBinding;
         info.textures.push_back(tb);
@@ -28309,12 +28422,13 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
     // Storage images for the indirect path — mirror the direct path.
     for (const auto& img : programObject->computeReflection.storageImages) {
         if (img.glBinding >= Impl::kMaxImageUnits) continue;
-        const auto& ib = impl_->imageBindings[img.glBinding];
+        auto& ib = impl_->imageBindings[img.glBinding];
         if (ib.texture == 0) continue;
         GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
         if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
         ComputeDispatchInfo::TextureBinding tb;
-        tb.metalTexture = texObj->metalTexture;
+        // CKPT119: level-restricted view when ib.level > 0.
+        tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
         tb.metalSamplerState = nullptr;
         tb.metalSlot = img.metalBinding;
         info.textures.push_back(tb);
@@ -28385,6 +28499,17 @@ bool GLContext::bindImageTexture(GLuint unit, GLuint texture, GLint level, GLboo
     }
 
     auto& binding = impl_->imageBindings[unit];
+    // CKPT119: invalidate the cached per-level texture view if the
+    // binding's identity (texture or level) changes, so the next
+    // `resolveImageMetalTexture` call re-creates a fresh view.
+    if (binding.metalLevelView != nullptr &&
+        (binding.cachedViewTexture != texture ||
+         binding.cachedViewLevel != level)) {
+        releaseRetainedMetalObject(binding.metalLevelView);
+        binding.metalLevelView = nullptr;
+        binding.cachedViewTexture = 0;
+        binding.cachedViewLevel = -1;
+    }
     binding.texture = texture;
     binding.level = level;
     binding.layered = layered;

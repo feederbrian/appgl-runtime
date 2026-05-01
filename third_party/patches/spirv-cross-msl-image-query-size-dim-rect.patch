@@ -1,0 +1,27 @@
+CKPT119 — SPIRV-Cross MSL: include DimRect in OpImageQuerySize get_height path
+
+Upstream emits int2(get_width()) for image2DRect / sampler2DRect because
+the conditional that appends ", get_height()" only matched Dim2D / DimCube
+/ Dim3D. With image2DRect (DimRect), MSL ended up with int2(W) which
+duplicates W into both lanes, giving (W,W) instead of (W,H).
+
+CTS KHR-GL46.shader_image_size.basic-nonMS-{vs,fs,cs}-* exercise this on a
+16x8 GL_TEXTURE_RECTANGLE storage image; pre-fix returned (16,16),
+post-fix returns (16,8) per GL 4.6 §11.1.3.2 / §15.3.6.
+
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -10875,7 +10875,12 @@ void CompilerMSL::emit_glsl_op(uint32_t result_type, uint32_t id, uint32_t eop,
+ 		string expr = type_to_glsl(rslt_type) + "(";
+ 		expr += img_exp + ".get_width(" + lod + ")";
+
+-		if (img_dim == Dim2D || img_dim == DimCube || img_dim == Dim3D)
++		// CKPT119 (AppGL): include DimRect (image2DRect / sampler2DRect) so
++		// imageSize / textureSize emit BOTH width and height. Upstream
++		// omits DimRect from this list, causing `int2(get_width())` to
++		// duplicate width into both components. CTS shader_image_size.*
++		// rect-sized cases (16x8) returned (16,16) before this fix.
++		if (img_dim == Dim2D || img_dim == DimCube || img_dim == Dim3D || img_dim == DimRect)
+ 			expr += ", " + img_exp + ".get_height(" + lod + ")";
+
+ 		if (img_dim == Dim3D)
