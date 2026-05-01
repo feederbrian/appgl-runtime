@@ -5068,18 +5068,36 @@ fragment float4 appgl_immediate_textured_fs(
         id<MTLBuffer> cpOutBuf = nil;
         id<MTLBuffer> patchOutBuf = nil;
         if (isPhase3) {
+            // CKPT137 (Sprint 13 Phase 2 Day 1 — γ2.1 runtime instrumentation):
+            // when APPGL_TRACE_TESS_BUF is set, allocate vsOutBuf/cpOutBuf in
+            // shared storage mode so we can blit-read post-write contents and
+            // verify per-patch buffer wiring vs symbolic-expected.
+            static const bool s_trBuf = (std::getenv("APPGL_TRACE_TESS_BUF") != nullptr);
+            const MTLResourceOptions storageOpt = s_trBuf
+                ? MTLResourceStorageModeShared
+                : MTLResourceStorageModePrivate;
             vsOutBuf = [device newBufferWithLength:vsOutBytes
-                                           options:MTLResourceStorageModePrivate];
+                                           options:storageOpt];
             cpOutBuf = [device newBufferWithLength:cpOutBytes
-                                           options:MTLResourceStorageModePrivate];
+                                           options:storageOpt];
             patchOutBuf = [device newBufferWithLength:patchOutBytes
-                                              options:MTLResourceStorageModePrivate];
+                                              options:storageOpt];
             if (vsOutBuf == nil || cpOutBuf == nil || patchOutBuf == nil) {
                 return false;
             }
             vsOutBuf.label = @"appgl-tess-vs-out";
             cpOutBuf.label = @"appgl-tess-cp-out";
             patchOutBuf.label = @"appgl-tess-patch-out";
+            if (s_trBuf) {
+                std::fprintf(stderr,
+                    "[TESS-BUF] alloc vsOutBuf=%p (sz=%lu) cpOutBuf=%p (sz=%lu) patchOutBuf=%p (sz=%lu) "
+                    "vertexCount=%lu patchCount=%d patchVertices=%d tessCtrlOutputVertices=%d\n",
+                    (void*)vsOutBuf, (unsigned long)vsOutBytes,
+                    (void*)cpOutBuf, (unsigned long)cpOutBytes,
+                    (void*)patchOutBuf, (unsigned long)patchOutBytes,
+                    (unsigned long)vertexCount, info.patchCount, info.patchVertices,
+                    info.tessControlOutputVertices);
+            }
         }
 
         // Sprint 5 Phase 1 — Path L Class 2A: full-precision tess level
@@ -5182,12 +5200,36 @@ fragment float4 appgl_immediate_textured_fs(
                 // The VS-as-compute path without stage_in keeps using
                 // dispatchThreads to preserve the SPIRV-Cross
                 // [[grid_size]] / spvStageInputSize early-return shape.
+                if (std::getenv("APPGL_TRACE_TESS_BUF") != nullptr) {
+                    std::fprintf(stderr,
+                        "[TESS-BUF] vsEnc dispatchThreads(%lu, 1, 1) tpg(%lu, 1, 1) maxPerTg=%lu\n",
+                        (unsigned long)vertexCount, (unsigned long)tgWidth,
+                        (unsigned long)maxPerTg);
+                }
                 [vsEnc dispatchThreads:MTLSizeMake(vertexCount, 1, 1)
                  threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
             }
             [vsEnc endEncoding];
             [vsCmdBuf commit];
             [vsCmdBuf waitUntilCompleted];
+            // CKPT137: dump vsOutBuf post-VS-compute when APPGL_TRACE_TESS_BUF.
+            // vsOutBuf is allocated Shared above when env-gate is set, so
+            // contents are accessible without additional blit.
+            if (std::getenv("APPGL_TRACE_TESS_BUF") != nullptr) {
+                const std::uint8_t* p = static_cast<const std::uint8_t*>([vsOutBuf contents]);
+                const NSUInteger len = vsOutBuf.length;
+                const NSUInteger slot = kPhase3SlotBytes;
+                const NSUInteger nverts = len / slot;
+                std::fprintf(stderr, "[TESS-BUF] post-VS-compute vsOutBuf len=%lu slot=%lu nverts=%lu\n",
+                    (unsigned long)len, (unsigned long)slot, (unsigned long)nverts);
+                for (NSUInteger v = 0; v < nverts && v < 4; ++v) {
+                    const float* f = reinterpret_cast<const float*>(p + v * slot);
+                    std::fprintf(stderr, "  vert[%lu] first16f= %g %g %g %g  %g %g %g %g  %g %g %g %g  %g %g %g %g\n",
+                        (unsigned long)v,
+                        f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7],
+                        f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
+                }
+            }
         }
 
         // (3b) Compute-encode the TCS dispatch.
@@ -5223,6 +5265,26 @@ fragment float4 appgl_immediate_textured_fs(
         [cenc endEncoding];
         [computeCmdBuf commit];
         [computeCmdBuf waitUntilCompleted];
+
+        // CKPT137: dump cpOutBuf + spvIndirectParams post-TCS-compute.
+        if (std::getenv("APPGL_TRACE_TESS_BUF") != nullptr) {
+            const std::uint8_t* p = static_cast<const std::uint8_t*>([cpOutBuf contents]);
+            const NSUInteger len = cpOutBuf.length;
+            const NSUInteger slot = kPhase3SlotBytes;
+            const NSUInteger ncps = len / slot;
+            std::fprintf(stderr, "[TESS-BUF] post-TCS-compute cpOutBuf len=%lu slot=%lu ncps=%lu\n",
+                (unsigned long)len, (unsigned long)slot, (unsigned long)ncps);
+            for (NSUInteger v = 0; v < ncps && v < 6; ++v) {
+                const float* f = reinterpret_cast<const float*>(p + v * slot);
+                std::fprintf(stderr, "  cp[%lu] first16f= %g %g %g %g  %g %g %g %g  %g %g %g %g  %g %g %g %g\n",
+                    (unsigned long)v,
+                    f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7],
+                    f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
+            }
+            const std::uint32_t* ip = static_cast<const std::uint32_t*>([indirectBuf contents]);
+            std::fprintf(stderr, "[TESS-BUF] indirectBuf [0]=%u (patchVertices) [1]=%u (patchCount)\n",
+                ip[0], ip[1]);
+        }
 
         if (std::getenv("APPGL_DUMP_TESOUT")) {
             float* fbf = static_cast<float*>([factorBufFull contents]);
