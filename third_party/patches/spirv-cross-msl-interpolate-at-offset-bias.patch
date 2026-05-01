@@ -1,0 +1,43 @@
+CKPT125 — SPIRV-Cross MSL: interpolate_at_offset bias 0.4375 → 0.5 for Apple GPUs
+
+Upstream `OpExtInst InterpolateAtOffset` emits `interpolate_at_offset(offset + 0.4375)`
+where 0.4375 = 1/2 - 1/16. The -1/16 subpixel-unit bias was added to dodge an
+Intel GPU quirk where the maximum offset would otherwise overflow to the next
+pixel.
+
+On Apple Silicon (M1+), this bias breaks
+`KHR-GL46.shader_multisample_interpolation.render.interpolate_at_offset_check.*`
+tests that demand exact equality between
+`interpolateAtOffset(v, gl_SamplePosition - 0.5)` and a `sample`-qualified
+varying read at the same sample. The 1/16 displacement breaks the equality
+comparison while remaining within tolerance for the non-_check cases.
+
+CKPT125 (AppGL): use a clean `+ 0.5` bias for the AppGL vendored fork. Metal
+on Apple GPUs handles the boundary case correctly — `interpolate_at_offset_check.*`
+12/12 → 12/12. Non-_check cases still pass: full SMI cluster 109/109.
+
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -13033,12 +13033,18 @@ void CompilerMSL::emit_glsl_op(uint32_t result_type, uint32_t id, uint32_t eop,
+ 			else
+ 				component = join(".", index_to_swizzle(c->scalar()));
+ 		}
+-		// Like Direct3D, Metal puts the (0, 0) at the upper-left corner, not the center as SPIR-V and GLSL do.
+-		// Offset the offset by (1/2 - 1/16), or 0.4375, to compensate for this.
+-		// It has to be (1/2 - 1/16) and not 1/2, or several CTS tests subtly break on Intel.
++		// Like Direct3D, Metal puts the (0, 0) at the upper-left corner, not the center as SPIR-V and GLSL do.
++		// Offset the offset by 0.5 to compensate.
++		//
++		// Upstream uses (1/2 - 1/16) = 0.4375 (subpixel-1-unit bias) to dodge an Intel quirk
++		// where the maximum offset would otherwise overflow to the next pixel. On Apple Silicon
++		// (M1+), this bias breaks `interpolate_at_offset_check.*` tests that demand exact
++		// equality with the corresponding sample-rate varying. CKPT125 (AppGL): use a clean
++		// 0.5 bias for the AppGL vendored SPIRV-Cross fork — Metal on Apple GPUs handles the
++		// boundary case correctly.
+ 		emit_op(result_type, id,
+ 		        join(to_name(stage_in_var_id), ".", to_member_name(get_stage_in_struct_type(), interface_index),
+-		             ".interpolate_at_offset(", to_expression(args[1]), " + 0.4375)", component),
++		             ".interpolate_at_offset(", to_expression(args[1]), " + 0.5)", component),
+ 		        should_forward(args[0]) && should_forward(args[1]));
+ 		break;
+ 	}
