@@ -20920,6 +20920,29 @@ bool GLContext::linkProgram(GLuint program) {
                     std::fprintf(stderr,
                         "[APPGL] T4I: VS-compute MSL early-return needle NOT found\n");
                 }
+                // CKPT139 (Sprint 13 Phase 2 Day 3): γ2.1.F vs γ2.1.G
+                // sentinel-encoding diagnostic. When APPGL_DIAG_TESS_SENTINEL
+                // is set, override `out.gl_Position` write to encode
+                // gl_GlobalInvocationID.{xyz} as float values, AND write a
+                // fixed sentinel to other fields so we can identify which
+                // thread populated each slot. Diagnostic-only; environment-gated.
+                if (std::getenv("APPGL_DIAG_TESS_SENTINEL") != nullptr) {
+                    const std::string oldPos =
+                        "out.gl_Position = float4(float(int(gl_VertexIndex)));";
+                    const std::string newPos =
+                        "out.gl_Position = float4(float(gl_GlobalInvocationID.x), "
+                        "float(gl_GlobalInvocationID.y), "
+                        "float(gl_GlobalInvocationID.z), 42.0);";
+                    const std::size_t posp = mslRef.find(oldPos);
+                    if (posp != std::string::npos) {
+                        mslRef.replace(posp, oldPos.size(), newPos);
+                        std::fprintf(stderr,
+                            "[APPGL] DIAG-SENTINEL: replaced gl_Position with thread-id encoding\n");
+                    } else {
+                        std::fprintf(stderr,
+                            "[APPGL] DIAG-SENTINEL: gl_Position pattern NOT found\n");
+                    }
+                }
             }
             // Extract TCS output_vertices now (before TES-compute
             // translation) so we can plumb the per-patch CP count into
