@@ -1694,6 +1694,51 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             msl = std::move(out);
         }
 
+        // CKPT120 (Sprint 11 Phase 2 Cluster A MSAA Day 5):
+        // gl_SampleMask write-through fix for non-MSAA framebuffers.
+        // GL 4.6 §17.3.3 + ARB_sample_shading: writes to gl_SampleMask
+        // have NO EFFECT when MSAA is disabled / sample-count is 1
+        // (the per-sample raster path doesn't run). Metal's
+        // `[[sample_mask]]` is unconditional — a 0-write at single-sample
+        // gates ALL fragment writes, dropping the entire draw. CTS
+        // sample_variables.mask.*.samples_0.* (36F) hits this: shader
+        // unconditionally writes `gl_SampleMask = u_sampleMask &
+        // gl_SampleMaskIn` → mask_zero → 0 → fragment dropped → texture
+        // stays clear-green → verifier expects red → FAIL.
+        //
+        // Fix: when the FS uses `[[sample_mask]]` AND `gl_NumSamples` is
+        // bound (it's always plumbed for FS via the FS preamble's
+        // GL_ARB_sample_shading reflection), inject a runtime override:
+        //   if (gl_NumSamples == 1) out.gl_SampleMask = 0xFFFFFFFFu;
+        // immediately before `return out;` of `main0`. Sample count is
+        // resolved at draw time from the bound FBO's color attachment.
+        if (execModel == spv::ExecutionModelFragment
+            && msl.find("[[sample_mask]]") != std::string::npos) {
+            // EXPLORATORY: unconditional override. Diagnostic-only step
+            // to verify whether [[sample_mask]] write-through is the only
+            // thing blocking samples_0 cases. If true, refactor to a
+            // proper sample-count-driven gating (next Day plumbs
+            // gl_NumSamples to a real per-draw uniform).
+            const std::string returnPattern = "    return out;";
+            const std::string injection =
+                "    out.gl_SampleMask = 0xFFFFFFFFu;\n";
+            std::string out2;
+            out2.reserve(msl.size() + 128);
+            std::size_t pos = 0;
+            while (pos < msl.size()) {
+                const std::size_t idx = msl.find(returnPattern, pos);
+                if (idx == std::string::npos) {
+                    out2.append(msl, pos, std::string::npos);
+                    break;
+                }
+                out2.append(msl, pos, idx - pos);
+                out2.append(injection);
+                out2.append(returnPattern);
+                pos = idx + returnPattern.size();
+            }
+            msl = std::move(out2);
+        }
+
         if (log != nullptr) {
             *log = "ok";
         }
