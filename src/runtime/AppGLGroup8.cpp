@@ -77,7 +77,26 @@ static void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format, GL
     auto* context = currentContextOrNull();
     if (context == nullptr || pixels == nullptr) return;
 
-    GLuint texName = context->state().boundTexture(target);
+    // GL 4.6 §8.11.4: glGetTexImage accepts the cube-face targets
+    // (GL_TEXTURE_CUBE_MAP_{POSITIVE,NEGATIVE}_{X,Y,Z}) as the `target`
+    // argument, but bindings are stored against the parent
+    // GL_TEXTURE_CUBE_MAP target. Translate cube-face → parent for the
+    // binding lookup. CTS copy_image.smoke_test cycles all targets
+    // including GL_TEXTURE_CUBE_MAP and queries via cube-face target
+    // (`tgt_get = GL_TEXTURE_CUBE_MAP_POSITIVE_X`). CKPT118 fix.
+    GLenum bindTarget = target;
+    switch (target) {
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+            bindTarget = GL_TEXTURE_CUBE_MAP;
+            break;
+        default: break;
+    }
+    GLuint texName = context->state().boundTexture(bindTarget);
     if (texName == 0) {
         context->pushError(GL_INVALID_OPERATION);
         return;
