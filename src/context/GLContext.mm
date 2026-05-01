@@ -1869,6 +1869,154 @@ struct GLContext::Impl {
                 }
                 return static_cast<double>(f);
             }
+            // Packed pixel types — the whole 32/16/8-bit word is the
+            // pixel; idx selects the per-channel bit-field. Required so
+            // `buildNativeUpload`'s per-channel native-format encoder
+            // can resolve a value from packed sources. CTS copy_image
+            // rgb10 → rgb10 cluster (12 tests) is gated on this — rgb10
+            // maps to MTLPixelFormatRGBA16Unorm and the previous
+            // implementation returned 0 here, falling back to the
+            // 8-bit rgba8 shadow with a 3-unit-in-10-bit precision loss.
+            case GL_UNSIGNED_INT_2_10_10_10_REV: {
+                std::uint32_t v;
+                std::memcpy(&v, src, 4);
+                std::uint32_t bits;
+                std::uint32_t maxBits;
+                switch (idx) {
+                    case 0: bits = v        & 0x3FFu; maxBits = 1023u; break;
+                    case 1: bits = (v >> 10) & 0x3FFu; maxBits = 1023u; break;
+                    case 2: bits = (v >> 20) & 0x3FFu; maxBits = 1023u; break;
+                    case 3: bits = (v >> 30) & 0x3u;   maxBits =    3u; break;
+                    default: return 0.0;
+                }
+                return asInteger ? static_cast<double>(bits)
+                                 : static_cast<double>(bits) / static_cast<double>(maxBits);
+            }
+            case GL_UNSIGNED_INT_10_10_10_2: {
+                std::uint32_t v;
+                std::memcpy(&v, src, 4);
+                std::uint32_t bits;
+                std::uint32_t maxBits;
+                switch (idx) {
+                    case 0: bits = (v >> 22) & 0x3FFu; maxBits = 1023u; break;
+                    case 1: bits = (v >> 12) & 0x3FFu; maxBits = 1023u; break;
+                    case 2: bits = (v >>  2) & 0x3FFu; maxBits = 1023u; break;
+                    case 3: bits = v         & 0x3u;   maxBits =    3u; break;
+                    default: return 0.0;
+                }
+                return asInteger ? static_cast<double>(bits)
+                                 : static_cast<double>(bits) / static_cast<double>(maxBits);
+            }
+            case GL_UNSIGNED_SHORT_5_6_5: {
+                std::uint16_t v;
+                std::memcpy(&v, src, 2);
+                std::uint32_t bits;
+                std::uint32_t maxBits;
+                switch (idx) {
+                    case 0: bits = (v >> 11) & 0x1Fu; maxBits = 31u; break;
+                    case 1: bits = (v >>  5) & 0x3Fu; maxBits = 63u; break;
+                    case 2: bits = v         & 0x1Fu; maxBits = 31u; break;
+                    default: return idx == 3 ? 1.0 : 0.0;
+                }
+                return asInteger ? static_cast<double>(bits)
+                                 : static_cast<double>(bits) / static_cast<double>(maxBits);
+            }
+            case GL_UNSIGNED_SHORT_5_6_5_REV: {
+                std::uint16_t v;
+                std::memcpy(&v, src, 2);
+                std::uint32_t bits;
+                std::uint32_t maxBits;
+                switch (idx) {
+                    case 0: bits = v         & 0x1Fu; maxBits = 31u; break;
+                    case 1: bits = (v >>  5) & 0x3Fu; maxBits = 63u; break;
+                    case 2: bits = (v >> 11) & 0x1Fu; maxBits = 31u; break;
+                    default: return idx == 3 ? 1.0 : 0.0;
+                }
+                return asInteger ? static_cast<double>(bits)
+                                 : static_cast<double>(bits) / static_cast<double>(maxBits);
+            }
+            case GL_UNSIGNED_SHORT_4_4_4_4: {
+                std::uint16_t v;
+                std::memcpy(&v, src, 2);
+                std::uint32_t bits;
+                switch (idx) {
+                    case 0: bits = (v >> 12) & 0xFu; break;
+                    case 1: bits = (v >>  8) & 0xFu; break;
+                    case 2: bits = (v >>  4) & 0xFu; break;
+                    case 3: bits = v         & 0xFu; break;
+                    default: return 0.0;
+                }
+                return asInteger ? static_cast<double>(bits) : static_cast<double>(bits) / 15.0;
+            }
+            case GL_UNSIGNED_SHORT_4_4_4_4_REV: {
+                std::uint16_t v;
+                std::memcpy(&v, src, 2);
+                std::uint32_t bits;
+                switch (idx) {
+                    case 0: bits = v         & 0xFu; break;
+                    case 1: bits = (v >>  4) & 0xFu; break;
+                    case 2: bits = (v >>  8) & 0xFu; break;
+                    case 3: bits = (v >> 12) & 0xFu; break;
+                    default: return 0.0;
+                }
+                return asInteger ? static_cast<double>(bits) : static_cast<double>(bits) / 15.0;
+            }
+            case GL_UNSIGNED_SHORT_5_5_5_1: {
+                std::uint16_t v;
+                std::memcpy(&v, src, 2);
+                std::uint32_t bits;
+                std::uint32_t maxBits;
+                switch (idx) {
+                    case 0: bits = (v >> 11) & 0x1Fu; maxBits = 31u; break;
+                    case 1: bits = (v >>  6) & 0x1Fu; maxBits = 31u; break;
+                    case 2: bits = (v >>  1) & 0x1Fu; maxBits = 31u; break;
+                    case 3: bits = v         & 0x1u;  maxBits =  1u; break;
+                    default: return 0.0;
+                }
+                return asInteger ? static_cast<double>(bits)
+                                 : static_cast<double>(bits) / static_cast<double>(maxBits);
+            }
+            case GL_UNSIGNED_SHORT_1_5_5_5_REV: {
+                std::uint16_t v;
+                std::memcpy(&v, src, 2);
+                std::uint32_t bits;
+                std::uint32_t maxBits;
+                switch (idx) {
+                    case 0: bits = v         & 0x1Fu; maxBits = 31u; break;
+                    case 1: bits = (v >>  5) & 0x1Fu; maxBits = 31u; break;
+                    case 2: bits = (v >> 10) & 0x1Fu; maxBits = 31u; break;
+                    case 3: bits = (v >> 15) & 0x1u;  maxBits =  1u; break;
+                    default: return 0.0;
+                }
+                return asInteger ? static_cast<double>(bits)
+                                 : static_cast<double>(bits) / static_cast<double>(maxBits);
+            }
+            case GL_UNSIGNED_BYTE_3_3_2: {
+                std::uint8_t v = src[0];
+                std::uint32_t bits;
+                std::uint32_t maxBits;
+                switch (idx) {
+                    case 0: bits = (v >> 5) & 0x7u; maxBits = 7u; break;
+                    case 1: bits = (v >> 2) & 0x7u; maxBits = 7u; break;
+                    case 2: bits = v        & 0x3u; maxBits = 3u; break;
+                    default: return idx == 3 ? 1.0 : 0.0;
+                }
+                return asInteger ? static_cast<double>(bits)
+                                 : static_cast<double>(bits) / static_cast<double>(maxBits);
+            }
+            case GL_UNSIGNED_BYTE_2_3_3_REV: {
+                std::uint8_t v = src[0];
+                std::uint32_t bits;
+                std::uint32_t maxBits;
+                switch (idx) {
+                    case 0: bits = v        & 0x7u; maxBits = 7u; break;
+                    case 1: bits = (v >> 3) & 0x7u; maxBits = 7u; break;
+                    case 2: bits = (v >> 6) & 0x3u; maxBits = 3u; break;
+                    default: return idx == 3 ? 1.0 : 0.0;
+                }
+                return asInteger ? static_cast<double>(bits)
+                                 : static_cast<double>(bits) / static_cast<double>(maxBits);
+            }
             default:
                 return 0.0;
         }
@@ -2002,40 +2150,63 @@ struct GLContext::Impl {
                  type == GL_UNSIGNED_INT_10F_11F_11F_REV) ||
                 (mtlFmt == MTLPixelFormatRGB9E5Float &&
                  type == GL_UNSIGNED_INT_5_9_9_9_REV);
-            if (!packedMatchesMetal) return false;
+            if (packedMatchesMetal) {
+                outBpp = 4u;
+                const std::size_t totalPixels = static_cast<std::size_t>(width)
+                                              * static_cast<std::size_t>(height)
+                                              * static_cast<std::size_t>(depth);
+                nativeData.assign(totalPixels * outBpp, 0);
+                if (pixels == nullptr || totalPixels == 0) return true;
 
-            outBpp = 4u;
-            const std::size_t totalPixels = static_cast<std::size_t>(width)
-                                          * static_cast<std::size_t>(height)
-                                          * static_cast<std::size_t>(depth);
-            nativeData.assign(totalPixels * outBpp, 0);
-            if (pixels == nullptr || totalPixels == 0) return true;
+                const auto& store = state->pixelStore();
+                const std::size_t srcPixelBytes = 4u;   // all three packed types are 4 bytes
+                const std::size_t sourceWidth  = static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
+                const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
+                const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
+                const std::size_t imageBytes   = rowBytes * sourceHeight;
+                const std::size_t sourceOffset =
+                    static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                    + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
+                    + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
+                const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
 
-            const auto& store = state->pixelStore();
-            const std::size_t srcPixelBytes = 4u;   // all three packed types are 4 bytes
-            const std::size_t sourceWidth  = static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
-            const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
-            const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
-            const std::size_t imageBytes   = rowBytes * sourceHeight;
-            const std::size_t sourceOffset =
-                static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
-                + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
-                + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
-            const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
-
-            for (GLsizei z = 0; z < depth; ++z) {
-                for (GLsizei y = 0; y < height; ++y) {
-                    const std::uint8_t* srcRow =
-                        source + static_cast<std::size_t>(z) * imageBytes
-                               + static_cast<std::size_t>(y) * rowBytes;
-                    std::uint8_t* dstRow = nativeData.data()
-                        + (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
-                           + static_cast<std::size_t>(y))
-                          * static_cast<std::size_t>(width) * outBpp;
-                    std::memcpy(dstRow, srcRow, static_cast<std::size_t>(width) * outBpp);
+                for (GLsizei z = 0; z < depth; ++z) {
+                    for (GLsizei y = 0; y < height; ++y) {
+                        const std::uint8_t* srcRow =
+                            source + static_cast<std::size_t>(z) * imageBytes
+                                   + static_cast<std::size_t>(y) * rowBytes;
+                        std::uint8_t* dstRow = nativeData.data()
+                            + (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                               + static_cast<std::size_t>(y))
+                              * static_cast<std::size_t>(width) * outBpp;
+                        std::memcpy(dstRow, srcRow, static_cast<std::size_t>(width) * outBpp);
+                    }
                 }
+                return true;
             }
-            return true;
+            // Packed source but Metal native is not the matching packed
+            // format (e.g. rgb10 → MTLPixelFormatRGBA16Unorm with
+            // GL_UNSIGNED_INT_2_10_10_10_REV source). Fall through to
+            // the per-channel native-format encoder below ONLY when
+            // readSourceComponentDouble has a decoder for the packed
+            // type. Other packed types (8_8_8_8, 24_8, 10F_11F_11F_REV,
+            // 5_9_9_9_REV) have no per-channel decoder and would
+            // populate nativeData with zeros — return false instead so
+            // the caller falls back to the RGBA8 shadow path. CTS
+            // copy_image rgb10 → rgb10 cluster (12 tests) is gated on
+            // this path's reach for the 2_10_10_10_REV case.
+            const bool hasPerChannelDecoder =
+                type == GL_UNSIGNED_INT_2_10_10_10_REV ||
+                type == GL_UNSIGNED_INT_10_10_10_2 ||
+                type == GL_UNSIGNED_SHORT_5_6_5 ||
+                type == GL_UNSIGNED_SHORT_5_6_5_REV ||
+                type == GL_UNSIGNED_SHORT_4_4_4_4 ||
+                type == GL_UNSIGNED_SHORT_4_4_4_4_REV ||
+                type == GL_UNSIGNED_SHORT_5_5_5_1 ||
+                type == GL_UNSIGNED_SHORT_1_5_5_5_REV ||
+                type == GL_UNSIGNED_BYTE_3_3_2 ||
+                type == GL_UNSIGNED_BYTE_2_3_3_REV;
+            if (!hasPerChannelDecoder) return false;
         }
 
         // RGBA8Unorm is already handled perfectly by the rgba8 path.
