@@ -81,6 +81,13 @@ struct EmulatedVertex {
     // `[[primitive_id]]`. Default 0; only used when ed.hasPrimitiveID
     // is set (i.e. the GS source stores to gl_PrimitiveID anywhere).
     std::int32_t primitiveId = 0;
+    // Sprint 8 #9-C (CKPT95) — vertex-stream tag. Default 0 preserves
+    // single-stream behaviour (every OpEmitVertex == stream 0). Set by
+    // OpEmitStreamVertex(N) so downstream TF write paths can filter
+    // per-stream and update GLTransformFeedbackObject::
+    // capturedVertexCount[stream]. Per GL 4.6 §11.3.4 only stream-0
+    // vertices feed the rasterizer; streams 1..3 are TF-only.
+    std::uint32_t stream = 0;
 };
 
 // Post-GS output topology + vertex buffer ready for GPU raster.
@@ -168,6 +175,20 @@ struct EmulatedDraw {
     // Diagnostic: populated on failure with the reason (e.g. missing
     // opcode). Kept for surfacing in debug builds.
     std::string diagnostic;
+    // Sprint 8 #9-C (CKPT95) — per-stream emitted-vertex counts (post-
+    // expansion totals). Indexed by stream 0..3 (gl_MaxTransformFeedback-
+    // Streams floor). For single-stream GS programs (no
+    // OpEmitStreamVertex(N>0)) only [0] is non-zero. writeGsXfb-
+    // AndCheckDiscard accumulates these into
+    // GLTransformFeedbackObject::capturedVertexCount[stream] so
+    // glDrawTransformFeedbackStreamInstanced(stream=N) reads the right
+    // per-stream count. Day 24 (CKPT96) also uses this to filter TF
+    // writes per-stream BO.
+    std::array<std::size_t, 4> streamVertexCounts{};
+    // Per-vertex stream tag, parallel to expandedVertexData (one entry
+    // per vertex of expandedVertexData). Day 24 (CKPT96) uses this to
+    // route per-vertex TF writes to the correct per-stream BO.
+    std::vector<std::uint32_t> vertexStreams;
 };
 
 // Detect whether a program's GS stage can be emulated. Called once

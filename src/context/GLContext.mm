@@ -14576,15 +14576,64 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // Sprint 8 #9-C (CKPT68): accumulate vertex count on the bound TF
     // object — see writeTessTFAndUpdateCounters for full rationale.
     // CKPT85: per-bound-object check (see writeTessTFAndUpdateCounters).
-    // CKPT94 #9-C foundation: GS-emul interpreter path defaults to
-    // stream 0; Day 23 will route per-stream via EmitStreamVertex
-    // emission. Single-stream GS (no EmitStreamVertex(N!=0)) writes to
-    // stream 0, preserving existing behavior.
+    // CKPT94 #9-C foundation: per-stream array — slot [0] credited on
+    // single-stream paths.
+    // CKPT95 #9-C extension: GS emul now exposes per-stream vertex tags
+    // via ed.streamVertexCounts (post-expansion totals). When the GS
+    // uses OpEmitStreamVertex(N), credit stream N's slot directly.
+    // For single-stream GS (no streams ≠ 0 used), streamVertexCounts[0]
+    // == primsWritten*vpp and streams 1..3 are zero — matches CKPT94
+    // single-stream behaviour byte-for-byte.
+    //
+    // Per GL 4.6 §13.2 the count we credit is the number of vertices
+    // actually written to TF buffers, which currently equals
+    // `primsWritten * vpp` when GS-emul writes the entire expanded
+    // payload (Day 24 / CKPT96 lands per-stream BO routing that
+    // filters writes per-stream; until then the byte payload still
+    // carries every emitted vertex through to BO[0]/BO[1] as before
+    // and only the per-stream COUNT semantic shifts here).
     if (isTfActiveOnBoundImpl()) {
         const GLuint tfName = boundTransformFeedbackId;
         if (tfName != 0) {
             if (auto* tf = objects->transformFeedbacks().get(tfName)) {
-                tf->capturedVertexCount[0] += static_cast<GLsizei>(primsWritten * vpp);
+                bool hasMultiStream = false;
+                for (std::size_t s = 1; s < ed.streamVertexCounts.size(); ++s) {
+                    if (ed.streamVertexCounts[s] != 0) { hasMultiStream = true; break; }
+                }
+                if (hasMultiStream) {
+                    // Multi-stream GS — credit each slot independently.
+                    // primsWritten gating still applies (capacity-limited
+                    // writes drop tail primitives uniformly across all
+                    // streams since the emit interleave is shared).
+                    const std::size_t writtenVerts = primsWritten * vpp;
+                    const std::size_t totalVerts = ed.vertexCount;
+                    if (totalVerts == 0 || writtenVerts == totalVerts) {
+                        // No truncation — full per-stream counts apply.
+                        for (std::size_t s = 0; s < ed.streamVertexCounts.size()
+                                              && s < GLTransformFeedbackObject::kMaxTransformFeedbackStreams;
+                             ++s) {
+                            tf->capturedVertexCount[s] +=
+                                static_cast<GLsizei>(ed.streamVertexCounts[s]);
+                        }
+                    } else if (totalVerts > 0) {
+                        // Partial-truncation: scale each stream's count
+                        // by the same write-fraction. Approximate but
+                        // matches the all-or-nothing per-prim policy
+                        // already in this function.
+                        for (std::size_t s = 0; s < ed.streamVertexCounts.size()
+                                              && s < GLTransformFeedbackObject::kMaxTransformFeedbackStreams;
+                             ++s) {
+                            const std::size_t scaled =
+                                ed.streamVertexCounts[s] * writtenVerts / totalVerts;
+                            tf->capturedVertexCount[s] += static_cast<GLsizei>(scaled);
+                        }
+                    }
+                } else {
+                    // Single-stream GS — preserve CKPT94 byte-identical
+                    // behaviour at slot [0].
+                    tf->capturedVertexCount[0] +=
+                        static_cast<GLsizei>(primsWritten * vpp);
+                }
             }
         }
     }

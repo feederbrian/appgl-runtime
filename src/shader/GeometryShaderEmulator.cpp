@@ -65,6 +65,9 @@ namespace spv {
         OpLabel = 248, OpBranch = 249, OpBranchConditional = 250, OpSwitch = 251,
         OpReturn = 253,
         OpEmitVertex = 218, OpEndPrimitive = 219,
+        // Sprint 8 #9-C (CKPT95) — multi-stream GS emit. Stream operand is
+        // an <id> referencing a constant Int specifying the target stream.
+        OpEmitStreamVertex = 220, OpEndStreamPrimitive = 221,
     };
     enum ExecutionMode : std::uint32_t {
         ExecutionModeInvocations = 0,
@@ -561,7 +564,11 @@ private:
     void initVariables(const std::vector<PerVertexInput>& inputs);
 
     // Capture the current output state as an EmulatedVertex.
-    void emitVertex(std::vector<EmulatedVertex>& out);
+    // Sprint 8 #9-C (CKPT95) — `stream` defaults to 0 (OpEmitVertex).
+    // OpEmitStreamVertex(N) passes the stream index from its <id>
+    // operand, which is decoded from the constant Int that SPIR-V
+    // requires. Per GL 4.6 §11.3.4 only stream 0 feeds the rasterizer.
+    void emitVertex(std::vector<EmulatedVertex>& out, std::uint32_t stream = 0);
 
     // Scan Output variables for gl_ClipDistance / gl_CullDistance
     // (either direct BuiltIn or as members of a gl_PerVertex-style
@@ -2073,10 +2080,11 @@ void Interpreter::captureTcsPatchOutputs(
     }
 }
 
-void Interpreter::emitVertex(std::vector<EmulatedVertex>& out) {
+void Interpreter::emitVertex(std::vector<EmulatedVertex>& out, std::uint32_t stream) {
     // Capture gl_Position and named output varyings from their
     // respective output variables' storage.
     EmulatedVertex ev;
+    ev.stream = stream;
     ev.position[0] = currentPosition_[0];
     ev.position[1] = currentPosition_[1];
     ev.position[2] = currentPosition_[2];
@@ -3603,6 +3611,40 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            case spv::OpEmitStreamVertex: {
+                // Sprint 8 #9-C (CKPT95): w[1] = <id> Stream — must be a
+                // constant Int per SPIR-V spec. Decode via valueStore_
+                // / module_.constants and route the emit to the named
+                // stream. Stream out-of-range clamps to 0 (graceful
+                // degrade) — multi-stream limit advertised at 4 floor.
+                std::uint32_t streamIdx = 0;
+                if (wc >= 2) {
+                    Value sv;
+                    if (tryGetValue(w[1], sv)) {
+                        const std::int32_t s = sv.i[0];
+                        if (s >= 0 && static_cast<std::uint32_t>(s) < 4) {
+                            streamIdx = static_cast<std::uint32_t>(s);
+                        }
+                    }
+                }
+                emitVertex(emitted, streamIdx);
+                pc += wc;
+                break;
+            }
+            case spv::OpEndStreamPrimitive: {
+                // Sprint 8 #9-C (CKPT95): same primitive-boundary
+                // semantics as OpEndPrimitive. Per-stream prim
+                // segmentation (separate primEnds per stream) is a
+                // Day-24 / future-CKPT refinement — until per-stream
+                // BO writes need it, a shared boundary suffices for
+                // current single-stream-renders + count tracking.
+                const std::size_t sz = emitted.size();
+                if (primEnds.empty() || primEnds.back() != sz) {
+                    primEnds.push_back(sz);
+                }
+                pc += wc;
+                break;
+            }
             case spv::OpReturn: {
                 // Implicit EndPrimitive at function exit — GL 4.6 §11.3.4
                 // says the current strip (if any) ends when the shader
@@ -3725,6 +3767,9 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         // ─ GS-specific ─
         case spv::OpEmitVertex:
         case spv::OpEndPrimitive:
+        // ─ GS multi-stream (Sprint 8 #9-C, CKPT95) ─
+        case spv::OpEmitStreamVertex:
+        case spv::OpEndStreamPrimitive:
         // ─ Function ─
         case spv::OpReturn:
         case spv::OpFunction:
@@ -5511,8 +5556,22 @@ EmulatedDraw emulateGeometryDraw(
 
     d.expandedVertexData.resize(emittedAll.size() * fpv, 0.0f);
 
+    // Sprint 8 #9-C (CKPT95) — capture per-vertex stream tag and
+    // accumulate per-stream totals. Stream-tag survives strip→list
+    // expansion (each EmulatedVertex carries it through the rebuild
+    // above). vertexStreams is parallel to expandedVertexData (one
+    // entry per packed vertex); streamVertexCounts is the post-
+    // expansion total per stream that writeGsXfbAndCheckDiscard reads
+    // to update GLTransformFeedbackObject::capturedVertexCount.
+    d.vertexStreams.resize(emittedAll.size(), 0);
+
     for (std::size_t v = 0; v < emittedAll.size(); ++v) {
         float* dst = d.expandedVertexData.data() + v * fpv;
+        const std::uint32_t vstream = emittedAll[v].stream;
+        d.vertexStreams[v] = vstream;
+        if (vstream < d.streamVertexCounts.size()) {
+            d.streamVertexCounts[vstream]++;
+        }
         for (int k = 0; k < 4; ++k) dst[k] = emittedAll[v].position[k];
         for (std::size_t j = 0; j < emittedAll[v].varyings.size() && j + 4 < fpv; ++j) {
             dst[4 + j] = emittedAll[v].varyings[j];
