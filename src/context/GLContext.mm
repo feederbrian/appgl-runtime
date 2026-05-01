@@ -21694,6 +21694,17 @@ bool GLContext::useProgram(GLuint program) {
             return false;
         }
     }
+    // Sprint 9 Phase 1 (CKPT101): GL 4.6 §13.2.2 — UseProgram must
+    // generate INVALID_OPERATION when transform feedback is active and
+    // not paused on the currently-bound TF object. CTS
+    // `transform_feedback.api_errors_test` plants beginTransformFeedback
+    // then calls useProgram(0) and asserts the error is generated.
+    const bool tfActive = isTransformFeedbackActive();
+    const bool tfPaused = impl_->isTfPausedOnBoundImpl();
+    if (tfActive && !tfPaused) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     // GL 4.6 §7.3 deferred-delete protocol: if the outgoing current
     // program was already flagged deleteRequested by a prior
     // glDeleteProgram, this is the moment it actually gets erased —
