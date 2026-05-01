@@ -1028,7 +1028,11 @@ static void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
             // Sprint 8 #9-C (CKPT68): reset captured vertex count for
             // the new TF session. writeGsXfbAndCheckDiscard / VS-only-TF
             // helper TF-write paths accumulate during this session.
-            tfObj->capturedVertexCount = 0;
+            // CKPT94 foundation: capturedVertexCount is now per-stream
+            // (kMaxTransformFeedbackStreams = 4); zero ALL streams on
+            // BeginTransformFeedback so multi-stream GS captures start
+            // each session at zero.
+            tfObj->capturedVertexCount.fill(0);
         }
     }
 }

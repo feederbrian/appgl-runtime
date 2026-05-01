@@ -14306,7 +14306,10 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
         const GLuint tfName = boundTransformFeedbackId;
         if (tfName != 0) {
             if (auto* tf = objects->transformFeedbacks().get(tfName)) {
-                tf->capturedVertexCount += static_cast<GLsizei>(primsWritten * vpp);
+                // CKPT94 #9-C foundation: tess-stage TF writes always
+                // go to stream 0 (no `EmitStreamVertex` in TES). Day 23
+                // adds GS-emul per-stream routing via the array.
+                tf->capturedVertexCount[0] += static_cast<GLsizei>(primsWritten * vpp);
             }
         }
     }
@@ -14573,11 +14576,15 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // Sprint 8 #9-C (CKPT68): accumulate vertex count on the bound TF
     // object — see writeTessTFAndUpdateCounters for full rationale.
     // CKPT85: per-bound-object check (see writeTessTFAndUpdateCounters).
+    // CKPT94 #9-C foundation: GS-emul interpreter path defaults to
+    // stream 0; Day 23 will route per-stream via EmitStreamVertex
+    // emission. Single-stream GS (no EmitStreamVertex(N!=0)) writes to
+    // stream 0, preserving existing behavior.
     if (isTfActiveOnBoundImpl()) {
         const GLuint tfName = boundTransformFeedbackId;
         if (tfName != 0) {
             if (auto* tf = objects->transformFeedbacks().get(tfName)) {
-                tf->capturedVertexCount += static_cast<GLsizei>(primsWritten * vpp);
+                tf->capturedVertexCount[0] += static_cast<GLsizei>(primsWritten * vpp);
             }
         }
     }
@@ -29989,7 +29996,12 @@ bool GLContext::drawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei i
     // recent EndTransformFeedback. capturedVertexCount is updated by
     // writeGsXfbAndCheckDiscard / writeTessTFAndUpdateCounters during
     // TF capture.
-    const GLsizei vertexCount = tfObj->capturedVertexCount;
+    //
+    // CKPT94 #9-C foundation: per-stream array (gl_MaxTransformFeedbackStreams
+    // ≥ 4). Non-Stream variant always reads stream 0 per GL 4.6 §10.5 (the
+    // non-Stream entry point is implicitly stream 0). Multi-stream
+    // accumulators are added Day 23 via GS-emul EmitStreamVertex routing.
+    const GLsizei vertexCount = tfObj->capturedVertexCount[0];
     if (vertexCount <= 0 || instancecount == 0) {
         return true;  // zero-vertex / zero-instance draw is a no-op success
     }
@@ -30006,16 +30018,21 @@ bool GLContext::drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    // Sprint 8 #9-C (CKPT68) — see drawTransformFeedbackInstanced rationale.
-    // Stream parameter selects which vertex stream to read; for stream 0
-    // (the default) this is identical to non-Stream variant.
-    // Multi-stream (stream != 0) requires GS with `layout(stream=N) out`
-    // declarations; we don't yet model per-stream captured counts —
-    // current capturedVertexCount tracks the active TF total. CTS
-    // draw_xfb_stream_instanced_test uses stream 0 implicitly via a
-    // standard GS, so this passthrough suffices.
-    (void)stream;
-    const GLsizei vertexCount = tfObj->capturedVertexCount;
+    // Sprint 8 #9-C remainder (CKPT94 foundation): the stream parameter
+    // selects which captured vertex stream to draw from. The
+    // capturedVertexCount field is now an array indexed by stream
+    // (kMaxTransformFeedbackStreams = 4 per GL 4.0 spec floor). Streams
+    // beyond the per-object array bound are clamped down to 0 (graceful
+    // — matches GL spec validation expectations on out-of-range stream).
+    //
+    // Day 23 adds GS-emul EmitStreamVertex routing that populates streams
+    // 1..3 during capture; until then capturedVertexCount[1..3] stay at
+    // their zero-init values, and the test's stream=0 read continues to
+    // work for non-stream-using callers.
+    const std::size_t streamIdx =
+        (stream < GLTransformFeedbackObject::kMaxTransformFeedbackStreams)
+            ? static_cast<std::size_t>(stream) : 0u;
+    const GLsizei vertexCount = tfObj->capturedVertexCount[streamIdx];
     if (vertexCount <= 0 || instancecount == 0) {
         return true;
     }

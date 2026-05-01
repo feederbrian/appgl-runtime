@@ -1119,7 +1119,24 @@ struct GLTransformFeedbackObject {
     // {,Stream} as the `count` for the equivalent drawArrays draw.
     // Reset to 0 on each glBeginTransformFeedback; accumulated by
     // writeGsXfbAndCheckDiscard / VS-only-TF helper TF-write paths.
-    GLsizei capturedVertexCount = 0;
+    //
+    // Sprint 8 #9-C remainder (CKPT94): per-stream tracking. GL 4.0+
+    // multi-stream geometry shaders (`EmitStreamVertex(N)` /
+    // `layout(stream=N) out`) emit vertices to up to 4 distinct streams
+    // per the spec floor (gl_MaxTransformFeedbackStreams ≥ 4). Each
+    // stream has its own captured vertex count; `glDrawTransformFeedback-
+    // StreamInstanced(stream=K)` reads the K-th stream's count.
+    // Single-stream paths (VS-only TF, non-stream GS, tess) write to
+    // stream 0 only — this is the existing pre-#9-C behavior preserved
+    // under index 0. Sister to CKPT85's per-TF-object state migration
+    // (single-component infrastructure pattern, CONFIRMED at 3-instance);
+    // here at higher-cardinality scope (array-of-state).
+    //
+    // CTS `transform_feedback.draw_xfb_stream_instanced_test` is the
+    // immediate consumer — its GS uses `EmitStreamVertex(0)` x4 +
+    // `EmitStreamVertex(1)` x4 with `layout(stream=1) out vec4 color`.
+    static constexpr std::size_t kMaxTransformFeedbackStreams = 4;
+    std::array<GLsizei, kMaxTransformFeedbackStreams> capturedVertexCount{};
     // Per-TF-object indexed buffer bindings recorded by the DSA
     // `glTransformFeedbackBufferBase` / `glTransformFeedbackBufferRange`
     // entries. Queried back via `glGetTransformFeedbacki_v` /
