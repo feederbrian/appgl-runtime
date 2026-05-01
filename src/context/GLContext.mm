@@ -13980,6 +13980,13 @@ void GLContext::pushError(GLenum error,
         impl_->errors.pop_front();
     }
     impl_->errors.push_back(error);
+    static const bool s_trErr = (std::getenv("APPGL_TRACE_GL_ERR") != nullptr);
+    if (s_trErr) {
+        std::fprintf(stderr, "[GL_ERR] 0x%X (%.*s) at %s:%d msg='%.*s'\n",
+            error, (int)functionName.size(), functionName.data(),
+            loc.file_name(), loc.line(),
+            (int)message.size(), message.data());
+    }
     Runtime::ErrorRecord record;
     const bool internalCallSite = functionName.empty();
     if (internalCallSite) {
