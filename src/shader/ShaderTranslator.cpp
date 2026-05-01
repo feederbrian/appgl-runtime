@@ -613,7 +613,19 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // Metal driver ≥ MSL 2.2. Keep an eye on Apple-platform
         // regressions via the CTS sweep if we ever go back to 10.14
         // testing.
-        mslOpts.set_msl_version(2, 2);
+        //
+        // CKPT122 (Sprint 11 Phase 2 Cluster A Day 7 γ-pivot):
+        // bump to MSL 2.3 so SPIRV-Cross can emit pull-model
+        // interpolation (`stage_in.X.interpolate_at_sample(N)` /
+        // `interpolate_at_centroid()` / `interpolate_at_offset(o)`).
+        // Without 2.3, SPIRV-Cross throws "Pull-model interpolation
+        // requires MSL 2.3." for every FS using `interpolateAt*` GLSL
+        // functions, leaving the program unlinked. CTS
+        // KHR-GL46.shader_multisample_interpolation.render.{interpolate_at_*}
+        // (72F before this fix) all hit this wall. MSL 2.3 minimum
+        // matches macOS 11 Big Sur (Nov 2020), well below our 12.0+
+        // host minimum.
+        mslOpts.set_msl_version(2, 3);
         mslOpts.enable_decoration_binding = true;
         // Pad fragment outputs to vec4 so Metal doesn't reject pipelines
         // where the shader outputs fewer components than the render target
