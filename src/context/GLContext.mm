@@ -30018,6 +30018,69 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // GL 4.6 §18.3.2 / §18.2.3: the target argument must match the
+    // texture object's actual bound target. CTS copy_image.target_miss_match
+    // creates a TEXTURE_1D and calls copyImageSubData with target=
+    // TEXTURE_1D_ARRAY, expecting INVALID_ENUM.
+    if (srcIsTex) {
+        const GLTextureObject* tex = impl_->objects->textures().get(srcName);
+        if (tex != nullptr && tex->target != 0 && tex->target != srcTarget) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+    }
+    if (dstIsTex) {
+        const GLTextureObject* tex = impl_->objects->textures().get(dstName);
+        if (tex != nullptr && tex->target != 0 && tex->target != dstTarget) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+    }
+    // GL 4.6 §18.3.2: INVALID_OPERATION if source or destination texture
+    // is not "complete" — i.e. has any required level missing or
+    // dimensions inconsistent. CTS copy_image.incomplete_tex creates a
+    // TEXTURE_1D with no level data and expects INVALID_OPERATION on
+    // the copy. For the minimal completeness signal we check whether
+    // any level is defined: an empty `levels` map (or only undefined
+    // entries) on a non-immutable texture is incomplete.
+    auto isTextureComplete = [&](GLuint name) -> bool {
+        const GLTextureObject* tex = impl_->objects->textures().get(name);
+        if (tex == nullptr) return false;
+        if (tex->desc.immutable) return true; // texStorage initialises all levels
+        if (tex->levels.empty()) return false;
+        // GL 4.6 §8.17 mipmap completeness: a non-immutable texture is
+        // complete only if every level in [base, effectiveMax] is defined.
+        // CTS copy_image.incomplete_tex creates multi-level targets with
+        // only level 0 defined and DOES NOT call makeTextureComplete (which
+        // sets baseLevel/maxLevel both to 0). Without that, default
+        // maxLevel = 1000 means lots of levels required → incomplete.
+        const GLint baseLevel = tex->params.baseLevel;
+        // Effective max is clamped by both the explicit maxLevel and
+        // the natural log2(max-dim) bound at the base level. We use the
+        // base-level dimensions to compute the natural cap.
+        auto baseIt = tex->levels.find(baseLevel);
+        if (baseIt == tex->levels.end() || !baseIt->second.defined) return false;
+        const GLsizei baseW = baseIt->second.desc.width;
+        const GLsizei baseH = baseIt->second.desc.height;
+        const GLsizei baseD = baseIt->second.desc.depth;
+        const GLsizei maxDim = std::max({baseW, baseH, baseD, GLsizei{1}});
+        GLint naturalMax = baseLevel;
+        for (GLsizei m = maxDim; m > 1; m >>= 1) ++naturalMax;
+        const GLint effectiveMax = std::min(tex->params.maxLevel, naturalMax);
+        for (GLint lvl = baseLevel; lvl <= effectiveMax; ++lvl) {
+            auto it = tex->levels.find(lvl);
+            if (it == tex->levels.end() || !it->second.defined) return false;
+        }
+        return true;
+    };
+    if (srcIsTex && !isTextureComplete(srcName)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (dstIsTex && !isTextureComplete(dstName)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
 
     // GL 4.6 §18.2.3: srcLevel and dstLevel must be valid levels of
     // their objects. Renderbuffers only have level 0; textures have
@@ -30277,7 +30340,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     // Resolve source image shadow buffer, dimensions, and bytes-per-pixel.
     // -----------------------------------------------------------------------
     const std::uint8_t* srcPixels = nullptr;
-    GLsizei srcImgW = 0, srcImgH = 0;
+    GLsizei srcImgW = 0, srcImgH = 0, srcImgD = 1;
     std::size_t srcBpp = 4; // RGBA8 default
 
     if (srcIsTex) {
@@ -30291,6 +30354,18 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         const GLTextureImageLevel& srcImg = it->second;
         srcImgW = srcImg.desc.width;
         srcImgH = srcImg.desc.height;
+        srcImgD = srcImg.desc.depth;
+        // Per GL 4.6 §18.2.3 Table 18.1 — copyImageSubData per-target axis
+        // mapping. For TEXTURE_1D_ARRAY, the second axis (srcY/dstY) is the
+        // layer index (0..layers-1) while the height dimension proper is
+        // always 1. CTS copy_image.exceeding_boundaries plants Y=14 on a
+        // 16-wide × 6-layer 1D-array and expects INVALID_VALUE because
+        // 14+1 > 6. Re-route the Y-axis bound to the layer count for
+        // 1D_ARRAY so the bounds check fires on layer overflow even if
+        // raw `desc.height` is set to texel-row count.
+        if (srcTarget == GL_TEXTURE_1D_ARRAY) {
+            srcImgH = std::max<GLsizei>(srcTex->desc.depth, srcImg.desc.depth);
+        }
         // Prefer native data if available, else fall back to rgba8.
         if (srcImg.nativeBpp > 0 && !srcImg.nativeData.empty()) {
             srcPixels = srcImg.nativeData.data();
@@ -30304,6 +30379,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         if (!srcRB || !srcRB->storageDefined) { pushError(GL_INVALID_VALUE); return false; }
         srcImgW = srcRB->width;
         srcImgH = srcRB->height;
+        srcImgD = 1;
         if (!srcRB->rgba8.empty()) {
             srcPixels = srcRB->rgba8.data();
             srcBpp = 4;
@@ -30315,9 +30391,14 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         return true;
     }
 
-    // Bounds check source region.
+    // Bounds check source region. CKPT116 (Sprint 11 Phase 1 1c): include
+    // the depth/layer axis (srcZ + srcDepth > srcImgD) — 3D textures and
+    // *_ARRAY targets place layers on the Z axis. CTS copy_image.
+    // exceeding_boundaries also exercises the 1D_ARRAY layer-on-Y case
+    // (handled via srcImgH re-route above).
     if (srcX < 0 || srcY < 0 || srcZ < 0 ||
-        srcX + srcWidth > srcImgW || srcY + srcHeight > srcImgH) {
+        srcX + srcWidth > srcImgW || srcY + srcHeight > srcImgH ||
+        srcZ + srcDepth > srcImgD) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -30326,7 +30407,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     // Resolve destination image shadow buffer.
     // -----------------------------------------------------------------------
     std::uint8_t* dstPixels = nullptr;
-    GLsizei dstImgW = 0, dstImgH = 0;
+    GLsizei dstImgW = 0, dstImgH = 0, dstImgD = 1;
     std::size_t dstBpp = 4;
 
     // We need a writable pointer and the ability to invalidate the Metal texture.
@@ -30355,6 +30436,11 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         }
         dstImgW = dstImg->desc.width;
         dstImgH = dstImg->desc.height;
+        dstImgD = dstImg->desc.depth;
+        // CKPT116: 1D_ARRAY layer-count-on-Y axis (mirror src logic).
+        if (dstTarget == GL_TEXTURE_1D_ARRAY) {
+            dstImgH = std::max<GLsizei>(dstTex->desc.depth, dstImg->desc.depth);
+        }
 
         // Ensure the destination rgba8 buffer is large enough.
         const std::size_t totalPixels = static_cast<std::size_t>(dstImgW) * dstImgH;
@@ -30381,9 +30467,12 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         dstBpp = 4;
     }
 
-    // Bounds check destination region.
+    // Bounds check destination region. CKPT116: include the depth/layer
+    // axis for 3D / *_ARRAY targets, matching the source-side bound at
+    // line 30361+ above.
     if (dstX < 0 || dstY < 0 || dstZ < 0 ||
-        dstX + srcWidth > dstImgW || dstY + srcHeight > dstImgH) {
+        dstX + srcWidth > dstImgW || dstY + srcHeight > dstImgH ||
+        dstZ + srcDepth > dstImgD) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
