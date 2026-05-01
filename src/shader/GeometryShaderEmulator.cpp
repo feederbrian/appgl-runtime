@@ -1467,18 +1467,22 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                                         // gl_in[vi].gl_PointSize from VS pre-pass
                                         // PerVertexInput.pointSize. Required for
                                         // CTS data_pass_through pointsize variants.
-                                        // Day 2 found this combined with executeVs
-                                        // capturePointSize regresses tc_position
-                                        // in non-pointsize subruns. Day 3 isolates
-                                        // by gating on stage_: ONLY fire for TES
-                                        // input init (where the value is read by
-                                        // pointsize-variant TES bodies); SKIP for
-                                        // TCS / GS where the value can leak into
-                                        // glslang-emitted implicit gl_PerVertex
-                                        // copy paths and corrupt downstream
-                                        // gl_Position reads.
+                                        //
+                                        // CKPT98 (β.3 Day 26): widen to TessControl
+                                        // when the source pointSize differs from the
+                                        // default (1.0) — this allows TCS bodies that
+                                        // read `gl_in[0].gl_PointSize` (e.g. TCS that
+                                        // multiplies and copies forward to user-block
+                                        // tc_pointSize) to receive the VS-supplied
+                                        // value. The default-1.0 guard preserves
+                                        // CKPT71's regression-isolation: when the VS
+                                        // didn't meaningfully write gl_PointSize, we
+                                        // don't seed (avoids the gl_PerVertex
+                                        // implicit-copy interference that CKPT71
+                                        // observed for non-pointsize sub-runs).
                                         if (memW > 0 && base + runningOff < storage.size() &&
-                                            stage_ == Stage::TessEvaluation) {
+                                            (stage_ == Stage::TessEvaluation ||
+                                             stage_ == Stage::TessControl)) {
                                             storage[base + runningOff] = inputs[vi].pointSize;
                                         }
                                     } else if (mm->second.builtIn == spv::BuiltInClipDistance) {

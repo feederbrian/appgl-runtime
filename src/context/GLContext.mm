@@ -19980,13 +19980,42 @@ bool GLContext::linkProgram(GLuint program) {
                 // can run; without this, the tess detector never sees a
                 // tess-shader SPIR-V for tess+GS programs and the
                 // tess-emul path stays dormant at draw time.
+                //
+                // CKPT98 fix: also extract TCS execution modes
+                // (OutputVertices) so per-invocation TCS run iterates
+                // the right count. Without this, tess-emul ran only
+                // invocation 0 and slot-1 user-block writes (e.g.
+                // out_data[1].tc_position in data_pass_through) stayed
+                // zero, surfacing as fail-shape "index [40] expected
+                // [1,1,1,1] found [0,0,0,0]" downstream.
                 if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
                     programObject->tessControlSpirv = tessControlShader->spirv;
                     programObject->tessControlParsedModule.reset();
+                    auto tcModes = appgl::extractTessellationModes(
+                        tessControlShader->spirv.data(),
+                        tessControlShader->spirv.size());
+                    if (tcModes.outputVertices > 0) {
+                        programObject->tessControlOutputVertices =
+                            static_cast<GLint>(tcModes.outputVertices);
+                    }
                 }
                 if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
                     programObject->tessEvalSpirv = tessEvalShader->spirv;
                     programObject->tessEvalParsedModule.reset();
+                    auto teModes = appgl::extractTessellationModes(
+                        tessEvalShader->spirv.data(),
+                        tessEvalShader->spirv.size());
+                    if (teModes.genMode != 0) {
+                        programObject->tessGenMode = teModes.genMode;
+                    }
+                    if (teModes.genSpacing != 0) {
+                        programObject->tessGenSpacing = teModes.genSpacing;
+                    }
+                    if (teModes.genVertexOrder != 0) {
+                        programObject->tessGenVertexOrder = teModes.genVertexOrder;
+                    }
+                    programObject->tessGenPointMode =
+                        teModes.pointMode ? GL_TRUE : GL_FALSE;
                 }
                 (void)appgl::detectGeometryEmulatable(*programObject);
                 if (programObject->hasTessellation) {
