@@ -14808,11 +14808,28 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                         off += ed.varyingWidths[k];
                     }
                     if (!found) {
-                        // Unknown varying name — treat as zero-byte
-                        // skip (mirrors prior behaviour for unmatched
-                        // sources). Future: handle gl_SkipComponents*
-                        // explicitly.
-                        src = {0, 0};
+                        // CKPT111 (Sprint 10 Phase 2 Day 2): handle
+                        // gl_SkipComponents{1,2,3,4} per GL 4.6 §7.3.1.1
+                        // — advance the slot cursor by N floats without
+                        // writing any data, leaving N components of
+                        // existing buffer contents untouched. The CTS
+                        // capture_special_interleaved_test layout is
+                        //   variable_1 + skip4 + variable_2 + nextBuffer +
+                        //   variable_3 + skip4 + variable_4
+                        // so variable_2 lands at offset 8 floats (not 4)
+                        // in BO0. Encoded as a TfSource with
+                        // offset = SIZE_MAX (skip sentinel) and count = N.
+                        if (name.size() == 18 &&
+                            name.compare(0, 17, "gl_SkipComponents") == 0 &&
+                            name[17] >= '1' && name[17] <= '4') {
+                            src = {static_cast<std::size_t>(-1),
+                                   static_cast<std::size_t>(name[17] - '0')};
+                        } else {
+                            // Unknown varying name — treat as zero-byte
+                            // skip (mirrors prior behaviour for unmatched
+                            // sources).
+                            src = {0, 0};
+                        }
                     }
                 }
                 slots.back().srcList.push_back(src);
@@ -14864,6 +14881,12 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                         if (!slotMatchesPrim(sl, pstream)) continue;
                         for (const auto& src : sl.srcList) {
                             if (src.count == 0) continue;
+                            // CKPT111: gl_SkipComponentsN sentinel —
+                            // advance cursor without writing.
+                            if (src.offset == static_cast<std::size_t>(-1)) {
+                                sl.cursor += src.count * sizeof(float);
+                                continue;
+                            }
                             writeToBuffer(sl.buffer, sl.cursor,
                                           vertexBase + src.offset, src.count);
                             sl.cursor += src.count * sizeof(float);
