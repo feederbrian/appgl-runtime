@@ -7557,11 +7557,18 @@ void APIENTRY glDrawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei i
     // CKPT101: GL 4.6 §10.5 — when the active program has a geometry shader,
     // `mode` must match the GS output topology. Without GS, any draw mode is
     // compatible with the captured TF stream. CTS api_errors_test asserts this.
+    //
+    // CKPT110 fix (Sprint 10 Phase 2 Day 1): the original check used
+    // `gsOutputTopology != 0` as the "have-GS" guard, but GL_POINTS is
+    // literally 0x0000 — so any GS program with `layout(points) out`
+    // collided with the "unset" sentinel and the entire compat check
+    // was skipped silently. Use `gsPresent` (boolean, set
+    // unconditionally on successful GS-SPIR-V parse) as the gate.
     {
         const GLuint progName = ctx->state().currentProgram();
         if (progName != 0) {
             auto* prog = ctx->objects().programs().get(progName);
-            if (prog && prog->gsOutputTopology != 0) {
+            if (prog && prog->gsPresent) {
                 auto compat = [](GLenum gsTopo, GLenum drawMode) -> bool {
                     switch (gsTopo) {
                         case GL_POINTS:
@@ -7583,6 +7590,19 @@ void APIENTRY glDrawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei i
                                           "draw mode incompatible with active geometry shader output topology");
                     return;
                 }
+            }
+            // CKPT110 NEW: GL 4.6 §10.5 redirect to §10.4 — if a TES is
+            // active, drawTransformFeedbackInstanced is equivalent to
+            // drawArrays(mode), and §10.4 requires mode == GL_PATCHES
+            // when tess is active. CTS api_errors_test asserts this via
+            // sub-check at line 1555 with mis-leadingly-named "geometry
+            // shader" log message that actually exercises the tess path.
+            // Gate is `hasTessellation` (set unconditionally at link time
+            // for any program with TES; sister to `gsPresent`).
+            if (prog && prog->hasTessellation && mode != GL_PATCHES) {
+                recordValidationError(ctx, "glDrawTransformFeedbackInstanced", GL_INVALID_OPERATION,
+                                      "draw mode must be GL_PATCHES when tessellation is active");
+                return;
             }
         }
     }
@@ -7630,12 +7650,14 @@ void APIENTRY glDrawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
         }
     }
     // CKPT101: GL 4.6 §10.5 — GS output topology must match `mode`.
-    // Mirror of the check in glDrawTransformFeedbackInstanced.
+    // Mirror of the check in glDrawTransformFeedbackInstanced. CKPT110
+    // fix: gate on `gsPresent` (not `gsOutputTopology != 0`) because
+    // GL_POINTS == 0x0000 collides with the "unset" sentinel.
     {
         const GLuint progName = ctx->state().currentProgram();
         if (progName != 0) {
             auto* prog = ctx->objects().programs().get(progName);
-            if (prog && prog->gsOutputTopology != 0) {
+            if (prog && prog->gsPresent) {
                 auto compat = [](GLenum gsTopo, GLenum drawMode) -> bool {
                     switch (gsTopo) {
                         case GL_POINTS:           return drawMode == GL_POINTS;
@@ -7649,6 +7671,13 @@ void APIENTRY glDrawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
                                           "draw mode incompatible with active geometry shader output topology");
                     return;
                 }
+            }
+            // CKPT110: tess-active mode-must-be-PATCHES check (sister
+            // to drawTransformFeedbackInstanced).
+            if (prog && prog->hasTessellation && mode != GL_PATCHES) {
+                recordValidationError(ctx, "glDrawTransformFeedbackStreamInstanced", GL_INVALID_OPERATION,
+                                      "draw mode must be GL_PATCHES when tessellation is active");
+                return;
             }
         }
     }
