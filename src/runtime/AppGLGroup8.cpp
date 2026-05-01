@@ -2091,9 +2091,82 @@ static void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLe
 }
 
 static void APIENTRY glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val) {
-    (void)pname;
-    (void)index;
-    (void)val;
+    // CKPT128 (Sprint 12 Phase 1 Day 2): GL 4.6 §22.2 / ARB_texture_multisample.
+    // Returns the sample-position in [0, 1] window coordinates (relative to
+    // pixel upper-left) for the given sample index of the currently bound
+    // MS framebuffer. The position values must match what the FS reads
+    // via gl_SamplePosition (which Metal lowers to `get_sample_position
+    // (gl_SampleID)`) so CTS sample_variables.position.fixed.* sees a
+    // consistent pair.
+    //
+    // Metal on Apple Silicon uses the standard D3D / industry sample
+    // patterns for sampleCount 1/2/4/8. These are the same positions
+    // that `metal::get_sample_position(sample_id)` returns for the
+    // default (non-programmable) sample positions Apple uses when
+    // MTLRenderPassDescriptor.samplePositions is left unset.
+    //
+    // Hardcoding here matches Apple's behaviour and keeps glGetMultisamplefv
+    // consistent with the per-sample shader's view. We resolve the active
+    // sample count from the bound FBO's color attachment via the runtime;
+    // if no MS attachment is bound, return (0.5, 0.5) (single-sample
+    // pixel center) as a safe default.
+    auto* ctx = appgl::Runtime::shared().currentContext();
+    if (ctx == nullptr || val == nullptr) return;
+    if (pname != GL_SAMPLE_POSITION) {
+        ctx->pushError(GL_INVALID_ENUM);
+        return;
+    }
+    // Resolve current sample count from bound DRAW framebuffer's color attachment 0.
+    GLint samples = 1;
+    {
+        const GLuint drawFbo = ctx->state().boundDrawFramebuffer();
+        if (drawFbo != 0) {
+            const auto* fbo = ctx->objects().framebuffers().get(drawFbo);
+            if (fbo != nullptr) {
+                auto it = fbo->attachments.find(GL_COLOR_ATTACHMENT0);
+                if (it != fbo->attachments.end()) {
+                    const auto& att = it->second;
+                    if (att.kind == GLFramebufferAttachment::Kind::Texture) {
+                        if (auto* tex = ctx->objects().textures().get(att.object)) {
+                            samples = std::max<GLint>(tex->desc.samples, 1);
+                        }
+                    } else if (att.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+                        if (auto* rb = ctx->objects().renderbuffers().get(att.object)) {
+                            samples = std::max<GLint>(rb->samples, 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Standard MSAA sample positions (Metal default = D3D pattern).
+    // Each row: x, y in [0,1] window coords (origin at upper-left).
+    static const float positions_1[1][2]  = { {0.5f, 0.5f} };
+    static const float positions_2[2][2]  = { {0.75f, 0.75f}, {0.25f, 0.25f} };
+    static const float positions_4[4][2]  = {
+        {0.375f, 0.125f}, {0.875f, 0.375f},
+        {0.125f, 0.625f}, {0.625f, 0.875f}
+    };
+    static const float positions_8[8][2]  = {
+        {0.5625f, 0.3125f}, {0.4375f, 0.6875f},
+        {0.8125f, 0.5625f}, {0.3125f, 0.1875f},
+        {0.1875f, 0.8125f}, {0.0625f, 0.4375f},
+        {0.6875f, 0.9375f}, {0.9375f, 0.0625f}
+    };
+    const float (*table)[2] = nullptr;
+    GLint count = 0;
+    switch (samples) {
+        case 1: table = positions_1; count = 1; break;
+        case 2: table = positions_2; count = 2; break;
+        case 3: case 4: table = positions_4; count = 4; break;
+        default: table = positions_8; count = 8; break;
+    }
+    if (static_cast<GLint>(index) >= count) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return;
+    }
+    val[0] = table[index][0];
+    val[1] = table[index][1];
 }
 
 static void APIENTRY glSampleMaski(GLuint maskNumber, GLbitfield mask) {
