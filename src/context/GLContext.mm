@@ -747,6 +747,59 @@ std::uint32_t packUF_5_9_9_9_REV(double r, double g, double b) {
          | (bM << 18) | (gM << 9) | rM;
 }
 
+// Decode an N-bit unsigned float channel (mantissaBits + 5-bit exp, bias
+// 15, no sign) from a 32-bit packed word's low bits. Inverse of
+// `floatToUnsignedFP`. Used by getTextureImage to read back
+// MTLPixelFormatRG11B10Float pixels.
+double unsignedFPToDouble(std::uint32_t bits, int mantissaBits) {
+    const std::uint32_t mantMask = (1u << mantissaBits) - 1u;
+    const std::uint32_t mant = bits & mantMask;
+    const std::uint32_t exp  = (bits >> mantissaBits) & 0x1Fu;
+    if (exp == 0u) {
+        // Subnormal: value = mant * 2^(1-15-mantissaBits) = mant * 2^(-14-mantissaBits)
+        return std::ldexp(static_cast<double>(mant),
+                          -14 - mantissaBits);
+    }
+    if (exp == 31u) {
+        return mant ? std::numeric_limits<double>::quiet_NaN()
+                    : std::numeric_limits<double>::infinity();
+    }
+    // Normal: value = (1 + mant / 2^mantBits) * 2^(exp - 15)
+    //                = (2^mantBits + mant) * 2^(exp - 15 - mantBits)
+    return std::ldexp(
+        static_cast<double>((1u << mantissaBits) + mant),
+        static_cast<int>(exp) - 15 - mantissaBits);
+}
+
+// Decode a GL_UNSIGNED_INT_10F_11F_11F_REV packed word into 3 doubles.
+//   bits  0-10:  R (11-bit unsigned float, 5-exp + 6-mant)
+//   bits 11-21:  G (11-bit unsigned float)
+//   bits 22-31:  B (10-bit unsigned float, 5-exp + 5-mant)
+void unpackUF_10F11F11F_REV(std::uint32_t v, double& r, double& g, double& b) {
+    r = unsignedFPToDouble((v >>  0) & 0x7FFu, 6);
+    g = unsignedFPToDouble((v >> 11) & 0x7FFu, 6);
+    b = unsignedFPToDouble((v >> 22) & 0x3FFu, 5);
+}
+
+// Decode a GL_UNSIGNED_INT_5_9_9_9_REV (RGB9_E5 shared-exponent) packed
+// word into 3 doubles.
+//   bits  0- 8:  R mantissa (9 bits, unsigned int)
+//   bits  9-17:  G mantissa (9 bits)
+//   bits 18-26:  B mantissa (9 bits)
+//   bits 27-31:  shared exponent (5 bits, bias 15)
+// Per GL 4.6 §2.3.4.3: value = mantissa * 2^(exp - 15 - 9) = mantissa /
+// 512 * 2^(exp - 15).
+void unpackUF_5_9_9_9_REV(std::uint32_t v, double& r, double& g, double& b) {
+    const std::uint32_t mantR = (v >>  0) & 0x1FFu;
+    const std::uint32_t mantG = (v >>  9) & 0x1FFu;
+    const std::uint32_t mantB = (v >> 18) & 0x1FFu;
+    const std::uint32_t exp   = (v >> 27) & 0x1Fu;
+    const double scale = std::ldexp(1.0, static_cast<int>(exp) - 15 - 9);
+    r = static_cast<double>(mantR) * scale;
+    g = static_cast<double>(mantG) * scale;
+    b = static_cast<double>(mantB) * scale;
+}
+
 std::size_t safeDimension(GLsizei value) {
     return static_cast<std::size_t>(std::max<GLsizei>(value, 1));
 }
@@ -32501,7 +32554,15 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     MTLPixelFormat pf = metalTex.pixelFormat;
     NSUInteger srcBpp = 0;
     NSUInteger srcComponents = 0;
-    enum class SrcType { Float32, Float16, UNorm8, SNorm8, UNorm16, SNorm16, UInt8, SInt8, UInt16, SInt16, UInt32, SInt32 };
+    enum class SrcType { Float32, Float16, UNorm8, SNorm8, UNorm16, SNorm16, UInt8, SInt8, UInt16, SInt16, UInt32, SInt32,
+                         // Packed 32-bit Metal pixel formats. Each pixel is one
+                         // 32-bit word; component extraction happens inside
+                         // readSrcComponent. CTS copy_image relies on these for
+                         // every src/dst format pair involving rgb10_a2,
+                         // rgb10_a2ui, r11f_g11f_b10f, and rgb9_e5 (13 common
+                         // failing format pairs × 12 buckets = 156 tests).
+                         PackedRGB10A2_UN, PackedRGB10A2_UI,
+                         PackedRG11B10F, PackedRGB9E5F };
     SrcType srcType = SrcType::UNorm8;
 
     switch (pf) {
@@ -32542,6 +32603,15 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         case MTLPixelFormatR32Sint:        srcBpp = 4;  srcComponents = 1; srcType = SrcType::SInt32; break;
         case MTLPixelFormatRG32Sint:       srcBpp = 8;  srcComponents = 2; srcType = SrcType::SInt32; break;
         case MTLPixelFormatRGBA32Sint:     srcBpp = 16; srcComponents = 4; srcType = SrcType::SInt32; break;
+        // Packed 32-bit Metal pixel formats. The whole 32-bit word is the
+        // pixel; readSrcComponent extracts per-component values. CTS
+        // copy_image's 13 common-failing format pairs (rgb10_a2/rgb10_a2ui/
+        // r11f_g11f_b10f/rgb9_e5 cross-paired) × 12 src/dst target buckets
+        // = 156 tests gated on these.
+        case MTLPixelFormatRGB10A2Unorm:   srcBpp = 4;  srcComponents = 4; srcType = SrcType::PackedRGB10A2_UN; break;
+        case MTLPixelFormatRGB10A2Uint:    srcBpp = 4;  srcComponents = 4; srcType = SrcType::PackedRGB10A2_UI; break;
+        case MTLPixelFormatRG11B10Float:   srcBpp = 4;  srcComponents = 3; srcType = SrcType::PackedRG11B10F; break;
+        case MTLPixelFormatRGB9E5Float:    srcBpp = 4;  srcComponents = 3; srcType = SrcType::PackedRGB9E5F; break;
         default:
             // Unsupported Metal pixel format for readback.
             pushError(GL_INVALID_OPERATION);
@@ -32604,6 +32674,59 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                mipmapLevel:mipLevel];
     }
 
+    // Bit-perfect passthrough for matched Metal packed-format ↔ GL packed-
+    // type pairs. RGB9_E5 in particular has multiple bit representations
+    // for the same value (a mantissa-shift can be absorbed into the
+    // shared exponent), so a decode-then-reencode roundtrip produces
+    // bytes that compare-not-equal to the source even though the value
+    // is identical. CTS copy_image's verifier compares raw bytes, so we
+    // must preserve the source bit pattern when the user asked for the
+    // matching packed type. This also avoids a small per-pixel cost on
+    // the hot path. Format pairings are 1:1 — only one GL packed type
+    // matches each of these 4 Metal pixel formats.
+    {
+        const bool packedPassthrough =
+            ((pf == MTLPixelFormatRGB10A2Unorm  ||
+              pf == MTLPixelFormatRGB10A2Uint)  &&
+              type == GL_UNSIGNED_INT_2_10_10_10_REV) ||
+            (pf == MTLPixelFormatRG11B10Float    &&
+              type == GL_UNSIGNED_INT_10F_11F_11F_REV) ||
+            (pf == MTLPixelFormatRGB9E5Float     &&
+              type == GL_UNSIGNED_INT_5_9_9_9_REV);
+        if (packedPassthrough) {
+            // dstPixelBytes is 4 for these packed types; srcBpp is also 4.
+            // Honour PACK alignment / row-length / skip-* on the destination
+            // side, mirroring the loop below.
+            const auto& packStorePT = impl_->state->pixelStore();
+            const std::size_t dstRowStridePixelsPT = packStorePT.packRowLength > 0
+                ? static_cast<std::size_t>(packStorePT.packRowLength)
+                : static_cast<std::size_t>(texWidth);
+            const std::size_t dstRowBytesAlignedPT = alignByteCount(
+                dstRowStridePixelsPT * dstPixelBytes, packStorePT.packAlignment);
+            const std::size_t dstSliceBytesAlignedPT = dstRowBytesAlignedPT
+                * (packStorePT.packImageHeight > 0
+                   ? static_cast<std::size_t>(packStorePT.packImageHeight)
+                   : texHeight);
+            const std::size_t dstSkipBytesPT =
+                static_cast<std::size_t>(packStorePT.packSkipImages) * dstSliceBytesAlignedPT +
+                static_cast<std::size_t>(packStorePT.packSkipRows)   * dstRowBytesAlignedPT +
+                static_cast<std::size_t>(packStorePT.packSkipPixels) * dstPixelBytes;
+            auto* destBasePT = static_cast<std::uint8_t*>(pixels) + dstSkipBytesPT;
+            const NSUInteger srcRowBytesPT = texWidth * srcBpp;
+            const NSUInteger srcSliceBytesPT = srcRowBytesPT * texHeight;
+            for (NSUInteger slice = 0; slice < numSlices; ++slice) {
+                const std::uint8_t* sliceRaw = raw.data() + slice * srcSliceBytesPT;
+                std::uint8_t* destSlice = destBasePT + slice * dstSliceBytesAlignedPT;
+                for (NSUInteger row = 0; row < texHeight; ++row) {
+                    std::memcpy(destSlice + row * dstRowBytesAlignedPT,
+                                sliceRaw  + row * srcRowBytesPT,
+                                texWidth * srcBpp);
+                }
+            }
+            return true;
+        }
+    }
+
     // Helper: read one source component as a double.
     const bool isBGRA = (pf == MTLPixelFormatBGRA8Unorm);
     auto readSrcComponent = [&](const std::uint8_t* srcPixel, NSUInteger comp) -> double {
@@ -32636,14 +32759,62 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             case SrcType::SInt16:  { std::int16_t v;  std::memcpy(&v, srcPixel + comp * 2, 2); return static_cast<double>(v); }
             case SrcType::UInt32:  { std::uint32_t v; std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v); }
             case SrcType::SInt32:  { std::int32_t v;  std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v); }
+            case SrcType::PackedRGB10A2_UN: {
+                // 32-bit pixel: R[0..9] G[10..19] B[20..29] A[30..31], all unsigned-norm.
+                std::uint32_t v; std::memcpy(&v, srcPixel, 4);
+                switch (comp) {
+                    case 0: return ((v      ) & 0x3FFu) / 1023.0;
+                    case 1: return ((v >> 10) & 0x3FFu) / 1023.0;
+                    case 2: return ((v >> 20) & 0x3FFu) / 1023.0;
+                    case 3: return ((v >> 30) &   0x3u) /    3.0;
+                    default: return 0.0;
+                }
+            }
+            case SrcType::PackedRGB10A2_UI: {
+                // 32-bit pixel: R[0..9] G[10..19] B[20..29] A[30..31], unsigned-int (no normalization).
+                std::uint32_t v; std::memcpy(&v, srcPixel, 4);
+                switch (comp) {
+                    case 0: return static_cast<double>((v      ) & 0x3FFu);
+                    case 1: return static_cast<double>((v >> 10) & 0x3FFu);
+                    case 2: return static_cast<double>((v >> 20) & 0x3FFu);
+                    case 3: return static_cast<double>((v >> 30) &   0x3u);
+                    default: return 0.0;
+                }
+            }
+            case SrcType::PackedRG11B10F: {
+                std::uint32_t v; std::memcpy(&v, srcPixel, 4);
+                double r=0.0, g=0.0, b=0.0;
+                unpackUF_10F11F11F_REV(v, r, g, b);
+                switch (comp) {
+                    case 0: return r;
+                    case 1: return g;
+                    case 2: return b;
+                    default: return 0.0;
+                }
+            }
+            case SrcType::PackedRGB9E5F: {
+                std::uint32_t v; std::memcpy(&v, srcPixel, 4);
+                double r=0.0, g=0.0, b=0.0;
+                unpackUF_5_9_9_9_REV(v, r, g, b);
+                switch (comp) {
+                    case 0: return r;
+                    case 1: return g;
+                    case 2: return b;
+                    default: return 0.0;
+                }
+            }
             default: return 0.0;
         }
     };
 
     // Determine whether the source is an integer format (no normalization on write).
+    // PackedRGB10A2_UI yields raw integer mantissas; the other Packed*
+    // variants yield already-normalized doubles (UNorm or unsigned-float
+    // decoded values).
     const bool srcIsInteger = (srcType == SrcType::UInt8  || srcType == SrcType::SInt8  ||
                                srcType == SrcType::UInt16 || srcType == SrcType::SInt16 ||
-                               srcType == SrcType::UInt32 || srcType == SrcType::SInt32);
+                               srcType == SrcType::UInt32 || srcType == SrcType::SInt32 ||
+                               srcType == SrcType::PackedRGB10A2_UI);
     const bool srcIsNormalized = !srcIsInteger;
 
     // BGR/BGRA swizzle for destination format. Mirrors readFBOColorNative.
