@@ -189,6 +189,15 @@ struct EmulatedDraw {
     // per vertex of expandedVertexData). Day 24 (CKPT96) uses this to
     // route per-vertex TF writes to the correct per-stream BO.
     std::vector<std::uint32_t> vertexStreams;
+    // Sprint 8 #9-C (CKPT96) — per-output-varying stream tag, parallel
+    // to varyingNames / varyingWidths / varyingLocations. Captured from
+    // SPIR-V DecorationStream on the OpVariable (glslang emits this for
+    // `layout(stream=N) out`). Default 0 (no decoration → stream 0).
+    // writeGsXfbAndCheckDiscard reads this to determine per-buffer
+    // stream ownership in the INTERLEAVED_ATTRIBS gl_NextBuffer-split
+    // path so vertices write only to the buffer whose owner stream
+    // matches the vertex's stream tag.
+    std::vector<std::uint32_t> varyingStreams;
 };
 
 // Detect whether a program's GS stage can be emulated. Called once

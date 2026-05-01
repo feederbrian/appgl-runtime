@@ -3612,15 +3612,22 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 break;
             }
             case spv::OpEmitStreamVertex: {
-                // Sprint 8 #9-C (CKPT95): w[1] = <id> Stream — must be a
-                // constant Int per SPIR-V spec. Decode via valueStore_
-                // / module_.constants and route the emit to the named
-                // stream. Stream out-of-range clamps to 0 (graceful
-                // degrade) — multi-stream limit advertised at 4 floor.
+                // Sprint 8 #9-C (CKPT95→CKPT96): w[0] = <id> Stream — must
+                // be a constant Int per SPIR-V spec. Decode via
+                // valueStore_ / module_.constants and route the emit to
+                // the named stream. Stream out-of-range clamps to 0
+                // (graceful degrade) — multi-stream limit advertised at
+                // 4 (gl_MaxTransformFeedbackStreams floor).
+                //
+                // CKPT96 fix: was reading w[1] (off-by-one — `w` already
+                // points one past the opcode word, so the first operand
+                // is at w[0], not w[1]). Caught at runtime: streamCounts
+                // showed all 32 vertices tagged stream 0 even though 4 of
+                // 8 emits per invocation use OpEmitStreamVertex(1).
                 std::uint32_t streamIdx = 0;
                 if (wc >= 2) {
                     Value sv;
-                    if (tryGetValue(w[1], sv)) {
+                    if (tryGetValue(w[0], sv)) {
                         const std::int32_t s = sv.i[0];
                         if (s >= 0 && static_cast<std::uint32_t>(s) < 4) {
                             streamIdx = static_cast<std::uint32_t>(s);
@@ -4029,6 +4036,11 @@ struct OutputVaryingDesc {
     std::uint32_t location = 0;
     std::uint8_t interp = 0;     // 0=smooth, 1=flat, 2=noperspective, 3=centroid
     std::uint8_t baseType = 0;   // 0=float, 1=int, 2=uint
+    // Sprint 8 #9-C (CKPT96) — GLSL `layout(stream=N) out` →
+    // SPIR-V DecorationStream. Default 0 (single-stream behaviour).
+    // writeGsXfbAndCheckDiscard uses this to route per-buffer per-
+    // stream TF writes when the GS uses multi-stream emit.
+    std::uint32_t stream = 0;
 };
 
 std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
@@ -4051,6 +4063,12 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
         if (dIt != mod.decorations.end() && dIt->second.hasBuiltIn) continue;
         OutputVaryingDesc d;
         d.name = info.name;
+        // Sprint 8 #9-C (CKPT96) — capture DecorationStream on the
+        // OpVariable. glslang emits this for `layout(stream=N) out`
+        // qualifiers; default 0 means stream 0.
+        if (dIt != mod.decorations.end() && dIt->second.hasStream) {
+            d.stream = dIt->second.stream;
+        }
         auto tIt = mod.types.find(info.typeId);
         if (tIt != mod.types.end()) {
             d.width = mod.scalarWidth(tIt->second.pointeeType);
@@ -4988,17 +5006,23 @@ EmulatedDraw emulateGeometryDraw(
     std::vector<std::uint32_t> outLocations;
     std::vector<std::uint8_t>  outInterp;
     std::vector<std::uint8_t>  outBaseType;
+    // Sprint 8 #9-C (CKPT96) — per-varying stream tag from
+    // DecorationStream. Default 0 (no decoration). Mirrors the layout
+    // of the other outX vectors so the per-varying index lines up.
+    std::vector<std::uint32_t> outStreams;
     outNames.reserve(outVaryings.size());
     outWidths.reserve(outVaryings.size());
     outLocations.reserve(outVaryings.size());
     outInterp.reserve(outVaryings.size());
     outBaseType.reserve(outVaryings.size());
+    outStreams.reserve(outVaryings.size());
     for (const auto& v : outVaryings) {
         outNames.push_back(v.name);
         outWidths.push_back(v.width);
         outLocations.push_back(v.location);
         outInterp.push_back(v.interp);
         outBaseType.push_back(v.baseType);
+        outStreams.push_back(v.stream);
     }
 
     // ─── VS pre-pass ────────────────────────────────────────────
@@ -5452,6 +5476,7 @@ EmulatedDraw emulateGeometryDraw(
     d.varyingNames      = std::move(outNames);
     d.varyingLocations  = std::move(outLocations);
     d.varyingInterp     = std::move(outInterp);
+    d.varyingStreams    = std::move(outStreams);   // Sprint 8 #9-C (CKPT96)
     d.varyingBaseType   = std::move(outBaseType);
     d.clipDistanceLen   = clipLen;
     d.cullDistanceLen   = cullLen;

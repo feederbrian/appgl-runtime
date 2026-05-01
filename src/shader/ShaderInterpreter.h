@@ -121,6 +121,12 @@ struct DecorationSet {
     // SSBO runtime-array it generates).
     bool hasArrayStride = false;
     std::uint32_t arrayStride = 0;
+    // Sprint 8 #9-C (CKPT96) — GLSL `layout(stream=N) out` →
+    // SPIR-V DecorationStream (=29). Carries the target vertex
+    // stream index for transform-feedback per-stream BO routing.
+    // `gl_MaxTransformFeedbackStreams` floor is 4 (GL 4.0).
+    bool hasStream = false;
+    std::uint32_t stream = 0;
 };
 
 struct MemberDecorations {

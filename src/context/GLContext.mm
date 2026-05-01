@@ -14342,6 +14342,17 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     const std::size_t vpp = vertsPerPrim(ed.topology);
     const std::size_t primsGenerated = (vpp > 0) ? (ed.vertexCount / vpp) : 0;
     std::size_t primsWritten = 0;
+    // Sprint 8 #9-C (CKPT96) — per-stream tracking for multi-stream
+    // GS+TF. Populated by the INTERLEAVED multi-slot branch when
+    // any output varying carries DecorationStream != 0; the count-
+    // credit block at the end of the function uses this to credit
+    // per-stream slots of GLTransformFeedbackObject::
+    // capturedVertexCount, replacing the CKPT95 streamVertexCounts
+    // fallback when truncation-aware tracking is available.
+    std::array<std::size_t,
+               GLTransformFeedbackObject::kMaxTransformFeedbackStreams>
+        primsWrittenByStream{};
+    bool primsWrittenByStreamValid = false;
 
     // When transform feedback is active and the program has TF
     // varyings configured, the emulator's expanded vertex data is
@@ -14431,34 +14442,154 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         // also dropped (per GL 4.6 §13.2), and we stop
         // incrementing `primsWritten`.
         if (interleaved) {
-            auto binding = state->indexedBufferBinding(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
-            const std::size_t baseOffset = static_cast<std::size_t>(binding.offset);
-            const std::size_t rangeSize = static_cast<std::size_t>(binding.size);
-            std::size_t perVertexBytes = 0;
-            for (const auto& s : sources) perVertexBytes += s.count * sizeof(float);
-            const std::size_t perPrimBytes = perVertexBytes * vpp;
-            std::size_t cursor = baseOffset;
-            const std::size_t nPrim = (vpp > 0) ? (vCount / vpp) : 0;
-            bool truncated = false;
-            for (std::size_t p = 0; p < nPrim; ++p) {
-                if (truncated ||
-                    !primFits(GL_TRANSFORM_FEEDBACK_BUFFER, 0,
-                              binding.buffer, cursor, baseOffset,
-                              rangeSize, perPrimBytes)) {
-                    truncated = true;
+            // Sprint 8 #9-C (CKPT96) — INTERLEAVED branch rebuilt to
+            // honour `gl_NextBuffer` markers (advance to BO[N+1]) AND
+            // per-stream DecorationStream filtering for multi-stream GS.
+            //
+            // Each TfBufSlot holds a contiguous run of TfSources whose
+            // bytes interleave into one GL_TRANSFORM_FEEDBACK_BUFFER
+            // binding. `gl_NextBuffer` between two varyings creates a
+            // new slot bound to the next indexed binding. Per-buffer
+            // stream ownership is captured from the first non-builtin
+            // varying's DecorationStream (gl_Position is always stream 0
+            // and doesn't claim ownership; gl_NextBuffer-only buffers
+            // inherit the default stream 0). Emitted vertices contribute
+            // to a slot iff the vertex's stream tag matches the slot's
+            // owner stream — for single-stream GS programs this short-
+            // circuits to "every vertex contributes to every slot",
+            // preserving CKPT95-and-earlier semantics byte-identical.
+            //
+            // Per-prim truncation per GL 4.6 §13.2: a primitive counts
+            // as written iff every matching slot has room for
+            // `slot.perVertexBytes * vpp` at its current cursor. Any
+            // matching slot's truncation marks the primitive truncated
+            // (and every subsequent same-stream primitive thereafter).
+            // Different streams have independent truncation tracking
+            // through `slot.truncated` per slot.
+            struct TfBufSlot {
+                GLuint buffer = 0;
+                std::size_t baseOffset = 0;
+                std::size_t rangeSize = 0;
+                std::size_t cursor = 0;
+                std::size_t perVertexBytes = 0;
+                std::vector<TfSource> srcList;
+                std::uint32_t stream = 0;
+                bool truncated = false;
+            };
+            std::vector<TfBufSlot> slots;
+            auto bindNextSlot = [&](GLuint idx) -> TfBufSlot& {
+                slots.emplace_back();
+                TfBufSlot& sl = slots.back();
+                auto b = state->indexedBufferBinding(
+                    GL_TRANSFORM_FEEDBACK_BUFFER, idx);
+                sl.buffer = b.buffer;
+                sl.baseOffset = static_cast<std::size_t>(b.offset);
+                sl.rangeSize = static_cast<std::size_t>(b.size);
+                sl.cursor = sl.baseOffset;
+                return sl;
+            };
+            bindNextSlot(0);
+            GLuint slotBindIdx = 0;
+            for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                const std::string& name = tfNames[i];
+                if (name == "gl_NextBuffer") {
+                    ++slotBindIdx;
+                    bindNextSlot(slotBindIdx);
                     continue;
                 }
+                TfSource src;
+                if (name == "gl_Position") {
+                    src = {0, 4};   // stream 0 (built-in)
+                } else {
+                    std::size_t off = 4;
+                    bool found = false;
+                    for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
+                        if (ed.varyingNames[k] == name) {
+                            src = {off, ed.varyingWidths[k]};
+                            // First non-builtin varying claims the
+                            // slot's stream (the spec requires all
+                            // varyings in the same buffer share a
+                            // stream; we honour that by taking the
+                            // first observed and ignoring later ones).
+                            if (slots.back().stream == 0 &&
+                                k < ed.varyingStreams.size() &&
+                                ed.varyingStreams[k] != 0) {
+                                slots.back().stream = ed.varyingStreams[k];
+                            }
+                            found = true;
+                            break;
+                        }
+                        off += ed.varyingWidths[k];
+                    }
+                    if (!found) {
+                        // Unknown varying name — treat as zero-byte
+                        // skip (mirrors prior behaviour for unmatched
+                        // sources). Future: handle gl_SkipComponents*
+                        // explicitly.
+                        src = {0, 0};
+                    }
+                }
+                slots.back().srcList.push_back(src);
+                slots.back().perVertexBytes += src.count * sizeof(float);
+            }
+
+            bool anyMultiStream = false;
+            for (const auto& s : slots) {
+                if (s.stream != 0) { anyMultiStream = true; break; }
+            }
+            auto slotMatchesPrim = [&](const TfBufSlot& s,
+                                       std::uint32_t pstream) -> bool {
+                if (!anyMultiStream) return true;
+                return s.stream == pstream;
+            };
+
+            const std::size_t nPrim = (vpp > 0) ? (vCount / vpp) : 0;
+            for (std::size_t p = 0; p < nPrim; ++p) {
+                const std::size_t firstV = p * vpp;
+                const std::uint32_t pstream =
+                    (firstV < ed.vertexStreams.size())
+                        ? ed.vertexStreams[firstV] : 0u;
+
+                bool allFit = true;
+                for (auto& sl : slots) {
+                    if (!slotMatchesPrim(sl, pstream)) continue;
+                    if (sl.truncated) { allFit = false; break; }
+                    const std::size_t needBytes = sl.perVertexBytes * vpp;
+                    if (needBytes == 0) continue;
+                    if (!primFits(GL_TRANSFORM_FEEDBACK_BUFFER, 0,
+                                  sl.buffer, sl.cursor, sl.baseOffset,
+                                  sl.rangeSize, needBytes)) {
+                        allFit = false;
+                        break;
+                    }
+                }
+                if (!allFit) {
+                    for (auto& sl : slots) {
+                        if (slotMatchesPrim(sl, pstream)) sl.truncated = true;
+                    }
+                    continue;
+                }
+
                 for (std::size_t vi = 0; vi < vpp; ++vi) {
                     const std::size_t v = p * vpp + vi;
-                    const float* vertexBase = ed.expandedVertexData.data() + v * fpv;
-                    for (const auto& s : sources) {
-                        writeToBuffer(binding.buffer, cursor,
-                                      vertexBase + s.offset, s.count);
-                        cursor += s.count * sizeof(float);
+                    const float* vertexBase =
+                        ed.expandedVertexData.data() + v * fpv;
+                    for (auto& sl : slots) {
+                        if (!slotMatchesPrim(sl, pstream)) continue;
+                        for (const auto& src : sl.srcList) {
+                            if (src.count == 0) continue;
+                            writeToBuffer(sl.buffer, sl.cursor,
+                                          vertexBase + src.offset, src.count);
+                            sl.cursor += src.count * sizeof(float);
+                        }
                     }
                 }
                 ++primsWritten;
+                if (pstream < primsWrittenByStream.size()) {
+                    ++primsWrittenByStream[pstream];
+                }
             }
+            primsWrittenByStreamValid = true;
         } else {
             // GL_SEPARATE_ATTRIBS — each source writes to its own
             // TF binding. A primitive counts as "written" iff all
@@ -14600,15 +14731,27 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 for (std::size_t s = 1; s < ed.streamVertexCounts.size(); ++s) {
                     if (ed.streamVertexCounts[s] != 0) { hasMultiStream = true; break; }
                 }
-                if (hasMultiStream) {
-                    // Multi-stream GS — credit each slot independently.
-                    // primsWritten gating still applies (capacity-limited
-                    // writes drop tail primitives uniformly across all
-                    // streams since the emit interleave is shared).
+                if (hasMultiStream && primsWrittenByStreamValid) {
+                    // CKPT96: INTERLEAVED multi-stream path tracked per-
+                    // stream prim writes truncation-aware. Use those
+                    // directly — gives the spec-correct count for each
+                    // stream including partial-truncation cases.
+                    for (std::size_t s = 0;
+                         s < primsWrittenByStream.size() &&
+                         s < GLTransformFeedbackObject::kMaxTransformFeedbackStreams;
+                         ++s) {
+                        tf->capturedVertexCount[s] +=
+                            static_cast<GLsizei>(primsWrittenByStream[s] * vpp);
+                    }
+                } else if (hasMultiStream) {
+                    // CKPT95 fallback path (SEPARATE_ATTRIBS multi-
+                    // stream, or any non-INTERLEAVED multi-stream
+                    // route): credit each slot from interpreter
+                    // streamVertexCounts; truncation is approximated
+                    // by scaling each stream by writtenVerts/totalVerts.
                     const std::size_t writtenVerts = primsWritten * vpp;
                     const std::size_t totalVerts = ed.vertexCount;
                     if (totalVerts == 0 || writtenVerts == totalVerts) {
-                        // No truncation — full per-stream counts apply.
                         for (std::size_t s = 0; s < ed.streamVertexCounts.size()
                                               && s < GLTransformFeedbackObject::kMaxTransformFeedbackStreams;
                              ++s) {
@@ -14616,10 +14759,6 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                                 static_cast<GLsizei>(ed.streamVertexCounts[s]);
                         }
                     } else if (totalVerts > 0) {
-                        // Partial-truncation: scale each stream's count
-                        // by the same write-fraction. Approximate but
-                        // matches the all-or-nothing per-prim policy
-                        // already in this function.
                         for (std::size_t s = 0; s < ed.streamVertexCounts.size()
                                               && s < GLTransformFeedbackObject::kMaxTransformFeedbackStreams;
                              ++s) {

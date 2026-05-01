@@ -39,6 +39,8 @@ namespace spv {
         DecorationPatch = 5,
         DecorationCentroid = 16, DecorationOffset = 35,
         DecorationDescriptorSet = 34, DecorationBinding = 33,
+        // Sprint 8 #9-C (CKPT96) — GLSL `layout(stream=N) out` decoration.
+        DecorationStream = 29,
     };
 }
 #endif
@@ -203,6 +205,13 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 } else if (deco == spv::DecorationDescriptorSet && wc >= 4) {
                     decorations[target].hasDescriptorSet = true;
                     decorations[target].descriptorSet = w[2];
+                } else if (deco == spv::DecorationStream && wc >= 4) {
+                    // Sprint 8 #9-C (CKPT96): GLSL `layout(stream=N) out`
+                    // → DecorationStream on the OpVariable. Used by
+                    // writeGsXfbAndCheckDiscard to route per-stream BO
+                    // writes for multi-stream GS programs.
+                    decorations[target].hasStream = true;
+                    decorations[target].stream = w[2];
                 }
                 break;
             }
