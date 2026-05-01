@@ -8524,6 +8524,46 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             pushError(GL_INVALID_ENUM);
             return false;
         }
+        // Sprint 9 Phase 2 (CKPT102): GL 4.6 §16.1 — depth/stencil read
+        // formats require the FBO to have the corresponding attachment.
+        // CTS packed_pixels.* tests assert "Invalid format used but
+        // glReadPixels succeeded" when reading GL_DEPTH_STENCIL from an
+        // FBO whose color attachment is RGBA8. The 804 such "invalid
+        // format succeeded" failures across the packed_pixels suite all
+        // share this gap.
+        if (isDepthReadback || isStencilReadback || isDepthStencilReadback) {
+            const GLuint fbName = impl_->state->boundReadFramebuffer();
+            const GLFramebufferObject* fb = impl_->objects->framebuffers().get(fbName);
+            bool hasDepth = false, hasStencil = false;
+            if (fb != nullptr) {
+                auto attachmentLive = [&](GLenum point) -> bool {
+                    auto it = fb->attachments.find(point);
+                    return it != fb->attachments.end() &&
+                           it->second.kind != GLFramebufferAttachment::Kind::None &&
+                           it->second.object != 0;
+                };
+                if (attachmentLive(GL_DEPTH_ATTACHMENT) ||
+                    attachmentLive(GL_DEPTH_STENCIL_ATTACHMENT)) {
+                    hasDepth = true;
+                }
+                if (attachmentLive(GL_STENCIL_ATTACHMENT) ||
+                    attachmentLive(GL_DEPTH_STENCIL_ATTACHMENT)) {
+                    hasStencil = true;
+                }
+            }
+            if (isDepthReadback && !hasDepth) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            if (isStencilReadback && !hasStencil) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            if (isDepthStencilReadback && !(hasDepth && hasStencil)) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+        }
         // Format+type compatibility (Table 18.2). Rejects packed types
         // with incompatible base formats, and float types with integer
         // formats. Was previously silent → CTS flagged "invalid format
