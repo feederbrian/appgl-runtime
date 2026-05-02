@@ -225,6 +225,14 @@ struct SampledTextureSlot {
     std::vector<std::uint8_t> data;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    // CKPT160 (Sprint 14 Day 7): depth/layers field for OpImageQuerySize
+    // on 3D / 2D_ARRAY / CUBE_MAP_ARRAY / 1D_ARRAY storage images. For
+    // 2D/RECT/CUBE/BUFFER targets where the third dimension is meaningless,
+    // leave at default (0) — the OpImageQuerySize handler distinguishes
+    // 2D-class (returns ivec2) vs 3D-class (returns ivec3) per the SPIR-V
+    // result type, so the depth field is only consulted when ivec3 result
+    // is requested.
+    std::uint32_t depth = 0;
     std::uint32_t bytesPerRow = 0;
     std::uint32_t internalFormat = 0;
     std::uint32_t samplerType = 0;

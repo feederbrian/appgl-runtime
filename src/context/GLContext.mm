@@ -5346,6 +5346,12 @@ struct GLContext::Impl {
                 appgl::SampledTextureSlot& slot = slots[i];
                 slot.width = static_cast<std::uint32_t>(mtlTex.width);
                 slot.height = static_cast<std::uint32_t>(mtlTex.height);
+                // CKPT160 (Sprint 14 Day 7): populate depth field for
+                // OpImageQuerySize on 3D / array / cube-array storage
+                // images. Metal exposes either depth (3D) or arrayLength
+                // (array) — pick the larger as the third dimension.
+                slot.depth = static_cast<std::uint32_t>(
+                    std::max<NSUInteger>(mtlTex.depth, mtlTex.arrayLength));
                 slot.bytesPerRow = slot.width * bpp;
                 slot.internalFormat = intFmt;
                 slot.samplerType = 0;  // not applicable for storage images

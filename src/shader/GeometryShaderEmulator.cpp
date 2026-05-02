@@ -3034,6 +3034,111 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            // CKPT160 (Sprint 14 Day 7): OpImageQuerySize / OpImageQuerySizeLod
+            // for storage image variables in GS. Returns the bound texture's
+            // dimensions resolved through `storageImages_` (built from
+            // imageBindings unit at draw time).
+            //   OpImageQuerySize: w[0]=resultType, w[1]=resultId, w[2]=image
+            //   OpImageQuerySizeLod: same plus w[3]=lod (we ignore — slot is
+            //                        always level 0 in our shadow).
+            case spv::OpImageQuerySize:
+            case spv::OpImageQuerySizeLod: {
+                auto sIt = sampledImages_.find(w[2]);
+                if (sIt == sampledImages_.end()) {
+                    valueStore_[w[1]] = Value{Value::Kind::Int4,
+                                              {0, 0, 0, 0},
+                                              {0, 0, 0, 0},
+                                              false};
+                    pc += wc;
+                    break;
+                }
+                const SampledImageHandle& h = sIt->second;
+                const SampledTextureMap* mapPtr = h.isStorage
+                    ? storageImages_ : sampledTextures_;
+                if (mapPtr == nullptr) {
+                    valueStore_[w[1]] = Value{Value::Kind::Int4,
+                                              {0, 0, 0, 0},
+                                              {0, 0, 0, 0},
+                                              false};
+                    pc += wc;
+                    break;
+                }
+                auto arrIt = mapPtr->find(h.arrayVarId);
+                std::uint32_t qw = 0, qh = 0, qd = 0;
+                if (arrIt != mapPtr->end() &&
+                    h.elementIdx < arrIt->second.size()) {
+                    const SampledTextureSlot& slot =
+                        arrIt->second[h.elementIdx];
+                    qw = slot.width;
+                    qh = slot.height;
+                    qd = slot.depth;
+                }
+                // Result component count from SPIR-V resultType. Vector
+                // kinds Vec2/Vec3/Vec4 carry the count via their kind
+                // enum; Int / UInt are scalar. Default to ivec2.
+                std::uint32_t componentCount = 2;
+                auto tIt = module_.types.find(w[0]);
+                bool isUnsigned = false;
+                if (tIt != module_.types.end()) {
+                    using K = TypeInfo::Kind;
+                    switch (tIt->second.kind) {
+                        case K::Vec2: componentCount = 2; break;
+                        case K::Vec3: componentCount = 3; break;
+                        case K::Vec4: componentCount = 4; break;
+                        case K::Int:  componentCount = 1; break;
+                        case K::UInt: componentCount = 1; isUnsigned = true; break;
+                        default: break;
+                    }
+                    if (componentCount > 1) {
+                        auto bIt = module_.types.find(tIt->second.componentType);
+                        if (bIt != module_.types.end() &&
+                            bIt->second.kind == K::UInt) {
+                            isUnsigned = true;
+                        }
+                    }
+                }
+                Value out{};
+                out.kind = isUnsigned ? Value::Kind::UInt4 : Value::Kind::Int4;
+                if (componentCount >= 1) {
+                    out.i[0] = static_cast<std::int32_t>(qw);
+                }
+                if (componentCount >= 2) {
+                    out.i[1] = static_cast<std::int32_t>(qh);
+                }
+                if (componentCount >= 3) {
+                    out.i[2] = static_cast<std::int32_t>(qd);
+                }
+                if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
+                    std::fprintf(stderr,
+                        "[GS-img] querysize: var=%u elem=%u → "
+                        "(%u,%u,%u) compCount=%u\n",
+                        h.arrayVarId, h.elementIdx, qw, qh, qd,
+                        componentCount);
+                }
+                valueStore_[w[1]] = out;
+                pc += wc;
+                break;
+            }
+            // CKPT160 (Sprint 14 Day 7): OpImageWrite — currently a no-op
+            // in the GS interpreter. Full implementation requires
+            // shadowing the destination storage image's CPU buffer and
+            // syncing back to Metal after GS execution. Without this,
+            // shaders that write storage images from GS (e.g.
+            // shader_image_size.basic-nonMS-gs-* writes results to
+            // g_result iimage2D) will still fail validation since the
+            // captured data is never produced. The op is accepted at
+            // body-walk so the broader shader continues; full sync is
+            // future work (sister to Tess emulator OpImage gap).
+            //   OpImageWrite: w[0]=image, w[1]=coord, w[2]=texel
+            case spv::OpImageWrite: {
+                if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
+                    std::fprintf(stderr,
+                        "[GS-img] write: image=%u (no-op; sync-back to "
+                        "Metal not implemented)\n", w[1]);
+                }
+                pc += wc;
+                break;
+            }
             case spv::OpCompositeExtract: {
                 // w[0]=type, w[1]=resultId, w[2]=composite, w[3..]=indices
                 Value composite;
@@ -3791,6 +3896,11 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpImageSampleExplicitLod:     // 88
         // ─ Storage image load (Sprint 7 P1 #4, CKPT54) ─
         case spv::OpImageRead:                  // 98
+        // ─ Storage image write + size query (Sprint 14 Day 7, CKPT160) ─
+        case spv::OpImageWrite:                 // 99 (currently no-op,
+                                                //     see body handler)
+        case spv::OpImageQuerySizeLod:          // 103
+        case spv::OpImageQuerySize:             // 104
             return true;
         default:
             return false;
