@@ -505,6 +505,11 @@ private:
     // `[[render_target_array_index]]` output slot entirely.
     bool didWriteLayer_ = false;
 
+    // Sprint 15 Day 10 [metal-viewport-array]: mirror for
+    // BuiltInViewportIndex (sister to didWriteLayer_). Flips on when
+    // any emitted vertex captures a non-nullopt gl_ViewportIndex.
+    bool didWriteViewportIndex_ = false;
+
     // Mirror for BuiltInPointSize — flips on if any primitive's
     // emitVertex captured a non-nullopt value. Tells the draw
     // encoder whether to slot a per-vertex pointSize into the
@@ -522,6 +527,7 @@ private:
 
 public:
     bool didWriteLayer() const { return didWriteLayer_; }
+    bool didWriteViewportIndex() const { return didWriteViewportIndex_; }
     bool didWritePointSize() const { return didWritePointSize_; }
     bool didWritePrimitiveID() const { return didWritePrimitiveID_; }
 
@@ -603,6 +609,10 @@ private:
     // so the synth pass-through VS can emit
     // `[[render_target_array_index]]`.
     std::optional<std::int32_t> captureLayer() const;
+    // Sprint 15 Day 10 [metal-viewport-array]: sister to captureLayer
+    // for BuiltInViewportIndex (= 10). Returns nullopt if the GS
+    // didn't write gl_ViewportIndex.
+    std::optional<std::int32_t> captureViewportIndex() const;
 
     // Phase 3f-8: after a TCS invocation, scan Output variables for
     // gl_TessLevelOuter (BuiltIn = 11) and gl_TessLevelInner
@@ -1835,6 +1845,56 @@ std::optional<std::int32_t> Interpreter::captureLayer() const {
     return std::nullopt;
 }
 
+// Sprint 15 Day 10 [metal-viewport-array]: sister to captureLayer
+// for BuiltInViewportIndex. Same two-shape walk (direct Output int +
+// gl_PerVertex-style struct member). Returns the per-vertex
+// gl_ViewportIndex as int32, or nullopt if the GS doesn't write the
+// builtin.
+std::optional<std::int32_t> Interpreter::captureViewportIndex() const {
+    for (const auto& [varId, info] : module_.variables) {
+        if (info.storageClass != spv::StorageClassOutput) continue;
+        auto sIt = varStorage_.find(varId);
+        if (sIt == varStorage_.end()) continue;
+        auto tIt = module_.types.find(info.typeId);
+        if (tIt == module_.types.end()) continue;
+        const std::uint32_t pointee = tIt->second.pointeeType;
+        auto pIt = module_.types.find(pointee);
+        if (pIt == module_.types.end()) continue;
+        // Shape 1: direct Output int decorated BuiltInViewportIndex.
+        auto dIt = module_.decorations.find(varId);
+        if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn &&
+            dIt->second.builtIn == spv::BuiltInViewportIndex) {
+            if (!sIt->second.empty()) {
+                std::int32_t v = 0;
+                std::memcpy(&v, &sIt->second[0], sizeof(std::int32_t));
+                return v;
+            }
+            return 0;
+        }
+        // Shape 2: member of a gl_PerVertex-style struct.
+        if (pIt->second.kind != TypeInfo::Kind::Struct) continue;
+        auto mdIt = module_.memberDecorations.find(pointee);
+        if (mdIt == module_.memberDecorations.end()) continue;
+        std::uint32_t runningOff = 0;
+        for (std::size_t m = 0; m < pIt->second.memberTypes.size(); ++m) {
+            const std::uint32_t memberType = pIt->second.memberTypes[m];
+            const std::uint32_t memberWidth = module_.scalarWidth(memberType);
+            auto mdm = mdIt->second.perMember.find(static_cast<std::uint32_t>(m));
+            if (mdm != mdIt->second.perMember.end() && mdm->second.hasBuiltIn
+                && mdm->second.builtIn == spv::BuiltInViewportIndex) {
+                if (runningOff < sIt->second.size()) {
+                    std::int32_t v = 0;
+                    std::memcpy(&v, &sIt->second[runningOff], sizeof(std::int32_t));
+                    return v;
+                }
+                return 0;
+            }
+            runningOff += memberWidth;
+        }
+    }
+    return std::nullopt;
+}
+
 bool Interpreter::captureTessLevels(float outer[4], float inner[2]) const {
     // Scan Output variables for gl_TessLevelOuter / gl_TessLevelInner
     // (BuiltIn = 11 / 12 respectively). These are always arrays of
@@ -2140,6 +2200,13 @@ void Interpreter::emitVertex(std::vector<EmulatedVertex>& out, std::uint32_t str
     if (auto layerValue = captureLayer(); layerValue.has_value()) {
         ev.layer = *layerValue;
         didWriteLayer_ = true;
+    }
+    // Sprint 15 Day 10 [metal-viewport-array]: capture gl_ViewportIndex
+    // (sister to gl_Layer). Always captured; emission gated on env at
+    // the synth-VS site.
+    if (auto vi = captureViewportIndex(); vi.has_value()) {
+        ev.viewportIndex = *vi;
+        didWriteViewportIndex_ = true;
     }
     if (auto pointSizeValue = capturePointSize(); pointSizeValue.has_value()) {
         ev.pointSize = *pointSizeValue;
@@ -5540,6 +5607,9 @@ EmulatedDraw emulateGeometryDraw(
                 if (interp.didWriteLayer()) {
                     d.hasLayer = true;
                 }
+                if (interp.didWriteViewportIndex()) {
+                    d.hasViewportIndex = true;
+                }
                 if (interp.didWritePointSize()) {
                     d.hasPointSize = true;
                 }
@@ -5717,8 +5787,10 @@ EmulatedDraw emulateGeometryDraw(
     const std::size_t layerSlot = d.hasLayer ? 1 : 0;
     const std::size_t pointSizeSlot = d.hasPointSize ? 1 : 0;
     const std::size_t primIdSlot = d.hasPrimitiveID ? 1 : 0;
+    // Sprint 15 Day 10 [metal-viewport-array]: viewport-index slot.
+    const std::size_t viSlot = d.hasViewportIndex ? 1 : 0;
     const std::size_t fpv = 4 + totalVaryingWidth + clipLen + cullLen
-                          + layerSlot + pointSizeSlot + primIdSlot;
+                          + layerSlot + pointSizeSlot + primIdSlot + viSlot;
 
     d.topology          = expandedTopo;
     d.vertexCount       = emittedAll.size();
@@ -5768,6 +5840,28 @@ EmulatedDraw emulateGeometryDraw(
                 const std::int32_t lastLayer = emittedAll[i + primSize - 1].layer;
                 for (std::size_t k = 0; k < primSize; ++k) {
                     emittedAll[i + k].layer = lastLayer;
+                }
+            }
+        }
+    }
+    // Sprint 15 Day 10 [metal-viewport-array]: viewport-index per-
+    // primitive propagation. Sister to gl_Layer pattern. LAST_VERTEX_
+    // CONVENTION (default user provoking) — copy provoking vertex's
+    // value to all vertices in the primitive.
+    if (d.hasViewportIndex && expandedTopo != 0) {
+        std::size_t primSize = 0;
+        switch (expandedTopo) {
+            case GL_POINTS:        primSize = 1; break;
+            case GL_LINES:         primSize = 2; break;
+            case GL_TRIANGLES:     primSize = 3; break;
+            default:               primSize = 0; break;
+        }
+        if (primSize > 0) {
+            for (std::size_t i = 0; i + primSize <= emittedAll.size(); i += primSize) {
+                const std::int32_t lastVi =
+                    emittedAll[i + primSize - 1].viewportIndex;
+                for (std::size_t k = 0; k < primSize; ++k) {
+                    emittedAll[i + k].viewportIndex = lastVi;
                 }
             }
         }
@@ -5889,6 +5983,14 @@ EmulatedDraw emulateGeometryDraw(
             const std::size_t pidOff = cullBase + cullLen + layerSlot + pointSizeSlot;
             std::memcpy(&dst[pidOff], &emittedAll[v].primitiveId, sizeof(std::int32_t));
         }
+        // Sprint 15 Day 10 [metal-viewport-array]: viewport-index
+        // slot packed after primitiveID.
+        if (d.hasViewportIndex) {
+            const std::size_t viOff = cullBase + cullLen + layerSlot
+                + pointSizeSlot + primIdSlot;
+            std::memcpy(&dst[viOff], &emittedAll[v].viewportIndex,
+                        sizeof(std::int32_t));
+        }
     }
 
     d.ok = true;
@@ -5917,7 +6019,8 @@ EmulatedDraw emulateGeometryDraw(
 // side. Matching on both sides is what makes the stage link work.
 
 std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
-                                           bool layeredFbo) {
+                                           bool layeredFbo,
+                                           bool viewportArrayBound) {
     // Emit render_target_array_index only when both the GS wrote
     // gl_Layer AND the bound FBO is a layered attachment. On a
     // non-layered FBO, writing [[render_target_array_index]] with
@@ -5927,6 +6030,17 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     // declared to keep the vertex-descriptor stride in sync with
     // the packed buffer produced by emulateGeometryDraw.
     const bool emitRenderTargetArrayIndex = draw.hasLayer && layeredFbo;
+    // Sprint 15 Day 10 [metal-viewport-array]: emit
+    // `[[viewport_array_index]]` only when GS wrote gl_ViewportIndex
+    // AND encoder bound multi-viewport (Day 8 commit `39b9fd1`
+    // populates this when state diverges from slot 0). Caller
+    // additionally gates `viewportArrayBound` on the env-gate
+    // `APPGL_ENABLE_METAL_VIEWPORT_INDEX` so this is opt-in
+    // groundwork pending Day 11+ deeper Metal-API diagnosis (per
+    // CKPT181 finding that unconditional emission caused a
+    // pre-merge regression on viewport_array.provoking_vertex).
+    const bool emitViewportArrayIndex =
+        draw.hasViewportIndex && viewportArrayBound;
     auto mslTypeFor = [](std::uint32_t width, std::uint8_t baseType) -> const char* {
         const char* floatNames[] = { "float", "float2", "float3", "float4" };
         const char* intNames[]   = { "int",   "int2",   "int3",   "int4"   };
@@ -6002,15 +6116,21 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         4 + totalVaryingWidth + draw.clipDistanceLen + draw.cullDistanceLen
         + (draw.hasLayer ? 1u : 0u)
         + (draw.hasPointSize ? 1u : 0u)
-        + (draw.hasPrimitiveID ? 1u : 0u);
+        + (draw.hasPrimitiveID ? 1u : 0u)
+        + (draw.hasViewportIndex ? 1u : 0u);
     const std::uint32_t layerFloatOff = 4 + totalVaryingWidth
         + draw.clipDistanceLen + draw.cullDistanceLen;
     const std::uint32_t psFloatOff =
         layerFloatOff + (draw.hasLayer ? 1u : 0u);
     const std::uint32_t pidFloatOff =
         psFloatOff + (draw.hasPointSize ? 1u : 0u);
+    // Sprint 15 Day 10 [metal-viewport-array]: viewport-index slot
+    // sits after primitiveID (matches encoder packing order).
+    const std::uint32_t viFloatOff =
+        pidFloatOff + (draw.hasPrimitiveID ? 1u : 0u);
     const bool needsTrailingBuffer =
-        draw.hasLayer || draw.hasPointSize || draw.hasPrimitiveID;
+        draw.hasLayer || draw.hasPointSize || draw.hasPrimitiveID
+        || draw.hasViewportIndex;
 
     // ─ Vertex output struct.
     auto interpTag = [](std::uint8_t interp) -> const char* {
@@ -6060,6 +6180,11 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     // emit the per-vertex value.
     if (emitRenderTargetArrayIndex) {
         src += "    uint gl_Layer [[render_target_array_index]];\n";
+    }
+    // Sprint 15 Day 10 [metal-viewport-array]: per-vertex viewport
+    // selection slot (sister to render_target_array_index).
+    if (emitViewportArrayIndex) {
+        src += "    uint gl_ViewportIndex [[viewport_array_index]];\n";
     }
     for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
         const std::uint32_t loc = (i < draw.varyingLocations.size())
@@ -6172,6 +6297,15 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
         src += std::to_string(strideFloats);
         src += " + ";
         src += std::to_string(layerFloatOff);
+        src += "]), 0));\n";
+    }
+    // Sprint 15 Day 10 [metal-viewport-array]: read gl_ViewportIndex
+    // from packed buffer (sister to gl_Layer).
+    if (emitViewportArrayIndex) {
+        src += "    out.gl_ViewportIndex = uint(max(as_type<int>(gs_packed[gs_vid * ";
+        src += std::to_string(strideFloats);
+        src += " + ";
+        src += std::to_string(viFloatOff);
         src += "]), 0));\n";
     }
     if (draw.hasPrimitiveID) {

@@ -68,6 +68,16 @@ struct EmulatedVertex {
     // vertex is used for the whole primitive, but the per-vertex
     // snapshot lets us pick the right one on the MSL side.
     std::int32_t layer = 0;
+    // Sprint 15 Day 10 [metal-viewport-array]: gl_ViewportIndex
+    // value at EmitVertex (sister to `layer`). Captured by interpreter
+    // when the GS writes BuiltInViewportIndex; routed through the
+    // synth pass-through VS as `[[viewport_array_index]]` (gated on
+    // routeViewportIndex && APPGL_ENABLE_METAL_VIEWPORT_INDEX env).
+    // Day 9 surfaced a provoking-vertex-convention regression on
+    // viewport_array.provoking_vertex when emission was unconditional;
+    // Day 10 reintroduces the sister-pattern as opt-in groundwork
+    // pending Day 11+ deeper Metal-API diagnosis.
+    std::int32_t viewportIndex = 0;
     // gl_PointSize value at EmitVertex (BuiltInPointSize). Routed
     // through the synth pass-through VS as `[[point_size]]` on
     // GL_POINTS output topologies. Default 1.0 matches the value
@@ -163,6 +173,14 @@ struct EmulatedDraw {
     // compatible. When true, each vertex in expandedVertexData
     // carries an `int32` layer value appended after clip/cull.
     bool hasLayer = false;
+    // Sprint 15 Day 10 [metal-viewport-array]: True if any emitted
+    // vertex wrote gl_ViewportIndex. Sister to `hasLayer`. Synth VS
+    // emits `[[viewport_array_index]]` only when this is true AND
+    // routeViewportIndex (encoder bound multi-viewport) AND env-gate
+    // `APPGL_ENABLE_METAL_VIEWPORT_INDEX` is set. Default-off keeps
+    // baseline behavior (no regression on viewport_array.provoking_
+    // vertex per CKPT181 finding).
+    bool hasViewportIndex = false;
     // True when the GS wrote gl_PointSize on any primitive. Drives
     // whether the packed buffer carries a per-vertex point-size
     // slot + whether the synth VS emits `[[point_size]]` with that
@@ -612,7 +630,8 @@ bool runTcsForVertex(
 // non-layered attachments route all writes to slice 0 per
 // GL 4.6 §9.4.1.
 std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
-                                           bool layeredFbo = true);
+                                           bool layeredFbo = true,
+                                           bool viewportArrayBound = false);
 
 // Post-process the fragment shader MSL that SPIRV-Cross produced
 // for a GS-emulated program so it reads the GS-supplied

@@ -790,6 +790,12 @@ struct GLProgramObject {
     // (layered vs. non-layered) and Metal won't accept swapping.
     std::string gsPassThroughVertexMSL;
     bool gsPassThroughVertexMSLLayered = false;
+    // Sprint 15 Day 10 [metal-viewport-array]: sister to
+    // gsPassThroughVertexMSLLayered. True when the cached MSL emits
+    // `[[viewport_array_index]]` (env-gated via
+    // APPGL_ENABLE_METAL_VIEWPORT_INDEX). Cache invalidates when env
+    // toggles or viewport-array binding diverges.
+    bool gsPassThroughVertexMSLViewportArray = false;
     ShaderReflection gsPassThroughReflection;
     // Rewritten FS MSL for GS-emulated draws that require routing a
     // GS-supplied gl_PrimitiveID override through a flat user varying

@@ -25830,6 +25830,32 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     void* preFboColTex = resolveFBOColorTarget(preFboW, preFboH, preFboDSTex, &preFboArrayLen);
     const bool fboIsLayered = (preFboColTex != nullptr && preFboArrayLen > 0);
     const bool routeLayer = ed.hasLayer && fboIsLayered;
+    // Sprint 15 Day 10 [metal-viewport-array]: detect multi-viewport
+    // binding (state divergence from slot 0) gated on env-var
+    // `APPGL_ENABLE_METAL_VIEWPORT_INDEX`. Inert by default per
+    // CKPT181 lesson (unconditional emission regressed
+    // viewport_array.provoking_vertex; root cause requires Day 11+
+    // Metal-API diagnosis).
+    const bool routeViewportIndex = ed.hasViewportIndex &&
+        std::getenv("APPGL_ENABLE_METAL_VIEWPORT_INDEX") != nullptr &&
+        [this]() -> bool {
+            appgl::GLStateTracker::IndexedViewportEntry vparr[
+                appgl::TranslatedDrawInfo::kMaxDrawViewports];
+            std::size_t got = 0;
+            this->state->getViewportArray(vparr,
+                appgl::TranslatedDrawInfo::kMaxDrawViewports, &got);
+            for (std::size_t i = 1; i < got; ++i) {
+                if (vparr[i].x != vparr[0].x ||
+                    vparr[i].y != vparr[0].y ||
+                    vparr[i].width != vparr[0].width ||
+                    vparr[i].height != vparr[0].height ||
+                    vparr[i].depthNear != vparr[0].depthNear ||
+                    vparr[i].depthFar != vparr[0].depthFar) {
+                    return true;
+                }
+            }
+            return false;
+        }();
 
     // Invalidate the cached synth VS when its layered-ness doesn't
     // match the current draw. Metal won't accept swapping the
@@ -25837,7 +25863,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     // pipeline, so we rebuild from scratch. The pipeline cache
     // flushed too (same rebuild-on-next-draw path).
     if (!program.gsPassThroughVertexMSL.empty() &&
-        program.gsPassThroughVertexMSLLayered != routeLayer) {
+        (program.gsPassThroughVertexMSLLayered != routeLayer ||
+         program.gsPassThroughVertexMSLViewportArray != routeViewportIndex)) {
         program.gsPassThroughVertexMSL.clear();
         program.gsPassThroughPipelineStateCache.clear();
         program.gsPassThroughPipelineState = nullptr;
@@ -25856,8 +25883,10 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     // draw). Matching reflection + attribute layout built from the
     // same `ed` so Metal's vertex descriptor picks the right formats.
     if (program.gsPassThroughVertexMSL.empty()) {
-        program.gsPassThroughVertexMSL = appgl::synthesisePassThroughVertexMSL(ed, routeLayer);
+        program.gsPassThroughVertexMSL = appgl::synthesisePassThroughVertexMSL(
+            ed, routeLayer, routeViewportIndex);
         program.gsPassThroughVertexMSLLayered = routeLayer;
+        program.gsPassThroughVertexMSLViewportArray = routeViewportIndex;
         if (std::getenv("APPGL_GS_DUMP_MSL") != nullptr) {
             std::fprintf(stderr, "\n[GS] synth VS MSL (routeLayer=%d hasLayer=%d clipLen=%u cullLen=%u):\n%s\n",
                 (int)routeLayer, (int)ed.hasLayer, ed.clipDistanceLen, ed.cullDistanceLen,
