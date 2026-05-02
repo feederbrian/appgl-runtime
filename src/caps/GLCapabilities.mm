@@ -696,7 +696,8 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // synchronous (single-threaded shader compile), but advertising
     // the extension lets CTS `parallel_shader_compile.simple_queries`
     // and `.max_shader_compile_threads` exercise the API surface.
-    integerLimits_[GL_NUM_EXTENSIONS] = 44;
+    // CKPT146 (Sprint 13 Day 10): bumped 44 → 45 for GL_ARB_gpu_shader5.
+    integerLimits_[GL_NUM_EXTENSIONS] = 45;
     // GL 4.6 SPIR-V extension queries.  The SPIR-V extensions CTS test
     // (KHR-GL46.spirv_extensions.spirv_extensions_queries) calls
     // glGetIntegerv(GL_NUM_SPIR_V_EXTENSIONS) and then iterates with
@@ -1150,6 +1151,15 @@ void GLCapabilities::initializeExtensions() {
         "GL_ARB_program_interface_query "
         "GL_ARB_shading_language_420pack "
         "GL_ARB_shading_language_packing "
+        // GL_ARB_gpu_shader5 — CKPT146 (Sprint 13 Day 10): advertise the
+        // extension for the gpu_shader5_gl.{implicit_conversions,
+        // function_overloading,float_encoding} tests which gate-bail on
+        // !isExtensionSupported("GL_ARB_gpu_shader5"). Functional surface
+        // already in place: gpu_shader5.precise_qualifier passes,
+        // gpu_shader5.fma_accuracy passes, gpu_shader5.sampler_array_indexing
+        // passes. The extension's dynamic-indexing additions align with
+        // GL 4.0 core, which our SPIRV-Cross MSL emit covers.
+        "GL_ARB_gpu_shader5 "
         // GL_ARB_parallel_shader_compile / GL_KHR_parallel_shader_compile —
         // our compile is synchronous (one thread) so the API surface is a
         // spec-correct no-op: MAX_SHADER_COMPILER_THREADS tracks whatever

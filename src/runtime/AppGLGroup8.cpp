@@ -1525,6 +1525,11 @@ static const char* const kAppGLExtensionList[] = {
     "GL_ARB_program_interface_query",
     "GL_ARB_shading_language_420pack",
     "GL_ARB_shading_language_packing",
+    // CKPT146 (Sprint 13 Day 10): GL_ARB_gpu_shader5 — extension's
+    // functional surface (precise qualifier, fma(), sampler array dynamic
+    // indexing) is already live; advertising flips the GLAD bool that
+    // gates the gpu_shader5_gl.* tests' early-bail check.
+    "GL_ARB_gpu_shader5",
     // GL_ARB_parallel_shader_compile / GL_KHR_parallel_shader_compile
     // — see GLCapabilities.mm for rationale (synchronous-compile
     // no-op implementation satisfies the CTS query surface).
