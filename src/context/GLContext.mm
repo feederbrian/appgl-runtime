@@ -3186,12 +3186,21 @@ struct GLContext::Impl {
             const GLsizei layerFaces = std::max<GLsizei>(baseLevel.desc.depth, 6);
             descriptor.arrayLength = static_cast<NSUInteger>(layerFaces / 6);
         }
-        // MTLTextureType1D does not support mipmapping (Metal asserts
-        // `mipmapLevelCount == 1` inside MTLTextureDescriptorInternal). GL
-        // allows levels > 0 on 1D textures in principle, but our translation
-        // layer doesn't need them — keep level 0 only for this target.
+        // CKPT157 (Sprint 14 Day 4): MTLTextureType1D, MTLTextureType1DArray,
+        // and MTLTextureTypeTextureBuffer all assert `mipmapLevelCount == 1`
+        // inside MTLTextureDescriptorInternal::validateWithDevice:. GL allows
+        // multi-level pyramids on TEXTURE_1D / TEXTURE_1D_ARRAY in principle
+        // (texture_view.gettexparameter creates a 6-level 1D_ARRAY) and
+        // TEXTURE_BUFFER is single-level by spec — clamp all three on the
+        // Metal side. Was previously TEXTURE_1D only, which let advertising
+        // GL_ARB_texture_view trip a Metal hard assertion at descriptor
+        // creation (CKPT156 Day 3 experiment).
         const NSUInteger requestedLevels = static_cast<NSUInteger>(highestDefinedLevel + 1);
-        descriptor.mipmapLevelCount = (object.target == GL_TEXTURE_1D) ? 1u : requestedLevels;
+        const bool metalRequiresSingleLevel =
+            (object.target == GL_TEXTURE_1D ||
+             object.target == GL_TEXTURE_1D_ARRAY ||
+             object.target == GL_TEXTURE_BUFFER);
+        descriptor.mipmapLevelCount = metalRequiresSingleLevel ? 1u : requestedLevels;
         // Include MTLTextureUsageShaderWrite for non-MSAA textures so
         // imageStore in compute / graphics shaders actually lands.
         // GL has no separate "this texture will be used as storage image"
