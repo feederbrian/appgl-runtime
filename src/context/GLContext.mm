@@ -17827,6 +17827,17 @@ bool GLContext::linkProgram(GLuint program) {
         GeometryOnly,
         TessControlOnly,
         TessEvalOnly,
+        // Sprint 15 Day 18 (CKPT191) — VS+GS no-FS combination.
+        // CTS `shader_image_load_store.basic-allTargets-{loadStore,atomic}GS`
+        // and SILS GS sister tests build programs with only VS+GS and enable
+        // GL_RASTERIZER_DISCARD; image writes happen in the GS body, no
+        // rasterisation. Previously rejected as ProgramKind::Unknown at link
+        // (see CKPT164 for prior characterization). This kind translates VS
+        // standalone, runs GS detection / CPU emulation setup, and lets the
+        // existing nil-fragmentFunction + rasterizationEnabled=NO pipeline
+        // path handle the no-FS draw — same shape that ProgramKind::VertexOnly
+        // relies on for SSBO-VS tests.
+        VertexGeometry,
         // Separable multi-stage combination that doesn't match any
         // of the above — accepted only when GL_PROGRAM_SEPARABLE is
         // set. The program is linked for introspection; the actual
@@ -17855,6 +17866,14 @@ bool GLContext::linkProgram(GLuint program) {
     } else if (vertexShader != nullptr && fragmentShader != nullptr &&
                geometryShader != nullptr && computeShader == nullptr) {
         kind = ProgramKind::VertexGeometryFragment;
+    } else if (vertexShader != nullptr && geometryShader != nullptr &&
+               fragmentShader == nullptr && computeShader == nullptr &&
+               tessControlShader == nullptr && tessEvalShader == nullptr) {
+        // Sprint 15 Day 18 (CKPT191) — VS+GS no-FS path. CTS SILS GS tests
+        // build VS+GS-only programs with GL_RASTERIZER_DISCARD; image writes
+        // happen in the GS body. Previously rejected as Unknown at link
+        // (CKPT164 prior characterization).
+        kind = ProgramKind::VertexGeometry;
     } else if (vertexShader != nullptr && fragmentShader != nullptr &&
                tessEvalShader != nullptr &&
                computeShader == nullptr) {
@@ -21385,6 +21404,67 @@ bool GLContext::linkProgram(GLuint program) {
             if (vsOk && fsOk) {
                 programObject->vertexReflection = std::move(vsRefl);
                 programObject->fragmentReflection = std::move(fsRefl);
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::VertexGeometry: {
+            // Sprint 15 Day 18 (CKPT191) — VS+GS no-FS combination. Mirrors
+            // the VertexGeometryFragment branch's GS detection / emulation
+            // setup but skips fragment translation entirely. The draw-time
+            // pipeline path already handles `hasFragmentStage = false +
+            // rasterizerDiscard = true` for VertexOnly tests; we reuse the
+            // same nil-fragmentFunction + rasterizationEnabled=NO Metal
+            // pipeline configuration. CTS targets:
+            // shader_image_load_store.basic-allTargets-{loadStoreGS, atomicGS,
+            // loadStoreVS, atomicVS} (the GS variants build VS+GS only with
+            // image writes in the GS body; the VS variants don't reach this
+            // case). Prior characterization at CKPT164 §3 estimated this as
+            // multi-day infrastructure; the surgical scope ended up tractable
+            // because VertexOnly already wired the no-FS pipeline path.
+            ShaderReflection vsRefl, gsRefl;
+            const bool vsOk = translateCachedStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl);
+            std::string unusedGsMSL;
+            (void)translateCachedStage("geometry", geometryShader, unusedGsMSL, gsRefl);
+            programObject->geometryReflection = gsRefl;
+            // CPU GS emulation hookup — copy GS SPIR-V onto the program
+            // (survives shader detach/delete) and let the emulator decide
+            // whether it can handle this shader. Mirrors VertexGeometryFragment.
+            if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+                programObject->geometrySpirv = geometryShader->spirv;
+                if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                    programObject->vertexSpirv = vertexShader->spirv;
+                }
+                (void)appgl::detectGeometryEmulatable(*programObject);
+            }
+            // No mesh-shader path here: SILS GS targets need CPU emulation
+            // for image opcodes; the mesh path doesn't gate on FS but the
+            // SILS shape (image writes from GS body) lives entirely in the
+            // CPU interpreter.
+            if (programObject->metalGSTier == GLProgramObject::MetalGSTier::None &&
+                programObject->geometryEmulated) {
+                programObject->metalGSTier =
+                    GLProgramObject::MetalGSTier::CPUInterpreter;
+            }
+            if (programObject->geometryEmulated) {
+                Runtime::shared().recordShaderTranslation({
+                    programTag + "-geometry-cpu-emulation-no-fs", "geometry",
+                    quickHash(geometryShader->source),
+                    linkVertexHash, "",
+                    "VS+GS-no-FS program (CKPT191): geometry shader runs on "
+                    "the CPU emulator; pipeline fragmentFunction = nil + "
+                    "rasterizationEnabled = NO at draw time",
+                    "", true
+                });
+            }
+            if (vsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
+                // Empty fragmentMSL signals the no-FS pipeline path. The
+                // draw-time encoder treats this as legitimate when
+                // rasterizerDiscard is set (matches VertexOnly behaviour).
+                programObject->fragmentMSL.clear();
                 programObject->hasTranslatedPipeline = true;
                 rasterTranslationOk = true;
             }
