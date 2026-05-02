@@ -5348,6 +5348,43 @@ struct GLContext::Impl {
                     case GL_RGBA8:
                         bpp = 4;
                         break;
+                    // CKPT163 (Sprint 14 Day 10): extend storage-image
+                    // format gate to cover 16-byte / 8-byte texel
+                    // formats CTS shader_image_size.basic-nonMS-gs-*
+                    // and shader_image_load_store tests rely on. The
+                    // OpImageQuerySize/Read/Write handlers don't
+                    // actually use this `bpp` for write-only image
+                    // queries (size returned via slot.width/.height/
+                    // .depth from the Metal descriptor), but the gate
+                    // still controls whether the slot data buffer is
+                    // pre-allocated and read back via getBytes — so a
+                    // missing format here still skips the slot entry.
+                    case GL_RGBA32F:
+                    case GL_RGBA32I:
+                    case GL_RGBA32UI:
+                        bpp = 16;
+                        break;
+                    case GL_RG32F:
+                    case GL_RG32I:
+                    case GL_RG32UI:
+                    case GL_RGBA16F:
+                    case GL_RGBA16I:
+                    case GL_RGBA16UI:
+                    case GL_RGBA16:
+                    case GL_RGBA16_SNORM:
+                        bpp = 8;
+                        break;
+                    case GL_RG16F:
+                    case GL_RG16I:
+                    case GL_RG16UI:
+                    case GL_RGBA8I:
+                    case GL_RGBA8UI:
+                    case GL_RGBA8_SNORM:
+                    case GL_R11F_G11F_B10F:
+                    case GL_RGB10_A2:
+                    case GL_RGB10_A2UI:
+                        bpp = 4;
+                        break;
                     default:
                         break;
                 }
@@ -5359,14 +5396,35 @@ struct GLContext::Impl {
                     continue;
                 }
                 appgl::SampledTextureSlot& slot = slots[i];
-                slot.width = static_cast<std::uint32_t>(mtlTex.width);
-                slot.height = static_cast<std::uint32_t>(mtlTex.height);
+                // CKPT163 (Sprint 14 Day 10): honor the image binding's
+                // `level` for OpImageQuerySize. GL 4.6 §11.1.3.2 / §15.3.6
+                // require imageSize to return the BOUND level's
+                // dimensions, not level 0. Pre-fix returned mtlTex.width
+                // (always level 0), which surfaced via
+                // shader_image_size.basic-nonMS-gs-{f,i,u} where image_2d
+                // bound at level=1 of a 512x128 texture expects (256,64)
+                // but got (512,128). Downscale by 2^level with floor of 1.
+                const std::uint32_t boundLevel =
+                    static_cast<std::uint32_t>(std::max(0, ib.level));
+                auto levelDim = [&](NSUInteger base) -> std::uint32_t {
+                    NSUInteger v = base >> boundLevel;
+                    return static_cast<std::uint32_t>(std::max<NSUInteger>(v, 1));
+                };
+                slot.width = levelDim(mtlTex.width);
+                slot.height = levelDim(mtlTex.height);
                 // CKPT160 (Sprint 14 Day 7): populate depth field for
                 // OpImageQuerySize on 3D / array / cube-array storage
                 // images. Metal exposes either depth (3D) or arrayLength
                 // (array) — pick the larger as the third dimension.
-                slot.depth = static_cast<std::uint32_t>(
-                    std::max<NSUInteger>(mtlTex.depth, mtlTex.arrayLength));
+                // 3D textures' depth scales with mip level; array
+                // textures' arrayLength does NOT (CKPT163: per GL spec
+                // image array views report the same array count across
+                // all levels).
+                if (mtlTex.depth > 1) {
+                    slot.depth = levelDim(mtlTex.depth);
+                } else {
+                    slot.depth = static_cast<std::uint32_t>(mtlTex.arrayLength);
+                }
                 slot.bytesPerRow = slot.width * bpp;
                 slot.internalFormat = intFmt;
                 slot.samplerType = 0;  // not applicable for storage images
@@ -21530,11 +21588,43 @@ bool GLContext::linkProgram(GLuint program) {
             ShaderReflection gsRefl;
             (void)translateCachedStage("geometry", geometryShader,
                                        unusedGsMSL, gsRefl);
-            // Populate GS metadata so glGetProgramiv(GL_GEOMETRY_*)
-            // queries answer correctly on separable programs.
-            // detectGeometryEmulatable handles the parse + mode walk
-            // even when the body is outside the emulator's subset.
+            // CKPT163 (Sprint 14 Day 10): persist the GS reflection on
+            // the program. Pre-fix it was captured into a local that
+            // immediately fell out of scope, so the runtime
+            // (buildStorageImageMap, buildSampledTextureMap, draw-path
+            // resource resolution) saw an empty reflection on every
+            // separable GS-only program. Sister to the VS+GS+FS path at
+            // line 20668 which always persisted gsRefl.
+            programObject->geometryReflection = gsRefl;
+            // Sister-fix: translateCachedStage above bails before
+            // reflect() if spirvToMSL fails or returns empty, which
+            // happens for GS shaders that SPIRV-Cross can't fully
+            // translate (e.g. complex EmitVertex / EmitStreamVertex
+            // shapes used by CTS shader_image_size.basic-nonMS-gs-*).
+            // Direct reflect-only fallback walks the SPIR-V again
+            // and populates `storageImages`/`sampledTextures`/
+            // `uniformBlocks`/`storageBuffers` even when MSL emit
+            // failed — the GS interpreter doesn't need MSL anyway,
+            // only the reflection metadata.
             if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+                if (programObject->geometryReflection.storageImages.empty() &&
+                    programObject->geometryReflection.sampledTextures.empty() &&
+                    programObject->geometryReflection.uniformBlocks.empty()) {
+                    try {
+                        appgl::ShaderTranslator reflTranslator;
+                        appgl::BindingMap reflBindings;  // defaults are fine
+                                                          // for reflect-only.
+                        programObject->geometryReflection =
+                            reflTranslator.reflect(
+                                geometryShader->spirv.data(),
+                                geometryShader->spirv.size(),
+                                reflBindings, nullptr);
+                    } catch (...) {
+                        // If reflect throws, leave the empty
+                        // reflection in place — same end-state as
+                        // pre-fix.
+                    }
+                }
                 programObject->geometrySpirv = geometryShader->spirv;
                 (void)appgl::detectGeometryEmulatable(*programObject);
             }
