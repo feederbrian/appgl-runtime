@@ -289,6 +289,13 @@ public:
         storageImages_ = m;
     }
 
+    // CKPT162 (Sprint 14 Day 9): drain captured imageStore() writes
+    // accumulated during this interpreter's execution. Caller flushes
+    // them to Metal textures via replaceRegion: after GS completes.
+    std::vector<PendingImageWrite> takePendingImageWrites() {
+        return std::move(pendingImageWrites_);
+    }
+
     void setUniforms(const UniformValues* u) { uniforms_ = u; }
     void setVsInputs(const VertexAttribs* a, std::int32_t vertexID, std::int32_t instanceID) {
         vsAttribs_ = a;
@@ -431,6 +438,12 @@ private:
     // sampledTextures_ because the GL binding model is different —
     // image units are a separate namespace from sampler units.
     const SampledTextureMap* storageImages_ = nullptr;
+    // CKPT162 (Sprint 14 Day 9): captured imageStore() writes during
+    // GS interpreter execution. Drained by takePendingImageWrites()
+    // after the body walk; the runtime flushes each write to its
+    // bound Metal texture via replaceRegion: so subsequent reads
+    // (glGetTexImage / FS samples) see the GS-emitted data.
+    std::vector<PendingImageWrite> pendingImageWrites_;
 
     // Synthetic "sampled image handle" tracked through the SPIR-V
     // body walk. OpAccessChain on a sampler-array variable, OpLoad
@@ -3119,22 +3132,72 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
-            // CKPT160 (Sprint 14 Day 7): OpImageWrite — currently a no-op
-            // in the GS interpreter. Full implementation requires
-            // shadowing the destination storage image's CPU buffer and
-            // syncing back to Metal after GS execution. Without this,
-            // shaders that write storage images from GS (e.g.
-            // shader_image_size.basic-nonMS-gs-* writes results to
-            // g_result iimage2D) will still fail validation since the
-            // captured data is never produced. The op is accepted at
-            // body-walk so the broader shader continues; full sync is
-            // future work (sister to Tess emulator OpImage gap).
-            //   OpImageWrite: w[0]=image, w[1]=coord, w[2]=texel
+            // CKPT162 (Sprint 14 Day 9): OpImageWrite — captures the
+            // store into pendingImageWrites_ for the runtime to flush
+            // to Metal via replaceRegion: after GS execution. Builds
+            // on CKPT160 acceptance into isSupportedGsOpcode.
+            //   OpImageWrite: w[0]=image, w[1]=coord, w[2]=texel,
+            //                 [w[3..]=imageOperands]
             case spv::OpImageWrite: {
+                auto sIt = sampledImages_.find(w[0]);
+                if (sIt == sampledImages_.end()) { pc += wc; break; }
+                const SampledImageHandle& h = sIt->second;
+                if (!h.isStorage || storageImages_ == nullptr) {
+                    pc += wc; break;
+                }
+                auto arrIt = storageImages_->find(h.arrayVarId);
+                if (arrIt == storageImages_->end() ||
+                    h.elementIdx >= arrIt->second.size()) {
+                    pc += wc; break;
+                }
+                Value coordV{}, texelV{};
+                if (!tryGetValue(w[1], coordV) ||
+                    !tryGetValue(w[2], texelV)) {
+                    pc += wc; break;
+                }
+                PendingImageWrite pw;
+                pw.arrayVarId = h.arrayVarId;
+                pw.elementIdx = h.elementIdx;
+                // Coord is ivec2 / ivec3 / int (pack into 3-int vec).
+                auto coordI = [&](int idx) -> std::int32_t {
+                    if (idx >= coordV.componentCount()) return 0;
+                    if (coordV.isIntKind() ||
+                        coordV.kind == Value::Kind::UInt ||
+                        coordV.kind == Value::Kind::UInt2 ||
+                        coordV.kind == Value::Kind::UInt3 ||
+                        coordV.kind == Value::Kind::UInt4) {
+                        return coordV.i[idx];
+                    }
+                    return static_cast<std::int32_t>(coordV.f[idx]);
+                };
+                pw.coord[0] = coordI(0);
+                pw.coord[1] = coordI(1);
+                pw.coord[2] = coordI(2);
+                // Texel can be ivec4 / uvec4 / vec4 / scalar; pack into
+                // 4×u32. For float texels, reinterpret-cast.
+                const SampledTextureSlot& slot = arrIt->second[h.elementIdx];
+                pw.internalFormat = slot.internalFormat;
+                const int texelCount = std::min(4, texelV.componentCount());
+                if (texelV.isFloatKind()) {
+                    for (int k = 0; k < texelCount; ++k) {
+                        std::uint32_t bits = 0;
+                        std::memcpy(&bits, &texelV.f[k], 4);
+                        pw.value[k] = bits;
+                    }
+                } else {
+                    for (int k = 0; k < texelCount; ++k) {
+                        pw.value[k] = static_cast<std::uint32_t>(texelV.i[k]);
+                    }
+                }
+                pendingImageWrites_.push_back(pw);
                 if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
                     std::fprintf(stderr,
-                        "[GS-img] write: image=%u (no-op; sync-back to "
-                        "Metal not implemented)\n", w[1]);
+                        "[GS-img] write: var=%u elem=%u coord=(%d,%d,%d) "
+                        "value=(0x%X,0x%X,0x%X,0x%X) fmt=0x%X\n",
+                        pw.arrayVarId, pw.elementIdx,
+                        pw.coord[0], pw.coord[1], pw.coord[2],
+                        pw.value[0], pw.value[1], pw.value[2], pw.value[3],
+                        pw.internalFormat);
                 }
                 pc += wc;
                 break;
@@ -5482,6 +5545,17 @@ EmulatedDraw emulateGeometryDraw(
                 }
                 if (interp.didWritePrimitiveID()) {
                     d.hasPrimitiveID = true;
+                }
+                // CKPT162 (Sprint 14 Day 9): drain captured image writes
+                // for runtime sync-back after GS body completes.
+                {
+                    auto writes = interp.takePendingImageWrites();
+                    if (!writes.empty()) {
+                        d.pendingImageWrites.insert(
+                            d.pendingImageWrites.end(),
+                            std::make_move_iterator(writes.begin()),
+                            std::make_move_iterator(writes.end()));
+                    }
                 }
                 // Shift the per-invocation primEnds by the current
                 // emittedAll size so they remain valid indices into

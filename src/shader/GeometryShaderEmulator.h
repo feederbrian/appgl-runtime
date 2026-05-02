@@ -90,6 +90,23 @@ struct EmulatedVertex {
     std::uint32_t stream = 0;
 };
 
+// CKPT162 (Sprint 14 Day 9): captured imageStore() write from the GS
+// interpreter, deferred for sync-back to the bound Metal texture after
+// GS execution completes. The interpreter cannot write directly because
+// the storageImages_ map is const; instead it appends a record per
+// `imageStore` call, and the runtime walks these and applies them via
+// `replaceRegion:` on the bound MTLTexture. internalFormat drives the
+// per-channel byte layout; coord packs (x, y, z/layer) for the texel
+// position; value packs up to 4×u32 channels (covers the formats the
+// CPU shadow already handles: GL_RGBA32{I,UI,F}, GL_R32{I,UI,F}, etc.).
+struct PendingImageWrite {
+    std::uint32_t arrayVarId = 0;
+    std::uint32_t elementIdx = 0;
+    std::int32_t coord[3] = {0, 0, 0};
+    std::uint32_t value[4] = {0, 0, 0, 0};
+    std::uint32_t internalFormat = 0;
+};
+
 // Post-GS output topology + vertex buffer ready for GPU raster.
 struct EmulatedDraw {
     GLenum topology = 0;              // one of GL_POINTS / GL_LINE_STRIP / GL_TRIANGLE_STRIP
@@ -198,6 +215,14 @@ struct EmulatedDraw {
     // path so vertices write only to the buffer whose owner stream
     // matches the vertex's stream tag.
     std::vector<std::uint32_t> varyingStreams;
+    // CKPT162 (Sprint 14 Day 9): captured imageStore() writes from the
+    // GS interpreter. Appended by the OpImageWrite handler. The runtime
+    // walks this list after GS execution and applies each write to the
+    // bound Metal texture for the corresponding image binding via
+    // replaceRegion: so subsequent glGetTexImage / pipeline reads see
+    // the GS-emitted data. Empty when the GS doesn't use imageStore or
+    // emulation runs along the no-image path.
+    std::vector<PendingImageWrite> pendingImageWrites;
 };
 
 // Detect whether a program's GS stage can be emulated. Called once

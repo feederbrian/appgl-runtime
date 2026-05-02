@@ -5248,6 +5248,21 @@ struct GLContext::Impl {
         const bool trace = (std::getenv("APPGL_TRACE_GS_EMUL_TEX") != nullptr);
         if (spirv.empty() || reflection == nullptr ||
             reflection->storageImages.empty()) {
+            // CKPT162 (Sprint 14 Day 9): empty reflection.storageImages
+            // observed for VS+GS shaders that use storage images (e.g.
+            // shader_image_size.basic-nonMS-gs-* writes to g_result
+            // iimage2D but our ShaderTranslator reflection captures 0
+            // storageImages for the GS — multi-day upstream investigation
+            // into ShaderTranslator.cpp:2311 active-interface filter).
+            // Until that's fixed, the OpImageWrite sync-back path
+            // captures writes correctly but has no Metal texture to
+            // forward them to.
+            if (trace) {
+                std::fprintf(stderr,
+                    "[GS-img] buildStorageImageMap: empty (spirv=%zu refl=%d storageImages=%zu)\n",
+                    spirv.size(), reflection != nullptr,
+                    reflection ? reflection->storageImages.size() : 0);
+            }
             return result;
         }
         const auto vars = appgl::collectSamplerVarsFromSpirv(
@@ -7983,6 +7998,16 @@ struct GLContext::Impl {
     // `emulateGeometryDraw` succeeds.
     bool writeGsXfbAndCheckDiscard(GLProgramObject& program,
                                    const appgl::EmulatedDraw& ed);
+    // CKPT162 (Sprint 14 Day 9): flush captured imageStore() writes
+    // from the GS interpreter to bound Metal textures via
+    // replaceRegion:. Called from writeGsXfbAndCheckDiscard prior to
+    // the rasterizer-discard / TF-capture branches so the destination
+    // images carry GS-emitted data on either path.
+    void flushPendingImageWritesForStage(
+        const std::vector<appgl::PendingImageWrite>& writes,
+        const ShaderReflection* reflection,
+        const std::vector<std::uint32_t>& spirv,
+        GLProgramObject& program);
     // Synthesise a pass-through VS and encode the expanded vertex
     // buffer through the normal translated-draw encoder. Shared by
     // drawArrays and drawElements — the expanded buffer is already
@@ -14819,9 +14844,165 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
     }
 }
 
+// CKPT162 (Sprint 14 Day 9): flush pendingImageWrites captured during
+// GS interpreter execution to their bound Metal textures via
+// replaceRegion:. Called once per emulated GS draw, before the
+// XFB-and-discard check, so subsequent glGetTexImage / FS samples on
+// the destination images see the GS-emitted data.
+void GLContext::Impl::flushPendingImageWritesForStage(
+    const std::vector<appgl::PendingImageWrite>& writes,
+    const ShaderReflection* reflection,
+    const std::vector<std::uint32_t>& spirv,
+    GLProgramObject& program)
+{
+    if (writes.empty() || reflection == nullptr || spirv.empty()) return;
+    // Walk SPIR-V vars to map varId -> reflection storage-image entry
+    // (mirror of buildStorageImageMap's matching).
+    const auto vars = appgl::collectSamplerVarsFromSpirv(
+        spirv.data(), spirv.size());
+    for (const auto& pw : writes) {
+        // Find SPIR-V var matching pw.arrayVarId.
+        const appgl::SamplerVarInfo* matchingVar = nullptr;
+        for (const auto& v : vars) {
+            if (v.varId == pw.arrayVarId) { matchingVar = &v; break; }
+        }
+        if (matchingVar == nullptr) continue;
+        // Find reflection storage-image entry by name.
+        const ShaderReflection::ResourceBinding* imgRefl = nullptr;
+        for (const auto& si : reflection->storageImages) {
+            if (si.name == matchingVar->name) {
+                imgRefl = &si;
+                break;
+            }
+            constexpr const char* kPrefix = "_appgl_";
+            constexpr std::size_t kPrefixLen = 7;
+            if (matchingVar->name.compare(0, kPrefixLen, kPrefix) == 0 &&
+                si.name == matchingVar->name.substr(kPrefixLen)) {
+                imgRefl = &si;
+                break;
+            }
+        }
+        if (imgRefl == nullptr) continue;
+        // Resolve effective unit: layout binding default + element index,
+        // optionally overridden by glUniform1i (mirror of
+        // buildStorageImageMap's logic).
+        std::string lookupName = matchingVar->name;
+        constexpr const char* kPrefix = "_appgl_";
+        constexpr std::size_t kPrefixLen = 7;
+        if (lookupName.compare(0, kPrefixLen, kPrefix) == 0) {
+            lookupName = lookupName.substr(kPrefixLen);
+        }
+        GLuint effUnit = imgRefl->glBinding +
+                          static_cast<GLuint>(pw.elementIdx);
+        for (const auto& uinfo : program.uniforms) {
+            if (uinfo.name != lookupName) continue;
+            auto uvIt = program.uniformValues.find(uinfo.location);
+            if (uvIt != program.uniformValues.end() &&
+                pw.elementIdx <
+                    static_cast<std::uint32_t>(uvIt->second.ints.size())) {
+                if (uvIt->second.ints[pw.elementIdx] >= 0) {
+                    effUnit = static_cast<GLuint>(
+                        uvIt->second.ints[pw.elementIdx]);
+                }
+            }
+            break;
+        }
+        if (effUnit >= kMaxImageUnits) continue;
+        const auto& ib = imageBindings[effUnit];
+        if (ib.texture == 0) continue;
+        GLTextureObject* texObj = objects->textures().get(ib.texture);
+        if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+        id<MTLTexture> mtlTex = (__bridge id<MTLTexture>)texObj->metalTexture;
+        if (mtlTex.width == 0 || mtlTex.height == 0) continue;
+        // Encode the texel into a small native-format buffer per the
+        // stored internalFormat. Initial format set covers the cases
+        // CTS shader_image_size + shader_image_load_store actually use
+        // for g_result and friends.
+        std::uint8_t buf[16] = {};
+        std::size_t texelBytes = 0;
+        switch (pw.internalFormat) {
+            case GL_RGBA32I:
+            case GL_RGBA32UI:
+            case GL_RGBA32F: {
+                std::memcpy(buf,      &pw.value[0], 4);
+                std::memcpy(buf + 4,  &pw.value[1], 4);
+                std::memcpy(buf + 8,  &pw.value[2], 4);
+                std::memcpy(buf + 12, &pw.value[3], 4);
+                texelBytes = 16;
+                break;
+            }
+            case GL_R32I:
+            case GL_R32UI:
+            case GL_R32F: {
+                std::memcpy(buf, &pw.value[0], 4);
+                texelBytes = 4;
+                break;
+            }
+            case GL_RGBA8:
+            case GL_RGBA8UI:
+            case GL_RGBA8I: {
+                buf[0] = static_cast<std::uint8_t>(pw.value[0] & 0xFF);
+                buf[1] = static_cast<std::uint8_t>(pw.value[1] & 0xFF);
+                buf[2] = static_cast<std::uint8_t>(pw.value[2] & 0xFF);
+                buf[3] = static_cast<std::uint8_t>(pw.value[3] & 0xFF);
+                texelBytes = 4;
+                break;
+            }
+            default:
+                continue;  // Format not in the initial sync-back set.
+        }
+        if (texelBytes == 0) continue;
+        // Bound the coord to the texture extent. Defensive — shaders
+        // that compute out-of-range coords spec-wise no-op the store.
+        if (pw.coord[0] < 0 ||
+            static_cast<NSUInteger>(pw.coord[0]) >= mtlTex.width) continue;
+        if (pw.coord[1] < 0 ||
+            static_cast<NSUInteger>(pw.coord[1]) >= mtlTex.height) continue;
+        const NSUInteger sliceLayer =
+            static_cast<NSUInteger>(std::max(0, pw.coord[2]));
+        MTLRegion region = MTLRegionMake2D(
+            static_cast<NSUInteger>(pw.coord[0]),
+            static_cast<NSUInteger>(pw.coord[1]),
+            1, 1);
+        @try {
+            [mtlTex replaceRegion:region
+                      mipmapLevel:0
+                            slice:sliceLayer
+                        withBytes:buf
+                      bytesPerRow:texelBytes
+                    bytesPerImage:texelBytes];
+        } @catch (NSException* exc) {
+            // Private-storage textures or array-target mismatches
+            // can throw; ignore — the test will fail value-check at
+            // glGetTexImage time, which surfaces a clearer signal
+            // than a runtime abort.
+        }
+        if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
+            std::fprintf(stderr,
+                "[GS-img] flush: var=%u elem=%u unit=%u tex=%u "
+                "coord=(%d,%d,%d) bytes=%zu fmt=0x%X\n",
+                pw.arrayVarId, pw.elementIdx, effUnit, ib.texture,
+                pw.coord[0], pw.coord[1], pw.coord[2], texelBytes,
+                pw.internalFormat);
+        }
+    }
+}
+
 bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     GLProgramObject& program, const appgl::EmulatedDraw& ed)
 {
+    // CKPT162 (Sprint 14 Day 9): flush captured imageStore writes from
+    // the GS interpreter to the bound Metal textures. Done before the
+    // XFB capture / rasterizer-discard handling so subsequent reads
+    // (glGetTexImage / FS samples) see the GS-emitted data on either
+    // branch.
+    if (!ed.pendingImageWrites.empty()) {
+        flushPendingImageWritesForStage(
+            ed.pendingImageWrites,
+            &program.geometryReflection,
+            program.geometrySpirv,
+            program);
+    }
     // Vertices-per-primitive for the emulator's *expanded*
     // topology. Strip outputs were decomposed to list form in
     // `emulateGeometryDraw`, so ed.topology is one of GL_POINTS /
