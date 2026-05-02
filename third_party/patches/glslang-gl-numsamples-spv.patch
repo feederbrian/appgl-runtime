@@ -1,5 +1,5 @@
 diff --git a/glslang/MachineIndependent/Initialize.cpp b/glslang/MachineIndependent/Initialize.cpp
-index d4f87a4..48af477 100644
+index d4f87a4..2470459 100644
 --- a/glslang/MachineIndependent/Initialize.cpp
 +++ b/glslang/MachineIndependent/Initialize.cpp
 @@ -6754,11 +6754,20 @@ void TBuiltIns::initialize(int version, EProfile profile, const SpvVersion& spvV
@@ -28,3 +28,28 @@ index d4f87a4..48af477 100644
          }
  
          if (version >= 150)
+@@ -6846,10 +6855,20 @@ void TBuiltIns::initialize(int version, EProfile profile, const SpvVersion& spvV
+                 "flat  in highp    int gl_SampleMaskIn[];"
+                 "     out highp    int gl_SampleMask[];"
+                 );
+-            if (spvVersion.spv == 0)
+-                stageBuiltins[EShLangFragment].append(  // GL_OES_sample_variables
+-                    "uniform lowp int gl_NumSamples;"
+-                    );
++            // AppGL Sprint 13 Day 12 (CKPT148): mirror CKPT103's fix from
++            // the GL profile path. Pre-CKPT148 the ES `uniform lowp int
++            // gl_NumSamples;` was gated on `spvVersion.spv == 0` — meaning
++            // it was suppressed when targeting SPIR-V. AppGL emits SPIR-V
++            // for the AppGL→Metal pipeline, so the gate left
++            // gl_NumSamples undeclared in ES 3.1 fragment shaders. CTS
++            // KHR-GL46.es_31_compatibility.sample_variables.* uses 91 ES
++            // 3.1 fragment shaders that reference gl_NumSamples and all
++            // failed to compile pre-CKPT148. Declare it unconditionally;
++            // SPIRV-Cross translates it to a Metal `[[sample_count]]`
++            // built-in or a runtime uniform feed at MSL emission time.
++            stageBuiltins[EShLangFragment].append(  // GL_OES_sample_variables
++                "uniform lowp int gl_NumSamples;"
++                );
+         }
+         stageBuiltins[EShLangFragment].append(
+             "highp float gl_FragDepthEXT;"       // GL_EXT_frag_depth
