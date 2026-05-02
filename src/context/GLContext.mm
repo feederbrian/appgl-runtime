@@ -34312,6 +34312,31 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                          PackedRGB10A2_UN, PackedRGB10A2_UI,
                          PackedRG11B10F, PackedRGB9E5F };
     SrcType srcType = SrcType::UNorm8;
+    // Sprint 15 Day 15 [packed_pixels-tooling] APPGL_TRACE_CONVERSION
+    // env-gated diagnostic: trace the source pixel-format detection
+    // entry. Sister to APPGL_TRACE_TF_VS / APPGL_DUMP_TF_VS_MSL pattern
+    // (env-gated stderr emission with structured diagnostic). Activates
+    // only when env set; inert by default — preserves CKPT182 baseline
+    // byte-for-byte. Used to disambiguate h4-A (Metal-side compressed
+    // source storage) / h4-B (srcType detection) / h4-C (CTS gradient
+    // tolerance) per CKPT184/185 hypothesis space. Cowork .gputrace
+    // analysis returns may correlate with these runtime values.
+    const bool traceConversion =
+        std::getenv("APPGL_TRACE_CONVERSION") != nullptr;
+    if (traceConversion) {
+        std::fprintf(stderr,
+            "[APPGL] trace-conv getTextureImage entry "
+            "tex=%u level=%d format=0x%04X type=0x%04X "
+            "internalFmt=0x%04X mtlPixelFormat=%lu "
+            "texWidth=%lu texHeight=%lu mipLevel=%lu "
+            "dstComponents=%zu dstPixelBytes=%zu typeIsPacked=%d\n",
+            texture, level, format, type,
+            obj->desc.internalFormat,
+            (unsigned long)pf,
+            (unsigned long)texWidth, (unsigned long)texHeight,
+            (unsigned long)mipLevel,
+            dstComponents, dstPixelBytes, typeIsPacked ? 1 : 0);
+    }
 
     switch (pf) {
         case MTLPixelFormatR32Float:       srcBpp = 4;  srcComponents = 1; srcType = SrcType::Float32; break;
@@ -34361,9 +34386,50 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         case MTLPixelFormatRG11B10Float:   srcBpp = 4;  srcComponents = 3; srcType = SrcType::PackedRG11B10F; break;
         case MTLPixelFormatRGB9E5Float:    srcBpp = 4;  srcComponents = 3; srcType = SrcType::PackedRGB9E5F; break;
         default:
+            // Sprint 15 Day 15 [packed_pixels-tooling] env-gated trace:
+            // capture which Metal pixel format hit the unsupported-
+            // default case. For compressed sources (BC4/BC5/BPTC),
+            // this is the expected path UNLESS our impl decompresses
+            // to an RGBA8/etc. shadow format pre-readback.
+            if (std::getenv("APPGL_TRACE_CONVERSION") != nullptr) {
+                std::fprintf(stderr,
+                    "[APPGL] trace-conv getTextureImage UNSUPPORTED-PF "
+                    "tex=%u mtlPixelFormat=%lu internalFmt=0x%04X "
+                    "→ INVALID_OPERATION\n",
+                    texture, (unsigned long)pf,
+                    obj->desc.internalFormat);
+            }
             // Unsupported Metal pixel format for readback.
             pushError(GL_INVALID_OPERATION);
             return false;
+    }
+    if (traceConversion) {
+        // Trace successful srcType selection — distinguishes h4-B
+        // (srcType detection wrong) from h4-A/h4-C.
+        const char* srcTypeName = "?";
+        switch (srcType) {
+            case SrcType::Float32: srcTypeName = "Float32"; break;
+            case SrcType::Float16: srcTypeName = "Float16"; break;
+            case SrcType::UNorm8:  srcTypeName = "UNorm8"; break;
+            case SrcType::SNorm8:  srcTypeName = "SNorm8"; break;
+            case SrcType::UNorm16: srcTypeName = "UNorm16"; break;
+            case SrcType::SNorm16: srcTypeName = "SNorm16"; break;
+            case SrcType::UInt8:   srcTypeName = "UInt8"; break;
+            case SrcType::SInt8:   srcTypeName = "SInt8"; break;
+            case SrcType::UInt16:  srcTypeName = "UInt16"; break;
+            case SrcType::SInt16:  srcTypeName = "SInt16"; break;
+            case SrcType::UInt32:  srcTypeName = "UInt32"; break;
+            case SrcType::SInt32:  srcTypeName = "SInt32"; break;
+            case SrcType::PackedRGB10A2_UN: srcTypeName = "PackedRGB10A2_UN"; break;
+            case SrcType::PackedRGB10A2_UI: srcTypeName = "PackedRGB10A2_UI"; break;
+            case SrcType::PackedRG11B10F:   srcTypeName = "PackedRG11B10F"; break;
+            case SrcType::PackedRGB9E5F:    srcTypeName = "PackedRGB9E5F"; break;
+        }
+        std::fprintf(stderr,
+            "[APPGL] trace-conv getTextureImage detected "
+            "srcType=%s srcBpp=%lu srcComponents=%lu\n",
+            srcTypeName, (unsigned long)srcBpp,
+            (unsigned long)srcComponents);
     }
 
     // Determine how many slices we need to read — 2D arrays use
