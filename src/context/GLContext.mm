@@ -31041,6 +31041,29 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
         const GLTextureObject* tex = impl_->objects->textures().get(name);
         if (tex == nullptr) return false;
         if (tex->desc.immutable) return true; // texStorage initialises all levels
+        // GL 4.6 §8.17 — multisample textures (TEXTURE_2D_MULTISAMPLE
+        // and TEXTURE_2D_MULTISAMPLE_ARRAY) have NO mipmap chain by
+        // spec: completeness only requires the single base level to be
+        // defined. The general mipmap-completeness loop below would
+        // otherwise reject MS textures that legitimately have only
+        // level 0 (the natural-max derived from base-level dimensions
+        // requests log2(max-dim) levels which never exist for MS).
+        // CKPT174 EMERGENCY (Sprint 15 Day 3): regression repair after
+        // CKPT159 (`309cbbe`) cleared desc.immutable on MS textures
+        // created via legacy glTexImage*Multisample — that fix is
+        // correct for ARB_texture_view's origtexture mutability check,
+        // but exposed this latent assumption that non-immutable always
+        // implies a mipmap chain. Restores copy_image.samples_mismatch
+        // (regressed from 324/324 in Sprint 13 close to 323/324 in
+        // Sprint 14 close).
+        const GLenum tgt = tex->desc.target != 0 ? tex->desc.target : tex->target;
+        const bool isMSTarget =
+            (tgt == GL_TEXTURE_2D_MULTISAMPLE ||
+             tgt == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+        if (isMSTarget) {
+            auto it = tex->levels.find(0);
+            return it != tex->levels.end() && it->second.defined;
+        }
         if (tex->levels.empty()) return false;
         // GL 4.6 §8.17 mipmap completeness: a non-immutable texture is
         // complete only if every level in [base, effectiveMax] is defined.
