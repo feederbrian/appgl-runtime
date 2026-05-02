@@ -28252,18 +28252,54 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     // through SSBOs exclusively) but the path is symmetric with the
     // graphics uboBindings resolver — walk each reflected block,
     // look up the bound buffer via glBindBufferBase, forward it.
+    //
+    // CKPT143 (Sprint 13 Day 7): UBO array support. SPIRV-Cross emits a
+    // UBO array (`uniform B { ... } b[N]`) as N separate `[[buffer(M)]]`
+    // / `[[buffer(M+1)]]` … `[[buffer(M+N-1)]]` slots. CTS
+    // shading_language_420pack.binding_uniform_block_array binds 14
+    // separate UBOs to GL slots 2..15 and expects each shader element
+    // `goku[i]` to read from the bound buffer at GL slot 2+i. Pre-fix
+    // only the first element resolved; the other 13 stayed unbound and
+    // returned zero, failing the per-element verification. Mirrors the
+    // graphics-path resolveUBOBindings array iteration at line 5111+.
     for (const auto& ubo : programObject->computeReflection.uniformBlocks) {
-        const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
-            GL_UNIFORM_BUFFER, ubo.glBinding);
-        if (binding.buffer == 0) continue;
-        const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
-        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+        if (ubo.name == "_DefaultUniforms") continue;
+        const int numInstances = (ubo.blockArraySize > 0)
+            ? static_cast<int>(ubo.blockArraySize) : 1;
+        const bool isArray = (ubo.blockArraySize > 0);
+        for (int inst = 0; inst < numInstances; ++inst) {
+            // Build the lookup name: "B" or "B[0]", "B[1]" … so
+            // glUniformBlockBinding-driven binding overrides on a
+            // specific element honor the resourceUniformBlocks map.
+            std::string lookupName = ubo.name;
+            if (isArray) {
+                lookupName += "[" + std::to_string(inst) + "]";
+            }
+            // Default per-element binding is glBinding+inst (consecutive
+            // slots, GL 4.6 §7.6.2). Override with resourceUniformBlocks
+            // location if the app has called glUniformBlockBinding.
+            GLuint glBindingPoint = ubo.glBinding + static_cast<GLuint>(inst);
+            for (std::size_t bi = 0; bi < programObject->resourceUniformBlocks.size(); ++bi) {
+                if (programObject->resourceUniformBlocks[bi].name == lookupName) {
+                    GLint bp = programObject->resourceUniformBlocks[bi].location;
+                    if (bp >= 0) {
+                        glBindingPoint = static_cast<GLuint>(bp);
+                    }
+                    break;
+                }
+            }
+            const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
+                GL_UNIFORM_BUFFER, glBindingPoint);
+            if (binding.buffer == 0) continue;
+            const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+            if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
 
-        ComputeDispatchInfo::BufferBinding bb;
-        bb.metalBuffer = bufObj->metalBuffer;
-        bb.offset = static_cast<std::size_t>(binding.offset);
-        bb.metalSlot = ubo.metalBinding;
-        info.buffers.push_back(bb);
+            ComputeDispatchInfo::BufferBinding bb;
+            bb.metalBuffer = bufObj->metalBuffer;
+            bb.offset = static_cast<std::size_t>(binding.offset);
+            bb.metalSlot = ubo.metalBinding + static_cast<std::uint32_t>(inst);
+            info.buffers.push_back(bb);
+        }
     }
 
     // Texture/sampler bindings for compute stage. Less common than
@@ -28456,17 +28492,39 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         bb.metalSlot = ssbo.metalBinding;
         info.buffers.push_back(bb);
     }
+    // CKPT143 (Sprint 13 Day 7): UBO array support — see direct-dispatch
+    // path above for full rationale. Mirror here for dispatchComputeIndirect.
     for (const auto& ubo : programObject->computeReflection.uniformBlocks) {
-        const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
-            GL_UNIFORM_BUFFER, ubo.glBinding);
-        if (binding.buffer == 0) continue;
-        const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
-        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
-        ComputeDispatchInfo::BufferBinding bb;
-        bb.metalBuffer = bufObj->metalBuffer;
-        bb.offset = static_cast<std::size_t>(binding.offset);
-        bb.metalSlot = ubo.metalBinding;
-        info.buffers.push_back(bb);
+        if (ubo.name == "_DefaultUniforms") continue;
+        const int numInstances = (ubo.blockArraySize > 0)
+            ? static_cast<int>(ubo.blockArraySize) : 1;
+        const bool isArray = (ubo.blockArraySize > 0);
+        for (int inst = 0; inst < numInstances; ++inst) {
+            std::string lookupName = ubo.name;
+            if (isArray) {
+                lookupName += "[" + std::to_string(inst) + "]";
+            }
+            GLuint glBindingPoint = ubo.glBinding + static_cast<GLuint>(inst);
+            for (std::size_t bi = 0; bi < programObject->resourceUniformBlocks.size(); ++bi) {
+                if (programObject->resourceUniformBlocks[bi].name == lookupName) {
+                    GLint bp = programObject->resourceUniformBlocks[bi].location;
+                    if (bp >= 0) {
+                        glBindingPoint = static_cast<GLuint>(bp);
+                    }
+                    break;
+                }
+            }
+            const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
+                GL_UNIFORM_BUFFER, glBindingPoint);
+            if (binding.buffer == 0) continue;
+            const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+            if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+            ComputeDispatchInfo::BufferBinding bb;
+            bb.metalBuffer = bufObj->metalBuffer;
+            bb.offset = static_cast<std::size_t>(binding.offset);
+            bb.metalSlot = ubo.metalBinding + static_cast<std::uint32_t>(inst);
+            info.buffers.push_back(bb);
+        }
     }
     thread_local std::vector<std::uint8_t> computeUniformScratchIndirect;
     if (!programObject->uniformLayoutComputed
