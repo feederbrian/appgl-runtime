@@ -28309,29 +28309,129 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     // the resulting (texture, sampler) pair at the reflected slot.
     // The logic mirrors resolveSamplerBindings but targets the
     // compute slot space.
+    // CKPT144 (Sprint 13 Day 8): sampler-type-aware texture target lookup
+    // for compute. The pre-fix code probed GL_TEXTURE_2D first then fell
+    // back to boundTextureOnUnitAny — which iterates targets in
+    // {2D, 2D_ARRAY, CUBE_MAP, …, 1D, 1D_ARRAY, …} order and returns the
+    // first non-zero binding. CTS shading_language_420pack.binding_samplers_
+    // texture_type_{1D,1D_array,2D_array,2D_rect,3D,cube} declares the
+    // sampler with a non-2D type. gluStateReset binds a default texture
+    // (name 0) to every (unit, target) pair before each test, so the
+    // unit always has a 2D entry. Pre-fix: a `sampler1D` lookup hit the
+    // GL_TEXTURE_2D probe first and returned the default-2D texture
+    // (which Metal then refused to bind to a `texture1d` slot, or
+    // sampling returned zeros). Mirrors the graphics-path resolveSamplerBindings
+    // sampler-type → preferredTarget mapping at line 4607+.
+    auto preferredTargetForSamplerType = [](GLenum samplerGLType) -> GLenum {
+        switch (samplerGLType) {
+            case GL_SAMPLER_1D:
+            case GL_INT_SAMPLER_1D:
+            case GL_UNSIGNED_INT_SAMPLER_1D:
+            case GL_SAMPLER_1D_SHADOW:
+                return GL_TEXTURE_1D;
+            case GL_SAMPLER_2D:
+            case GL_INT_SAMPLER_2D:
+            case GL_UNSIGNED_INT_SAMPLER_2D:
+            case GL_SAMPLER_2D_SHADOW:
+                return GL_TEXTURE_2D;
+            case GL_SAMPLER_3D:
+            case GL_INT_SAMPLER_3D:
+            case GL_UNSIGNED_INT_SAMPLER_3D:
+                return GL_TEXTURE_3D;
+            case GL_SAMPLER_CUBE:
+            case GL_INT_SAMPLER_CUBE:
+            case GL_UNSIGNED_INT_SAMPLER_CUBE:
+            case GL_SAMPLER_CUBE_SHADOW:
+                return GL_TEXTURE_CUBE_MAP;
+            case GL_SAMPLER_1D_ARRAY:
+            case GL_INT_SAMPLER_1D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+            case GL_SAMPLER_1D_ARRAY_SHADOW:
+                return GL_TEXTURE_1D_ARRAY;
+            case GL_SAMPLER_2D_ARRAY:
+            case GL_INT_SAMPLER_2D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+            case GL_SAMPLER_2D_ARRAY_SHADOW:
+                return GL_TEXTURE_2D_ARRAY;
+            case GL_SAMPLER_2D_RECT:
+            case GL_INT_SAMPLER_2D_RECT:
+            case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+            case GL_SAMPLER_2D_RECT_SHADOW:
+                return GL_TEXTURE_RECTANGLE;
+            case GL_SAMPLER_BUFFER:
+            case GL_INT_SAMPLER_BUFFER:
+            case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+                return GL_TEXTURE_BUFFER;
+            case GL_SAMPLER_CUBE_MAP_ARRAY:
+            case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+            case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                return GL_TEXTURE_CUBE_MAP_ARRAY;
+            case GL_SAMPLER_2D_MULTISAMPLE:
+            case GL_INT_SAMPLER_2D_MULTISAMPLE:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+                return GL_TEXTURE_2D_MULTISAMPLE;
+            case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                return GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+            default:
+                return 0;
+        }
+    };
+
+    const bool traceCompSamp = std::getenv("APPGL_TRACE_COMP_SAMP") != nullptr;
     for (const auto& samp : programObject->computeReflection.sampledTextures) {
-        // Find the matching uniform to read its texture-unit value.
+        // Find the matching uniform to read its texture-unit value AND
+        // its sampler GL type (drives preferredTarget below).
         GLint uniformLoc = -1;
+        GLenum samplerGLType = 0;
         for (const auto& u : programObject->uniforms) {
             if (u.name == samp.name) {
                 uniformLoc = u.location;
+                samplerGLType = u.type;
                 break;
             }
         }
-        if (uniformLoc < 0) continue;
+        if (uniformLoc < 0) {
+            if (traceCompSamp) std::fprintf(stderr, "[CMP-SAMP] name=%s SKIP=no_uniform\n", samp.name.c_str());
+            continue;
+        }
         auto uvIt = programObject->uniformValues.find(uniformLoc);
         const GLuint unit = (uvIt != programObject->uniformValues.end() && !uvIt->second.ints.empty())
             ? static_cast<GLuint>(uvIt->second.ints[0]) : 0;
 
-        GLenum discoveredTarget = GL_TEXTURE_2D;
-        GLuint texName = impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_2D);
+        // Probe the sampler-type-derived target FIRST. Falls back to
+        // GL_TEXTURE_2D probe + any-target if the preferred target has no
+        // binding (e.g. a sampler2D uniform with the texture bound at
+        // GL_TEXTURE_RECTANGLE — same generic-2D-then-any pattern as
+        // before, but specific-first).
+        GLenum preferredTarget = preferredTargetForSamplerType(samplerGLType);
+        GLenum discoveredTarget = preferredTarget != 0 ? preferredTarget : GL_TEXTURE_2D;
+        GLuint texName = preferredTarget != 0
+            ? impl_->state->boundTextureOnUnit(unit, preferredTarget) : 0;
+        if (texName == 0) {
+            texName = impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_2D);
+            if (texName != 0) discoveredTarget = GL_TEXTURE_2D;
+        }
         if (texName == 0) {
             texName = impl_->state->boundTextureOnUnitAny(unit, &discoveredTarget);
         }
-        if (texName == 0) continue;
+        if (traceCompSamp) {
+            std::fprintf(stderr, "[CMP-SAMP] name=%s loc=%d type=0x%X unit=%u prefTgt=0x%X tex=%u tgt=0x%X metalSlot=%u",
+                samp.name.c_str(), uniformLoc, samplerGLType, unit, preferredTarget,
+                texName, discoveredTarget, samp.metalBinding);
+        }
+        if (texName == 0) {
+            if (traceCompSamp) std::fprintf(stderr, " SKIP=no_texture\n");
+            continue;
+        }
 
         GLTextureObject* texObj = impl_->objects->textures().get(texName);
-        if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+        if (texObj == nullptr || texObj->metalTexture == nullptr) {
+            if (traceCompSamp) std::fprintf(stderr, " SKIP=null_metalTexture\n");
+            continue;
+        }
         // Build the sampler state if dirty.
         if (texObj->samplerDirty) {
             impl_->rebuildTextureSamplerState(texName, *texObj);
@@ -28342,6 +28442,7 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         tb.metalSamplerState = texObj->metalSampler;
         tb.metalSlot = samp.metalBinding;
         info.textures.push_back(tb);
+        if (traceCompSamp) std::fprintf(stderr, " BOUND\n");
     }
 
     // Storage images (imageLoad/imageStore). Bound via
@@ -28541,17 +28642,58 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         info.computeUniformData = computeUniformScratchIndirect.data();
         info.computeUniformSize = computeUniformScratchIndirect.size();
     }
+    // CKPT144 (Sprint 13 Day 8): sampler-type-aware target lookup —
+    // see direct-dispatch path above for full rationale. Indirect mirror.
+    auto preferredTargetForSamplerType2 = [](GLenum samplerGLType) -> GLenum {
+        switch (samplerGLType) {
+            case GL_SAMPLER_1D: case GL_INT_SAMPLER_1D: case GL_UNSIGNED_INT_SAMPLER_1D:
+            case GL_SAMPLER_1D_SHADOW: return GL_TEXTURE_1D;
+            case GL_SAMPLER_2D: case GL_INT_SAMPLER_2D: case GL_UNSIGNED_INT_SAMPLER_2D:
+            case GL_SAMPLER_2D_SHADOW: return GL_TEXTURE_2D;
+            case GL_SAMPLER_3D: case GL_INT_SAMPLER_3D: case GL_UNSIGNED_INT_SAMPLER_3D:
+                return GL_TEXTURE_3D;
+            case GL_SAMPLER_CUBE: case GL_INT_SAMPLER_CUBE: case GL_UNSIGNED_INT_SAMPLER_CUBE:
+            case GL_SAMPLER_CUBE_SHADOW: return GL_TEXTURE_CUBE_MAP;
+            case GL_SAMPLER_1D_ARRAY: case GL_INT_SAMPLER_1D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY: case GL_SAMPLER_1D_ARRAY_SHADOW:
+                return GL_TEXTURE_1D_ARRAY;
+            case GL_SAMPLER_2D_ARRAY: case GL_INT_SAMPLER_2D_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY: case GL_SAMPLER_2D_ARRAY_SHADOW:
+                return GL_TEXTURE_2D_ARRAY;
+            case GL_SAMPLER_2D_RECT: case GL_INT_SAMPLER_2D_RECT:
+            case GL_UNSIGNED_INT_SAMPLER_2D_RECT: case GL_SAMPLER_2D_RECT_SHADOW:
+                return GL_TEXTURE_RECTANGLE;
+            case GL_SAMPLER_BUFFER: case GL_INT_SAMPLER_BUFFER:
+            case GL_UNSIGNED_INT_SAMPLER_BUFFER: return GL_TEXTURE_BUFFER;
+            case GL_SAMPLER_CUBE_MAP_ARRAY: case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY: case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                return GL_TEXTURE_CUBE_MAP_ARRAY;
+            case GL_SAMPLER_2D_MULTISAMPLE: case GL_INT_SAMPLER_2D_MULTISAMPLE:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE: return GL_TEXTURE_2D_MULTISAMPLE;
+            case GL_SAMPLER_2D_MULTISAMPLE_ARRAY: case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                return GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+            default: return 0;
+        }
+    };
     for (const auto& samp : programObject->computeReflection.sampledTextures) {
         GLint uniformLoc = -1;
+        GLenum samplerGLType = 0;
         for (const auto& u : programObject->uniforms) {
-            if (u.name == samp.name) { uniformLoc = u.location; break; }
+            if (u.name == samp.name) { uniformLoc = u.location; samplerGLType = u.type; break; }
         }
         if (uniformLoc < 0) continue;
         auto uvIt = programObject->uniformValues.find(uniformLoc);
         const GLuint unit = (uvIt != programObject->uniformValues.end() && !uvIt->second.ints.empty())
             ? static_cast<GLuint>(uvIt->second.ints[0]) : 0;
-        GLenum discoveredTarget = GL_TEXTURE_2D;
-        GLuint texName = impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_2D);
+        GLenum preferredTarget = preferredTargetForSamplerType2(samplerGLType);
+        GLenum discoveredTarget = preferredTarget != 0 ? preferredTarget : GL_TEXTURE_2D;
+        GLuint texName = preferredTarget != 0
+            ? impl_->state->boundTextureOnUnit(unit, preferredTarget) : 0;
+        if (texName == 0) {
+            texName = impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_2D);
+            if (texName != 0) discoveredTarget = GL_TEXTURE_2D;
+        }
         if (texName == 0) {
             texName = impl_->state->boundTextureOnUnitAny(unit, &discoveredTarget);
         }
