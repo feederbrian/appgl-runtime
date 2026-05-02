@@ -2135,21 +2135,44 @@ struct MetalFrameGraph::Impl {
                 pass.renderTargetArrayLength = info.fboColorArrayLength;
             }
             if (passDepthStencil != nil) {
-                pass.depthAttachment.texture = passDepthStencil;
-                pass.depthAttachment.storeAction = MTLStoreActionStore;
-                pass.stencilAttachment.texture = passDepthStencil;
-                pass.stencilAttachment.storeAction = MTLStoreActionStore;
-                if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
-                    pass.depthAttachment.loadAction = MTLLoadActionClear;
-                    pass.depthAttachment.clearDepth = pendingClearDepth;
-                } else {
-                    pass.depthAttachment.loadAction = MTLLoadActionLoad;
+                // CKPT168 (Sprint 14 Day 15): attach to depth/stencil
+                // pass slots only when the texture's pixel format is
+                // depth/stencil-renderable per Metal's format table.
+                // Pre-fix: blindly attached to BOTH slots regardless of
+                // format, which Metal validation rejected with
+                // "PixelFormat MTLPixelFormatDepth32Float is not
+                // stencil renderable" on layered FBOs that use
+                // depth-only attachments (CTS layered_framebuffer.
+                // depth_support; sub-shape A of CKPT165 5F target).
+                const MTLPixelFormat dsFormat = passDepthStencil.pixelFormat;
+                const bool fmtHasDepth =
+                    dsFormat == MTLPixelFormatDepth32Float ||
+                    dsFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+                    dsFormat == MTLPixelFormatDepth16Unorm;
+                const bool fmtHasStencil =
+                    dsFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+                    dsFormat == MTLPixelFormatStencil8 ||
+                    dsFormat == MTLPixelFormatX32_Stencil8 ||
+                    dsFormat == MTLPixelFormatX24_Stencil8;
+                if (fmtHasDepth) {
+                    pass.depthAttachment.texture = passDepthStencil;
+                    pass.depthAttachment.storeAction = MTLStoreActionStore;
+                    if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_DEPTH_BUFFER_BIT)) {
+                        pass.depthAttachment.loadAction = MTLLoadActionClear;
+                        pass.depthAttachment.clearDepth = pendingClearDepth;
+                    } else {
+                        pass.depthAttachment.loadAction = MTLLoadActionLoad;
+                    }
                 }
-                if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
-                    pass.stencilAttachment.loadAction = MTLLoadActionClear;
-                    pass.stencilAttachment.clearStencil = pendingClearStencil;
-                } else {
-                    pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+                if (fmtHasStencil) {
+                    pass.stencilAttachment.texture = passDepthStencil;
+                    pass.stencilAttachment.storeAction = MTLStoreActionStore;
+                    if (!isFBODraw && hasPendingClear && (pendingClearMask & GL_STENCIL_BUFFER_BIT)) {
+                        pass.stencilAttachment.loadAction = MTLLoadActionClear;
+                        pass.stencilAttachment.clearStencil = pendingClearStencil;
+                    } else {
+                        pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+                    }
                 }
             }
             if (!isFBODraw) {
