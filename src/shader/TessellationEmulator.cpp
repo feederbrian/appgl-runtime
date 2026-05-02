@@ -545,9 +545,44 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
             return out;
         }
         auto eIt = module.types.find(pIt->second.componentType);
-        if (eIt == module.types.end() ||
-            eIt->second.kind != appgl::interp::TypeInfo::Kind::Struct) {
-            out.diagnostic = "Input array of non-struct (id=" +
+        if (eIt == module.types.end()) {
+            out.diagnostic = "Input array with missing element type (id=" +
+                             std::to_string(varId) + "): " + info.name;
+            return out;
+        }
+        // Sprint 15 Day 23 (CKPT196): 4th accepted shape — bare
+        // scalar / vector array Inputs. CTS cull_distance.coverage
+        // uses `flat in int INPUT_TE_NAME[]` for chain propagation
+        // through TES (similarly `flat in vec4 foo[]` patterns are
+        // common). glslang emits these as `Array of scalar` (Int /
+        // UInt / Float / Bool) or `Array of vector` (Vec2 / Vec3 /
+        // Vec4) — no struct wrapping. Pre-existing classifier
+        // rejected these as "Input array of non-struct" because the
+        // initVariables branch (GeometryShaderEmulator.cpp ~1431+)
+        // only knew the struct-array seeding path. Component 6
+        // (Day 24+) extends initVariables to handle scalar-array
+        // seeding; this gate (Component 5) just admits the shape so
+        // the chain plumbing engages. Gated behind the existing
+        // APPGL_ENABLE_TESS_EMUL_GLIN=1 opt-in (already required for
+        // any non-builtin Input array). Inert by default.
+        using K = appgl::interp::TypeInfo::Kind;
+        const K eKind = eIt->second.kind;
+        const bool isScalarArray =
+            eKind == K::Bool || eKind == K::Int || eKind == K::UInt ||
+            eKind == K::Float;
+        const bool isVectorArray =
+            eKind == K::Vec2 || eKind == K::Vec3 || eKind == K::Vec4;
+        const bool isMatrixArray = eKind == K::Matrix;
+        if (isScalarArray || isVectorArray || isMatrixArray) {
+            // 4th accepted shape — proceed to next Input variable
+            // without further struct-decoration checks. Component 6
+            // (Day 24+) handles the per-vertex seeding from
+            // EmulatedDraw.varyingNames lookup keyed by the var's
+            // declared name (info.name).
+            continue;
+        }
+        if (eIt->second.kind != appgl::interp::TypeInfo::Kind::Struct) {
+            out.diagnostic = "Input array of non-struct/scalar/vector (id=" +
                              std::to_string(varId) + "): " + info.name;
             return out;
         }
