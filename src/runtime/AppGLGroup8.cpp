@@ -1530,6 +1530,18 @@ static const char* const kAppGLExtensionList[] = {
     // indexing) is already live; advertising flips the GLAD bool that
     // gates the gpu_shader5_gl.* tests' early-bail check.
     "GL_ARB_gpu_shader5",
+    // GL_ARB_compute_shader DELIBERATELY NOT ADVERTISED — CKPT155 (Sprint
+    // 14 Day 2) characterized the advertisement: 1 NS→Fail (basic-allFormats-
+    // loadStoreComputeStage now exercises Read() and image data comes back
+    // [0,0,0,0]) plus 2 deceptive-Pass→Fail regressions (basic-allTargets-
+    // {atomicCS,loadStoreCS} skipped via `return NO_ERROR` which CTS counts
+    // as Pass; advertising forces them to run RunStage(4) which hits the
+    // same image-data-zeroes bug on non-2D targets — TEXTURE_CUBE_MAP_ARRAY
+    // / TEXTURE_3D / TEXTURE_1D_ARRAY image bindings drop their writes).
+    // Net delta: −2 Pass / +3 Fail / −1 NS. Re-enable once compute-stage
+    // image load/store on non-2D targets is fixed (likely a missing usage
+    // bit + view/face-aware MTLTexture binding in resolveImageBindings for
+    // compute, similar to Session 13 bd39bb9 but for cube/array/3D).
     // GL_ARB_parallel_shader_compile / GL_KHR_parallel_shader_compile
     // — see GLCapabilities.mm for rationale (synchronous-compile
     // no-op implementation satisfies the CTS query surface).

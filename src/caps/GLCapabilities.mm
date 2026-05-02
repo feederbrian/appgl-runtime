@@ -1160,6 +1160,16 @@ void GLCapabilities::initializeExtensions() {
         // passes. The extension's dynamic-indexing additions align with
         // GL 4.0 core, which our SPIRV-Cross MSL emit covers.
         "GL_ARB_gpu_shader5 "
+        // GL_ARB_compute_shader DELIBERATELY NOT ADVERTISED — CKPT155
+        // (Sprint 14 Day 2) found 2 deceptive-Pass→Fail regressions:
+        // basic-allTargets-{atomicCS,loadStoreCS} return NO_ERROR (= Pass)
+        // from their unsupported-skip branch, but advertising forces the
+        // RunStage(4) compute path that fails with [0,0,0,0] image data
+        // for TEXTURE_CUBE_MAP_ARRAY / TEXTURE_3D / TEXTURE_1D_ARRAY
+        // image bindings + GL_INVALID_OPERATION post-test. Re-enable
+        // once compute-stage image load/store on non-2D targets is
+        // implemented (likely view-aware MTLTexture face/slice binding
+        // in resolveImageBindings, sister to Session 13 bd39bb9 for 2D).
         // GL_ARB_parallel_shader_compile / GL_KHR_parallel_shader_compile —
         // our compile is synchronous (one thread) so the API surface is a
         // spec-correct no-op: MAX_SHADER_COMPILER_THREADS tracks whatever
