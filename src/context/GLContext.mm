@@ -6998,27 +6998,94 @@ struct GLContext::Impl {
     }
 
     bool readStencilAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
-        if (attachment.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
-            return false;
-        }
-        const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
-        if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->stencil8.empty()) {
-            return false;
-        }
-        auto* out = static_cast<std::uint8_t*>(pixels);
-        for (GLsizei row = 0; row < height; ++row) {
-            for (GLsizei col = 0; col < width; ++col) {
-                const GLint srcX = x + col;
-                const GLint srcY = y + row;
-                const std::size_t dstOffset = static_cast<std::size_t>(row * width + col);
-                if (srcX < 0 || srcY < 0 || srcX >= renderbuffer->width || srcY >= renderbuffer->height) {
-                    out[dstOffset] = 0;
-                    continue;
-                }
-                out[dstOffset] = renderbuffer->stencil8[static_cast<std::size_t>(srcY) * static_cast<std::size_t>(renderbuffer->width) + static_cast<std::size_t>(srcX)];
+        if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
+            if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->stencil8.empty()) {
+                return false;
             }
+            auto* out = static_cast<std::uint8_t*>(pixels);
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const GLint srcX = x + col;
+                    const GLint srcY = y + row;
+                    const std::size_t dstOffset = static_cast<std::size_t>(row * width + col);
+                    if (srcX < 0 || srcY < 0 || srcX >= renderbuffer->width || srcY >= renderbuffer->height) {
+                        out[dstOffset] = 0;
+                        continue;
+                    }
+                    out[dstOffset] = renderbuffer->stencil8[static_cast<std::size_t>(srcY) * static_cast<std::size_t>(renderbuffer->width) + static_cast<std::size_t>(srcX)];
+                }
+            }
+            return true;
         }
-        return true;
+        // Sprint 15 Day 34 (CKPT207): Texture-kind depth-stencil attachment
+        // stencil readback. Sister-pattern reuse from Day 31 (CKPT204)
+        // GL_DEPTH_STENCIL handler: blit with `MTLBlitOptionStencilFromDepthStencil`
+        // to extract stencil into a separate buffer (Metal's depth-stencil
+        // getBytes layout isn't directly addressable for stencil-only).
+        // Pre-patch this case rejected outright via the Renderbuffer-only
+        // gate and pushed GL_INVALID_FRAMEBUFFER_OPERATION at the
+        // readPixels site (line 9123). CTS
+        // packed_pixels.pbo_rectangle.depth*_stencil8_format_*  surfaces
+        // these as "Valid format used but glReadPixels failed" for output =
+        // [GL_STENCIL_INDEX, *].
+        if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
+            const GLTextureObject* tex = objects->textures().get(attachment.object);
+            if (tex == nullptr || tex->metalTexture == nullptr) return false;
+            id<MTLTexture> metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
+            const MTLPixelFormat pf = metalTex.pixelFormat;
+            if (pf != MTLPixelFormatDepth24Unorm_Stencil8 &&
+                pf != MTLPixelFormatDepth32Float_Stencil8) {
+                return false;
+            }
+            if (device == nil || commandQueue == nil) return false;
+            const NSUInteger metalMipLevel =
+                static_cast<NSUInteger>(attachment.level);
+            const NSUInteger texW =
+                std::max<NSUInteger>(metalTex.width >> metalMipLevel, 1);
+            const NSUInteger texH =
+                std::max<NSUInteger>(metalTex.height >> metalMipLevel, 1);
+            const NSUInteger stencilBytesPerRow = texW;
+            const NSUInteger stencilBytesPerImage = stencilBytesPerRow * texH;
+            id<MTLBuffer> stencilBuf =
+                [device newBufferWithLength:stencilBytesPerImage
+                                    options:MTLResourceStorageModeShared];
+            if (stencilBuf == nil) return false;
+            id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+            id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+            MTLRegion region = MTLRegionMake2D(0, 0, texW, texH);
+            [blit copyFromTexture:metalTex sourceSlice:0 sourceLevel:metalMipLevel
+                     sourceOrigin:region.origin sourceSize:region.size
+                         toBuffer:stencilBuf destinationOffset:0
+            destinationBytesPerRow:stencilBytesPerRow
+          destinationBytesPerImage:stencilBytesPerImage
+                          options:MTLBlitOptionStencilFromDepthStencil];
+            [blit endEncoding];
+            [cmd commit];
+            [cmd waitUntilCompleted];
+            const std::uint8_t* stencilBytes =
+                static_cast<const std::uint8_t*>([stencilBuf contents]);
+            auto* out = static_cast<std::uint8_t*>(pixels);
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const GLint srcX = x + col;
+                    const GLint srcY = y + row;
+                    const std::size_t dstOffset =
+                        static_cast<std::size_t>(row * width + col);
+                    if (srcX < 0 || srcY < 0 ||
+                        srcX >= static_cast<GLint>(texW) ||
+                        srcY >= static_cast<GLint>(texH)) {
+                        out[dstOffset] = 0;
+                        continue;
+                    }
+                    out[dstOffset] = stencilBytes[
+                        static_cast<std::size_t>(srcY) * texW +
+                        static_cast<std::size_t>(srcX)];
+                }
+            }
+            return true;
+        }
+        return false;
     }
 
     // Write helpers for blitFramebuffer. They mirror readXxxAttachmentPixels and
