@@ -34158,18 +34158,34 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    // Sprint 15 Day 26 (CKPT199): GL 4.6 §8.5 / §18.3.1 — when
+    // GL_PIXEL_PACK_BUFFER is bound, `pixels` is a BYTE OFFSET into the
+    // bound PBO, NOT a client pointer. Offset 0 is perfectly legal.
+    // Sister to `readPixels` PBO handling at line 8906-8942 (Cowork
+    // TARGET 1 root-cause finding: getTextureImage lacked the PBO arm
+    // that readPixels has, so all `gl.getTexImage(..., 0)` calls under
+    // a bound PBO silently no-op'd at the `pixels == nullptr` early-
+    // return below — leaving the PBO at its 0xaa CTS sentinel fill,
+    // which on UNorm8 readback decodes to 0xaa/255.0 = 0.666667 and
+    // produces the test's "expected 0 got 0.666667" gradient mismatch.
+    // Affects packed_pixels.pbo_rectangle.* family — 15+ test cluster
+    // win path.
+    const bool packPBOBound =
+        impl_->state->boundBuffer(GL_PIXEL_PACK_BUFFER) != 0;
     // Level must be in-range relative to the texture's mipmap count.
     // CTS `textures_image_query_errors` passes level = MAX_TEXTURE_SIZE
     // (typically 16384) — without this guard the `getBytes:mipmapLevel:`
     // call below crashes inside AGX with "Specified mipmap level OOB".
-    if (pixels != nullptr) {
+    if (pixels != nullptr || packPBOBound) {
         id<MTLTexture> probeTex = (__bridge id<MTLTexture>)obj->metalTexture;
         if (static_cast<NSUInteger>(level) >= probeTex.mipmapLevelCount) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
     }
-    if (pixels == nullptr) return true;
+    // Null-pixel early-out only when no PBO is bound — otherwise null
+    // (== offset 0) is a valid PBO destination.
+    if (pixels == nullptr && !packPBOBound) return true;
 
     const std::size_t dstComponents = componentCountForFormat(format);
     const bool typeIsPacked = isPackedPixelType(type);
@@ -34190,6 +34206,31 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     NSUInteger mipLevel = static_cast<NSUInteger>(level);
     NSUInteger texWidth  = std::max<NSUInteger>(metalTex.width  >> mipLevel, 1);
     NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+
+    // Sprint 15 Day 26 (CKPT199): resolve GL_PIXEL_PACK_BUFFER offset
+    // → real shadow pointer EARLY, before the depth/stencil readback
+    // paths below dereference `pixels`. The original PBO resolution at
+    // line ~34386 only fires for the color path; depth and stencil
+    // readback paths used `static_cast<std::uint8_t*>(pixels)` directly,
+    // segfaulting on PBO offset=0. CTS
+    // packed_pixels.pbo_rectangle.depth_component_format_depth_component
+    // surfaces this as SIGSEGV after the dispatch-level PBO fix landed.
+    // Sister to readPixels resolvePackPBO call at line 8932-8942.
+    if (packPBOBound) {
+        const std::size_t earlyPackBytes =
+            static_cast<std::size_t>(texWidth) *
+            static_cast<std::size_t>(texHeight) *
+            std::max<std::size_t>(bytesPerPixel(format, type), 1);
+        const std::size_t earlyTypeBytes =
+            std::max<std::size_t>(bytesPerComponent(type), 1);
+        auto [earlyPackDest, earlyPackOk] =
+            impl_->resolvePackPBO(pixels, earlyPackBytes, earlyTypeBytes);
+        if (!earlyPackOk) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        pixels = earlyPackDest;
+    }
 
     // GL 4.6 §8.11.4 depth-format readback. The color converter below
     // doesn't know about Metal depth pixel formats and would push
@@ -34347,36 +34388,12 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         // OPERATION via the unsupported-source-format default arm.
     }
 
-    // GL 4.6 §8.11.4: when GL_PIXEL_PACK_BUFFER is bound, `pixels` is
-    // a byte offset into that buffer — NOT a client pointer. Resolve
-    // it through the shadow mirror; on failure (buffer too small,
-    // mis-aligned offset, mapped buffer, or missing PBO) push
-    // INVALID_OPERATION and return. Without this check, CTS
-    // `textures_image_query_errors` passes
-    // `BufferOffsetAsPointer(sizeof(GLuint))` with a buffer too small
-    // to hold the packed image and we segfault dereferencing the
-    // offset as a raw pointer.
-    //
-    // NOTE: bufferSize check below is "required rows × bytesPerRow"
-    // at the texture's mip level, which is what the spec says should
-    // be packed. Pack-state (alignment / row length / skip rows) is
-    // applied later in the write loop so this is an over-estimate
-    // when the tightest layout differs — still spec-safe because we
-    // reject EARLIER than the write.
-    const std::size_t packRequiredBytes =
-        static_cast<std::size_t>(texWidth) *
-        static_cast<std::size_t>(texHeight) *
-        dstPixelBytes;
-    auto [packDest, packOk] = impl_->resolvePackPBO(pixels, packRequiredBytes, dstBpc);
-    if (!packOk) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
-    }
-    // If a PBO is bound, redirect subsequent writes into the shadow;
-    // otherwise `pixels` is the client pointer and is unchanged.
-    if (packDest != pixels) {
-        pixels = packDest;
-    }
+    // GL 4.6 §8.11.4 PBO offset-resolution previously lived here, but
+    // Sprint 15 Day 26 (CKPT199) hoisted it earlier (right after
+    // texWidth/texHeight) so the depth/stencil readback paths above
+    // also see a real shadow pointer instead of dereferencing the PBO
+    // offset directly. The early-resolve covers all readback paths
+    // including the color converter below; this site is now redundant.
 
     // Determine source bytes-per-pixel from the Metal pixel format.
     MTLPixelFormat pf = metalTex.pixelFormat;

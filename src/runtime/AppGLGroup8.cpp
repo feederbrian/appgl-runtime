@@ -75,7 +75,22 @@ static void APIENTRY glLogicOp(GLenum opcode) {
 
 static void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, void *pixels) {
     auto* context = currentContextOrNull();
-    if (context == nullptr || pixels == nullptr) return;
+    if (context == nullptr) return;
+    // Sprint 15 Day 26 (CKPT199): GL 4.6 §8.5 / §18.3.1 — when
+    // GL_PIXEL_PACK_BUFFER is bound, `pixels` is a BYTE OFFSET into
+    // the bound PBO, NOT a client pointer. Offset 0 is perfectly
+    // legal (CTS `packed_pixels.pbo_rectangle.*` family passes
+    // `m_usePBO ? 0 : &buf[0]` and reads back via glMapBuffer).
+    // Pre-patch this null-pointer early-return silently dropped the
+    // call without ever reaching context->getTextureImage; the PBO
+    // stayed at its 0xaa CTS sentinel fill, decoding on UNorm8 to
+    // 0xaa/255.0 = 0.666667 — matching the test's "expected 0 got
+    // 0.666667" gradient mismatch shape (Cowork TARGET 1 finding).
+    // Affects ~15+ test cluster: compressed_red_rgtc1_format_*,
+    // compressed_signed_red_rgtc1_format_*, compressed_rg_rgtc2_format_*
+    // and similar pbo_rectangle variants.
+    const bool packPBOBound = context->state().boundBuffer(GL_PIXEL_PACK_BUFFER) != 0;
+    if (pixels == nullptr && !packPBOBound) return;
 
     // GL 4.6 §8.11.4: glGetTexImage accepts the cube-face targets
     // (GL_TEXTURE_CUBE_MAP_{POSITIVE,NEGATIVE}_{X,Y,Z}) as the `target`
