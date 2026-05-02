@@ -1,0 +1,109 @@
+diff --git a/glslang/MachineIndependent/Initialize.cpp b/glslang/MachineIndependent/Initialize.cpp
+index d4f87a4..f1673e6 100644
+--- a/glslang/MachineIndependent/Initialize.cpp
++++ b/glslang/MachineIndependent/Initialize.cpp
+@@ -6754,11 +6754,20 @@ void TBuiltIns::initialize(int version, EProfile profile, const SpvVersion& spvV
+                 "     out int  gl_SampleMask[];"
+                 );
+ 
+-            if (spvVersion.spv == 0) {
+-                stageBuiltins[EShLangFragment].append(
+-                    "uniform int gl_NumSamples;"
+-                );
+-            }
++            // AppGL Sprint 9 Phase 3 (CKPT103): expose gl_NumSamples even
++            // when targeting SPIR-V. The original `spvVersion.spv == 0`
++            // gate suppressed this for Vulkan-flavoured SPIR-V (Vulkan
++            // doesn't have gl_NumSamples — it uses
++            // SubpassInput / SampleMask attribute instead). But AppGL
++            // emulates OpenGL via Vulkan-target SPIR-V, and CTS
++            // sample_variables.* / shader_multisample_interpolation.* tests
++            // require gl_NumSamples to compile. Declare it
++            // unconditionally at the GL fragment-stage built-ins level —
++            // SPIRV-Cross can map it to a Metal `[[sample_count]]` or
++            // equivalent at MSL emission time, or a runtime-fed uniform.
++            stageBuiltins[EShLangFragment].append(
++                "uniform int gl_NumSamples;"
++            );
+         }
+ 
+         if (version >= 150)
+@@ -6846,10 +6855,20 @@ void TBuiltIns::initialize(int version, EProfile profile, const SpvVersion& spvV
+                 "flat  in highp    int gl_SampleMaskIn[];"
+                 "     out highp    int gl_SampleMask[];"
+                 );
+-            if (spvVersion.spv == 0)
+-                stageBuiltins[EShLangFragment].append(  // GL_OES_sample_variables
+-                    "uniform lowp int gl_NumSamples;"
+-                    );
++            // AppGL Sprint 13 Day 12 (CKPT148): mirror CKPT103's fix from
++            // the GL profile path. Pre-CKPT148 the ES `uniform lowp int
++            // gl_NumSamples;` was gated on `spvVersion.spv == 0` — meaning
++            // it was suppressed when targeting SPIR-V. AppGL emits SPIR-V
++            // for the AppGL→Metal pipeline, so the gate left
++            // gl_NumSamples undeclared in ES 3.1 fragment shaders. CTS
++            // KHR-GL46.es_31_compatibility.sample_variables.* uses 91 ES
++            // 3.1 fragment shaders that reference gl_NumSamples and all
++            // failed to compile pre-CKPT148. Declare it unconditionally;
++            // SPIRV-Cross translates it to a Metal `[[sample_count]]`
++            // built-in or a runtime uniform feed at MSL emission time.
++            stageBuiltins[EShLangFragment].append(  // GL_OES_sample_variables
++                "uniform lowp int gl_NumSamples;"
++                );
+         }
+         stageBuiltins[EShLangFragment].append(
+             "highp float gl_FragDepthEXT;"       // GL_EXT_frag_depth
+@@ -8774,7 +8793,17 @@ void TBuiltIns::initialize(const TBuiltInResource &resources, int version, EProf
+     }
+ 
+     // GL_ARB_cull_distance
+-    if (profile != EEsProfile && version >= 450) {
++    // AppGL Sprint 15 Day 19 (CKPT192): lower version gate from 450 to 130
++    // to mirror the gl_MaxClipDistances emission policy at line 8580 above.
++    // The CTS `cull_distance.coverage` test compiles a multi-stage pipeline
++    // with `#version 150 + #extension GL_ARB_cull_distance : require` and
++    // reads `gl_MaxCullDistances` via transform feedback. With the previous
++    // >=450 gate the constants weren't emitted, leaving the symbols undefined
++    // even though the test enabled the extension explicitly. Mirror the
++    // clip-distance behaviour so any GL profile with the extension declared
++    // sees the constants. Documented in
++    // third_party/patches/glslang-cull-distance-builtin-constants-version-gate.patch.
++    if (profile != EEsProfile && version >= 130) {
+         snprintf(builtInConstant, maxSize, "const int gl_MaxCullDistances = %d;",                resources.maxCullDistances);
+         s.append(builtInConstant);
+         snprintf(builtInConstant, maxSize, "const int gl_MaxCombinedClipAndCullDistances = %d;", resources.maxCombinedClipAndCullDistances);
+diff --git a/glslang/MachineIndependent/Versions.cpp b/glslang/MachineIndependent/Versions.cpp
+index ce705a3..d560f11 100644
+--- a/glslang/MachineIndependent/Versions.cpp
++++ b/glslang/MachineIndependent/Versions.cpp
+@@ -212,7 +212,7 @@ void TParseVersions::initializeExtensionBehavior()
+     extensionBehavior[E_GL_ARB_sparse_texture2]              = EBhDisable;
+     extensionBehavior[E_GL_ARB_sparse_texture_clamp]         = EBhDisable;
+     extensionBehavior[E_GL_ARB_shader_stencil_export]        = EBhDisable;
+-//    extensionBehavior[E_GL_ARB_cull_distance]                = EBhDisable;    // present for 4.5, but need extension control over block members
++    extensionBehavior[E_GL_ARB_cull_distance]                = EBhDisable;    // AppGL Sprint 15 Day 19 (CKPT192): registered so CTS cull_distance.coverage's `#extension GL_ARB_cull_distance : require` is accepted. Upstream comment ("need extension control over block members") referred to gl_PerVertex.gl_CullDistance gating; that's a separate concern from extension recognition itself.
+     extensionBehavior[E_GL_ARB_post_depth_coverage]          = EBhDisable;
+     extensionBehavior[E_GL_ARB_shader_viewport_layer_array]  = EBhDisable;
+     extensionBehavior[E_GL_ARB_fragment_shader_interlock]    = EBhDisable;
+@@ -521,7 +521,7 @@ void TParseVersions::getPreamble(std::string& preamble)
+             "#define GL_ARB_sample_shading 1\n"
+             "#define GL_ARB_shader_image_size 1\n"
+             "#define GL_ARB_shading_language_packing 1\n"
+-//            "#define GL_ARB_cull_distance 1\n"    // present for 4.5, but need extension control over block members
++            "#define GL_ARB_cull_distance 1\n"    // AppGL Sprint 15 Day 19 (CKPT192): emit the preprocessor define so `#ifdef GL_ARB_cull_distance` blocks compile.
+             "#define GL_ARB_post_depth_coverage 1\n"
+             "#define GL_ARB_fragment_shader_interlock 1\n"
+             "#define GL_ARB_uniform_buffer_object 1\n"
+diff --git a/glslang/MachineIndependent/Versions.h b/glslang/MachineIndependent/Versions.h
+index bb17dc9..cfb7428 100644
+--- a/glslang/MachineIndependent/Versions.h
++++ b/glslang/MachineIndependent/Versions.h
+@@ -149,7 +149,7 @@ const char* const E_GL_ARB_shader_ballot                = "GL_ARB_shader_ballot"
+ const char* const E_GL_ARB_sparse_texture2              = "GL_ARB_sparse_texture2";
+ const char* const E_GL_ARB_sparse_texture_clamp         = "GL_ARB_sparse_texture_clamp";
+ const char* const E_GL_ARB_shader_stencil_export        = "GL_ARB_shader_stencil_export";
+-// const char* const E_GL_ARB_cull_distance            = "GL_ARB_cull_distance";  // present for 4.5, but need extension control over block members
++const char* const E_GL_ARB_cull_distance                = "GL_ARB_cull_distance";  // AppGL Sprint 15 Day 19 (CKPT192): un-stubbed so CTS cull_distance.coverage's `#extension GL_ARB_cull_distance : require` declaration is accepted. Block-member level gating remains a separate upstream concern.
+ const char* const E_GL_ARB_post_depth_coverage          = "GL_ARB_post_depth_coverage";
+ const char* const E_GL_ARB_shader_viewport_layer_array  = "GL_ARB_shader_viewport_layer_array";
+ const char* const E_GL_ARB_fragment_shader_interlock    = "GL_ARB_fragment_shader_interlock";
