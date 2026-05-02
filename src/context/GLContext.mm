@@ -20261,6 +20261,12 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->metalVsTfComputePSOCache.clear();
     programObject->metalVsTfNeedsDescriptor = false;
     programObject->metalVsTfTier = GLProgramObject::MetalVsTfTier::None;
+    // Sprint 15 Q3-Option-B Phase 2 [metal-tf-vs]: clear the reflected
+    // output struct layout + pre-resolved TF varying sources so the
+    // relink-time gate produces a fresh layout (TF varying names may
+    // have changed via glTransformFeedbackVaryings between links).
+    programObject->vsTfOutputLayout = appgl::StageOutputLayout{};
+    programObject->vsTfResolvedSources.clear();
     // Step 7-4: release cached graphics-stage MTLFunctions on relink.
     releaseRetainedMetalObject(programObject->metalVertexFunction);
     programObject->metalVertexFunction = nullptr;
@@ -20669,18 +20675,98 @@ bool GLContext::linkProgram(GLuint program) {
                         programObject->vsTfAsComputeReflection =
                             ShaderReflection{};
                     }
+                    // Sprint 15 Q3-Option-B Phase 2 [metal-tf-vs]:
+                    // reflect the VS-as-compute output struct layout +
+                    // pre-resolve each declared TF varying name to a
+                    // (struct-offset, GL-packed-bytes) pair. Done once
+                    // at link time so Phase 3's draw-time TF writer
+                    // doesn't repeat the name lookup per dispatch.
+                    // Reflection runs whenever tier=VsAsCompute (both
+                    // direct-PSO and deferred-descriptor branches);
+                    // the layout is independent of stage_in attributes
+                    // (those affect input descriptor, not output struct).
+                    if (programObject->metalVsTfTier ==
+                            GLProgramObject::MetalVsTfTier::VsAsCompute) {
+                        programObject->vsTfOutputLayout =
+                            translator.reflectStageOutputLayout(
+                                vsSpirvData, vsSpirvWords, vsTfOpts);
+                        const auto& layout =
+                            programObject->vsTfOutputLayout;
+                        const auto& tfNames =
+                            programObject->transformFeedbackVaryingNames;
+                        programObject->vsTfResolvedSources.clear();
+                        programObject->vsTfResolvedSources.resize(
+                            tfNames.size());
+                        std::size_t resolvedCount = 0;
+                        for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                            const std::string& name = tfNames[i];
+                            for (const auto& m : layout.members) {
+                                if (m.name == name ||
+                                    (name == "gl_Position" &&
+                                     m.isBuiltIn &&
+                                     m.builtIn ==
+                                         spv::BuiltInPosition)) {
+                                    programObject
+                                        ->vsTfResolvedSources[i] = {
+                                        m.offset,
+                                        m.glPackedBytes > 0
+                                            ? m.glPackedBytes
+                                            : m.size};
+                                    ++resolvedCount;
+                                    break;
+                                }
+                            }
+                        }
+                        // If any TF varying name failed to resolve, the
+                        // gate stays in VsAsCompute tier but Phase 3's
+                        // draw-time path will fall back to the CPU
+                        // helper for safety (the name-mismatch could
+                        // be a stripBuffer probe target, an extension
+                        // syntax we don't reflect, or a true link
+                        // error already caught by linkProgram). The
+                        // diagnostic record makes the unresolved
+                        // varying easy to find post-mortem.
+                        if (resolvedCount < tfNames.size()) {
+                            std::string unresolved;
+                            for (std::size_t i = 0; i < tfNames.size();
+                                 ++i) {
+                                if (programObject->vsTfResolvedSources[i]
+                                        .bytes == 0) {
+                                    if (!unresolved.empty()) unresolved += ", ";
+                                    unresolved += tfNames[i];
+                                }
+                            }
+                            Runtime::shared().recordShaderTranslation({
+                                programTag +
+                                    "-vs-tf-varying-resolution",
+                                "vertex",
+                                quickHash(vertexShader->source),
+                                linkVertexHash, linkFragmentHash,
+                                std::string("metal-tf-vs unresolved "
+                                            "TF varying(s): ") +
+                                    unresolved,
+                                "", false
+                            });
+                        }
+                    }
                     if (std::getenv("APPGL_TRACE_TF_VS")) {
                         std::fprintf(stderr,
                             "[APPGL] tf-vs-probe program=%u "
                             "tfVaryings=%zu vsTfTier=%d "
-                            "needsDescriptor=%d psoOk=%d\n",
+                            "needsDescriptor=%d psoOk=%d "
+                            "structSize=%zu members=%zu "
+                            "resolved=%zu\n",
                             program,
                             programObject
                                 ->transformFeedbackVaryingNames.size(),
                             (int)programObject->metalVsTfTier,
                             programObject->metalVsTfNeedsDescriptor
                                 ? 1 : 0,
-                            vsTfPSO != nullptr ? 1 : 0);
+                            vsTfPSO != nullptr ? 1 : 0,
+                            programObject->vsTfOutputLayout.structSize,
+                            programObject->vsTfOutputLayout
+                                .members.size(),
+                            programObject->vsTfResolvedSources.size());
                     }
                 }
             }

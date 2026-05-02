@@ -910,6 +910,30 @@ struct GLProgramObject {
     };
     MetalVsTfTier metalVsTfTier = MetalVsTfTier::None;
 
+    // Sprint 15 Q3-Option-B Phase 2 [metal-tf-vs]: VS-as-compute output
+    // struct layout (member name + byte offset + GL-packed byte size).
+    // Sister of `tessEvalOutputLayout` — reflected at link time under
+    // `forceVertexForTessellation=true` so the bytes match the kernel-
+    // emitted output buffer's per-vertex stride. Phase 3's draw-time
+    // path uses this layout to copy per-vertex bytes into the bound
+    // GL_TRANSFORM_FEEDBACK_BUFFER at GL's interleaved/separate stride.
+    // Empty for non-VS-TF programs / when the link-time gate skipped.
+    appgl::StageOutputLayout vsTfOutputLayout;
+    // Sprint 15 Q3-Option-B Phase 2 [metal-tf-vs]: pre-resolved per-TF-
+    // varying source (struct-offset + byte-size) inside the VS-compute
+    // output struct, computed once at link time so the draw-time TF
+    // writer doesn't repeat the name lookup. One entry per declared TF
+    // varying (matches `transformFeedbackVaryingNames` order). Source
+    // with `bytes==0` indicates an unresolved varying name (Phase 3
+    // will emit GL_INVALID_OPERATION at draw time per GL 4.6 §13.2.1
+    // when this happens). `gl_Position` is special-cased to match the
+    // builtin's BuiltInPosition decoration.
+    struct VsTfTfSource {
+        std::size_t offset = 0;  // byte offset inside the MSL struct
+        std::size_t bytes = 0;   // GL-packed byte size for this varying
+    };
+    std::vector<VsTfTfSource> vsTfResolvedSources;
+
     // Which Metal tess draw path the link probe has cleared this
     // program for. Set at link time after the Phase-2-handleability
     // substring scan + Phase-3 VS-compute PSO availability check.

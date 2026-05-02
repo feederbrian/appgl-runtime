@@ -2758,12 +2758,26 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
         mslOpts.set_msl_version(2, 2);
         const auto execModel = compiler.get_execution_model();
         const bool isTessEval = (execModel == spv::ExecutionModelTessellationEvaluation);
+        const bool isVertex = (execModel == spv::ExecutionModelVertex);
         if (options.forceTessellation && isTessEval) {
             mslOpts.raw_buffer_tese_input = true;
             mslOpts.tess_domain_origin_lower_left = true;
         }
         if (options.forceTessEvalAsCompute && isTessEval) {
             mslOpts.tess_evaluation_as_compute = true;
+            mslOpts.capture_output_to_buffer = true;
+        }
+        // Sprint 15 Q3-Option-B Phase 2 [metal-tf-vs]: mirror the
+        // VS-as-compute MSL options here so the reflected output
+        // struct layout matches the kernel-emitted output buffer's
+        // per-vertex stride byte-for-byte. Without this gate, an
+        // identical SPIR-V would be reflected as a conventional
+        // `vertex` MSL output (returned struct) which can have
+        // different padding from the `kernel` form (capture-to-
+        // buffer struct), and the per-varying byte-offsets we
+        // resolve at link time would not match the runtime layout.
+        if (options.forceVertexForTessellation && isVertex) {
+            mslOpts.vertex_for_tessellation = true;
             mslOpts.capture_output_to_buffer = true;
         }
         compiler.set_msl_options(mslOpts);
