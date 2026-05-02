@@ -1150,6 +1150,15 @@ struct GLProgramObject {
     std::vector<UniformLayoutEntry> tessControlUniformLayout;
     std::vector<UniformLayoutEntry> tessVertexAsComputeUniformLayout;
     std::vector<UniformLayoutEntry> tessEvalAsComputeUniformLayout;
+    // Sprint 15 Day 27 (CKPT200): Phase 3b Component A — uniform-block
+    // layout cache for VS-as-compute (TF-VS path). Sister to
+    // `tessVertexAsComputeUniformLayout`; computed lazily on first
+    // dispatch via `computeStageUniformLayout(layout, reflection,
+    // uniforms)` and reused across draws (link-time stable).
+    // `buildStageUniformBuffer(scratch, reflection, uniformValues,
+    // layout)` packs current uniform values into the byte buffer fed
+    // to the VS-as-compute encoder at slot 16.
+    std::vector<UniformLayoutEntry> vsTfAsComputeUniformLayout;
     bool uniformLayoutComputed = false;
 };
 

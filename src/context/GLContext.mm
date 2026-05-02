@@ -26661,15 +26661,20 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             // its own default-uniform-block as a UBO at slot 16 (per
             // SPIRV-Cross's tess emit convention), which is exactly
             // what `program.uniforms` feeds when populated.
-            const bool noUniforms =
-                program->vsTfAsComputeReflection.uniformBlocks.empty();
+            // Sprint 15 Day 27 (CKPT200): Phase 3b proper Component A —
+            // relax the noUniforms gate and pack uniform bytes from
+            // program.uniformValues into the compute encoder at slot
+            // 16. Sister-pattern reuse from tess Phase 3 uniform path
+            // (line ~25584-25590, `tessVertexAsComputeUniformLayout`
+            // + `buildStageUniformBuffer`). The cached layout on the
+            // program object survives across draws (link-time stable);
+            // packing the byte buffer per draw is cheap.
             bool gpuTfHandled = false;
             if (dispatchGateOn &&
                 program->metalVsTfTier ==
                     GLProgramObject::MetalVsTfTier::VsAsCompute &&
                 program->metalVsTfComputePipelineState != nullptr &&
                 !program->metalVsTfNeedsDescriptor &&
-                noUniforms &&
                 program->vsTfOutputLayout.structSize > 0 &&
                 !program->vsTfResolvedSources.empty() &&
                 impl_->frameGraph != nullptr &&
@@ -26686,20 +26691,36 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                         program->vsTfOutputLayout.structSize;
                     std::vector<std::uint8_t> outBytes(
                         perVertexBytes * static_cast<std::size_t>(count));
-                    // Day 4 Phase 3a: bind no uniforms (uniformBytes=
-                    // nullptr). Programs that read default-uniform-
-                    // block values fall through to the CPU helper via
-                    // the encoder's diagnostic path; Phase 3b will
-                    // populate the uniform bytes from
-                    // `program->vsTfAsComputeReflection` +
-                    // `program->uniformValues`.
+                    // Phase 3b Component A: pack uniform bytes when
+                    // the VS reflection reports any uniform blocks.
+                    // Lazy layout-cache build on first dispatch.
+                    thread_local std::vector<std::uint8_t> vsTfUniformScratch;
+                    const std::uint8_t* uniformBytesPtr = nullptr;
+                    std::size_t uniformBytesLen = 0;
+                    if (!program->vsTfAsComputeReflection.uniformBlocks.empty()) {
+                        if (program->vsTfAsComputeUniformLayout.empty()) {
+                            computeStageUniformLayout(
+                                program->vsTfAsComputeUniformLayout,
+                                program->vsTfAsComputeReflection,
+                                program->uniforms);
+                        }
+                        if (!program->vsTfAsComputeUniformLayout.empty()) {
+                            buildStageUniformBuffer(
+                                vsTfUniformScratch,
+                                program->vsTfAsComputeReflection,
+                                program->uniformValues,
+                                program->vsTfAsComputeUniformLayout);
+                            uniformBytesPtr = vsTfUniformScratch.data();
+                            uniformBytesLen = vsTfUniformScratch.size();
+                        }
+                    }
                     const bool encodeOk =
                         impl_->frameGraph->encodeVsTfComputeDraw(
                             program->metalVsTfComputePipelineState,
                             static_cast<std::uint32_t>(count),
                             perVertexBytes,
-                            /*uniformBytes=*/nullptr,
-                            /*uniformLength=*/0,
+                            uniformBytesPtr,
+                            uniformBytesLen,
                             outBytes.data());
                     if (encodeOk) {
                         impl_->writeVsTfFromComputeOutput(
