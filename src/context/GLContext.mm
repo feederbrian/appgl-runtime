@@ -34409,6 +34409,106 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         // OPERATION via the unsupported-source-format default arm.
     }
 
+    // Sprint 15 Day 31 (CKPT204): GL 4.6 §8.11.4 — DEPTH_STENCIL
+    // readback. Sister to the DEPTH_COMPONENT handler immediately
+    // above. Format=GL_DEPTH_STENCIL + type=GL_UNSIGNED_INT_24_8
+    // requires extracting both 24-bit depth and 8-bit stencil and
+    // packing into a uint32 (high 24 bits = depth, low 8 bits =
+    // stencil per Table 8.5/8.6). Metal's depth-stencil textures
+    // need TWO blits with `MTLBlitOptionDepthFromDepthStencil` /
+    // `MTLBlitOptionStencilFromDepthStencil` to extract each
+    // component into separate buffers — getBytes layout for
+    // depth-stencil isn't directly addressable. Pre-patch this case
+    // hit the source-format-switch UNSUPPORTED-PF default arm and
+    // pushed INVALID_OPERATION (CKPT203 trace finding).
+    if (format == GL_DEPTH_STENCIL && type == GL_UNSIGNED_INT_24_8) {
+        const MTLPixelFormat pf = metalTex.pixelFormat;
+        if (pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+            pf == MTLPixelFormatDepth32Float_Stencil8) {
+            id<MTLDevice> mtlDevice = impl_->device;
+            id<MTLCommandQueue> mtlQueue = impl_->commandQueue;
+            if (mtlDevice == nil || mtlQueue == nil) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            // Two extraction blits — depth, then stencil. Depth size
+            // depends on storage format (4B Depth32Float, 4B
+            // Depth24Unorm). Stencil is always 1B.
+            const NSUInteger depthSrcBytes =
+                (pf == MTLPixelFormatDepth32Float_Stencil8) ? 4 : 4;
+            const NSUInteger depthBytesPerRow = texWidth * depthSrcBytes;
+            const NSUInteger depthBytesPerImage = depthBytesPerRow * texHeight;
+            const NSUInteger stencilBytesPerRow = texWidth * 1;
+            const NSUInteger stencilBytesPerImage = stencilBytesPerRow * texHeight;
+            id<MTLBuffer> depthBuf = [mtlDevice newBufferWithLength:depthBytesPerImage
+                                                            options:MTLResourceStorageModeShared];
+            id<MTLBuffer> stencilBuf = [mtlDevice newBufferWithLength:stencilBytesPerImage
+                                                              options:MTLResourceStorageModeShared];
+            if (depthBuf == nil || stencilBuf == nil) {
+                pushError(GL_OUT_OF_MEMORY);
+                return false;
+            }
+            id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
+            id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+            MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
+            [blit copyFromTexture:metalTex sourceSlice:0 sourceLevel:mipLevel
+                     sourceOrigin:region.origin sourceSize:region.size
+                         toBuffer:depthBuf destinationOffset:0
+            destinationBytesPerRow:depthBytesPerRow
+          destinationBytesPerImage:depthBytesPerImage
+                          options:MTLBlitOptionDepthFromDepthStencil];
+            [blit copyFromTexture:metalTex sourceSlice:0 sourceLevel:mipLevel
+                     sourceOrigin:region.origin sourceSize:region.size
+                         toBuffer:stencilBuf destinationOffset:0
+            destinationBytesPerRow:stencilBytesPerRow
+          destinationBytesPerImage:stencilBytesPerImage
+                          options:MTLBlitOptionStencilFromDepthStencil];
+            [blit endEncoding];
+            [cmd commit];
+            [cmd waitUntilCompleted];
+            const std::uint8_t* depthBytes =
+                static_cast<const std::uint8_t*>([depthBuf contents]);
+            const std::uint8_t* stencilBytes =
+                static_cast<const std::uint8_t*>([stencilBuf contents]);
+            auto readDepthFloat = [&](NSUInteger idx) -> float {
+                if (pf == MTLPixelFormatDepth32Float_Stencil8) {
+                    float v;
+                    std::memcpy(&v, depthBytes + idx * 4, 4);
+                    return v;
+                } else {
+                    // MTLPixelFormatDepth24Unorm_Stencil8 — depth blit
+                    // returns 4 bytes per pixel with depth in low 24
+                    // bits. Mask + normalise.
+                    std::uint32_t v;
+                    std::memcpy(&v, depthBytes + idx * 4, 4);
+                    return static_cast<float>(v & 0x00FFFFFF) /
+                           static_cast<float>(0x00FFFFFF);
+                }
+            };
+            auto* outBytes = static_cast<std::uint8_t*>(pixels);
+            const std::size_t pixCount = static_cast<std::size_t>(texWidth) *
+                                         static_cast<std::size_t>(texHeight);
+            auto clamp01 = [](float v) {
+                return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            };
+            for (std::size_t i = 0; i < pixCount; ++i) {
+                const float d = clamp01(readDepthFloat(i));
+                const std::uint32_t depth24 =
+                    static_cast<std::uint32_t>(d * 16777215.0f + 0.5f) & 0x00FFFFFF;
+                const std::uint8_t stencil8 = stencilBytes[i];
+                // GL_UNSIGNED_INT_24_8: depth in high 24 bits, stencil
+                // in low 8 bits (per GL 4.6 Table 8.5).
+                const std::uint32_t packed = (depth24 << 8) | stencil8;
+                std::memcpy(outBytes + i * 4, &packed, 4);
+            }
+            return true;
+        }
+        // Non-depth-stencil Metal pixel format with DEPTH_STENCIL GL
+        // format — fall through to the generic switch which raises
+        // INVALID_OPERATION via the unsupported-source-format default
+        // arm.
+    }
+
     // GL 4.6 §8.11.4 PBO offset-resolution previously lived here, but
     // Sprint 15 Day 26 (CKPT199) hoisted it earlier (right after
     // texWidth/texHeight) so the depth/stencil readback paths above
