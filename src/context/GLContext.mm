@@ -34464,9 +34464,23 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         case MTLPixelFormatRG16Float:      srcBpp = 4;  srcComponents = 2; srcType = SrcType::Float16; break;
         case MTLPixelFormatRGBA16Float:    srcBpp = 8;  srcComponents = 4; srcType = SrcType::Float16; break;
         case MTLPixelFormatR8Unorm:        srcBpp = 1;  srcComponents = 1; srcType = SrcType::UNorm8; break;
+        case MTLPixelFormatR8Unorm_sRGB:   srcBpp = 1;  srcComponents = 1; srcType = SrcType::UNorm8; break;
         case MTLPixelFormatRG8Unorm:       srcBpp = 2;  srcComponents = 2; srcType = SrcType::UNorm8; break;
-        case MTLPixelFormatRGBA8Unorm:     srcBpp = 4;  srcComponents = 4; srcType = SrcType::UNorm8; break;
-        case MTLPixelFormatBGRA8Unorm:     srcBpp = 4;  srcComponents = 4; srcType = SrcType::UNorm8; break;
+        case MTLPixelFormatRG8Unorm_sRGB:  srcBpp = 2;  srcComponents = 2; srcType = SrcType::UNorm8; break;
+        case MTLPixelFormatRGBA8Unorm:        srcBpp = 4;  srcComponents = 4; srcType = SrcType::UNorm8; break;
+        // Sprint 15 Day 29 (CKPT202): sRGB Metal pixel formats decode
+        // back to UNorm8 byte representation for getTexImage purposes.
+        // The sRGB encoding is on store/load, not in the byte storage
+        // itself — getTextureImage's spec semantics are byte-equivalent
+        // to the non-sRGB variant. Without these arms, every CTS
+        // packed_pixels.pbo_rectangle.{srgb8,srgb8_alpha8,
+        // compressed_srgb,compressed_srgb_alpha}.* test failed at
+        // INVALID_OPERATION via the default case below. Sister to the
+        // Day 26 PBO offset fix in scope (CPU-side path-selection bug;
+        // fail before reaching the data path).
+        case MTLPixelFormatRGBA8Unorm_sRGB:   srcBpp = 4;  srcComponents = 4; srcType = SrcType::UNorm8; break;
+        case MTLPixelFormatBGRA8Unorm:        srcBpp = 4;  srcComponents = 4; srcType = SrcType::UNorm8; break;
+        case MTLPixelFormatBGRA8Unorm_sRGB:   srcBpp = 4;  srcComponents = 4; srcType = SrcType::UNorm8; break;
         case MTLPixelFormatR8Snorm:        srcBpp = 1;  srcComponents = 1; srcType = SrcType::SNorm8; break;
         case MTLPixelFormatRG8Snorm:       srcBpp = 2;  srcComponents = 2; srcType = SrcType::SNorm8; break;
         case MTLPixelFormatRGBA8Snorm:     srcBpp = 4;  srcComponents = 4; srcType = SrcType::SNorm8; break;
