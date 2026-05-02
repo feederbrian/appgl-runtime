@@ -800,6 +800,37 @@ public:
                                      void** outFunction = nullptr,
                                      void* stageInputOutputDescriptor = nullptr);
 
+    // Sprint 15 Q3-Option-B Phase 3a [metal-tf-vs]: dispatch a VS-as-
+    // compute kernel (built via Phase 1's `forceVertexForTessellation`
+    // emission) and capture per-vertex output struct bytes into a
+    // Shared MTLBuffer. Used by VS+FS+TF programs (no GS, no tess) to
+    // replace the CPU `emulateVsOnlyDrawForTf` SPIR-V interpreter with
+    // a Metal-native compute dispatch.
+    //
+    // `vsComputePSO` — retained id<MTLComputePipelineState> from the
+    //   program's `metalVsTfComputePipelineState` (built at link time).
+    // `vertexCount` — per-vertex dispatch count (gridSize.x).
+    // `perVertexBytes` — size of the per-vertex output struct (matches
+    //   `program.vsTfOutputLayout.structSize`).
+    // `uniformBytes` / `uniformLength` — VS uniform-block bytes (bound
+    //   at `[[buffer(16)]]`); pass nullptr/0 if the VS uses no uniforms.
+    // `outBytes` — caller-provided buffer (size >= vertexCount *
+    //   perVertexBytes); receives the captured per-vertex output.
+    // Returns true on success, false on any Metal failure (caller
+    // should fall back to CPU `emulateVsOnlyDrawForTf`).
+    //
+    // Day 4 Phase 3a: handles attributeless VS programs (PSO built
+    // without MTLStageInputOutputDescriptor — i.e.
+    // `program.metalVsTfNeedsDescriptor == false`). Phase 3c (Day 6+)
+    // will extend this to VAO-bound stage-input programs via
+    // per-VAO PSO + buffer binding plumbing.
+    bool encodeVsTfComputeDraw(void* vsComputePSO,
+                               std::uint32_t vertexCount,
+                               std::size_t perVertexBytes,
+                               const void* uniformBytes,
+                               std::size_t uniformLength,
+                               std::uint8_t* outBytes);
+
     // Sprint 3 [metal-mesh-GS]: compile MSL source into a retained
     // id<MTLFunction> (no pipeline state). Used for the mesh-shader
     // path where the render PSO build is FBO-format-keyed and

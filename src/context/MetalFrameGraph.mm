@@ -4758,6 +4758,83 @@ fragment float4 appgl_immediate_textured_fs(
         return (void*)CFBridgingRetain(pso);
     }
 
+    // Sprint 15 Q3-Option-B Phase 3a [metal-tf-vs]: dispatch VS-as-
+    // compute kernel + capture per-vertex output bytes (no
+    // MTLStageInputOutputDescriptor — attributeless VS only). See
+    // public-API doc on `MetalFrameGraph::encodeVsTfComputeDraw`.
+    bool encodeVsTfComputeDraw(void* vsComputePSO,
+                               std::uint32_t vertexCount,
+                               std::size_t perVertexBytes,
+                               const void* uniformBytes,
+                               std::size_t uniformLength,
+                               std::uint8_t* outBytes)
+    {
+        if (vsComputePSO == nullptr || vertexCount == 0 ||
+            perVertexBytes == 0 || outBytes == nullptr) {
+            return false;
+        }
+        if (device == nil || commandQueue == nil) {
+            return false;
+        }
+        const NSUInteger totalBytes =
+            static_cast<NSUInteger>(perVertexBytes) *
+            static_cast<NSUInteger>(vertexCount);
+        id<MTLBuffer> outBuf =
+            [device newBufferWithLength:totalBytes
+                                options:MTLResourceStorageModeShared];
+        if (outBuf == nil) {
+            return false;
+        }
+        outBuf.label = @"appgl-vstf-out";
+
+        id<MTLCommandBuffer> cmdBuf = [commandQueue commandBuffer];
+        if (cmdBuf == nil) {
+            return false;
+        }
+        cmdBuf.label = @"appgl-vstf-vs-compute";
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+        if (enc == nil) {
+            return false;
+        }
+        id<MTLComputePipelineState> pso =
+            (__bridge id<MTLComputePipelineState>)vsComputePSO;
+        [enc setComputePipelineState:pso];
+        // Per-vertex output buffer at [[buffer(28)]] (matches SPIRV-
+        // Cross's default `shader_output_buffer_index`).
+        [enc setBuffer:outBuf offset:0 atIndex:28];
+        if (uniformBytes != nullptr && uniformLength > 0) {
+            [enc setBytes:uniformBytes
+                   length:uniformLength
+                  atIndex:16];
+        }
+        // Match the existing tess-as-compute VS encoder shape:
+        // dispatchThreads sets [[grid_size]] to vertexCount; SPIRV-
+        // Cross's emitted VS uses `gl_GlobalInvocationID.x` as the
+        // per-vertex index and bounds-checks via the
+        // spvStageInputSize early-return.
+        const NSUInteger maxPerTg =
+            pso.maxTotalThreadsPerThreadgroup > 0
+                ? pso.maxTotalThreadsPerThreadgroup : 32;
+        const NSUInteger tgWidth =
+            vertexCount < maxPerTg ? vertexCount : maxPerTg;
+        [enc dispatchThreads:MTLSizeMake(vertexCount, 1, 1)
+         threadsPerThreadgroup:MTLSizeMake(tgWidth, 1, 1)];
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+        if (cmdBuf.status == MTLCommandBufferStatusError) {
+            return false;
+        }
+
+        const std::uint8_t* contents =
+            static_cast<const std::uint8_t*>([outBuf contents]);
+        if (contents == nullptr) {
+            return false;
+        }
+        std::memcpy(outBytes, contents, totalBytes);
+        return true;
+    }
+
     // Sprint 3 [metal-mesh-GS]: compile MSL → retained MTLFunction.
     // Mesh render PSOs are FBO-format-keyed so the PSO build itself
     // happens at draw time, but the source-to-AIR compile is stable
@@ -5115,9 +5192,9 @@ fragment float4 appgl_immediate_textured_fs(
                 std::fprintf(stderr,
                     "[TESS-BUF] alloc vsOutBuf=%p (sz=%lu) cpOutBuf=%p (sz=%lu) patchOutBuf=%p (sz=%lu) "
                     "vertexCount=%lu patchCount=%d patchVertices=%d tessCtrlOutputVertices=%d\n",
-                    (void*)vsOutBuf, (unsigned long)vsOutBytes,
-                    (void*)cpOutBuf, (unsigned long)cpOutBytes,
-                    (void*)patchOutBuf, (unsigned long)patchOutBytes,
+                    (__bridge void*)vsOutBuf, (unsigned long)vsOutBytes,
+                    (__bridge void*)cpOutBuf, (unsigned long)cpOutBytes,
+                    (__bridge void*)patchOutBuf, (unsigned long)patchOutBytes,
                     (unsigned long)vertexCount, info.patchCount, info.patchVertices,
                     info.tessControlOutputVertices);
             }
@@ -8139,6 +8216,22 @@ void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::st
 
 void* MetalFrameGraph::compileMSLFunction(const std::string& msl, std::string* outError) {
     return impl_->compileMSLFunction(msl, outError);
+}
+
+// Sprint 15 Q3-Option-B Phase 3a [metal-tf-vs]: dispatch a VS-as-
+// compute kernel and capture per-vertex output bytes. Forwards to
+// Impl::encodeVsTfComputeDraw which has access to the private device
+// + commandQueue.
+bool MetalFrameGraph::encodeVsTfComputeDraw(void* vsComputePSO,
+                                            std::uint32_t vertexCount,
+                                            std::size_t perVertexBytes,
+                                            const void* uniformBytes,
+                                            std::size_t uniformLength,
+                                            std::uint8_t* outBytes)
+{
+    return impl_->encodeVsTfComputeDraw(vsComputePSO, vertexCount,
+                                        perVertexBytes, uniformBytes,
+                                        uniformLength, outBytes);
 }
 
 MetalFrameGraph::TessPipelineProbeResult MetalFrameGraph::probeTessellationPipeline(

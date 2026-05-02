@@ -8141,6 +8141,21 @@ struct GLContext::Impl {
         std::size_t perVertexSlotBytes,
         GLenum topology);
 
+    // Sprint 15 Q3-Option-B Phase 3a [metal-tf-vs]: TF writer + counter
+    // bump for the VS-as-compute path. Sister of
+    // `writeTessTFAndUpdateCounters` — uses `program.vsTfOutputLayout`
+    // + `program.vsTfResolvedSources` (populated at link time) to copy
+    // per-vertex bytes from the VS-as-compute Metal dispatch output
+    // buffer into the bound GL_TRANSFORM_FEEDBACK_BUFFER. Called from
+    // drawArrays / drawElements VS-only-TF gate when the GPU dispatch
+    // succeeds.
+    void writeVsTfFromComputeOutput(
+        GLProgramObject& program,
+        const std::uint8_t* vsOutBytes,
+        std::uint32_t totalVerts,
+        std::size_t perVertexSlotBytes,
+        GLenum topology);
+
     // Resolve the program the GS emulator should read from, handling
     // the separable-pipeline case. When `currentProgramName` is
     // non-zero (user called glUseProgram), returns that program
@@ -14896,6 +14911,197 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                 // CKPT94 #9-C foundation: tess-stage TF writes always
                 // go to stream 0 (no `EmitStreamVertex` in TES). Day 23
                 // adds GS-emul per-stream routing via the array.
+                tf->capturedVertexCount[0] += static_cast<GLsizei>(primsWritten * vpp);
+            }
+        }
+    }
+}
+
+// Sprint 15 Q3-Option-B Phase 3a [metal-tf-vs]: TF writer + counter
+// bump for the VS-as-compute path. Sister of `writeTessTFAndUpdateCounters`
+// (which sources tess-as-compute output) — this one sources its
+// per-vertex bytes from the VS-as-compute Metal dispatch output buffer +
+// `program.vsTfOutputLayout` / `program.vsTfResolvedSources` (both
+// populated at link time by the Phase 2 reflection block).
+//
+// Called from drawArrays / drawElements VS-only-TF gate when the GPU
+// compute dispatch (`MetalFrameGraph::encodeVsTfComputeDraw`) succeeds.
+// Mirrors the interleaved + separate-attribs branches of the tess-TF
+// writer; since VS-only-TF has no concept of "primitive vs vertex"
+// asymmetry (the VS runs once per vertex and TF writes are per-vertex),
+// this writer flattens the topology computation accordingly.
+void GLContext::Impl::writeVsTfFromComputeOutput(
+    GLProgramObject& program,
+    const std::uint8_t* vsOutBytes,
+    std::uint32_t totalVerts,
+    std::size_t perVertexSlotBytes,
+    GLenum topology)
+{
+    if (vsOutBytes == nullptr || totalVerts == 0 ||
+        perVertexSlotBytes == 0) {
+        return;
+    }
+    // Primitive count derived from topology + vertex count (same logic
+    // used by the tess-TF writer; needed for query counter updates).
+    auto vertsPerPrim = [](GLenum topo) -> std::size_t {
+        switch (topo) {
+            case GL_POINTS:                   return 1;
+            case GL_LINES:
+            case GL_LINE_STRIP:
+            case GL_LINE_LOOP:                return 2;
+            case GL_TRIANGLES:
+            case GL_TRIANGLE_STRIP:
+            case GL_TRIANGLE_FAN:             return 3;
+            case GL_LINES_ADJACENCY:
+            case GL_LINE_STRIP_ADJACENCY:     return 4;
+            case GL_TRIANGLES_ADJACENCY:
+            case GL_TRIANGLE_STRIP_ADJACENCY: return 6;
+            default:                          return 1;
+        }
+    };
+    const std::size_t vpp = vertsPerPrim(topology);
+    const std::size_t primsGenerated = (vpp > 0) ? (totalVerts / vpp) : 0;
+    std::size_t primsWritten = 0;
+
+    // Helper: write `bytes` length bytes to (buffer, bufOffset).
+    // Mirrors writeToBuffer in writeTessTFAndUpdateCounters.
+    auto writeToBuffer = [this](GLuint bufferName, std::size_t bufOffset,
+                                const std::uint8_t* src, std::size_t bytes) {
+        if (bufferName == 0 || bytes == 0) return;
+        GLBufferObject* buf = objects->buffers().get(bufferName);
+        if (buf == nullptr) return;
+        if (bufOffset + bytes > buf->shadowBytes.size()) return;
+        std::memcpy(buf->shadowBytes.data() + bufOffset, src, bytes);
+        if (buf->metalBuffer != nullptr) {
+            id<MTLBuffer> mb = (__bridge id<MTLBuffer>)buf->metalBuffer;
+            std::uint8_t* mc = static_cast<std::uint8_t*>([mb contents]);
+            if (mc != nullptr) {
+                std::memcpy(mc + bufOffset, src, bytes);
+            }
+        }
+    };
+
+    const bool doTF =
+        transformFeedbackActive &&
+        !program.transformFeedbackVaryingNames.empty() &&
+        !program.vsTfResolvedSources.empty();
+
+    if (doTF) {
+        const bool interleaved =
+            (program.transformFeedbackBufferMode == GL_INTERLEAVED_ATTRIBS);
+        const auto& sources = program.vsTfResolvedSources;
+
+        if (interleaved) {
+            auto binding = state->indexedBufferBinding(
+                GL_TRANSFORM_FEEDBACK_BUFFER, 0u);
+            std::size_t cursor = static_cast<std::size_t>(binding.offset);
+            const std::size_t rangeSize =
+                static_cast<std::size_t>(binding.size);
+            std::size_t perVertexBytes = 0;
+            for (const auto& s : sources) perVertexBytes += s.bytes;
+            for (std::uint32_t v = 0; v < totalVerts; ++v) {
+                GLBufferObject* buf = binding.buffer != 0
+                    ? objects->buffers().get(binding.buffer) : nullptr;
+                const std::size_t capacity = buf == nullptr
+                    ? 0
+                    : ((rangeSize > 0)
+                        ? (static_cast<std::size_t>(binding.offset) + rangeSize)
+                        : buf->shadowBytes.size());
+                if (cursor + perVertexBytes > capacity) {
+                    break;  // GL 4.6 §13.2: drop this + remaining
+                }
+                const std::uint8_t* vertBase =
+                    vsOutBytes + static_cast<std::size_t>(v) * perVertexSlotBytes;
+                for (const auto& s : sources) {
+                    writeToBuffer(binding.buffer, cursor,
+                                  vertBase + s.offset, s.bytes);
+                    cursor += s.bytes;
+                }
+            }
+            // Primitives written = full primitives that fit; partial
+            // primitives at the end count as non-written (matches
+            // GL 4.6 §13.2 truncation semantics).
+            primsWritten = (cursor - static_cast<std::size_t>(binding.offset))
+                / (perVertexBytes * vpp);
+            if (primsWritten > primsGenerated) primsWritten = primsGenerated;
+        } else {
+            // GL_SEPARATE_ATTRIBS — one varying per TF binding.
+            struct SepBinding {
+                GLuint buffer = 0;
+                std::size_t baseOffset = 0;
+                std::size_t rangeSize = 0;
+                std::size_t cursor = 0;
+                std::size_t bytes = 0;
+                bool truncated = false;
+            };
+            std::vector<SepBinding> binds(sources.size());
+            for (std::size_t i = 0; i < sources.size(); ++i) {
+                auto b = state->indexedBufferBinding(
+                    GL_TRANSFORM_FEEDBACK_BUFFER, static_cast<GLuint>(i));
+                binds[i].buffer     = b.buffer;
+                binds[i].baseOffset = static_cast<std::size_t>(b.offset);
+                binds[i].rangeSize  = static_cast<std::size_t>(b.size);
+                binds[i].cursor     = binds[i].baseOffset;
+                binds[i].bytes      = sources[i].bytes;
+            }
+            std::size_t writtenVerts = 0;
+            for (std::uint32_t v = 0; v < totalVerts; ++v) {
+                bool allFit = true;
+                for (std::size_t i = 0; i < sources.size(); ++i) {
+                    GLBufferObject* buf = binds[i].buffer != 0
+                        ? objects->buffers().get(binds[i].buffer) : nullptr;
+                    const std::size_t capacity = buf == nullptr
+                        ? 0
+                        : ((binds[i].rangeSize > 0)
+                            ? (binds[i].baseOffset + binds[i].rangeSize)
+                            : buf->shadowBytes.size());
+                    if (binds[i].truncated ||
+                        binds[i].cursor + binds[i].bytes > capacity) {
+                        allFit = false;
+                        break;
+                    }
+                }
+                if (!allFit) {
+                    for (auto& b : binds) b.truncated = true;
+                    break;
+                }
+                const std::uint8_t* vertBase =
+                    vsOutBytes + static_cast<std::size_t>(v) * perVertexSlotBytes;
+                for (std::size_t i = 0; i < sources.size(); ++i) {
+                    writeToBuffer(binds[i].buffer, binds[i].cursor,
+                                  vertBase + sources[i].offset,
+                                  sources[i].bytes);
+                    binds[i].cursor += binds[i].bytes;
+                }
+                ++writtenVerts;
+            }
+            primsWritten = (vpp > 0) ? (writtenVerts / vpp) : 0;
+        }
+    } else if (transformFeedbackActive) {
+        primsWritten = primsGenerated;
+    }
+
+    // Accumulate counts — mirror the writeTessTFAndUpdateCounters path.
+    objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
+        if (!q.active) return;
+        switch (q.target) {
+            case GL_PRIMITIVES_GENERATED:
+                q.result += static_cast<GLuint64>(primsGenerated);
+                break;
+            case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+                if (transformFeedbackActive) {
+                    q.result += static_cast<GLuint64>(primsWritten);
+                }
+                break;
+            default: break;
+        }
+    });
+    if (isTfActiveOnBoundImpl()) {
+        const GLuint tfName = boundTransformFeedbackId;
+        if (tfName != 0) {
+            if (auto* tf = objects->transformFeedbacks().get(tfName)) {
+                // VS-only-TF writes always go to stream 0 (no
+                // EmitStreamVertex equivalent in VS).
                 tf->capturedVertexCount[0] += static_cast<GLsizei>(primsWritten * vpp);
             }
         }
@@ -26278,19 +26484,109 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         const GLuint vaoName2 = impl_->state->boundVertexArray();
         GLVertexArrayObject* vao = (vaoName2 != 0) ? impl_->objects->vertexArrays().get(vaoName2) : nullptr;
         if (vao != nullptr && !program->vertexSpirv.empty()) {
-            appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
-                *program, *vao, *impl_->objects, *impl_->state,
-                mode, count, first);
-            if (ed.ok) {
-                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
-                    return true;
+            // Sprint 15 Q3-Option-B Phase 3a [metal-tf-vs]: GPU
+            // compute-dispatch path. Replaces the CPU
+            // `emulateVsOnlyDrawForTf` SPIR-V interpreter with a Metal
+            // VS-as-compute dispatch when the program has a built
+            // VS-compute PSO + a reflected output struct + all TF
+            // varyings resolved at link time. Day 4 constraint: only
+            // attributeless VS programs (`metalVsTfNeedsDescriptor==
+            // false`) AND no default-uniform-block usage AND no UBOs
+            // (Phase 3a doesn't bind uniforms; Phase 3b adds that).
+            // Phase 3c (Day 6+) extends to VAO-bound stage_in
+            // programs via `metalVsTfComputePSOCache`.
+            //
+            // Phase 3a is groundwork-only: gated behind the secondary
+            // `APPGL_ENABLE_METAL_TF_VS_DISPATCH=1` env so it stays
+            // off by default until Phase 3b lands proper uniform
+            // binding. With only the primary gate
+            // `APPGL_ENABLE_METAL_TF_VS=1` set, Phase 1+2 link-time
+            // reflection runs but draw-time still routes via the
+            // CPU helper (preserves CKPT173+CKPT174 behaviour).
+            //
+            // Falls back to CPU helper on any precondition mismatch
+            // OR encoder failure — preserving correctness.
+            const bool dispatchGateOn =
+                std::getenv("APPGL_ENABLE_METAL_TF_VS_DISPATCH") != nullptr;
+            // Phase 3a doesn't yet bind uniform-block bytes — skip
+            // GPU path when the VS uses any uniform block (default or
+            // named). Phase 3b (Day 5) will populate the uniform
+            // bytes from `program->uniformValues` per
+            // `vsTfAsComputeReflection`. The VS-as-compute MSL embeds
+            // its own default-uniform-block as a UBO at slot 16 (per
+            // SPIRV-Cross's tess emit convention), which is exactly
+            // what `program.uniforms` feeds when populated.
+            const bool noUniforms =
+                program->vsTfAsComputeReflection.uniformBlocks.empty();
+            bool gpuTfHandled = false;
+            if (dispatchGateOn &&
+                program->metalVsTfTier ==
+                    GLProgramObject::MetalVsTfTier::VsAsCompute &&
+                program->metalVsTfComputePipelineState != nullptr &&
+                !program->metalVsTfNeedsDescriptor &&
+                noUniforms &&
+                program->vsTfOutputLayout.structSize > 0 &&
+                !program->vsTfResolvedSources.empty() &&
+                impl_->frameGraph != nullptr &&
+                count > 0 && first >= 0) {
+                // Verify every TF varying name resolved (skip GPU
+                // path otherwise — CPU helper covers exotic varying
+                // shapes more robustly).
+                bool allResolved = true;
+                for (const auto& s : program->vsTfResolvedSources) {
+                    if (s.bytes == 0) { allResolved = false; break; }
                 }
-                // VS-only-TF without rasterizer-discard: fall through
-                // to the regular Metal-side draw so the FS still
-                // runs. The TF buffer was already populated.
-            } else if (!ed.diagnostic.empty()) {
-                APPGL_LOG(SHADER, @"drawArrays VS-only-TF: %s",
-                          ed.diagnostic.c_str());
+                if (allResolved) {
+                    const std::size_t perVertexBytes =
+                        program->vsTfOutputLayout.structSize;
+                    std::vector<std::uint8_t> outBytes(
+                        perVertexBytes * static_cast<std::size_t>(count));
+                    // Day 4 Phase 3a: bind no uniforms (uniformBytes=
+                    // nullptr). Programs that read default-uniform-
+                    // block values fall through to the CPU helper via
+                    // the encoder's diagnostic path; Phase 3b will
+                    // populate the uniform bytes from
+                    // `program->vsTfAsComputeReflection` +
+                    // `program->uniformValues`.
+                    const bool encodeOk =
+                        impl_->frameGraph->encodeVsTfComputeDraw(
+                            program->metalVsTfComputePipelineState,
+                            static_cast<std::uint32_t>(count),
+                            perVertexBytes,
+                            /*uniformBytes=*/nullptr,
+                            /*uniformLength=*/0,
+                            outBytes.data());
+                    if (encodeOk) {
+                        impl_->writeVsTfFromComputeOutput(
+                            *program, outBytes.data(),
+                            static_cast<std::uint32_t>(count),
+                            perVertexBytes, mode);
+                        if (impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
+                            return true;
+                        }
+                        // Without rasterizer-discard, fall through to
+                        // the regular Metal-side draw so the FS still
+                        // runs. TF buffer is already populated above.
+                        gpuTfHandled = true;
+                    }
+                }
+            }
+            if (!gpuTfHandled) {
+                appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
+                    *program, *vao, *impl_->objects, *impl_->state,
+                    mode, count, first);
+                if (ed.ok) {
+                    if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                        return true;
+                    }
+                    // VS-only-TF without rasterizer-discard: fall
+                    // through to the regular Metal-side draw so the
+                    // FS still runs. The TF buffer was already
+                    // populated.
+                } else if (!ed.diagnostic.empty()) {
+                    APPGL_LOG(SHADER, @"drawArrays VS-only-TF: %s",
+                              ed.diagnostic.c_str());
+                }
             }
         }
     }
