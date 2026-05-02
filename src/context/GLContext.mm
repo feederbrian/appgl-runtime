@@ -23307,7 +23307,7 @@ GLint GLContext::getUniformLocation(GLuint program, const GLchar* name) {
         bool changed = false;
         while ((pos = rewritten.find(from, pos)) != std::string::npos) {
             // Word-boundary check: don't replace inside sampler2D etc.
-            bool leftOk = (pos == 0) || !std::isalnum(static_cast<unsigned char>(rewritten[pos - 1])) && rewritten[pos - 1] != '_';
+            bool leftOk = (pos == 0) || (!std::isalnum(static_cast<unsigned char>(rewritten[pos - 1])) && rewritten[pos - 1] != '_');
             std::size_t end = pos + from.size();
             bool rightOk = (end >= rewritten.size()) || (!std::isalnum(static_cast<unsigned char>(rewritten[end])) && rewritten[end] != '_');
             if (leftOk && rightOk) {
@@ -24572,6 +24572,42 @@ static void populateTranslatedDrawFixedFunctionState(
     const auto& dr = state.depthRange();
     tdi.depthRangeNear = dr.nearValue;
     tdi.depthRangeFar = dr.farValue;
+    // Sprint 15 Q3-Option-B Day 8 [metal-viewport-array]: populate
+    // per-index viewport array (GL 4.1 ARB_viewport_array). Bind
+    // multi-viewport at the encoder when ANY indexed slot diverges
+    // from slot 0 (i.e. the app has called glViewportIndexed* or
+    // glViewportArrayv to set per-index state). Otherwise count=0 to
+    // preserve the single-viewport encoder path.
+    {
+        appgl::GLStateTracker::IndexedViewportEntry vparr[
+            appgl::TranslatedDrawInfo::kMaxDrawViewports];
+        std::size_t got = 0;
+        state.getViewportArray(vparr,
+            appgl::TranslatedDrawInfo::kMaxDrawViewports, &got);
+        bool anyDiverge = false;
+        for (std::size_t i = 1; i < got; ++i) {
+            if (vparr[i].x != vparr[0].x ||
+                vparr[i].y != vparr[0].y ||
+                vparr[i].width != vparr[0].width ||
+                vparr[i].height != vparr[0].height ||
+                vparr[i].depthNear != vparr[0].depthNear ||
+                vparr[i].depthFar != vparr[0].depthFar) {
+                anyDiverge = true;
+                break;
+            }
+        }
+        if (anyDiverge) {
+            for (std::size_t i = 0; i < got; ++i) {
+                tdi.viewportArray[i].originX = vparr[i].x;
+                tdi.viewportArray[i].originY = vparr[i].y;
+                tdi.viewportArray[i].width = vparr[i].width;
+                tdi.viewportArray[i].height = vparr[i].height;
+                tdi.viewportArray[i].depthNear = vparr[i].depthNear;
+                tdi.viewportArray[i].depthFar = vparr[i].depthFar;
+            }
+            tdi.viewportArrayCount = got;
+        }
+    }
 
     // GL 4.6 §14.5.1 — scissor state.
     tdi.scissorTestEnabled = state.isEnabled(GL_SCISSOR_TEST);

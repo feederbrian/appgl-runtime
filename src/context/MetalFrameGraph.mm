@@ -2294,7 +2294,30 @@ struct MetalFrameGraph::Impl {
         // RC-A02: set Metal viewport from GL viewport state.
         // Metal framebuffer Y is top-down while OpenGL viewport Y is
         // bottom-up.  Convert: metalOriginY = renderTargetH - glY - glH.
-        if (info.viewportWidth > 0 && info.viewportHeight > 0) {
+        //
+        // Sprint 15 Q3-Option-B Day 8 [metal-viewport-array]: when
+        // `info.viewportArrayCount > 1`, bind the full per-index
+        // viewport array via `setViewports:count:` so shaders that
+        // write gl_ViewportIndex / [[viewport_array_index]] route to
+        // the right rectangle. Single-viewport path is preserved for
+        // the common case to keep behavior bit-identical to pre-Day-8
+        // baselines on tests that don't exercise viewport_array.
+        if (info.viewportArrayCount > 1) {
+            const double rtHeight = static_cast<double>(colorTexture.height);
+            MTLViewport vps[TranslatedDrawInfo::kMaxDrawViewports];
+            for (std::size_t i = 0; i < info.viewportArrayCount; ++i) {
+                const auto& e = info.viewportArray[i];
+                vps[i].originX = static_cast<double>(e.originX);
+                vps[i].originY = rtHeight - static_cast<double>(e.originY)
+                    - static_cast<double>(e.height);
+                vps[i].width   = static_cast<double>(e.width);
+                vps[i].height  = static_cast<double>(e.height);
+                vps[i].znear   = e.depthNear;
+                vps[i].zfar    = e.depthFar;
+            }
+            [currentRenderEncoder setViewports:vps
+                                         count:info.viewportArrayCount];
+        } else if (info.viewportWidth > 0 && info.viewportHeight > 0) {
             const double rtHeight = static_cast<double>(colorTexture.height);
             MTLViewport vp;
             vp.originX = static_cast<double>(info.viewportX);

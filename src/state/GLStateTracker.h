@@ -159,6 +159,23 @@ public:
     void setDepthRangeArray(GLuint first, GLsizei count, const GLdouble* v);
     bool queryFloatIndexed(GLenum target, GLuint index, GLfloat* data) const;
     bool queryDoubleIndexed(GLenum target, GLuint index, GLdouble* data) const;
+    // Sprint 15 Q3-Option-B Day 8 [metal-viewport-array]: bulk read
+    // accessor for the kMaxViewports indexed-viewport array. Used by
+    // MetalFrameGraph to bind multiple Metal viewports via
+    // `setViewports:count:` when a draw uses gl_ViewportIndex routing.
+    // Returns kMaxViewports (16) entries; caller decides how many to
+    // pass to Metal based on draw-time program characteristics.
+    struct IndexedViewportEntry {
+        GLfloat x = 0;
+        GLfloat y = 0;
+        GLfloat width = 1;
+        GLfloat height = 1;
+        GLdouble depthNear = 0.0;
+        GLdouble depthFar = 1.0;
+    };
+    void getViewportArray(IndexedViewportEntry* outArray,
+                          std::size_t outCapacity,
+                          std::size_t* outCount) const;
     // Per-viewport SCISSOR_TEST state. GL 4.1 §17.3.2:
     //   Enable(SCISSOR_TEST)       → all slots TRUE
     //   Disable(SCISSOR_TEST)      → all slots FALSE

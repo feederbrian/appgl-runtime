@@ -289,6 +289,26 @@ struct TranslatedDrawInfo {
     GLsizei viewportHeight = 0;
     GLdouble depthRangeNear = 0.0;
     GLdouble depthRangeFar = 1.0;
+    // Sprint 15 Q3-Option-B Day 8 [metal-viewport-array]: per-viewport-
+    // index array (GL 4.1 ARB_viewport_array). When `viewportArrayCount
+    // > 1` the encoder binds all entries via `setViewports:count:`
+    // instead of the single-viewport `setViewport:`. Required for any
+    // shader that writes gl_ViewportIndex (per-primitive viewport
+    // selection). When `viewportArrayCount <= 1`, the single-viewport
+    // path is used. Each entry gives an independent rectangle + depth
+    // range; SPIRV-Cross emits `[[viewport_array_index]]` on the VS or
+    // mesh-shader output to drive the selection.
+    static constexpr std::size_t kMaxDrawViewports = 16;
+    struct ViewportEntry {
+        GLfloat originX = 0.0f;
+        GLfloat originY = 0.0f;
+        GLfloat width = 0.0f;
+        GLfloat height = 0.0f;
+        GLdouble depthNear = 0.0;
+        GLdouble depthFar = 1.0;
+    };
+    ViewportEntry viewportArray[kMaxDrawViewports] = {};
+    std::size_t viewportArrayCount = 0;
 
     // GL 4.6 §14.5.1 / GL_SCISSOR_TEST. When enabled, fragments outside
     // the box are discarded. Metal has no separate "scissor enabled"

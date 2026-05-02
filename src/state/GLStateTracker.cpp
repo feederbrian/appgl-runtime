@@ -623,6 +623,29 @@ bool GLStateTracker::queryDoubleIndexed(GLenum target, GLuint index, GLdouble* d
     }
 }
 
+// Sprint 15 Q3-Option-B Day 8 [metal-viewport-array]: bulk read
+// accessor for the indexed viewport array. Mirrors viewport + depth-
+// range slots into a flat `IndexedViewportEntry` array for the Metal
+// encoder to bind via `setViewports:count:` in one call.
+void GLStateTracker::getViewportArray(IndexedViewportEntry* outArray,
+                                       std::size_t outCapacity,
+                                       std::size_t* outCount) const {
+    const std::size_t n = std::min<std::size_t>(outCapacity, kMaxViewports);
+    if (outArray != nullptr) {
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto& vp = indexedViewports_[i];
+            const auto& dr = indexedDepthRanges_[i];
+            outArray[i].x = vp.x;
+            outArray[i].y = vp.y;
+            outArray[i].width = vp.w;
+            outArray[i].height = vp.h;
+            outArray[i].depthNear = dr.nearValue;
+            outArray[i].depthFar = dr.farValue;
+        }
+    }
+    if (outCount != nullptr) *outCount = n;
+}
+
 // --- Tessellation state (GL 4.0) ---
 
 void GLStateTracker::setPatchParameteri(GLenum pname, GLint value) {
