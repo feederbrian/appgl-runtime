@@ -20247,6 +20247,20 @@ bool GLContext::linkProgram(GLuint program) {
     // compute PSO (populated once the SPIRV-Cross fork patch lands).
     releaseRetainedMetalObject(programObject->metalTessEvalComputePipelineState);
     programObject->metalTessEvalComputePipelineState = nullptr;
+    // Sprint 15 Q3-Option-B Phase 1 [metal-tf-vs]: release the
+    // retained VS-as-compute PSO + clear the MSL/reflection/cache so a
+    // relink under different env settings re-evaluates the gate
+    // cleanly. Mirrors the metal-tess-TF VS-compute reset above.
+    programObject->vsTfAsComputeMSL.clear();
+    programObject->vsTfAsComputeReflection = ShaderReflection{};
+    releaseRetainedMetalObject(programObject->metalVsTfComputePipelineState);
+    programObject->metalVsTfComputePipelineState = nullptr;
+    for (auto& entry : programObject->metalVsTfComputePSOCache) {
+        releaseRetainedMetalObject(entry.second);
+    }
+    programObject->metalVsTfComputePSOCache.clear();
+    programObject->metalVsTfNeedsDescriptor = false;
+    programObject->metalVsTfTier = GLProgramObject::MetalVsTfTier::None;
     // Step 7-4: release cached graphics-stage MTLFunctions on relink.
     releaseRetainedMetalObject(programObject->metalVertexFunction);
     programObject->metalVertexFunction = nullptr;
@@ -20571,6 +20585,104 @@ bool GLContext::linkProgram(GLuint program) {
             // `transform_feedback.{capture,query,discard}_vertex_*`.
             if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
                 programObject->vertexSpirv = vertexShader->spirv;
+            }
+            // Sprint 15 Q3-Option-B Phase 1 [metal-tf-vs]: VS-as-compute
+            // MSL emit + PSO build for VS+FS+TF programs (no GS, no
+            // tess). Sister-pattern reuse of the existing metal-tess-TF
+            // VS-compute groundwork — `forceVertexForTessellation`
+            // emits the VS as a Metal compute kernel that captures
+            // per-vertex outputs into a buffer (Phase 2 will plumb the
+            // TF buffer binding; Phase 3 will swap draw-time routing).
+            //
+            // Phase 1 lays groundwork only — no draw-time behaviour
+            // change. CPU `emulateVsOnlyDrawForTf` remains the
+            // authoritative TF capture path until Phase 3 routes
+            // around it. Master gate: APPGL_ENABLE_METAL_TF_VS=1
+            // (off by default, mirroring APPGL_ENABLE_METAL_TESS_TF's
+            // conservative posture). Read once at link time so a
+            // relink under different env settings re-evaluates cleanly.
+            //
+            // Pre-conditions:
+            //   • VS+FS translation succeeded (vsOk && fsOk)
+            //   • TF varyings declared via glTransformFeedbackVaryings
+            //   • VS SPIR-V preserved (just stashed above)
+            //   • impl_->frameGraph present (Metal device available)
+            //
+            // Outcomes:
+            //   • tier=VsAsCompute + retained PSO: Phase 3 eligible
+            //     directly (gl_VertexID-only VS, no [[stage_in]])
+            //   • tier=VsAsCompute + metalVsTfNeedsDescriptor=true:
+            //     Phase 3 builds per-VAO PSO at draw time via
+            //     metalVsTfComputePSOCache
+            //   • tier=None: gate skipped OR translation/build failed
+            //     for non-descriptor reasons → CPU fallback preserved
+            if (vsOk && fsOk &&
+                !programObject->transformFeedbackVaryingNames.empty() &&
+                !programObject->vertexSpirv.empty() &&
+                impl_->frameGraph != nullptr &&
+                std::getenv("APPGL_ENABLE_METAL_TF_VS") != nullptr) {
+                appgl::TranslatorOptions vsTfOpts;
+                vsTfOpts.forceVertexForTessellation = true;
+                ShaderReflection vsTfRefl;
+                std::string vsTfMSL;
+                const bool vsTfTrOk = translateStage(
+                    "vertex-tf-compute", vsSpirvData, vsSpirvWords,
+                    vertexShader->source, vsTfMSL, vsTfRefl, vsTfOpts);
+                if (vsTfTrOk && !vsTfMSL.empty()) {
+                    programObject->vsTfAsComputeMSL = std::move(vsTfMSL);
+                    programObject->vsTfAsComputeReflection =
+                        std::move(vsTfRefl);
+                    std::string vsTfPsoErr;
+                    void* vsTfPSO =
+                        impl_->frameGraph->buildComputePipelineState(
+                            programObject->vsTfAsComputeMSL, &vsTfPsoErr,
+                            nullptr, nullptr);
+                    if (vsTfPSO != nullptr) {
+                        programObject->metalVsTfComputePipelineState =
+                            vsTfPSO;
+                        programObject->metalVsTfTier =
+                            GLProgramObject::MetalVsTfTier::VsAsCompute;
+                    } else if (vsTfPsoErr.find("stage_in") !=
+                               std::string::npos) {
+                        // VS declares [[stage_in]] — defer PSO build to
+                        // draw time when the bound VAO's
+                        // MTLStageInputOutputDescriptor is known. Phase
+                        // 3's draw-time path will lookup-or-build a
+                        // per-VAO PSO via metalVsTfComputePSOCache.
+                        programObject->metalVsTfNeedsDescriptor = true;
+                        programObject->metalVsTfTier =
+                            GLProgramObject::MetalVsTfTier::VsAsCompute;
+                    } else {
+                        // Compile failed for non-descriptor reasons —
+                        // surface via diagnostic + leave tier=None so
+                        // draw-time stays on the CPU helper.
+                        Runtime::shared().recordShaderTranslation({
+                            programTag + "-vs-tf-compute-pipeline",
+                            "vertex",
+                            quickHash(vertexShader->source),
+                            linkVertexHash, linkFragmentHash,
+                            std::string("metal-tf-vs PSO build failed: ")
+                                + vsTfPsoErr,
+                            "", false
+                        });
+                        programObject->vsTfAsComputeMSL.clear();
+                        programObject->vsTfAsComputeReflection =
+                            ShaderReflection{};
+                    }
+                    if (std::getenv("APPGL_TRACE_TF_VS")) {
+                        std::fprintf(stderr,
+                            "[APPGL] tf-vs-probe program=%u "
+                            "tfVaryings=%zu vsTfTier=%d "
+                            "needsDescriptor=%d psoOk=%d\n",
+                            program,
+                            programObject
+                                ->transformFeedbackVaryingNames.size(),
+                            (int)programObject->metalVsTfTier,
+                            programObject->metalVsTfNeedsDescriptor
+                                ? 1 : 0,
+                            vsTfPSO != nullptr ? 1 : 0);
+                    }
+                }
             }
             break;
         }

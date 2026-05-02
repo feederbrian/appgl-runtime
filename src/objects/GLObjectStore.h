@@ -860,6 +860,56 @@ struct GLProgramObject {
     // existing render path, and the probe skips this PSO.
     void* metalTessEvalComputePipelineState = nullptr;
 
+    // Sprint 15 Q3-Option-B Phase 1 groundwork [metal-tf-vs]: VS-as-
+    // compute path for VS+FS+TF programs (no GS, no tess). Sister of
+    // the metal-tess-TF VS-compute path: SPIRV-Cross emits the VS
+    // with `vertex_for_tessellation + capture_output_to_buffer` so
+    // per-vertex outputs land in a Metal buffer that the TF-capture
+    // encoder consumes. Replaces the CPU-side `emulateVsOnlyDrawForTf`
+    // SPIR-V interpreter on the draw-time path once Phase 3 wires
+    // the encoder routing in.
+    //
+    // Phase 1 (this checkpoint) lays the link-time groundwork only:
+    //   • re-translate VS with `forceVertexForTessellation=true` to
+    //     produce the kernel form
+    //   • build the MTLComputePipelineState directly when the VS has
+    //     no `[[stage_in]]` (gl_VertexID-only), or set
+    //     `metalVsTfNeedsDescriptor=true` and defer to draw time when
+    //     a MTLStageInputOutputDescriptor (built from the bound VAO)
+    //     is required
+    //   • stash MSL + reflection + PSO + tier on the program object
+    //
+    // No draw-time behaviour change at Phase 1 — encodeTranslatedDraw
+    // still routes TF-active VS+FS programs through the CPU helper.
+    // Phase 2 (next checkpoint) adds TF buffer binding plumbing;
+    // Phase 3 swaps the draw-time routing.
+    //
+    // Master gate: APPGL_ENABLE_METAL_TF_VS=1 (off by default; mirrors
+    // the conservative posture of APPGL_ENABLE_METAL_TESS_TF). The
+    // gate is read once at link time so a relink under different env
+    // settings re-evaluates cleanly.
+    std::string vsTfAsComputeMSL;
+    ShaderReflection vsTfAsComputeReflection;
+    void* metalVsTfComputePipelineState = nullptr;
+    bool metalVsTfNeedsDescriptor = false;
+    // VAO-descriptor-hash-keyed PSO cache for the deferred-build path
+    // (mirrors `metalTessVertexPSOCache`). Phase 1 leaves the map empty
+    // — Phase 3's draw-time path lookup-or-builds entries here when
+    // `metalVsTfNeedsDescriptor==true`. Each entry is a
+    // CFBridgingRetain'd id<MTLComputePipelineState>; released
+    // alongside the rest of the metal-tf-vs state at relink/delete.
+    std::unordered_map<std::string, void*> metalVsTfComputePSOCache;
+    // Routing tier for the VS+FS+TF compute chain. None=fall through
+    // to CPU `emulateVsOnlyDrawForTf` (current behaviour), VsAsCompute
+    // =Phase 3 routing eligible.  Set by the link-time gate when the
+    // master env is on AND the program has TF varyings AND VS-compute
+    // build (or deferred-descriptor flag) succeeded.
+    enum class MetalVsTfTier : std::uint8_t {
+        None = 0,
+        VsAsCompute = 1,
+    };
+    MetalVsTfTier metalVsTfTier = MetalVsTfTier::None;
+
     // Which Metal tess draw path the link probe has cleared this
     // program for. Set at link time after the Phase-2-handleability
     // substring scan + Phase-3 VS-compute PSO availability check.
