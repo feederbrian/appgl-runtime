@@ -1525,6 +1525,17 @@ static const char* const kAppGLExtensionList[] = {
     "GL_ARB_program_interface_query",
     "GL_ARB_shading_language_420pack",
     "GL_ARB_shading_language_packing",
+    // GL_ARB_texture_view DELIBERATELY NOT ADVERTISED — CKPT156
+    // (Sprint 14 Day 3) probed: gates use honest tcu::NotSupportedError
+    // (not the CKPT155 NO_ERROR-paradox), but the very first test
+    // texture_view.gettexparameter crashed the runtime with a HARD
+    // Metal assertion: `MTLTextureDescriptor requests a mipmapLevelCount
+    // of 6 but the texture type MTLTextureType1DArray requires that
+    // mipmapLevelCount is 1`. textureView's MTLTexture path doesn't
+    // clamp/translate per-target mipmap rules (Metal's MTLTextureType1D
+    // and MTLTextureType1DArray require mipmapLevelCount==1, but the GL
+    // spec allows 1D + 1D_ARRAY mipmap pyramids). Re-enable once the
+    // textureView Metal-side per-target mipmap clamping is implemented.
     // CKPT146 (Sprint 13 Day 10): GL_ARB_gpu_shader5 — extension's
     // functional surface (precise qualifier, fma(), sampler array dynamic
     // indexing) is already live; advertising flips the GLAD bool that

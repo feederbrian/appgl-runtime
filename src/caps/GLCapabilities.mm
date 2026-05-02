@@ -1151,6 +1151,14 @@ void GLCapabilities::initializeExtensions() {
         "GL_ARB_program_interface_query "
         "GL_ARB_shading_language_420pack "
         "GL_ARB_shading_language_packing "
+        // GL_ARB_texture_view DELIBERATELY NOT ADVERTISED — CKPT156
+        // (Sprint 14 Day 3) found that texture_view.gettexparameter
+        // crashes the runtime via Metal hard assertion: 1D_ARRAY +
+        // mipmapLevelCount > 1 is rejected at descriptor validation
+        // time. textureView's Metal-side per-target mipmap clamping
+        // is not implemented (Metal's MTLTextureType1D and 1DArray
+        // require mipmapLevelCount==1; GL spec allows 1D / 1D_ARRAY
+        // mipmap pyramids). Re-enable once that translation lands.
         // GL_ARB_gpu_shader5 — CKPT146 (Sprint 13 Day 10): advertise the
         // extension for the gpu_shader5_gl.{implicit_conversions,
         // function_overloading,float_encoding} tests which gate-bail on
