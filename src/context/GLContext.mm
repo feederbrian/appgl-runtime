@@ -5391,7 +5391,22 @@ struct GLContext::Impl {
         GLProgramObject& program,
         TranslatedDrawInfo& info)
     {
-        auto resolveStage = [&](const ShaderReflection* reflection,
+        const bool trace = std::getenv("APPGL_TRACE_IMG_BIND") != nullptr;
+        if (trace) {
+            std::fprintf(stderr, "[IMG-BIND] resolveImageBindings called: vsRefl=%p fsRefl=%p\n",
+                (void*)info.vertexReflection, (void*)info.fragmentReflection);
+            if (info.vertexReflection) {
+                std::fprintf(stderr, "[IMG-BIND]   vsRefl.storageImages.size=%zu samplers.size=%zu\n",
+                    info.vertexReflection->storageImages.size(),
+                    info.vertexReflection->sampledTextures.size());
+            }
+            if (info.fragmentReflection) {
+                std::fprintf(stderr, "[IMG-BIND]   fsRefl.storageImages.size=%zu samplers.size=%zu\n",
+                    info.fragmentReflection->storageImages.size(),
+                    info.fragmentReflection->sampledTextures.size());
+            }
+        }
+        auto resolveStage = [&](const char* stageName, const ShaderReflection* reflection,
                                 std::vector<TranslatedDrawInfo::TextureBinding>& outList) {
             if (reflection == nullptr) return;
             for (const auto& img : reflection->storageImages) {
@@ -5412,11 +5427,24 @@ struct GLContext::Impl {
                         break;
                     }
                 }
-                if (effectiveUnit >= Impl::kMaxImageUnits) continue;
+                if (trace) {
+                    std::fprintf(stderr, "[IMG-BIND] %s name=%s glBinding=%u effUnit=%u metalSlot=%u",
+                        stageName, img.name.c_str(), img.glBinding, effectiveUnit, img.metalBinding);
+                }
+                if (effectiveUnit >= Impl::kMaxImageUnits) {
+                    if (trace) std::fprintf(stderr, " SKIP=overflow\n");
+                    continue;
+                }
                 auto& ib = imageBindings[effectiveUnit];
-                if (ib.texture == 0) continue;
+                if (ib.texture == 0) {
+                    if (trace) std::fprintf(stderr, " SKIP=imageBindings_empty\n");
+                    continue;
+                }
                 GLTextureObject* texObj = objects->textures().get(ib.texture);
-                if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+                if (texObj == nullptr || texObj->metalTexture == nullptr) {
+                    if (trace) std::fprintf(stderr, " SKIP=metalTexture_null tex=%u\n", ib.texture);
+                    continue;
+                }
                 TranslatedDrawInfo::TextureBinding tb;
                 // CKPT119: prefer level-restricted view when ib.level > 0
                 // so imageSize() returns LEVEL-N dimensions.
@@ -5424,10 +5452,11 @@ struct GLContext::Impl {
                 tb.metalSamplerState = nullptr;  // no sampler for storage images
                 tb.metalSlot = img.metalBinding;
                 outList.push_back(tb);
+                if (trace) std::fprintf(stderr, " BOUND tex=%u\n", ib.texture);
             }
         };
-        resolveStage(info.vertexReflection, info.vertexTextures);
-        resolveStage(info.fragmentReflection, info.fragmentTextures);
+        resolveStage("VS", info.vertexReflection, info.vertexTextures);
+        resolveStage("FS", info.fragmentReflection, info.fragmentTextures);
     }
 
     bool replaceBufferStorage(GLBufferObject& object, GLsizeiptr size, const void* data, GLenum usage) {
