@@ -5416,43 +5416,56 @@ struct GLContext::Impl {
                 // shading_language_420pack.binding_image_single_stage_*
                 // relies on this: `uni_image` has no layout binding and
                 // only picks up unit 0 via glUniform1i.
-                GLuint effectiveUnit = img.glBinding;
+                //
+                // CKPT145 (Sprint 13 Day 9): image array iteration. SPIRV-
+                // Cross emits an image array as N consecutive `[[texture(M+i)]]`
+                // slots; each element resolves to imageBindings[glBinding+i].
+                GLint imageArraySize = 1;
+                const GLProgramUniformValue* imageValue = nullptr;
                 for (const auto& u : program.uniforms) {
                     if (u.name == img.name) {
+                        imageArraySize = std::max<GLint>(u.arraySize, 1);
                         auto uvIt = program.uniformValues.find(u.location);
-                        if (uvIt != program.uniformValues.end()
-                            && !uvIt->second.ints.empty()) {
-                            effectiveUnit = static_cast<GLuint>(uvIt->second.ints[0]);
+                        if (uvIt != program.uniformValues.end()) {
+                            imageValue = &uvIt->second;
                         }
                         break;
                     }
                 }
-                if (trace) {
-                    std::fprintf(stderr, "[IMG-BIND] %s name=%s glBinding=%u effUnit=%u metalSlot=%u",
-                        stageName, img.name.c_str(), img.glBinding, effectiveUnit, img.metalBinding);
+                for (GLint arrayElement = 0; arrayElement < imageArraySize; ++arrayElement) {
+                    GLuint effectiveUnit = img.glBinding + static_cast<GLuint>(arrayElement);
+                    if (imageValue != nullptr &&
+                        static_cast<std::size_t>(arrayElement) < imageValue->ints.size()) {
+                        effectiveUnit = static_cast<GLuint>(imageValue->ints[arrayElement]);
+                    }
+                    if (trace) {
+                        std::fprintf(stderr, "[IMG-BIND] %s name=%s[%d] glBinding=%u effUnit=%u metalSlot=%u",
+                            stageName, img.name.c_str(), arrayElement, img.glBinding,
+                            effectiveUnit, img.metalBinding + arrayElement);
+                    }
+                    if (effectiveUnit >= Impl::kMaxImageUnits) {
+                        if (trace) std::fprintf(stderr, " SKIP=overflow\n");
+                        continue;
+                    }
+                    auto& ib = imageBindings[effectiveUnit];
+                    if (ib.texture == 0) {
+                        if (trace) std::fprintf(stderr, " SKIP=imageBindings_empty\n");
+                        continue;
+                    }
+                    GLTextureObject* texObj = objects->textures().get(ib.texture);
+                    if (texObj == nullptr || texObj->metalTexture == nullptr) {
+                        if (trace) std::fprintf(stderr, " SKIP=metalTexture_null tex=%u\n", ib.texture);
+                        continue;
+                    }
+                    TranslatedDrawInfo::TextureBinding tb;
+                    // CKPT119: prefer level-restricted view when ib.level > 0
+                    // so imageSize() returns LEVEL-N dimensions.
+                    tb.metalTexture = resolveImageMetalTexture(ib, texObj);
+                    tb.metalSamplerState = nullptr;  // no sampler for storage images
+                    tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                    outList.push_back(tb);
+                    if (trace) std::fprintf(stderr, " BOUND tex=%u\n", ib.texture);
                 }
-                if (effectiveUnit >= Impl::kMaxImageUnits) {
-                    if (trace) std::fprintf(stderr, " SKIP=overflow\n");
-                    continue;
-                }
-                auto& ib = imageBindings[effectiveUnit];
-                if (ib.texture == 0) {
-                    if (trace) std::fprintf(stderr, " SKIP=imageBindings_empty\n");
-                    continue;
-                }
-                GLTextureObject* texObj = objects->textures().get(ib.texture);
-                if (texObj == nullptr || texObj->metalTexture == nullptr) {
-                    if (trace) std::fprintf(stderr, " SKIP=metalTexture_null tex=%u\n", ib.texture);
-                    continue;
-                }
-                TranslatedDrawInfo::TextureBinding tb;
-                // CKPT119: prefer level-restricted view when ib.level > 0
-                // so imageSize() returns LEVEL-N dimensions.
-                tb.metalTexture = resolveImageMetalTexture(ib, texObj);
-                tb.metalSamplerState = nullptr;  // no sampler for storage images
-                tb.metalSlot = img.metalBinding;
-                outList.push_back(tb);
-                if (trace) std::fprintf(stderr, " BOUND tex=%u\n", ib.texture);
             }
         };
         resolveStage("VS", info.vertexReflection, info.vertexTextures);
@@ -28386,10 +28399,12 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         // its sampler GL type (drives preferredTarget below).
         GLint uniformLoc = -1;
         GLenum samplerGLType = 0;
+        GLint samplerArraySize = 1;
         for (const auto& u : programObject->uniforms) {
             if (u.name == samp.name) {
                 uniformLoc = u.location;
                 samplerGLType = u.type;
+                samplerArraySize = std::max<GLint>(u.arraySize, 1);
                 break;
             }
         }
@@ -28398,51 +28413,67 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             continue;
         }
         auto uvIt = programObject->uniformValues.find(uniformLoc);
-        const GLuint unit = (uvIt != programObject->uniformValues.end() && !uvIt->second.ints.empty())
-            ? static_cast<GLuint>(uvIt->second.ints[0]) : 0;
+        const GLProgramUniformValue* samplerValue =
+            (uvIt != programObject->uniformValues.end()) ? &uvIt->second : nullptr;
 
-        // Probe the sampler-type-derived target FIRST. Falls back to
-        // GL_TEXTURE_2D probe + any-target if the preferred target has no
-        // binding (e.g. a sampler2D uniform with the texture bound at
-        // GL_TEXTURE_RECTANGLE — same generic-2D-then-any pattern as
-        // before, but specific-first).
         GLenum preferredTarget = preferredTargetForSamplerType(samplerGLType);
-        GLenum discoveredTarget = preferredTarget != 0 ? preferredTarget : GL_TEXTURE_2D;
-        GLuint texName = preferredTarget != 0
-            ? impl_->state->boundTextureOnUnit(unit, preferredTarget) : 0;
-        if (texName == 0) {
-            texName = impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_2D);
-            if (texName != 0) discoveredTarget = GL_TEXTURE_2D;
-        }
-        if (texName == 0) {
-            texName = impl_->state->boundTextureOnUnitAny(unit, &discoveredTarget);
-        }
-        if (traceCompSamp) {
-            std::fprintf(stderr, "[CMP-SAMP] name=%s loc=%d type=0x%X unit=%u prefTgt=0x%X tex=%u tgt=0x%X metalSlot=%u",
-                samp.name.c_str(), uniformLoc, samplerGLType, unit, preferredTarget,
-                texName, discoveredTarget, samp.metalBinding);
-        }
-        if (texName == 0) {
-            if (traceCompSamp) std::fprintf(stderr, " SKIP=no_texture\n");
-            continue;
-        }
 
-        GLTextureObject* texObj = impl_->objects->textures().get(texName);
-        if (texObj == nullptr || texObj->metalTexture == nullptr) {
-            if (traceCompSamp) std::fprintf(stderr, " SKIP=null_metalTexture\n");
-            continue;
-        }
-        // Build the sampler state if dirty.
-        if (texObj->samplerDirty) {
-            impl_->rebuildTextureSamplerState(texName, *texObj);
-        }
+        // CKPT145 (Sprint 13 Day 9): sampler array iteration. SPIRV-Cross
+        // emits a sampler array (`uniform sampler2D goku[7]`) as N
+        // separate `[[texture(M+i)]]` slots. CTS shading_language_420pack.
+        // binding_sampler_array binds 7 distinct textures at GL units 1..7
+        // and expects each shader element `goku[i]` to read from the bound
+        // texture at GL unit 1+i. Pre-fix: only goku[0] resolved (compute
+        // path read `ints[0]` once); goku[1..6] unbound → wrong values.
+        // Mirrors the graphics-path resolveSamplerBindings array iteration
+        // at GLContext.mm:4683+.
+        for (GLint arrayElement = 0; arrayElement < samplerArraySize; ++arrayElement) {
+            GLuint unit = 0;
+            if (samplerValue != nullptr &&
+                static_cast<std::size_t>(arrayElement) < samplerValue->ints.size()) {
+                unit = static_cast<GLuint>(samplerValue->ints[arrayElement]);
+            }
 
-        ComputeDispatchInfo::TextureBinding tb;
-        tb.metalTexture = texObj->metalTexture;
-        tb.metalSamplerState = texObj->metalSampler;
-        tb.metalSlot = samp.metalBinding;
-        info.textures.push_back(tb);
-        if (traceCompSamp) std::fprintf(stderr, " BOUND\n");
+            // Probe the sampler-type-derived target FIRST. Falls back to
+            // GL_TEXTURE_2D probe + any-target if the preferred target has
+            // no binding.
+            GLenum discoveredTarget = preferredTarget != 0 ? preferredTarget : GL_TEXTURE_2D;
+            GLuint texName = preferredTarget != 0
+                ? impl_->state->boundTextureOnUnit(unit, preferredTarget) : 0;
+            if (texName == 0) {
+                texName = impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_2D);
+                if (texName != 0) discoveredTarget = GL_TEXTURE_2D;
+            }
+            if (texName == 0) {
+                texName = impl_->state->boundTextureOnUnitAny(unit, &discoveredTarget);
+            }
+            if (traceCompSamp) {
+                std::fprintf(stderr, "[CMP-SAMP] name=%s[%d] loc=%d type=0x%X unit=%u prefTgt=0x%X tex=%u tgt=0x%X metalSlot=%u",
+                    samp.name.c_str(), arrayElement, uniformLoc, samplerGLType, unit, preferredTarget,
+                    texName, discoveredTarget, samp.metalBinding + arrayElement);
+            }
+            if (texName == 0) {
+                if (traceCompSamp) std::fprintf(stderr, " SKIP=no_texture\n");
+                continue;
+            }
+
+            GLTextureObject* texObj = impl_->objects->textures().get(texName);
+            if (texObj == nullptr || texObj->metalTexture == nullptr) {
+                if (traceCompSamp) std::fprintf(stderr, " SKIP=null_metalTexture\n");
+                continue;
+            }
+            // Build the sampler state if dirty.
+            if (texObj->samplerDirty) {
+                impl_->rebuildTextureSamplerState(texName, *texObj);
+            }
+
+            ComputeDispatchInfo::TextureBinding tb;
+            tb.metalTexture = texObj->metalTexture;
+            tb.metalSamplerState = texObj->metalSampler;
+            tb.metalSlot = samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+            info.textures.push_back(tb);
+            if (traceCompSamp) std::fprintf(stderr, " BOUND\n");
+        }
     }
 
     // Storage images (imageLoad/imageStore). Bound via
@@ -28454,30 +28485,46 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     // one of the three images has an explicit layout binding, and the
     // others rely on glUniform1i to set the unit.
     for (const auto& img : programObject->computeReflection.storageImages) {
-        GLuint effectiveUnit = img.glBinding;
-        // Look up the named uniform. If the app has called
-        // glUniform1i(loc, K) for this image uniform, prefer K.
+        // CKPT145 (Sprint 13 Day 9): storage image array iteration. SPIRV-
+        // Cross emits an image array (`uniform image2D goku[7]`) as N
+        // separate `[[texture(M+i)]]` slots. Pre-fix: only goku[0] resolved;
+        // goku[1..N-1] unbound → wrong values. CTS shading_language_420pack.
+        // binding_image_array exercises this with 7 elements.
+        // Look up the matching uniform to read array size + per-element
+        // uniform-value (glUniform1i overrides).
+        GLint imageArraySize = 1;
+        const GLProgramUniformValue* imageValue = nullptr;
         for (const auto& u : programObject->uniforms) {
             if (u.name == img.name) {
+                imageArraySize = std::max<GLint>(u.arraySize, 1);
                 auto uvIt = programObject->uniformValues.find(u.location);
-                if (uvIt != programObject->uniformValues.end()
-                    && !uvIt->second.ints.empty()) {
-                    effectiveUnit = static_cast<GLuint>(uvIt->second.ints[0]);
+                if (uvIt != programObject->uniformValues.end()) {
+                    imageValue = &uvIt->second;
                 }
                 break;
             }
         }
-        if (effectiveUnit >= Impl::kMaxImageUnits) continue;
-        auto& ib = impl_->imageBindings[effectiveUnit];
-        if (ib.texture == 0) continue;
-        GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
-        if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
-        ComputeDispatchInfo::TextureBinding tb;
-        // CKPT119: level-restricted view when ib.level > 0.
-        tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
-        tb.metalSamplerState = nullptr;  // no sampler for storage images
-        tb.metalSlot = img.metalBinding;
-        info.textures.push_back(tb);
+        for (GLint arrayElement = 0; arrayElement < imageArraySize; ++arrayElement) {
+            // GL 4.6 §7.6: per-element effective unit. Default is
+            // glBinding+arrayElement (consecutive layout). Override per
+            // element via glUniform1i(loc[i], K).
+            GLuint effectiveUnit = img.glBinding + static_cast<GLuint>(arrayElement);
+            if (imageValue != nullptr &&
+                static_cast<std::size_t>(arrayElement) < imageValue->ints.size()) {
+                effectiveUnit = static_cast<GLuint>(imageValue->ints[arrayElement]);
+            }
+            if (effectiveUnit >= Impl::kMaxImageUnits) continue;
+            auto& ib = impl_->imageBindings[effectiveUnit];
+            if (ib.texture == 0) continue;
+            GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
+            if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+            ComputeDispatchInfo::TextureBinding tb;
+            // CKPT119: level-restricted view when ib.level > 0.
+            tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
+            tb.metalSamplerState = nullptr;  // no sampler for storage images
+            tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+            info.textures.push_back(tb);
+        }
     }
 
     (void)impl_->frameGraph->encodeComputeDispatch(info);
@@ -28676,38 +28723,53 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             default: return 0;
         }
     };
+    // CKPT145 (Sprint 13 Day 9): sampler array iteration — see direct
+    // dispatch path for full rationale. Indirect mirror.
     for (const auto& samp : programObject->computeReflection.sampledTextures) {
         GLint uniformLoc = -1;
         GLenum samplerGLType = 0;
+        GLint samplerArraySize = 1;
         for (const auto& u : programObject->uniforms) {
-            if (u.name == samp.name) { uniformLoc = u.location; samplerGLType = u.type; break; }
+            if (u.name == samp.name) {
+                uniformLoc = u.location;
+                samplerGLType = u.type;
+                samplerArraySize = std::max<GLint>(u.arraySize, 1);
+                break;
+            }
         }
         if (uniformLoc < 0) continue;
         auto uvIt = programObject->uniformValues.find(uniformLoc);
-        const GLuint unit = (uvIt != programObject->uniformValues.end() && !uvIt->second.ints.empty())
-            ? static_cast<GLuint>(uvIt->second.ints[0]) : 0;
+        const GLProgramUniformValue* samplerValue =
+            (uvIt != programObject->uniformValues.end()) ? &uvIt->second : nullptr;
         GLenum preferredTarget = preferredTargetForSamplerType2(samplerGLType);
-        GLenum discoveredTarget = preferredTarget != 0 ? preferredTarget : GL_TEXTURE_2D;
-        GLuint texName = preferredTarget != 0
-            ? impl_->state->boundTextureOnUnit(unit, preferredTarget) : 0;
-        if (texName == 0) {
-            texName = impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_2D);
-            if (texName != 0) discoveredTarget = GL_TEXTURE_2D;
+        for (GLint arrayElement = 0; arrayElement < samplerArraySize; ++arrayElement) {
+            GLuint unit = 0;
+            if (samplerValue != nullptr &&
+                static_cast<std::size_t>(arrayElement) < samplerValue->ints.size()) {
+                unit = static_cast<GLuint>(samplerValue->ints[arrayElement]);
+            }
+            GLenum discoveredTarget = preferredTarget != 0 ? preferredTarget : GL_TEXTURE_2D;
+            GLuint texName = preferredTarget != 0
+                ? impl_->state->boundTextureOnUnit(unit, preferredTarget) : 0;
+            if (texName == 0) {
+                texName = impl_->state->boundTextureOnUnit(unit, GL_TEXTURE_2D);
+                if (texName != 0) discoveredTarget = GL_TEXTURE_2D;
+            }
+            if (texName == 0) {
+                texName = impl_->state->boundTextureOnUnitAny(unit, &discoveredTarget);
+            }
+            if (texName == 0) continue;
+            GLTextureObject* texObj = impl_->objects->textures().get(texName);
+            if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+            if (texObj->samplerDirty) {
+                impl_->rebuildTextureSamplerState(texName, *texObj);
+            }
+            ComputeDispatchInfo::TextureBinding tb;
+            tb.metalTexture = texObj->metalTexture;
+            tb.metalSamplerState = texObj->metalSampler;
+            tb.metalSlot = samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+            info.textures.push_back(tb);
         }
-        if (texName == 0) {
-            texName = impl_->state->boundTextureOnUnitAny(unit, &discoveredTarget);
-        }
-        if (texName == 0) continue;
-        GLTextureObject* texObj = impl_->objects->textures().get(texName);
-        if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
-        if (texObj->samplerDirty) {
-            impl_->rebuildTextureSamplerState(texName, *texObj);
-        }
-        ComputeDispatchInfo::TextureBinding tb;
-        tb.metalTexture = texObj->metalTexture;
-        tb.metalSamplerState = texObj->metalSampler;
-        tb.metalSlot = samp.metalBinding;
-        info.textures.push_back(tb);
     }
     // Storage images for the indirect path — mirror the direct path.
     for (const auto& img : programObject->computeReflection.storageImages) {
