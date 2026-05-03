@@ -2330,15 +2330,41 @@ struct MetalFrameGraph::Impl {
             [currentRenderEncoder setViewports:vps
                                          count:info.viewportArrayCount];
         } else if (info.viewportWidth > 0 && info.viewportHeight > 0) {
+            // Sprint 16 Day 4 [layered_rendering]: clamp viewport to
+            // render target bounds. The Y-flip computation
+            // `rtHeight - glY - glH` produces negative originY when the
+            // GL viewport is taller than the render target — which
+            // happens for FBO draws that don't reset glViewport from
+            // the default-framebuffer's window dimensions (e.g. CTS
+            // `geometry_shader.layered_rendering.layered_rendering`
+            // creates a 32×32 layered FBO but never calls glViewport,
+            // so state.viewport() stays at glcts's default 256×256).
+            // Negative originY is silently rejected by Metal's
+            // tile-rasterizer on Apple Silicon, dropping every fragment.
+            // Clamp the GL viewport rect to the render target before
+            // computing the Metal-flipped origin so the bound rect is
+            // always non-negative and within bounds.
             const double rtHeight = static_cast<double>(colorTexture.height);
+            const GLint rtW = static_cast<GLint>(colorTexture.width);
+            const GLint rtH = static_cast<GLint>(colorTexture.height);
+            // GL viewport (bottom-up coords). Clamp x/y to [0, rt) and
+            // width/height so the resulting rect fits in the RT.
+            const GLint glX = std::max<GLint>(0, info.viewportX);
+            const GLint glY = std::max<GLint>(0, info.viewportY);
+            const GLsizei availW = static_cast<GLsizei>(std::max<GLint>(0, rtW - glX));
+            const GLsizei availH = static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
+            const GLsizei glW = std::min<GLsizei>(info.viewportWidth, availW);
+            const GLsizei glH = std::min<GLsizei>(info.viewportHeight, availH);
             MTLViewport vp;
-            vp.originX = static_cast<double>(info.viewportX);
-            vp.originY = rtHeight - static_cast<double>(info.viewportY) - static_cast<double>(info.viewportHeight);
-            vp.width   = static_cast<double>(info.viewportWidth);
-            vp.height  = static_cast<double>(info.viewportHeight);
+            vp.originX = static_cast<double>(glX);
+            vp.originY = rtHeight - static_cast<double>(glY) - static_cast<double>(glH);
+            vp.width   = static_cast<double>(glW);
+            vp.height  = static_cast<double>(glH);
             vp.znear   = info.depthRangeNear;
             vp.zfar    = info.depthRangeFar;
-            [currentRenderEncoder setViewport:vp];
+            if (vp.width > 0 && vp.height > 0) {
+                [currentRenderEncoder setViewport:vp];
+            }
         }
 
         // GL 4.6 §14.5.1 — scissor test. Metal has no "disable scissor"
