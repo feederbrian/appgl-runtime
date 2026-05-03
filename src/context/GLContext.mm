@@ -6014,10 +6014,34 @@ struct GLContext::Impl {
                     // FramebufferTextureLayer attaches a single slice
                     // (att->layered == false) — the whole-texture slice
                     // count doesn't apply there.
+                    //
+                    // Per-target layer counts (Metal "slice" terminology):
+                    //   GL_TEXTURE_3D            → desc.depth (z slices)
+                    //   GL_TEXTURE_CUBE_MAP      → 6 (faces)
+                    //   GL_TEXTURE_CUBE_MAP_ARRAY→ 6 × desc.layers
+                    //   GL_TEXTURE_2D_ARRAY etc. → desc.layers
+                    //
+                    // The cubemap path was previously falling through to
+                    // `desc.layers` which texStorage2D leaves at 1 (only
+                    // GL_TEXTURE_*_ARRAY targets bump it from depth) — so
+                    // every layered-cubemap draw set
+                    // renderTargetArrayLength=0 and Metal asserted
+                    // "AGX: Texture read/write assertion failed:
+                    //  slice < getNumSlices() && Specified slice OOB"
+                    // the moment the synth VS routed any
+                    // [[render_target_array_index]] >= 1. Surfaced by
+                    // CTS layered_rendering.layered_rendering's
+                    // cubemap iteration where the GS emits
+                    // gl_Layer = n for n in 0..5.
                     if (outColorArrayLength != nullptr && att->layered && !primarySet) {
-                        const GLsizei layers = (texObj->target == GL_TEXTURE_3D)
-                            ? std::max<GLsizei>(texObj->desc.depth, 1)
-                            : std::max<GLsizei>(texObj->desc.layers, 1);
+                        GLsizei layers = std::max<GLsizei>(texObj->desc.layers, 1);
+                        if (texObj->target == GL_TEXTURE_3D) {
+                            layers = std::max<GLsizei>(texObj->desc.depth, 1);
+                        } else if (texObj->target == GL_TEXTURE_CUBE_MAP) {
+                            layers = 6;
+                        } else if (texObj->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+                            layers = 6 * std::max<GLsizei>(texObj->desc.layers, 1);
+                        }
                         if (layers > 1) {
                             *outColorArrayLength = static_cast<std::uint32_t>(layers);
                         }
