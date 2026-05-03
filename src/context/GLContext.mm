@@ -5785,11 +5785,23 @@ struct GLContext::Impl {
                 height = info.height;
                 samples = info.samples;
                 hasDimensions = true;
-            } else if (width != info.width || height != info.height) {
-                return GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
             } else if (samples != info.samples) {
                 return GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
             }
+            // GL 4.6 §9.4.1: ARB_framebuffer_object (now core) drops the
+            // ARB_framebuffer_object §3 wording that required all
+            // attachments to have matching dimensions —
+            // `FRAMEBUFFER_INCOMPLETE_DIMENSIONS_EXT` is gone in core
+            // GL 3.0+. Rendering uses the intersection of the attached
+            // image sizes (§9.4.2). CTS
+            // `viewport_array.depth_range_depth_test` builds an FBO
+            // with a 16x2 R32F colour attachment and a 128x128 D32F
+            // depth attachment and expects `glClear(GL_DEPTH_BUFFER_BIT)`
+            // to succeed; the prior strict-equal check rejected this
+            // valid configuration with `INVALID_FRAMEBUFFER_OPERATION`.
+            // The samples mismatch (above) is still a real
+            // `INCOMPLETE_MULTISAMPLE` since Metal can't render
+            // mixed-sample-count attachments in a single pass.
         }
 
         if (!hasAttachment) {
