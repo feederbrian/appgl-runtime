@@ -557,7 +557,18 @@ bool runTesForVertex(
     // (default) keeps the pre-CKPT69 behaviour of leaving user-block
     // gl_in[] reads unresolved (zeroed).
     const std::vector<std::string>* inVaryingNames = nullptr,
-    const std::vector<std::uint32_t>* inVaryingWidths = nullptr);
+    const std::vector<std::uint32_t>* inVaryingWidths = nullptr,
+    // Sprint 16 Day 6 (CKPT215) — Tess OpImage gap. When non-null,
+    // the per-vertex TES interpreter receives the same sampled-texture
+    // and storage-image maps that VS/GS interpreters already accept
+    // (mirror of vsSampledTextures/vsStorageImages on
+    // `runVsForVertex` style — see GSE.cpp:5486-5491). Without these
+    // wires the interpreter's `sampledTextures_` / `storageImages_`
+    // are empty, so a TES body executing `texture(sampler, coord)`
+    // (lowers to OpImageSampleExplicitLod) hits the empty-map fallback
+    // at GSE.cpp:2845-2853 and silently returns zeros.
+    const SampledTextureMap* sampledTextures = nullptr,
+    const SampledTextureMap* storageImages = nullptr);
 
 // Run a single TCS invocation on CPU. One invocation per
 // (patch, invocationID) where invocationID ∈ [0, layout(vertices=N)).
@@ -611,7 +622,11 @@ bool runTcsForVertex(
     const std::vector<std::string>* inVaryingNames = nullptr,
     const std::vector<std::uint32_t>* inVaryingWidths = nullptr,
     const std::vector<std::string>* outVaryingNames = nullptr,
-    const std::vector<std::uint32_t>* outVaryingWidths = nullptr);
+    const std::vector<std::uint32_t>* outVaryingWidths = nullptr,
+    // Sprint 16 Day 6 (CKPT215) — Tess OpImage gap; sister to
+    // runTesForVertex's new params. Same maps semantics.
+    const SampledTextureMap* sampledTextures = nullptr,
+    const SampledTextureMap* storageImages = nullptr);
 
 // Synthesise a pass-through vertex-shader MSL source that reads
 // the expanded per-vertex payload (one buffer slot with gl_Position

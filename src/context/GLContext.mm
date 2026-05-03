@@ -26506,9 +26506,40 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         GLVertexArrayObject* tvao = (vaoName != 0)
             ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         if (tvao != nullptr) {
+            // Sprint 16 Day 6 (CKPT215) — Tess OpImage gap. Build
+            // per-stage sampler/storage-image maps so TCS/TES bodies
+            // that call texture()/imageLoad()/imageStore() resolve
+            // through real bindings instead of the empty-map fallback.
+            // Sister-pattern to the GS-stage resolver at GLContext.mm:
+            // 26265 (resolveSamplerBindings/resolveImageBindings).
+            // tessControlReflection is the TCS reflection; the TES
+            // reflection data lives in tessEvalAsComputeReflection
+            // (legacy naming — also used by pure CPU emul path).
+            appgl::SampledTextureMap tcsSamMap, tcsImgMap, tesSamMap, tesImgMap;
+            if (!program->tessControlSpirv.empty()) {
+                tcsSamMap = impl_->buildSampledTextureMap(
+                    program->tessControlSpirv,
+                    &program->tessControlReflection, *program);
+                tcsImgMap = impl_->buildStorageImageMap(
+                    program->tessControlSpirv,
+                    &program->tessControlReflection, *program);
+            }
+            if (!program->tessEvalSpirv.empty()) {
+                tesSamMap = impl_->buildSampledTextureMap(
+                    program->tessEvalSpirv,
+                    &program->tessEvalAsComputeReflection, *program);
+                tesImgMap = impl_->buildStorageImageMap(
+                    program->tessEvalSpirv,
+                    &program->tessEvalAsComputeReflection, *program);
+            }
             appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
                 *program, *tvao, *impl_->objects, *impl_->state,
-                mode, count, first, /*elementIndices=*/nullptr);
+                mode, count, first, /*elementIndices=*/nullptr,
+                /*instanceCount=*/1, /*baseInstance=*/0,
+                tcsSamMap.empty() ? nullptr : &tcsSamMap,
+                tcsImgMap.empty() ? nullptr : &tcsImgMap,
+                tesSamMap.empty() ? nullptr : &tesSamMap,
+                tesImgMap.empty() ? nullptr : &tesImgMap);
             if (ted.ok) {
                 // Phase 3f-7: transform-feedback capture + rasterizer-
                 // discard early-out. The helper walks
@@ -26633,9 +26664,33 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             const bool hasTess = emulProgram->tessellationEmulated ||
                                  emulProgram->tessellationInterpreted;
             if (hasTess) {
+                // Sprint 16 Day 6 (CKPT215) — Tess OpImage gap; build
+                // TCS/TES sampler+image maps for tess+GS path too.
+                appgl::SampledTextureMap _tcsSam, _tcsImg, _tesSam, _tesImg;
+                if (!emulProgram->tessControlSpirv.empty()) {
+                    _tcsSam = impl_->buildSampledTextureMap(
+                        emulProgram->tessControlSpirv,
+                        &emulProgram->tessControlReflection, *emulProgram);
+                    _tcsImg = impl_->buildStorageImageMap(
+                        emulProgram->tessControlSpirv,
+                        &emulProgram->tessControlReflection, *emulProgram);
+                }
+                if (!emulProgram->tessEvalSpirv.empty()) {
+                    _tesSam = impl_->buildSampledTextureMap(
+                        emulProgram->tessEvalSpirv,
+                        &emulProgram->tessEvalAsComputeReflection, *emulProgram);
+                    _tesImg = impl_->buildStorageImageMap(
+                        emulProgram->tessEvalSpirv,
+                        &emulProgram->tessEvalAsComputeReflection, *emulProgram);
+                }
                 priorStage = appgl::emulateTessellationDraw(
                     *emulProgram, *vao, *impl_->objects, *impl_->state,
-                    mode, count, first, /*elementIndices=*/nullptr);
+                    mode, count, first, /*elementIndices=*/nullptr,
+                    /*instanceCount=*/1, /*baseInstance=*/0,
+                    _tcsSam.empty() ? nullptr : &_tcsSam,
+                    _tcsImg.empty() ? nullptr : &_tcsImg,
+                    _tesSam.empty() ? nullptr : &_tesSam,
+                    _tesImg.empty() ? nullptr : &_tesImg);
                 if (!priorStage.ok && !priorStage.diagnostic.empty()) {
                     APPGL_LOG(SHADER, @"drawArrays tess+GS: tess-emul: %s",
                               priorStage.diagnostic.c_str());

@@ -440,7 +440,18 @@ EmulatedDraw emulateTessellationDraw(
     GLint first,
     const std::uint32_t* elementIndices,
     GLsizei instanceCount = 1,
-    GLuint baseInstance = 0);
+    GLuint baseInstance = 0,
+    // Sprint 16 Day 6 (CKPT215) — Tess OpImage gap. Sampler / storage-
+    // image bindings for TCS+TES stages, resolved by the GL caller from
+    // the program's reflection (sister to existing GS-stage resolver).
+    // When non-null, plumbed through to runTesForVertex /
+    // runTcsForVertex which pass them to the per-vertex Interpreter so
+    // OpImageSample* / OpImageRead / OpImageWrite resolve against real
+    // texture data instead of the empty-map fallback (zeros).
+    const SampledTextureMap* tcsSampledTextures = nullptr,
+    const SampledTextureMap* tcsStorageImages = nullptr,
+    const SampledTextureMap* tesSampledTextures = nullptr,
+    const SampledTextureMap* tesStorageImages = nullptr);
 
 }  // namespace appgl
 

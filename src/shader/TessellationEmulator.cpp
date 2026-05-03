@@ -1883,7 +1883,11 @@ EmulatedDraw emulateTessellationDraw(
     GLint first,
     const std::uint32_t* elementIndices,
     GLsizei instanceCount,
-    GLuint baseInstance)
+    GLuint baseInstance,
+    const SampledTextureMap* tcsSampledTextures,
+    const SampledTextureMap* tcsStorageImages,
+    const SampledTextureMap* tesSampledTextures,
+    const SampledTextureMap* tesStorageImages)
 {
     (void)vao;
     (void)instanceCount;
@@ -1967,7 +1971,13 @@ EmulatedDraw emulateTessellationDraw(
                                              // discards per-patch outputs;
                                              // the full pre-pass rebuilds
                                              // them below.
-            &diag);
+            &diag,
+            /*inVaryingNames=*/nullptr,
+            /*inVaryingWidths=*/nullptr,
+            /*outVaryingNames=*/nullptr,
+            /*outVaryingWidths=*/nullptr,
+            /*sampledTextures=*/tcsSampledTextures,
+            /*storageImages=*/tcsStorageImages);
         tcsLevelsCaptured = ok;
     }
 
@@ -2331,7 +2341,9 @@ EmulatedDraw emulateTessellationDraw(
                     /*inVaryingNames=*/  &crossStageVsToTcs,
                     /*inVaryingWidths=*/ &crossStageVsToTcsWidths,
                     /*outVaryingNames=*/ &crossStageTcsToTes,
-                    /*outVaryingWidths=*/&crossStageTcsToTesWidths);
+                    /*outVaryingWidths=*/&crossStageTcsToTesWidths,
+                    /*sampledTextures=*/tcsSampledTextures,
+                    /*storageImages=*/tcsStorageImages);
                 if (tcsDebug && !ok) {
                     std::fprintf(stderr, "[tess-emul] TCS bail (patch=%zu iv=%d): %s\n",
                         p, iv, diag.c_str());
@@ -2418,7 +2430,9 @@ EmulatedDraw emulateTessellationDraw(
             ssboMap, thisPatchInputs, outV,
             uniformMapPtr, thisPatchVaryings, &diag,
             /*inVaryingNames=*/  &crossStageTcsToTes,
-            /*inVaryingWidths=*/ &crossStageTcsToTesWidths);
+            /*inVaryingWidths=*/ &crossStageTcsToTesWidths,
+            /*sampledTextures=*/tesSampledTextures,
+            /*storageImages=*/tesStorageImages);
         if (!ok && tesDebug && !diag.empty() &&
             tesBailSeen->insert(diag).second) {
             std::fprintf(stderr, "[tess-emul] TES bail: %s\n", diag.c_str());

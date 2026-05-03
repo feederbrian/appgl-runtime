@@ -6646,7 +6646,9 @@ bool runTesForVertex(
     const TesPatchVaryingMap* patchVaryings,
     std::string* diagnostic,
     const std::vector<std::string>* inVaryingNames,
-    const std::vector<std::uint32_t>* inVaryingWidths)
+    const std::vector<std::uint32_t>* inVaryingWidths,
+    const SampledTextureMap* sampledTextures,
+    const SampledTextureMap* storageImages)
 {
     if (tesSpirv == nullptr || tesWordCount < 5) {
         if (diagnostic) *diagnostic = "runTesForVertex: empty SPIR-V";
@@ -6718,6 +6720,19 @@ bool runTesForVertex(
     }
     tesInterp.setStorageBuffers(&ssboInterp);
 
+    // Sprint 16 Day 6 (CKPT215) — Tess OpImage gap. Sister-pattern to
+    // VS pre-pass for tess at GSE.cpp:5486-5491: TES bodies that call
+    // texture()/texelFetch()/imageLoad()/imageStore() now resolve
+    // through these maps. Without these wires, OpImageSample*/Read/
+    // Write ops hit the empty-map fallback at GSE.cpp:2845-2853 and
+    // silently return zeros.
+    if (sampledTextures != nullptr) {
+        tesInterp.setSampledTextures(sampledTextures);
+    }
+    if (storageImages != nullptr) {
+        tesInterp.setStorageImages(storageImages);
+    }
+
     // Phase 3f-14: wire the patch-varying map. Interpreter's TES
     // initVariables arm pulls Input-Patch-Location varying values
     // from here.
@@ -6786,7 +6801,9 @@ bool runTcsForVertex(
     const std::vector<std::string>* inVaryingNames,
     const std::vector<std::uint32_t>* inVaryingWidths,
     const std::vector<std::string>* outVaryingNames,
-    const std::vector<std::uint32_t>* outVaryingWidths)
+    const std::vector<std::uint32_t>* outVaryingWidths,
+    const SampledTextureMap* sampledTextures,
+    const SampledTextureMap* storageImages)
 {
     if (tcsSpirv == nullptr || tcsWordCount < 5) {
         if (diagnostic) *diagnostic = "runTcsForVertex: empty SPIR-V";
@@ -6852,6 +6869,14 @@ bool runTcsForVertex(
         }
     }
     tcsInterp.setStorageBuffers(&ssboInterp);
+
+    // Sprint 16 Day 6 (CKPT215) — Tess OpImage gap; sister to TES.
+    if (sampledTextures != nullptr) {
+        tcsInterp.setSampledTextures(sampledTextures);
+    }
+    if (storageImages != nullptr) {
+        tcsInterp.setStorageImages(storageImages);
+    }
 
     // Phase 3f-10: convert per-patch EmulatedVertex inputs (position +
     // clip/cull) into PerVertexInput so the interpreter's gl_in[]
