@@ -24753,6 +24753,23 @@ static void populateTranslatedDrawFixedFunctionState(
                 tdi.viewportArray[i].depthFar = vparr[i].depthFar;
             }
             tdi.viewportArrayCount = got;
+            // Sprint 16 Day 3 [viewport_array]: pair the indexed scissor
+            // array. When viewport array is bound, Metal requires a
+            // matching scissor count (otherwise viewports 1..N-1 see
+            // an undefined scissor and clip every fragment).
+            appgl::GLStateTracker::IndexedScissorEntry scarr[
+                appgl::TranslatedDrawInfo::kMaxDrawViewports];
+            std::size_t scgot = 0;
+            state.getScissorArray(scarr,
+                appgl::TranslatedDrawInfo::kMaxDrawViewports, &scgot);
+            const std::size_t cap = std::min(got, scgot);
+            for (std::size_t i = 0; i < cap; ++i) {
+                tdi.scissorArray[i].x = scarr[i].x;
+                tdi.scissorArray[i].y = scarr[i].y;
+                tdi.scissorArray[i].width = scarr[i].width;
+                tdi.scissorArray[i].height = scarr[i].height;
+                tdi.scissorArray[i].enabled = scarr[i].enabled;
+            }
         }
     }
 

@@ -1559,7 +1559,19 @@ struct MetalFrameGraph::Impl {
             // topology class; other modes defer to the Point
             // override above or leave Unspecified for the legacy
             // path compatibility.
-            if (info.fboColorArrayLength > 0) {
+            //
+            // Sprint 16 Day 3 [viewport_array]: the same Metal-pipeline
+            // requirement applies to `[[viewport_array_index]]` —
+            // unspecified topology silently disables the per-vertex
+            // viewport selection at draw time (no validation error,
+            // fragments just drop). Trigger the topology classification
+            // also when the encoder is binding a viewport array
+            // (`viewportArrayCount > 1`), because that's when the
+            // synth VS emits `[[viewport_array_index]]` (env-gated)
+            // OR when a VS using ARB_shader_viewport_layer_array
+            // emits it directly.
+            if (info.fboColorArrayLength > 0 ||
+                info.viewportArrayCount > 1) {
                 switch (info.mode) {
                     case GL_POINTS:
                         desc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
@@ -2339,41 +2351,37 @@ struct MetalFrameGraph::Impl {
         // outside the render target so no fragments pass — matching
         // CTS `viewport_array.scissor_zero_dimension` which expects
         // every fragment discarded when width=height=0.
+        //
+        // Sprint 16 Day 3 [viewport_array]: when the viewport array is
+        // bound (count > 1), pair it 1:1 with a scissor array via
+        // `setScissorRects:count:`. Per Apple Metal docs (and observed
+        // behaviour on Apple Silicon), `setViewports:count:N` followed
+        // by single `setScissorRect:` leaves scissor slots 1..N-1 at an
+        // implementation-defined state that drops fragments at any
+        // viewport > 0. Symmetric N-count is required.
         {
             const NSUInteger rtW = colorTexture.width;
             const NSUInteger rtH = colorTexture.height;
-            MTLScissorRect sr;
-            if (!info.scissorTestEnabled) {
-                sr.x = 0;
-                sr.y = 0;
-                sr.width = rtW;
-                sr.height = rtH;
-            } else if (info.scissorWidth <= 0 || info.scissorHeight <= 0) {
-                // Zero-dimension box: no fragments pass. Metal accepts
-                // width=height=0 as a valid (degenerate) scissor which
-                // correctly culls every fragment — matching GL 4.6
-                // §14.5.1 behaviour for zero-dimension scissor.
-                sr.x = 0;
-                sr.y = 0;
-                sr.width = 0;
-                sr.height = 0;
-            } else {
-                // GL scissor is bottom-up; Metal is top-down. Flip Y
-                // using render target height. Then clamp to target.
-                GLint glX = info.scissorX;
-                GLint glY = info.scissorY;
-                GLsizei glW = info.scissorWidth;
-                GLsizei glH = info.scissorHeight;
+            // Helper that converts a single GL scissor rect (bottom-up,
+            // RT-relative) plus an enabled flag into a Metal scissor
+            // rect (top-down, clamped). When disabled, returns the
+            // full RT — matching GL semantics where scissor only
+            // discards when the test is on.
+            auto makeMetalScissor = [&](bool enabled, GLint glX, GLint glY,
+                                        GLsizei glW, GLsizei glH) -> MTLScissorRect {
+                MTLScissorRect sr;
+                if (!enabled) {
+                    sr.x = 0; sr.y = 0; sr.width = rtW; sr.height = rtH;
+                    return sr;
+                }
+                if (glW <= 0 || glH <= 0) {
+                    sr.x = 0; sr.y = 0; sr.width = 0; sr.height = 0;
+                    return sr;
+                }
                 GLint metalX = std::max<GLint>(0, glX);
                 GLint metalY_bottomLeft = std::max<GLint>(0, glY);
-                GLint metalY =
-                    static_cast<GLint>(rtH) - metalY_bottomLeft - glH;
-                if (metalY < 0) {
-                    // Rect extends above render target; clamp top to 0
-                    // and shrink height accordingly.
-                    glH += metalY;
-                    metalY = 0;
-                }
+                GLint metalY = static_cast<GLint>(rtH) - metalY_bottomLeft - glH;
+                if (metalY < 0) { glH += metalY; metalY = 0; }
                 GLsizei availW = static_cast<GLsizei>(rtW) - metalX;
                 GLsizei availH = static_cast<GLsizei>(rtH) - metalY;
                 GLsizei finalW = std::min<GLsizei>(glW, std::max<GLsizei>(0, availW));
@@ -2381,16 +2389,45 @@ struct MetalFrameGraph::Impl {
                 if (finalW <= 0 || finalH <= 0) {
                     sr.x = rtW > 0 ? rtW - 1 : 0;
                     sr.y = rtH > 0 ? rtH - 1 : 0;
-                    sr.width = 1;
-                    sr.height = 1;
-                } else {
-                    sr.x = static_cast<NSUInteger>(metalX);
-                    sr.y = static_cast<NSUInteger>(metalY);
-                    sr.width = static_cast<NSUInteger>(finalW);
-                    sr.height = static_cast<NSUInteger>(finalH);
+                    sr.width = 1; sr.height = 1;
+                    return sr;
                 }
+                sr.x = static_cast<NSUInteger>(metalX);
+                sr.y = static_cast<NSUInteger>(metalY);
+                sr.width = static_cast<NSUInteger>(finalW);
+                sr.height = static_cast<NSUInteger>(finalH);
+                return sr;
+            };
+
+            if (info.viewportArrayCount > 1) {
+                // Multi-viewport path: build N matching scissors. Per-
+                // slot enable comes from glEnablei(SCISSOR_TEST, i);
+                // when none of the slots have the test on we still
+                // call setScissorRects:count: so Metal gets the
+                // symmetric pairing it expects (each slot at full RT).
+                MTLScissorRect srs[TranslatedDrawInfo::kMaxDrawViewports];
+                for (std::size_t i = 0; i < info.viewportArrayCount; ++i) {
+                    const auto& sce = info.scissorArray[i];
+                    // Honour both global SCISSOR_TEST and per-slot
+                    // enable: the per-slot view in indexedScissorTest_
+                    // is broadcast on global enable (GLStateTracker.cpp
+                    // setEnabled(GL_SCISSOR_TEST)) — but a draw with
+                    // global off needs a full-RT scissor at all slots
+                    // regardless of the per-slot rect.
+                    const bool enabled = info.scissorTestEnabled && sce.enabled;
+                    srs[i] = makeMetalScissor(enabled, sce.x, sce.y,
+                                               sce.width, sce.height);
+                }
+                [currentRenderEncoder setScissorRects:srs
+                                                count:info.viewportArrayCount];
+            } else {
+                // Single-viewport path: original logic.
+                MTLScissorRect sr = makeMetalScissor(info.scissorTestEnabled,
+                                                     info.scissorX, info.scissorY,
+                                                     info.scissorWidth,
+                                                     info.scissorHeight);
+                [currentRenderEncoder setScissorRect:sr];
             }
-            [currentRenderEncoder setScissorRect:sr];
         }
 
         // Bind vertex data at buffer index 0.

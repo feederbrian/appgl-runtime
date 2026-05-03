@@ -176,6 +176,20 @@ public:
     void getViewportArray(IndexedViewportEntry* outArray,
                           std::size_t outCapacity,
                           std::size_t* outCount) const;
+    // Sprint 16 Day 3 [viewport_array]: sister bulk read for the
+    // indexed-scissor array. Mirrors getViewportArray; needed because
+    // Metal's setScissorRects:count: must be matched 1:1 with
+    // setViewports:count: when a draw uses gl_ViewportIndex routing.
+    struct IndexedScissorEntry {
+        GLint x = 0;
+        GLint y = 0;
+        GLsizei width = 1;
+        GLsizei height = 1;
+        bool enabled = false;
+    };
+    void getScissorArray(IndexedScissorEntry* outArray,
+                         std::size_t outCapacity,
+                         std::size_t* outCount) const;
     // Per-viewport SCISSOR_TEST state. GL 4.1 §17.3.2:
     //   Enable(SCISSOR_TEST)       → all slots TRUE
     //   Disable(SCISSOR_TEST)      → all slots FALSE

@@ -329,6 +329,21 @@ struct TranslatedDrawInfo {
     GLint scissorY = 0;
     GLsizei scissorWidth = 0;
     GLsizei scissorHeight = 0;
+    // Sprint 16 Day 3 [viewport_array]: per-index scissor rect array,
+    // sister to viewportArray. Required because Metal pairs viewport
+    // and scissor by index — a `setViewports:count:N` MUST be matched
+    // with `setScissorRects:count:N` (or the unset scissor slots
+    // default to (0,0,0,0) and clip every fragment at viewports 1..N-1).
+    // When `viewportArrayCount > 1` the encoder uses these N entries;
+    // otherwise the single-rect `scissor*` fields above apply.
+    struct ScissorEntry {
+        GLint x = 0;
+        GLint y = 0;
+        GLsizei width = 0;
+        GLsizei height = 0;
+        bool enabled = false;   // per-slot SCISSOR_TEST (glEnablei)
+    };
+    ScissorEntry scissorArray[kMaxDrawViewports] = {};
 
     // Phase 8X Group 4d follow-up¹⁴ — blend state plumbing.
     //

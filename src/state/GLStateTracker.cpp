@@ -646,6 +646,29 @@ void GLStateTracker::getViewportArray(IndexedViewportEntry* outArray,
     if (outCount != nullptr) *outCount = n;
 }
 
+// Sprint 16 Day 3 [viewport_array]: sister to getViewportArray. The
+// per-slot scissor + per-slot scissor-test state. Caller projects to
+// MTLScissorRect[count] for `setScissorRects:count:`. Per-slot
+// scissor-test enable comes from glEnablei(SCISSOR_TEST, i) — when
+// disabled at slot i, callers should clamp the scissor to the full
+// render target so fragments at viewport[i] aren't culled.
+void GLStateTracker::getScissorArray(IndexedScissorEntry* outArray,
+                                      std::size_t outCapacity,
+                                      std::size_t* outCount) const {
+    const std::size_t n = std::min<std::size_t>(outCapacity, kMaxViewports);
+    if (outArray != nullptr) {
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto& sc = indexedScissors_[i];
+            outArray[i].x = sc.x;
+            outArray[i].y = sc.y;
+            outArray[i].width = sc.w;
+            outArray[i].height = sc.h;
+            outArray[i].enabled = indexedScissorTest_[i];
+        }
+    }
+    if (outCount != nullptr) *outCount = n;
+}
+
 // --- Tessellation state (GL 4.0) ---
 
 void GLStateTracker::setPatchParameteri(GLenum pname, GLint value) {
