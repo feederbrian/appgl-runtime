@@ -34488,7 +34488,9 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     // depth-stencil isn't directly addressable. Pre-patch this case
     // hit the source-format-switch UNSUPPORTED-PF default arm and
     // pushed INVALID_OPERATION (CKPT203 trace finding).
-    if (format == GL_DEPTH_STENCIL && type == GL_UNSIGNED_INT_24_8) {
+    if (format == GL_DEPTH_STENCIL &&
+        (type == GL_UNSIGNED_INT_24_8 ||
+         type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV)) {
         const MTLPixelFormat pf = metalTex.pixelFormat;
         if (pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
             pf == MTLPixelFormatDepth32Float_Stencil8) {
@@ -34558,15 +34560,44 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             auto clamp01 = [](float v) {
                 return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             };
-            for (std::size_t i = 0; i < pixCount; ++i) {
-                const float d = clamp01(readDepthFloat(i));
-                const std::uint32_t depth24 =
-                    static_cast<std::uint32_t>(d * 16777215.0f + 0.5f) & 0x00FFFFFF;
-                const std::uint8_t stencil8 = stencilBytes[i];
-                // GL_UNSIGNED_INT_24_8: depth in high 24 bits, stencil
-                // in low 8 bits (per GL 4.6 Table 8.5).
-                const std::uint32_t packed = (depth24 << 8) | stencil8;
-                std::memcpy(outBytes + i * 4, &packed, 4);
+            // Sprint 16 Day 1 EMERGENCY (CKPT210): branch on type to
+            // emit the correct packed layout. Pre-EMERGENCY we only
+            // handled GL_UNSIGNED_INT_24_8 (4 bytes per texel); CTS
+            // packed_pixels.depth*_stencil8_format_depth_component
+            // tests ALSO read with GL_FLOAT_32_UNSIGNED_INT_24_8_REV
+            // (8 bytes per texel: float depth + uint32 with stencil
+            // in low byte and 24 bits of padding), and Sprint 15
+            // Day 26 PBO offset honored fix EXPOSED this latent gap
+            // — pre-Day-26 the call early-returned at the dispatch
+            // entry without reaching here; post-Day-26 the call
+            // reaches the source-format switch which rejects
+            // mtlPixelFormat=260 as UNSUPPORTED-PF → spurious
+            // INVALID_OPERATION → "Error during glGetTexImage".
+            // SCOUT-acute-regression-fix-with-paired-class-cascade
+            // (CONFIRMED post-CKPT174 PROMOTION) 4th-instance.
+            if (type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV) {
+                // GL 4.6 Table 8.5: 8-byte struct per texel:
+                //   float depth (4 bytes), uint32 stencil-in-low-8 (4 bytes).
+                // Output layout matches GLSL's struct-of-arrays semantic;
+                // we just emit raw 8-byte slot per texel.
+                for (std::size_t i = 0; i < pixCount; ++i) {
+                    const float d = readDepthFloat(i);
+                    const std::uint32_t stencilSlot =
+                        static_cast<std::uint32_t>(stencilBytes[i]);
+                    std::memcpy(outBytes + i * 8, &d, 4);
+                    std::memcpy(outBytes + i * 8 + 4, &stencilSlot, 4);
+                }
+            } else {
+                // GL_UNSIGNED_INT_24_8 (4 bytes per texel, depth in high
+                // 24 bits, stencil in low 8 bits per Table 8.5).
+                for (std::size_t i = 0; i < pixCount; ++i) {
+                    const float d = clamp01(readDepthFloat(i));
+                    const std::uint32_t depth24 =
+                        static_cast<std::uint32_t>(d * 16777215.0f + 0.5f) & 0x00FFFFFF;
+                    const std::uint8_t stencil8 = stencilBytes[i];
+                    const std::uint32_t packed = (depth24 << 8) | stencil8;
+                    std::memcpy(outBytes + i * 4, &packed, 4);
+                }
             }
             return true;
         }
