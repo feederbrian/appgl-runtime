@@ -4830,6 +4830,23 @@ fragment float4 appgl_immediate_textured_fs(
                    length:uniformLength
                   atIndex:16];
         }
+        // Sprint 16 Day 1 (CKPT209) — Phase 3b Component E:
+        // SPIRV-Cross's vertex_for_tessellation MSL emit declares
+        // `uint3 spvDispatchBase [[grid_origin]]` (per
+        // spirv_msl.cpp:1050-1060) and computes
+        // `gl_VertexIndex = gl_GlobalInvocationID.x + spvDispatchBase.x`.
+        // Plain `dispatchThreads:` doesn't initialise [[grid_origin]],
+        // so spvDispatchBase reads garbage → gl_VertexIndex points
+        // anywhere → switch on gl_VertexID%4 jumps to a random case
+        // OR no case → output stays at allocation default (0).
+        // Fix: call setStageInRegion: with origin (0,0,0) to prime
+        // [[grid_origin]] before dispatch. Sister-pattern reuse from
+        // Metal's stage_in-compute-kernel pattern (the [[grid_origin]]
+        // attribute is shared across stage_in and grid-origin compute
+        // dispatch). `dispatchThreads:` then proceeds with a known
+        // base offset of zero, matching glDrawArrays(POINTS, 0, N)
+        // semantics where gl_BaseVertex = 0.
+        [enc setStageInRegion:MTLRegionMake1D(0, vertexCount)];
         // Match the existing tess-as-compute VS encoder shape:
         // dispatchThreads sets [[grid_size]] to vertexCount; SPIRV-
         // Cross's emitted VS uses `gl_GlobalInvocationID.x` as the
