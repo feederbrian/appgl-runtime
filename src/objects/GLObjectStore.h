@@ -197,6 +197,32 @@ struct GLTextureObject {
     // KHR-GL46.direct_state_access.textures_generate_mipmap_errors test.
     // Non-cube targets ignore this field.
     std::uint8_t cubeFacesDefined = 0;
+    // Sprint 16 Day 17 (CKPT226) [Y-flip Option B + viewport routing
+    // dual-fix]: this texture has at some point been bound as a
+    // colour attachment of a framebuffer, so it is potentially the
+    // sink of one or more rendered draws. Metal's storage convention
+    // is row 0 at the top of the texture; OpenGL `glGetTexImage`
+    // returns row 0 at the bottom. The render path applies a
+    // viewport Y-flip (`originY = rtH - glY - glH`) so the GPU writes
+    // Metal-storage-row (rtH-1-glY) for what GL calls row 0. Reading
+    // that back without the inverse flip hands the caller upside-down
+    // data — observable on `viewport_array.dynamic_viewport_index`,
+    // `geometry_shader.layered_rendering.layered_rendering`, and
+    // their siblings.
+    //
+    // Pure upload-then-readback round-trips (CTS `copy_image.*` is
+    // the archetype) keep the Metal convention end-to-end because
+    // the upload path doesn't flip either, so unconditionally
+    // Y-flipping the readback regresses 134 copy_image cases (CKPT221
+    // Day 12 empirical refutation). The flag tracks "this texture
+    // was bound for rendering" so the readback only flips for the
+    // rendered case.
+    //
+    // Set on FBO colour-attachment binding (`framebufferTexture` /
+    // `framebufferTextureLayer` / `framebufferTexture2D`); remains
+    // true for the texture's lifetime. Renderbuffers don't carry
+    // this flag because they aren't readable via `glGetTexImage`.
+    bool wasRenderedTo = false;
 };
 
 struct GLSamplerObject {

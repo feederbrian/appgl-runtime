@@ -13347,6 +13347,16 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
         textureObject->target == GL_TEXTURE_CUBE_MAP_ARRAY;
     stored.layered = layered && targetIsLayered;
     framebuffer->attachments[attachment] = stored;
+    // Sprint 16 Day 17 (CKPT226) [Y-flip Option B + viewport routing
+    // dual-fix]: a colour-attachment binding is the conservative
+    // trigger for "this texture is potentially going to be rendered
+    // to". Once set, `glGetTexImage` will Y-flip on readback per the
+    // GLTextureObject::wasRenderedTo comment.
+    if (isColorAttachment(attachment)) {
+        if (GLTextureObject* mut = impl_->objects->textures().get(texture)) {
+            mut->wasRenderedTo = true;
+        }
+    }
     return true;
 }
 
@@ -26019,13 +26029,25 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     const bool fboIsLayered = (preFboColTex != nullptr && preFboArrayLen > 0);
     const bool routeLayer = ed.hasLayer && fboIsLayered;
     // Sprint 15 Day 10 [metal-viewport-array]: detect multi-viewport
-    // binding (state divergence from slot 0) gated on env-var
-    // `APPGL_ENABLE_METAL_VIEWPORT_INDEX`. Inert by default per
-    // CKPT181 lesson (unconditional emission regressed
-    // viewport_array.provoking_vertex; root cause requires Day 11+
-    // Metal-API diagnosis).
+    // binding (state divergence from slot 0). Originally env-gated on
+    // `APPGL_ENABLE_METAL_VIEWPORT_INDEX` per CKPT181 because
+    // unconditional emission regressed `viewport_array.provoking_vertex`.
+    //
+    // Sprint 16 Day 16 (CKPT225) traced the regression to the
+    // 2-bug-cancellation phenomenon: provoking_vertex passed
+    // pre-Sprint-16 with viewport routing OFF *because* the missing
+    // Y-flip in `glGetTexImage` hid the wrong-viewport-region by
+    // reading raw Metal-storage rows. With both bugs fixed together
+    // (Day 17: re-enable viewport routing + Y-flip the readback in
+    // `glGetTexImage`), the per-vertex `gl_ViewportIndex` actually
+    // routes to the right rectangle and the readback agrees with
+    // OpenGL Y-up convention.
+    //
+    // The state-divergence guard (only emit when at least one entry
+    // 1..N differs from slot 0) stays in place — Metal pipelines that
+    // never need multi-viewport stay on the cheap single-viewport
+    // path.
     const bool routeViewportIndex = ed.hasViewportIndex &&
-        std::getenv("APPGL_ENABLE_METAL_VIEWPORT_INDEX") != nullptr &&
         [this]() -> bool {
             appgl::GLStateTracker::IndexedViewportEntry vparr[
                 appgl::TranslatedDrawInfo::kMaxDrawViewports];
@@ -34499,10 +34521,16 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             auto clamp01 = [](float v) {
                 return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             };
+            // Sprint 16 Day 17 (CKPT226) [Y-flip Option B]: render-then-
+            // readback depth/stencil textures need source rows reversed.
+            // See `GLTextureObject::wasRenderedTo` for rationale.
+            const bool yFlipReadbackDS = obj->wasRenderedTo;
             for (NSUInteger row = 0; row < texHeight; ++row) {
+                const NSUInteger srcRow = yFlipReadbackDS
+                    ? (texHeight - 1 - row) : row;
                 for (NSUInteger col = 0; col < texWidth; ++col) {
                     const std::size_t i = row * texWidth + col;
-                    const float d = clamp01(readDepthFloat(col, row));
+                    const float d = clamp01(readDepthFloat(col, srcRow));
                     switch (type) {
                         case GL_UNSIGNED_BYTE: {
                             const std::uint8_t v = static_cast<std::uint8_t>(d * 255.0f + 0.5f);
@@ -34954,12 +34982,18 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             auto* destBasePT = static_cast<std::uint8_t*>(pixels) + dstSkipBytesPT;
             const NSUInteger srcRowBytesPT = texWidth * srcBpp;
             const NSUInteger srcSliceBytesPT = srcRowBytesPT * texHeight;
+            // Sprint 16 Day 17 (CKPT226) [Y-flip Option B]: render-then-
+            // readback textures need source rows reversed (see general
+            // path below for the full rationale).
+            const bool yFlipReadbackPT = obj->wasRenderedTo;
             for (NSUInteger slice = 0; slice < numSlices; ++slice) {
                 const std::uint8_t* sliceRaw = raw.data() + slice * srcSliceBytesPT;
                 std::uint8_t* destSlice = destBasePT + slice * dstSliceBytesAlignedPT;
                 for (NSUInteger row = 0; row < texHeight; ++row) {
+                    const NSUInteger srcRow = yFlipReadbackPT
+                        ? (texHeight - 1 - row) : row;
                     std::memcpy(destSlice + row * dstRowBytesAlignedPT,
-                                sliceRaw  + row * srcRowBytesPT,
+                                sliceRaw  + srcRow * srcRowBytesPT,
                                 texWidth * srcBpp);
                 }
             }
@@ -35088,12 +35122,25 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
 
     auto* destBase = static_cast<std::uint8_t*>(pixels) + dstSkipBytes;
 
+    // Sprint 16 Day 17 (CKPT226) [Y-flip Option B + viewport routing
+    // dual-fix]: textures attached as colour attachments have been
+    // rendered into with the viewport originY flipped to match GL
+    // Y-up. Reading them back verbatim hands the caller upside-down
+    // rows. The flag flips the source-row index here only for
+    // rendered-to textures; pure upload-then-readback (CTS
+    // `copy_image.*`, the archetype) keeps `wasRenderedTo == false`
+    // and stays on the no-flip Metal-storage path. Together with the
+    // viewport-routing un-gate above (see `routeViewportIndex`),
+    // this is the dual-fix that closes the CKPT225-discovered
+    // 2-bug-cancellation phenomenon.
+    const bool yFlipReadback = obj->wasRenderedTo;
     for (NSUInteger slice = 0; slice < numSlices; ++slice) {
       const std::uint8_t* sliceRaw = raw.data() + slice * bytesPerImage;
       std::uint8_t* dest = destBase + slice * dstSliceBytesAligned;
       for (NSUInteger row = 0; row < texHeight; ++row) {
+        const NSUInteger srcRow = yFlipReadback ? (texHeight - 1 - row) : row;
         for (NSUInteger col = 0; col < texWidth; ++col) {
-            const std::size_t srcPixelOffset = (row * texWidth + col) * srcBpp;
+            const std::size_t srcPixelOffset = (srcRow * texWidth + col) * srcBpp;
             const std::uint8_t* srcPixel = sliceRaw + srcPixelOffset;
 
             // Read source components as doubles. Pad missing components
