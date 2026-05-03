@@ -5879,7 +5879,19 @@ EmulatedDraw emulateGeometryDraw(
     // layer_id decides the output colour — without this fix, the
     // FS sees the strip's first-vertex layer_id (stale from the
     // previous strip iteration) instead of the LAST's.
-    if (!outInterp.empty()) {
+    // NOTE: read interpolation qualifiers from `d.varyingInterp`, not
+    // local `outInterp` — `outInterp` was moved into `d.varyingInterp`
+    // at the field-assignment block above (line 5801: `std::move(
+    // outInterp)`), leaving the local in valid-but-unspecified
+    // (typically empty) state. The original f451ecd flat-varying
+    // propagation block read from the moved-from local, so the guard
+    // `if (!outInterp.empty())` was always false and the entire block
+    // was silently skipped — surfaced by Sprint 16 Day 13 Cowork
+    // .gputrace evidence on layered_rendering.layered_rendering
+    // showing positions 0,1,4 of each 6-vertex strip-expanded layer
+    // group carrying the previous layer's stale `flat out int
+    // layer_id` value.
+    if (!d.varyingInterp.empty()) {
         std::size_t primSize = 0;
         switch (expandedTopo) {
             case GL_POINTS:    primSize = 1; break;
@@ -5891,22 +5903,22 @@ EmulatedDraw emulateGeometryDraw(
             // Pre-compute varying offsets (flat-scalar start per
             // varying index) so we can copy the last vertex's slice
             // for any flat varying without re-traversing every loop.
-            std::vector<std::size_t> varyingOffsets(outInterp.size(), 0);
+            std::vector<std::size_t> varyingOffsets(d.varyingInterp.size(), 0);
             {
                 std::size_t off = 0;
-                for (std::size_t vi = 0; vi < outInterp.size(); ++vi) {
+                for (std::size_t vi = 0; vi < d.varyingInterp.size(); ++vi) {
                     varyingOffsets[vi] = off;
                     if (vi < outWidths.size()) off += outWidths[vi];
                 }
             }
             for (std::size_t i = 0; i + primSize <= emittedAll.size(); i += primSize) {
                 const std::size_t last = i + primSize - 1;
-                for (std::size_t vi = 0; vi < outInterp.size(); ++vi) {
+                for (std::size_t vi = 0; vi < d.varyingInterp.size(); ++vi) {
                     // Only flat-qualified outputs carry provoking-
                     // vertex semantics. Smooth / noperspective
                     // interpolate across all three vertices and
                     // don't care about the provoking choice.
-                    if (outInterp[vi] != 1) continue;
+                    if (d.varyingInterp[vi] != 1) continue;
                     const std::size_t varyOff = varyingOffsets[vi];
                     const std::uint32_t width = (vi < outWidths.size()) ? outWidths[vi] : 0;
                     if (width == 0) continue;
