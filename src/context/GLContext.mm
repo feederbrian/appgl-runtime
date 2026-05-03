@@ -24759,12 +24759,31 @@ static void populateTranslatedDrawFixedFunctionState(
     // from slot 0 (i.e. the app has called glViewportIndexed* or
     // glViewportArrayv to set per-index state). Otherwise count=0 to
     // preserve the single-viewport encoder path.
+    //
+    // Sprint 16 Day 19 (CKPT228): also bind the array when only the
+    // *scissor* array diverges (`glScissorIndexed*` /
+    // `glScissorArrayv`). CTS `viewport_array.scissor` /
+    // `viewport_array.scissor_clear` set 16 per-index scissor rects
+    // but never touch glViewportArrayv — every indexed viewport
+    // stays at slot 0's value, so the prior viewport-only divergence
+    // check stayed false, the encoder used the single-viewport
+    // single-scissor path, and Metal applied the same default
+    // scissor to every fragment regardless of the per-vertex
+    // `gl_ViewportIndex` the GS emitted. Detecting scissor divergence
+    // routes the draw through `setViewports:count:N` +
+    // `setScissorRects:count:N` even when viewport[1..N-1] match
+    // slot 0, which is what the scissor tests need.
     {
         appgl::GLStateTracker::IndexedViewportEntry vparr[
             appgl::TranslatedDrawInfo::kMaxDrawViewports];
         std::size_t got = 0;
         state.getViewportArray(vparr,
             appgl::TranslatedDrawInfo::kMaxDrawViewports, &got);
+        appgl::GLStateTracker::IndexedScissorEntry scarr_pre[
+            appgl::TranslatedDrawInfo::kMaxDrawViewports];
+        std::size_t scgot_pre = 0;
+        state.getScissorArray(scarr_pre,
+            appgl::TranslatedDrawInfo::kMaxDrawViewports, &scgot_pre);
         bool anyDiverge = false;
         for (std::size_t i = 1; i < got; ++i) {
             if (vparr[i].x != vparr[0].x ||
@@ -24775,6 +24794,18 @@ static void populateTranslatedDrawFixedFunctionState(
                 vparr[i].depthFar != vparr[0].depthFar) {
                 anyDiverge = true;
                 break;
+            }
+        }
+        if (!anyDiverge) {
+            for (std::size_t i = 1; i < scgot_pre; ++i) {
+                if (scarr_pre[i].x != scarr_pre[0].x ||
+                    scarr_pre[i].y != scarr_pre[0].y ||
+                    scarr_pre[i].width != scarr_pre[0].width ||
+                    scarr_pre[i].height != scarr_pre[0].height ||
+                    scarr_pre[i].enabled != scarr_pre[0].enabled) {
+                    anyDiverge = true;
+                    break;
+                }
             }
         }
         if (anyDiverge) {
@@ -26047,6 +26078,16 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     // 1..N differs from slot 0) stays in place — Metal pipelines that
     // never need multi-viewport stay on the cheap single-viewport
     // path.
+    // Sprint 16 Day 19 (CKPT228) — also bind on scissor-array
+    // divergence. CTS `viewport_array.scissor` /
+    // `viewport_array.scissor_clear` set 16 per-index scissor rects
+    // without ever calling glViewportArrayv, so the viewport-only
+    // divergence check below stayed false. The encoder then took
+    // the single-viewport / single-scissor path and dropped every
+    // GS-emitted gl_ViewportIndex into slot 0. Mirroring the check
+    // for scissor[1..N-1] vs scissor[0] routes those tests through
+    // the array path so the `[[viewport_array_index]]` rasteriser
+    // walk picks up the matching scissor rect.
     const bool routeViewportIndex = ed.hasViewportIndex &&
         [this]() -> bool {
             appgl::GLStateTracker::IndexedViewportEntry vparr[
@@ -26061,6 +26102,20 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                     vparr[i].height != vparr[0].height ||
                     vparr[i].depthNear != vparr[0].depthNear ||
                     vparr[i].depthFar != vparr[0].depthFar) {
+                    return true;
+                }
+            }
+            appgl::GLStateTracker::IndexedScissorEntry scarr[
+                appgl::TranslatedDrawInfo::kMaxDrawViewports];
+            std::size_t scgot = 0;
+            this->state->getScissorArray(scarr,
+                appgl::TranslatedDrawInfo::kMaxDrawViewports, &scgot);
+            for (std::size_t i = 1; i < scgot; ++i) {
+                if (scarr[i].x != scarr[0].x ||
+                    scarr[i].y != scarr[0].y ||
+                    scarr[i].width != scarr[0].width ||
+                    scarr[i].height != scarr[0].height ||
+                    scarr[i].enabled != scarr[0].enabled) {
                     return true;
                 }
             }
