@@ -6266,7 +6266,23 @@ struct GLContext::Impl {
             GLTextureImageLevel& image = level->second;
             const GLsizei sourceWidth = std::max<GLsizei>(image.desc.width, 1);
             const GLsizei sourceHeight = texture->target == GL_TEXTURE_1D ? 1 : std::max<GLsizei>(image.desc.height, 1);
-            const GLsizei sourceDepth = texture->target == GL_TEXTURE_3D ? std::max<GLsizei>(image.desc.depth, 1) : 1;
+            // Sprint 16 Day 20 (CKPT229) — array targets store layers in
+            // `image.desc.depth` (texStorage3D bumps it to the layer
+            // count). Treating only `GL_TEXTURE_3D` as having depth left
+            // 2D_ARRAY / 1D_ARRAY / 2D_MULTISAMPLE_ARRAY / CUBE_MAP_ARRAY
+            // attachments stuck at depth=1, so a layered-attachment
+            // glClear only wrote layer 0 and layers 1..N-1 stayed at
+            // their pre-clear values — observable as "Region (0x0).
+            // Expected: 0 got -1" on `viewport_array.scissor_clear`,
+            // which clears 16 layers at the same scissor[0] rect.
+            const bool isLayeredStorage =
+                texture->target == GL_TEXTURE_3D ||
+                texture->target == GL_TEXTURE_2D_ARRAY ||
+                texture->target == GL_TEXTURE_1D_ARRAY ||
+                texture->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+                texture->target == GL_TEXTURE_CUBE_MAP_ARRAY;
+            const GLsizei sourceDepth = isLayeredStorage
+                ? std::max<GLsizei>(image.desc.depth, 1) : 1;
             if (image.rgba8.size() < rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth)) {
                 image.rgba8.assign(rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth), 0);
             }
@@ -6275,9 +6291,58 @@ struct GLContext::Impl {
             if (firstLayer < 0 || firstLayer >= sourceDepth || lastLayer > sourceDepth) {
                 return false;
             }
+            // Sprint 16 Day 20 (CKPT229) — honour the scissor test on
+            // glClear per GL 4.6 §17.4.3 (clearing the buffers): "The
+            // pixel ownership test, the scissor test, sRGB conversion,
+            // and dithering are applied. All other tests are disabled."
+            // For multi-viewport, slot 0's scissor (rect + enable bit)
+            // controls clear masking — `viewport_array.scissor_clear`
+            // sets 16 per-index scissors and per-index SCISSOR_TEST
+            // enable bits, expecting the clear to be confined to
+            // scissor[0]'s rect. Without this gate every clear wrote
+            // the entire RT and the test failed at the first non-zero
+            // region of layer 0.
+            //
+            // CTS scissor coords are GL Y-up; our CPU shadow rgba8 is
+            // Metal-storage-Y-down (textures are uploaded via
+            // `replaceRegion` without an inverse flip, so row 0 of
+            // rgba8 == top of the texture as Metal sees it). We
+            // therefore translate scissor (glX, glY, glW, glH) to
+            // shadow rows by mapping `glY` (bottom) to
+            // `sourceHeight - glY - glH` (top of the band).
+            appgl::GLStateTracker::IndexedScissorEntry scarr[
+                appgl::TranslatedDrawInfo::kMaxDrawViewports];
+            std::size_t scgot = 0;
+            state->getScissorArray(scarr,
+                appgl::TranslatedDrawInfo::kMaxDrawViewports, &scgot);
+            const bool clearScissorActive =
+                scgot > 0 &&
+                (scarr[0].enabled || state->isEnabled(GL_SCISSOR_TEST));
+            GLsizei scissorMinX = 0, scissorMaxX = sourceWidth;
+            GLsizei scissorMinY = 0, scissorMaxY = sourceHeight;
+            if (clearScissorActive) {
+                const auto& s0 = scarr[0];
+                if (s0.width <= 0 || s0.height <= 0) {
+                    // Zero-dim scissor masks every pixel; nothing to write.
+                    return replaceMetalTexture(*texture);
+                }
+                scissorMinX = std::max<GLsizei>(0, s0.x);
+                scissorMaxX = std::min<GLsizei>(sourceWidth, s0.x + s0.width);
+                // GL Y-up bottom-left → Metal-storage Y-down top-row.
+                const GLsizei glTop = s0.y + s0.height;
+                const GLsizei metalMinY =
+                    std::max<GLsizei>(0, sourceHeight - glTop);
+                const GLsizei metalMaxY =
+                    std::min<GLsizei>(sourceHeight, sourceHeight - s0.y);
+                scissorMinY = metalMinY;
+                scissorMaxY = metalMaxY;
+                if (scissorMinX >= scissorMaxX || scissorMinY >= scissorMaxY) {
+                    return replaceMetalTexture(*texture);
+                }
+            }
             for (GLsizei z = firstLayer; z < lastLayer; ++z) {
-                for (GLsizei y = 0; y < sourceHeight; ++y) {
-                    for (GLsizei x = 0; x < sourceWidth; ++x) {
+                for (GLsizei y = scissorMinY; y < scissorMaxY; ++y) {
+                    for (GLsizei x = scissorMinX; x < scissorMaxX; ++x) {
                         const std::size_t offset =
                             ((static_cast<std::size_t>(z) * static_cast<std::size_t>(sourceHeight)
                                 + static_cast<std::size_t>(y))
