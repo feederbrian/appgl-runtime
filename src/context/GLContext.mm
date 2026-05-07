@@ -7153,12 +7153,166 @@ struct GLContext::Impl {
         return true;
     }
 
+    // Sprint 17 Day 7+ Bank-Group-A B-revised: shared depth-readback
+    // helper for both Renderbuffer-kind and Texture-kind paths. Handles
+    // Metal-texture getBytes (Shared/Managed) or blit-to-staging
+    // (Private; default on Apple Silicon for depth textures), depth-
+    // format → GLfloat conversion, and Y-flip gated on clipOrigin.
+    bool readDepthFromMetalTexture(id<MTLTexture> metalTex,
+                                   NSUInteger mipLevel,
+                                   GLint x, GLint y,
+                                   GLsizei width, GLsizei height,
+                                   void* pixels) const {
+        if (metalTex == nil) return false;
+        const MTLPixelFormat pf = metalTex.pixelFormat;
+        const NSUInteger texWidth = std::max<NSUInteger>(metalTex.width >> mipLevel, 1);
+        const NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+        // Flush any pending render encoder so the depth writes are visible.
+        if (frameGraph != nullptr) {
+            frameGraph->flushForReadback();
+        }
+        // Raw-bytes read depends on the depth format width.
+        NSUInteger srcBpp = 0;
+        switch (pf) {
+            case MTLPixelFormatDepth32Float:                srcBpp = 4; break;
+            case MTLPixelFormatDepth16Unorm:                srcBpp = 2; break;
+            case MTLPixelFormatDepth32Float_Stencil8:       srcBpp = 8; break;
+            case MTLPixelFormatDepth24Unorm_Stencil8:       srcBpp = 4; break;
+            default:
+                // Unknown depth-format mapping — bail safely so
+                // the caller reports INVALID_FRAMEBUFFER_OPERATION
+                // rather than returning garbage bytes.
+                return false;
+        }
+        const NSUInteger bytesPerRow = texWidth * srcBpp;
+        std::vector<std::uint8_t> raw(bytesPerRow * texHeight);
+        // Two read paths depending on the Metal storage mode:
+        //   - Shared/Managed: direct `getBytes:` works.
+        //   - Private: can't read directly on the CPU; blit the
+        //     texture into a shared staging buffer via a
+        //     blitCommandEncoder, then memcpy the contents.
+        //   (Apple Silicon Metal defaults depth textures to
+        //   Private, so the blit path is the common one here.)
+        if (metalTex.storageMode != MTLStorageModePrivate) {
+            MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
+            [metalTex getBytes:raw.data()
+                   bytesPerRow:bytesPerRow
+                    fromRegion:region
+                   mipmapLevel:mipLevel];
+        } else {
+            id<MTLDevice> mtlDevice = device;
+            id<MTLCommandQueue> mtlQueue = commandQueue;
+            if (mtlDevice == nil || mtlQueue == nil) {
+                return false;
+            }
+            const NSUInteger stagingSize = bytesPerRow * texHeight;
+            id<MTLBuffer> staging = [mtlDevice newBufferWithLength:stagingSize
+                                                          options:MTLResourceStorageModeShared];
+            if (staging == nil) return false;
+            id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
+            if (cmd == nil) return false;
+            id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+            if (blit == nil) return false;
+            MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
+            [blit copyFromTexture:metalTex
+                      sourceSlice:0
+                      sourceLevel:mipLevel
+                     sourceOrigin:region.origin
+                       sourceSize:region.size
+                         toBuffer:staging
+                destinationOffset:0
+           destinationBytesPerRow:bytesPerRow
+         destinationBytesPerImage:stagingSize];
+            [blit endEncoding];
+            [cmd commit];
+            [cmd waitUntilCompleted];
+            std::memcpy(raw.data(), [staging contents], stagingSize);
+        }
+        auto readDepth = [&](NSUInteger srcX, NSUInteger srcY) -> float {
+            const std::uint8_t* srcPixel = raw.data() + (srcY * texWidth + srcX) * srcBpp;
+            switch (pf) {
+                case MTLPixelFormatDepth32Float: {
+                    float v; std::memcpy(&v, srcPixel, 4); return v;
+                }
+                case MTLPixelFormatDepth16Unorm: {
+                    std::uint16_t v; std::memcpy(&v, srcPixel, 2);
+                    return static_cast<float>(v) / 65535.0f;
+                }
+                case MTLPixelFormatDepth32Float_Stencil8: {
+                    float v; std::memcpy(&v, srcPixel, 4); return v;
+                }
+                case MTLPixelFormatDepth24Unorm_Stencil8: {
+                    // Metal lays D24S8 as D24 in low 24 bits of
+                    // the 32-bit word on MTLPixelFormatDepth24-
+                    // Unorm_Stencil8.
+                    std::uint32_t v; std::memcpy(&v, srcPixel, 4);
+                    return static_cast<float>(v & 0x00FFFFFF) / static_cast<float>(0x00FFFFFF);
+                }
+                default: return 0.0f;
+            }
+        };
+        // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate depth-readback
+        // Y-flip on current clipOrigin (sister gate to color readback
+        // path; same single-state-snapshot conservative scope).
+        const bool yFlipDepthReadback = (state->clipOrigin() != GL_UPPER_LEFT);
+        auto* out = static_cast<GLfloat*>(pixels);
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint glY = y + row;
+                // GL row 0 = bottom; Metal row 0 = top.
+                const GLint srcY = yFlipDepthReadback
+                    ? (static_cast<GLint>(texHeight) - 1 - glY)
+                    : glY;
+                const std::size_t dstOffset = static_cast<std::size_t>(row * width + col);
+                if (srcX < 0 || srcY < 0 ||
+                    static_cast<NSUInteger>(srcX) >= texWidth ||
+                    static_cast<NSUInteger>(srcY) >= texHeight) {
+                    out[dstOffset] = 0.0f;
+                    continue;
+                }
+                out[dstOffset] = readDepth(static_cast<NSUInteger>(srcX),
+                                           static_cast<NSUInteger>(srcY));
+            }
+        }
+        return true;
+    }
+
     bool readDepthAttachmentPixels(const GLFramebufferAttachment& attachment, GLint x, GLint y, GLsizei width, GLsizei height, void* pixels) const {
         if (attachment.kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             const GLRenderbufferObject* renderbuffer = objects->renderbuffers().get(attachment.object);
-            if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->depth32.empty()) {
+            if (renderbuffer == nullptr || !renderbuffer->storageDefined) {
                 return false;
             }
+            // Sprint 17 Day 7+ Bank-Group-A B-revised: prefer the
+            // Metal-texture read path over the CPU shadow `depth32`.
+            // The shadow only captures `glClearDepth` initialisation
+            // (line 6841) and `writeDepthAttachmentPixels` (CPU
+            // glBlitFramebuffer path), NOT in-render-pass depth
+            // output — Metal writes those to `metalTexture` directly
+            // and the shadow stays at the cleared value. CTS
+            // `clip_control.depth_mode_zero_to_one` /
+            // `_one_to_one` exercise this with `glClearDepth(0.5)`,
+            // a depth-gradient draw, then `glReadPixels(GL_DEPTH_-
+            // COMPONENT, GL_FLOAT, …)` — pre-fix the readback
+            // returned 0.5 everywhere (max-diff = 0.5) instead of
+            // the rendered gradient.
+            if (renderbuffer->metalTexture != nullptr) {
+                id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                if (readDepthFromMetalTexture(metalTex, /*mipLevel*/0,
+                                              x, y, width, height, pixels)) {
+                    return true;
+                }
+                // Fall through to CPU shadow path on Metal-readback
+                // failure (storage mode mismatch, queue unavailable,
+                // unknown depth format) so well-tested CPU-blit
+                // pipelines that still rely on the shadow stay
+                // functional.
+            }
+            // CPU shadow fallback — preserves CPU-blit code path
+            // (writeDepthAttachmentPixels at line ~7536) and the
+            // glClearDepth-only no-render scenario.
+            if (renderbuffer->depth32.empty()) return false;
             auto* out = static_cast<GLfloat*>(pixels);
             for (GLsizei row = 0; row < height; ++row) {
                 for (GLsizei col = 0; col < width; ++col) {
@@ -7183,124 +7337,11 @@ struct GLContext::Impl {
         // surfaced as `GL_INVALID_FRAMEBUFFER_OPERATION`.
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
             const GLTextureObject* tex = objects->textures().get(attachment.object);
-            if (tex == nullptr || tex->metalTexture == nullptr) {
-                return false;
-            }
+            if (tex == nullptr || tex->metalTexture == nullptr) return false;
             id<MTLTexture> metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
-            // Convert the Metal pixel format to GLfloat depth samples.
-            const MTLPixelFormat pf = metalTex.pixelFormat;
             const NSUInteger mipLevel = static_cast<NSUInteger>(std::max<GLint>(attachment.level, 0));
-            const NSUInteger texWidth = std::max<NSUInteger>(metalTex.width >> mipLevel, 1);
-            const NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
-            // Flush any pending render encoder so the depth writes are visible.
-            if (frameGraph != nullptr) {
-                frameGraph->flushForReadback();
-            }
-            // Raw-bytes read depends on the depth format width.
-            NSUInteger srcBpp = 4;
-            switch (pf) {
-                case MTLPixelFormatDepth32Float:                srcBpp = 4; break;
-                case MTLPixelFormatDepth16Unorm:                srcBpp = 2; break;
-                case MTLPixelFormatDepth32Float_Stencil8:       srcBpp = 8; break;
-                case MTLPixelFormatDepth24Unorm_Stencil8:       srcBpp = 4; break;
-                default:
-                    // Unknown depth-format mapping — bail safely so
-                    // the caller reports INVALID_FRAMEBUFFER_OPERATION
-                    // rather than returning garbage bytes.
-                    return false;
-            }
-            const NSUInteger bytesPerRow = texWidth * srcBpp;
-            std::vector<std::uint8_t> raw(bytesPerRow * texHeight);
-            // Two read paths depending on the Metal storage mode:
-            //   - Shared/Managed: direct `getBytes:` works.
-            //   - Private: can't read directly on the CPU; blit the
-            //     texture into a shared staging buffer via a
-            //     blitCommandEncoder, then memcpy the contents.
-            //   (Apple Silicon Metal defaults depth textures to
-            //   Private, so the blit path is the common one here.)
-            if (metalTex.storageMode != MTLStorageModePrivate) {
-                MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
-                [metalTex getBytes:raw.data()
-                       bytesPerRow:bytesPerRow
-                        fromRegion:region
-                       mipmapLevel:mipLevel];
-            } else {
-                id<MTLDevice> mtlDevice = device;
-                id<MTLCommandQueue> mtlQueue = commandQueue;
-                if (mtlDevice == nil || mtlQueue == nil) {
-                    return false;
-                }
-                const NSUInteger stagingSize = bytesPerRow * texHeight;
-                id<MTLBuffer> staging = [mtlDevice newBufferWithLength:stagingSize
-                                                              options:MTLResourceStorageModeShared];
-                if (staging == nil) return false;
-                id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
-                if (cmd == nil) return false;
-                id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-                if (blit == nil) return false;
-                MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
-                [blit copyFromTexture:metalTex
-                          sourceSlice:0
-                          sourceLevel:mipLevel
-                         sourceOrigin:region.origin
-                           sourceSize:region.size
-                             toBuffer:staging
-                    destinationOffset:0
-               destinationBytesPerRow:bytesPerRow
-             destinationBytesPerImage:stagingSize];
-                [blit endEncoding];
-                [cmd commit];
-                [cmd waitUntilCompleted];
-                std::memcpy(raw.data(), [staging contents], stagingSize);
-            }
-            auto readDepth = [&](NSUInteger srcX, NSUInteger srcY) -> float {
-                const std::uint8_t* srcPixel = raw.data() + (srcY * texWidth + srcX) * srcBpp;
-                switch (pf) {
-                    case MTLPixelFormatDepth32Float: {
-                        float v; std::memcpy(&v, srcPixel, 4); return v;
-                    }
-                    case MTLPixelFormatDepth16Unorm: {
-                        std::uint16_t v; std::memcpy(&v, srcPixel, 2);
-                        return static_cast<float>(v) / 65535.0f;
-                    }
-                    case MTLPixelFormatDepth32Float_Stencil8: {
-                        float v; std::memcpy(&v, srcPixel, 4); return v;
-                    }
-                    case MTLPixelFormatDepth24Unorm_Stencil8: {
-                        // Metal lays D24S8 as D24 in low 24 bits of
-                        // the 32-bit word on MTLPixelFormatDepth24-
-                        // Unorm_Stencil8.
-                        std::uint32_t v; std::memcpy(&v, srcPixel, 4);
-                        return static_cast<float>(v & 0x00FFFFFF) / static_cast<float>(0x00FFFFFF);
-                    }
-                    default: return 0.0f;
-                }
-            };
-            // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate depth-readback
-            // Y-flip on current clipOrigin (sister gate to color readback
-            // path; same single-state-snapshot conservative scope).
-            const bool yFlipDepthReadback = (state->clipOrigin() != GL_UPPER_LEFT);
-            auto* out = static_cast<GLfloat*>(pixels);
-            for (GLsizei row = 0; row < height; ++row) {
-                for (GLsizei col = 0; col < width; ++col) {
-                    const GLint srcX = x + col;
-                    const GLint glY = y + row;
-                    // GL row 0 = bottom; Metal row 0 = top.
-                    const GLint srcY = yFlipDepthReadback
-                        ? (static_cast<GLint>(texHeight) - 1 - glY)
-                        : glY;
-                    const std::size_t dstOffset = static_cast<std::size_t>(row * width + col);
-                    if (srcX < 0 || srcY < 0 ||
-                        static_cast<NSUInteger>(srcX) >= texWidth ||
-                        static_cast<NSUInteger>(srcY) >= texHeight) {
-                        out[dstOffset] = 0.0f;
-                        continue;
-                    }
-                    out[dstOffset] = readDepth(static_cast<NSUInteger>(srcX),
-                                               static_cast<NSUInteger>(srcY));
-                }
-            }
-            return true;
+            return readDepthFromMetalTexture(metalTex, mipLevel,
+                                             x, y, width, height, pixels);
         }
         return false;
     }
