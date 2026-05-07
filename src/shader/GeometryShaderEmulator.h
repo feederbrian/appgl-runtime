@@ -173,6 +173,17 @@ struct EmulatedDraw {
     // compatible. When true, each vertex in expandedVertexData
     // carries an `int32` layer value appended after clip/cull.
     bool hasLayer = false;
+    // Sprint 17 Day 1 (CKPT236) [Probe A 2DMSArray clamp]: maximum
+    // gl_Layer value emitted by any vertex when hasLayer == true.
+    // Consumed by `MetalFrameGraph::encodeTranslatedDraw` to clamp
+    // `pass.renderTargetArrayLength` for `MTLTextureType2DMultisampleArray`
+    // colour attachments — Apple Silicon's AGX driver asserts
+    // `slice < getNumSlices()` when rTAL is set to the texture's
+    // full arrayLength on MS-array layered draws (Codex Sprint 17
+    // Day 1 forensics, h2DM-3 verdict; Clerk-validated). Setting
+    // rTAL to (max+1) instead of arrayLength clears the assertion
+    // for the active-layer-span. Zero when hasLayer is false.
+    std::uint32_t maxEmittedLayer = 0;
     // Sprint 15 Day 10 [metal-viewport-array]: True if any emitted
     // vertex wrote gl_ViewportIndex. Sister to `hasLayer`. Synth VS
     // emits `[[viewport_array_index]]` only when this is true AND

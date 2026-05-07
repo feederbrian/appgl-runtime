@@ -504,6 +504,19 @@ struct TranslatedDrawInfo {
     // either non-layered or attached as a single slice via
     // framebufferTextureLayer, and layered output is disabled.
     std::uint32_t fboColorArrayLength = 0;
+    // Sprint 17 Day 1 (CKPT236) [Probe A 2DMSArray clamp]: maximum
+    // gl_Layer value emitted by the GS for this draw. Applied by
+    // `encodeTranslatedDraw` when the colour attachment is
+    // `MTLTextureType2DMultisampleArray` to clamp
+    // `pass.renderTargetArrayLength` to `min(fboColorArrayLength,
+    // maxEmittedLayer + 1)` instead of the texture's full
+    // arrayLength. Apple Silicon's AGX driver asserts
+    // `slice < getNumSlices()` when rTAL is set to the full
+    // arrayLength on MS-array layered draws — Codex Sprint 17 Day 1
+    // forensics h2DM-3 verdict; Clerk-validated. Zero when not a
+    // layered GS-emul draw OR when GS doesn't write gl_Layer (in
+    // which case fboColorArrayLength itself is also zero).
+    std::uint32_t maxEmittedLayer = 0;
     // Phase 6-5: per-attachment slice index for FramebufferTextureLayer
     // attachments. When the app calls `glFramebufferTextureLayer(FBO,
     // COLOR_ATTACHMENT0 + i, tex, 0, layer)`, Metal's equivalent is
@@ -1090,6 +1103,10 @@ public:
         // `[[render_target_array_index]]`. Mirrors legacy
         // encodeTranslatedDraw's fboColorArrayLength (line 2092).
         std::uint32_t fboColorArrayLength = 0;
+        // Sprint 17 Day 1 (CKPT236) [Probe A 2DMSArray clamp]: max
+        // emitted gl_Layer for this mesh draw. See TranslatedDrawInfo's
+        // identical field for full rationale (Codex h2DM-3 verdict).
+        std::uint32_t maxEmittedLayer = 0;
         // GL render state — mirrors TranslatedDrawInfo's pipeline
         // toggles. Applied to the mesh-render encoder before
         // drawMeshThreadgroups so the mesh-shader path produces

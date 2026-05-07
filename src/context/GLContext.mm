@@ -26647,6 +26647,11 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // renderTargetArrayLength at 0 to match.
         if (routeLayer) {
             tdi.fboColorArrayLength = preFboArrayLen;
+            // Sprint 17 Day 1 (CKPT236) [Probe A 2DMSArray clamp]:
+            // forward GS-emul-tracked max emitted layer so
+            // `encodeTranslatedDraw` can clamp `renderTargetArrayLength`
+            // for MS-array attachments (h2DM-3 AGX assertion fix).
+            tdi.maxEmittedLayer = ed.maxEmittedLayer;
         }
     }
 

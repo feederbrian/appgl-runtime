@@ -5994,6 +5994,14 @@ EmulatedDraw emulateGeometryDraw(
         if (d.hasLayer) {
             const std::size_t layerOff = cullBase + cullLen;
             std::memcpy(&dst[layerOff], &emittedAll[v].layer, sizeof(std::int32_t));
+            // Sprint 17 Day 1 (CKPT236) [Probe A]: track max emitted
+            // layer for downstream `pass.renderTargetArrayLength`
+            // clamp on 2DMSArray attachments (Codex h2DM-3 verdict).
+            if (emittedAll[v].layer >= 0 &&
+                static_cast<std::uint32_t>(emittedAll[v].layer) > d.maxEmittedLayer) {
+                d.maxEmittedLayer =
+                    static_cast<std::uint32_t>(emittedAll[v].layer);
+            }
         }
         // Append gl_PointSize float at the very tail when
         // d.hasPointSize — read by the synth VS and emitted as

@@ -2144,7 +2144,33 @@ struct MetalFrameGraph::Impl {
             // Non-layered draws leave this at 0 (Metal's default
             // non-layered behaviour).
             if (info.fboColorArrayLength > 0) {
-                pass.renderTargetArrayLength = info.fboColorArrayLength;
+                // Sprint 17 Day 1 (CKPT236) [Probe A 2DMSArray
+                // clamp]: Apple Silicon's AGX driver asserts
+                // `slice < getNumSlices() && Specified slice OOB`
+                // when rTAL is set to the texture's full
+                // arrayLength on `MTLTextureType2DMultisampleArray`
+                // colour attachments — Codex Sprint 17 Day 1
+                // forensics h2DM-3 verdict (Clerk-validated). The
+                // active layer span (max(gl_Layer)+1) is what the
+                // rasteriser actually routes into; clamping rTAL
+                // to that span clears the assertion. Non-MS-array
+                // layered targets (2D_ARRAY / 3D / CUBE / CUBE_ARRAY)
+                // keep the texture's full arrayLength behaviour.
+                NSUInteger rtal = static_cast<NSUInteger>(
+                    info.fboColorArrayLength);
+                if (info.maxEmittedLayer > 0 &&
+                    info.fboColorTexture != nullptr) {
+                    id<MTLTexture> colTex = (__bridge id<MTLTexture>)
+                        info.fboColorTexture;
+                    if (colTex.textureType ==
+                            MTLTextureType2DMultisampleArray) {
+                        const NSUInteger active =
+                            static_cast<NSUInteger>(
+                                info.maxEmittedLayer + 1u);
+                        if (active < rtal) rtal = active;
+                    }
+                }
+                pass.renderTargetArrayLength = rtal;
             }
             if (passDepthStencil != nil) {
                 // CKPT168 (Sprint 14 Day 15): attach to depth/stencil
@@ -6718,7 +6744,23 @@ fragment float4 appgl_immediate_textured_fs(
         // descriptor for the rasterizer to honour it. Mirrors legacy
         // encodeTranslatedDraw at MetalFrameGraph.mm:2092.
         if (info.fboColorArrayLength > 0) {
-            rpd.renderTargetArrayLength = info.fboColorArrayLength;
+            // Sprint 17 Day 1 (CKPT236) [Probe A 2DMSArray clamp]:
+            // mirror the legacy-encoder clamp for the mesh path.
+            // See encodeTranslatedDraw 2DMSArray comment block.
+            NSUInteger rtal = static_cast<NSUInteger>(
+                info.fboColorArrayLength);
+            if (info.maxEmittedLayer > 0 &&
+                info.fboColorTexture != nullptr) {
+                id<MTLTexture> colTex = (__bridge id<MTLTexture>)
+                    info.fboColorTexture;
+                if (colTex.textureType ==
+                        MTLTextureType2DMultisampleArray) {
+                    const NSUInteger active = static_cast<NSUInteger>(
+                        info.maxEmittedLayer + 1u);
+                    if (active < rtal) rtal = active;
+                }
+            }
+            rpd.renderTargetArrayLength = rtal;
         }
         if (info.fboDepthStencilTexture != nullptr) {
             id<MTLTexture> dsTex =
