@@ -33920,6 +33920,41 @@ bool GLContext::getNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr
     body \
     impl_->state->bindTexture(_target, _prevTex);
 
+// Sprint 17 Day 5+ DSA Phase 5-2 [textures_parameter_setup_errors]:
+// GL 4.6 §8.11 — the DSA `glTextureParameter*` family demands
+// INVALID_OPERATION (not INVALID_ENUM) when the texture's effective
+// target is `TEXTURE_2D_MULTISAMPLE` or `TEXTURE_2D_MULTISAMPLE_ARRAY`
+// AND `pname` is any sampler state. The non-DSA `glTexParameter*`
+// path pushes INVALID_ENUM for the same scenario (per §8.10
+// table 23.18; covered by the existing check at line ~12786).
+//
+// CTS `direct_state_access.textures_parameter_setup_errors` asserts
+// the DSA error-code distinction explicitly. The shared helper
+// returns true when the (target, pname) combo violates the DSA-spec
+// rule and the caller has pushed INVALID_OPERATION.
+static bool dsaIsSamplerStateOnMultisampleTarget(GLenum target, GLenum pname) {
+    const bool isMSTarget = (target == GL_TEXTURE_2D_MULTISAMPLE ||
+                             target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY);
+    if (!isMSTarget) return false;
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:
+        case GL_TEXTURE_MAG_FILTER:
+        case GL_TEXTURE_WRAP_S:
+        case GL_TEXTURE_WRAP_T:
+        case GL_TEXTURE_WRAP_R:
+        case GL_TEXTURE_MIN_LOD:
+        case GL_TEXTURE_MAX_LOD:
+        case GL_TEXTURE_LOD_BIAS:
+        case GL_TEXTURE_COMPARE_MODE:
+        case GL_TEXTURE_COMPARE_FUNC:
+        case GL_TEXTURE_BORDER_COLOR:
+        case GL_TEXTURE_MAX_ANISOTROPY:
+            return true;
+        default:
+            return false;
+    }
+}
+
 
 // GL 4.6 §8.19 shared effective-target check for DSA TextureStorage*.
 // When the DSA function's dim-signature doesn't match the texture's
@@ -34324,6 +34359,10 @@ static bool isNonScalarTexParameter(GLenum pname) {
 
 bool GLContext::textureParameterf(GLuint texture, GLenum pname, GLfloat param) {
     DSA_TEX_WRAP(texture, {
+        if (dsaIsSamplerStateOnMultisampleTarget(_target, pname)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         if (isNonScalarTexParameter(pname)) {
             pushError(GL_INVALID_ENUM);
             return false;
@@ -34336,6 +34375,10 @@ bool GLContext::textureParameterf(GLuint texture, GLenum pname, GLfloat param) {
 
 bool GLContext::textureParameterfv(GLuint texture, GLenum pname, const GLfloat* param) {
     DSA_TEX_WRAP(texture, {
+        if (dsaIsSamplerStateOnMultisampleTarget(_target, pname)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = texParameterFloat(_target, pname, param);
         return ok;
     })
@@ -34343,6 +34386,10 @@ bool GLContext::textureParameterfv(GLuint texture, GLenum pname, const GLfloat* 
 
 bool GLContext::textureParameteri(GLuint texture, GLenum pname, GLint param) {
     DSA_TEX_WRAP(texture, {
+        if (dsaIsSamplerStateOnMultisampleTarget(_target, pname)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         if (isNonScalarTexParameter(pname)) {
             pushError(GL_INVALID_ENUM);
             return false;
@@ -34355,6 +34402,10 @@ bool GLContext::textureParameteri(GLuint texture, GLenum pname, GLint param) {
 
 bool GLContext::textureParameteriv(GLuint texture, GLenum pname, const GLint* param) {
     DSA_TEX_WRAP(texture, {
+        if (dsaIsSamplerStateOnMultisampleTarget(_target, pname)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = texParameterInteger(_target, pname, param);
         return ok;
     })
@@ -34362,6 +34413,10 @@ bool GLContext::textureParameteriv(GLuint texture, GLenum pname, const GLint* pa
 
 bool GLContext::textureParameterIiv(GLuint texture, GLenum pname, const GLint* params) {
     DSA_TEX_WRAP(texture, {
+        if (dsaIsSamplerStateOnMultisampleTarget(_target, pname)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = texParameterInteger(_target, pname, params);
         return ok;
     })
@@ -34369,6 +34424,10 @@ bool GLContext::textureParameterIiv(GLuint texture, GLenum pname, const GLint* p
 
 bool GLContext::textureParameterIuiv(GLuint texture, GLenum pname, const GLuint* params) {
     DSA_TEX_WRAP(texture, {
+        if (dsaIsSamplerStateOnMultisampleTarget(_target, pname)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
         bool ok = texParameterUnsignedInteger(_target, pname, params);
         return ok;
     })
