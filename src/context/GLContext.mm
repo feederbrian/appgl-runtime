@@ -28239,7 +28239,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     if (program != nullptr && program->needsCullDistancePrepass &&
         program->hasTranslatedPipeline) {
         const bool isLineOrTri =
-            (mode == GL_LINES || mode == GL_TRIANGLES ||
+            (mode == GL_POINTS || mode == GL_LINES || mode == GL_TRIANGLES ||
              mode == GL_LINE_STRIP || mode == GL_LINE_LOOP ||
              mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN);
         if (isLineOrTri) {
@@ -29434,7 +29434,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         program->hasTranslatedPipeline && vao != nullptr &&
         count > 0 && effectivePtr != nullptr) {
         const bool isLineOrTriDE =
-            (mode == GL_LINES || mode == GL_TRIANGLES ||
+            (mode == GL_POINTS || mode == GL_LINES || mode == GL_TRIANGLES ||
              mode == GL_LINE_STRIP || mode == GL_LINE_LOOP ||
              mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN);
         if (isLineOrTriDE) {

@@ -314,6 +314,19 @@ public:
         vsVertexID_ = vertexID;
         vsInstanceID_ = instanceID;
     }
+    // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 5 — caller-supplied
+    // base-name → base-Location override map for VS Input variables.
+    // Used when SPIR-V's `OpDecorate <var> Location` is absent (e.g.,
+    // arrays-of-floats compiled by glslang's xfb path that omits
+    // per-variable Location decoration but SPIRV-Cross's reflection
+    // recovers the location from the original GLSL `layout(location=N)`).
+    // For array Input variables, the per-element location is computed
+    // as base + element_index. Default null preserves implicit
+    // auto-assign behavior for back-compat.
+    void setVsInputLocationOverrides(
+            const std::unordered_map<std::string, std::uint32_t>* m) {
+        vsInputLocOverrides_ = m;
+    }
     // GS-stage gl_PrimitiveIDIn (BuiltInPrimitiveId = 7). Populated
     // per GS invocation by the caller; the emulator's initVariables
     // seeds the GS Input variable with this value when the variable
@@ -397,6 +410,9 @@ private:
     // storage).
     const UniformValues* uniforms_ = nullptr;
     const VertexAttribs* vsAttribs_ = nullptr;
+    // Phase 3 day 5 input-array Location override map (see
+    // setVsInputLocationOverrides). Non-owning.
+    const std::unordered_map<std::string, std::uint32_t>* vsInputLocOverrides_ = nullptr;
     std::int32_t vsVertexID_ = 0;
     std::int32_t vsInstanceID_ = 0;
     std::int32_t gsPrimitiveId_ = 0;
@@ -1310,6 +1326,25 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
             auto dIt = module_.decorations.find(varId);
             // Built-in inputs (gl_VertexIndex etc.) are not user attribs.
             if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn) continue;
+            // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 5 — caller
+            // override-map (vertexReflection.vertexInputs base-name → base
+            // location) takes precedence over the SPIR-V Decoration walk.
+            // glslang's xfb path emits arrays-of-floats inputs without
+            // per-variable Location decoration; SPIRV-Cross's reflection
+            // recovers the location from the original GLSL layout(location=N).
+            // CTS cull_distance.functional_* tests use `in float
+            // culldistance_data[8]` (locations 1..8) + `in vec2 position`
+            // (location 9) — without this override, implicit auto-assign
+            // mismatched the VAO layout, making `runVsForVertex` read all
+            // zeros for cull-distance attributes.
+            if (vsInputLocOverrides_ != nullptr && !info.name.empty()) {
+                auto oIt = vsInputLocOverrides_->find(info.name);
+                if (oIt != vsInputLocOverrides_->end()) {
+                    inputLocationByVarId[varId] = oIt->second;
+                    explicitLocs.push_back(oIt->second);
+                    continue;
+                }
+            }
             if (dIt != module_.decorations.end() && dIt->second.hasLocation) {
                 inputLocationByVarId[varId] = dIt->second.location;
                 explicitLocs.push_back(dIt->second.location);
@@ -1601,17 +1636,72 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
             if (vsAttribs_ != nullptr) {
                 auto locIt = inputLocationByVarId.find(varId);
                 if (locIt != inputLocationByVarId.end()) {
-                    auto aIt = vsAttribs_->find(locIt->second);
-                    if (aIt != vsAttribs_->end()) {
-                        const Value& v = aIt->second;
-                        const int n = v.componentCount();
-                        if (v.isFloatKind()) {
-                            for (int k = 0; k < n && static_cast<std::uint32_t>(k) < width; ++k) {
-                                storage[k] = v.f[k];
+                    // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 5 —
+                    // detect arrays-of-floats input variables spanning
+                    // multiple locations (GL 4.6 §4.4.1: each array
+                    // element occupies its own consecutive location).
+                    // For `in float arr[N]` at base location L, element K
+                    // lives at location L+K and is sourced from
+                    // vsAttribs[L+K]. Detect via pointee-type kind ==
+                    // Array; element type confirmed scalar-or-vec3-or-
+                    // less-floats. Otherwise fall back to single-Value
+                    // lookup (preserves existing behavior for vec[2-4] +
+                    // scalar inputs which fit in one Value).
+                    bool handledAsArray = false;
+                    auto pIt = module_.types.find(tIt->second.pointeeType);
+                    if (pIt != module_.types.end() &&
+                        pIt->second.kind == TypeInfo::Kind::Array) {
+                        const std::uint32_t elementType = pIt->second.componentType;
+                        const std::uint32_t elementWidth = module_.scalarWidth(elementType);
+                        // Each element occupies one location (per spec)
+                        // when element width <= 4. Wider elements (mat3,
+                        // mat4 inputs) consume multiple locations per
+                        // element — out of scope here; fall through.
+                        if (elementWidth >= 1 && elementWidth <= 4) {
+                            const std::uint32_t baseLoc = locIt->second;
+                            const std::uint32_t arrayLen =
+                                width / std::max<std::uint32_t>(1, elementWidth);
+                            for (std::uint32_t e = 0; e < arrayLen; ++e) {
+                                auto eIt = vsAttribs_->find(baseLoc + e);
+                                if (eIt == vsAttribs_->end()) continue;
+                                const Value& v = eIt->second;
+                                const int n = v.componentCount();
+                                const std::uint32_t dstBase = e * elementWidth;
+                                if (v.isFloatKind()) {
+                                    for (int k = 0;
+                                         k < n &&
+                                         k < static_cast<int>(elementWidth) &&
+                                         dstBase + static_cast<std::uint32_t>(k) < width;
+                                         ++k) {
+                                        storage[dstBase + k] = v.f[k];
+                                    }
+                                } else {
+                                    for (int k = 0;
+                                         k < n &&
+                                         k < static_cast<int>(elementWidth) &&
+                                         dstBase + static_cast<std::uint32_t>(k) < width;
+                                         ++k) {
+                                        std::memcpy(&storage[dstBase + k],
+                                                    &v.i[k], 4);
+                                    }
+                                }
                             }
-                        } else {
-                            for (int k = 0; k < n && static_cast<std::uint32_t>(k) < width; ++k) {
-                                std::memcpy(&storage[k], &v.i[k], 4);
+                            handledAsArray = true;
+                        }
+                    }
+                    if (!handledAsArray) {
+                        auto aIt = vsAttribs_->find(locIt->second);
+                        if (aIt != vsAttribs_->end()) {
+                            const Value& v = aIt->second;
+                            const int n = v.componentCount();
+                            if (v.isFloatKind()) {
+                                for (int k = 0; k < n && static_cast<std::uint32_t>(k) < width; ++k) {
+                                    storage[k] = v.f[k];
+                                }
+                            } else {
+                                for (int k = 0; k < n && static_cast<std::uint32_t>(k) < width; ++k) {
+                                    std::memcpy(&storage[k], &v.i[k], 4);
+                                }
                             }
                         }
                     }
@@ -7153,11 +7243,38 @@ bool runVsForVertex(
         }
     }
 
+    // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 5 — build the
+    // base-name → base-Location override map for the interpreter from
+    // `program.vertexReflection.vertexInputs` (SPIRV-Cross's reflection
+    // recovers explicit `layout(location=N)` qualifiers, including for
+    // arrays-of-floats whose per-element entries SPIRV-Cross splits as
+    // `name[K]` in the reflection list). Key = base name (`[K]` suffix
+    // stripped); value = minimum location across split entries (i.e.,
+    // location of element [0]). The interpreter consumes this map in
+    // `initVariables` to override implicit auto-assign for variables
+    // that lack `OpDecorate <var> Location <N>` in the SPIR-V (sister
+    // precedent: glslang's xfb path strips those decorations from
+    // certain inputs while still emitting per-element Location info
+    // SPIRV-Cross can recover at MSL-emit time).
+    std::unordered_map<std::string, std::uint32_t> vsInputLocOverrides;
+    for (const auto& vi : program.vertexReflection.vertexInputs) {
+        std::string base = vi.name;
+        const std::size_t bracket = base.find('[');
+        if (bracket != std::string::npos) base.resize(bracket);
+        auto it = vsInputLocOverrides.find(base);
+        if (it == vsInputLocOverrides.end() || it->second > vi.location) {
+            vsInputLocOverrides[base] = vi.location;
+        }
+    }
+
     Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
                          outVaryingNames, outVaryingWidths);
     vsInterp.setUniforms(&uniforms);
     vsInterp.setVsInputs(&vsAttribs,
                          static_cast<std::int32_t>(vboSlot), instanceID);
+    if (!vsInputLocOverrides.empty()) {
+        vsInterp.setVsInputLocationOverrides(&vsInputLocOverrides);
+    }
     if (sampledTextures != nullptr) {
         vsInterp.setSampledTextures(sampledTextures);
     }
