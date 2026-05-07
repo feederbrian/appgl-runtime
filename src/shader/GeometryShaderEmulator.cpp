@@ -5321,6 +5321,204 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     return d;
 }
 
+// Sprint 17 Day 7+ Bank-Group-H Path B Component C — CPU cull pre-pass
+// for VS+FS programs writing gl_CullDistance. Implements GL §14.6.3:
+// "the primitive is discarded iff for some channel i, ALL vertices
+// have cull_distance[i] < 0."
+//
+// Runs the VS interpreter once per draw vertex (sister-pattern reuse
+// of emulateVsOnlyDrawForTf at line 5129; same `runVsForVertex`
+// engine), captures `cullDistance` per vertex, groups vertices into
+// primitives based on `drawMode` topology, applies §14.6.3, and
+// outputs a filtered list of original-vertex-indices for non-culled
+// primitives. The caller (drawArrays / drawElements) then issues a
+// Metal `drawIndexedPrimitives` against a transient index buffer
+// built from `filteredIndicesOut` so Metal renders only visible
+// primitives.
+//
+// Topology coverage (Phase 3 day 2 scope):
+//   - GL_POINTS (vpp=1)        — discrete; each vertex = 1 primitive
+//   - GL_LINES (vpp=2)         — discrete; pairs
+//   - GL_TRIANGLES (vpp=3)     — discrete; triplets
+//   - GL_LINE_STRIP            — sliding window step=1
+//   - GL_TRIANGLE_STRIP        — sliding window with alternating winding
+//   - GL_LINE_LOOP             — strip + wraparound primitive
+//   - GL_TRIANGLE_FAN          — shared first vertex
+// Adjacency variants (GL_LINES_ADJACENCY etc.) are NOT covered by this
+// pre-pass — those CTS tests don't exercise cull_distance so deferring
+// to future work is safe.
+//
+// Returns true on success; false (with diagnostic) on VS-pre-pass
+// failure or unknown topology. `filteredIndicesOut` is populated only
+// when the function returns true; on false, the caller should fall
+// through to the legacy (no-cull-prepass) path.
+bool emulateVsCullPrepass(
+    GLProgramObject& program,
+    const GLVertexArrayObject& vao,
+    GLObjectStore& objects,
+    const GLStateTracker& state,
+    GLenum drawMode, GLsizei count, GLint first,
+    const std::uint32_t* elementIndices,
+    GLsizei instanceCount,
+    GLuint baseInstance,
+    std::vector<std::uint32_t>& filteredIndicesOut,
+    std::string* diagnostic)
+{
+    filteredIndicesOut.clear();
+    if (program.vertexSpirv.empty()) {
+        if (diagnostic) *diagnostic = "emulateVsCullPrepass: empty VS SPIR-V";
+        return false;
+    }
+    if (count <= 0) {
+        // Empty draw — nothing to cull, nothing to render.
+        return true;
+    }
+    // Per-topology vertices-per-primitive (vpp) + indexing mode.
+    enum class Topo { Points, Lines, Triangles, LineStrip, LineLoop,
+                      TriangleStrip, TriangleFan, Unknown };
+    Topo topo = Topo::Unknown;
+    std::uint32_t vpp = 0;
+    switch (drawMode) {
+        case GL_POINTS:         topo = Topo::Points;        vpp = 1; break;
+        case GL_LINES:          topo = Topo::Lines;         vpp = 2; break;
+        case GL_TRIANGLES:      topo = Topo::Triangles;     vpp = 3; break;
+        case GL_LINE_STRIP:     topo = Topo::LineStrip;     vpp = 2; break;
+        case GL_LINE_LOOP:      topo = Topo::LineLoop;      vpp = 2; break;
+        case GL_TRIANGLE_STRIP: topo = Topo::TriangleStrip; vpp = 3; break;
+        case GL_TRIANGLE_FAN:   topo = Topo::TriangleFan;   vpp = 3; break;
+        default:
+            if (diagnostic) *diagnostic =
+                "emulateVsCullPrepass: unsupported topology 0x" +
+                std::to_string(drawMode);
+            return false;
+    }
+    const GLsizei effectiveInstances = std::max<GLsizei>(1, instanceCount);
+    const std::size_t totalVerts =
+        static_cast<std::size_t>(count) * static_cast<std::size_t>(effectiveInstances);
+    // Pre-pass: run VS for each vertex; capture cullDistance + position
+    // (position not used here but cheap to grab — runVsForVertex
+    // populates it unconditionally).
+    std::vector<EmulatedVertex> perVertex(totalVerts);
+    {
+        // No captured varyings — only need cull/clip distances + position.
+        // runVsForVertex populates outVertex.cullDistance via the VS's
+        // OpStore-to-BuiltInCullDistance walk regardless of captured
+        // names list (sister to emulateVsOnlyDrawForTf line 5295).
+        std::vector<std::string> emptyNames;
+        std::vector<std::uint32_t> emptyWidths;
+        std::string vsDiag;
+        for (GLsizei instanceIdx = 0; instanceIdx < effectiveInstances; ++instanceIdx) {
+            const std::int32_t glInstanceID = instanceIdx;
+            (void)baseInstance;
+            for (GLsizei vi = 0; vi < count; ++vi) {
+                const std::size_t vboSlot = (elementIndices != nullptr)
+                    ? static_cast<std::size_t>(elementIndices[vi])
+                    : static_cast<std::size_t>(first + vi);
+                const std::size_t globalIdx =
+                    static_cast<std::size_t>(instanceIdx) *
+                        static_cast<std::size_t>(count) +
+                    static_cast<std::size_t>(vi);
+                EmulatedVertex& outV = perVertex[globalIdx];
+                outV = EmulatedVertex{};
+                outV.position[3] = 1.0f;
+                if (!runVsForVertex(
+                        program.vertexSpirv.data(),
+                        program.vertexSpirv.size(),
+                        program, vao, objects, vboSlot, glInstanceID,
+                        emptyNames, emptyWidths, outV, &vsDiag,
+                        nullptr, nullptr)) {
+                    if (diagnostic) *diagnostic =
+                        "emulateVsCullPrepass: VS-pre-pass: " + vsDiag;
+                    return false;
+                }
+            }
+        }
+    }
+    // Per-primitive iteration + §14.6.3 cull check + filtered indices.
+    // Helper: vertexForPrim maps (primIdx, slot) → vertex-array index.
+    auto vertexForPrim = [&](std::size_t p, std::uint32_t slot,
+                             std::size_t baseV, std::size_t cnt) -> std::size_t {
+        switch (topo) {
+            case Topo::Points:
+            case Topo::Lines:
+            case Topo::Triangles:
+                return baseV + p * vpp + slot;
+            case Topo::LineStrip:
+                return baseV + p + slot;
+            case Topo::LineLoop:
+                return baseV + ((p + slot) % cnt);
+            case Topo::TriangleStrip: {
+                // Alternate winding for odd primitives so the test's
+                // §14.6.3 evaluation sees the same vertex set GL would.
+                const std::uint32_t s = (p & 1u)
+                    ? (slot == 0 ? 1u : (slot == 1 ? 0u : 2u))
+                    : slot;
+                return baseV + p + s;
+            }
+            case Topo::TriangleFan:
+                return baseV + (slot == 0 ? 0u : (p + slot));
+            default:
+                return baseV;
+        }
+    };
+    auto primCountFor = [&](std::size_t cnt) -> std::size_t {
+        switch (topo) {
+            case Topo::Points: return cnt;
+            case Topo::Lines: return cnt / 2;
+            case Topo::Triangles: return cnt / 3;
+            case Topo::LineStrip:
+                return (cnt >= 2) ? (cnt - 1) : 0;
+            case Topo::LineLoop:
+                return cnt;
+            case Topo::TriangleStrip:
+                return (cnt >= 3) ? (cnt - 2) : 0;
+            case Topo::TriangleFan:
+                return (cnt >= 3) ? (cnt - 2) : 0;
+            default: return 0;
+        }
+    };
+    const std::size_t cnt = static_cast<std::size_t>(count);
+    const std::size_t primsPerInstance = primCountFor(cnt);
+    filteredIndicesOut.reserve(primsPerInstance * vpp * effectiveInstances);
+    for (GLsizei instanceIdx = 0; instanceIdx < effectiveInstances; ++instanceIdx) {
+        const std::size_t baseV =
+            static_cast<std::size_t>(instanceIdx) * cnt;
+        for (std::size_t p = 0; p < primsPerInstance; ++p) {
+            // Gather this primitive's vertex indices.
+            std::array<std::size_t, 3> primVerts{0, 0, 0};
+            for (std::uint32_t s = 0; s < vpp; ++s) {
+                primVerts[s] = vertexForPrim(p, s, baseV, cnt);
+            }
+            // §14.6.3: cull iff for SOME channel i, ALL vertices have
+            // cullDistance[i] < 0.
+            std::size_t maxCullLen = 0;
+            for (std::uint32_t s = 0; s < vpp; ++s) {
+                maxCullLen = std::max(maxCullLen,
+                                      perVertex[primVerts[s]].cullDistance.size());
+            }
+            bool culled = false;
+            for (std::size_t plane = 0; plane < maxCullLen && !culled; ++plane) {
+                bool allNeg = true;
+                for (std::uint32_t s = 0; s < vpp; ++s) {
+                    const auto& cd = perVertex[primVerts[s]].cullDistance;
+                    const float c = (plane < cd.size()) ? cd[plane] : 0.0f;
+                    if (c >= 0.0f) { allNeg = false; break; }
+                }
+                if (allNeg) culled = true;
+            }
+            if (culled) continue;
+            // Primitive survives — append its vertex indices in the
+            // order Metal will rasterize them.
+            for (std::uint32_t s = 0; s < vpp; ++s) {
+                filteredIndicesOut.push_back(
+                    static_cast<std::uint32_t>(primVerts[s]));
+            }
+        }
+    }
+    (void)state;   // future: per-state coordination (e.g., gl_DrawID)
+    return true;
+}
+
 EmulatedDraw emulateGeometryDraw(
     GLProgramObject& program,
     const GLVertexArrayObject& vao,

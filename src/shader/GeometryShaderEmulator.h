@@ -368,6 +368,29 @@ EmulatedDraw emulateVsOnlyDrawForTf(
 // existing `scanClipCullWrites` SPIR-V walk (sister-pattern leverage).
 bool vsSpirvWritesCullDistance(const std::uint32_t* spirv, std::size_t wordCount);
 
+// Sprint 17 Day 7+ Bank-Group-H Path B Component C — CPU cull pre-pass
+// for VS+FS programs writing gl_CullDistance. Implements GL §14.6.3
+// per-primitive cull check by running the VS interpreter per vertex,
+// capturing cullDistance, grouping vertices into primitives by topology
+// (POINTS / LINES / TRIANGLES / LINE_STRIP / LINE_LOOP / TRIANGLE_STRIP
+// / TRIANGLE_FAN), and outputting a list of original-vertex-indices for
+// non-culled primitives. Caller issues a Metal indexed draw against a
+// transient buffer built from `filteredIndicesOut`. Returns true on
+// success; false on VS-pre-pass failure or unknown topology.
+bool emulateVsCullPrepass(
+    GLProgramObject& program,
+    const GLVertexArrayObject& vao,
+    GLObjectStore& objects,
+    const GLStateTracker& state,
+    GLenum drawMode,
+    GLsizei count,
+    GLint first,
+    const std::uint32_t* elementIndices,
+    GLsizei instanceCount,
+    GLuint baseInstance,
+    std::vector<std::uint32_t>& filteredIndicesOut,
+    std::string* diagnostic);
+
 // Emulate a single drawArrays/drawElements call for a program that
 // has a GS stage. Returns an `EmulatedDraw` whose `.ok` flag tells
 // the caller whether the CPU path produced a usable expanded-vertex
