@@ -8516,6 +8516,23 @@ struct GLContext::Impl {
     bool encodeEmulatedGsDraw(GLProgramObject& program, GLuint programName,
                               const appgl::EmulatedDraw& ed);
 
+    // Sprint 17 Day 7+ Bank-Group-H Path B Component D-γ — render the
+    // VS+FS program against a CPU-cull-prepass-filtered original-vertex
+    // index list. Mirrors the drawElements translated-pipeline path
+    // (TranslatedDrawInfo + frameGraph->encodeTranslatedDraw) using
+    // `filteredIndices` as a UINT32 client-side index array. Caller
+    // (drawArrays / drawElements Component B branch) has already run
+    // emulateVsCullPrepass and confirmed `program.needsCullDistancePrepass`
+    // + line/triangle topology + non-empty filtered indices. Returns
+    // true on successful encode, false on any precondition mismatch
+    // OR encoder failure (caller falls through to legacy translated
+    // path on false to preserve correctness).
+    bool dispatchCullFilteredDraw(GLProgramObject& program,
+                                  GLVertexArrayObject& vao,
+                                  GLuint programName,
+                                  GLenum mode,
+                                  const std::vector<std::uint32_t>& filteredIndices);
+
     // Metal-native tessellation draw path (Phase 2 of the metal-tess
     // project). When the program has been identified as a tess program
     // with a successful link-time pipeline probe, this path takes over
@@ -21695,10 +21712,22 @@ bool GLContext::linkProgram(GLuint program) {
                 fsSpirvData = fragmentShader->spirv.data();
                 fsSpirvWords = fragmentShader->spirv.size();
             }
+            // Sprint 17 Day 7+ Bank-Group-H Path B Component A2: detect
+            // VS cull-distance writes before VS translation so the
+            // `disableCullDistanceClipRouting` option suppresses the
+            // ShaderTranslator gl_CullDistance → [[clip_distance]] HW
+            // routing for this program. CPU pre-pass at draw time
+            // performs §14.6.3 culling instead. Phase 2 §1.1 confirmed
+            // Option β (keep routing) refutation.
+            const bool vsCullPrepass =
+                appgl::vsSpirvWritesCullDistance(vsSpirvData, vsSpirvWords);
+            appgl::TranslatorOptions vsOptions;
+            vsOptions.disableCullDistanceClipRouting = vsCullPrepass;
+
             ShaderReflection vsRefl, fsRefl;
             const bool vsOk = translateStage(
                 "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
-                programObject->vertexMSL, vsRefl);
+                programObject->vertexMSL, vsRefl, vsOptions);
             const bool fsOk = translateStage(
                 "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
                 programObject->fragmentMSL, fsRefl);
@@ -21719,29 +21748,12 @@ bool GLContext::linkProgram(GLuint program) {
             if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
                 programObject->vertexSpirv = vertexShader->spirv;
             }
-            // Sprint 17 Day 7+ Bank-Group-H Path B Component A1: detect
-            // VS+FS programs that write gl_CullDistance (and have neither
-            // GS nor tess). Sets `needsCullDistancePrepass=true` so the
-            // draw-time path dispatches `emulateVsCullPrepass` to evaluate
-            // GL §14.6.3 per-primitive cull on CPU, and so the VS-stage
-            // MSL translator suppresses gl_CullDistance → [[clip_distance]]
-            // routing (Phase 2 confirmed Option β refutation: residual
-            // per-fragment clip would over-clip 0th vertex pixel on
-            // non-tested cull channels per CTS test design at
-            // glcCullDistance.cpp:2236-2246).
-            //
-            // Sister-pattern leverage (Item 26 LIVE 17th-instance):
-            // `appgl::scanClipCullWrites` already exists at
-            // GeometryShaderEmulator.cpp:4778 — reuses the SPIR-V output
-            // walk already proven against the GS-emul path.
-            if (!programObject->vertexSpirv.empty() &&
-                !programObject->gsPresent &&
-                !programObject->hasTessellation) {
-                programObject->needsCullDistancePrepass =
-                    appgl::vsSpirvWritesCullDistance(
-                        programObject->vertexSpirv.data(),
-                        programObject->vertexSpirv.size());
-            }
+            // Sprint 17 Day 7+ Bank-Group-H Path B Component A1: commit
+            // the VS cull-distance flag detected above (pre-translation)
+            // onto the program object. VertexFragment kind guarantees
+            // !gsPresent && !hasTessellation here; if a later relink
+            // attaches GS or tess, line 21430's reset clears this flag.
+            programObject->needsCullDistancePrepass = vsCullPrepass;
             // Sprint 15 Q3-Option-B Phase 1 [metal-tf-vs]: VS-as-compute
             // MSL emit + PSO build for VS+FS+TF programs (no GS, no
             // tess). Sister-pattern reuse of the existing metal-tess-TF
@@ -27393,6 +27405,188 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     return ok;
 }
 
+// Sprint 17 Day 7+ Bank-Group-H Path B Component D-γ — see header
+// comment on the Impl method declaration. Sister-pattern leverage
+// (Item 26 LIVE 18th-instance) with the drawElements internal
+// translated-pipeline setup at GLContext::drawElements (~line 29291);
+// kept as a separate function rather than a refactor of drawElements
+// to minimise regression-test surface on the existing path.
+bool GLContext::Impl::dispatchCullFilteredDraw(
+        GLProgramObject& program,
+        GLVertexArrayObject& vao,
+        GLuint programName,
+        GLenum mode,
+        const std::vector<std::uint32_t>& filteredIndices) {
+    if (filteredIndices.empty()) {
+        return true;
+    }
+    if (!program.hasTranslatedPipeline) {
+        return false;
+    }
+    if (vao.attributes.empty() || frameGraph == nullptr) {
+        return false;
+    }
+
+    // Find primary enabled attribute for primary-VBO detection. Mirror
+    // of the drawArrays primaryIdx scan — cull_distance CTS tests use
+    // attribute 0 unused with bindings at locations 1..9.
+    std::size_t primaryIdx = 0;
+    bool foundEnabled = false;
+    for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
+        if (vao.attributes[ai].enabled) {
+            primaryIdx = ai;
+            foundEnabled = true;
+            break;
+        }
+    }
+    if (!foundEnabled) {
+        return false;
+    }
+    const auto& posAttr = vao.attributes[primaryIdx];
+    auto resolved = resolveVertexAttrib(posAttr, vao);
+    GLBufferObject* vbo = (resolved.bufferName != 0)
+        ? objects->buffers().get(resolved.bufferName) : nullptr;
+    if (vbo == nullptr || vbo->shadowBytes.empty()) {
+        return false;
+    }
+    const std::size_t posStride = resolved.stride;
+    const std::size_t startOff = resolved.offset;
+    if (startOff > vbo->shadowBytes.size()) {
+        return false;
+    }
+
+    TranslatedDrawInfo tdi;
+    tdi.mode = mode;
+    tdi.vertexCount = static_cast<GLsizei>(filteredIndices.size());
+    tdi.vertexData = vbo->shadowBytes.data() + startOff;
+    tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
+    tdi.vertexStride = posStride;
+    tdi.metalVertexBuffer = vbo->metalBuffer;
+    tdi.metalVertexBufferOffset = startOff;
+    // Filtered indices fed as UINT32 client-side index array;
+    // encodeTranslatedDraw stages them into a Metal ring buffer.
+    tdi.indices = filteredIndices.data();
+    tdi.indexCount = static_cast<GLsizei>(filteredIndices.size());
+    tdi.indexType = GL_UNSIGNED_INT;
+
+    populateTranslatedDrawFixedFunctionState(tdi, *state);
+    tdi.vertexMSL = &program.vertexMSL;
+    tdi.fragmentMSL = &program.fragmentMSL;
+    tdi.vertexReflection = &program.vertexReflection;
+    tdi.fragmentReflection = &program.fragmentReflection;
+    tdi.pipelineStateOut = &program.metalPipelineState;
+    tdi.pipelineColorFormatOut = &program.metalPipelineColorFormat;
+    tdi.pipelineStateCacheOut = &program.metalPipelineStateCache;
+    tdi.metalVertexFunction = program.metalVertexFunction;
+    tdi.metalFragmentFunction = program.metalFragmentFunction;
+    tdi.metalVertexFunctionOut = &program.metalVertexFunction;
+    tdi.metalFragmentFunctionOut = &program.metalFragmentFunction;
+    tdi.program = programName;
+
+    // VAO-grouped attribute layout — mirror of drawElements grouping.
+    {
+        struct CPGroupKey {
+            GLuint bufferName;
+            std::size_t stride;
+            bool operator==(const CPGroupKey& o) const {
+                return bufferName == o.bufferName && stride == o.stride;
+            }
+        };
+        struct CPGroupKeyHash {
+            std::size_t operator()(const CPGroupKey& k) const {
+                return std::hash<GLuint>()(k.bufferName)
+                     ^ (std::hash<std::size_t>()(k.stride) << 16);
+            }
+        };
+        std::unordered_map<CPGroupKey, std::size_t, CPGroupKeyHash> cpExtraMap;
+        for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
+            const auto& attr = vao.attributes[ai];
+            if (!attr.enabled) continue;
+            auto attrRes = resolveVertexAttrib(attr, vao);
+            TranslatedDrawInfo::VertexAttributeLayout layout;
+            layout.location = static_cast<GLuint>(ai);
+            populateVertexAttributeLayoutVAOFields(layout, attr);
+            if (attrRes.bufferName == resolved.bufferName
+                && attrRes.stride == posStride) {
+                layout.offset = attrRes.offset - resolved.offset;
+                tdi.vertexAttributeLayouts.push_back(layout);
+            } else {
+                GLBufferObject* extraVbo =
+                    objects->buffers().get(attrRes.bufferName);
+                if (extraVbo == nullptr || extraVbo->shadowBytes.empty()) continue;
+                CPGroupKey key{attrRes.bufferName, attrRes.stride};
+                auto it = cpExtraMap.find(key);
+                std::size_t idx;
+                if (it == cpExtraMap.end()) {
+                    idx = tdi.extraVertexBuffers.size();
+                    cpExtraMap[key] = idx;
+                    TranslatedDrawInfo::ExtraVertexBuffer evb;
+                    evb.data = extraVbo->shadowBytes.data();
+                    evb.byteCount = extraVbo->shadowBytes.size();
+                    evb.stride = attrRes.stride;
+                    evb.divisor = 0;
+                    evb.metalBuffer = extraVbo->metalBuffer;
+                    evb.metalBufferOffset = 0;
+                    tdi.extraVertexBuffers.push_back(std::move(evb));
+                } else {
+                    idx = it->second;
+                }
+                layout.offset = attrRes.offset;
+                tdi.extraVertexBuffers[idx].attributes.push_back(layout);
+            }
+        }
+    }
+
+    if (!program.uniformLayoutComputed) {
+        computeStageUniformLayout(program.vertexUniformLayout,
+            program.vertexReflection, program.uniforms);
+        computeStageUniformLayout(program.fragmentUniformLayout,
+            program.fragmentReflection, program.uniforms);
+        program.uniformLayoutComputed = true;
+    }
+    thread_local std::vector<std::uint8_t> cpVtxUniform;
+    thread_local std::vector<std::uint8_t> cpFragUniform;
+    pushSynthesizedMatrixUniforms(program, matrixState);
+    buildStageUniformBuffer(cpVtxUniform,
+        program.vertexReflection, program.uniformValues,
+        program.vertexUniformLayout);
+    buildStageUniformBuffer(cpFragUniform,
+        program.fragmentReflection, program.uniformValues,
+        program.fragmentUniformLayout);
+    tdi.vertexUniformData = cpVtxUniform.data();
+    tdi.vertexUniformSize = cpVtxUniform.size();
+    tdi.fragmentUniformData = cpFragUniform.data();
+    tdi.fragmentUniformSize = cpFragUniform.size();
+
+    resolveSamplerBindings(program, tdi);
+    resolveUBOBindings(program, tdi);
+    resolveSSBOBindings(program, tdi);
+    resolveImageBindings(program, tdi);
+
+    {
+        GLsizei fboW = 0, fboH = 0;
+        void* fboDSTex = nullptr;
+        std::array<void*, 7> extraColTex = {};
+        std::array<std::uint32_t, 8> colSlices = {};
+        void* fboColTex = resolveFBOColorTarget(
+            fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
+        if (fboColTex != nullptr) {
+            tdi.fboColorTexture = fboColTex;
+            tdi.fboAdditionalColorTextures = extraColTex;
+            tdi.fboColorSlices = colSlices;
+            tdi.fboDepthStencilTexture = fboDSTex;
+            tdi.fboWidth = fboW;
+            tdi.fboHeight = fboH;
+        }
+    }
+
+    thread_local std::string cpPipelineBuildErr;
+    cpPipelineBuildErr.clear();
+    tdi.pipelineBuildErrorOut = &cpPipelineBuildErr;
+
+    return frameGraph->encodeTranslatedDraw(tdi);
+}
+
 // GL 4.6 §10.1 Table 10.1 — the full set of primitive modes that
 // glDraw*/glMultiDraw* accept. Anything else raises
 // GL_INVALID_ENUM. Shared by every draw entry.
@@ -27993,6 +28187,62 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 } else if (!ed.diagnostic.empty()) {
                     APPGL_LOG(SHADER, @"drawArrays VS-only-TF: %s",
                               ed.diagnostic.c_str());
+                }
+            }
+        }
+    }
+
+    // Sprint 17 Day 7+ Bank-Group-H Path B Component B (drawArrays):
+    // VS+FS programs that write gl_CullDistance get a CPU pre-pass +
+    // Metal indexed-draw routing. Phase 2 §1.2 confirmed this is gated
+    // on `needsCullDistancePrepass` (link-time A1 detect: VS writes
+    // CullDistance && !gsPresent && !hasTessellation) + line/triangle
+    // topology. Component E (Phase 3 day 5) handles TF coordination.
+    if (program != nullptr && program->needsCullDistancePrepass &&
+        program->hasTranslatedPipeline) {
+        const bool isLineOrTri =
+            (mode == GL_LINES || mode == GL_TRIANGLES ||
+             mode == GL_LINE_STRIP || mode == GL_LINE_LOOP ||
+             mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN);
+        if (isLineOrTri) {
+            const GLuint vaoNameCP = impl_->state->boundVertexArray();
+            GLVertexArrayObject* vaoCP = (vaoNameCP != 0)
+                ? impl_->objects->vertexArrays().get(vaoNameCP) : nullptr;
+            if (vaoCP != nullptr) {
+                std::vector<std::uint32_t> filteredIdx;
+                std::string cullDiag;
+                const bool prepassOk = appgl::emulateVsCullPrepass(
+                    *program, *vaoCP, *impl_->objects, *impl_->state,
+                    mode, count, first, /*elementIndices=*/nullptr,
+                    /*instanceCount=*/1, /*baseInstance=*/0,
+                    filteredIdx, &cullDiag);
+                if (prepassOk) {
+                    if (filteredIdx.empty()) {
+                        // GL §14.6.3 — all primitives culled. Count
+                        // input primitives and short-circuit. Legacy
+                        // path is bypassed so do the counter update
+                        // here (its own update would otherwise run
+                        // in the fall-through case below).
+                        if (!program->gsPresent) {
+                            impl_->updatePrimitiveCountersForNonGsDraw(
+                                mode, count, 1);
+                        }
+                        return true;
+                    }
+                    if (impl_->dispatchCullFilteredDraw(
+                            *program, *vaoCP, programName, mode,
+                            filteredIdx)) {
+                        if (!program->gsPresent) {
+                            impl_->updatePrimitiveCountersForNonGsDraw(
+                                mode, count, 1);
+                        }
+                        return true;
+                    }
+                    // Fall through to legacy path on encode failure
+                    // (legacy path runs its own counter update).
+                } else if (!cullDiag.empty()) {
+                    APPGL_LOG(SHADER, @"drawArrays cull-prepass: %s",
+                              cullDiag.c_str());
                 }
             }
         }
@@ -29135,6 +29385,68 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             } else if (!ed.diagnostic.empty()) {
                 APPGL_LOG(SHADER, @"drawElements VS-only-TF: %s",
                           ed.diagnostic.c_str());
+            }
+        }
+    }
+
+    // Sprint 17 Day 7+ Bank-Group-H Path B Component B (drawElements):
+    // sister of drawArrays B branch. Expand effectivePtr to UINT32 and
+    // route through emulateVsCullPrepass + dispatchCullFilteredDraw.
+    if (program != nullptr && program->needsCullDistancePrepass &&
+        program->hasTranslatedPipeline && vao != nullptr &&
+        count > 0 && effectivePtr != nullptr) {
+        const bool isLineOrTriDE =
+            (mode == GL_LINES || mode == GL_TRIANGLES ||
+             mode == GL_LINE_STRIP || mode == GL_LINE_LOOP ||
+             mode == GL_TRIANGLE_STRIP || mode == GL_TRIANGLE_FAN);
+        if (isLineOrTriDE) {
+            std::vector<std::uint32_t> cpIdx32(static_cast<std::size_t>(count));
+            bool idxOk = true;
+            if (effectiveType == GL_UNSIGNED_INT) {
+                std::memcpy(cpIdx32.data(), effectivePtr,
+                            static_cast<std::size_t>(count) * sizeof(std::uint32_t));
+            } else if (effectiveType == GL_UNSIGNED_SHORT) {
+                const std::uint16_t* src16 =
+                    static_cast<const std::uint16_t*>(effectivePtr);
+                for (GLsizei i = 0; i < count; ++i) cpIdx32[i] = src16[i];
+            } else if (effectiveType == GL_UNSIGNED_BYTE) {
+                const std::uint8_t* src8 =
+                    static_cast<const std::uint8_t*>(effectivePtr);
+                for (GLsizei i = 0; i < count; ++i) cpIdx32[i] = src8[i];
+            } else {
+                idxOk = false;
+            }
+            if (idxOk) {
+                std::vector<std::uint32_t> filteredIdx;
+                std::string cullDiag;
+                const bool prepassOk = appgl::emulateVsCullPrepass(
+                    *program, *vao, *impl_->objects, *impl_->state,
+                    mode, count, /*first=*/0, cpIdx32.data(),
+                    /*instanceCount=*/1, /*baseInstance=*/0,
+                    filteredIdx, &cullDiag);
+                if (prepassOk) {
+                    if (filteredIdx.empty()) {
+                        if (!program->gsPresent &&
+                            !impl_->transformFeedbackActive) {
+                            impl_->updatePrimitiveCountersForNonGsDraw(
+                                mode, count, 1);
+                        }
+                        return true;
+                    }
+                    if (impl_->dispatchCullFilteredDraw(
+                            *program, *vao, programName, mode,
+                            filteredIdx)) {
+                        if (!program->gsPresent &&
+                            !impl_->transformFeedbackActive) {
+                            impl_->updatePrimitiveCountersForNonGsDraw(
+                                mode, count, 1);
+                        }
+                        return true;
+                    }
+                } else if (!cullDiag.empty()) {
+                    APPGL_LOG(SHADER, @"drawElements cull-prepass: %s",
+                              cullDiag.c_str());
+                }
             }
         }
     }
