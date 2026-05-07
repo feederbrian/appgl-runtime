@@ -356,6 +356,25 @@ struct TranslatorOptions {
     // check then fires for all threads → silent kernel skip.
     // [[threads_per_grid]] returns the dispatched size correctly.
     bool forceThreadsPerGridForStageInputSize = false;
+
+    // Sprint 17 Day 3+ BONUS-1 [clip_control]: per-link clip_control
+    // depth-mode snapshot. Drives SPIRV-Cross's `vertex.fixup_clipspace`
+    // flag in `spirvToMSL`:
+    //   GL_NEGATIVE_ONE_TO_ONE (GL traditional [-1,+1]) → fixup=true
+    //     (emit `gl_Position.z = (z + w) * 0.5` for Metal [0,+1]).
+    //   GL_ZERO_TO_ONE (D3D-like [0,+1])               → fixup=false
+    //     (already Metal-compatible; no shader-side adjustment).
+    //
+    // Default GL_NEGATIVE_ONE_TO_ONE preserves pre-BONUS-1 behaviour
+    // (fixup_clipspace was hardcoded to true). Caller (linkProgram /
+    // synth-MSL site) overrides with `state->clipDepthMode()` so each
+    // program captures the depth mode in effect at link time.
+    //
+    // Origin side (`GL_LOWER_LEFT` vs `GL_UPPER_LEFT`) is NOT here —
+    // it's handled at draw time via `TranslatedDrawInfo::clipOrigin`
+    // gating the existing viewport-Y-flip mechanism in
+    // MetalFrameGraph (single-source-of-truth for Y-axis flip).
+    GLenum clipDepthMode = GL_NEGATIVE_ONE_TO_ONE;
 };
 
 // Phase 3B.5 [metal-tess-TF]: stage-output struct layout. Populated for

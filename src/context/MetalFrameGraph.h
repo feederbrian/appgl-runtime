@@ -310,6 +310,20 @@ struct TranslatedDrawInfo {
     ViewportEntry viewportArray[kMaxDrawViewports] = {};
     std::size_t viewportArrayCount = 0;
 
+    // Sprint 17 Day 3+ BONUS-1 [clip_control]: per-draw clip_control
+    // origin snapshot. Drives the viewport-descriptor Y-flip gate in
+    // `encodeTranslatedDraw` / `tryMetalMeshGSDraw`:
+    //   GL_LOWER_LEFT (GL traditional, Y-up clip) →
+    //     `originY = rtHeight - glY - glH` (existing flip; converts
+    //     bottom-up GL coords to top-down Metal coords).
+    //   GL_UPPER_LEFT (D3D-like, Y-down clip) →
+    //     `originY = glY` (no flip; user has explicitly opted into
+    //     Metal-native top-down convention).
+    // The flip is single-sourced here — SPIRV-Cross's `flip_vert_y`
+    // stays default false in ShaderTranslator. Combining shader-side
+    // and viewport-side flip would double-flip on UPPER_LEFT.
+    GLenum clipOrigin = GL_LOWER_LEFT;
+
     // GL 4.6 §14.5.1 / GL_SCISSOR_TEST. When enabled, fragments outside
     // the box are discarded. Metal has no separate "scissor enabled"
     // flag — `setScissorRect:` always applies. To mirror the GL
@@ -1156,6 +1170,11 @@ public:
         std::int32_t scissorY = 0;
         std::int32_t scissorWidth = 0;
         std::int32_t scissorHeight = 0;
+        // Sprint 17 Day 3+ BONUS-1 [clip_control]: mesh-GS-path mirror
+        // of TranslatedDrawInfo::clipOrigin. Drives viewport-Y-flip
+        // gate in `encodeMetalMeshGSDraw`. See TranslatedDrawInfo's
+        // identical field for full rationale.
+        std::uint32_t clipOrigin = 0x8CA1;  // GL_LOWER_LEFT
         // Diagnostic. Used by callers in error-path logging.
         std::string diagnostic;
     };

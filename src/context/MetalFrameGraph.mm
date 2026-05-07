@@ -2342,12 +2342,19 @@ struct MetalFrameGraph::Impl {
         // baselines on tests that don't exercise viewport_array.
         if (info.viewportArrayCount > 1) {
             const double rtHeight = static_cast<double>(colorTexture.height);
+            // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate viewport-Y-flip
+            // on `info.clipOrigin`. Default GL_LOWER_LEFT → flip as before
+            // (GL bottom-up → Metal top-down). GL_UPPER_LEFT → no flip
+            // (user opted into Metal-native top-down convention).
+            const bool flipY = (info.clipOrigin != GL_UPPER_LEFT);
             MTLViewport vps[TranslatedDrawInfo::kMaxDrawViewports];
             for (std::size_t i = 0; i < info.viewportArrayCount; ++i) {
                 const auto& e = info.viewportArray[i];
                 vps[i].originX = static_cast<double>(e.originX);
-                vps[i].originY = rtHeight - static_cast<double>(e.originY)
-                    - static_cast<double>(e.height);
+                vps[i].originY = flipY
+                    ? (rtHeight - static_cast<double>(e.originY)
+                       - static_cast<double>(e.height))
+                    : static_cast<double>(e.originY);
                 vps[i].width   = static_cast<double>(e.width);
                 vps[i].height  = static_cast<double>(e.height);
                 vps[i].znear   = e.depthNear;
@@ -2381,9 +2388,15 @@ struct MetalFrameGraph::Impl {
             const GLsizei availH = static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
             const GLsizei glW = std::min<GLsizei>(info.viewportWidth, availW);
             const GLsizei glH = std::min<GLsizei>(info.viewportHeight, availH);
+            // Sprint 17 Day 3+ BONUS-1 [clip_control]: see flip-gate
+            // rationale at the multi-viewport site above. Single-viewport
+            // path applies the same `clipOrigin`-dependent Y-flip choice.
+            const bool flipY = (info.clipOrigin != GL_UPPER_LEFT);
             MTLViewport vp;
             vp.originX = static_cast<double>(glX);
-            vp.originY = rtHeight - static_cast<double>(glY) - static_cast<double>(glH);
+            vp.originY = flipY
+                ? (rtHeight - static_cast<double>(glY) - static_cast<double>(glH))
+                : static_cast<double>(glY);
             vp.width   = static_cast<double>(glW);
             vp.height  = static_cast<double>(glH);
             vp.znear   = info.depthRangeNear;
@@ -6867,14 +6880,20 @@ fragment float4 appgl_immediate_textured_fs(
             [renc setDepthBias:bias slopeScale:slope clamp:clampV];
         }
         // Viewport. GL bottom-up → Metal top-down conversion.
+        // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate Y-flip on
+        // `info.clipOrigin` (mesh-GS path). See encodeTranslatedDraw
+        // for full rationale.
         if (info.viewportWidth > 0 && info.viewportHeight > 0) {
             id<MTLTexture> colorTex =
                 (__bridge id<MTLTexture>)info.fboColorTexture;
             const double rtHeight = static_cast<double>(colorTex.height);
+            const bool flipY = (info.clipOrigin != GL_UPPER_LEFT);
             MTLViewport vp;
             vp.originX = static_cast<double>(info.viewportX);
-            vp.originY = rtHeight - static_cast<double>(info.viewportY)
-                       - static_cast<double>(info.viewportHeight);
+            vp.originY = flipY
+                ? (rtHeight - static_cast<double>(info.viewportY)
+                   - static_cast<double>(info.viewportHeight))
+                : static_cast<double>(info.viewportY);
             vp.width   = static_cast<double>(info.viewportWidth);
             vp.height  = static_cast<double>(info.viewportHeight);
             vp.znear   = info.depthRangeNear;

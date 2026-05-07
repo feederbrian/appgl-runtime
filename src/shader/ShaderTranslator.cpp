@@ -958,8 +958,25 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             }
         }
 
+        // Sprint 17 Day 3+ BONUS-1 [clip_control]: drive SPIRV-Cross's
+        // depth-fixup flag from the per-link `clipDepthMode` snapshot
+        // captured at translation time.
+        //   GL_NEGATIVE_ONE_TO_ONE (GL default, [-1,+1] clip-z) →
+        //     fixup_clipspace=true; SPIRV-Cross emits
+        //     `gl_Position.z = (z + w) * 0.5` so the [0,+1] Metal
+        //     clip-z range receives the correctly-mapped value.
+        //   GL_ZERO_TO_ONE (D3D-like [0,+1] clip-z) →
+        //     fixup_clipspace=false; the GL clip-z range already
+        //     matches Metal's, no shader-side mapping needed.
+        // Origin side (`flip_vert_y`) stays default false — AppGL
+        // already handles the GL bottom-up → Metal top-down convention
+        // via the viewport descriptor's `originY = rtH - glY - glH`
+        // flip in MetalFrameGraph (single-source-of-truth). Enabling
+        // SPIRV-Cross flip_vert_y here would compound with that
+        // viewport-flip into a double-flip artifact on UPPER_LEFT.
         spirv_cross::CompilerGLSL::Options glslOpts = compiler.get_common_options();
-        glslOpts.vertex.fixup_clipspace = true;
+        glslOpts.vertex.fixup_clipspace =
+            (options.clipDepthMode == GL_NEGATIVE_ONE_TO_ONE);
         compiler.set_common_options(glslOpts);
 
         // Remap uniform buffers (UBOs + push constants) to Metal buffer slots.

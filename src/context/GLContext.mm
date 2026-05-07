@@ -7115,12 +7115,21 @@ struct GLContext::Impl {
 
         // RC-A02: OpenGL framebuffer row 0 is at the bottom; Metal
         // texture row 0 is at the top.  Flip Y during readback.
+        // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate readback Y-flip
+        // on the current `glClipControl` origin. When origin is
+        // GL_UPPER_LEFT the draw-time viewport descriptor's Y-flip is
+        // OFF (BONUS-1.2 gate), so Metal texture storage is in user's
+        // top-down convention — readback should NOT re-flip. Single-
+        // -state-snapshot per readback call (CONSERVATIVE scope: assumes
+        // draw-time clipOrigin == readback-time clipOrigin, which holds
+        // for the BONUS-1 target clip_control sub-tests).
+        const bool yFlipReadback = (state->clipOrigin() != GL_UPPER_LEFT);
         auto* out = static_cast<std::uint8_t*>(pixels);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
                 const GLint srcX = x + col;
                 const GLint glY = y + row;
-                const GLint srcY = sourceHeight - 1 - glY;
+                const GLint srcY = yFlipReadback ? (sourceHeight - 1 - glY) : glY;
                 const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
                 if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
                     std::memset(out + dstOffset, 0, 4);
@@ -7267,13 +7276,19 @@ struct GLContext::Impl {
                     default: return 0.0f;
                 }
             };
+            // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate depth-readback
+            // Y-flip on current clipOrigin (sister gate to color readback
+            // path; same single-state-snapshot conservative scope).
+            const bool yFlipDepthReadback = (state->clipOrigin() != GL_UPPER_LEFT);
             auto* out = static_cast<GLfloat*>(pixels);
             for (GLsizei row = 0; row < height; ++row) {
                 for (GLsizei col = 0; col < width; ++col) {
                     const GLint srcX = x + col;
                     const GLint glY = y + row;
                     // GL row 0 = bottom; Metal row 0 = top.
-                    const GLint srcY = static_cast<GLint>(texHeight) - 1 - glY;
+                    const GLint srcY = yFlipDepthReadback
+                        ? (static_cast<GLint>(texHeight) - 1 - glY)
+                        : glY;
                     const std::size_t dstOffset = static_cast<std::size_t>(row * width + col);
                     if (srcX < 0 || srcY < 0 ||
                         static_cast<NSUInteger>(srcX) >= texWidth ||
@@ -8081,12 +8096,16 @@ struct GLContext::Impl {
 
         auto* dest = static_cast<std::uint8_t*>(pixels);
 
+        // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate native-format
+        // FBO color readback Y-flip on current clipOrigin (sister to
+        // readColorAttachmentPixels gate above).
+        const bool yFlipNativeReadback = (state->clipOrigin() != GL_UPPER_LEFT);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
                 const GLint srcX = x + col;
                 const GLint glY = y + row;
                 // RC-A02: OpenGL row 0 = bottom → Metal row 0 = top.
-                const GLint srcY = sourceHeight - 1 - glY;
+                const GLint srcY = yFlipNativeReadback ? (sourceHeight - 1 - glY) : glY;
 
                 // Destination byte offset honours PACK_ALIGNMENT,
                 // PACK_ROW_LENGTH, and PACK_SKIP_{ROWS,PIXELS}.
@@ -20976,12 +20995,20 @@ bool GLContext::linkProgram(GLuint program) {
                               const std::string& sourceText,
                               std::string& mslOut,
                               ShaderReflection& reflectionOut,
-                              const appgl::TranslatorOptions& options = {}) -> bool {
+                              const appgl::TranslatorOptions& optionsIn = {}) -> bool {
         if (spirvData == nullptr || spirvWords == 0) {
             return false;
         }
         const std::string stageTag = programTag + "-" + stageName;
         const std::string hash = quickHash(sourceText);
+
+        // Sprint 17 Day 3+ BONUS-1 [clip_control]: snapshot the
+        // current `glClipControl` depth mode into the per-link
+        // translator options so SPIRV-Cross's `vertex.fixup_clipspace`
+        // tracks GL state at link time. Caller-provided overrides
+        // (e.g. tess opts, mesh-GS opts) preserved by copy-then-amend.
+        appgl::TranslatorOptions options = optionsIn;
+        options.clipDepthMode = impl_->state->clipDepthMode();
 
         // Phase 8X Group 4d follow-up²³ — sub-step marker + C++ exception
         // guard around spirvToMSL. SPIRV-Cross can throw `spirv_cross_error`
@@ -25072,6 +25099,11 @@ static void populateTranslatedDrawFixedFunctionState(
     const auto& dr = state.depthRange();
     tdi.depthRangeNear = dr.nearValue;
     tdi.depthRangeFar = dr.farValue;
+    // Sprint 17 Day 3+ BONUS-1 [clip_control]: snapshot the
+    // current `glClipControl` origin into TranslatedDrawInfo so
+    // MetalFrameGraph's viewport-Y-flip can gate on it
+    // (`GL_UPPER_LEFT` → no flip, `GL_LOWER_LEFT` → flip as before).
+    tdi.clipOrigin = state.clipOrigin();
     // Sprint 15 Q3-Option-B Day 8 [metal-viewport-array]: populate
     // per-index viewport array (GL 4.1 ARB_viewport_array). Bind
     // multi-viewport at the encoder when ANY indexed slot diverges
@@ -26351,6 +26383,11 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
         info.scissorWidth = sc.width;
         info.scissorHeight = sc.height;
     }
+    // Sprint 17 Day 3+ BONUS-1 [clip_control]: snapshot
+    // glClipControl origin for the mesh-GS path's viewport-Y-flip
+    // gate. Sister to TranslatedDrawInfo's clipOrigin set in the
+    // legacy path.
+    info.clipOrigin = static_cast<std::uint32_t>(state->clipOrigin());
 
     const bool ok = frameGraph->encodeMetalMeshGSDraw(info);
     if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
@@ -26460,7 +26497,16 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     // viewport_array DUAL-FIX wins all use multi-viewport draws,
     // so they DO engage `routeViewportIndex` and DO set the flag,
     // preserving the +4 wins via correct Y-flip on readback.
-    if (routeViewportIndex) {
+    // Sprint 17 Day 3+ BONUS-1 [clip_control]: also gate on
+    // `state->clipOrigin() == GL_LOWER_LEFT`. The flag's contract is
+    // "this texture has Y-flipped contents that need readback-unflip"
+    // — but under `glClipControl(GL_UPPER_LEFT, _)` the viewport
+    // descriptor's Y-flip is OFF (BONUS-1.2 gate at MetalFrameGraph
+    // viewport-bind sites), so the texture's Metal storage is already
+    // top-down and `glGetTexImage` should return it unflipped.
+    // Setting the flag in that case would trigger a spurious readback
+    // flip and corrupt the result on UPPER_LEFT draws.
+    if (routeViewportIndex && state->clipOrigin() == GL_LOWER_LEFT) {
         const GLuint fboName = state->boundDrawFramebuffer();
         if (fboName != 0) {
             if (const GLFramebufferObject* fbo =
