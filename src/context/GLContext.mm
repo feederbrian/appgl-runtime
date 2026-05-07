@@ -34880,36 +34880,157 @@ bool GLContext::validateCopyTextureSubImage(
     return true;
 }
 
+// Sprint 17 Day 7+ Bank-Group-F: shared Metal-blit helper for the three
+// glCopyTextureSubImage*D entry points. CTS
+// `direct_state_access.textures_copy` populates a source texture +
+// binds it to a framebuffer color attachment, then asks for a region-
+// copy into a destination texture. Pre-fix all three entry points
+// validated then `(void)args; return true;` — no Metal copy was issued
+// and the destination stayed at its initialised zeros.
+//
+// Source: current READ_FRAMEBUFFER's read-buffer attachment. The 3D
+// test sets glReadBuffer(COLOR_ATTACHMENT0+zoffset) before each layer
+// copy so this naturally lands on the right slice. Destination: the
+// named texture's level + (xoffset, yoffset, zoffset) origin.
+//
+// For 3D destinations the GL `zoffset` is a depth offset into the
+// dest texture's volume; for array/cube destinations it's a slice
+// index; for plain 2D it's ignored. The `srcReadBuffer` argument is
+// passed for explicit override but defaults to honouring the FBO's
+// current read-buffer.
+bool GLContext::blitReadFBOToTextureSubImage(
+    GLuint dstTextureName, GLint level,
+    GLint xoffset, GLint yoffset, GLint zoffset,
+    GLint x, GLint y, GLsizei width, GLsizei height,
+    GLenum srcReadBuffer) {
+    auto* dstObj = impl_->objects->textures().get(dstTextureName);
+    if (!dstObj || dstObj->metalTexture == nullptr) return false;
+    // Get source FBO + attachment.
+    const GLuint readFbName = impl_->state->boundReadFramebuffer();
+    if (readFbName == 0) return false;  // default FB; not exercised by CTS test
+    const GLFramebufferObject* readFb = impl_->objects->framebuffers().get(readFbName);
+    if (readFb == nullptr) return false;
+    // Honour the explicit override if the caller provided one (used by
+    // the 3D path which targets COLOR_ATTACHMENT0+zoffset directly).
+    // Otherwise fall back to the FBO's currently selected read-buffer.
+    const GLenum readEnum = (srcReadBuffer != 0) ? srcReadBuffer : readFb->readBuffer;
+    const GLFramebufferAttachment* srcAttach =
+        impl_->framebufferAttachment(*readFb, readEnum);
+    if (srcAttach == nullptr) return false;
+    // Resolve src to MTLTexture + slice/level info.
+    id<MTLTexture> srcTex = nil;
+    NSUInteger srcMipLevel = 0;
+    NSUInteger srcSlice = 0;
+    NSUInteger srcZ = 0;
+    if (srcAttach->kind == GLFramebufferAttachment::Kind::Texture) {
+        auto* srcGl = impl_->objects->textures().get(srcAttach->object);
+        if (!srcGl || srcGl->metalTexture == nullptr) return false;
+        srcTex = (__bridge id<MTLTexture>)srcGl->metalTexture;
+        srcMipLevel = static_cast<NSUInteger>(std::max<GLint>(srcAttach->level, 0));
+        if (srcGl->target == GL_TEXTURE_3D) {
+            srcZ = static_cast<NSUInteger>(std::max<GLint>(srcAttach->layer, 0));
+        } else {
+            srcSlice = static_cast<NSUInteger>(std::max<GLint>(srcAttach->layer, 0));
+        }
+    } else if (srcAttach->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+        auto* srcRb = impl_->objects->renderbuffers().get(srcAttach->object);
+        if (!srcRb || srcRb->metalTexture == nullptr) return false;
+        srcTex = (__bridge id<MTLTexture>)srcRb->metalTexture;
+    } else {
+        return false;
+    }
+    if (srcTex == nil) return false;
+    id<MTLTexture> dstTex = (__bridge id<MTLTexture>)dstObj->metalTexture;
+    // Flush any pending render encoder so source pixels are visible.
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushForReadback();
+    }
+    id<MTLDevice> mtlDevice = impl_->device;
+    id<MTLCommandQueue> mtlQueue = impl_->commandQueue;
+    if (mtlDevice == nil || mtlQueue == nil) return false;
+    id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
+    if (cmd == nil) return false;
+    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+    if (blit == nil) return false;
+    // Sister-pattern: GLContext.mm:7217 / 7406 + MetalFrameGraph.mm:4726
+    // already use copyFromTexture in the readback paths. Same shape here
+    // but writing into a destination texture rather than a buffer.
+    const NSUInteger dstSlice = (dstObj->target == GL_TEXTURE_3D)
+        ? 0 : static_cast<NSUInteger>(std::max<GLint>(zoffset, 0));
+    const NSUInteger dstZ = (dstObj->target == GL_TEXTURE_3D)
+        ? static_cast<NSUInteger>(std::max<GLint>(zoffset, 0)) : 0;
+    [blit copyFromTexture:srcTex
+              sourceSlice:srcSlice
+              sourceLevel:srcMipLevel
+             sourceOrigin:MTLOriginMake(
+                 static_cast<NSUInteger>(std::max<GLint>(x, 0)),
+                 static_cast<NSUInteger>(std::max<GLint>(y, 0)),
+                 srcZ)
+               sourceSize:MTLSizeMake(
+                 static_cast<NSUInteger>(std::max<GLsizei>(width, 0)),
+                 static_cast<NSUInteger>(std::max<GLsizei>(height, 1)),
+                 1)
+                toTexture:dstTex
+         destinationSlice:dstSlice
+         destinationLevel:static_cast<NSUInteger>(std::max<GLint>(level, 0))
+        destinationOrigin:MTLOriginMake(
+                 static_cast<NSUInteger>(std::max<GLint>(xoffset, 0)),
+                 static_cast<NSUInteger>(std::max<GLint>(yoffset, 0)),
+                 dstZ)];
+    [blit endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return true;
+}
+
 bool GLContext::copyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
-    warnBypassOnce("copyTextureSubImage1D", texture);
     if (!validateCopyTextureSubImage(texture, 1, level, xoffset, 0, 0, width, 0)) {
         return false;
     }
     DSA_TEX_WRAP(texture, {
-        (void)level; (void)xoffset; (void)x; (void)y; (void)width;
-        // Accepted — deferred to Metal blit path.
+        // 1D: blit from current read buffer at (x, y, w=width, h=1)
+        // to the destination 1D texture at (xoffset, 0, level).
+        if (!blitReadFBOToTextureSubImage(texture, level,
+                                          xoffset, 0, 0,
+                                          x, y, width, 1,
+                                          GL_COLOR_ATTACHMENT0)) {
+            warnBypassOnce("copyTextureSubImage1D", texture);
+        }
         return true;
     })
 }
 
 bool GLContext::copyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
-    warnBypassOnce("copyTextureSubImage2D", texture);
     if (!validateCopyTextureSubImage(texture, 2, level, xoffset, yoffset, 0, width, height)) {
         return false;
     }
     DSA_TEX_WRAP(texture, {
-        (void)level; (void)xoffset; (void)yoffset; (void)x; (void)y; (void)width; (void)height;
+        if (!blitReadFBOToTextureSubImage(texture, level,
+                                          xoffset, yoffset, 0,
+                                          x, y, width, height,
+                                          GL_COLOR_ATTACHMENT0)) {
+            warnBypassOnce("copyTextureSubImage2D", texture);
+        }
         return true;
     })
 }
 
 bool GLContext::copyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
-    warnBypassOnce("copyTextureSubImage3D", texture);
     if (!validateCopyTextureSubImage(texture, 3, level, xoffset, yoffset, zoffset, width, height)) {
         return false;
     }
     DSA_TEX_WRAP(texture, {
-        (void)level; (void)xoffset; (void)yoffset; (void)zoffset; (void)x; (void)y; (void)width; (void)height;
+        // 3D: source attachment is COLOR_ATTACHMENT0+zoffset (per CTS
+        // gl_glCopyTextureSubImage3D usage; see CopyTest::CopyTextureSub-
+        // Image3DAndCheckErrors at gl4cDirectStateAccessTexturesTests.cpp:
+        // 5417-5424 which calls glReadBuffer(COLOR_ATTACHMENT0 + zoffset)
+        // before the copy so subsequent reads land on the right layer).
+        if (!blitReadFBOToTextureSubImage(texture, level,
+                                          xoffset, yoffset, zoffset,
+                                          x, y, width, height,
+                                          GL_COLOR_ATTACHMENT0 + zoffset)) {
+            warnBypassOnce("copyTextureSubImage3D", texture);
+        }
         return true;
     })
 }

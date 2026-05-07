@@ -389,6 +389,13 @@ public:
     bool copyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width);
     bool copyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
     bool copyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height);
+    // Bank-Group-F shared helper: blit from current READ_FRAMEBUFFER's
+    // attachment named by `srcReadBuffer` into the destination texture.
+    // For 3D destinations, `zoffset` selects the destination layer.
+    bool blitReadFBOToTextureSubImage(GLuint dstTextureName, GLint level,
+                                      GLint xoffset, GLint yoffset, GLint zoffset,
+                                      GLint x, GLint y, GLsizei width, GLsizei height,
+                                      GLenum srcReadBuffer);
     // Shared GL 4.6 §8.6 validation for the three copyTextureSubImage
     // variants (effective-target check, level ≥ 0, offset/size ≥ 0,
     // bounds). `dim` ∈ {1, 2, 3} selects the per-variant constraints.
