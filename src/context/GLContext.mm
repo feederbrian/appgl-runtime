@@ -7028,8 +7028,35 @@ struct GLContext::Impl {
         // MTLStoreActionMultisampleResolve to trigger the implicit
         // resolve, and read from the temp. Non-MS textures fall
         // through to the direct getBytes path unchanged.
+        //
+        // Sprint 17 Day 2 (CKPT237) [Probe C — h2DM-5b fix]: for
+        // 2DMSArray sources (`MTLTextureType2DMultisampleArray`), route
+        // the caller's requested source slice through the resolve pass
+        // while keeping the single-slice 2D destination shape (cheap
+        // 1× alloc; one-pass resolve per readback). The source-slice
+        // selection on `colorAttachments[0].slice` reads from the
+        // requested array layer; `resolveSlice = 0` writes to the
+        // single-slice destination; readback then reads slice 0 of
+        // the destination regardless of the source's array-layer index.
+        //
+        // Pre-Probe-C bug (Sprint 17 Day 1 Track A capture + Day 2
+        // Track A2 validation-layer-enabled finding + B2 source-grounded
+        // localisation): the resolve always read sourceSlice=0 and wrote
+        // to a single-slice 2D destination, then `getBytes(slice=metalSlice)`
+        // on a destination with arrayLength=1 produced
+        // `_validateGetBytes:75: slice(N) must be < (1)` Metal API
+        // validation assertion for any non-zero source layer (the
+        // `attachment.layer` from glFramebufferTextureLayer-style
+        // bindings on layered MS textures).
+        //
+        // Sister-pattern preservation: plain 2DMS (non-array) sources
+        // keep `sourceIsArray = false` → both source-slice and
+        // destination-slice indices stay at 0 → behaviour identical
+        // to pre-Probe-C (B2 §8.3 sister-pattern verified correct).
         id<MTLTexture> readTex = metalTex;
         if (metalTex.sampleCount > 1 && device != nil && commandQueue != nil) {
+            const bool sourceIsArray =
+                metalTex.textureType == MTLTextureType2DMultisampleArray;
             MTLTextureDescriptor* tempDesc = [MTLTextureDescriptor
                 texture2DDescriptorWithPixelFormat:metalTex.pixelFormat
                                             width:metalTex.width
@@ -7041,6 +7068,11 @@ struct GLContext::Impl {
             if (resolvedTex != nil) {
                 MTLRenderPassDescriptor* rpd = [MTLRenderPassDescriptor renderPassDescriptor];
                 rpd.colorAttachments[0].texture = metalTex;
+                // For 2DMSArray sources, read the caller's requested
+                // slice (metalSlice = attachment.layer per line ~6952);
+                // for plain 2DMS, slice is always 0.
+                rpd.colorAttachments[0].slice =
+                    sourceIsArray ? metalSlice : 0;
                 rpd.colorAttachments[0].loadAction = MTLLoadActionLoad;
                 rpd.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
                 rpd.colorAttachments[0].resolveTexture = resolvedTex;
@@ -7053,6 +7085,14 @@ struct GLContext::Impl {
                 [cb commit];
                 [cb waitUntilCompleted];
                 readTex = resolvedTex;
+                // After resolve, the destination is single-slice 2D
+                // and contains the data from the source's requested
+                // slice. Override metalSlice to 0 for the getBytes
+                // call below — reading slice 0 of the destination is
+                // always valid (arrayLength=1).
+                if (sourceIsArray) {
+                    metalSlice = 0;
+                }
             }
         }
 
