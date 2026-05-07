@@ -7868,12 +7868,24 @@ struct GLContext::Impl {
         bool is3DTextureSrc = false;
         NSUInteger depthSlice3D = 0;
 
+        // Sprint 17 Day 7+ Bank-Group-B: track whether the source was
+        // viewport-rendered (Y-flipped at draw time) vs filled by a
+        // non-viewport mechanism (image_store from compute, blit from
+        // glTexSubImage, etc.). Only viewport-rendered storage needs
+        // the readback Y-flip; compute-image-store storage is already
+        // in the user's expected (top-down) row order. CTS
+        // `gpu_shader5.images_array_indexing` wires a R32UI texture to
+        // a framebuffer color attachment and reads it back through
+        // glReadPixels; pre-fix the cliporigin-only Y-flip mis-applied
+        // to the compute-written texture.
+        bool sourceWasViewportFlipped = true;  // default: treat as flipped
         if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
             if (!rb || !rb->storageDefined || rb->metalTexture == nullptr) return false;
             metalTex = (__bridge id<MTLTexture>)rb->metalTexture;
             sourceWidth = rb->width;
             sourceHeight = rb->height;
+            // Renderbuffers are always draw targets — viewport-flip applies.
         } else if (att->kind == GLFramebufferAttachment::Kind::Texture) {
             const GLTextureObject* tex = objects->textures().get(att->object);
             if (!tex || tex->metalTexture == nullptr) return false;
@@ -7890,6 +7902,7 @@ struct GLContext::Impl {
             sourceHeight = static_cast<GLsizei>(metalTex.height >> metalMipLevel);
             if (sourceWidth < 1) sourceWidth = 1;
             if (sourceHeight < 1) sourceHeight = 1;
+            sourceWasViewportFlipped = tex->wasViewportRenderedTo;
         } else {
             return false;
         }
@@ -8140,7 +8153,14 @@ struct GLContext::Impl {
         // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate native-format
         // FBO color readback Y-flip on current clipOrigin (sister to
         // readColorAttachmentPixels gate above).
-        const bool yFlipNativeReadback = (state->clipOrigin() != GL_UPPER_LEFT);
+        // Sprint 17 Day 7+ Bank-Group-B: also gate on source-was-
+        // viewport-flipped — texture-kind attachments written by
+        // compute image_store have storage in user's expected
+        // (top-down) row order already; double-flipping breaks
+        // CTS `gpu_shader5.images_array_indexing`.
+        const bool yFlipNativeReadback =
+            sourceWasViewportFlipped &&
+            (state->clipOrigin() != GL_UPPER_LEFT);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
                 const GLint srcX = x + col;
