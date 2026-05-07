@@ -29937,6 +29937,38 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         }
     }
 
+    // Sprint 17 Day 4+ BONUS-2 Phase 3-r [gpu_shader5 atomic_counters_array_indexing]:
+    // atomic counter buffer binding for compute. SPIRV-Cross emits AC
+    // as `volatile device gl_AtomicCounterBlock_<N>& [[buffer(N)]]`
+    // (atomic counter binding maps directly to a Metal buffer slot at
+    // the GL binding value, sister to UBO mapping at slot N+kUniform-
+    // BufferBase but distinct in SPIRV-Cross's atomic-counter emit
+    // path). Walk the program's atomic-counter buffer resource list
+    // (populated at link time from glslang's reflection) and bind
+    // each GL_ATOMIC_COUNTER_BUFFER-bound buffer at the matching
+    // Metal slot. Without this binding, atomicCounter* operations
+    // execute against an unbound MTLBuffer and produce undefined
+    // (typically zero) reads.
+    for (const auto& ac : programObject->resourceAtomicCounterBuffers) {
+        if (ac.binding < 0) continue;
+        const GLuint glBinding = static_cast<GLuint>(ac.binding);
+        const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
+            GL_ATOMIC_COUNTER_BUFFER, glBinding);
+        if (binding.buffer == 0) continue;
+        const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+
+        ComputeDispatchInfo::BufferBinding bb;
+        bb.metalBuffer = bufObj->metalBuffer;
+        bb.offset = static_cast<std::size_t>(binding.offset);
+        // SPIRV-Cross atomic counter Metal slot mapping: GL binding
+        // value used directly (verified via APPGL_DUMP_MSL output for
+        // `gpu_shader5.atomic_counters_array_indexing`:
+        // `[[buffer(0)]]` for `layout(binding=0)`).
+        bb.metalSlot = glBinding;
+        info.buffers.push_back(bb);
+    }
+
     // Texture/sampler bindings for compute stage. Less common than
     // SSBOs but real — image-processing compute shaders sample from
     // textures. Walk each reflected sampler uniform, resolve the
