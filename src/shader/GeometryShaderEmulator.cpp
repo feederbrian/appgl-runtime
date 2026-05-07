@@ -5891,7 +5891,28 @@ EmulatedDraw emulateGeometryDraw(
     // showing positions 0,1,4 of each 6-vertex strip-expanded layer
     // group carrying the previous layer's stale `flat out int
     // layer_id` value.
-    if (!d.varyingInterp.empty()) {
+    //
+    // Sprint 17 Day 1 (CKPT236) [option (b) gate]: skip propagation
+    // when GL_RASTERIZER_DISCARD is enabled. Per GL 4.6 §13.2.2,
+    // transform-feedback captures the per-vertex emitted varying
+    // values pre-propagation; provoking-vertex flat propagation is
+    // a RASTERIZATION-side concept (FS sees the LAST vertex's flat
+    // value via `flatInputProvokingVertex` semantics, not XFB).
+    // Applying propagation before XFB writeback corrupts
+    // `geometry_shader.input.gl_in_array_contents` (CKPT236 bisect
+    // identified 96d16b0 as the cause) — that test enables
+    // GL_RASTERIZER_DISCARD and validates per-vertex XFB-captured
+    // `gs_fs_b = vs_gs_b[i]` values for i=0,1,2 (3 distinct values
+    // for a 3-vertex triangle); with propagation active, all 3
+    // values become the LAST vertex's, breaking the assertion.
+    //
+    // The layered_rendering.layered_rendering rasterization use case
+    // (the original 96d16b0 fix target) is unaffected — it does NOT
+    // enable GL_RASTERIZER_DISCARD, so propagation continues to fire
+    // correctly for the FS's per-primitive layer_id case-match.
+    const bool rasterizerDiscarded =
+        state.isEnabled(GL_RASTERIZER_DISCARD);
+    if (!d.varyingInterp.empty() && !rasterizerDiscarded) {
         std::size_t primSize = 0;
         switch (expandedTopo) {
             case GL_POINTS:    primSize = 1; break;
