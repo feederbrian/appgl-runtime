@@ -29829,6 +29829,15 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     // buffer + offset into the dispatch info. SSBOs with no binding
     // are simply omitted — Metal's unbound-slot behaviour is undefined
     // but won't crash, and the test will fail verification cleanly.
+    // Sprint 17 Day 4+ BONUS-2 Phase 2-r [gpu_shader5 ssbo_array_indexing]:
+    // SSBO array element iteration. SPIRV-Cross emits a GLSL SSBO array
+    // (`buffer B { ... } b[N]`) as N separate `[[buffer(M)]] / [[buffer(
+    // M+1)]] ... [[buffer(M+N-1)]]` slots — same shape as the UBO array
+    // emit. Each element binds independently at GL slot
+    // (effectiveBinding+inst) and Metal slot (ssbo.metalBinding+inst).
+    // Sister to the UBO array iteration loop further below (line 29871+,
+    // CKPT143 lineage) and the graphics-path resolveUBOBindings array
+    // iteration (line 5111+).
     for (const auto& ssbo : programObject->computeReflection.storageBuffers) {
         // Effective binding may be remapped by glShaderStorageBlockBinding;
         // consult resourceStorageBlocks (same pattern as the graphics
@@ -29840,17 +29849,37 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                 break;
             }
         }
-        const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
-            GL_SHADER_STORAGE_BUFFER, effectiveBinding);
-        if (binding.buffer == 0) continue;
-        const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
-        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+        const int numInstances = (ssbo.blockArraySize > 0)
+            ? static_cast<int>(ssbo.blockArraySize) : 1;
+        const bool isArray = (ssbo.blockArraySize > 0);
+        for (int inst = 0; inst < numInstances; ++inst) {
+            // Build the lookup name: "B" or "B[0]"/"B[1]"… so
+            // glShaderStorageBlockBinding-driven binding overrides on a
+            // specific element honor the resourceStorageBlocks map.
+            std::string lookupName = ssbo.name;
+            if (isArray) lookupName += "[" + std::to_string(inst) + "]";
+            // Default per-element binding is effectiveBinding+inst
+            // (consecutive slots, GL 4.6 §7.8). Override with
+            // resourceStorageBlocks location if remapped.
+            GLuint glBindingPoint = effectiveBinding + static_cast<GLuint>(inst);
+            for (const auto& rb : programObject->resourceStorageBlocks) {
+                if (rb.name == lookupName && rb.location >= 0) {
+                    glBindingPoint = static_cast<GLuint>(rb.location);
+                    break;
+                }
+            }
+            const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
+                GL_SHADER_STORAGE_BUFFER, glBindingPoint);
+            if (binding.buffer == 0) continue;
+            const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+            if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
 
-        ComputeDispatchInfo::BufferBinding bb;
-        bb.metalBuffer = bufObj->metalBuffer;
-        bb.offset = static_cast<std::size_t>(binding.offset);
-        bb.metalSlot = ssbo.metalBinding;
-        info.buffers.push_back(bb);
+            ComputeDispatchInfo::BufferBinding bb;
+            bb.metalBuffer = bufObj->metalBuffer;
+            bb.offset = static_cast<std::size_t>(binding.offset);
+            bb.metalSlot = ssbo.metalBinding + static_cast<std::uint32_t>(inst);
+            info.buffers.push_back(bb);
+        }
     }
 
     // Resolve uniform-block bindings for the compute stage. Compute
