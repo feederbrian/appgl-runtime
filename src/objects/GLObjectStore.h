@@ -1136,6 +1136,31 @@ struct GLProgramObject {
     // driving GL_NUM_COMPATIBLE_SUBROUTINES / GL_COMPATIBLE_SUBROUTINES.
     std::vector<GLProgramResourceEntry> resourceSubroutines[6];
     std::vector<GLProgramResourceEntry> resourceSubroutineUniforms[6];
+    // Sprint 17 Day 3 (CKPT238) [Track 3A — shape-agnostic
+    // foundational]: GL 4.0 subroutine selection state.
+    //
+    // Per GL 4.6 §7.9, glUniformSubroutinesuiv operates on the
+    // currently-bound program (no `program` argument); each call
+    // sets ALL subroutine-uniform selections for one shader stage at
+    // once — `indices[location]` maps the subroutine-uniform AT
+    // LOCATION to the subroutine AT INDEX value. State lives on the
+    // program object (relink blows it).
+    //
+    // Indexed by stage (VS=0..CS=5); inner array indexed by uniform
+    // location, mirroring the GL setter API contract (NOT by uniform
+    // index in `resourceSubroutineUniforms[stage]`). The location is
+    // the value returned by glGetSubroutineUniformLocation.
+    //
+    // Default-init at link time per spec ("any compatible
+    // implementation"); we choose compatible-subroutine index 0 for
+    // each uniform location.
+    //
+    // `subroutineSelectionsDirty` is set on glUniformSubroutinesuiv
+    // and consumed by the draw-encode path (Sub-task 3A.4 per
+    // SPIRV-TW shape decision: table-lookup uniform-buffer pack OR
+    // spec-constant pipeline rebuild). Cleared post-consumption.
+    std::vector<GLuint> currentSubroutineSelections[6];
+    bool subroutineSelectionsDirty = false;
 
     // GL 4.3 SSBO binding remapping (block index → user-specified binding).
     std::unordered_map<GLuint, GLuint> ssboBindingRemap;

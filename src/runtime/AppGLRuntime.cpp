@@ -6865,23 +6865,151 @@ void APIENTRY glGetActiveSubroutineName(GLuint program, GLenum shadertype, GLuin
     markProgramFunction(FunctionId::glGetActiveSubroutineName, "Active subroutine name stub (no subroutines).");
 }
 
+// Sprint 17 Day 3 (CKPT238) [Track 3A — shape-agnostic foundational]:
+// glUniformSubroutinesuiv now state-tracks the current subroutine
+// selections per stage on the bound program. Per GL 4.6 §7.9, the
+// call sets ALL subroutine-uniform selections for one shader stage at
+// once — `indices[location]` maps the subroutine uniform AT LOCATION
+// to the subroutine AT INDEX value. Pipeline plumbing (consumer of
+// `subroutineSelectionsDirty`) lands as Sub-task 3A.4 once SPIRV-TW
+// shape decision (table-lookup vs specialization-constant) is
+// finalised. This stage of the work is shape-agnostic — both shapes
+// require the state-tracking scaffolding.
 void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GLuint* indices) {
     auto* ctx = requireCurrentContext("glUniformSubroutinesuiv");
     if (!ctx) return;
-    (void)shadertype; (void)count; (void)indices;
-    // No subroutine uniforms → count must be 0 for valid call, any >0 is technically invalid.
-    // Accept silently for robustness (state-tracked stub).
-    markProgramFunction(FunctionId::glUniformSubroutinesuiv, "UniformSubroutinesuiv stub (no subroutines, no-op).");
-    Runtime::shared().recordBootstrapTrace("glUniformSubroutinesuiv(shadertype=" + std::to_string(shadertype) + ", count=" + std::to_string(count) + ")");
+
+    // Stage validation — GL 4.6 §7.9 specifies one of the 6 valid
+    // shader-stage enums; anything else is GL_INVALID_ENUM.
+    int si = -1;
+    switch (shadertype) {
+        case GL_VERTEX_SHADER:          si = 0; break;
+        case GL_TESS_CONTROL_SHADER:    si = 1; break;
+        case GL_TESS_EVALUATION_SHADER: si = 2; break;
+        case GL_GEOMETRY_SHADER:        si = 3; break;
+        case GL_FRAGMENT_SHADER:        si = 4; break;
+        case GL_COMPUTE_SHADER:         si = 5; break;
+        default:
+            recordValidationError(ctx, "glUniformSubroutinesuiv",
+                GL_INVALID_ENUM, "invalid shader type");
+            return;
+    }
+
+    // GL 4.6 §7.9: the operation targets the currently-bound program;
+    // no `program` argument is passed. INVALID_OPERATION if no linked
+    // program is active.
+    const GLuint progName = ctx->state().currentProgram();
+    auto* prog = ctx->objects().programs().get(progName);
+    if (prog == nullptr || !prog->linked) {
+        recordValidationError(ctx, "glUniformSubroutinesuiv",
+            GL_INVALID_OPERATION, "no linked program currently bound");
+        return;
+    }
+
+    // Spec: count must equal the value of GL_ACTIVE_SUBROUTINE_UNIFORM_LOCATIONS
+    // for the stage (= max(location)+1 for active subroutine uniforms;
+    // since reflection populates locations contiguously from 0, this
+    // equals resourceSubroutineUniforms[si].size() in our impl).
+    const auto& unis = prog->resourceSubroutineUniforms[si];
+    if (count < 0 ||
+        static_cast<std::size_t>(count) != unis.size()) {
+        recordValidationError(ctx, "glUniformSubroutinesuiv",
+            GL_INVALID_VALUE,
+            "count does not match active subroutine uniform locations");
+        return;
+    }
+
+    // Update selections; validate each subroutine index.
+    auto& selections = prog->currentSubroutineSelections[si];
+    selections.resize(unis.size());
+    const auto& subs = prog->resourceSubroutines[si];
+    for (GLsizei i = 0; i < count; ++i) {
+        if (indices == nullptr) {
+            recordValidationError(ctx, "glUniformSubroutinesuiv",
+                GL_INVALID_VALUE, "indices array is null");
+            return;
+        }
+        if (static_cast<std::size_t>(indices[i]) >= subs.size()) {
+            recordValidationError(ctx, "glUniformSubroutinesuiv",
+                GL_INVALID_VALUE, "subroutine index out of range");
+            return;
+        }
+        selections[static_cast<std::size_t>(i)] = indices[i];
+    }
+    prog->subroutineSelectionsDirty = true;
+
+    markProgramFunction(FunctionId::glUniformSubroutinesuiv,
+        "Subroutine selection state-tracked (pipeline plumbing 3A.4 pending).");
+    Runtime::shared().recordBootstrapTrace(
+        "glUniformSubroutinesuiv(shadertype=" + std::to_string(shadertype) +
+        ", count=" + std::to_string(count) + ")");
 }
 
+// Sprint 17 Day 3 (CKPT238) [Track 3A — shape-agnostic foundational]:
+// reads from currentSubroutineSelections[stage] populated by
+// glUniformSubroutinesuiv. Returns 0 when no selection has been made
+// yet OR the location is out of range (graceful degradation; spec
+// says GL_INVALID_VALUE for OOR location, which we now report).
 void APIENTRY glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuint* params) {
     auto* ctx = requireCurrentContext("glGetUniformSubroutineuiv");
     if (!ctx) return;
-    (void)shadertype; (void)location;
-    if (params) *params = 0;
-    markProgramFunction(FunctionId::glGetUniformSubroutineuiv, "GetUniformSubroutineuiv stub (returns 0).");
-    Runtime::shared().recordBootstrapTrace("glGetUniformSubroutineuiv(shadertype=" + std::to_string(shadertype) + ", location=" + std::to_string(location) + ")");
+
+    if (params == nullptr) {
+        // No-op rather than error; matches the stub-ish "robustness"
+        // pattern of other GL getters when params is null.
+        return;
+    }
+
+    int si = -1;
+    switch (shadertype) {
+        case GL_VERTEX_SHADER:          si = 0; break;
+        case GL_TESS_CONTROL_SHADER:    si = 1; break;
+        case GL_TESS_EVALUATION_SHADER: si = 2; break;
+        case GL_GEOMETRY_SHADER:        si = 3; break;
+        case GL_FRAGMENT_SHADER:        si = 4; break;
+        case GL_COMPUTE_SHADER:         si = 5; break;
+        default:
+            recordValidationError(ctx, "glGetUniformSubroutineuiv",
+                GL_INVALID_ENUM, "invalid shader type");
+            *params = 0;
+            return;
+    }
+
+    const GLuint progName = ctx->state().currentProgram();
+    auto* prog = ctx->objects().programs().get(progName);
+    if (prog == nullptr || !prog->linked) {
+        recordValidationError(ctx, "glGetUniformSubroutineuiv",
+            GL_INVALID_OPERATION, "no linked program currently bound");
+        *params = 0;
+        return;
+    }
+
+    if (location < 0 ||
+        static_cast<std::size_t>(location) >=
+            prog->resourceSubroutineUniforms[si].size()) {
+        recordValidationError(ctx, "glGetUniformSubroutineuiv",
+            GL_INVALID_VALUE, "subroutine uniform location out of range");
+        *params = 0;
+        return;
+    }
+
+    const auto& selections = prog->currentSubroutineSelections[si];
+    if (static_cast<std::size_t>(location) < selections.size()) {
+        *params = selections[static_cast<std::size_t>(location)];
+    } else {
+        // Default per GL 4.6 §7.9: "any compatible subroutine
+        // implementation"; we default to compatible-subroutine
+        // index 0 (also matches what link-time default-init will
+        // populate; until then, return 0).
+        *params = 0;
+    }
+
+    markProgramFunction(FunctionId::glGetUniformSubroutineuiv,
+        "Subroutine selection read from state.");
+    Runtime::shared().recordBootstrapTrace(
+        "glGetUniformSubroutineuiv(shadertype=" + std::to_string(shadertype) +
+        ", location=" + std::to_string(location) + ") -> " +
+        std::to_string(*params));
 }
 
 void APIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pname, GLint* values) {
