@@ -13576,16 +13576,16 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
         textureObject->target == GL_TEXTURE_CUBE_MAP_ARRAY;
     stored.layered = layered && targetIsLayered;
     framebuffer->attachments[attachment] = stored;
-    // Sprint 16 Day 17 (CKPT226) [Y-flip Option B + viewport routing
-    // dual-fix]: a colour-attachment binding is the conservative
-    // trigger for "this texture is potentially going to be rendered
-    // to". Once set, `glGetTexImage` will Y-flip on readback per the
-    // GLTextureObject::wasRenderedTo comment.
-    if (isColorAttachment(attachment)) {
-        if (GLTextureObject* mut = impl_->objects->textures().get(texture)) {
-            mut->wasRenderedTo = true;
-        }
-    }
+    // Sprint 17 Day 1 (CKPT236) [A.2 narrow gate]: the binding-time
+    // `wasRenderedTo` set originally added by Sprint 16 Day 17
+    // (CKPT226) was over-broad — DSA multisample storage tests +
+    // texture_barrier tests bind their textures as colour
+    // attachments but do NOT render via the viewport-flipped Metal
+    // write path, so unconditionally Y-flipping their readback
+    // regresses 58 tests (54 DSA + 4 TB). The flag is now set in the
+    // draw-encoding path (`encodeEmulatedGsDraw` and siblings) only
+    // when `routeViewportIndex == true` — the precise condition
+    // under which the GPU writes Y-flipped Metal-storage rows.
     return true;
 }
 
@@ -26351,6 +26351,43 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             return false;
         }();
 
+    // Sprint 17 Day 1 (CKPT236) [A.2 narrow gate]: mark the bound
+    // draw-FBO's colour attachments as viewport-rendered-to ONLY
+    // when this draw will engage the viewport-flipped Metal write
+    // path (`routeViewportIndex == true`). Replaces the over-broad
+    // binding-time set in `framebufferTexture` (Sprint 16 Day 17 /
+    // CKPT226) — that set fired for DSA multisample storage and
+    // texture_barrier tests that bind a texture as colour
+    // attachment but never engage the viewport-flipped write,
+    // causing 58 false-positive Y-flips on `glGetTexImage`
+    // readback (CKPT236 bisect).
+    //
+    // Single-viewport draws (where `routeViewportIndex == false`)
+    // do NOT set the flag here; their writes either don't happen
+    // (DSA storage allocation), don't apply viewport flip
+    // (texture_barrier render-to-self with single viewport), or
+    // are otherwise opaque-byte-pattern preserved. The 4 +4
+    // viewport_array DUAL-FIX wins all use multi-viewport draws,
+    // so they DO engage `routeViewportIndex` and DO set the flag,
+    // preserving the +4 wins via correct Y-flip on readback.
+    if (routeViewportIndex) {
+        const GLuint fboName = state->boundDrawFramebuffer();
+        if (fboName != 0) {
+            if (const GLFramebufferObject* fbo =
+                    objects->framebuffers().get(fboName)) {
+                for (const auto& kv : fbo->attachments) {
+                    if (!isColorAttachment(kv.first)) continue;
+                    if (kv.second.kind !=
+                            GLFramebufferAttachment::Kind::Texture) continue;
+                    if (GLTextureObject* mut =
+                            objects->textures().get(kv.second.object)) {
+                        mut->wasViewportRenderedTo = true;
+                    }
+                }
+            }
+        }
+    }
+
     // Invalidate the cached synth VS when its layered-ness doesn't
     // match the current draw. Metal won't accept swapping the
     // `[[render_target_array_index]]` declaration on an existing
@@ -34805,10 +34842,12 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             auto clamp01 = [](float v) {
                 return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             };
-            // Sprint 16 Day 17 (CKPT226) [Y-flip Option B]: render-then-
-            // readback depth/stencil textures need source rows reversed.
-            // See `GLTextureObject::wasRenderedTo` for rationale.
-            const bool yFlipReadbackDS = obj->wasRenderedTo;
+            // Sprint 16 Day 17 (CKPT226) [Y-flip Option B] / Sprint 17
+            // Day 1 (CKPT236) [A.2 narrow gate]: render-then-readback
+            // depth/stencil textures need source rows reversed when
+            // their writes went through the viewport-flipped path.
+            // See `GLTextureObject::wasViewportRenderedTo` for rationale.
+            const bool yFlipReadbackDS = obj->wasViewportRenderedTo;
             for (NSUInteger row = 0; row < texHeight; ++row) {
                 const NSUInteger srcRow = yFlipReadbackDS
                     ? (texHeight - 1 - row) : row;
@@ -35266,10 +35305,12 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             auto* destBasePT = static_cast<std::uint8_t*>(pixels) + dstSkipBytesPT;
             const NSUInteger srcRowBytesPT = texWidth * srcBpp;
             const NSUInteger srcSliceBytesPT = srcRowBytesPT * texHeight;
-            // Sprint 16 Day 17 (CKPT226) [Y-flip Option B]: render-then-
-            // readback textures need source rows reversed (see general
-            // path below for the full rationale).
-            const bool yFlipReadbackPT = obj->wasRenderedTo;
+            // Sprint 16 Day 17 (CKPT226) [Y-flip Option B] / Sprint 17
+            // Day 1 (CKPT236) [A.2 narrow gate]: render-then-readback
+            // textures need source rows reversed when their writes
+            // went through the viewport-flipped path (see general path
+            // below for the full rationale).
+            const bool yFlipReadbackPT = obj->wasViewportRenderedTo;
             for (NSUInteger slice = 0; slice < numSlices; ++slice) {
                 const std::uint8_t* sliceRaw = raw.data() + slice * srcSliceBytesPT;
                 std::uint8_t* destSlice = destBasePT + slice * dstSliceBytesAlignedPT;
@@ -35407,17 +35448,24 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     auto* destBase = static_cast<std::uint8_t*>(pixels) + dstSkipBytes;
 
     // Sprint 16 Day 17 (CKPT226) [Y-flip Option B + viewport routing
-    // dual-fix]: textures attached as colour attachments have been
-    // rendered into with the viewport originY flipped to match GL
-    // Y-up. Reading them back verbatim hands the caller upside-down
-    // rows. The flag flips the source-row index here only for
-    // rendered-to textures; pure upload-then-readback (CTS
-    // `copy_image.*`, the archetype) keeps `wasRenderedTo == false`
-    // and stays on the no-flip Metal-storage path. Together with the
+    // dual-fix] / Sprint 17 Day 1 (CKPT236) [A.2 narrow gate]:
+    // textures rendered through the viewport-flipped Metal write
+    // path were written with rows in (rtH-1-glY) order. Reading them
+    // back verbatim hands the caller upside-down rows. The flag
+    // flips the source-row index here only for textures whose writes
+    // went through `routeViewportIndex == true` draws (the precise
+    // condition that engages viewport flip on the GL Y-up
+    // convention). Pure upload-then-readback (`copy_image.*`),
+    // DSA storage allocation (`textures_storage_multisample_*`),
+    // texture_barrier render-to-self, and clearColorAttachment
+    // direct path all keep `wasViewportRenderedTo == false` and
+    // stay on the no-flip Metal-storage path. Together with the
     // viewport-routing un-gate above (see `routeViewportIndex`),
-    // this is the dual-fix that closes the CKPT225-discovered
-    // 2-bug-cancellation phenomenon.
-    const bool yFlipReadback = obj->wasRenderedTo;
+    // this is the narrowed dual-fix that closes the CKPT225-
+    // discovered 2-bug-cancellation while not regressing 58 tests
+    // that the over-broad CKPT226 binding-time set was wrongly
+    // flipping (CKPT236 bisect).
+    const bool yFlipReadback = obj->wasViewportRenderedTo;
     for (NSUInteger slice = 0; slice < numSlices; ++slice) {
       const std::uint8_t* sliceRaw = raw.data() + slice * bytesPerImage;
       std::uint8_t* dest = destBase + slice * dstSliceBytesAligned;

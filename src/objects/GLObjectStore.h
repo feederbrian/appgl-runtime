@@ -198,31 +198,42 @@ struct GLTextureObject {
     // Non-cube targets ignore this field.
     std::uint8_t cubeFacesDefined = 0;
     // Sprint 16 Day 17 (CKPT226) [Y-flip Option B + viewport routing
-    // dual-fix]: this texture has at some point been bound as a
-    // colour attachment of a framebuffer, so it is potentially the
-    // sink of one or more rendered draws. Metal's storage convention
-    // is row 0 at the top of the texture; OpenGL `glGetTexImage`
-    // returns row 0 at the bottom. The render path applies a
-    // viewport Y-flip (`originY = rtH - glY - glH`) so the GPU writes
+    // dual-fix] / Sprint 17 Day 1 (CKPT236) [A.2 narrow gate]: this
+    // texture has been the sink of a draw whose Metal write path
+    // applied the viewport Y-flip (`originY = rtH - glY - glH`).
+    // Metal stores row 0 at the top; OpenGL `glGetTexImage` returns
+    // row 0 at the bottom; the render's viewport flip writes
     // Metal-storage-row (rtH-1-glY) for what GL calls row 0. Reading
     // that back without the inverse flip hands the caller upside-down
     // data — observable on `viewport_array.dynamic_viewport_index`,
     // `geometry_shader.layered_rendering.layered_rendering`, and
     // their siblings.
     //
-    // Pure upload-then-readback round-trips (CTS `copy_image.*` is
-    // the archetype) keep the Metal convention end-to-end because
-    // the upload path doesn't flip either, so unconditionally
-    // Y-flipping the readback regresses 134 copy_image cases (CKPT221
-    // Day 12 empirical refutation). The flag tracks "this texture
-    // was bound for rendering" so the readback only flips for the
-    // rendered case.
+    // Pure upload-then-readback round-trips (CTS `copy_image.*`,
+    // `direct_state_access.textures_storage_multisample_*`,
+    // `texture_barrier.*`) keep the Metal convention end-to-end
+    // because their writes don't go through the GL Y-up viewport
+    // flip path — DSA storage allocation, clearColorAttachment direct
+    // path, copy_image, and texture_barrier render-to-self all
+    // potentially bind the texture as a colour attachment but do NOT
+    // engage the viewport-flipped multi-viewport routing path on
+    // their writes. Unconditionally Y-flipping the readback regresses
+    // those clusters (CKPT221 Day 12 + Sprint 17 Day 1 CKPT236
+    // empirical refutations).
     //
-    // Set on FBO colour-attachment binding (`framebufferTexture` /
-    // `framebufferTextureLayer` / `framebufferTexture2D`); remains
-    // true for the texture's lifetime. Renderbuffers don't carry
-    // this flag because they aren't readable via `glGetTexImage`.
-    bool wasRenderedTo = false;
+    // Set in the draw-encoding path (`encodeEmulatedGsDraw` and
+    // sister encoders) ONLY when `routeViewportIndex == true` for
+    // the in-flight draw and the bound draw-FBO has colour
+    // attachments — the flag is per-texture and remains true for
+    // the texture's lifetime. Renderbuffers don't carry this flag
+    // because they aren't readable via `glGetTexImage`.
+    //
+    // Sprint 17 Day 1 narrowing (CKPT236): the binding-time set
+    // (originally in `framebufferTexture`) was over-broad and
+    // produced 58 false-positive Y-flips (DSA multisample storage
+    // + texture_barrier). Moved to draw-time set gated on
+    // routeViewportIndex active.
+    bool wasViewportRenderedTo = false;
 };
 
 struct GLSamplerObject {
