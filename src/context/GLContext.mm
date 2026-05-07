@@ -12690,6 +12690,19 @@ bool GLContext::texStorage(
     object->desc.levels = levels;
     object->desc.immutable = true;
     object->target = target;
+    // Sprint 17 Day 8+ FANTASTIC #9 cube fix — texStorage* on a cube
+    // target allocates all 6 faces' immutable storage in a single call
+    // (GL 4.6 §8.19). Mark `cubeFacesDefined` complete here so the
+    // cube-completeness check in `getTextureImage` (line ~35913) and
+    // `generateMipmap` (line ~13371) accept the texture without
+    // requiring a per-face `glTexImage2D` after `glTexStorage2D`.
+    // CTS `shading_language_420pack.binding_images_texture_type_cube`
+    // creates a cube via texStorage2D, fills via compute imageStore,
+    // reads back via glGetTexImage; pre-fix the readback raised
+    // GL_INVALID_OPERATION because cubeFacesDefined was never set.
+    if (target == GL_TEXTURE_CUBE_MAP) {
+        object->cubeFacesDefined = 0x3F;
+    }
 
     // Pre-create ALL levels [0, levels-1] per GL 4.6 §8.19: "All
     // [immutable storage] images are created by this function."
