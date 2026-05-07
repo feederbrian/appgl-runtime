@@ -8533,6 +8533,19 @@ struct GLContext::Impl {
                                   GLenum mode,
                                   const std::vector<std::uint32_t>& filteredIndices);
 
+    // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — wrapper around
+    // `frameGraph->encodeTranslatedDraw` that marks the bound draw FBO's
+    // colour-texture attachments as having been viewport-rendered. Required
+    // for `glReadPixels` / `glGetTexImage` to apply the correct GL bottom-
+    // up Y-flip on readback. Sister to the encodeEmulatedGsDraw set-site
+    // at GLContext.mm:27115 (gated on routeViewportIndex for GS-emul
+    // layered draws) but generalised: applies for all VS+FS legacy +
+    // dispatchCullFilteredDraw paths that render to colour-texture FBO
+    // attachments. Gate on `clipOrigin == GL_LOWER_LEFT` preserves the
+    // Bank-Group-A-1 + Bank-Group-B + Sprint 17 Day 1 CKPT236 narrowing
+    // precedent (compute / image_store / blit paths still bypass).
+    bool encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi);
+
     // Metal-native tessellation draw path (Phase 2 of the metal-tess
     // project). When the program has been identified as a tess program
     // with a successful link-time pipeline probe, this path takes over
@@ -27401,7 +27414,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     gsPipelineBuildError.clear();
     tdi.pipelineBuildErrorOut = &gsPipelineBuildError;
 
-    const bool ok = frameGraph->encodeTranslatedDraw(tdi);
+    const bool ok = encodeTranslatedDrawAndMarkFbo(tdi);
     return ok;
 }
 
@@ -27584,7 +27597,32 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     cpPipelineBuildErr.clear();
     tdi.pipelineBuildErrorOut = &cpPipelineBuildErr;
 
-    return frameGraph->encodeTranslatedDraw(tdi);
+    return encodeTranslatedDrawAndMarkFbo(tdi);
+}
+
+// Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — see header
+// comment at the Impl method declaration. Item 26 LIVE 19th-instance
+// candidate: sister-pattern leverage at the call-site-wrapper level.
+bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
+    const bool ok = frameGraph->encodeTranslatedDraw(tdi);
+    if (ok && state->clipOrigin() == GL_LOWER_LEFT) {
+        const GLuint fboName = state->boundDrawFramebuffer();
+        if (fboName != 0) {
+            if (GLFramebufferObject* fbo =
+                    objects->framebuffers().get(fboName)) {
+                for (const auto& kv : fbo->attachments) {
+                    if (!isColorAttachment(kv.first)) continue;
+                    if (kv.second.kind !=
+                            GLFramebufferAttachment::Kind::Texture) continue;
+                    if (GLTextureObject* tex =
+                            objects->textures().get(kv.second.object)) {
+                        tex->wasViewportRenderedTo = true;
+                    }
+                }
+            }
+        }
+    }
+    return ok;
 }
 
 // GL 4.6 §10.1 Table 10.1 — the full set of primitive modes that
@@ -28336,7 +28374,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             pipelineBuildError.clear();
             tdi.pipelineBuildErrorOut = &pipelineBuildError;
 
-            const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+            const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
             if (ok) {
                 return true;
             }
@@ -28561,7 +28599,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     pipelineBuildError.clear();
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
 
-                    const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
                     if (ok) {
                         return true;
                     }
@@ -28790,7 +28828,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             thread_local std::string pipelineBuildError;
             pipelineBuildError.clear();
             tdi.pipelineBuildErrorOut = &pipelineBuildError;
-            const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+            const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
             if (ok) {
                 return true;
             }
@@ -29004,7 +29042,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     pipelineBuildError.clear();
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
 
-                    const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
                     if (ok) {
                         return true;
                     }
@@ -29550,7 +29588,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         pipelineBuildErrorDE.clear();
         tdi.pipelineBuildErrorOut = &pipelineBuildErrorDE;
 
-        const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+        const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
         if (ok) {
             // Sprint 8 #9-A (CKPT67): primitive counter update is
             // handled by the VS-only-TF helper at the earlier hook
@@ -29755,7 +29793,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     pipelineBuildError.clear();
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
 
-                    const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
                     if (ok) {
                         return true;
                     }
@@ -30057,7 +30095,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     pipelineBuildError.clear();
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
 
-                    const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
                     if (ok) {
                         return true;
                     }
@@ -30473,7 +30511,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     pipelineBuildError.clear();
                     tdi.pipelineBuildErrorOut = &pipelineBuildError;
 
-                    const bool ok = impl_->frameGraph->encodeTranslatedDraw(tdi);
+                    const bool ok = impl_->encodeTranslatedDrawAndMarkFbo(tdi);
                     if (ok) {
                         return true;
                     }
