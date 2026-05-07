@@ -814,6 +814,22 @@ struct GLProgramObject {
     std::uint32_t gsMaxVertices = 0;
     std::uint32_t gsInvocations = 1;
 
+    // Sprint 17 Day 7+ Bank-Group-H Phase 6-2-r Path B Component A1.
+    // Set true at link time when:
+    //   • VS writes gl_CullDistance (per `scanClipCullWrites` SPIR-V walk)
+    //   • !gsPresent (no geometry stage in the pipeline)
+    //   • !hasTessellation (no TCS/TES stage)
+    // Drives:
+    //   1) Translator: `disableCullDistanceClipRouting` option suppresses
+    //      the gl_CullDistance → [[clip_distance]] HW routing in
+    //      ShaderTranslator.cpp:1562-1700 (Phase 2 confirmed Option β
+    //      refutation — residual per-fragment clip over-clips 0th vertex
+    //      pixel on non-tested cull channels per CTS test design).
+    //   2) Draw path: dispatches `emulateVsCullPrepass` to evaluate
+    //      GL §14.6.3 per-primitive cull on CPU before issuing the
+    //      Metal draw with a filtered index buffer.
+    bool needsCullDistancePrepass = false;
+
     // Cached synthesised pass-through VS for the GS-emulation draw
     // path. Built lazily on the first emulated draw (the layout is
     // fixed at link time by the GS output SPIR-V, which doesn't

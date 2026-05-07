@@ -360,6 +360,14 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     // pass nullptr (default).
     const std::uint32_t* elementIndices = nullptr);
 
+// Sprint 17 Day 7+ Bank-Group-H Path B Component A1 helper. Walks the
+// VS SPIR-V's Output variable / struct-member decorations and returns
+// true iff any output is decorated `BuiltInCullDistance`. Used at link
+// time on VS+FS-only programs (`!gsPresent && !hasTessellation`) to set
+// `GLProgramObject::needsCullDistancePrepass`. Internally reuses the
+// existing `scanClipCullWrites` SPIR-V walk (sister-pattern leverage).
+bool vsSpirvWritesCullDistance(const std::uint32_t* spirv, std::size_t wordCount);
+
 // Emulate a single drawArrays/drawElements call for a program that
 // has a GS stage. Returns an `EmulatedDraw` whose `.ok` flag tells
 // the caller whether the CPU path produced a usable expanded-vertex

@@ -21424,6 +21424,10 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->gsOutputTopology = 0;
     programObject->gsMaxVertices = 0;
     programObject->gsInvocations = 1;
+    // Sprint 17 Day 7+ Bank-Group-H Path B Component A1 — reset
+    // `needsCullDistancePrepass` at relink. Recomputed below post
+    // VS-stage SPIR-V availability + GS/tess-presence detection.
+    programObject->needsCullDistancePrepass = false;
 
     ShaderTranslator translator;
     BindingMap bindings;
@@ -21714,6 +21718,29 @@ bool GLContext::linkProgram(GLuint program) {
             // `transform_feedback.{capture,query,discard}_vertex_*`.
             if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
                 programObject->vertexSpirv = vertexShader->spirv;
+            }
+            // Sprint 17 Day 7+ Bank-Group-H Path B Component A1: detect
+            // VS+FS programs that write gl_CullDistance (and have neither
+            // GS nor tess). Sets `needsCullDistancePrepass=true` so the
+            // draw-time path dispatches `emulateVsCullPrepass` to evaluate
+            // GL §14.6.3 per-primitive cull on CPU, and so the VS-stage
+            // MSL translator suppresses gl_CullDistance → [[clip_distance]]
+            // routing (Phase 2 confirmed Option β refutation: residual
+            // per-fragment clip would over-clip 0th vertex pixel on
+            // non-tested cull channels per CTS test design at
+            // glcCullDistance.cpp:2236-2246).
+            //
+            // Sister-pattern leverage (Item 26 LIVE 17th-instance):
+            // `appgl::scanClipCullWrites` already exists at
+            // GeometryShaderEmulator.cpp:4778 — reuses the SPIR-V output
+            // walk already proven against the GS-emul path.
+            if (!programObject->vertexSpirv.empty() &&
+                !programObject->gsPresent &&
+                !programObject->hasTessellation) {
+                programObject->needsCullDistancePrepass =
+                    appgl::vsSpirvWritesCullDistance(
+                        programObject->vertexSpirv.data(),
+                        programObject->vertexSpirv.size());
             }
             // Sprint 15 Q3-Option-B Phase 1 [metal-tf-vs]: VS-as-compute
             // MSL emit + PSO build for VS+FS+TF programs (no GS, no

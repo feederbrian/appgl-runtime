@@ -1588,8 +1588,18 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // Only applied to vertex shaders (MSL `vertex main0_out main0(`).
         // Fragment/compute stages have no rasterizer clipping and don't
         // declare `[[clip_distance]]` at all.
+        //
+        // Sprint 17 Day 7+ Bank-Group-H Path B Component A2: when the
+        // caller flags `disableCullDistanceClipRouting`, the CPU
+        // `emulateVsCullPrepass` handles GL §14.6.3 per-primitive cull
+        // by filtering the index buffer; routing cull→[[clip_distance]]
+        // here would then over-clip at the per-fragment level for any
+        // vertex with a negative cull value on a non-culled channel
+        // (Phase 2 confirmed via CTS test design at glcCullDistance
+        // .cpp:2236-2246).
         if (msl.find("vertex ") != std::string::npos
-            && msl.find("gl_CullDistance_0 [[user(cull0)]]") != std::string::npos) {
+            && msl.find("gl_CullDistance_0 [[user(cull0)]]") != std::string::npos
+            && !options.disableCullDistanceClipRouting) {
             // Count cull distances (gl_CullDistance_0 through _7).
             int cullCount = 0;
             for (int k = 0; k < 8; ++k) {

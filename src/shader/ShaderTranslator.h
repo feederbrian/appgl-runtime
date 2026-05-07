@@ -242,6 +242,20 @@ struct TranslatorOptions {
     // optional and errors out cleanly downstream.
     bool forceTessEvalAsCompute = false;
 
+    // Sprint 17 Day 7+ Bank-Group-H Phase 6-2-r Path B Component A2.
+    // When true, the gl_CullDistance → [[clip_distance]] HW-slot
+    // routing at ShaderTranslator.cpp:1562-1700 is suppressed for the
+    // emitted MSL. Used for VS+FS programs flagged with
+    // `needsCullDistancePrepass=true` — the CPU pre-pass at
+    // `emulateVsCullPrepass` evaluates GL §14.6.3 per-primitive cull
+    // and filters the draw, so the residual per-fragment clip from
+    // the cull→clip routing must be disabled to avoid over-clipping
+    // 0th vertex pixels on non-tested cull channels (Phase 2
+    // empirical confirmed via CTS test design at glcCullDistance.cpp
+    // :2236-2246 — 0th vertex always negative on non-tested
+    // channels, would trigger unwanted [[clip_distance]] discard).
+    bool disableCullDistanceClipRouting = false;
+
     // Phase 3B.5 [metal-tess-TF]: per-patch control-point count to plumb
     // into SPIRV-Cross's TES compilation so the emitted
     //   gl_in = &spvIn[gl_PrimitiveID * N];

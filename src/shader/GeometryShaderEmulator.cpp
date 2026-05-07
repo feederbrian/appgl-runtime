@@ -5027,6 +5027,18 @@ Value readVertexAttribFromVAO(
 }
 }  // namespace
 
+// Sprint 17 Day 7+ Bank-Group-H Path B Component A1 — public helper
+// for link-time VS gl_CullDistance detection. Wraps `scanClipCullWrites`
+// (in the anon namespace above) behind a stable signature so callers
+// (GLContext.mm linkProgram) don't need access to the internal
+// SpirvModule type.
+bool vsSpirvWritesCullDistance(const std::uint32_t* spirv, std::size_t wordCount) {
+    if (spirv == nullptr || wordCount < 5) return false;
+    SpirvModule mod;
+    if (!mod.parse(spirv, wordCount)) return false;
+    return scanClipCullWrites(mod).second;
+}
+
 // Sprint 6 P1 sub-task 3 day 3 (CKPT43): expose sampler-variable
 // discovery so platform .mm callers can build SampledTextureMaps
 // without re-parsing SPIR-V. Walks the module's variables, picks
