@@ -1,6 +1,8 @@
 #ifndef APPGL_SHADER_GEOMETRY_SHADER_EMULATOR_H
 #define APPGL_SHADER_GEOMETRY_SHADER_EMULATOR_H
 
+#include "ShaderInterpreter.h"  // appgl::interp::UniformBufferMap (BONUS-2)
+
 // Geometry-shader CPU emulator.
 //
 // Metal has no geometry-shader stage. For CTS conformance — starting with
@@ -448,7 +450,15 @@ bool runVsForVertex(
     const std::vector<std::uint32_t>& outVaryingWidths,
     EmulatedVertex& outVertex,
     std::string* diagnostic = nullptr,
-    const SampledTextureMap* sampledTextures = nullptr);
+    const SampledTextureMap* sampledTextures = nullptr,
+    // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: caller-
+    // supplied per-binding UBO buffer map for runtime UBO array
+    // dynamic-indexing. Built once per draw in the caller (e.g.
+    // `emulateVsOnlyDrawForTf`) from `state.indexedBufferBinding(
+    // GL_UNIFORM_BUFFER, baseBinding+i)` for each `uniform Block { }
+    // arr[N]` declared in the VS. Default nullptr preserves
+    // backward-compat (programs without UBO arrays don't need it).
+    const appgl::interp::UniformBufferMap* uniformBuffers = nullptr);
 
 // Run a single TES invocation on CPU for the vertex whose tess-space
 // barycentric / parametric coord is `tessCoord`. Exposed so the tess-

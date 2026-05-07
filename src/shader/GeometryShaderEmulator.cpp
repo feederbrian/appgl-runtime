@@ -270,6 +270,18 @@ public:
     using StorageBufferMap = std::unordered_map<std::uint32_t, StorageBufferRegion>;
     void setStorageBuffers(const StorageBufferMap* m) { storageBuffers_ = m; }
 
+    // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: UBO
+    // array dynamic-indexing for the TF-capture VS-only interpreter
+    // path. Caller supplies a (binding → const-pointer + size) map
+    // drawn from `state.indexedBufferBinding(GL_UNIFORM_BUFFER, N)`
+    // → GLBufferObject::shadowBytes. Read-only by GL spec — no
+    // store-side counterpart. Sister to StorageBufferMap above.
+    // Alias the namespace-level type from ShaderInterpreter.h so
+    // callers using `Interpreter::UniformBufferMap` see the same
+    // type as `appgl::interp::UniformBufferMap`.
+    using UniformBufferMap = appgl::interp::UniformBufferMap;
+    void setUniformBuffers(const UniformBufferMap* m) { uniformBuffers_ = m; }
+
     // Sprint 6 Phase 1 sub-task 3 day 3 (CKPT43): caller-supplied
     // sampler-array texture data for OpImageSampleImplicit/ExplicitLod.
     // Non-null pointer → interpreter accepts OpSampledImage / OpImage*
@@ -423,6 +435,22 @@ private:
     // initVariables time (so storeSSBO/loadSSBO know which binding
     // and which element/member stride each root varId maps to).
     const StorageBufferMap* storageBuffers_ = nullptr;
+
+    // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: caller-
+    // supplied binding → (const host pointer, size) map for UBO
+    // array dynamic-indexing in OpLoad. Sister to storageBuffers_;
+    // read-only. Populated from `state.indexedBufferBinding(
+    // GL_UNIFORM_BUFFER, N)` → GLBufferObject::shadowBytes by the
+    // TF-capture caller (`runVsForVertex`).
+    const UniformBufferMap* uniformBuffers_ = nullptr;
+
+    // Sprint 17 Day 4+ BONUS-2: per-variable UBO array meta. Sister
+    // to ssboVarMeta_ (line 477). Populated by initVariables when a
+    // Uniform variable's pointee is Array(Block-Struct) — i.e. a
+    // UBO array like `PositionBlock positionBlocks[4]`. Drives the
+    // OpAccessChain dispatch that resolves the first index to a
+    // binding (= baseBinding + idx).
+    std::unordered_map<std::uint32_t, UniformBufferArrayMeta> uboArrayVarMeta_;
 
     // Sprint 6 P1 sub-task 3 day 3 (CKPT43): caller-supplied sampler-
     // array texture data, populated by the runtime caller (e.g.
@@ -667,6 +695,14 @@ private:
     void storeToSSBO(std::uint32_t binding, std::uint32_t byteOffset,
                      const Value& v, std::uint32_t leafTypeId);
 
+    // Sprint 17 Day 4+ BONUS-2: byte-level UBO read via caller-supplied
+    // binding → (const host ptr, size) map. Read-only — UBOs are
+    // immutable per GL spec; no store counterpart. leafTypeId
+    // determines scalar/vec layout (std140 default; extends to
+    // std430 in Phase 4 if surfaced). Sister to loadFromSSBO.
+    Value loadFromUBO(std::uint32_t binding, std::uint32_t byteOffset,
+                      std::uint32_t leafTypeId);
+
     // Apply GLSL.std.450 extended instruction.
     Value evalExtInst(std::uint32_t glslOp, const std::uint32_t* operands,
                       std::uint32_t nOperands);
@@ -724,9 +760,20 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
         }
     }
 
+    // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: detect
+    // UBO array root via the per-variable meta populated at
+    // initVariables time. The first access-chain index resolves to a
+    // binding (= baseBinding + idx). Subsequent indices accumulate
+    // byteOffset within the indexed buffer using the same SSBO-path
+    // member-offset / array-stride rules (std140 layout for UBOs).
+    auto uboMetaIt = uboArrayVarMeta_.find(base);
+    const bool rootIsUboArray = (uboMetaIt != uboArrayVarMeta_.end());
+    std::uint32_t uboArrayElemBinding = 0;
+    bool uboFirstIndexResolved = false;
+
     std::uint32_t curType = tIt->second.pointeeType;   // deref pointer
     std::uint32_t offset = 0;         // scalar offset (non-SSBO path)
-    std::uint32_t byteOffset = 0;     // byte offset (SSBO path; std430)
+    std::uint32_t byteOffset = 0;     // byte offset (SSBO / UBO path)
 
     for (std::uint32_t k = 0; k < nIndices; ++k) {
         auto curTIt = module_.types.find(curType);
@@ -749,18 +796,37 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
         if (t.kind == TypeInfo::Kind::Array ||
             t.kind == TypeInfo::Kind::RuntimeArray) {
             const std::uint32_t elemW = module_.scalarWidth(t.componentType);
+            // BONUS-2: for UBO array root, the FIRST array index
+            // dispatches to a separate binding (each array element
+            // is a distinct GL UBO bound at baseBinding+idx). Don't
+            // accumulate byte offset across the dispatch — buffer
+            // selection is the entire effect of this index.
+            // Subsequent indices (struct member, nested array) walk
+            // within the selected buffer per std140 byte rules below.
+            if (rootIsUboArray && !uboFirstIndexResolved) {
+                uboArrayElemBinding =
+                    uboMetaIt->second.baseBinding +
+                    static_cast<std::uint32_t>(idx);
+                uboFirstIndexResolved = true;
+                curType = t.componentType;
+                continue;
+            }
             offset += static_cast<std::uint32_t>(idx) * elemW;
             // SSBO byte offset: use DecorationArrayStride on the array
             // type, else fall back to scalar-width * 4 bytes (covers
             // packed scalar arrays).
-            if (rootIsSSBO) {
+            if (rootIsSSBO || rootIsUboArray) {
                 std::uint32_t stride = 0;
                 auto dIt = module_.decorations.find(curType);
                 if (dIt != module_.decorations.end() && dIt->second.hasArrayStride) {
                     stride = dIt->second.arrayStride;
                 }
                 if (stride == 0) {
-                    // Fallback: std430 packed — 4 bytes per scalar.
+                    // Fallback: scalar-width * 4 bytes (std430-style
+                    // packed). UBO arrays nested below the dispatch
+                    // index typically carry DecorationArrayStride from
+                    // glslang per std140; fallback only fires for the
+                    // bare-scalar-array edge case.
                     stride = elemW * 4u;
                     if (stride == 0) stride = 4;
                 }
@@ -774,10 +840,11 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             for (std::uint32_t m = 0; m < static_cast<std::uint32_t>(idx); ++m) {
                 offset += module_.scalarWidth(t.memberTypes[m]);
             }
-            // SSBO byte offset: read DecorationOffset from member
+            // SSBO/UBO byte offset: read DecorationOffset from member
             // decorations. glslang always emits this for every SSBO /
-            // UBO struct member.
-            if (rootIsSSBO) {
+            // UBO struct member (per spec — required for std140/std430
+            // member layouts to be unambiguous).
+            if (rootIsSSBO || rootIsUboArray) {
                 auto mdIt = module_.memberDecorations.find(curType);
                 if (mdIt != module_.memberDecorations.end()) {
                     auto pIt2 = mdIt->second.perMember.find(
@@ -792,15 +859,17 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
         } else if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
                    t.kind == TypeInfo::Kind::Vec4) {
             offset += static_cast<std::uint32_t>(idx);
-            if (rootIsSSBO) {
-                // std430: vec component = 4 bytes for float/int/uint.
+            if (rootIsSSBO || rootIsUboArray) {
+                // std140/std430: vec component = 4 bytes for
+                // float/int/uint. Both layouts pack vec components
+                // identically; no layout-distinction needed here.
                 byteOffset += static_cast<std::uint32_t>(idx) * 4u;
             }
             curType = t.componentType;
         } else if (t.kind == TypeInfo::Kind::Matrix) {
             const std::uint32_t colW = module_.scalarWidth(t.componentType);
             offset += static_cast<std::uint32_t>(idx) * colW;
-            if (rootIsSSBO) {
+            if (rootIsSSBO || rootIsUboArray) {
                 // Matrix column stride: fall back to colW * 4 bytes
                 // (std430 vec-column-packed) when no MatrixStride
                 // decoration is parsed. Matrices in SSBO are rare in
@@ -820,6 +889,17 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     r.isStorageBuffer = rootIsSSBO;
     r.byteOffset = byteOffset;
     r.binding = rootBinding;
+    // Sprint 17 Day 4+ BONUS-2: when the root is a UBO array, the
+    // resolved binding came from the first array index dispatch
+    // (uboArrayElemBinding). Override `binding` and flip
+    // `isUniformBuffer` so OpLoad routes through `uniformBuffers_`.
+    // The byteOffset accumulated above (struct member / vec
+    // component / nested array) addresses within the indexed
+    // buffer.
+    if (rootIsUboArray && uboFirstIndexResolved) {
+        r.isUniformBuffer = true;
+        r.binding = uboArrayElemBinding;
+    }
     return r;
 }
 
@@ -1072,6 +1152,110 @@ Value Interpreter::loadFromSSBO(std::uint32_t binding,
     return v;
 }
 
+// Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: byte-level
+// UBO read via caller-supplied binding → (const ptr, size) map.
+// Sister to `loadFromSSBO` above (~30 LOC of mirrored read paths).
+// Read-only — UBOs are immutable per GL spec; no storeToUBO. Layout
+// rules: std140 by default. For Phase 1 target uniform_blocks_array_
+// indexing, vec4 leaf is layout-invariant (std140 == std430). Defer
+// std140 col-major-matrix / array-stride-16 distinctions to Phase 4
+// if surfaced.
+Value Interpreter::loadFromUBO(std::uint32_t binding,
+                               std::uint32_t byteOffset,
+                               std::uint32_t leafTypeId)
+{
+    Value v;
+    if (uniformBuffers_ == nullptr) {
+        bail("loadFromUBO: no UBO map set");
+        return v;
+    }
+    auto bIt = uniformBuffers_->find(binding);
+    if (bIt == uniformBuffers_->end() || bIt->second.ptr == nullptr) {
+        // Unbound binding: return zeros (sister to loadFromSSBO defensive
+        // path). Spec is undefined for unbound UBO reads but zeros are
+        // the GL-conformant safe choice.
+        auto tIt = module_.types.find(leafTypeId);
+        if (tIt != module_.types.end()) {
+            switch (tIt->second.kind) {
+                case TypeInfo::Kind::Int:   v.kind = Value::Kind::Int;   break;
+                case TypeInfo::Kind::UInt:  v.kind = Value::Kind::UInt;  break;
+                case TypeInfo::Kind::Bool:  v.kind = Value::Kind::Bool;  break;
+                case TypeInfo::Kind::Vec2:  v.kind = Value::Kind::Float2; break;
+                case TypeInfo::Kind::Vec3:  v.kind = Value::Kind::Float3; break;
+                case TypeInfo::Kind::Vec4:  v.kind = Value::Kind::Float4; break;
+                default:                    v.kind = Value::Kind::Float;  break;
+            }
+        }
+        return v;
+    }
+    const std::uint8_t* base = bIt->second.ptr;
+    const std::size_t size = bIt->second.size;
+
+    auto readScalar = [&](std::uint32_t off) -> std::uint32_t {
+        if (off + 4 > size) return 0;
+        std::uint32_t raw = 0;
+        std::memcpy(&raw, base + off, 4);
+        return raw;
+    };
+
+    auto tIt = module_.types.find(leafTypeId);
+    if (tIt == module_.types.end()) {
+        bail("loadFromUBO: unknown leaf type");
+        return v;
+    }
+    const TypeInfo& t = tIt->second;
+
+    auto leafIsInt = [&]() -> bool {
+        if (t.kind == TypeInfo::Kind::Int)  return true;
+        if (t.kind == TypeInfo::Kind::UInt) return true;
+        if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
+            t.kind == TypeInfo::Kind::Vec4) {
+            auto cIt = module_.types.find(t.componentType);
+            if (cIt != module_.types.end()) {
+                return cIt->second.kind == TypeInfo::Kind::Int ||
+                       cIt->second.kind == TypeInfo::Kind::UInt;
+            }
+        }
+        return false;
+    };
+    auto leafIsUInt = [&]() -> bool {
+        if (t.kind == TypeInfo::Kind::UInt) return true;
+        if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
+            t.kind == TypeInfo::Kind::Vec4) {
+            auto cIt = module_.types.find(t.componentType);
+            if (cIt != module_.types.end()) {
+                return cIt->second.kind == TypeInfo::Kind::UInt;
+            }
+        }
+        return false;
+    };
+
+    const int n = (t.kind == TypeInfo::Kind::Vec4) ? 4 :
+                  (t.kind == TypeInfo::Kind::Vec3) ? 3 :
+                  (t.kind == TypeInfo::Kind::Vec2) ? 2 : 1;
+    if (leafIsInt()) {
+        v.kind = (n == 1 ? (leafIsUInt() ? Value::Kind::UInt : Value::Kind::Int) :
+                  n == 2 ? (leafIsUInt() ? Value::Kind::UInt2 : Value::Kind::Int2) :
+                  n == 3 ? (leafIsUInt() ? Value::Kind::UInt3 : Value::Kind::Int3) :
+                           (leafIsUInt() ? Value::Kind::UInt4 : Value::Kind::Int4));
+        for (int k = 0; k < n; ++k) {
+            std::uint32_t raw = readScalar(byteOffset + k * 4);
+            std::memcpy(&v.i[k], &raw, 4);
+        }
+    } else {
+        v.kind = (n == 1 ? Value::Kind::Float :
+                  n == 2 ? Value::Kind::Float2 :
+                  n == 3 ? Value::Kind::Float3 : Value::Kind::Float4);
+        for (int k = 0; k < n; ++k) {
+            std::uint32_t raw = readScalar(byteOffset + k * 4);
+            float f = 0.0f;
+            std::memcpy(&f, &raw, 4);
+            v.f[k] = f;
+        }
+    }
+    return v;
+}
+
 void Interpreter::storeToSSBO(std::uint32_t binding,
                               std::uint32_t byteOffset,
                               const Value& v,
@@ -1183,6 +1367,43 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
             }
             ssboVarMeta_[varId] = meta;
             continue;   // skip uniform seeding + other per-var handlers
+        }
+
+        // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: detect
+        // UBO array shape — Uniform storage class with pointee type
+        // Array(Block-decorated Struct). For `uniform PositionBlock {
+        // ... } positionBlocks[4]`, glslang emits:
+        //   varId : OpVariable <ptr_to_Array_PositionBlock_4> Uniform
+        //   <PositionBlock> : OpTypeStruct {decorate Block}
+        //   <Array_PositionBlock_4> : OpTypeArray <PositionBlock> 4
+        // Stash baseBinding + arrayLen so resolveAccessChain can
+        // dispatch the first index → binding=baseBinding+idx.
+        if (info.storageClass == spv::StorageClassUniform) {
+            auto pT = module_.types.find(tIt->second.pointeeType);
+            if (pT != module_.types.end() &&
+                pT->second.kind == TypeInfo::Kind::Array) {
+                auto innerT = module_.types.find(pT->second.componentType);
+                if (innerT != module_.types.end() &&
+                    innerT->second.kind == TypeInfo::Kind::Struct) {
+                    auto blockDec = module_.decorations.find(pT->second.componentType);
+                    if (blockDec != module_.decorations.end() && blockDec->second.isBlock) {
+                        UniformBufferArrayMeta uboMeta;
+                        auto vDec = module_.decorations.find(varId);
+                        if (vDec != module_.decorations.end() && vDec->second.hasBinding) {
+                            uboMeta.baseBinding = vDec->second.binding;
+                        }
+                        // OpTypeArray's length lives in
+                        // arrayLengthConstId (SPIR-V constant id);
+                        // resolve via module_.constants. Mirrors the
+                        // pattern in SpirvModule::scalarWidth.
+                        auto lenIt = module_.constants.find(pT->second.arrayLengthConstId);
+                        uboMeta.arrayLen = (lenIt != module_.constants.end())
+                            ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0;
+                        uboArrayVarMeta_[varId] = uboMeta;
+                        continue;   // skip varStorage_ seeding for UBO arrays
+                    }
+                }
+            }
         }
 
         // ── Uniform / UniformConstant — seed from caller's map.
@@ -2678,6 +2899,15 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     if (acIt != accessChains_.end()) {
                         if (acIt->second.isStorageBuffer) {
                             valueStore_[w[1]] = loadFromSSBO(
+                                acIt->second.binding,
+                                acIt->second.byteOffset,
+                                acIt->second.leafTypeId);
+                        } else if (acIt->second.isUniformBuffer) {
+                            // Sprint 17 Day 4+ BONUS-2: UBO array load
+                            // — read from the per-binding UBO map at
+                            // the byteOffset accumulated during access-
+                            // chain resolution.
+                            valueStore_[w[1]] = loadFromUBO(
                                 acIt->second.binding,
                                 acIt->second.byteOffset,
                                 acIt->second.leafTypeId);
@@ -4951,6 +5181,69 @@ EmulatedDraw emulateVsOnlyDrawForTf(
                     static_cast<std::size_t>(effectiveInstances);
     d.expandedVertexData.assign(d.vertexCount * fpv, 0.0f);
 
+    // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: walk VS
+    // SPIR-V variables for UBO array shapes (`uniform Block { ... }
+    // arr[N]`) and populate a UniformBufferMap from the GL state's
+    // GL_UNIFORM_BUFFER indexed bindings + GLBufferObject shadow
+    // bytes. Sister to encodeEmulatedGsDraw's gsSsboMap walker.
+    // Built once per draw — every per-vertex runVsForVertex re-uses
+    // the same map. Skips BufferBlock-decorated structs (those are
+    // SSBOs handled by ssboVarMeta_ machinery in the Interpreter).
+    Interpreter::UniformBufferMap vsUboMap;
+    {
+        SpirvModule vsModForUbo;
+        if (vsModForUbo.parse(program.vertexSpirv.data(), program.vertexSpirv.size())) {
+            for (const auto& [varId, info] : vsModForUbo.variables) {
+                if (info.storageClass != spv::StorageClassUniform) continue;
+                auto tIt = vsModForUbo.types.find(info.typeId);
+                if (tIt == vsModForUbo.types.end()) continue;
+                auto pT = vsModForUbo.types.find(tIt->second.pointeeType);
+                if (pT == vsModForUbo.types.end() ||
+                    pT->second.kind != TypeInfo::Kind::Array) continue;
+                auto innerT = vsModForUbo.types.find(pT->second.componentType);
+                if (innerT == vsModForUbo.types.end() ||
+                    innerT->second.kind != TypeInfo::Kind::Struct) continue;
+                auto bDec = vsModForUbo.decorations.find(pT->second.componentType);
+                if (bDec == vsModForUbo.decorations.end() || !bDec->second.isBlock) continue;
+                if (bDec->second.isBufferBlock) continue;   // SSBO — skip
+                auto vDec = vsModForUbo.decorations.find(varId);
+                if (vDec == vsModForUbo.decorations.end() || !vDec->second.hasBinding) continue;
+                const std::uint32_t baseBinding = vDec->second.binding;
+                // Resolve array length from constant table (sister to
+                // initVariables UBO array detection).
+                auto lenIt = vsModForUbo.constants.find(pT->second.arrayLengthConstId);
+                const std::uint32_t arrayLen = (lenIt != vsModForUbo.constants.end())
+                    ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0;
+                if (arrayLen == 0) continue;
+                for (std::uint32_t inst = 0; inst < arrayLen; ++inst) {
+                    const std::uint32_t bp = baseBinding + inst;
+                    if (vsUboMap.count(bp) != 0) continue;
+                    GLIndexedBufferBinding bb =
+                        state.indexedBufferBinding(GL_UNIFORM_BUFFER, bp);
+                    if (bb.buffer == 0) continue;
+                    const GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
+                    if (bufObj == nullptr || bufObj->shadowBytes.empty()) continue;
+                    const std::uint8_t* dataPtr = bufObj->shadowBytes.data();
+                    std::size_t dataSize = bufObj->shadowBytes.size();
+                    if (bb.offset > 0) {
+                        if (static_cast<std::size_t>(bb.offset) >= dataSize) continue;
+                        dataPtr += bb.offset;
+                        dataSize -= static_cast<std::size_t>(bb.offset);
+                    }
+                    if (bb.size > 0 && static_cast<std::size_t>(bb.size) < dataSize) {
+                        dataSize = static_cast<std::size_t>(bb.size);
+                    }
+                    UniformBufferRegion region;
+                    region.ptr = dataPtr;
+                    region.size = dataSize;
+                    vsUboMap[bp] = region;
+                }
+            }
+        }
+    }
+    const Interpreter::UniformBufferMap* vsUboMapPtr =
+        vsUboMap.empty() ? nullptr : &vsUboMap;
+
     // Per-vertex VS interpretation. runVsForVertex captures position +
     // named output varyings into an EmulatedVertex; we pack into the
     // flat per-vertex slot in `expandedVertexData`.
@@ -4989,7 +5282,9 @@ EmulatedDraw emulateVsOnlyDrawForTf(
                 program, vao, objects, vboSlot,
                 glInstanceID,
                 capturedNames, capturedWidths,
-                outVertex, &vsDiag);
+                outVertex, &vsDiag,
+                /*sampledTextures=*/ nullptr,
+                /*uniformBuffers=*/ vsUboMapPtr);
             if (!ok) {
                 d.ok = false;
                 d.diagnostic = "VS-only-TF: " + vsDiag;
@@ -6613,7 +6908,8 @@ bool runVsForVertex(
     const std::vector<std::uint32_t>& outVaryingWidths,
     EmulatedVertex& outVertex,
     std::string* diagnostic,
-    const SampledTextureMap* sampledTextures)
+    const SampledTextureMap* sampledTextures,
+    const Interpreter::UniformBufferMap* uniformBuffers)
 {
     if (vsSpirv == nullptr || vsWordCount < 5) {
         if (diagnostic) *diagnostic = "runVsForVertex: empty SPIR-V";
@@ -6654,6 +6950,14 @@ bool runVsForVertex(
                          static_cast<std::int32_t>(vboSlot), instanceID);
     if (sampledTextures != nullptr) {
         vsInterp.setSampledTextures(sampledTextures);
+    }
+    // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: caller
+    // can pass a pre-built UBO array map (per-binding shadow bytes
+    // for any `uniform Block { ... } arr[N]` declared in the VS).
+    // Built once per draw in `emulateVsOnlyDrawForTf` (has state +
+    // objects access); reused across all per-vertex invocations.
+    if (uniformBuffers != nullptr) {
+        vsInterp.setUniformBuffers(uniformBuffers);
     }
 
     outVertex.position[0] = outVertex.position[1] = outVertex.position[2] = 0.0f;

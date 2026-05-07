@@ -179,6 +179,45 @@ struct AccessChainResult {
     bool isStorageBuffer = false;
     std::uint32_t byteOffset = 0;
     std::uint32_t binding = 0;
+    // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: when
+    // the root variable is a UBO ARRAY (Uniform storage class +
+    // pointee Array(Block-decorated Struct)), `isUniformBuffer`
+    // flips on. The first index in the access-chain resolves to a
+    // GL UBO binding (= baseBinding + idx); subsequent indices
+    // accumulate `byteOffset` within that bound buffer. OpLoad
+    // routes through caller-supplied `UniformBufferMap` instead of
+    // varStorage_. Read-only — no storeToUBO counterpart (UBOs are
+    // read-only per GL spec). Mutually exclusive with
+    // isStorageBuffer (which is read+write).
+    bool isUniformBuffer = false;
+};
+
+// ─── UBO array dispatch (Sprint 17 Day 4+ BONUS-2) ──────────────────
+
+// Per-binding UBO buffer region for runtime UBO/UBO-array dynamic
+// indexing in the CPU SPIR-V interpreter. Used by the TF-capture
+// path (`emulateVsOnlyDrawForTf` → `runVsForVertex`) to feed UBO
+// data the Interpreter wouldn't otherwise see. Sister to the SSBO
+// path's StorageBufferRegion (declared in GeometryShaderEmulator.cpp's
+// translation unit alongside the Interpreter class).
+struct UniformBufferRegion {
+    const std::uint8_t* ptr = nullptr;
+    std::size_t size = 0;
+};
+
+// Public typedef for UBO array map shared between callers and
+// Interpreter. Mirrors the pattern of `SampledTextureMap` from
+// GeometryShaderEmulator.h. The Interpreter class re-aliases the
+// same type internally.
+using UniformBufferMap = std::unordered_map<std::uint32_t, UniformBufferRegion>;
+
+// Per-variable UBO array meta. baseBinding is the GL binding point
+// of element [0]; arrayLen is the static array length parsed from
+// the SPIR-V type. OpAccessChain uses this to resolve the first
+// index → binding=baseBinding+idx. Sister to StorageBufferVarMeta.
+struct UniformBufferArrayMeta {
+    std::uint32_t baseBinding = 0;
+    std::uint32_t arrayLen = 1;
 };
 
 }  // namespace appgl::interp
