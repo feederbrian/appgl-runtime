@@ -1162,6 +1162,23 @@ struct GLProgramObject {
     std::vector<GLuint> currentSubroutineSelections[6];
     bool subroutineSelectionsDirty = false;
 
+    // Sprint 17 Day 7+ (Bank-Group-C re-engagement): synthetic
+    // dispatch-uniform location side-channel. The compat rewriter
+    // `rewriteSubroutinesForSpirv` emits one `uniform uint
+    // __appgl_sub_<UNI>;` per v1-eligible subroutine uniform (void
+    // return, no params) plus a `void __appgl_dispatch_<UNI>()`
+    // helper that branches on the synthetic uniform's value to the
+    // selected impl. This map is populated at link time by walking
+    // every stage's `_DefaultUniforms` reflection for `__appgl_sub_*`
+    // members and noting their auto-assigned default-block locations.
+    // Keyed by subroutine-uniform NAME (the original user identifier,
+    // e.g. "routine"), value is the GL location of the corresponding
+    // synthetic dispatch uniform. `glUniformSubroutinesuiv` consumes
+    // this map to push the selected subroutine index into the dispatch
+    // uniform's storage so the helper's if-else chain selects the
+    // requested impl at runtime. (CTS `viewport_index_subroutine`.)
+    std::unordered_map<std::string, GLint> subroutineDispatchUniformLocations;
+
     // GL 4.3 SSBO binding remapping (block index → user-specified binding).
     std::unordered_map<GLuint, GLuint> ssboBindingRemap;
 

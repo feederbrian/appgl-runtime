@@ -16546,6 +16546,27 @@ bool GLContext::compileShader(GLuint shader) {
         std::unordered_map<std::string, std::string> uniformToImpl;
         std::unordered_map<std::string, std::vector<std::string>> typeToImpls;
         std::unordered_map<std::string, std::string> uniformToType;
+        // Sprint 17 Day 7+ Bank-Group-C dynamic-dispatch (v1):
+        // capture subroutine-type prototype return-type + raw param
+        // text. v1 covers void-return parameterless subroutines
+        // (CTS viewport_index_subroutine — `subroutine void
+        // indexSetter();`). Other shapes fall back to static
+        // FIRST_IMPL_NAME substitution (current pre-Sprint-17
+        // behavior; non-regressing for sister tests).
+        std::unordered_map<std::string, std::string> typeReturn;
+        std::unordered_map<std::string, std::string> typeParams;
+        // Capture each subroutine impl's body text so v1 dispatch can
+        // INLINE `{body}` at call sites instead of emitting an
+        // OpFunctionCall. The GS-emul interpreter (SPIR-V CPU
+        // executor at GeometryShaderEmulator.cpp `isSupportedGsOpcode`)
+        // does not support OpFunctionCall (opcode 57), so a static
+        // FIRST_IMPL_NAME like `four()` only worked when glslang
+        // happened to inline it across stages. Once we emit a real
+        // dispatch shape (`if (sel) four(); else five();`) glslang
+        // keeps the OpFunctionCall and the emul rejects the GS. To
+        // preserve GS-emul compatibility we inline impl body text
+        // directly at the dispatch site.
+        std::unordered_map<std::string, std::string> implBody;
         // Subroutine type-prototype names (e.g. the `T` in
         // `subroutine void T();`) — emit a dummy `int T;` after
         // stripping so glslang's reserved-identifier validator
@@ -16614,6 +16635,33 @@ bool GLContext::compileShader(GLuint shader) {
                         typeToImpls[t].push_back(fnName);
                     }
                 }
+                // Sprint 17 Day 7+ Bank-Group-C: capture impl body
+                // text for v1 inline dispatch. Walk past `(params)`
+                // then capture matched `{body}`.
+                skipWs(q);
+                if (q < in.size() && in[q] == '(') {
+                    int pd2 = 1;
+                    ++q;
+                    while (q < in.size() && pd2 > 0) {
+                        if (in[q] == '(') ++pd2;
+                        else if (in[q] == ')') --pd2;
+                        ++q;
+                    }
+                }
+                skipWs(q);
+                if (q < in.size() && in[q] == '{' && !fnName.empty()) {
+                    const std::size_t bodyStart = q + 1;
+                    int bd = 1;
+                    ++q;
+                    while (q < in.size() && bd > 0) {
+                        if (in[q] == '{') ++bd;
+                        else if (in[q] == '}') --bd;
+                        if (bd > 0) ++q;
+                    }
+                    const std::size_t bodyEnd = q;
+                    implBody[fnName] = in.substr(bodyStart, bodyEnd - bodyStart);
+                    if (q < in.size()) ++q;  // past `}`
+                }
                 p = q;
                 continue;
             }
@@ -16635,6 +16683,23 @@ bool GLContext::compileShader(GLuint shader) {
             std::string typeProtoName = readWord(q);
             if (!typeProtoName.empty()) {
                 subTypeNames.push_back(typeProtoName);
+                // Sprint 17 Day 7+ Bank-Group-C v1 dispatch: capture
+                // return type + raw param text from `(...)` to
+                // detect v1-eligibility (void-return + no-params).
+                typeReturn[typeProtoName] = next;
+                skipWs(q);
+                std::size_t paramsStart = q;
+                if (q < in.size() && in[q] == '(') {
+                    int pd = 1;
+                    ++q;
+                    while (q < in.size() && pd > 0) {
+                        if (in[q] == '(') ++pd;
+                        else if (in[q] == ')') --pd;
+                        ++q;
+                    }
+                    typeParams[typeProtoName] =
+                        in.substr(paramsStart, q - paramsStart);
+                }
             }
             p = q;
         }
@@ -16644,6 +16709,41 @@ bool GLContext::compileShader(GLuint shader) {
             if (it != typeToImpls.end() && !it->second.empty()) {
                 uniformToImpl[kv.first] = it->second.front();
             }
+        }
+        // Sprint 17 Day 7+ Bank-Group-C: compute v1-eligibility per
+        // subroutine uniform. v1 covers void-return parameterless
+        // subroutines (covers CTS viewport_index_subroutine). Other
+        // shapes fall back to static FIRST_IMPL_NAME at call sites.
+        // Additionally require ALL impls of the subroutine type to
+        // have captured `{body}` text — v1 inlines bodies at the call
+        // site to avoid OpFunctionCall (unsupported by GS-emul).
+        std::unordered_map<std::string, bool> uniformIsV1Eligible;
+        for (const auto& kv : uniformToType) {
+            const std::string& tname = kv.second;
+            auto retIt = typeReturn.find(tname);
+            auto parIt = typeParams.find(tname);
+            if (retIt == typeReturn.end() || parIt == typeParams.end()) continue;
+            const std::string& ret = retIt->second;
+            // Strip whitespace from params for comparison.
+            std::string p = parIt->second;
+            p.erase(std::remove_if(p.begin(), p.end(),
+                [](unsigned char c) { return std::isspace(c); }), p.end());
+            const bool voidRet = (ret == "void");
+            const bool noParams = (p == "()" || p == "(void)");
+            // All impls must have captured body for inline dispatch.
+            bool allBodiesCaptured = true;
+            auto tiIt = typeToImpls.find(tname);
+            if (tiIt == typeToImpls.end() || tiIt->second.empty()) {
+                allBodiesCaptured = false;
+            } else {
+                for (const auto& impl : tiIt->second) {
+                    if (implBody.find(impl) == implBody.end()) {
+                        allBodiesCaptured = false;
+                        break;
+                    }
+                }
+            }
+            uniformIsV1Eligible[kv.first] = voidRet && noParams && allBodiesCaptured;
         }
         // Collect unique subroutine-uniform names so we can append a
         // dummy `int <NAME>;` declaration for each, preserving the
@@ -16729,6 +16829,82 @@ bool GLContext::compileShader(GLuint shader) {
                 skipWs(tt);
                 auto it = uniformToImpl.find(word);
                 if (it != uniformToImpl.end() && tt < in.size() && in[tt] == '(') {
+                    // Sprint 17 Day 7+ Bank-Group-C: v1-eligible (void
+                    // return, no params) + statement-position call site
+                    // → emit inline if-else dispatch chain consuming
+                    // `(args);`. Otherwise fall back to static
+                    // FIRST_IMPL_NAME emission and let `(args)` flow
+                    // naturally (current behavior).
+                    auto v1It = uniformIsV1Eligible.find(word);
+                    if (v1It != uniformIsV1Eligible.end() && v1It->second) {
+                        // Walk past matched `(args)`.
+                        std::size_t q = tt + 1;
+                        int pd = 1;
+                        while (q < in.size() && pd > 0) {
+                            if (in[q] == '(') ++pd;
+                            else if (in[q] == ')') --pd;
+                            ++q;
+                        }
+                        // Statement-position check: next non-ws must
+                        // be `;`. If not, fall back to static.
+                        std::size_t r = q;
+                        while (r < in.size() &&
+                               std::isspace(static_cast<unsigned char>(in[r]))) ++r;
+                        if (r < in.size() && in[r] == ';') {
+                            // Consume `;` too.
+                            std::size_t consumeEnd = r + 1;
+                            // Look up impls for this uniform.
+                            auto utIt = uniformToType.find(word);
+                            std::vector<std::string> impls;
+                            if (utIt != uniformToType.end()) {
+                                auto tiIt = typeToImpls.find(utIt->second);
+                                if (tiIt != typeToImpls.end()) impls = tiIt->second;
+                            }
+                            if (impls.empty()) {
+                                // No impls — degenerate; fall through to static.
+                                out.append(it->second);
+                                i = afterSubscript;
+                                continue;
+                            }
+                            // Sprint 17 Day 7+ Bank-Group-C: emit
+                            // INLINE body text per branch (not
+                            // function calls) — avoids OpFunctionCall
+                            // which the GS-emul interpreter rejects.
+                            // v1-eligibility above guarantees every
+                            // impl has captured body text.
+                            auto bodyOf = [&](const std::string& nm) -> const std::string& {
+                                auto bIt = implBody.find(nm);
+                                static const std::string kEmpty;
+                                return bIt == implBody.end() ? kEmpty : bIt->second;
+                            };
+                            if (impls.size() == 1) {
+                                out.append("{");
+                                out.append(bodyOf(impls[0]));
+                                out.append("}");
+                            } else {
+                                out.append("if (_appgl_sub_");
+                                out.append(word);
+                                out.append(" == 0u) {");
+                                out.append(bodyOf(impls[0]));
+                                out.append("}");
+                                for (std::size_t k = 1; k + 1 < impls.size(); ++k) {
+                                    out.append(" else if (_appgl_sub_");
+                                    out.append(word);
+                                    out.append(" == ");
+                                    out.append(std::to_string(k));
+                                    out.append("u) {");
+                                    out.append(bodyOf(impls[k]));
+                                    out.append("}");
+                                }
+                                out.append(" else {");
+                                out.append(bodyOf(impls.back()));
+                                out.append("}");
+                            }
+                            i = consumeEnd;
+                            continue;
+                        }
+                        // Not statement-position: fall through to static.
+                    }
                     // Skip the identifier + optional [subscript]
                     // entirely and emit the impl name. The call's
                     // `(...)` then follows naturally.
@@ -16766,6 +16942,63 @@ bool GLContext::compileShader(GLuint shader) {
                 out.append(n);
                 out.append(";\n");
             }
+        }
+        // Sprint 17 Day 7+ Bank-Group-C: emit synthetic dispatch
+        // uniforms for v1-eligible subroutine uniforms. The link-time
+        // `processSubroutineDispatchUniforms` lambda walks every
+        // stage's `_DefaultUniforms` reflection for these, registers
+        // their default-block locations into
+        // `subroutineDispatchUniformLocations`, and
+        // `glUniformSubroutinesuiv` writes the selected subroutine
+        // index into `_appgl_sub_<UNI>`. The inline if-else chain
+        // emitted at call sites then branches to the selected impl.
+        //
+        // CRITICAL: the synthetic uniform declarations must precede
+        // `main()` in lexical order — call sites in `main()` reference
+        // `_appgl_sub_<UNI>` and GLSL requires identifier declaration
+        // before use even at global scope (glslang's parser is single-
+        // pass on globals). Inject the header right after the
+        // `#version`/`#extension` block at the top of the rewritten
+        // output rather than appending at the end.
+        std::string synthHeader;
+        for (const auto& n : subUniNames) {
+            auto it = uniformIsV1Eligible.find(n);
+            if (it == uniformIsV1Eligible.end() || !it->second) continue;
+            if (synthHeader.empty()) {
+                synthHeader = "// appgl: subroutine dynamic-dispatch uniforms (v1)\n";
+            }
+            synthHeader += "uniform uint _appgl_sub_";
+            synthHeader += n;
+            synthHeader += ";\n";
+        }
+        if (!synthHeader.empty()) {
+            // Find injection point: end of last contiguous `#version`/
+            // `#extension`/`#pragma` line at the top of `out`. Skip
+            // initial whitespace, then scan forward across consecutive
+            // preprocessor-directive lines so the synthesized header
+            // lands AFTER all extension enables (e.g.
+            // GL_ARB_geometry_shader4 / viewport_array) but BEFORE any
+            // user code.
+            std::size_t injectAt = 0;
+            while (injectAt < out.size() &&
+                   std::isspace(static_cast<unsigned char>(out[injectAt]))) {
+                ++injectAt;
+            }
+            while (injectAt < out.size() && out[injectAt] == '#') {
+                std::size_t lineEnd = out.find('\n', injectAt);
+                if (lineEnd == std::string::npos) {
+                    injectAt = out.size();
+                    break;
+                }
+                injectAt = lineEnd + 1;
+                // Skip whitespace + blank lines between directives.
+                while (injectAt < out.size() &&
+                       (out[injectAt] == ' ' || out[injectAt] == '\t' ||
+                        out[injectAt] == '\r' || out[injectAt] == '\n')) {
+                    ++injectAt;
+                }
+            }
+            out.insert(injectAt, synthHeader);
         }
         return out;
     };
@@ -22768,6 +23001,40 @@ bool GLContext::linkProgram(GLuint program) {
             const auto& block = refl.uniformBlocks[0];
             if (block.name != "_DefaultUniforms") return;
             for (const auto& member : block.members) {
+                // Sprint 17 Day 7+ Bank-Group-C: skip synthetic
+                // dispatch uniforms emitted by
+                // `rewriteSubroutinesForSpirv` for v1 dynamic
+                // dispatch. These are processed separately by
+                // `processSubroutineDispatchUniforms` (above) for ALL
+                // stages and exposed only via the side-channel
+                // `subroutineDispatchUniformLocations`. Spec-correct:
+                // subroutine uniforms are queryable via separate
+                // GL_*_SUBROUTINE_UNIFORM interfaces only and must NOT
+                // appear in glGetActiveUniform enumeration.
+                if (member.name.compare(0, 11, "_appgl_sub_") == 0) {
+                    continue;
+                }
+                // Skip the rewriter's bare-name reserved-keyword
+                // validation stubs (`int <NAME>;` for each subroutine
+                // uniform / type). These exist only to push the
+                // user identifier through glslang's reserved-keyword
+                // check (CTS CommonBugs.CommonBug_ReservedNames); they
+                // would otherwise leak as bogus default-block int
+                // uniforms with auto-assigned locations in
+                // glGetUniformLocation / glGetActiveUniform output.
+                {
+                    bool isSubroutineStub = false;
+                    for (int sIdx = 0; sIdx < 6 && !isSubroutineStub; ++sIdx) {
+                        for (const auto& su : programObject->resourceSubroutineUniforms[sIdx]) {
+                            if (su.name == member.name) { isSubroutineStub = true; break; }
+                        }
+                        if (isSubroutineStub) break;
+                        for (const auto& sr : programObject->resourceSubroutines[sIdx]) {
+                            if (sr.name == member.name) { isSubroutineStub = true; break; }
+                        }
+                    }
+                    if (isSubroutineStub) continue;
+                }
                 // Gate this stage's referencedBy bit on whether the
                 // stage's source actually declares the top-level
                 // name as a uniform (see lambda comment above).
@@ -22927,6 +23194,88 @@ bool GLContext::linkProgram(GLuint program) {
         const std::string& tesSrc2 = tessEvalShader ? tessEvalShader->source : kEmptySrc;
         supplementFromReflection(programObject->tessControlReflection, 0x08, tcsSrc2);
         supplementFromReflection(programObject->tessEvalAsComputeReflection, 0x10, tesSrc2);
+
+        // ── Sprint 17 Day 7+ Bank-Group-C: synthetic dispatch uniforms ──
+        //
+        // The compat rewriter `rewriteSubroutinesForSpirv` emits one
+        // `uniform uint _appgl_sub_<UNI>;` per v1-eligible subroutine
+        // uniform (void return, no params) so the inline if-else
+        // dispatch chain emitted at call sites can branch on the
+        // selected impl. These synthetic uniforms appear in EVERY
+        // stage's `_DefaultUniforms` block (whichever stage declared
+        // the subroutine). Unlike user uniforms, this processing runs
+        // for ALL stages — including GS and CS, which
+        // `supplementFromReflection` does NOT cover — because the
+        // synthetic uniform must be locatable for the
+        // `glUniformSubroutinesuiv` setter regardless of which stage
+        // emitted it (CTS `viewport_index_subroutine` declares the
+        // subroutine in GS only).
+        //
+        // Names are excluded from `programObject->resourceUniforms`
+        // (so glGetActiveUniform / glGetProgramResource* enumeration
+        // doesn't expose them — spec-correct: subroutine uniforms are
+        // queryable via separate GL_*_SUBROUTINE_UNIFORM interfaces
+        // only). The reflection filter at the top of the
+        // `supplementFromReflection` member loop also skips them for
+        // the VS/FS/TCS/TES paths.
+        auto processSubroutineDispatchUniforms = [&](const ShaderReflection& refl) {
+            if (refl.uniformBlocks.empty()) return;
+            const auto& block = refl.uniformBlocks[0];
+            if (block.name != "_DefaultUniforms") return;
+            for (const auto& member : block.members) {
+                if (member.name.compare(0, 11, "_appgl_sub_") != 0) continue;
+                // Side-channel keyed by ORIGINAL subroutine-uniform
+                // name (strip `_appgl_sub_` 11-char prefix).
+                const std::string uniName = member.name.substr(11);
+                // Reuse the scanner's pre-existing entry if present
+                // (the lightweight GLSL reflector at reflectGLSL()
+                // walks the rewritten source and picks up the
+                // synthetic `uniform uint _appgl_sub_<UNI>;` decl
+                // before this lambda runs); otherwise allocate a
+                // fresh default-block slot. Either way the
+                // side-channel must be populated so
+                // glUniformSubroutinesuiv can locate the dispatch
+                // uniform's value cell.
+                GLint existingLoc = -1;
+                for (const auto& u : programObject->uniforms) {
+                    if (u.name == member.name) { existingLoc = u.location; break; }
+                }
+                GLint targetLoc = existingLoc;
+                if (existingLoc < 0) {
+                    GLProgramUniformInfo info;
+                    info.name = member.name;
+                    info.type = GL_UNSIGNED_INT;
+                    info.arraySize = 1;
+                    info.isArray = false;
+                    info.explicitLocation = -1;
+                    info.explicitBinding = -1;
+                    info.location = supplementNextLoc;
+                    supplementNextLoc += 1;
+                    targetLoc = info.location;
+                    knownUniformNames.insert(member.name);
+                    programObject->uniforms.push_back(std::move(info));
+                }
+                // Ensure a zero-seeded value cell exists at the chosen
+                // location (the scanner's appendDeclarationsAsUniforms
+                // path doesn't seed values for uniforms it discovers
+                // by source scanning — only the SPIR-V flatten path
+                // does).
+                auto& valueSlot = programObject->uniformValues[targetLoc];
+                if (valueSlot.uints.empty()) {
+                    valueSlot.type = GL_UNSIGNED_INT;
+                    valueSlot.arraySize = 1;
+                    valueSlot.uints.assign(1, 0u);
+                }
+                programObject->subroutineDispatchUniformLocations[uniName] = targetLoc;
+                // Intentionally NOT pushed into resourceUniforms.
+            }
+        };
+        processSubroutineDispatchUniforms(programObject->vertexReflection);
+        processSubroutineDispatchUniforms(programObject->fragmentReflection);
+        processSubroutineDispatchUniforms(programObject->geometryReflection);
+        processSubroutineDispatchUniforms(programObject->tessControlReflection);
+        processSubroutineDispatchUniforms(programObject->tessEvalAsComputeReflection);
+        processSubroutineDispatchUniforms(programObject->computeReflection);
     }
 
     // ── Merge SPIRV-Cross uniform block reflection into the program's

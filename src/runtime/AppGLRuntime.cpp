@@ -6938,8 +6938,49 @@ void APIENTRY glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GL
     }
     prog->subroutineSelectionsDirty = true;
 
+    // Sprint 17 Day 7+ Bank-Group-C: push selection into the synthetic
+    // dispatch uniform `__appgl_sub_<UNI>` so the inline if-else chain
+    // emitted at call sites by `rewriteSubroutinesForSpirv` branches
+    // to the requested impl. The synthetic uniform's GL location was
+    // recorded in `subroutineDispatchUniformLocations[uniName]` at
+    // link time by `processSubroutineDispatchUniforms`.
+    //
+    // Index translation: `indices[i]` is a GLOBAL stage subroutine
+    // index (position in `resourceSubroutines[stage]`); the dispatch
+    // chain branches on TYPE-LOCAL impl position. Translate via the
+    // subroutine uniform's `activeVariables` (compatible subroutines
+    // listed in declaration order; matches the chain's branch order).
+    for (GLsizei i = 0; i < count; ++i) {
+        const auto& u = unis[static_cast<std::size_t>(i)];
+        auto locIt = prog->subroutineDispatchUniformLocations.find(u.name);
+        if (locIt == prog->subroutineDispatchUniformLocations.end()) {
+            // Not v1-eligible (or non-subroutine fallback); the
+            // rewriter emitted static FIRST_IMPL_NAME for this
+            // uniform. Nothing to push.
+            continue;
+        }
+        const auto& compatibles = u.activeVariables;
+        const GLint globalIdx = static_cast<GLint>(indices[i]);
+        std::size_t typeLocal = 0;
+        bool found = false;
+        for (std::size_t k = 0; k < compatibles.size(); ++k) {
+            if (compatibles[k] == globalIdx) {
+                typeLocal = k;
+                found = true;
+                break;
+            }
+        }
+        if (!found) continue;  // INVALID_VALUE was already pushed above
+        auto valIt = prog->uniformValues.find(locIt->second);
+        if (valIt == prog->uniformValues.end()) continue;
+        if (valIt->second.uints.empty()) {
+            valIt->second.uints.assign(1, 0u);
+        }
+        valIt->second.uints[0] = static_cast<GLuint>(typeLocal);
+    }
+
     markProgramFunction(FunctionId::glUniformSubroutinesuiv,
-        "Subroutine selection state-tracked (pipeline plumbing 3A.4 pending).");
+        "Subroutine selection state-tracked + synthetic dispatch uniform pushed.");
     Runtime::shared().recordBootstrapTrace(
         "glUniformSubroutinesuiv(shadertype=" + std::to_string(shadertype) +
         ", count=" + std::to_string(count) + ")");
