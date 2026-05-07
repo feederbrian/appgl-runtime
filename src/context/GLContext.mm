@@ -13478,9 +13478,35 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (textarget != 0 && textureObject->target != textarget) {
-        pushError(GL_INVALID_OPERATION);
-        return false;
+    // GL 4.6 §9.2.8 / §8.18.1 textarget-vs-texture-target validation:
+    // glFramebufferTexture2D with a cube-map face textarget
+    // (GL_TEXTURE_CUBE_MAP_POSITIVE_X..NEGATIVE_Z) is valid when the
+    // texture is a cube map. The face textarget specifies WHICH face
+    // to attach; the texture's actual `target` is GL_TEXTURE_CUBE_MAP
+    // (NOT the face enum). Sprint 17 Day 2 (CKPT237) [Probe E]:
+    // pre-fix, a direct comparison `obj_target != textarget` rejected
+    // every cube-map-face attach with GL_INVALID_OPERATION even though
+    // the texture WAS a cube map. Surfaced post-Probe-C by
+    // KHR-GL46.geometry_shader.layered_rendering.layered_rendering
+    // iter-0 (CUBEMAP); pre-existing bug masked by the upstream
+    // h2DM-5b crash that Probe C resolved (Item 14 cascade-uncovers
+    // pattern).
+    {
+        const bool isCubeFaceTextarget =
+            textarget == GL_TEXTURE_CUBE_MAP_POSITIVE_X ||
+            textarget == GL_TEXTURE_CUBE_MAP_NEGATIVE_X ||
+            textarget == GL_TEXTURE_CUBE_MAP_POSITIVE_Y ||
+            textarget == GL_TEXTURE_CUBE_MAP_NEGATIVE_Y ||
+            textarget == GL_TEXTURE_CUBE_MAP_POSITIVE_Z ||
+            textarget == GL_TEXTURE_CUBE_MAP_NEGATIVE_Z;
+        const bool textargetMatchesObj =
+            textureObject->target == textarget ||
+            (isCubeFaceTextarget &&
+             textureObject->target == GL_TEXTURE_CUBE_MAP);
+        if (textarget != 0 && !textargetMatchesObj) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
     }
     // GL 4.6 §9.2.8 attachability rules on texture target.
     //
