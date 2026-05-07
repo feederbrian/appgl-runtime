@@ -16082,6 +16082,23 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // fit into the bound TF buffers. Other query targets
     // (SAMPLES_PASSED, TIME_ELAPSED, …) stay on the synthetic-1
     // fallback path — the legacy behaviour.
+    //
+    // Sprint 17 Day 7+ Bank-Group-G: gate the PRIMITIVES_GENERATED /
+    // TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN updates on `gsPresent`.
+    // The non-GS VS-only-TF path (`emulateVsOnlyDrawForTf` →
+    // `writeGsXfbAndCheckDiscard`) leaves `ed.topology` at the user's
+    // draw mode (e.g. GL_TRIANGLE_STRIP) rather than decomposed-to-
+    // list (GL_TRIANGLES) like the GS-emul path does, so the
+    // `primsGenerated = ed.vertexCount / vpp` arithmetic above gives
+    // the wrong count for strip topologies (4/3 = 1, not 4-2 = 2).
+    // For non-GS draws, `updatePrimitiveCountersForNonGsDraw` already
+    // does the strip-aware math at the drawArrays/drawElements
+    // call site — gating here avoids both the wrong-count update AND
+    // the double-count when both paths run. CTS
+    // `direct_state_access.queries_functional` exercises this with
+    // `glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)` + TF capture and
+    // expects PRIMITIVES_GENERATED = 2.
+    if (program.gsPresent) {
     objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
         if (!q.active) return;
         switch (q.target) {
@@ -16114,6 +16131,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 break;
         }
     });
+    }   // if (program.gsPresent)
 
     // Sprint 8 #9-C (CKPT68): accumulate vertex count on the bound TF
     // object — see writeTessTFAndUpdateCounters for full rationale.
