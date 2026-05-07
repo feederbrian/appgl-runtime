@@ -13618,7 +13618,31 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
     stored.kind = GLFramebufferAttachment::Kind::Texture;
     stored.object = texture;
     stored.level = level;
-    stored.layer = layer;
+    // Sprint 17 Day 2 (CKPT237) [Probe G — cascade Sub-bug A]: when
+    // glFramebufferTexture2D is called with a cube-map face textarget
+    // (GL_TEXTURE_CUBE_MAP_POSITIVE_X..NEGATIVE_Z), the runtime
+    // wrapper passes layer=0 because per GL 4.6 §9.2.8 the cube face
+    // is encoded in textarget, not in layer. Pre-fix: stored.layer
+    // was set to 0 for ALL cube-face attachments, losing the
+    // face-index information; downstream consumers
+    // (`resolveFBOColorTarget` populating `fboColorSlices` /
+    // `readColorAttachmentPixels` computing `metalSlice`) saw layer=0
+    // for every face and routed Metal slice 0 (POSITIVE_X coincidence)
+    // for any face. Surfaced post-Probe-E during cascade
+    // investigation (Probe F) as the architecturally-clean Sub-bug A
+    // localization (Item 14 cascade pattern).
+    //
+    // Fix: derive stored.layer from textarget when it's a cube-face
+    // enum via the existing `cubeFaceIndexForTarget` helper (returns
+    // 0..5 for POSITIVE_X..NEGATIVE_Z, -1 otherwise). Non-cube-face
+    // call sites fall through to the caller-supplied layer (existing
+    // semantics preserved).
+    {
+        const int cubeFaceIdx = Impl::cubeFaceIndexForTarget(textarget);
+        stored.layer = (cubeFaceIdx >= 0)
+            ? static_cast<GLint>(cubeFaceIdx)
+            : layer;
+    }
     stored.textureTarget = textarget == 0 ? textureObject->target : textarget;
     // GL 4.6 §9.4.1 defines GL_FRAMEBUFFER_ATTACHMENT_LAYERED as
     // true only when the attachment was made with FramebufferTexture
