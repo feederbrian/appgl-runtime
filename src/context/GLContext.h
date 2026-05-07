@@ -151,6 +151,14 @@ public:
     bool bindTexture(GLenum target, GLuint texture);
     bool texImage(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void* pixels);
     bool texSubImage(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels);
+    // Sprint 17 Day 7+ Bank-Group-E: BC-format compressed texture upload.
+    // Allocates a Metal texture with the matching MTLPixelFormat (per
+    // GLCapabilities format table) and uploads the user payload via
+    // replaceRegion. Sister to texImage but specialised for the 4×4-block
+    // BPTC + RGTC family on Mac2.
+    bool compressedTexImage(GLenum target, GLint level, GLenum internalformat,
+                            GLsizei width, GLsizei height, GLsizei depth,
+                            GLsizei imageSize, const void* data);
     bool texParameterInteger(GLenum target, GLenum pname, const GLint* params);
     bool texParameterUnsignedInteger(GLenum target, GLenum pname, const GLuint* params);
     bool texParameterFloat(GLenum target, GLenum pname, const GLfloat* params);

@@ -12395,6 +12395,145 @@ bool GLContext::texSubImage(
     return true;
 }
 
+// Sprint 17 Day 7+ Bank-Group-E: 4×4-block compressed-texture upload.
+//
+// Pre-fix `glCompressedTexImage2D` was a drop-data stub at
+// AppGLGroup8.cpp:528 — only desc.width/height/internalFormat were
+// recorded; no Metal texture allocated, no bytes uploaded. CTS
+// `direct_state_access.textures_get_image` (compressed sub-test)
+// uploads BC7 (16 bytes) via this path then reads it back via
+// glGetCompressedTextureImage; pre-fix readback returned zeros.
+//
+// Implementation strategy:
+// 1. Look up MTLPixelFormat from caps (already populated for BPTC +
+//    RGTC at GLCapabilities.mm:524-537 when supportsBC).
+// 2. Allocate MTLTexture with that format + width/height + level
+//    count (single mipLevel for now; multi-level arrives via
+//    compressedTexSubImage on subsequent calls).
+// 3. Upload via replaceRegion:mipmapLevel:withBytes:bytesPerRow: with
+//    block-aware byte counts ((W+3)/4)*bytesPerBlock per row of
+//    blocks).
+// 4. Stash MTLTexture pointer on the GLTextureObject so subsequent
+//    sample / readback paths see it.
+//
+// 4×4-block BPTC + RGTC family: BC1/BC4 = 8 bytes/block;
+// BC2/BC3/BC5/BC6H/BC7 = 16 bytes/block. Other compressed formats
+// (ETC2 / EAC / ASTC) deferred to Bank-Group-E follow-up.
+bool GLContext::compressedTexImage(GLenum target, GLint level,
+                                   GLenum internalformat,
+                                   GLsizei width, GLsizei height,
+                                   GLsizei depth,
+                                   GLsizei imageSize, const void* data) {
+    if (level < 0 || width <= 0 || height <= 0 || depth <= 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!object->instantiated) {
+        // First bind via glBindTexture should have set instantiated.
+        // Synthesise one here so the caller path stays defensive.
+        object->instantiated = true;
+    }
+    if (impl_->capabilities == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    auto fmtCap = impl_->capabilities->format(internalformat);
+    if (!fmtCap.has_value() || !fmtCap->compressed) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    const MTLPixelFormat pf = static_cast<MTLPixelFormat>(fmtCap->metalPixelFormat);
+    NSUInteger bytesPerBlock = 0;
+    switch (pf) {
+        case MTLPixelFormatBC1_RGBA:
+        case MTLPixelFormatBC1_RGBA_sRGB:
+        case MTLPixelFormatBC4_RUnorm:
+        case MTLPixelFormatBC4_RSnorm:
+            bytesPerBlock = 8;
+            break;
+        case MTLPixelFormatBC2_RGBA:
+        case MTLPixelFormatBC2_RGBA_sRGB:
+        case MTLPixelFormatBC3_RGBA:
+        case MTLPixelFormatBC3_RGBA_sRGB:
+        case MTLPixelFormatBC5_RGUnorm:
+        case MTLPixelFormatBC5_RGSnorm:
+        case MTLPixelFormatBC6H_RGBFloat:
+        case MTLPixelFormatBC6H_RGBUfloat:
+        case MTLPixelFormatBC7_RGBAUnorm:
+        case MTLPixelFormatBC7_RGBAUnorm_sRGB:
+            bytesPerBlock = 16;
+            break;
+        default:
+            // Other compressed formats (ETC2 / EAC / ASTC) — fall back
+            // to the legacy drop-data path. Caller already recorded
+            // dimensions in AppGLGroup8.cpp:528.
+            return true;
+    }
+    id<MTLDevice> mtlDevice = impl_->device;
+    if (mtlDevice == nil) {
+        // No Metal device — silently accept; downstream sampling /
+        // readback will hit the no-MTLTexture branch.
+        return true;
+    }
+    // Record dimensions on the GL texture object so subsequent queries
+    // (glGetCompressedTextureSubImage bounds, glGetTexLevelParameter)
+    // see the right values.
+    object->target = target;
+    object->desc.target = target;
+    object->desc.width = width;
+    object->desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
+    object->desc.depth = depth;
+    object->desc.internalFormat = internalformat;
+    // Allocate Metal texture if missing OR if format/size changed.
+    id<MTLTexture> existing = (__bridge id<MTLTexture>)object->metalTexture;
+    bool needAlloc = (existing == nil) ||
+                     existing.pixelFormat != pf ||
+                     existing.width != static_cast<NSUInteger>(width) ||
+                     existing.height != static_cast<NSUInteger>(height);
+    if (needAlloc) {
+        MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+        desc.textureType = (target == GL_TEXTURE_2D)
+            ? MTLTextureType2D
+            : MTLTextureType2D;  // 1D / 3D BC are unusual; default 2D
+        desc.pixelFormat = pf;
+        desc.width = static_cast<NSUInteger>(width);
+        desc.height = static_cast<NSUInteger>(height);
+        desc.depth = 1;
+        desc.mipmapLevelCount = static_cast<NSUInteger>(level + 1);
+        desc.usage = MTLTextureUsageShaderRead;
+        desc.storageMode = MTLStorageModeShared;
+        id<MTLTexture> newTex = [mtlDevice newTextureWithDescriptor:desc];
+        if (newTex == nil) {
+            pushError(GL_OUT_OF_MEMORY);
+            return false;
+        }
+        if (object->metalTexture != nullptr) {
+            releaseRetainedMetalObject(object->metalTexture);
+        }
+        object->metalTexture = transferRetainedMetalObject(newTex);
+        existing = newTex;
+    }
+    // Upload payload (if provided). Block-aware bytesPerRow.
+    if (data != nullptr && imageSize > 0) {
+        const NSUInteger blocksX = (static_cast<NSUInteger>(width) + 3) / 4;
+        const NSUInteger bytesPerRow = blocksX * bytesPerBlock;
+        MTLRegion region = MTLRegionMake2D(
+            0, 0,
+            static_cast<NSUInteger>(width),
+            static_cast<NSUInteger>(height));
+        [existing replaceRegion:region
+                    mipmapLevel:static_cast<NSUInteger>(level)
+                      withBytes:data
+                    bytesPerRow:bytesPerRow];
+    }
+    return true;
+}
+
 bool GLContext::texStorage(
     GLenum target,
     GLsizei levels,
@@ -36630,6 +36769,63 @@ bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei b
     // "buffer would be too small" branch via PBO offset overflow; the
     // plain bufSize case isn't negative-tested here.
     (void)bufSize;
+    // Sprint 17 Day 7+ Bank-Group-E: actual BC-format readback. CTS
+    // `direct_state_access.textures_get_image` (compressed sub-test)
+    // uploads 16 BC7 bytes via glCompressedTexImage2D and expects the
+    // same bytes back via glGetCompressedTextureImage. The pre-fix
+    // path validated args + returned true with `pixels` untouched, so
+    // the test saw 16 zeros instead of the input bytes.
+    //
+    // We support the 4×4-block BC family (BPTC + RGTC) on Apple Mac2
+    // family. Block dimensions are always 4×4; bytesPerBlock differs
+    // per format (16 for BC7/BC6H/BC5/BC2/BC3; 8 for BC1/BC4).
+    if (pixels != nullptr && obj->metalTexture != nullptr) {
+        id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
+        const MTLPixelFormat pf = metalTex.pixelFormat;
+        NSUInteger bytesPerBlock = 0;
+        switch (pf) {
+            case MTLPixelFormatBC1_RGBA:
+            case MTLPixelFormatBC1_RGBA_sRGB:
+            case MTLPixelFormatBC4_RUnorm:
+            case MTLPixelFormatBC4_RSnorm:
+                bytesPerBlock = 8;
+                break;
+            case MTLPixelFormatBC2_RGBA:
+            case MTLPixelFormatBC2_RGBA_sRGB:
+            case MTLPixelFormatBC3_RGBA:
+            case MTLPixelFormatBC3_RGBA_sRGB:
+            case MTLPixelFormatBC5_RGUnorm:
+            case MTLPixelFormatBC5_RGSnorm:
+            case MTLPixelFormatBC6H_RGBFloat:
+            case MTLPixelFormatBC6H_RGBUfloat:
+            case MTLPixelFormatBC7_RGBAUnorm:
+            case MTLPixelFormatBC7_RGBAUnorm_sRGB:
+                bytesPerBlock = 16;
+                break;
+            default:
+                bytesPerBlock = 0;
+                break;
+        }
+        if (bytesPerBlock != 0) {
+            const NSUInteger lvl = static_cast<NSUInteger>(level);
+            const NSUInteger w = std::max<NSUInteger>(metalTex.width >> lvl, 1);
+            const NSUInteger h = std::max<NSUInteger>(metalTex.height >> lvl, 1);
+            const NSUInteger blocksX = (w + 3) / 4;
+            const NSUInteger blocksY = (h + 3) / 4;
+            const NSUInteger bytesPerRow = blocksX * bytesPerBlock;
+            const NSUInteger required = bytesPerRow * blocksY;
+            if (bufSize >= 0 &&
+                static_cast<NSUInteger>(bufSize) < required) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            MTLRegion region = MTLRegionMake2D(0, 0, w, h);
+            [metalTex getBytes:pixels
+                   bytesPerRow:bytesPerRow
+                    fromRegion:region
+                   mipmapLevel:lvl];
+        }
+    }
     return true;
 }
 

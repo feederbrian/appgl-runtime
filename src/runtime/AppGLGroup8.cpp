@@ -527,18 +527,26 @@ static void APIENTRY glCompressedTexImage3D(GLenum target, GLint level, GLenum i
 
 static void APIENTRY glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data) {
     (void)border;
-    (void)imageSize;
-    (void)data;
-    // GL 4.6 §8.11.1: the compressed payload is still dropped, but
-    // callers (especially CTS error-path tests) expect the bound
-    // texture to have its width/height/internalFormat recorded so
-    // subsequent queries (textureSubImage, getTexLevelParameter,
-    // glGetCompressedTextureSubImage bounds checks) see the right
-    // dimensions. Without this update `desc.width==0` forced the
-    // §8.11.4 range check in getCompressedTextureSubImage to reject
-    // with INVALID_VALUE before the later bufSize check could fire.
     auto* ctx = currentContextOrNull();
     if (ctx == nullptr) return;
+    // Sprint 17 Day 7+ Bank-Group-E: actual compressed-texture upload
+    // for the BPTC + RGTC family (4×4-block formats). The
+    // `compressedTexImage` helper allocates a Metal texture with the
+    // matching pixel format and uploads the payload via
+    // replaceRegion. CTS `direct_state_access.textures_get_image`
+    // (compressed sub-test) exercises this with BC7. Other compressed
+    // formats (ETC2 / EAC / ASTC) keep the legacy drop-data path until
+    // Bank-Group-E follow-up.
+    if (level >= 0 && width > 0 && height > 0) {
+        if (ctx->compressedTexImage(target, level, internalformat,
+                                    width, height, /*depth*/1,
+                                    imageSize, data)) {
+            return;
+        }
+    }
+    // Fallback: record dimensions only (legacy behaviour for unsupported
+    // formats or sub-zero level/width/height that compressedTexImage
+    // rejects).
     if (level == 0 && width > 0 && height > 0) {
         GLuint tex = ctx->state().boundTexture(target);
         if (tex != 0) {
