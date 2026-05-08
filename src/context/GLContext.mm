@@ -22163,13 +22163,40 @@ bool GLContext::linkProgram(GLuint program) {
                 fsSpirvData = fragmentShader->spirv.data();
                 fsSpirvWords = fragmentShader->spirv.size();
             }
+            // Sprint 17 Day 9+ R13 sub-bank item_5 lines/triangles:
+            // extend Path B (`needsCullDistancePrepass`) to GS-present
+            // programs. When the VS writes gl_Clip/CullDistance and the
+            // GS path doesn't emulate (the `programStoresClipOrCull`
+            // stopgap at `GeometryShaderEmulator.cpp:4544` rejects to
+            // avoid pixel-coverage gaps in GS-emul cull routing), the
+            // legacy translated VS+FS pipeline runs with cull→clip
+            // routing siblings driving HW clip — exactly the
+            // mixed-sign over-clip case Path B was created to handle.
+            // CPU pre-pass on the VS gives spec-correct §14.6.3
+            // primitive-level culling for passthrough GS (VS values
+            // flow through GS unchanged); non-passthrough GS that
+            // modifies cull values is rare and falls outside this gate.
+            const bool vsCullPrepassVgf =
+                appgl::vsSpirvWritesCullDistance(vsSpirvData, vsSpirvWords);
+            appgl::TranslatorOptions vsOptionsVgf;
+            vsOptionsVgf.disableCullDistanceClipRouting = vsCullPrepassVgf;
             ShaderReflection vsRefl, fsRefl, gsRefl;
             const bool vsOk = translateStage(
                 "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
-                programObject->vertexMSL, vsRefl);
+                programObject->vertexMSL, vsRefl, vsOptionsVgf);
             const bool fsOk = translateStage(
                 "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
                 programObject->fragmentMSL, fsRefl);
+            // Sprint 17 Day 9+ R13 sub-bank item_5: commit
+            // `needsCullDistancePrepass` for VertexGeometryFragment kind
+            // when the VS writes gl_Clip/CullDistance. The drawArrays
+            // dispatch site at line ~28344 already gates on `program->
+            // needsCullDistancePrepass && program->hasTranslatedPipeline`
+            // — both conditions hold here for VS+GS+FS programs whose
+            // GS-emul rejects (GS-emul stopgap at GeometryShaderEmulator
+            // .cpp:4544). For passthrough GS, VS-only Path B is
+            // spec-correct because cull values flow through unchanged.
+            programObject->needsCullDistancePrepass = vsCullPrepassVgf;
             std::string unusedGsMSL;
             (void)translateCachedStage("geometry", geometryShader, unusedGsMSL, gsRefl);
             // Keep the GS reflection so `GL_REFERENCED_BY_GEOMETRY_SHADER`
