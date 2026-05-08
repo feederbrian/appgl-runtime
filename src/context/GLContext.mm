@@ -15357,9 +15357,15 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
                 q.result += static_cast<GLuint64>(prims);
                 break;
             case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
-                if (tfActive) {
-                    q.result += static_cast<GLuint64>(prims);
-                }
+                // Sprint 17 Day 9+ regression-debt #5 (R7): when TF is
+                // active for a non-GS draw, `writeGsXfbAndCheckDiscard`
+                // already credited this query with the buffer-cap-
+                // aware `primsWritten`. Crediting the submitted prim
+                // count here would double-count and over-report,
+                // regressing CTS `transform_feedback.query_vertex_*_
+                // test` whose TF buffer fits fewer prims than the
+                // draw submits. Leave TFB_WRITTEN to writeGsXfb when
+                // TF is active.
                 break;
             case GL_VERTICES_SUBMITTED:
             case GL_VERTEX_SHADER_INVOCATIONS:
@@ -16376,27 +16382,40 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // (SAMPLES_PASSED, TIME_ELAPSED, …) stay on the synthetic-1
     // fallback path — the legacy behaviour.
     //
-    // Sprint 17 Day 7+ Bank-Group-G: gate the PRIMITIVES_GENERATED /
-    // TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN updates on `gsPresent`.
-    // The non-GS VS-only-TF path (`emulateVsOnlyDrawForTf` →
-    // `writeGsXfbAndCheckDiscard`) leaves `ed.topology` at the user's
-    // draw mode (e.g. GL_TRIANGLE_STRIP) rather than decomposed-to-
-    // list (GL_TRIANGLES) like the GS-emul path does, so the
+    // Sprint 17 Day 7+ Bank-Group-G: gate the PRIMITIVES_GENERATED
+    // update on `gsPresent`. The non-GS VS-only-TF path
+    // (`emulateVsOnlyDrawForTf` → `writeGsXfbAndCheckDiscard`)
+    // leaves `ed.topology` at the user's draw mode (e.g.
+    // GL_TRIANGLE_STRIP) rather than decomposed-to-list
+    // (GL_TRIANGLES) like the GS-emul path does, so the
     // `primsGenerated = ed.vertexCount / vpp` arithmetic above gives
     // the wrong count for strip topologies (4/3 = 1, not 4-2 = 2).
-    // For non-GS draws, `updatePrimitiveCountersForNonGsDraw` already
-    // does the strip-aware math at the drawArrays/drawElements
-    // call site — gating here avoids both the wrong-count update AND
-    // the double-count when both paths run. CTS
-    // `direct_state_access.queries_functional` exercises this with
-    // `glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)` + TF capture and
-    // expects PRIMITIVES_GENERATED = 2.
-    if (program.gsPresent) {
+    // For non-GS draws, `updatePrimitiveCountersForNonGsDraw` does
+    // the strip-aware math at the drawArrays/drawElements call site.
+    //
+    // Sprint 17 Day 9+ regression-debt #5 (R7): the
+    // TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN update must NOT share
+    // that gate. `primsWritten` was incremented per-primitive above
+    // by the buffer-cap-aware iteration (one increment iff the
+    // primitive's bytes fit in every TF binding), so it carries the
+    // GL 4.6 §22.3-required "subset that fit into the bound TF
+    // buffers" semantic regardless of stage shape. With the gate
+    // present this credit was lost on the VS-only-TF path, and
+    // `updatePrimitiveCountersForNonGsDraw`'s fallback credits the
+    // submitted (uncapped) prim count — so CTS
+    // `transform_feedback.query_vertex_{interleaved,separate}_test`
+    // (which sizes the TF buffer to fit only 3 of the 4 submitted
+    // POINTS) regressed (extracted 4 vs expected 3). The non-GS
+    // sister gate at `updatePrimitiveCountersForNonGsDraw`'s
+    // TFB_WRITTEN case skips when `transformFeedbackActive` to
+    // avoid double-counting against the credit issued here.
     objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
         if (!q.active) return;
         switch (q.target) {
             case GL_PRIMITIVES_GENERATED:
-                q.result += static_cast<GLuint64>(primsGenerated);
+                if (program.gsPresent) {
+                    q.result += static_cast<GLuint64>(primsGenerated);
+                }
                 break;
             case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
                 if (transformFeedbackActive) {
@@ -16424,7 +16443,6 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 break;
         }
     });
-    }   // if (program.gsPresent)
 
     // Sprint 8 #9-C (CKPT68): accumulate vertex count on the bound TF
     // object — see writeTessTFAndUpdateCounters for full rationale.
