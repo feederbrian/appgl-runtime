@@ -7297,7 +7297,22 @@ struct GLContext::Impl {
             // COMPONENT, GL_FLOAT, …)` — pre-fix the readback
             // returned 0.5 everywhere (max-diff = 0.5) instead of
             // the rendered gradient.
-            if (renderbuffer->metalTexture != nullptr) {
+            // Sprint 17 Day 9+ Bank-Group-A-1 narrow-gate (regression-
+            // debt #1+#2): only prefer the Metal-texture path when this
+            // RB has actually been written by a Metal render pass.
+            // Pre-narrow `6ba6aad` always-prefers-metal logic regressed
+            // CTS `direct_state_access.framebuffers_blit` +
+            // `renderbuffers_storage` — those tests use glClearBufferfv
+            // (CPU-shadow-only path) followed by readback, with no
+            // render pass; the Metal texture stayed at its default
+            // zero state and the read returned 0 instead of the cleared
+            // 0.5. Narrowing on `wasMetalDepthRendered` preserves
+            // Bank-Group-A-1 `clip_control.depth_mode_one_to_one` (sets
+            // the flag via the post-render encodeTranslatedDrawAndMark-
+            // Fbo helper) while restoring CPU-shadow read for clear-
+            // only RBs.
+            if (renderbuffer->metalTexture != nullptr &&
+                renderbuffer->wasMetalDepthRendered) {
                 id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer->metalTexture;
                 if (readDepthFromMetalTexture(metalTex, /*mipLevel*/0,
                                               x, y, width, height, pixels)) {
@@ -27618,20 +27633,44 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
 // candidate: sister-pattern leverage at the call-site-wrapper level.
 bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
-    if (ok && state->clipOrigin() == GL_LOWER_LEFT) {
+    if (ok) {
         const GLuint fboName = state->boundDrawFramebuffer();
         if (fboName != 0) {
             if (GLFramebufferObject* fbo =
                     objects->framebuffers().get(fboName)) {
-                for (const auto& kv : fbo->attachments) {
-                    if (!isColorAttachment(kv.first)) continue;
-                    if (kv.second.kind !=
-                            GLFramebufferAttachment::Kind::Texture) continue;
-                    if (GLTextureObject* tex =
-                            objects->textures().get(kv.second.object)) {
-                        tex->wasViewportRenderedTo = true;
+                // Color-texture attachments — Y-flip widening per
+                // 9f17b5a (gated on clipOrigin == GL_LOWER_LEFT to
+                // preserve Bank-Group-A-1 + B narrowing).
+                if (state->clipOrigin() == GL_LOWER_LEFT) {
+                    for (const auto& kv : fbo->attachments) {
+                        if (!isColorAttachment(kv.first)) continue;
+                        if (kv.second.kind !=
+                                GLFramebufferAttachment::Kind::Texture) continue;
+                        if (GLTextureObject* tex =
+                                objects->textures().get(kv.second.object)) {
+                            tex->wasViewportRenderedTo = true;
+                        }
                     }
                 }
+                // Sprint 17 Day 9+ Bank-Group-A-1 narrow-gate
+                // (regression-debt #1+#2): mark depth-renderbuffer
+                // attachments as Metal-rendered so subsequent
+                // glReadPixels(GL_DEPTH_COMPONENT) prefers the Metal-
+                // texture readback path (Bank-Group-A-1 `6ba6aad`).
+                // Not gated on clipOrigin: depth tracking is about
+                // render-pass-target-validity, not Y-flip orientation.
+                auto markDepthAttachment = [&](GLenum attEnum) {
+                    auto it = fbo->attachments.find(attEnum);
+                    if (it == fbo->attachments.end()) return;
+                    if (it->second.kind !=
+                            GLFramebufferAttachment::Kind::Renderbuffer) return;
+                    if (GLRenderbufferObject* rb =
+                            objects->renderbuffers().get(it->second.object)) {
+                        rb->wasMetalDepthRendered = true;
+                    }
+                };
+                markDepthAttachment(GL_DEPTH_ATTACHMENT);
+                markDepthAttachment(GL_DEPTH_STENCIL_ATTACHMENT);
             }
         }
     }

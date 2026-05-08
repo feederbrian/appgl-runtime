@@ -262,6 +262,17 @@ struct GLRenderbufferObject {
     std::vector<std::uint8_t> stencil8;
     bool instantiated = false;
     bool storageDefined = false;
+    // Sprint 17 Day 9+ Bank-Group-A-1 narrow-gate (regression-debt #1+#2):
+    // True when a Metal render pass with this RB as depth attachment
+    // wrote the texture; false when only CPU-shadow paths
+    // (glClearBufferfv, glRenderbufferStorage init) were the source of
+    // depth data. `readDepthAttachmentPixels` gates Metal-texture
+    // readback (Bank-Group-A-1 commit `6ba6aad`) on this flag so RBs
+    // that were ONLY cleared (no render pass) fall through to the CPU
+    // shadow — matches CTS `direct_state_access.framebuffers_blit` +
+    // `renderbuffers_storage` pre-fix behavior while preserving
+    // `clip_control.depth_mode_one_to_one` post-fix behavior.
+    bool wasMetalDepthRendered = false;
 };
 
 struct GLFramebufferAttachment {
