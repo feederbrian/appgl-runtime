@@ -6018,6 +6018,71 @@ EmulatedDraw emulateGeometryDraw(
     const Interpreter::StorageBufferMap* gsSsboMapPtr =
         gsSsboMap.empty() ? nullptr : &gsSsboMap;
 
+    // Sprint 17 Day 9+ regression-debt #4 [Day 4+ BONUS-2 cross-component]:
+    // mirror the SSBO walker for UBO arrays. The Interpreter's BONUS-2
+    // initVariables UBO array detection routes OpLoad through
+    // `loadFromUBO`, which requires `setUniformBuffers` to be called
+    // by the emulator host. Without this map, GS programs containing
+    // `uniform Block { ... } arr[N]` regress to zero reads (test
+    // `geometry_shader.limits.max_uniform_blocks` extracted 0 vs
+    // expected sum-1..N). Sister to emulateVsOnlyDrawForTf at line
+    // 5286 — same shape, walks both GS and VS SPIR-V like the SSBO
+    // walker above.
+    Interpreter::UniformBufferMap gsUboMap;
+    auto addUbosFromGsModule = [&](const std::vector<std::uint32_t>& spirv) {
+        if (spirv.empty()) return;
+        SpirvModule sMod;
+        if (!sMod.parse(spirv.data(), spirv.size())) return;
+        for (const auto& [varId, info] : sMod.variables) {
+            if (info.storageClass != spv::StorageClassUniform) continue;
+            auto tIt = sMod.types.find(info.typeId);
+            if (tIt == sMod.types.end()) continue;
+            auto pT = sMod.types.find(tIt->second.pointeeType);
+            if (pT == sMod.types.end() ||
+                pT->second.kind != TypeInfo::Kind::Array) continue;
+            auto innerT = sMod.types.find(pT->second.componentType);
+            if (innerT == sMod.types.end() ||
+                innerT->second.kind != TypeInfo::Kind::Struct) continue;
+            auto bDec = sMod.decorations.find(pT->second.componentType);
+            if (bDec == sMod.decorations.end() || !bDec->second.isBlock) continue;
+            if (bDec->second.isBufferBlock) continue;   // SSBO — handled above
+            auto vDec = sMod.decorations.find(varId);
+            if (vDec == sMod.decorations.end() || !vDec->second.hasBinding) continue;
+            const std::uint32_t baseBinding = vDec->second.binding;
+            auto lenIt = sMod.constants.find(pT->second.arrayLengthConstId);
+            const std::uint32_t arrayLen = (lenIt != sMod.constants.end())
+                ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0;
+            if (arrayLen == 0) continue;
+            for (std::uint32_t inst = 0; inst < arrayLen; ++inst) {
+                const std::uint32_t bp = baseBinding + inst;
+                if (gsUboMap.count(bp) != 0) continue;
+                GLIndexedBufferBinding bb =
+                    state.indexedBufferBinding(GL_UNIFORM_BUFFER, bp);
+                if (bb.buffer == 0) continue;
+                const GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
+                if (bufObj == nullptr || bufObj->shadowBytes.empty()) continue;
+                const std::uint8_t* dataPtr = bufObj->shadowBytes.data();
+                std::size_t dataSize = bufObj->shadowBytes.size();
+                if (bb.offset > 0) {
+                    if (static_cast<std::size_t>(bb.offset) >= dataSize) continue;
+                    dataPtr += bb.offset;
+                    dataSize -= static_cast<std::size_t>(bb.offset);
+                }
+                if (bb.size > 0 && static_cast<std::size_t>(bb.size) < dataSize) {
+                    dataSize = static_cast<std::size_t>(bb.size);
+                }
+                UniformBufferRegion region;
+                region.ptr = dataPtr;
+                region.size = dataSize;
+                gsUboMap[bp] = region;
+            }
+        }
+    };
+    addUbosFromGsModule(program.geometrySpirv);
+    addUbosFromGsModule(program.vertexSpirv);
+    const Interpreter::UniformBufferMap* gsUboMapPtr =
+        gsUboMap.empty() ? nullptr : &gsUboMap;
+
     const GLsizei effectiveInstances = std::max<GLsizei>(1, instanceCount);
     for (GLsizei instanceIdx = 0; instanceIdx < effectiveInstances; ++instanceIdx) {
         const std::int32_t glInstanceID = static_cast<std::int32_t>(instanceIdx);
@@ -6086,6 +6151,9 @@ EmulatedDraw emulateGeometryDraw(
                 }
                 if (gsSsboMapPtr != nullptr) {
                     vsInterp.setStorageBuffers(gsSsboMapPtr);
+                }
+                if (gsUboMapPtr != nullptr) {
+                    vsInterp.setUniformBuffers(gsUboMapPtr);
                 }
                 EmulatedVertex vsOut;
                 vsOut.position[0] = vsOut.position[1] = vsOut.position[2] = 0.0f;
@@ -6179,6 +6247,9 @@ EmulatedDraw emulateGeometryDraw(
                 }
                 if (gsSsboMapPtr != nullptr) {
                     interp.setStorageBuffers(gsSsboMapPtr);
+                }
+                if (gsUboMapPtr != nullptr) {
+                    interp.setUniformBuffers(gsUboMapPtr);
                 }
                 if (std::getenv("APPGL_TRACE_GS_EMUL_TEX")) {
                     std::fprintf(stderr,
