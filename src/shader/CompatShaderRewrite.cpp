@@ -733,6 +733,45 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         // the #version line) so the shader compiles and samples the minimum
         // values the GL 4.5 spec guarantees (both are 8 per §23.4).
         if (strippedCullDistance) {
+            // Sprint 17 Day 9+ R13 sub-bank items 7+8: when the source
+            // declares `#extension GL_ARB_cull_distance` and we strip
+            // it (because glslang's Vulkan front-end doesn't recognize
+            // the extension token), the user's `in float gl_CullDistance
+            // [N];` / `out float gl_CullDistance[N];` redeclarations
+            // and any direct `gl_CullDistance[i]` reads in the shader
+            // body lose glslang's built-in identifier — under
+            // `#version 150` (or any pre-450) gl_CullDistance is
+            // unknown without the extension, so glslang reports
+            // "identifiers starting with gl_ are reserved" on the
+            // redeclaration line. Upgrade `#version` to 460 so
+            // gl_CullDistance is accepted as a core built-in (added
+            // GLSL 4.5). The 460 target matches the rest of AppGL's
+            // SPIR-V translation context (max GL we advertise) and
+            // keeps the Vulkan front-end happy. Surfaces:
+            // `cull_distance.functional_test_item_7_*` (24F) +
+            // `cull_distance.functional_test_item_8_*_points` (8F).
+            std::size_t versionPos = result.source.find("#version");
+            if (versionPos != std::string::npos) {
+                std::size_t eol = result.source.find('\n', versionPos);
+                if (eol != std::string::npos) {
+                    const std::string_view versionLine(
+                        result.source.data() + versionPos,
+                        eol - versionPos);
+                    const int versionNumber = parseVersionNumber(versionLine);
+                    if (versionNumber > 0 && versionNumber < 450) {
+                        // Replace `#version <N>` (and any optional
+                        // profile token; the test sources use just
+                        // `#version 150`) with `#version 460 core`.
+                        const std::size_t lineLen = eol - versionPos;
+                        const std::string newLine = "#version 460 core";
+                        result.source.replace(versionPos, lineLen, newLine);
+                        // Adjust eol to the new line length so the
+                        // `compatDefines` insert below lands at the
+                        // right offset.
+                        eol = versionPos + newLine.size();
+                    }
+                }
+            }
             // Use #define rather than `const int` declarations — the shader
             // still has subsequent `#extension` directives (GL_ARB_compute_shader
             // etc.), and GLSL requires all #extensions to precede any regular
@@ -741,11 +780,11 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
             const std::string compatDefines =
                 "\n#define gl_MaxCullDistances 8\n"
                 "#define gl_MaxCombinedClipAndCullDistances 8\n";
-            std::size_t versionPos = result.source.find("#version");
-            if (versionPos != std::string::npos) {
-                std::size_t eol = result.source.find('\n', versionPos);
-                if (eol != std::string::npos) {
-                    result.source.insert(eol + 1, compatDefines);
+            std::size_t versionPos2 = result.source.find("#version");
+            if (versionPos2 != std::string::npos) {
+                std::size_t eol2 = result.source.find('\n', versionPos2);
+                if (eol2 != std::string::npos) {
+                    result.source.insert(eol2 + 1, compatDefines);
                 }
             } else {
                 result.source.insert(0, compatDefines);
