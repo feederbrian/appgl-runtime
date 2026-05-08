@@ -1597,6 +1597,105 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // vertex with a negative cull value on a non-culled channel
         // (Phase 2 confirmed via CTS test design at glcCullDistance
         // .cpp:2236-2246).
+        // Sprint 17 Day 9+ Bank-Group-H R13 sub-bank item_4 (dynamic-
+        // index cull writes): runs UNGATED by
+        // `disableCullDistanceClipRouting` because the issue is
+        // unconditional MSL invalidity. SPIRV-Cross's MSL backend
+        // flattens `gl_CullDistance` into per-index struct fields
+        // (`gl_CullDistance_K [[user(cullK)]]`) but emits
+        // `out.gl_CullDistance[expr]` (array access) when the VS code
+        // dynamically indexes the array — `gl_CullDistance` is no
+        // longer a struct member after flattening, so the access is
+        // invalid. The static-index post-processing below matches
+        // `out.gl_CullDistance_K = EXPR;` lines (and skips when Path B
+        // disables cull→clip routing); dynamic-index lines never match
+        // either pattern. Without this transform, CTS
+        // `cull_distance.functional_test_item_4`
+        // (use_dynamic_index_based_writes) writes were dropped on both
+        // Path B (CPU does its own cull, but flattened fields are also
+        // read by the FS for fetch_culldistances variants) and the
+        // legacy cull→clip routing.
+        //
+        // Route dynamic-index writes through a local
+        // `spvUnsafeArray<float, M>` then unroll a copy-back to the
+        // flattened struct fields just before `return out;`. The
+        // copy-back lines have static indices so the cull→clip pass
+        // below picks them up and emits HW clip-distance siblings
+        // automatically (when not disabled by Path B).
+        if (msl.find("vertex ") != std::string::npos
+            && msl.find("gl_CullDistance_0 [[user(cull0)]]") != std::string::npos) {
+            int cullCountForDyn = 0;
+            for (int k = 0; k < 8; ++k) {
+                char needle[64];
+                std::snprintf(needle, sizeof(needle),
+                              "gl_CullDistance_%d [[user(cull%d)]]", k, k);
+                if (msl.find(needle) != std::string::npos) {
+                    cullCountForDyn = k + 1;
+                } else {
+                    break;
+                }
+            }
+            // Detect any `out.gl_CullDistance[<expr>]` where the bracket
+            // contents are NOT a single decimal literal (digit run + `]`).
+            // Static-index emit is `out.gl_CullDistance_K = ...` (no
+            // `[`), so any `out.gl_CullDistance[` is dynamic. Only fire
+            // when at least one such line exists AND we have flattened
+            // fields to route to.
+            const std::string dynPrefix = "out.gl_CullDistance[";
+            const bool hasDynCullWrite =
+                cullCountForDyn > 0 &&
+                msl.find(dynPrefix) != std::string::npos;
+            if (hasDynCullWrite) {
+                // Locate `main0_out out = {};` (the function-entry decl
+                // emitted by SPIRV-Cross for vertex stages) and inject
+                // a synthetic local cull array right after.
+                const std::string outInitLine = "main0_out out = {};";
+                std::size_t outInitPos = msl.find(outInitLine);
+                if (outInitPos != std::string::npos) {
+                    std::size_t injectPos = outInitPos + outInitLine.size();
+                    std::string localDecl =
+                        "\n    spvUnsafeArray<float, " +
+                        std::to_string(cullCountForDyn) +
+                        "> _appgl_cullDist = {};";
+                    msl.insert(injectPos, localDecl);
+                    // Replace every `out.gl_CullDistance[` with
+                    // `_appgl_cullDist[`. The injection above moved the
+                    // remainder of the buffer, so the find-replace pass
+                    // operates on the post-injection string.
+                    std::size_t scan = 0;
+                    while (true) {
+                        std::size_t hit = msl.find(dynPrefix, scan);
+                        if (hit == std::string::npos) break;
+                        msl.replace(hit, dynPrefix.size(), "_appgl_cullDist[");
+                        scan = hit + std::string("_appgl_cullDist[").size();
+                    }
+                    // Insert the unrolled copy-back to flattened struct
+                    // fields just before `return out;`. The static-index
+                    // cull→clip pass below then picks up these lines and
+                    // emits HW `out.gl_ClipDistance[N+K]` siblings.
+                    const std::string returnStmt = "return out;";
+                    std::size_t retPos = msl.rfind(returnStmt);
+                    if (retPos != std::string::npos) {
+                        std::string copyBack;
+                        copyBack.reserve(cullCountForDyn * 64);
+                        for (int k = 0; k < cullCountForDyn; ++k) {
+                            copyBack += "    out.gl_CullDistance_";
+                            copyBack += std::to_string(k);
+                            copyBack += " = _appgl_cullDist[";
+                            copyBack += std::to_string(k);
+                            copyBack += "];\n";
+                        }
+                        msl.insert(retPos, copyBack);
+                    }
+                }
+            }
+        }
+        // Static-index cull→clip routing (Sprint 17 Day 7+ Path B
+        // Component A2 disable gate restored). The dynamic-index
+        // transform above unconditionally fixes the broken MSL; this
+        // block additionally synthesizes HW `[[clip_distance]]`
+        // siblings for static-index cull writes when the caller does
+        // NOT have a CPU pre-pass to handle GL §14.6.3 cull semantics.
         if (msl.find("vertex ") != std::string::npos
             && msl.find("gl_CullDistance_0 [[user(cull0)]]") != std::string::npos
             && !options.disableCullDistanceClipRouting) {
