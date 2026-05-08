@@ -6244,6 +6244,25 @@ struct GLContext::Impl {
             if (level == texture->levels.end() || !level->second.defined) {
                 return false;
             }
+            // Sprint 17 Day 9+/10+ Bank-Group-A-2 narrow-gate sister fix
+            // (regression-debt #6 viewport_array.scissor_clear via
+            // b56aa9c): mark this color-texture FBO attachment as
+            // viewport-rendered so subsequent glReadPixels /
+            // glGetTexImage Y-flips. Sister to Path B Y-flip widening
+            // (commit `9f17b5a`'s encodeTranslatedDrawAndMarkFbo
+            // wrapper) for draws — this covers clear-only paths (no
+            // draw). Gate on clipOrigin == GL_LOWER_LEFT preserves
+            // Bank-Group-A-1 + Bank-Group-B narrowing precedent.
+            // Pre-narrow `b56aa9c` (Sprint 17 Day 1 CKPT236) the
+            // binding-time set in `framebufferTexture` covered clear-
+            // only textures; post-narrow only routeViewportIndex
+            // draws set the flag, regressing CTS
+            // `viewport_array.scissor_clear` (uses glClear without
+            // glDraw; 16-layer 2D_ARRAY readback returned
+            // uninitialized -1 SInt sentinel).
+            if (state->clipOrigin() == GL_LOWER_LEFT) {
+                texture->wasViewportRenderedTo = true;
+            }
             // CKPT127 (Sprint 12 Phase 1 Day 1 — β4 root-cause fix): MS
             // textures cannot be cleared via the rgba8-shadow + replaceMetalTexture
             // path because (a) the CPU shadow only stores 1 sample's worth of data
