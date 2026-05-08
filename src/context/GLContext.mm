@@ -12483,6 +12483,22 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
         // Synthesise one here so the caller path stays defensive.
         object->instantiated = true;
     }
+    // Sprint 17 Day 9+ Bank-Group-E narrow-gate (regression-debt #3):
+    // record dimensions UNCONDITIONALLY for any valid level/width/
+    // height before format-specific dispatch. Pre-narrow `dcba5cd`
+    // the dimension-recording happened later in the BC-format arm
+    // only; non-BC formats (ETC2 / EAC / ASTC) hit the default arm
+    // and returned true WITHOUT setting desc, leaving subsequent
+    // glGetCompressedTextureSubImage validation comparing
+    // `xoffset+width > texW=0` and pushing GL_INVALID_VALUE — CTS
+    // `get_texture_sub_image.errors_test` uses GL_COMPRESSED_RGB8_ETC2
+    // and expected GL_INVALID_OPERATION on bufSize-too-small.
+    object->target = target;
+    object->desc.target = target;
+    object->desc.width = width;
+    object->desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
+    object->desc.depth = depth;
+    object->desc.internalFormat = internalformat;
     if (impl_->capabilities == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
