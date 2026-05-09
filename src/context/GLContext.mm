@@ -8196,6 +8196,7 @@ struct GLContext::Impl {
             case MTLPixelFormatRGB10A2Unorm:   srcBpp = 4; srcComponents = 4; srcType = SrcType::Packed; break;
             case MTLPixelFormatRGB10A2Uint:    srcBpp = 4; srcComponents = 4; srcType = SrcType::Packed; break;
             case MTLPixelFormatRG11B10Float:   srcBpp = 4; srcComponents = 3; srcType = SrcType::Packed; break;
+            case MTLPixelFormatRGB9E5Float:    srcBpp = 4; srcComponents = 3; srcType = SrcType::Packed; break;
             default:
                 return false; // Unsupported format — fall back to RGBA8
         }
@@ -8252,7 +8253,8 @@ struct GLContext::Impl {
                 case SrcType::SInt32:  { std::int32_t v; std::memcpy(&v, srcPixel + comp * 4, 4); return static_cast<double>(v); }
                 case SrcType::Packed: {
                     // All packed formats currently supported here occupy
-                    // 4 bytes (RGB10A2Unorm / RGB10A2Uint / RG11B10F).
+                    // 4 bytes (RGB10A2Unorm / RGB10A2Uint / RG11B10F /
+                    // RGB9E5).
                     // Branch on Metal pixel format to extract.
                     std::uint32_t word;
                     std::memcpy(&word, srcPixel, 4);
@@ -8297,6 +8299,14 @@ struct GLContext::Impl {
                         if (comp == 0) return decode11(word & 0x7FFu);
                         if (comp == 1) return decode11((word >> 11) & 0x7FFu);
                         if (comp == 2) return decode10((word >> 22) & 0x3FFu);
+                        return 0.0;
+                    }
+                    if (pf == MTLPixelFormatRGB9E5Float) {
+                        double r = 0.0, g = 0.0, b = 0.0;
+                        unpackUF_5_9_9_9_REV(word, r, g, b);
+                        if (comp == 0) return r;
+                        if (comp == 1) return g;
+                        if (comp == 2) return b;
                         return 0.0;
                     }
                     return 0.0;
@@ -8569,16 +8579,18 @@ struct GLContext::Impl {
                 // Source-color conversion semantics (GL 4.6 §18.2.3,
                 // Table 18.1): vals[] carries the source data in one
                 // of two representations depending on srcType:
-                //   - Normalized (Float32/Float16/UNorm*/SNorm*):
+                //   - Float/normalized (Float32/Float16/UNorm*/SNorm*
+                //     plus packed float/unorm formats):
                 //     vals[c] is a float in [-1,1] or [0,1].
-                //   - Integer (UInt*/SInt*): vals[c] is the raw signed
-                //     or unsigned integer value.
+                //   - Integer (UInt*/SInt* / RGB10A2Uint): vals[c] is
+                //     the raw signed or unsigned integer value.
                 // The destination type (uint/int/float) then selects
                 // whether we scale or cast directly.
                 const bool srcIsNormalized =
                     (srcType == SrcType::Float32 || srcType == SrcType::Float16 ||
                      srcType == SrcType::UNorm8 || srcType == SrcType::SNorm8 ||
-                     srcType == SrcType::UNorm16 || srcType == SrcType::SNorm16);
+                     srcType == SrcType::UNorm16 || srcType == SrcType::SNorm16 ||
+                     (srcType == SrcType::Packed && pf != MTLPixelFormatRGB10A2Uint));
                 for (std::size_t dc = 0; dc < dstComponents; ++dc) {
                     // BGR/BGRA formats swizzle component order at write time.
                     // Previously scalars wrote vals[dc] (always RGBA order)
