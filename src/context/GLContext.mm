@@ -7179,6 +7179,7 @@ struct GLContext::Impl {
     // format → GLfloat conversion, and Y-flip gated on clipOrigin.
     bool readDepthFromMetalTexture(id<MTLTexture> metalTex,
                                    NSUInteger mipLevel,
+                                   NSUInteger sourceSlice,
                                    GLint x, GLint y,
                                    GLsizei width, GLsizei height,
                                    void* pixels) const {
@@ -7214,10 +7215,21 @@ struct GLContext::Impl {
         //   Private, so the blit path is the common one here.)
         if (metalTex.storageMode != MTLStorageModePrivate) {
             MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
-            [metalTex getBytes:raw.data()
-                   bytesPerRow:bytesPerRow
-                    fromRegion:region
-                   mipmapLevel:mipLevel];
+            if (sourceSlice == 0 &&
+                metalTex.textureType != MTLTextureType2DArray &&
+                metalTex.textureType != MTLTextureType2DMultisampleArray) {
+                [metalTex getBytes:raw.data()
+                       bytesPerRow:bytesPerRow
+                        fromRegion:region
+                       mipmapLevel:mipLevel];
+            } else {
+                [metalTex getBytes:raw.data()
+                       bytesPerRow:bytesPerRow
+                     bytesPerImage:bytesPerRow * texHeight
+                        fromRegion:region
+                       mipmapLevel:mipLevel
+                             slice:sourceSlice];
+            }
         } else {
             id<MTLDevice> mtlDevice = device;
             id<MTLCommandQueue> mtlQueue = commandQueue;
@@ -7234,7 +7246,7 @@ struct GLContext::Impl {
             if (blit == nil) return false;
             MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
             [blit copyFromTexture:metalTex
-                      sourceSlice:0
+                      sourceSlice:sourceSlice
                       sourceLevel:mipLevel
                      sourceOrigin:region.origin
                        sourceSize:region.size
@@ -7333,7 +7345,7 @@ struct GLContext::Impl {
             if (renderbuffer->metalTexture != nullptr &&
                 renderbuffer->wasMetalDepthRendered) {
                 id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer->metalTexture;
-                if (readDepthFromMetalTexture(metalTex, /*mipLevel*/0,
+                if (readDepthFromMetalTexture(metalTex, /*mipLevel*/0, /*sourceSlice*/0,
                                               x, y, width, height, pixels)) {
                     return true;
                 }
@@ -7374,7 +7386,13 @@ struct GLContext::Impl {
             if (tex == nullptr || tex->metalTexture == nullptr) return false;
             id<MTLTexture> metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
             const NSUInteger mipLevel = static_cast<NSUInteger>(std::max<GLint>(attachment.level, 0));
-            return readDepthFromMetalTexture(metalTex, mipLevel,
+            const MTLTextureType texType = metalTex.textureType;
+            const NSUInteger sourceSlice =
+                (texType == MTLTextureType2DArray ||
+                 texType == MTLTextureType2DMultisampleArray)
+                    ? static_cast<NSUInteger>(std::max<GLint>(attachment.layer, 0))
+                    : 0;
+            return readDepthFromMetalTexture(metalTex, mipLevel, sourceSlice,
                                              x, y, width, height, pixels);
         }
         return false;
@@ -7428,6 +7446,12 @@ struct GLContext::Impl {
                 std::max<NSUInteger>(metalTex.width >> metalMipLevel, 1);
             const NSUInteger texH =
                 std::max<NSUInteger>(metalTex.height >> metalMipLevel, 1);
+            const MTLTextureType texType = metalTex.textureType;
+            const NSUInteger sourceSlice =
+                (texType == MTLTextureType2DArray ||
+                 texType == MTLTextureType2DMultisampleArray)
+                    ? static_cast<NSUInteger>(std::max<GLint>(attachment.layer, 0))
+                    : 0;
             const NSUInteger stencilBytesPerRow = texW;
             const NSUInteger stencilBytesPerImage = stencilBytesPerRow * texH;
             id<MTLBuffer> stencilBuf =
@@ -7437,7 +7461,7 @@ struct GLContext::Impl {
             id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
             id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
             MTLRegion region = MTLRegionMake2D(0, 0, texW, texH);
-            [blit copyFromTexture:metalTex sourceSlice:0 sourceLevel:metalMipLevel
+            [blit copyFromTexture:metalTex sourceSlice:sourceSlice sourceLevel:metalMipLevel
                      sourceOrigin:region.origin sourceSize:region.size
                          toBuffer:stencilBuf destinationOffset:0
             destinationBytesPerRow:stencilBytesPerRow
@@ -36191,6 +36215,17 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     NSUInteger mipLevel = static_cast<NSUInteger>(level);
     NSUInteger texWidth  = std::max<NSUInteger>(metalTex.width  >> mipLevel, 1);
     NSUInteger texHeight = std::max<NSUInteger>(metalTex.height >> mipLevel, 1);
+    const NSUInteger imageSliceCount =
+        (metalTex.textureType == MTLTextureType2DArray) ? metalTex.arrayLength : 1;
+    const std::size_t imageOutputBytes =
+        static_cast<std::size_t>(texWidth) *
+        static_cast<std::size_t>(texHeight) *
+        static_cast<std::size_t>(imageSliceCount) *
+        dstPixelBytes;
+    if (bufSize > 0 && static_cast<std::size_t>(bufSize) < imageOutputBytes) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
 
     // Sprint 15 Day 26 (CKPT199): resolve GL_PIXEL_PACK_BUFFER offset
     // → real shadow pointer EARLY, before the depth/stencil readback
@@ -36203,9 +36238,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     // Sister to readPixels resolvePackPBO call at line 8932-8942.
     if (packPBOBound) {
         const std::size_t earlyPackBytes =
-            static_cast<std::size_t>(texWidth) *
-            static_cast<std::size_t>(texHeight) *
-            std::max<std::size_t>(bytesPerPixel(format, type), 1);
+            std::max<std::size_t>(imageOutputBytes, 1);
         const std::size_t earlyTypeBytes =
             std::max<std::size_t>(bytesPerComponent(type), 1);
         auto [earlyPackDest, earlyPackOk] =
@@ -36236,13 +36269,25 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
         if (srcBpp > 0) {
             const NSUInteger bytesPerRow = texWidth * srcBpp;
             const NSUInteger bytesPerImage = bytesPerRow * texHeight;
-            std::vector<std::uint8_t> raw(bytesPerImage);
+            const NSUInteger numSlices = imageSliceCount;
+            std::vector<std::uint8_t> raw(bytesPerImage * numSlices);
             if (metalTex.storageMode != MTLStorageModePrivate) {
                 MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
-                [metalTex getBytes:raw.data()
-                       bytesPerRow:bytesPerRow
-                        fromRegion:region
-                       mipmapLevel:mipLevel];
+                if (numSlices == 1 && metalTex.textureType != MTLTextureType2DArray) {
+                    [metalTex getBytes:raw.data()
+                           bytesPerRow:bytesPerRow
+                            fromRegion:region
+                           mipmapLevel:mipLevel];
+                } else {
+                    for (NSUInteger slice = 0; slice < numSlices; ++slice) {
+                        [metalTex getBytes:raw.data() + slice * bytesPerImage
+                               bytesPerRow:bytesPerRow
+                             bytesPerImage:bytesPerImage
+                                fromRegion:region
+                               mipmapLevel:mipLevel
+                                     slice:slice];
+                    }
+                }
             } else {
                 id<MTLDevice> mtlDevice = impl_->device;
                 id<MTLCommandQueue> mtlQueue = impl_->commandQueue;
@@ -36250,7 +36295,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                     pushError(GL_INVALID_OPERATION);
                     return false;
                 }
-                id<MTLBuffer> staging = [mtlDevice newBufferWithLength:bytesPerImage
+                const NSUInteger totalBytes = bytesPerImage * numSlices;
+                id<MTLBuffer> staging = [mtlDevice newBufferWithLength:totalBytes
                                                               options:MTLResourceStorageModeShared];
                 if (staging == nil) {
                     pushError(GL_OUT_OF_MEMORY);
@@ -36259,22 +36305,25 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
                 id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
                 MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
-                [blit copyFromTexture:metalTex
-                          sourceSlice:0
-                          sourceLevel:mipLevel
-                         sourceOrigin:region.origin
-                           sourceSize:region.size
-                             toBuffer:staging
-                    destinationOffset:0
-               destinationBytesPerRow:bytesPerRow
-             destinationBytesPerImage:bytesPerImage];
+                for (NSUInteger slice = 0; slice < numSlices; ++slice) {
+                    [blit copyFromTexture:metalTex
+                              sourceSlice:slice
+                              sourceLevel:mipLevel
+                             sourceOrigin:region.origin
+                               sourceSize:region.size
+                                 toBuffer:staging
+                        destinationOffset:slice * bytesPerImage
+                   destinationBytesPerRow:bytesPerRow
+                 destinationBytesPerImage:bytesPerImage];
+                }
                 [blit endEncoding];
                 [cmd commit];
                 [cmd waitUntilCompleted];
-                std::memcpy(raw.data(), [staging contents], bytesPerImage);
+                std::memcpy(raw.data(), [staging contents], totalBytes);
             }
-            auto readDepthFloat = [&](NSUInteger sx, NSUInteger sy) -> float {
-                const std::uint8_t* p = raw.data() + (sy * texWidth + sx) * srcBpp;
+            auto readDepthFloat = [&](NSUInteger slice, NSUInteger sx, NSUInteger sy) -> float {
+                const std::uint8_t* p =
+                    raw.data() + slice * bytesPerImage + (sy * texWidth + sx) * srcBpp;
                 switch (pf) {
                     case MTLPixelFormatDepth16Unorm: {
                         std::uint16_t v; std::memcpy(&v, p, 2);
@@ -36306,70 +36355,74 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             // their writes went through the viewport-flipped path.
             // See `GLTextureObject::wasViewportRenderedTo` for rationale.
             const bool yFlipReadbackDS = obj->wasViewportRenderedTo;
-            for (NSUInteger row = 0; row < texHeight; ++row) {
-                const NSUInteger srcRow = yFlipReadbackDS
-                    ? (texHeight - 1 - row) : row;
-                for (NSUInteger col = 0; col < texWidth; ++col) {
-                    const std::size_t i = row * texWidth + col;
-                    const float d = clamp01(readDepthFloat(col, srcRow));
-                    switch (type) {
-                        case GL_UNSIGNED_BYTE: {
-                            const std::uint8_t v = static_cast<std::uint8_t>(d * 255.0f + 0.5f);
-                            std::memcpy(outBytes + i, &v, 1);
-                            break;
+            for (NSUInteger slice = 0; slice < numSlices; ++slice) {
+                for (NSUInteger row = 0; row < texHeight; ++row) {
+                    const NSUInteger srcRow = yFlipReadbackDS
+                        ? (texHeight - 1 - row) : row;
+                    for (NSUInteger col = 0; col < texWidth; ++col) {
+                        const std::size_t i =
+                            static_cast<std::size_t>(slice) * pixCount +
+                            static_cast<std::size_t>(row) * texWidth + col;
+                        const float d = clamp01(readDepthFloat(slice, col, srcRow));
+                        switch (type) {
+                            case GL_UNSIGNED_BYTE: {
+                                const std::uint8_t v = static_cast<std::uint8_t>(d * 255.0f + 0.5f);
+                                std::memcpy(outBytes + i, &v, 1);
+                                break;
+                            }
+                            case GL_BYTE: {
+                                const std::int8_t v = static_cast<std::int8_t>(d * 127.0f + 0.5f);
+                                std::memcpy(outBytes + i, &v, 1);
+                                break;
+                            }
+                            case GL_UNSIGNED_SHORT: {
+                                const std::uint16_t v = static_cast<std::uint16_t>(d * 65535.0f + 0.5f);
+                                std::memcpy(outBytes + i * 2, &v, 2);
+                                break;
+                            }
+                            case GL_SHORT: {
+                                const std::int16_t v = static_cast<std::int16_t>(d * 32767.0f + 0.5f);
+                                std::memcpy(outBytes + i * 2, &v, 2);
+                                break;
+                            }
+                            case GL_UNSIGNED_INT: {
+                                const std::uint32_t v = static_cast<std::uint32_t>(
+                                    static_cast<double>(d) * 4294967295.0 + 0.5);
+                                std::memcpy(outBytes + i * 4, &v, 4);
+                                break;
+                            }
+                            case GL_INT: {
+                                const std::int32_t v = static_cast<std::int32_t>(
+                                    static_cast<double>(d) * 2147483647.0 + 0.5);
+                                std::memcpy(outBytes + i * 4, &v, 4);
+                                break;
+                            }
+                            case GL_FLOAT: {
+                                std::memcpy(outBytes + i * 4, &d, 4);
+                                break;
+                            }
+                            case GL_HALF_FLOAT: {
+                                std::uint32_t f; std::memcpy(&f, &d, 4);
+                                const std::uint32_t sign = (f >> 16) & 0x8000;
+                                std::int32_t exp = static_cast<std::int32_t>((f >> 23) & 0xFF) - 127 + 15;
+                                std::uint32_t mant = f & 0x7FFFFF;
+                                std::uint16_t h;
+                                if (exp <= 0) h = static_cast<std::uint16_t>(sign);
+                                else if (exp >= 31) h = static_cast<std::uint16_t>(sign | 0x7C00);
+                                else h = static_cast<std::uint16_t>(
+                                    sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
+                                std::memcpy(outBytes + i * 2, &h, 2);
+                                break;
+                            }
+                            default:
+                                // Unknown / packed type — leave the slot
+                                // untouched and let the caller's type-
+                                // validity check raise the appropriate
+                                // error. (DEPTH_COMPONENT + 24_8 packed
+                                // types is filtered by isFormatType-
+                                // Compatible upstream.)
+                                break;
                         }
-                        case GL_BYTE: {
-                            const std::int8_t v = static_cast<std::int8_t>(d * 127.0f + 0.5f);
-                            std::memcpy(outBytes + i, &v, 1);
-                            break;
-                        }
-                        case GL_UNSIGNED_SHORT: {
-                            const std::uint16_t v = static_cast<std::uint16_t>(d * 65535.0f + 0.5f);
-                            std::memcpy(outBytes + i * 2, &v, 2);
-                            break;
-                        }
-                        case GL_SHORT: {
-                            const std::int16_t v = static_cast<std::int16_t>(d * 32767.0f + 0.5f);
-                            std::memcpy(outBytes + i * 2, &v, 2);
-                            break;
-                        }
-                        case GL_UNSIGNED_INT: {
-                            const std::uint32_t v = static_cast<std::uint32_t>(
-                                static_cast<double>(d) * 4294967295.0 + 0.5);
-                            std::memcpy(outBytes + i * 4, &v, 4);
-                            break;
-                        }
-                        case GL_INT: {
-                            const std::int32_t v = static_cast<std::int32_t>(
-                                static_cast<double>(d) * 2147483647.0 + 0.5);
-                            std::memcpy(outBytes + i * 4, &v, 4);
-                            break;
-                        }
-                        case GL_FLOAT: {
-                            std::memcpy(outBytes + i * 4, &d, 4);
-                            break;
-                        }
-                        case GL_HALF_FLOAT: {
-                            std::uint32_t f; std::memcpy(&f, &d, 4);
-                            const std::uint32_t sign = (f >> 16) & 0x8000;
-                            std::int32_t exp = static_cast<std::int32_t>((f >> 23) & 0xFF) - 127 + 15;
-                            std::uint32_t mant = f & 0x7FFFFF;
-                            std::uint16_t h;
-                            if (exp <= 0) h = static_cast<std::uint16_t>(sign);
-                            else if (exp >= 31) h = static_cast<std::uint16_t>(sign | 0x7C00);
-                            else h = static_cast<std::uint16_t>(
-                                sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
-                            std::memcpy(outBytes + i * 2, &h, 2);
-                            break;
-                        }
-                        default:
-                            // Unknown / packed type — leave the slot
-                            // untouched and let the caller's type-
-                            // validity check raise the appropriate
-                            // error. (DEPTH_COMPONENT + 24_8 packed
-                            // types is filtered by isFormatType-
-                            // Compatible upstream.)
-                            break;
                     }
                 }
             }
@@ -36414,9 +36467,12 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             const NSUInteger depthBytesPerImage = depthBytesPerRow * texHeight;
             const NSUInteger stencilBytesPerRow = texWidth * 1;
             const NSUInteger stencilBytesPerImage = stencilBytesPerRow * texHeight;
-            id<MTLBuffer> depthBuf = [mtlDevice newBufferWithLength:depthBytesPerImage
+            const NSUInteger numSlices = imageSliceCount;
+            const NSUInteger depthTotalBytes = depthBytesPerImage * numSlices;
+            const NSUInteger stencilTotalBytes = stencilBytesPerImage * numSlices;
+            id<MTLBuffer> depthBuf = [mtlDevice newBufferWithLength:depthTotalBytes
                                                             options:MTLResourceStorageModeShared];
-            id<MTLBuffer> stencilBuf = [mtlDevice newBufferWithLength:stencilBytesPerImage
+            id<MTLBuffer> stencilBuf = [mtlDevice newBufferWithLength:stencilTotalBytes
                                                               options:MTLResourceStorageModeShared];
             if (depthBuf == nil || stencilBuf == nil) {
                 pushError(GL_OUT_OF_MEMORY);
@@ -36425,18 +36481,20 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             id<MTLCommandBuffer> cmd = [mtlQueue commandBuffer];
             id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
             MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
-            [blit copyFromTexture:metalTex sourceSlice:0 sourceLevel:mipLevel
-                     sourceOrigin:region.origin sourceSize:region.size
-                         toBuffer:depthBuf destinationOffset:0
-            destinationBytesPerRow:depthBytesPerRow
-          destinationBytesPerImage:depthBytesPerImage
-                          options:MTLBlitOptionDepthFromDepthStencil];
-            [blit copyFromTexture:metalTex sourceSlice:0 sourceLevel:mipLevel
-                     sourceOrigin:region.origin sourceSize:region.size
-                         toBuffer:stencilBuf destinationOffset:0
-            destinationBytesPerRow:stencilBytesPerRow
-          destinationBytesPerImage:stencilBytesPerImage
-                          options:MTLBlitOptionStencilFromDepthStencil];
+            for (NSUInteger slice = 0; slice < numSlices; ++slice) {
+                [blit copyFromTexture:metalTex sourceSlice:slice sourceLevel:mipLevel
+                         sourceOrigin:region.origin sourceSize:region.size
+                             toBuffer:depthBuf destinationOffset:slice * depthBytesPerImage
+                destinationBytesPerRow:depthBytesPerRow
+              destinationBytesPerImage:depthBytesPerImage
+                              options:MTLBlitOptionDepthFromDepthStencil];
+                [blit copyFromTexture:metalTex sourceSlice:slice sourceLevel:mipLevel
+                         sourceOrigin:region.origin sourceSize:region.size
+                             toBuffer:stencilBuf destinationOffset:slice * stencilBytesPerImage
+                destinationBytesPerRow:stencilBytesPerRow
+              destinationBytesPerImage:stencilBytesPerImage
+                              options:MTLBlitOptionStencilFromDepthStencil];
+            }
             [blit endEncoding];
             [cmd commit];
             [cmd waitUntilCompleted];
@@ -36462,6 +36520,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             auto* outBytes = static_cast<std::uint8_t*>(pixels);
             const std::size_t pixCount = static_cast<std::size_t>(texWidth) *
                                          static_cast<std::size_t>(texHeight);
+            const std::size_t totalPixCount =
+                pixCount * static_cast<std::size_t>(numSlices);
             auto clamp01 = [](float v) {
                 return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             };
@@ -36485,7 +36545,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 //   float depth (4 bytes), uint32 stencil-in-low-8 (4 bytes).
                 // Output layout matches GLSL's struct-of-arrays semantic;
                 // we just emit raw 8-byte slot per texel.
-                for (std::size_t i = 0; i < pixCount; ++i) {
+                for (std::size_t i = 0; i < totalPixCount; ++i) {
                     const float d = readDepthFloat(i);
                     const std::uint32_t stencilSlot =
                         static_cast<std::uint32_t>(stencilBytes[i]);
@@ -36495,7 +36555,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             } else {
                 // GL_UNSIGNED_INT_24_8 (4 bytes per texel, depth in high
                 // 24 bits, stencil in low 8 bits per Table 8.5).
-                for (std::size_t i = 0; i < pixCount; ++i) {
+                for (std::size_t i = 0; i < totalPixCount; ++i) {
                     const float d = clamp01(readDepthFloat(i));
                     const std::uint32_t depth24 =
                         static_cast<std::uint32_t>(d * 16777215.0f + 0.5f) & 0x00FFFFFF;
