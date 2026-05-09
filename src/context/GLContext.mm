@@ -37187,6 +37187,9 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     // BGR/BGRA swizzle for destination format. Mirrors readFBOColorNative.
     const bool formatIsBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
     const bool formatIsBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
+    const bool formatIsGreen = (format == GL_GREEN || format == GL_GREEN_INTEGER);
+    const bool formatIsBlue = (format == GL_BLUE || format == GL_BLUE_INTEGER);
+    const bool formatIsAlpha = (format == GL_ALPHA);
     auto pickComponent = [&](const double* vals4, int glCompIdx) -> double {
         if (formatIsBGR) {
             static const int map[3] = {2, 1, 0};
@@ -37195,6 +37198,9 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             static const int map[4] = {2, 1, 0, 3};
             return glCompIdx < 4 ? vals4[map[glCompIdx]] : 1.0;
         }
+        if (formatIsGreen) return glCompIdx == 0 ? vals4[1] : 0.0;
+        if (formatIsBlue) return glCompIdx == 0 ? vals4[2] : 0.0;
+        if (formatIsAlpha) return glCompIdx == 0 ? vals4[3] : 0.0;
         return vals4[glCompIdx];
     };
 
@@ -37265,6 +37271,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 // CTS copy_image & packed_pixels paths need packed-type readback.
                 // Pack the RGBA doubles into the requested packed format.
                 std::uint8_t* dp = dstPixelBase;
+                auto d = [&](int i) { return pickComponent(vals, i); };
                 auto packUN = [](double v, unsigned bits) -> std::uint32_t {
                     if (v < 0.0) v = 0.0;
                     if (v > 1.0) v = 1.0;
@@ -37273,114 +37280,114 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 };
                 switch (type) {
                     case GL_UNSIGNED_BYTE_3_3_2: {
-                        auto r = packUN(vals[0], 3);
-                        auto g = packUN(vals[1], 3);
-                        auto b = packUN(vals[2], 2);
+                        auto r = packUN(d(0), 3);
+                        auto g = packUN(d(1), 3);
+                        auto b = packUN(d(2), 2);
                         dp[0] = static_cast<std::uint8_t>((r << 5) | (g << 2) | b);
                         break;
                     }
                     case GL_UNSIGNED_BYTE_2_3_3_REV: {
-                        auto r = packUN(vals[0], 3);
-                        auto g = packUN(vals[1], 3);
-                        auto b = packUN(vals[2], 2);
+                        auto r = packUN(d(0), 3);
+                        auto g = packUN(d(1), 3);
+                        auto b = packUN(d(2), 2);
                         dp[0] = static_cast<std::uint8_t>((b << 6) | (g << 3) | r);
                         break;
                     }
                     case GL_UNSIGNED_SHORT_5_6_5: {
-                        auto r = packUN(vals[0], 5);
-                        auto g = packUN(vals[1], 6);
-                        auto b = packUN(vals[2], 5);
+                        auto r = packUN(d(0), 5);
+                        auto g = packUN(d(1), 6);
+                        auto b = packUN(d(2), 5);
                         std::uint16_t v16 = static_cast<std::uint16_t>((r << 11) | (g << 5) | b);
                         std::memcpy(dp, &v16, 2);
                         break;
                     }
                     case GL_UNSIGNED_SHORT_5_6_5_REV: {
-                        auto r = packUN(vals[0], 5);
-                        auto g = packUN(vals[1], 6);
-                        auto b = packUN(vals[2], 5);
+                        auto r = packUN(d(0), 5);
+                        auto g = packUN(d(1), 6);
+                        auto b = packUN(d(2), 5);
                         std::uint16_t v16 = static_cast<std::uint16_t>((b << 11) | (g << 5) | r);
                         std::memcpy(dp, &v16, 2);
                         break;
                     }
                     case GL_UNSIGNED_SHORT_4_4_4_4: {
-                        auto r = packUN(vals[0], 4);
-                        auto g = packUN(vals[1], 4);
-                        auto b = packUN(vals[2], 4);
-                        auto a = packUN(vals[3], 4);
+                        auto r = packUN(d(0), 4);
+                        auto g = packUN(d(1), 4);
+                        auto b = packUN(d(2), 4);
+                        auto a = packUN(d(3), 4);
                         std::uint16_t v16 = static_cast<std::uint16_t>((r << 12) | (g << 8) | (b << 4) | a);
                         std::memcpy(dp, &v16, 2);
                         break;
                     }
                     case GL_UNSIGNED_SHORT_4_4_4_4_REV: {
-                        auto r = packUN(vals[0], 4);
-                        auto g = packUN(vals[1], 4);
-                        auto b = packUN(vals[2], 4);
-                        auto a = packUN(vals[3], 4);
+                        auto r = packUN(d(0), 4);
+                        auto g = packUN(d(1), 4);
+                        auto b = packUN(d(2), 4);
+                        auto a = packUN(d(3), 4);
                         std::uint16_t v16 = static_cast<std::uint16_t>((a << 12) | (b << 8) | (g << 4) | r);
                         std::memcpy(dp, &v16, 2);
                         break;
                     }
                     case GL_UNSIGNED_SHORT_5_5_5_1: {
-                        auto r = packUN(vals[0], 5);
-                        auto g = packUN(vals[1], 5);
-                        auto b = packUN(vals[2], 5);
-                        auto a = packUN(vals[3], 1);
+                        auto r = packUN(d(0), 5);
+                        auto g = packUN(d(1), 5);
+                        auto b = packUN(d(2), 5);
+                        auto a = packUN(d(3), 1);
                         std::uint16_t v16 = static_cast<std::uint16_t>((r << 11) | (g << 6) | (b << 1) | a);
                         std::memcpy(dp, &v16, 2);
                         break;
                     }
                     case GL_UNSIGNED_SHORT_1_5_5_5_REV: {
-                        auto r = packUN(vals[0], 5);
-                        auto g = packUN(vals[1], 5);
-                        auto b = packUN(vals[2], 5);
-                        auto a = packUN(vals[3], 1);
+                        auto r = packUN(d(0), 5);
+                        auto g = packUN(d(1), 5);
+                        auto b = packUN(d(2), 5);
+                        auto a = packUN(d(3), 1);
                         std::uint16_t v16 = static_cast<std::uint16_t>((a << 15) | (b << 10) | (g << 5) | r);
                         std::memcpy(dp, &v16, 2);
                         break;
                     }
                     case GL_UNSIGNED_INT_8_8_8_8: {
-                        std::uint32_t r = packUN(vals[0], 8);
-                        std::uint32_t g = packUN(vals[1], 8);
-                        std::uint32_t b = packUN(vals[2], 8);
-                        std::uint32_t a = packUN(vals[3], 8);
+                        std::uint32_t r = packUN(d(0), 8);
+                        std::uint32_t g = packUN(d(1), 8);
+                        std::uint32_t b = packUN(d(2), 8);
+                        std::uint32_t a = packUN(d(3), 8);
                         std::uint32_t v32 = (r << 24) | (g << 16) | (b << 8) | a;
                         std::memcpy(dp, &v32, 4);
                         break;
                     }
                     case GL_UNSIGNED_INT_8_8_8_8_REV: {
-                        std::uint32_t r = packUN(vals[0], 8);
-                        std::uint32_t g = packUN(vals[1], 8);
-                        std::uint32_t b = packUN(vals[2], 8);
-                        std::uint32_t a = packUN(vals[3], 8);
+                        std::uint32_t r = packUN(d(0), 8);
+                        std::uint32_t g = packUN(d(1), 8);
+                        std::uint32_t b = packUN(d(2), 8);
+                        std::uint32_t a = packUN(d(3), 8);
                         std::uint32_t v32 = (a << 24) | (b << 16) | (g << 8) | r;
                         std::memcpy(dp, &v32, 4);
                         break;
                     }
                     case GL_UNSIGNED_INT_10_10_10_2: {
-                        std::uint32_t r = packUN(vals[0], 10);
-                        std::uint32_t g = packUN(vals[1], 10);
-                        std::uint32_t b = packUN(vals[2], 10);
-                        std::uint32_t a = packUN(vals[3], 2);
+                        std::uint32_t r = packUN(d(0), 10);
+                        std::uint32_t g = packUN(d(1), 10);
+                        std::uint32_t b = packUN(d(2), 10);
+                        std::uint32_t a = packUN(d(3), 2);
                         std::uint32_t v32 = (r << 22) | (g << 12) | (b << 2) | a;
                         std::memcpy(dp, &v32, 4);
                         break;
                     }
                     case GL_UNSIGNED_INT_2_10_10_10_REV: {
-                        std::uint32_t r = packUN(vals[0], 10);
-                        std::uint32_t g = packUN(vals[1], 10);
-                        std::uint32_t b = packUN(vals[2], 10);
-                        std::uint32_t a = packUN(vals[3], 2);
+                        std::uint32_t r = packUN(d(0), 10);
+                        std::uint32_t g = packUN(d(1), 10);
+                        std::uint32_t b = packUN(d(2), 10);
+                        std::uint32_t a = packUN(d(3), 2);
                         std::uint32_t v32 = (a << 30) | (b << 20) | (g << 10) | r;
                         std::memcpy(dp, &v32, 4);
                         break;
                     }
                     case GL_UNSIGNED_INT_10F_11F_11F_REV: {
-                        std::uint32_t v32 = packUF_10F11F11F_REV(vals[0], vals[1], vals[2]);
+                        std::uint32_t v32 = packUF_10F11F11F_REV(d(0), d(1), d(2));
                         std::memcpy(dp, &v32, 4);
                         break;
                     }
                     case GL_UNSIGNED_INT_5_9_9_9_REV: {
-                        std::uint32_t v32 = packUF_5_9_9_9_REV(vals[0], vals[1], vals[2]);
+                        std::uint32_t v32 = packUF_5_9_9_9_REV(d(0), d(1), d(2));
                         std::memcpy(dp, &v32, 4);
                         break;
                     }
