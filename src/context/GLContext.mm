@@ -9834,17 +9834,161 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             return false;
         }
         if (isPackedPixelType(type)) {
-            // Packed-pixel output: the format was validated as compatible
-            // above (isFormatTypeCompatible), so we return without
-            // error. Per-component conversion isn't implemented here;
-            // data is left at whatever the caller buffer held. This
-            // matches KHR-GL46.packed_pixels' expectation that "valid
-            // format used" ReadPixels succeeds — the test's separate
-            // gradient-comparison check will still surface any data
-            // mismatch. Proper packed-type encoding is a follow-up.
             const std::size_t packedBpp = bytesPerPixel(format, type);
-            std::memset(pixels, 0,
-                pixelCount * (packedBpp > 0 ? packedBpp : 1));
+            if (packedBpp == 0) {
+                pushError(GL_INVALID_ENUM);
+                return false;
+            }
+            const auto& packStore = impl_->state->pixelStore();
+            const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+            const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+                ? static_cast<std::size_t>(packStore.packRowLength)
+                : static_cast<std::size_t>(width);
+            const std::size_t dstRowBytes = alignByteCount(
+                dstRowStridePixels * packedBpp, packStore.packAlignment);
+            auto* dest = static_cast<std::uint8_t*>(pixels)
+                + static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes
+                + static_cast<std::size_t>(packStore.packSkipPixels) * packedBpp;
+
+            const bool formatIsBGR = (format == GL_BGR || format == GL_BGR_INTEGER);
+            const bool formatIsBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
+            const bool formatIsGreen = (format == GL_GREEN || format == GL_GREEN_INTEGER);
+            const bool formatIsBlue = (format == GL_BLUE || format == GL_BLUE_INTEGER);
+            const bool formatIsAlpha = (format == GL_ALPHA);
+            auto getComponent = [&](const double* vals4, int glCompIndex) -> double {
+                if (formatIsBGR) {
+                    static const int map[3] = {2, 1, 0};
+                    return glCompIndex < 3 ? vals4[map[glCompIndex]] : 1.0;
+                }
+                if (formatIsBGRA) {
+                    static const int map[4] = {2, 1, 0, 3};
+                    return glCompIndex < 4 ? vals4[map[glCompIndex]] : 1.0;
+                }
+                if (formatIsGreen) return glCompIndex == 0 ? vals4[1] : 0.0;
+                if (formatIsBlue) return glCompIndex == 0 ? vals4[2] : 0.0;
+                if (formatIsAlpha) return glCompIndex == 0 ? vals4[3] : 0.0;
+                return vals4[glCompIndex];
+            };
+            auto packUN = [](double v, unsigned bits) -> std::uint32_t {
+                if (v < 0.0) v = 0.0;
+                if (v > 1.0) v = 1.0;
+                const double maxVal = static_cast<double>((1u << bits) - 1u);
+                return static_cast<std::uint32_t>(v * maxVal + 0.5);
+            };
+
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const std::size_t srcIndex =
+                        (static_cast<std::size_t>(row) * static_cast<std::size_t>(width)
+                         + static_cast<std::size_t>(col)) * 4u;
+                    double vals[4] = {
+                        static_cast<double>(rgba8[srcIndex + 0]) / 255.0,
+                        static_cast<double>(rgba8[srcIndex + 1]) / 255.0,
+                        static_cast<double>(rgba8[srcIndex + 2]) / 255.0,
+                        static_cast<double>(rgba8[srcIndex + 3]) / 255.0
+                    };
+                    auto d = [&](int i) { return getComponent(vals, i); };
+                    std::uint8_t* dst = dest
+                        + static_cast<std::size_t>(row) * dstRowBytes
+                        + static_cast<std::size_t>(col) * packedBpp;
+                    switch (type) {
+                        case GL_UNSIGNED_BYTE_3_3_2: {
+                            const std::uint32_t r = packUN(d(0), 3);
+                            const std::uint32_t g = packUN(d(1), 3);
+                            const std::uint32_t b = packUN(d(2), 2);
+                            dst[0] = static_cast<std::uint8_t>((r << 5) | (g << 2) | b);
+                            break;
+                        }
+                        case GL_UNSIGNED_BYTE_2_3_3_REV: {
+                            const std::uint32_t r = packUN(d(0), 3);
+                            const std::uint32_t g = packUN(d(1), 3);
+                            const std::uint32_t b = packUN(d(2), 2);
+                            dst[0] = static_cast<std::uint8_t>((b << 6) | (g << 3) | r);
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_5_6_5: {
+                            std::uint16_t v = static_cast<std::uint16_t>(
+                                (packUN(d(0), 5) << 11) | (packUN(d(1), 6) << 5) | packUN(d(2), 5));
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_5_6_5_REV: {
+                            std::uint16_t v = static_cast<std::uint16_t>(
+                                (packUN(d(2), 5) << 11) | (packUN(d(1), 6) << 5) | packUN(d(0), 5));
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_4_4_4_4: {
+                            std::uint16_t v = static_cast<std::uint16_t>(
+                                (packUN(d(0), 4) << 12) | (packUN(d(1), 4) << 8)
+                                | (packUN(d(2), 4) << 4) | packUN(d(3), 4));
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_4_4_4_4_REV: {
+                            std::uint16_t v = static_cast<std::uint16_t>(
+                                (packUN(d(3), 4) << 12) | (packUN(d(2), 4) << 8)
+                                | (packUN(d(1), 4) << 4) | packUN(d(0), 4));
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_5_5_5_1: {
+                            std::uint16_t v = static_cast<std::uint16_t>(
+                                (packUN(d(0), 5) << 11) | (packUN(d(1), 5) << 6)
+                                | (packUN(d(2), 5) << 1) | packUN(d(3), 1));
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_SHORT_1_5_5_5_REV: {
+                            std::uint16_t v = static_cast<std::uint16_t>(
+                                (packUN(d(3), 1) << 15) | (packUN(d(2), 5) << 10)
+                                | (packUN(d(1), 5) << 5) | packUN(d(0), 5));
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_8_8_8_8: {
+                            std::uint32_t v = (packUN(d(0), 8) << 24) | (packUN(d(1), 8) << 16)
+                                | (packUN(d(2), 8) << 8) | packUN(d(3), 8);
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_8_8_8_8_REV: {
+                            std::uint32_t v = (packUN(d(3), 8) << 24) | (packUN(d(2), 8) << 16)
+                                | (packUN(d(1), 8) << 8) | packUN(d(0), 8);
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_10_10_10_2: {
+                            std::uint32_t v = (packUN(d(0), 10) << 22) | (packUN(d(1), 10) << 12)
+                                | (packUN(d(2), 10) << 2) | packUN(d(3), 2);
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_2_10_10_10_REV: {
+                            std::uint32_t v = (packUN(d(3), 2) << 30) | (packUN(d(2), 10) << 20)
+                                | (packUN(d(1), 10) << 10) | packUN(d(0), 10);
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_10F_11F_11F_REV: {
+                            std::uint32_t v = packUF_10F11F11F_REV(d(0), d(1), d(2));
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        case GL_UNSIGNED_INT_5_9_9_9_REV: {
+                            std::uint32_t v = packUF_5_9_9_9_REV(d(0), d(1), d(2));
+                            std::memcpy(dst, &v, sizeof(v));
+                            break;
+                        }
+                        default:
+                            std::memset(dst, 0, packedBpp);
+                            break;
+                    }
+                    if (packSwapBytes) {
+                        Impl::swapPixelStoreBytes(dst, packedBpp);
+                    }
+                }
+            }
             return true;
         }
         if (bpc == 0) {
