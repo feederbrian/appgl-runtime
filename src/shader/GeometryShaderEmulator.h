@@ -151,6 +151,10 @@ struct EmulatedDraw {
     // `flat out int geom_out_out0;` — that fail Metal pipeline-state
     // validation if the synthesised VS emits `float` on them.
     std::vector<std::uint8_t> varyingBaseType;
+    // Scalar byte size (per-varying). Most varyings are 4-byte float/int
+    // lanes; double-precision TF captures need 8-byte writes even though
+    // the CPU interpreter stores their arithmetic value in float lanes.
+    std::vector<std::uint8_t> varyingScalarByteSize;
     // gl_ClipDistance / gl_CullDistance array sizes captured on the
     // last EmitVertex. Per GL 4.6 §7.1 these are per-vertex float
     // arrays with implementation-defined max length (we advertise 8).
@@ -329,6 +333,7 @@ struct VsOutputVaryingInfo {
     std::uint32_t width = 0;     // flat scalar count
     std::uint32_t location = 0;
     std::uint8_t baseType = 0;   // 0=float, 1=int, 2=uint
+    std::uint8_t scalarByteSize = 4;
 };
 std::vector<VsOutputVaryingInfo> discoverVsOutputVaryings(
     const std::uint32_t* spirv, std::size_t wordCount);

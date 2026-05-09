@@ -4594,12 +4594,37 @@ std::uint32_t vertsPerInputPrim(GLenum topo) {
 // input layout — the synthesised pass-through VS will emit
 // `[[user(locn<N>)]]` in the same order, giving the FS translator a
 // consistent varying table.
+std::uint8_t scalarByteSizeForType(const SpirvModule& mod, std::uint32_t typeId) {
+    auto it = mod.types.find(typeId);
+    if (it == mod.types.end()) return 4;
+    const TypeInfo& t = it->second;
+    switch (t.kind) {
+        case TypeInfo::Kind::Pointer:
+            return scalarByteSizeForType(mod, t.pointeeType);
+        case TypeInfo::Kind::Vec2:
+        case TypeInfo::Kind::Vec3:
+        case TypeInfo::Kind::Vec4:
+        case TypeInfo::Kind::Matrix:
+        case TypeInfo::Kind::Array:
+        case TypeInfo::Kind::RuntimeArray:
+            return scalarByteSizeForType(mod, t.componentType);
+        case TypeInfo::Kind::Int:
+        case TypeInfo::Kind::UInt:
+        case TypeInfo::Kind::Float:
+            return static_cast<std::uint8_t>(
+                std::clamp<std::uint32_t>(t.elementScalarWidth, 4, 8));
+        default:
+            return 4;
+    }
+}
+
 struct OutputVaryingDesc {
     std::string name;
     std::uint32_t width = 0;     // flat scalar count (always in scalar units)
     std::uint32_t location = 0;
     std::uint8_t interp = 0;     // 0=smooth, 1=flat, 2=noperspective, 3=centroid
     std::uint8_t baseType = 0;   // 0=float, 1=int, 2=uint
+    std::uint8_t scalarByteSize = 4;
     // Sprint 8 #9-C (CKPT96) — GLSL `layout(stream=N) out` →
     // SPIR-V DecorationStream. Default 0 (single-stream behaviour).
     // writeGsXfbAndCheckDiscard uses this to route per-buffer per-
@@ -4636,6 +4661,7 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
         auto tIt = mod.types.find(info.typeId);
         if (tIt != mod.types.end()) {
             d.width = mod.scalarWidth(tIt->second.pointeeType);
+            d.scalarByteSize = scalarByteSizeForType(mod, tIt->second.pointeeType);
         }
         if (d.width == 0) continue;   // empty or unresolved — skip
         // If the type pointee is the gl_PerVertex output block
@@ -4677,6 +4703,7 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
                     }
                     if (!mname.empty()) d.name = mname;
                     d.width = mod.scalarWidth(st.memberTypes[0]);
+                    d.scalarByteSize = scalarByteSizeForType(mod, st.memberTypes[0]);
                 } else {
                     // Multi-member: emit one descriptor per member.
                     // Locations come from OpMemberDecorate Location
@@ -4703,6 +4730,7 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
                         md.name = mname.empty()
                             ? (info.name + "." + std::to_string(m)) : mname;
                         md.width = mod.scalarWidth(st.memberTypes[m]);
+                        md.scalarByteSize = scalarByteSizeForType(mod, st.memberTypes[m]);
                         if (md.width == 0) continue;
                         // Base type from the member's leaf scalar.
                         {
@@ -5023,6 +5051,196 @@ void augmentUniformMapWithUBOBlocks(
     }
 }
 
+std::size_t vertexAttribComponentByteSize(GLenum type) {
+    switch (type) {
+        case GL_BYTE:
+        case GL_UNSIGNED_BYTE:
+            return 1;
+        case GL_SHORT:
+        case GL_UNSIGNED_SHORT:
+        case GL_HALF_FLOAT:
+            return 2;
+        case GL_INT:
+        case GL_UNSIGNED_INT:
+        case GL_FLOAT:
+        case GL_FIXED:
+        case GL_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV:
+            return 4;
+        case GL_DOUBLE:
+            return 8;
+        default:
+            return 0;
+    }
+}
+
+bool vertexAttribPackedType(GLenum type) {
+    return type == GL_INT_2_10_10_10_REV ||
+           type == GL_UNSIGNED_INT_2_10_10_10_REV ||
+           type == GL_UNSIGNED_INT_10F_11F_11F_REV;
+}
+
+std::size_t vertexAttribByteSize(const GLVertexAttributeState& attr) {
+    if (vertexAttribPackedType(attr.type)) {
+        return 4;
+    }
+    const std::size_t componentBytes = vertexAttribComponentByteSize(attr.type);
+    if (componentBytes == 0) return 0;
+    const int componentCount = (attr.size == static_cast<GLint>(GL_BGRA))
+        ? 4 : std::clamp(attr.size, 1, 4);
+    return componentBytes * static_cast<std::size_t>(componentCount);
+}
+
+float halfBitsToFloat(std::uint16_t h) {
+    const std::uint32_t sign = (static_cast<std::uint32_t>(h & 0x8000u)) << 16;
+    int exp = static_cast<int>((h >> 10) & 0x1Fu);
+    std::uint32_t mant = h & 0x03FFu;
+    std::uint32_t bits = 0;
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;
+        } else {
+            exp = 1;
+            while ((mant & 0x0400u) == 0) {
+                mant <<= 1;
+                --exp;
+            }
+            mant &= 0x03FFu;
+            bits = sign |
+                   (static_cast<std::uint32_t>(exp + (127 - 15)) << 23) |
+                   (mant << 13);
+        }
+    } else if (exp == 31) {
+        bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+        bits = sign |
+               (static_cast<std::uint32_t>(exp + (127 - 15)) << 23) |
+               (mant << 13);
+    }
+    float f = 0.0f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+std::int32_t readSignedVertexComponent(const std::uint8_t* src, GLenum type, int component) {
+    switch (type) {
+        case GL_BYTE: {
+            std::int8_t v = 0;
+            std::memcpy(&v, src + component, sizeof(v));
+            return static_cast<std::int32_t>(v);
+        }
+        case GL_SHORT: {
+            std::int16_t v = 0;
+            std::memcpy(&v, src + component * 2, sizeof(v));
+            return static_cast<std::int32_t>(v);
+        }
+        case GL_INT: {
+            std::int32_t v = 0;
+            std::memcpy(&v, src + component * 4, sizeof(v));
+            return v;
+        }
+        default:
+            return 0;
+    }
+}
+
+std::uint32_t readUnsignedVertexComponent(const std::uint8_t* src, GLenum type, int component) {
+    switch (type) {
+        case GL_UNSIGNED_BYTE: {
+            std::uint8_t v = 0;
+            std::memcpy(&v, src + component, sizeof(v));
+            return static_cast<std::uint32_t>(v);
+        }
+        case GL_UNSIGNED_SHORT: {
+            std::uint16_t v = 0;
+            std::memcpy(&v, src + component * 2, sizeof(v));
+            return static_cast<std::uint32_t>(v);
+        }
+        case GL_UNSIGNED_INT: {
+            std::uint32_t v = 0;
+            std::memcpy(&v, src + component * 4, sizeof(v));
+            return v;
+        }
+        default:
+            return 0;
+    }
+}
+
+float normalizeSignedVertexComponent(std::int32_t value, GLenum type) {
+    double maxPositive = 1.0;
+    switch (type) {
+        case GL_BYTE:  maxPositive = 127.0; break;
+        case GL_SHORT: maxPositive = 32767.0; break;
+        case GL_INT:   maxPositive = 2147483647.0; break;
+        default:       return static_cast<float>(value);
+    }
+    return static_cast<float>(std::max(-1.0, static_cast<double>(value) / maxPositive));
+}
+
+float normalizeUnsignedVertexComponent(std::uint32_t value, GLenum type) {
+    double maxValue = 1.0;
+    switch (type) {
+        case GL_UNSIGNED_BYTE:  maxValue = 255.0; break;
+        case GL_UNSIGNED_SHORT: maxValue = 65535.0; break;
+        case GL_UNSIGNED_INT:   maxValue = 4294967295.0; break;
+        default:                return static_cast<float>(value);
+    }
+    return static_cast<float>(static_cast<double>(value) / maxValue);
+}
+
+bool vertexAttribSignedIntegerType(GLenum type) {
+    return type == GL_BYTE || type == GL_SHORT || type == GL_INT;
+}
+
+bool vertexAttribUnsignedIntegerType(GLenum type) {
+    return type == GL_UNSIGNED_BYTE ||
+           type == GL_UNSIGNED_SHORT ||
+           type == GL_UNSIGNED_INT;
+}
+
+float readFloatVertexComponent(const std::uint8_t* src,
+                               const GLVertexAttributeState& attr,
+                               int component) {
+    switch (attr.type) {
+        case GL_FLOAT: {
+            float v = 0.0f;
+            std::memcpy(&v, src + component * 4, sizeof(v));
+            return v;
+        }
+        case GL_HALF_FLOAT: {
+            std::uint16_t bits = 0;
+            std::memcpy(&bits, src + component * 2, sizeof(bits));
+            return halfBitsToFloat(bits);
+        }
+        case GL_DOUBLE: {
+            double v = 0.0;
+            std::memcpy(&v, src + component * 8, sizeof(v));
+            return static_cast<float>(v);
+        }
+        case GL_FIXED: {
+            std::int32_t v = 0;
+            std::memcpy(&v, src + component * 4, sizeof(v));
+            return static_cast<float>(static_cast<double>(v) / 65536.0);
+        }
+        default:
+            break;
+    }
+    if (vertexAttribSignedIntegerType(attr.type)) {
+        const std::int32_t v = readSignedVertexComponent(src, attr.type, component);
+        return attr.normalized == GL_TRUE
+            ? normalizeSignedVertexComponent(v, attr.type)
+            : static_cast<float>(v);
+    }
+    if (vertexAttribUnsignedIntegerType(attr.type)) {
+        const std::uint32_t v = readUnsignedVertexComponent(src, attr.type, component);
+        return attr.normalized == GL_TRUE
+            ? normalizeUnsignedVertexComponent(v, attr.type)
+            : static_cast<float>(v);
+    }
+    return 0.0f;
+}
+
 // Extract a single vertex's attribute value from a VAO + VBO shadow.
 // `attrIdx` is the GLVertexAttributeState array index (== Location
 // for the default non-separated-format path). `vertexIdx` is absolute
@@ -5031,7 +5249,8 @@ Value readVertexAttribFromVAO(
     const GLVertexArrayObject& vao,
     GLObjectStore& objects,
     std::size_t attrIdx,
-    std::size_t vertexIdx)
+    std::size_t vertexIdx,
+    std::int32_t instanceIdx)
 {
     Value v;
     if (attrIdx >= vao.attributes.size()) return v;
@@ -5060,11 +5279,17 @@ Value readVertexAttribFromVAO(
     // attr fields and produced wrong results. Post-CKPT72: honour
     // bindingPoint[bindingIndex] for the buffer source.
     GLuint bufferName = attr.buffer;
+    const std::size_t attrBytes = vertexAttribByteSize(attr);
+    if (attrBytes == 0) return v;
+    const int componentCount = (attr.size == static_cast<GLint>(GL_BGRA))
+        ? 4 : std::clamp(attr.size, 1, 4);
     std::size_t baseOffset = attr.pointer;
     std::size_t stride = attr.stride > 0 ? static_cast<std::size_t>(attr.stride)
-                                         : static_cast<std::size_t>(attr.size * 4);
+                                         : attrBytes;
+    GLuint divisor = attr.divisor;
     if (attr.bindingIndex < vao.bindingPoints.size()) {
         const auto& bp = vao.bindingPoints[attr.bindingIndex];
+        divisor = bp.divisor;
         if (bp.buffer != 0) {
             bufferName = bp.buffer;
             baseOffset = static_cast<std::size_t>(bp.offset) +
@@ -5078,8 +5303,12 @@ Value readVertexAttribFromVAO(
     if (bufferName == 0) return v;
     GLBufferObject* buf = objects.buffers().get(bufferName);
     if (buf == nullptr || buf->shadowBytes.empty()) return v;
-    const std::size_t byteOffset = baseOffset + relativeOffset + stride * vertexIdx;
-    if (byteOffset + static_cast<std::size_t>(attr.size * 4) > buf->shadowBytes.size()) {
+    const std::size_t fetchIdx = divisor > 0
+        ? (static_cast<std::size_t>(std::max<std::int32_t>(instanceIdx, 0)) /
+           static_cast<std::size_t>(divisor))
+        : vertexIdx;
+    const std::size_t byteOffset = baseOffset + relativeOffset + stride * fetchIdx;
+    if (byteOffset + attrBytes > buf->shadowBytes.size()) {
         return v;
     }
     const std::uint8_t* src = buf->shadowBytes.data() + byteOffset;
@@ -5089,8 +5318,8 @@ Value readVertexAttribFromVAO(
     // (0, 0, 0, 1). We always return a 4-component Value so the
     // VS-init path can copy however many components the SPIR-V
     // variable actually declares.
-    const bool isInt  = (attr.type == 0x1404 /* GL_INT */);
-    const bool isUInt = (attr.type == 0x1405 /* GL_UNSIGNED_INT */);
+    const bool isUInt = attr.integer && vertexAttribUnsignedIntegerType(attr.type);
+    const bool isInt  = attr.integer && !isUInt;
     v.kind = isInt  ? Value::Kind::Int4
            : isUInt ? Value::Kind::UInt4
                     : Value::Kind::Float4;
@@ -5099,18 +5328,19 @@ Value readVertexAttribFromVAO(
     if (isInt || isUInt) {
         v.i[0] = v.i[1] = v.i[2] = 0;
         v.i[3] = 1;
-        if (isInt || isUInt || attr.type == 0x1406 /* GL_FLOAT */) {
-            for (int k = 0; k < attr.size && k < 4; ++k) {
-                std::memcpy(&v.i[k], src + k * 4, 4);
+        for (int k = 0; k < componentCount; ++k) {
+            if (isUInt) {
+                const std::uint32_t u = readUnsignedVertexComponent(src, attr.type, k);
+                v.i[k] = static_cast<std::int32_t>(u);
+            } else if (vertexAttribSignedIntegerType(attr.type)) {
+                v.i[k] = readSignedVertexComponent(src, attr.type, k);
             }
         }
     } else {
         v.f[0] = v.f[1] = v.f[2] = 0.0f;
         v.f[3] = 1.0f;
-        if (attr.type == 0x1406 /* GL_FLOAT */) {
-            for (int k = 0; k < attr.size && k < 4; ++k) {
-                std::memcpy(&v.f[k], src + k * 4, 4);
-            }
+        for (int k = 0; k < componentCount; ++k) {
+            v.f[k] = readFloatVertexComponent(src, attr, k);
         }
     }
     return v;
@@ -5199,6 +5429,7 @@ std::vector<VsOutputVaryingInfo> discoverVsOutputVaryings(
         info.width = v.width;
         info.location = v.location;
         info.baseType = v.baseType;
+        info.scalarByteSize = v.scalarByteSize;
         result.push_back(std::move(info));
     }
     return result;
@@ -5269,12 +5500,14 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     d.varyingLocations.reserve(captured.size());
     d.varyingInterp.reserve(captured.size());
     d.varyingBaseType.reserve(captured.size());
+    d.varyingScalarByteSize.reserve(captured.size());
     for (const auto& v : captured) {
         d.varyingNames.push_back(v.name);
         d.varyingWidths.push_back(v.width);
         d.varyingLocations.push_back(v.location);
         d.varyingInterp.push_back(0);          // smooth (default; TF doesn't care)
         d.varyingBaseType.push_back(v.baseType);
+        d.varyingScalarByteSize.push_back(v.scalarByteSize);
     }
     d.floatsPerVertex = fpv;
 
@@ -5868,6 +6101,7 @@ EmulatedDraw emulateGeometryDraw(
     std::vector<std::uint32_t> outLocations;
     std::vector<std::uint8_t>  outInterp;
     std::vector<std::uint8_t>  outBaseType;
+    std::vector<std::uint8_t>  outScalarByteSize;
     // Sprint 8 #9-C (CKPT96) — per-varying stream tag from
     // DecorationStream. Default 0 (no decoration). Mirrors the layout
     // of the other outX vectors so the per-varying index lines up.
@@ -5877,6 +6111,7 @@ EmulatedDraw emulateGeometryDraw(
     outLocations.reserve(outVaryings.size());
     outInterp.reserve(outVaryings.size());
     outBaseType.reserve(outVaryings.size());
+    outScalarByteSize.reserve(outVaryings.size());
     outStreams.reserve(outVaryings.size());
     for (const auto& v : outVaryings) {
         outNames.push_back(v.name);
@@ -5884,6 +6119,7 @@ EmulatedDraw emulateGeometryDraw(
         outLocations.push_back(v.location);
         outInterp.push_back(v.interp);
         outBaseType.push_back(v.baseType);
+        outScalarByteSize.push_back(v.scalarByteSize);
         outStreams.push_back(v.stream);
     }
 
@@ -6133,7 +6369,8 @@ EmulatedDraw emulateGeometryDraw(
                 vsAttribs.clear();
                 for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
                     if (!vao.attributes[ai].enabled) continue;
-                    Value v = readVertexAttribFromVAO(vao, objects, ai, vboSlot);
+                    Value v = readVertexAttribFromVAO(
+                        vao, objects, ai, vboSlot, /*instanceIdx=*/0);
                     if (v.kind != Value::Kind::Invalid) {
                         vsAttribs[static_cast<std::uint32_t>(ai)] = v;
                     }
@@ -6467,6 +6704,7 @@ EmulatedDraw emulateGeometryDraw(
     d.varyingInterp     = std::move(outInterp);
     d.varyingStreams    = std::move(outStreams);   // Sprint 8 #9-C (CKPT96)
     d.varyingBaseType   = std::move(outBaseType);
+    d.varyingScalarByteSize = std::move(outScalarByteSize);
     d.clipDistanceLen   = clipLen;
     d.cullDistanceLen   = cullLen;
     // Pre-compute the primitive-id varying location for the
@@ -7308,7 +7546,8 @@ bool runVsForVertex(
     Interpreter::VertexAttribs vsAttribs;
     for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
         if (!vao.attributes[ai].enabled) continue;
-        Value v = readVertexAttribFromVAO(vao, mutableObjects, ai, vboSlot);
+        Value v = readVertexAttribFromVAO(
+            vao, mutableObjects, ai, vboSlot, instanceID);
         if (v.kind != Value::Kind::Invalid) {
             vsAttribs[static_cast<std::uint32_t>(ai)] = v;
         }
@@ -7336,6 +7575,17 @@ bool runVsForVertex(
         if (it == vsInputLocOverrides.end() || it->second > vi.location) {
             vsInputLocOverrides[base] = vi.location;
         }
+    }
+    // Link-time GLProgramObject::attributes is the authoritative GL view:
+    // it folds in glBindAttribLocation requests, which SPIRV-Cross
+    // reflection cannot observe from raw SPIR-V. VS-only TF tests that bind
+    // a_0, a_2, ... to sparse locations need those exact indices.
+    for (const auto& attrib : program.attributes) {
+        if (attrib.location < 0 || attrib.name.empty()) continue;
+        std::string base = attrib.name;
+        const std::size_t bracket = base.find('[');
+        if (bracket != std::string::npos) base.resize(bracket);
+        vsInputLocOverrides[base] = static_cast<std::uint32_t>(attrib.location);
     }
 
     Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,

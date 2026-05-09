@@ -16578,18 +16578,28 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         const bool interleaved =
             (program.transformFeedbackBufferMode == GL_INTERLEAVED_ATTRIBS);
 
-        struct TfSource { std::size_t offset = 0; std::size_t count = 0; };
+        struct TfSource {
+            std::size_t offset = 0;
+            std::size_t count = 0;
+            std::size_t scalarBytes = sizeof(float);
+        };
         std::vector<TfSource> sources(tfNames.size());
         for (std::size_t i = 0; i < tfNames.size(); ++i) {
             const std::string& name = tfNames[i];
             if (name == "gl_Position") {
-                sources[i] = {0, 4};
+                sources[i] = {0, 4, sizeof(float)};
                 continue;
             }
             std::size_t off = 4;   // skip position
             for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
                 if (ed.varyingNames[k] == name) {
-                    sources[i] = {off, ed.varyingWidths[k]};
+                    const std::size_t scalarBytes =
+                        (k < ed.varyingScalarByteSize.size() &&
+                         k < ed.varyingBaseType.size() &&
+                         ed.varyingBaseType[k] == 0 &&
+                         ed.varyingScalarByteSize[k] == sizeof(double))
+                            ? sizeof(double) : sizeof(float);
+                    sources[i] = {off, ed.varyingWidths[k], scalarBytes};
                     break;
                 }
                 off += ed.varyingWidths[k];
@@ -16597,23 +16607,35 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         }
 
         auto writeToBuffer = [this](GLuint bufferName, std::size_t bufOffset,
-                                    const float* src, std::size_t count) {
+                                    const float* src, std::size_t count,
+                                    std::size_t scalarBytes) {
             if (bufferName == 0 || count == 0) return;
             GLBufferObject* buf = objects->buffers().get(bufferName);
             if (buf == nullptr) return;
-            const std::size_t bytes = count * sizeof(float);
+            const std::size_t bytes = count * scalarBytes;
             if (bufOffset + bytes > buf->shadowBytes.size()) return;
+            std::vector<std::uint8_t> converted;
+            const void* writePtr = src;
+            if (scalarBytes == sizeof(double)) {
+                converted.resize(bytes);
+                for (std::size_t i = 0; i < count; ++i) {
+                    const double d = static_cast<double>(src[i]);
+                    std::memcpy(converted.data() + i * sizeof(double),
+                                &d, sizeof(d));
+                }
+                writePtr = converted.data();
+            }
             // Update both the shadow bytes AND the Metal buffer
             // contents. `mutableBufferContents` (the backing for
             // `glMapBufferRange`) prefers the Metal buffer when one
             // is allocated; writing only to `shadowBytes` leaves
             // the readback staring at uninitialised Metal memory.
-            std::memcpy(buf->shadowBytes.data() + bufOffset, src, bytes);
+            std::memcpy(buf->shadowBytes.data() + bufOffset, writePtr, bytes);
             if (buf->metalBuffer != nullptr) {
                 id<MTLBuffer> mb = (__bridge id<MTLBuffer>)buf->metalBuffer;
                 std::uint8_t* mc = static_cast<std::uint8_t*>([mb contents]);
                 if (mc != nullptr) {
-                    std::memcpy(mc + bufOffset, src, bytes);
+                    std::memcpy(mc + bufOffset, writePtr, bytes);
                 }
             }
         };
@@ -16702,13 +16724,19 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 }
                 TfSource src;
                 if (name == "gl_Position") {
-                    src = {0, 4};   // stream 0 (built-in)
+                    src = {0, 4, sizeof(float)};   // stream 0 (built-in)
                 } else {
                     std::size_t off = 4;
                     bool found = false;
                     for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
                         if (ed.varyingNames[k] == name) {
-                            src = {off, ed.varyingWidths[k]};
+                            const std::size_t scalarBytes =
+                                (k < ed.varyingScalarByteSize.size() &&
+                                 k < ed.varyingBaseType.size() &&
+                                 ed.varyingBaseType[k] == 0 &&
+                                 ed.varyingScalarByteSize[k] == sizeof(double))
+                                    ? sizeof(double) : sizeof(float);
+                            src = {off, ed.varyingWidths[k], scalarBytes};
                             // First non-builtin varying claims the
                             // slot's stream (the spec requires all
                             // varyings in the same buffer share a
@@ -16740,17 +16768,18 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                             name.compare(0, 17, "gl_SkipComponents") == 0 &&
                             name[17] >= '1' && name[17] <= '4') {
                             src = {static_cast<std::size_t>(-1),
-                                   static_cast<std::size_t>(name[17] - '0')};
+                                   static_cast<std::size_t>(name[17] - '0'),
+                                   sizeof(float)};
                         } else {
                             // Unknown varying name — treat as zero-byte
                             // skip (mirrors prior behaviour for unmatched
                             // sources).
-                            src = {0, 0};
+                            src = {0, 0, sizeof(float)};
                         }
                     }
                 }
                 slots.back().srcList.push_back(src);
-                slots.back().perVertexBytes += src.count * sizeof(float);
+                slots.back().perVertexBytes += src.count * src.scalarBytes;
             }
 
             bool anyMultiStream = false;
@@ -16801,12 +16830,13 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                             // CKPT111: gl_SkipComponentsN sentinel —
                             // advance cursor without writing.
                             if (src.offset == static_cast<std::size_t>(-1)) {
-                                sl.cursor += src.count * sizeof(float);
+                                sl.cursor += src.count * src.scalarBytes;
                                 continue;
                             }
                             writeToBuffer(sl.buffer, sl.cursor,
-                                          vertexBase + src.offset, src.count);
-                            sl.cursor += src.count * sizeof(float);
+                                          vertexBase + src.offset, src.count,
+                                          src.scalarBytes);
+                            sl.cursor += src.count * src.scalarBytes;
                         }
                     }
                 }
@@ -16839,7 +16869,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 binds[i].baseOffset = static_cast<std::size_t>(b.offset);
                 binds[i].rangeSize  = static_cast<std::size_t>(b.size);
                 binds[i].cursor     = binds[i].baseOffset;
-                binds[i].perVertexBytes = sources[i].count * sizeof(float);
+                binds[i].perVertexBytes = sources[i].count * sources[i].scalarBytes;
                 binds[i].perPrimBytes   = binds[i].perVertexBytes * vpp;
             }
             const std::size_t nPrim = (vpp > 0) ? (vCount / vpp) : 0;
@@ -16869,7 +16899,8 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                         const float* vertexBase = ed.expandedVertexData.data() + v * fpv;
                         writeToBuffer(binds[i].buffer, binds[i].cursor,
                                       vertexBase + sources[i].offset,
-                                      sources[i].count);
+                                      sources[i].count,
+                                      sources[i].scalarBytes);
                         binds[i].cursor += binds[i].perVertexBytes;
                     }
                 }
@@ -29414,6 +29445,32 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
                 if (ed.vertexCount == 0) return true;
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
+            }
+        }
+    }
+
+    if (program != nullptr &&
+        isTransformFeedbackActive() &&
+        !program->transformFeedbackVaryingNames.empty() &&
+        !program->geometryEmulated &&
+        !program->tessellationEmulated &&
+        !program->tessellationInterpreted &&
+        count > 0 && instancecount > 0) {
+        const GLuint vaoName = impl_->state->boundVertexArray();
+        GLVertexArrayObject* vao = (vaoName != 0)
+            ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
+        if (vao != nullptr && !program->vertexSpirv.empty()) {
+            appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
+                *program, *vao, *impl_->objects, *impl_->state,
+                mode, count, first, instancecount, /*baseInstance=*/0,
+                /*elementIndices=*/nullptr);
+            if (ed.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                    return true;
+                }
+            } else if (!ed.diagnostic.empty()) {
+                APPGL_LOG(SHADER, @"drawArraysInstanced VS-only-TF: %s",
+                          ed.diagnostic.c_str());
             }
         }
     }

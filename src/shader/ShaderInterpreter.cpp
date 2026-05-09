@@ -243,10 +243,17 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 TypeInfo t;
                 const bool isSigned = (wc >= 4 && w[2] != 0);
                 t.kind = isSigned ? TypeInfo::Kind::Int : TypeInfo::Kind::UInt;
+                t.elementScalarWidth = (wc >= 3 && w[1] >= 8) ? (w[1] / 8) : 4;
                 types[w[0]] = t;
                 break;
             }
-            case spv::OpTypeFloat: types[w[0]] = {TypeInfo::Kind::Float}; break;
+            case spv::OpTypeFloat: {
+                TypeInfo t;
+                t.kind = TypeInfo::Kind::Float;
+                t.elementScalarWidth = (wc >= 3 && w[1] >= 8) ? (w[1] / 8) : 4;
+                types[w[0]] = t;
+                break;
+            }
             case spv::OpTypeVector: {
                 TypeInfo t;
                 t.componentType = w[1];
