@@ -35,6 +35,51 @@ namespace {
 
 using namespace appgl::interp;
 
+std::uint8_t interpolationFromDecorations(const DecorationSet& decorations) {
+    if (decorations.isFlat) return 1;
+    if (decorations.isNoPerspective) return 2;
+    if (decorations.isCentroid) return 3;
+    return 0;
+}
+
+std::uint32_t scalarTypeIdForTessType(
+    const SpirvModule& module,
+    std::uint32_t typeId)
+{
+    auto it = module.types.find(typeId);
+    if (it == module.types.end()) return 0;
+    const TypeInfo& type = it->second;
+    switch (type.kind) {
+        case TypeInfo::Kind::Vec2:
+        case TypeInfo::Kind::Vec3:
+        case TypeInfo::Kind::Vec4:
+            return type.componentType;
+        case TypeInfo::Kind::Matrix:
+        case TypeInfo::Kind::Array:
+        case TypeInfo::Kind::RuntimeArray:
+            return scalarTypeIdForTessType(module, type.componentType);
+        case TypeInfo::Kind::Pointer:
+            return scalarTypeIdForTessType(module, type.pointeeType);
+        default:
+            return typeId;
+    }
+}
+
+std::uint8_t baseTypeForTessType(
+    const SpirvModule& module,
+    std::uint32_t typeId)
+{
+    const std::uint32_t scalarTypeId =
+        scalarTypeIdForTessType(module, typeId);
+    auto it = module.types.find(scalarTypeId);
+    if (it == module.types.end()) return 0;
+    switch (it->second.kind) {
+        case TypeInfo::Kind::Int:  return 1;
+        case TypeInfo::Kind::UInt: return 2;
+        default:                   return 0;
+    }
+}
+
 // TES execution modes we can handle (GL 4.6 §11.2.3 Table 11.8):
 //   ExecutionModeTriangles    → barycentric (u,v,w) with u+v+w = 1
 //   ExecutionModeQuads        → (u,v) with 0 <= u,v <= 1
@@ -239,6 +284,7 @@ void walkTessInterface(
                 ev.isBuiltIn = true;
                 ev.builtIn = decoIt->second.builtIn;
             }
+            ev.interp = interpolationFromDecorations(decoIt->second);
         }
 
         auto leafIt = module.types.find(pointee);
@@ -253,6 +299,8 @@ void walkTessInterface(
                 sub.isPerVertex = isPerVertex;
                 sub.scalarCount = module.scalarWidth(memberType);
                 sub.name = vi.name;
+                sub.baseType = baseTypeForTessType(module, memberType);
+                sub.interp = ev.interp;
                 auto namesIt = module.memberNames.find(pointee);
                 if (namesIt != module.memberNames.end()) {
                     auto nmIt = namesIt->second.find(memberIdx);
@@ -269,6 +317,9 @@ void walkTessInterface(
                             sub.hasLocation = true;
                             sub.location = perIt->second.location;
                         }
+                        const std::uint8_t memberInterp =
+                            interpolationFromDecorations(perIt->second);
+                        if (memberInterp != 0) sub.interp = memberInterp;
                     }
                 }
                 if (asOutput) {
@@ -284,6 +335,7 @@ void walkTessInterface(
         }
 
         ev.scalarCount = module.scalarWidth(pointee);
+        ev.baseType = baseTypeForTessType(module, pointee);
         if (asOutput) {
             onOutput(ev);
             if (outputs) outputs->push_back(std::move(ev));
@@ -1799,6 +1851,8 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
                         slot.location = nextSyntheticLocation++;
                     }
                     slot.numComponents = ov.scalarCount;
+                    slot.baseType = ov.baseType;
+                    slot.interp = ov.interp;
                     // Interpreter path produces these values at runtime;
                     // the mapping/scale/offset/constant fields are unused
                     // (only the matcher's affine path consults them).
@@ -2024,8 +2078,8 @@ EmulatedDraw emulateTessellationDraw(
         d.varyingNames.push_back(v.name);
         d.varyingWidths.push_back(static_cast<std::uint32_t>(v.numComponents));
         d.varyingLocations.push_back(v.location);
-        d.varyingInterp.push_back(0);     // smooth (default)
-        d.varyingBaseType.push_back(0);   // float
+        d.varyingInterp.push_back(v.interp);
+        d.varyingBaseType.push_back(v.baseType);
         varyingFloats += v.numComponents;
     }
     const std::size_t floatsPerVertex = kPosFloats + varyingFloats;
