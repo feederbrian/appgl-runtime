@@ -5932,7 +5932,7 @@ struct GLContext::Impl {
             info.complete = level->second.desc.width > 0 && level->second.desc.height > 0 && level->second.desc.depth > 0;
             info.width = level->second.desc.width;
             info.height = texture->target == GL_TEXTURE_1D ? 1 : level->second.desc.height;
-            info.samples = 0;
+            info.samples = level->second.desc.samples;
             info.internalFormat = level->second.desc.internalFormat;
             return info;
         }
@@ -6081,7 +6081,7 @@ struct GLContext::Impl {
                 }
             }
             if ((haveLayered && haveNonLayered) ||
-                (haveLayered && mixedColorTargets)) {
+                mixedColorTargets) {
                 return GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
             }
         }
