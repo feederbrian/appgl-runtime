@@ -1677,9 +1677,47 @@ struct GLContext::Impl {
         return objects->textures().get(name);
     }
 
+    static std::uint16_t byteSwap16(std::uint16_t v) {
+        return static_cast<std::uint16_t>((v << 8) | (v >> 8));
+    }
+
+    static std::uint32_t byteSwap32(std::uint32_t v) {
+        return ((v & 0x000000ffu) << 24)
+             | ((v & 0x0000ff00u) <<  8)
+             | ((v & 0x00ff0000u) >>  8)
+             | ((v & 0xff000000u) >> 24);
+    }
+
+    static void swapPixelStoreBytes(std::uint8_t* bytes, std::size_t width) {
+        if (width <= 1) return;
+        std::reverse(bytes, bytes + width);
+    }
+
+    static std::uint16_t readU16Value(const std::uint8_t* src, bool swapBytes) {
+        std::uint16_t v;
+        std::memcpy(&v, src, sizeof(v));
+        return swapBytes ? byteSwap16(v) : v;
+    }
+
+    static std::uint32_t readU32Value(const std::uint8_t* src, bool swapBytes) {
+        std::uint32_t v;
+        std::memcpy(&v, src, sizeof(v));
+        return swapBytes ? byteSwap32(v) : v;
+    }
+
+    static std::uint16_t readU16Component(const std::uint8_t* src, std::size_t idx, bool swapBytes) {
+        return readU16Value(src + idx * sizeof(std::uint16_t), swapBytes);
+    }
+
+    static std::uint32_t readU32Component(const std::uint8_t* src, std::size_t idx, bool swapBytes) {
+        return readU32Value(src + idx * sizeof(std::uint32_t), swapBytes);
+    }
+
     // Read a single source component and normalize it to [0..255] for
     // the RGBA8 shadow texture. Handles all GL pixel data types.
-    static std::uint8_t readComponentAsU8(const std::uint8_t* src, GLenum type, std::size_t componentIndex) {
+    static std::uint8_t readComponentAsU8(
+        const std::uint8_t* src, GLenum type, std::size_t componentIndex, bool swapBytes = false
+    ) {
         switch (type) {
             case GL_UNSIGNED_BYTE:
                 return src[componentIndex];
@@ -1688,29 +1726,35 @@ struct GLContext::Impl {
                 return static_cast<std::uint8_t>(std::max(0, static_cast<int>(v) * 255 / 127));
             }
             case GL_UNSIGNED_SHORT: {
-                auto v = reinterpret_cast<const std::uint16_t*>(src)[componentIndex];
+                auto v = readU16Component(src, componentIndex, swapBytes);
                 return static_cast<std::uint8_t>(v >> 8);
             }
             case GL_SHORT: {
-                auto v = reinterpret_cast<const std::int16_t*>(src)[componentIndex];
+                std::uint16_t bits = readU16Component(src, componentIndex, swapBytes);
+                std::int16_t v;
+                std::memcpy(&v, &bits, sizeof(v));
                 return static_cast<std::uint8_t>(std::max(0, static_cast<int>(v) * 255 / 32767));
             }
             case GL_UNSIGNED_INT: {
-                auto v = reinterpret_cast<const std::uint32_t*>(src)[componentIndex];
+                auto v = readU32Component(src, componentIndex, swapBytes);
                 return static_cast<std::uint8_t>(v >> 24);
             }
             case GL_INT: {
-                auto v = reinterpret_cast<const std::int32_t*>(src)[componentIndex];
+                std::uint32_t bits = readU32Component(src, componentIndex, swapBytes);
+                std::int32_t v;
+                std::memcpy(&v, &bits, sizeof(v));
                 return static_cast<std::uint8_t>(std::max(0, static_cast<int>(static_cast<double>(v) * 255.0 / 2147483647.0)));
             }
             case GL_FLOAT: {
-                auto v = reinterpret_cast<const float*>(src)[componentIndex];
+                std::uint32_t bits = readU32Component(src, componentIndex, swapBytes);
+                float v;
+                std::memcpy(&v, &bits, sizeof(v));
                 float clamped = std::max(0.0f, std::min(1.0f, v));
                 return static_cast<std::uint8_t>(clamped * 255.0f + 0.5f);
             }
             case GL_HALF_FLOAT: {
                 // IEEE 754 half-float → float conversion
-                auto bits = reinterpret_cast<const std::uint16_t*>(src)[componentIndex];
+                auto bits = readU16Component(src, componentIndex, swapBytes);
                 std::uint32_t sign = (bits & 0x8000u) << 16;
                 std::uint32_t exponent = (bits >> 10) & 0x1F;
                 std::uint32_t mantissa = bits & 0x3FF;
@@ -1822,7 +1866,7 @@ struct GLContext::Impl {
     // as normalized [0,1]/[-1,1] values (false). GL_FLOAT / GL_HALF_FLOAT
     // always return the float value regardless of the flag.
     static double readSourceComponentDouble(
-        const std::uint8_t* src, GLenum type, std::size_t idx, bool asInteger
+        const std::uint8_t* src, GLenum type, std::size_t idx, bool asInteger, bool swapBytes = false
     ) {
         switch (type) {
             case GL_UNSIGNED_BYTE: {
@@ -1834,26 +1878,33 @@ struct GLContext::Impl {
                 return asInteger ? static_cast<double>(v) : std::max(-1.0, v / 127.0);
             }
             case GL_UNSIGNED_SHORT: {
-                auto v = reinterpret_cast<const std::uint16_t*>(src)[idx];
+                auto v = readU16Component(src, idx, swapBytes);
                 return asInteger ? static_cast<double>(v) : v / 65535.0;
             }
             case GL_SHORT: {
-                auto v = reinterpret_cast<const std::int16_t*>(src)[idx];
+                std::uint16_t bits = readU16Component(src, idx, swapBytes);
+                std::int16_t v;
+                std::memcpy(&v, &bits, sizeof(v));
                 return asInteger ? static_cast<double>(v) : std::max(-1.0, v / 32767.0);
             }
             case GL_UNSIGNED_INT: {
-                auto v = reinterpret_cast<const std::uint32_t*>(src)[idx];
+                auto v = readU32Component(src, idx, swapBytes);
                 return asInteger ? static_cast<double>(v) : v / 4294967295.0;
             }
             case GL_INT: {
-                auto v = reinterpret_cast<const std::int32_t*>(src)[idx];
+                std::uint32_t bits = readU32Component(src, idx, swapBytes);
+                std::int32_t v;
+                std::memcpy(&v, &bits, sizeof(v));
                 return asInteger ? static_cast<double>(v) : std::max(-1.0, v / 2147483647.0);
             }
             case GL_FLOAT: {
-                return static_cast<double>(reinterpret_cast<const float*>(src)[idx]);
+                std::uint32_t bits = readU32Component(src, idx, swapBytes);
+                float v;
+                std::memcpy(&v, &bits, sizeof(v));
+                return static_cast<double>(v);
             }
             case GL_HALF_FLOAT: {
-                auto bits = reinterpret_cast<const std::uint16_t*>(src)[idx];
+                auto bits = readU16Component(src, idx, swapBytes);
                 std::uint32_t sign = (bits & 0x8000u) << 16;
                 std::uint32_t exponent = (bits >> 10) & 0x1Fu;
                 std::uint32_t mantissa = bits & 0x3FFu;
@@ -1878,8 +1929,7 @@ struct GLContext::Impl {
             // implementation returned 0 here, falling back to the
             // 8-bit rgba8 shadow with a 3-unit-in-10-bit precision loss.
             case GL_UNSIGNED_INT_2_10_10_10_REV: {
-                std::uint32_t v;
-                std::memcpy(&v, src, 4);
+                std::uint32_t v = readU32Value(src, swapBytes);
                 std::uint32_t bits;
                 std::uint32_t maxBits;
                 switch (idx) {
@@ -1893,8 +1943,7 @@ struct GLContext::Impl {
                                  : static_cast<double>(bits) / static_cast<double>(maxBits);
             }
             case GL_UNSIGNED_INT_10_10_10_2: {
-                std::uint32_t v;
-                std::memcpy(&v, src, 4);
+                std::uint32_t v = readU32Value(src, swapBytes);
                 std::uint32_t bits;
                 std::uint32_t maxBits;
                 switch (idx) {
@@ -1908,8 +1957,7 @@ struct GLContext::Impl {
                                  : static_cast<double>(bits) / static_cast<double>(maxBits);
             }
             case GL_UNSIGNED_SHORT_5_6_5: {
-                std::uint16_t v;
-                std::memcpy(&v, src, 2);
+                std::uint16_t v = readU16Value(src, swapBytes);
                 std::uint32_t bits;
                 std::uint32_t maxBits;
                 switch (idx) {
@@ -1922,8 +1970,7 @@ struct GLContext::Impl {
                                  : static_cast<double>(bits) / static_cast<double>(maxBits);
             }
             case GL_UNSIGNED_SHORT_5_6_5_REV: {
-                std::uint16_t v;
-                std::memcpy(&v, src, 2);
+                std::uint16_t v = readU16Value(src, swapBytes);
                 std::uint32_t bits;
                 std::uint32_t maxBits;
                 switch (idx) {
@@ -1936,8 +1983,7 @@ struct GLContext::Impl {
                                  : static_cast<double>(bits) / static_cast<double>(maxBits);
             }
             case GL_UNSIGNED_SHORT_4_4_4_4: {
-                std::uint16_t v;
-                std::memcpy(&v, src, 2);
+                std::uint16_t v = readU16Value(src, swapBytes);
                 std::uint32_t bits;
                 switch (idx) {
                     case 0: bits = (v >> 12) & 0xFu; break;
@@ -1949,8 +1995,7 @@ struct GLContext::Impl {
                 return asInteger ? static_cast<double>(bits) : static_cast<double>(bits) / 15.0;
             }
             case GL_UNSIGNED_SHORT_4_4_4_4_REV: {
-                std::uint16_t v;
-                std::memcpy(&v, src, 2);
+                std::uint16_t v = readU16Value(src, swapBytes);
                 std::uint32_t bits;
                 switch (idx) {
                     case 0: bits = v         & 0xFu; break;
@@ -1962,8 +2007,7 @@ struct GLContext::Impl {
                 return asInteger ? static_cast<double>(bits) : static_cast<double>(bits) / 15.0;
             }
             case GL_UNSIGNED_SHORT_5_5_5_1: {
-                std::uint16_t v;
-                std::memcpy(&v, src, 2);
+                std::uint16_t v = readU16Value(src, swapBytes);
                 std::uint32_t bits;
                 std::uint32_t maxBits;
                 switch (idx) {
@@ -1977,8 +2021,7 @@ struct GLContext::Impl {
                                  : static_cast<double>(bits) / static_cast<double>(maxBits);
             }
             case GL_UNSIGNED_SHORT_1_5_5_5_REV: {
-                std::uint16_t v;
-                std::memcpy(&v, src, 2);
+                std::uint16_t v = readU16Value(src, swapBytes);
                 std::uint32_t bits;
                 std::uint32_t maxBits;
                 switch (idx) {
@@ -2159,6 +2202,7 @@ struct GLContext::Impl {
                 if (pixels == nullptr || totalPixels == 0) return true;
 
                 const auto& store = state->pixelStore();
+                const bool unpackSwapBytes = (store.unpackSwapBytes == GL_TRUE);
                 const std::size_t srcPixelBytes = 4u;   // all three packed types are 4 bytes
                 const std::size_t sourceWidth  = static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
                 const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
@@ -2179,7 +2223,16 @@ struct GLContext::Impl {
                             + (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
                                + static_cast<std::size_t>(y))
                               * static_cast<std::size_t>(width) * outBpp;
-                        std::memcpy(dstRow, srcRow, static_cast<std::size_t>(width) * outBpp);
+                        if (!unpackSwapBytes) {
+                            std::memcpy(dstRow, srcRow, static_cast<std::size_t>(width) * outBpp);
+                        } else {
+                            for (GLsizei x = 0; x < width; ++x) {
+                                const std::uint8_t* srcPixel = srcRow + static_cast<std::size_t>(x) * outBpp;
+                                std::uint8_t* dstPixel = dstRow + static_cast<std::size_t>(x) * outBpp;
+                                std::uint32_t word = readU32Value(srcPixel, true);
+                                std::memcpy(dstPixel, &word, sizeof(word));
+                            }
+                        }
                     }
                 }
                 return true;
@@ -2236,6 +2289,7 @@ struct GLContext::Impl {
 
         // Pixel-store state
         const auto& store = state->pixelStore();
+        const bool unpackSwapBytes = (store.unpackSwapBytes == GL_TRUE);
         const std::size_t sourceWidth  = static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
         const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
         const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
@@ -2268,19 +2322,19 @@ struct GLContext::Impl {
                     double comps[4] = {0.0, 0.0, 0.0, 1.0};
 
                     if (isBGR && srcComponents >= 3) {
-                        comps[0] = readSourceComponentDouble(pixel, type, 2, asInteger);
-                        comps[1] = readSourceComponentDouble(pixel, type, 1, asInteger);
-                        comps[2] = readSourceComponentDouble(pixel, type, 0, asInteger);
+                        comps[0] = readSourceComponentDouble(pixel, type, 2, asInteger, unpackSwapBytes);
+                        comps[1] = readSourceComponentDouble(pixel, type, 1, asInteger, unpackSwapBytes);
+                        comps[2] = readSourceComponentDouble(pixel, type, 0, asInteger, unpackSwapBytes);
                         if (srcComponents > 3)
-                            comps[3] = readSourceComponentDouble(pixel, type, 3, asInteger);
+                            comps[3] = readSourceComponentDouble(pixel, type, 3, asInteger, unpackSwapBytes);
                     } else if (isBGRA && srcComponents >= 4) {
-                        comps[0] = readSourceComponentDouble(pixel, type, 2, asInteger);
-                        comps[1] = readSourceComponentDouble(pixel, type, 1, asInteger);
-                        comps[2] = readSourceComponentDouble(pixel, type, 0, asInteger);
-                        comps[3] = readSourceComponentDouble(pixel, type, 3, asInteger);
+                        comps[0] = readSourceComponentDouble(pixel, type, 2, asInteger, unpackSwapBytes);
+                        comps[1] = readSourceComponentDouble(pixel, type, 1, asInteger, unpackSwapBytes);
+                        comps[2] = readSourceComponentDouble(pixel, type, 0, asInteger, unpackSwapBytes);
+                        comps[3] = readSourceComponentDouble(pixel, type, 3, asInteger, unpackSwapBytes);
                     } else {
                         for (std::size_t c = 0; c < srcComponents && c < 4; ++c) {
-                            comps[c] = readSourceComponentDouble(pixel, type, c, asInteger);
+                            comps[c] = readSourceComponentDouble(pixel, type, c, asInteger, unpackSwapBytes);
                         }
                     }
 
@@ -2323,6 +2377,7 @@ struct GLContext::Impl {
         }
 
         const auto& store = state->pixelStore();
+        const bool unpackSwapBytes = (store.unpackSwapBytes == GL_TRUE);
         const std::size_t sourceWidth = static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
         const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
         const std::size_t rowBytes = alignByteCount(sourceWidth * pixelBytes, store.unpackAlignment);
@@ -2383,8 +2438,7 @@ struct GLContext::Impl {
                     if (packed) {
                         // Best-effort packed type conversion to RGBA8
                         if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) {
-                            std::uint32_t val;
-                            std::memcpy(&val, pixel, 4);
+                            std::uint32_t val = readU32Value(pixel, unpackSwapBytes);
                             if (type == GL_UNSIGNED_INT_8_8_8_8) {
                                 rgba8[destIndex + 0] = static_cast<std::uint8_t>((val >> 24) & 0xFF);
                                 rgba8[destIndex + 1] = static_cast<std::uint8_t>((val >> 16) & 0xFF);
@@ -2397,8 +2451,7 @@ struct GLContext::Impl {
                                 rgba8[destIndex + 3] = static_cast<std::uint8_t>((val >> 24) & 0xFF);
                             }
                         } else if (type == GL_UNSIGNED_SHORT_5_6_5 || type == GL_UNSIGNED_SHORT_5_6_5_REV) {
-                            std::uint16_t val;
-                            std::memcpy(&val, pixel, 2);
+                            std::uint16_t val = readU16Value(pixel, unpackSwapBytes);
                             if (type == GL_UNSIGNED_SHORT_5_6_5) {
                                 rgba8[destIndex + 0] = packedToU8((val >> 11) & 0x1F, 31);
                                 rgba8[destIndex + 1] = packedToU8((val >> 5) & 0x3F, 63);
@@ -2410,15 +2463,13 @@ struct GLContext::Impl {
                             }
                             rgba8[destIndex + 3] = 255;
                         } else if (type == GL_UNSIGNED_INT_2_10_10_10_REV) {
-                            std::uint32_t val;
-                            std::memcpy(&val, pixel, 4);
+                            std::uint32_t val = readU32Value(pixel, unpackSwapBytes);
                             rgba8[destIndex + 0] = packedToU8(val & 0x3FF, 1023);
                             rgba8[destIndex + 1] = packedToU8((val >> 10) & 0x3FF, 1023);
                             rgba8[destIndex + 2] = packedToU8((val >> 20) & 0x3FF, 1023);
                             rgba8[destIndex + 3] = packedToU8((val >> 30) & 0x3, 3);
                         } else if (type == GL_UNSIGNED_INT_10_10_10_2) {
-                            std::uint32_t val;
-                            std::memcpy(&val, pixel, 4);
+                            std::uint32_t val = readU32Value(pixel, unpackSwapBytes);
                             rgba8[destIndex + 0] = packedToU8((val >> 22) & 0x3FF, 1023);
                             rgba8[destIndex + 1] = packedToU8((val >> 12) & 0x3FF, 1023);
                             rgba8[destIndex + 2] = packedToU8((val >> 2) & 0x3FF, 1023);
@@ -2436,29 +2487,25 @@ struct GLContext::Impl {
                             rgba8[destIndex + 2] = packedToU8((val >> 6) & 0x3, 3);
                             rgba8[destIndex + 3] = 255;
                         } else if (type == GL_UNSIGNED_SHORT_4_4_4_4) {
-                            std::uint16_t val;
-                            std::memcpy(&val, pixel, 2);
+                            std::uint16_t val = readU16Value(pixel, unpackSwapBytes);
                             rgba8[destIndex + 0] = packedToU8((val >> 12) & 0xF, 15);
                             rgba8[destIndex + 1] = packedToU8((val >> 8) & 0xF, 15);
                             rgba8[destIndex + 2] = packedToU8((val >> 4) & 0xF, 15);
                             rgba8[destIndex + 3] = packedToU8(val & 0xF, 15);
                         } else if (type == GL_UNSIGNED_SHORT_4_4_4_4_REV) {
-                            std::uint16_t val;
-                            std::memcpy(&val, pixel, 2);
+                            std::uint16_t val = readU16Value(pixel, unpackSwapBytes);
                             rgba8[destIndex + 0] = packedToU8(val & 0xF, 15);
                             rgba8[destIndex + 1] = packedToU8((val >> 4) & 0xF, 15);
                             rgba8[destIndex + 2] = packedToU8((val >> 8) & 0xF, 15);
                             rgba8[destIndex + 3] = packedToU8((val >> 12) & 0xF, 15);
                         } else if (type == GL_UNSIGNED_SHORT_5_5_5_1) {
-                            std::uint16_t val;
-                            std::memcpy(&val, pixel, 2);
+                            std::uint16_t val = readU16Value(pixel, unpackSwapBytes);
                             rgba8[destIndex + 0] = packedToU8((val >> 11) & 0x1F, 31);
                             rgba8[destIndex + 1] = packedToU8((val >> 6) & 0x1F, 31);
                             rgba8[destIndex + 2] = packedToU8((val >> 1) & 0x1F, 31);
                             rgba8[destIndex + 3] = packedToU8(val & 0x1, 1);
                         } else if (type == GL_UNSIGNED_SHORT_1_5_5_5_REV) {
-                            std::uint16_t val;
-                            std::memcpy(&val, pixel, 2);
+                            std::uint16_t val = readU16Value(pixel, unpackSwapBytes);
                             rgba8[destIndex + 0] = packedToU8(val & 0x1F, 31);
                             rgba8[destIndex + 1] = packedToU8((val >> 5) & 0x1F, 31);
                             rgba8[destIndex + 2] = packedToU8((val >> 10) & 0x1F, 31);
@@ -2510,8 +2557,7 @@ struct GLContext::Impl {
                                 if (f >= 1.0f) return 255;
                                 return static_cast<std::uint8_t>(f * 255.0f + 0.5f);
                             };
-                            std::uint32_t val;
-                            std::memcpy(&val, pixel, 4);
+                            std::uint32_t val = readU32Value(pixel, unpackSwapBytes);
                             rgba8[destIndex + 0] = toU8(decodeFloat11(val & 0x7FF));
                             rgba8[destIndex + 1] = toU8(decodeFloat11((val >> 11) & 0x7FF));
                             rgba8[destIndex + 2] = toU8(decodeFloat10((val >> 22) & 0x3FF));
@@ -2523,8 +2569,7 @@ struct GLContext::Impl {
                             // 15). Layout: R bits[0..8], G bits[9..17],
                             // B bits[18..26], shared exp bits[27..31].
                             // Value = mantissa / 2^9 * 2^(exp-15).
-                            std::uint32_t val;
-                            std::memcpy(&val, pixel, 4);
+                            std::uint32_t val = readU32Value(pixel, unpackSwapBytes);
                             const std::uint32_t rm = val & 0x1FF;
                             const std::uint32_t gm = (val >> 9) & 0x1FF;
                             const std::uint32_t bm = (val >> 18) & 0x1FF;
@@ -2562,40 +2607,40 @@ struct GLContext::Impl {
                                       rgba8[destIndex + 2]);
                         }
                     } else if (isAlphaOnly || isIntensity) {
-                        std::uint8_t c = readComponentAsU8(pixel, type, 0);
+                        std::uint8_t c = readComponentAsU8(pixel, type, 0, unpackSwapBytes);
                         rgba8[destIndex + 0] = c;
                         rgba8[destIndex + 1] = c;
                         rgba8[destIndex + 2] = c;
                         rgba8[destIndex + 3] = c;
                     } else if (isLuminance) {
-                        std::uint8_t c = readComponentAsU8(pixel, type, 0);
+                        std::uint8_t c = readComponentAsU8(pixel, type, 0, unpackSwapBytes);
                         rgba8[destIndex + 0] = c;
                         rgba8[destIndex + 1] = c;
                         rgba8[destIndex + 2] = c;
                         rgba8[destIndex + 3] = 255;
                     } else if (isLuminanceAlpha) {
-                        std::uint8_t lum = readComponentAsU8(pixel, type, 0);
-                        std::uint8_t alp = readComponentAsU8(pixel, type, 1);
+                        std::uint8_t lum = readComponentAsU8(pixel, type, 0, unpackSwapBytes);
+                        std::uint8_t alp = readComponentAsU8(pixel, type, 1, unpackSwapBytes);
                         rgba8[destIndex + 0] = lum;
                         rgba8[destIndex + 1] = lum;
                         rgba8[destIndex + 2] = lum;
                         rgba8[destIndex + 3] = alp;
                     } else if (isBGR) {
-                        rgba8[destIndex + 0] = readComponentAsU8(pixel, type, 2); // B→R
-                        rgba8[destIndex + 1] = readComponentAsU8(pixel, type, 1); // G→G
-                        rgba8[destIndex + 2] = readComponentAsU8(pixel, type, 0); // R→B
+                        rgba8[destIndex + 0] = readComponentAsU8(pixel, type, 2, unpackSwapBytes); // B→R
+                        rgba8[destIndex + 1] = readComponentAsU8(pixel, type, 1, unpackSwapBytes); // G→G
+                        rgba8[destIndex + 2] = readComponentAsU8(pixel, type, 0, unpackSwapBytes); // R→B
                         rgba8[destIndex + 3] = 255;
                     } else if (isBGRA) {
-                        rgba8[destIndex + 0] = readComponentAsU8(pixel, type, 2); // B→R
-                        rgba8[destIndex + 1] = readComponentAsU8(pixel, type, 1); // G→G
-                        rgba8[destIndex + 2] = readComponentAsU8(pixel, type, 0); // R→B
-                        rgba8[destIndex + 3] = readComponentAsU8(pixel, type, 3); // A→A
+                        rgba8[destIndex + 0] = readComponentAsU8(pixel, type, 2, unpackSwapBytes); // B→R
+                        rgba8[destIndex + 1] = readComponentAsU8(pixel, type, 1, unpackSwapBytes); // G→G
+                        rgba8[destIndex + 2] = readComponentAsU8(pixel, type, 0, unpackSwapBytes); // R→B
+                        rgba8[destIndex + 3] = readComponentAsU8(pixel, type, 3, unpackSwapBytes); // A→A
                     } else {
                         // Standard GL_RED/RG/RGB/RGBA and _INTEGER variants
-                        rgba8[destIndex + 0] = readComponentAsU8(pixel, type, 0);
-                        rgba8[destIndex + 1] = components > 1 ? readComponentAsU8(pixel, type, 1) : 0;
-                        rgba8[destIndex + 2] = components > 2 ? readComponentAsU8(pixel, type, 2) : 0;
-                        rgba8[destIndex + 3] = components > 3 ? readComponentAsU8(pixel, type, 3) : 255;
+                        rgba8[destIndex + 0] = readComponentAsU8(pixel, type, 0, unpackSwapBytes);
+                        rgba8[destIndex + 1] = components > 1 ? readComponentAsU8(pixel, type, 1, unpackSwapBytes) : 0;
+                        rgba8[destIndex + 2] = components > 2 ? readComponentAsU8(pixel, type, 2, unpackSwapBytes) : 0;
+                        rgba8[destIndex + 3] = components > 3 ? readComponentAsU8(pixel, type, 3, unpackSwapBytes) : 255;
                     }
                 }
             }
@@ -8148,6 +8193,7 @@ struct GLContext::Impl {
         // caused column-shifts in the caller's buffer (the padding
         // byte collided with the next row's pixel 0).
         const auto& packStore = state->pixelStore();
+        const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
         const std::size_t dstRowStridePixels = packStore.packRowLength > 0
             ? static_cast<std::size_t>(packStore.packRowLength)
             : static_cast<std::size_t>(width);
@@ -8378,6 +8424,9 @@ struct GLContext::Impl {
                             break;
                         }
                     }
+                    if (packSwapBytes) {
+                        swapPixelStoreBytes(dstPtr, dstPackedBpp);
+                    }
                     continue;
                 }
 
@@ -8476,6 +8525,9 @@ struct GLContext::Impl {
                             dstP[0] = static_cast<std::uint8_t>(
                                 std::max(0.0, std::min(255.0, v)));
                             break;
+                    }
+                    if (packSwapBytes) {
+                        swapPixelStoreBytes(dstP, dstBpc);
                     }
                 }
             }
@@ -9673,43 +9725,45 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                     return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
                 };
                 auto* outBytes = static_cast<std::uint8_t*>(pixels);
+                const bool packSwapBytes = (impl_->state->pixelStore().packSwapBytes == GL_TRUE);
                 for (std::size_t i = 0; i < pixelCount; ++i) {
                     const float d = clamp01(stage[i]);
+                    std::uint8_t* out = outBytes + i * bytesPerComponent(type);
                     switch (type) {
                         case GL_UNSIGNED_BYTE: {
                             const std::uint8_t v =
                                 static_cast<std::uint8_t>(d * 255.0f + 0.5f);
-                            std::memcpy(outBytes + i, &v, 1);
+                            std::memcpy(out, &v, 1);
                             break;
                         }
                         case GL_BYTE: {
                             const std::int8_t v =
                                 static_cast<std::int8_t>(d * 127.0f + 0.5f);
-                            std::memcpy(outBytes + i, &v, 1);
+                            std::memcpy(out, &v, 1);
                             break;
                         }
                         case GL_UNSIGNED_SHORT: {
                             const std::uint16_t v =
                                 static_cast<std::uint16_t>(d * 65535.0f + 0.5f);
-                            std::memcpy(outBytes + i * 2, &v, 2);
+                            std::memcpy(out, &v, 2);
                             break;
                         }
                         case GL_SHORT: {
                             const std::int16_t v =
                                 static_cast<std::int16_t>(d * 32767.0f + 0.5f);
-                            std::memcpy(outBytes + i * 2, &v, 2);
+                            std::memcpy(out, &v, 2);
                             break;
                         }
                         case GL_UNSIGNED_INT: {
                             const std::uint32_t v = static_cast<std::uint32_t>(
                                 static_cast<double>(d) * 4294967295.0 + 0.5);
-                            std::memcpy(outBytes + i * 4, &v, 4);
+                            std::memcpy(out, &v, 4);
                             break;
                         }
                         case GL_INT: {
                             const std::int32_t v = static_cast<std::int32_t>(
                                 static_cast<double>(d) * 2147483647.0 + 0.5);
-                            std::memcpy(outBytes + i * 4, &v, 4);
+                            std::memcpy(out, &v, 4);
                             break;
                         }
                         case GL_HALF_FLOAT: {
@@ -9729,7 +9783,7 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                                 h = static_cast<std::uint16_t>(
                                     sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
                             }
-                            std::memcpy(outBytes + i * 2, &h, 2);
+                            std::memcpy(out, &h, 2);
                             break;
                         }
                         default: {
@@ -9739,6 +9793,9 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                             // defensive only.
                             break;
                         }
+                    }
+                    if (packSwapBytes) {
+                        Impl::swapPixelStoreBytes(out, bytesPerComponent(type));
                     }
                 }
                 return true;
@@ -9795,6 +9852,7 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             return false;
         }
         auto* dest = static_cast<std::uint8_t*>(pixels);
+        const bool packSwapBytes = (impl_->state->pixelStore().packSwapBytes == GL_TRUE);
         for (std::size_t i = 0; i < pixelCount; ++i) {
             const std::uint8_t r = rgba8[i * 4 + 0];
             const std::uint8_t g = rgba8[i * 4 + 1];
@@ -9808,32 +9866,39 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             }
             for (std::size_t c = 0; c < components; ++c) {
                 const float normalized = static_cast<float>(src[c]) / 255.0f;
+                std::uint8_t* dstP = dest + (i * components + c) * bpc;
                 switch (type) {
                     case GL_UNSIGNED_BYTE:
-                        dest[i * components * bpc + c] = src[c];
+                        dstP[0] = src[c];
                         break;
-                    case GL_BYTE:
-                        reinterpret_cast<std::int8_t*>(dest)[i * components + c] =
-                            static_cast<std::int8_t>(src[c] * 127 / 255);
+                    case GL_BYTE: {
+                        const std::int8_t v = static_cast<std::int8_t>(src[c] * 127 / 255);
+                        std::memcpy(dstP, &v, sizeof(v));
                         break;
-                    case GL_UNSIGNED_SHORT:
-                        reinterpret_cast<std::uint16_t*>(dest)[i * components + c] =
-                            static_cast<std::uint16_t>(src[c] * 257);
+                    }
+                    case GL_UNSIGNED_SHORT: {
+                        const std::uint16_t v = static_cast<std::uint16_t>(src[c] * 257);
+                        std::memcpy(dstP, &v, sizeof(v));
                         break;
-                    case GL_SHORT:
-                        reinterpret_cast<std::int16_t*>(dest)[i * components + c] =
-                            static_cast<std::int16_t>(src[c] * 32767 / 255);
+                    }
+                    case GL_SHORT: {
+                        const std::int16_t v = static_cast<std::int16_t>(src[c] * 32767 / 255);
+                        std::memcpy(dstP, &v, sizeof(v));
                         break;
-                    case GL_UNSIGNED_INT:
-                        reinterpret_cast<std::uint32_t*>(dest)[i * components + c] =
-                            static_cast<std::uint32_t>(src[c]) * 16843009u;
+                    }
+                    case GL_UNSIGNED_INT: {
+                        const std::uint32_t v = static_cast<std::uint32_t>(src[c]) * 16843009u;
+                        std::memcpy(dstP, &v, sizeof(v));
                         break;
-                    case GL_INT:
-                        reinterpret_cast<std::int32_t*>(dest)[i * components + c] =
+                    }
+                    case GL_INT: {
+                        const std::int32_t v =
                             static_cast<std::int32_t>(static_cast<double>(src[c]) * 2147483647.0 / 255.0);
+                        std::memcpy(dstP, &v, sizeof(v));
                         break;
+                    }
                     case GL_FLOAT:
-                        reinterpret_cast<float*>(dest)[i * components + c] = normalized;
+                        std::memcpy(dstP, &normalized, sizeof(normalized));
                         break;
                     case GL_HALF_FLOAT: {
                         // Simple float-to-half conversion
@@ -9846,12 +9911,15 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                         if (exp <= 0) half = static_cast<std::uint16_t>(sign);
                         else if (exp >= 31) half = static_cast<std::uint16_t>(sign | 0x7C00);
                         else half = static_cast<std::uint16_t>(sign | (exp << 10) | mant);
-                        reinterpret_cast<std::uint16_t*>(dest)[i * components + c] = half;
+                        std::memcpy(dstP, &half, sizeof(half));
                         break;
                     }
                     default:
-                        dest[i * components * bpc + c] = src[c];
+                        dstP[0] = src[c];
                         break;
+                }
+                if (packSwapBytes) {
+                    Impl::swapPixelStoreBytes(dstP, bpc);
                 }
             }
         }
@@ -36799,6 +36867,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             // Honour PACK alignment / row-length / skip-* on the destination
             // side, mirroring the loop below.
             const auto& packStorePT = impl_->state->pixelStore();
+            const bool packSwapBytesPT = (packStorePT.packSwapBytes == GL_TRUE);
             const std::size_t dstRowStridePixelsPT = packStorePT.packRowLength > 0
                 ? static_cast<std::size_t>(packStorePT.packRowLength)
                 : static_cast<std::size_t>(texWidth);
@@ -36827,9 +36896,18 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 for (NSUInteger row = 0; row < texHeight; ++row) {
                     const NSUInteger srcRow = yFlipReadbackPT
                         ? (texHeight - 1 - row) : row;
-                    std::memcpy(destSlice + row * dstRowBytesAlignedPT,
-                                sliceRaw  + srcRow * srcRowBytesPT,
-                                texWidth * srcBpp);
+                    std::uint8_t* dstRow = destSlice + row * dstRowBytesAlignedPT;
+                    const std::uint8_t* srcRowData = sliceRaw + srcRow * srcRowBytesPT;
+                    if (!packSwapBytesPT) {
+                        std::memcpy(dstRow, srcRowData, texWidth * srcBpp);
+                    } else {
+                        for (NSUInteger col = 0; col < texWidth; ++col) {
+                            std::uint8_t* dstPixel = dstRow + col * dstPixelBytes;
+                            const std::uint8_t* srcPixel = srcRowData + col * srcBpp;
+                            std::memcpy(dstPixel, srcPixel, dstPixelBytes);
+                            Impl::swapPixelStoreBytes(dstPixel, dstPixelBytes);
+                        }
+                    }
                 }
             }
             return true;
@@ -36943,6 +37021,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
     // Respect GL PACK state for destination row layout (CTS
     // packed_pixels uses PACK_ALIGNMENT=4 with small textures).
     const auto& packStore = impl_->state->pixelStore();
+    const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
     const std::size_t dstRowStridePixels = packStore.packRowLength > 0
         ? static_cast<std::size_t>(packStore.packRowLength)
         : static_cast<std::size_t>(texWidth);
@@ -37131,6 +37210,9 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                         std::memset(dp, 0, dstPixelBytes);
                         break;
                 }
+                if (packSwapBytes) {
+                    Impl::swapPixelStoreBytes(dp, dstPixelBytes);
+                }
                 continue;
             }
 
@@ -37205,6 +37287,9 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                         dstP[0] = static_cast<std::uint8_t>(
                             std::max(0.0, std::min(255.0, v)));
                         break;
+                }
+                if (packSwapBytes) {
+                    Impl::swapPixelStoreBytes(dstP, dstBpc);
                 }
             }
         }
