@@ -6419,9 +6419,13 @@ struct GLContext::Impl {
             if (level == texture->levels.end() || !level->second.defined) {
                 return false;
             }
+            if (state->clipOrigin() == GL_LOWER_LEFT) {
+                texture->wasFramebufferRenderedTo = true;
+            }
             // Defer readback-orientation marking until scissor state is
-            // known below. Full-surface clears keep Metal-storage
-            // orientation; only scissor clears need the Y-unflip marker.
+            // known below. Full-surface clears need only the framebuffer
+            // readback marker above; only scissor clears need the
+            // glGetTexImage Y-unflip marker.
             // CKPT127 (Sprint 12 Phase 1 Day 1 — β4 root-cause fix): MS
             // textures cannot be cleared via the rgba8-shadow + replaceMetalTexture
             // path because (a) the CPU shadow only stores 1 sample's worth of data
@@ -7115,6 +7119,7 @@ struct GLContext::Impl {
         GLsizei sourceHeight = 0;
         NSUInteger metalMipLevel = 0;
         NSUInteger metalSlice = 0;
+        bool sourceNeedsFboYFlip = true;
 
         // For 3D textures, `attachment.layer` is a Z coordinate into
         // the texture region, not a Metal slice index. Track separately
@@ -7141,6 +7146,9 @@ struct GLContext::Impl {
             if (texture->metalTexture != nullptr) {
                 metalTex = (__bridge id<MTLTexture>)texture->metalTexture;
             }
+            sourceNeedsFboYFlip =
+                texture->wasFramebufferRenderedTo ||
+                texture->wasViewportRenderedTo;
             // If no Metal texture, try CPU shadow
             if (metalTex == nil) {
                 if (level->second.rgba8.empty()) return false;
@@ -7148,11 +7156,16 @@ struct GLContext::Impl {
                 GLsizei sourceLayer = texture->target == GL_TEXTURE_3D ? attachment.layer : 0;
                 if (sourceLayer < 0 || sourceLayer >= std::max<GLsizei>(level->second.desc.depth, 1))
                     return false;
+                const bool yFlipCpuReadback =
+                    sourceNeedsFboYFlip &&
+                    state->clipOrigin() != GL_UPPER_LEFT;
                 auto* out = static_cast<std::uint8_t*>(pixels);
                 for (GLsizei row = 0; row < height; ++row) {
                     for (GLsizei col = 0; col < width; ++col) {
                         const GLint srcX = x + col;
-                        const GLint srcY = y + row;
+                        const GLint glY = y + row;
+                        const GLint srcY = yFlipCpuReadback
+                            ? (sourceHeight - 1 - glY) : glY;
                         const std::size_t dstOffset = static_cast<std::size_t>(row * width + col) * 4u;
                         if (srcX < 0 || srcY < 0 || srcX >= sourceWidth || srcY >= sourceHeight) {
                             std::memset(out + dstOffset, 0, 4);
@@ -7300,17 +7313,13 @@ struct GLContext::Impl {
               mipmapLevel:metalMipLevel
                     slice:metalSlice];
 
-        // RC-A02: OpenGL framebuffer row 0 is at the bottom; Metal
-        // texture row 0 is at the top.  Flip Y during readback.
-        // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate readback Y-flip
-        // on the current `glClipControl` origin. When origin is
-        // GL_UPPER_LEFT the draw-time viewport descriptor's Y-flip is
-        // OFF (BONUS-1.2 gate), so Metal texture storage is in user's
-        // top-down convention — readback should NOT re-flip. Single-
-        // -state-snapshot per readback call (CONSERVATIVE scope: assumes
-        // draw-time clipOrigin == readback-time clipOrigin, which holds
-        // for the BONUS-1 target clip_control sub-tests).
-        const bool yFlipReadback = (state->clipOrigin() != GL_UPPER_LEFT);
+        // FBO readback Y-flips only when the attachment was actually
+        // rendered/cleared through an FBO producer under LOWER_LEFT.
+        // Texture-kind attachments use wasFramebufferRenderedTo here;
+        // glGetTexImage intentionally stays on wasViewportRenderedTo.
+        const bool yFlipReadback =
+            sourceNeedsFboYFlip &&
+            state->clipOrigin() != GL_UPPER_LEFT;
         auto* out = static_cast<std::uint8_t*>(pixels);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
@@ -8094,17 +8103,12 @@ struct GLContext::Impl {
         bool is3DTextureSrc = false;
         NSUInteger depthSlice3D = 0;
 
-        // Sprint 17 Day 7+ Bank-Group-B: track whether the source was
-        // viewport-rendered (Y-flipped at draw time) vs filled by a
-        // non-viewport mechanism (image_store from compute, blit from
-        // glTexSubImage, etc.). Only viewport-rendered storage needs
-        // the readback Y-flip; compute-image-store storage is already
-        // in the user's expected (top-down) row order. CTS
-        // `gpu_shader5.images_array_indexing` wires a R32UI texture to
-        // a framebuffer color attachment and reads it back through
-        // glReadPixels; pre-fix the cliporigin-only Y-flip mis-applied
-        // to the compute-written texture.
-        bool sourceWasViewportFlipped = true;  // default: treat as flipped
+        // FBO readback orientation is separate from texture-image
+        // readback. Renderbuffers are always FBO producers; texture
+        // attachments opt in via wasFramebufferRenderedTo, with the older
+        // wasViewportRenderedTo marker still honored for routed GS/cull
+        // producers.
+        bool sourceNeedsFboYFlip = true;  // renderbuffers default to FBO-produced
         if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
             const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
             if (!rb || !rb->storageDefined || rb->metalTexture == nullptr) return false;
@@ -8128,7 +8132,9 @@ struct GLContext::Impl {
             sourceHeight = static_cast<GLsizei>(metalTex.height >> metalMipLevel);
             if (sourceWidth < 1) sourceWidth = 1;
             if (sourceHeight < 1) sourceHeight = 1;
-            sourceWasViewportFlipped = tex->wasViewportRenderedTo;
+            sourceNeedsFboYFlip =
+                tex->wasFramebufferRenderedTo ||
+                tex->wasViewportRenderedTo;
         } else {
             return false;
         }
@@ -8390,16 +8396,12 @@ struct GLContext::Impl {
 
         auto* dest = static_cast<std::uint8_t*>(pixels);
 
-        // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate native-format
-        // FBO color readback Y-flip on current clipOrigin (sister to
-        // readColorAttachmentPixels gate above).
-        // Sprint 17 Day 7+ Bank-Group-B: also gate on source-was-
-        // viewport-flipped — texture-kind attachments written by
-        // compute image_store have storage in user's expected
-        // (top-down) row order already; double-flipping breaks
-        // CTS `gpu_shader5.images_array_indexing`.
+        // Native-format FBO readback uses the framebuffer marker for
+        // ordinary draw/clear producers, while still honoring the legacy
+        // viewport marker for routed GS/cull producers. glGetTexImage
+        // remains governed only by wasViewportRenderedTo.
         const bool yFlipNativeReadback =
-            sourceWasViewportFlipped &&
+            sourceNeedsFboYFlip &&
             (state->clipOrigin() != GL_UPPER_LEFT);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
@@ -28125,19 +28127,24 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
         if (fboName != 0) {
             if (GLFramebufferObject* fbo =
                     objects->framebuffers().get(fboName)) {
-                // Color-texture attachments need readback Y-unflip only
-                // for known GL Y-up producer paths: viewport-index-routed
-                // GS-emul draws and CPU cull-prepass filtered draws. Ordinary
-                // FBO draws such as DSA multisample storage and texture_barrier
-                // keep Metal-storage orientation end-to-end.
-                if (tdi.markColorAttachmentReadbackFlip) {
+                // Split the two color-texture readback contracts:
+                // ordinary LOWER_LEFT FBO draws mark framebuffer readback
+                // only, while viewport-routed GS/cull paths also mark the
+                // narrower glGetTexImage Y-unflip flag.
+                if (tdi.clipOrigin == GL_LOWER_LEFT ||
+                    tdi.markColorAttachmentReadbackFlip) {
                     for (const auto& kv : fbo->attachments) {
                         if (!isColorAttachment(kv.first)) continue;
                         if (kv.second.kind !=
                                 GLFramebufferAttachment::Kind::Texture) continue;
                         if (GLTextureObject* tex =
                                 objects->textures().get(kv.second.object)) {
-                            tex->wasViewportRenderedTo = true;
+                            if (tdi.clipOrigin == GL_LOWER_LEFT) {
+                                tex->wasFramebufferRenderedTo = true;
+                            }
+                            if (tdi.markColorAttachmentReadbackFlip) {
+                                tex->wasViewportRenderedTo = true;
+                            }
                         }
                     }
                 }

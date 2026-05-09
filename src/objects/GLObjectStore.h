@@ -234,6 +234,15 @@ struct GLTextureObject {
     // + texture_barrier). Moved to draw-time set gated on
     // routeViewportIndex active.
     bool wasViewportRenderedTo = false;
+    // Sister to wasViewportRenderedTo, but scoped to framebuffer readback.
+    // Set when this texture is rendered or cleared as a framebuffer color
+    // attachment under LOWER_LEFT clip origin. Consumed by
+    // readColorAttachmentPixels/readFBOColorNative so glReadPixels and
+    // blit-source reads undo the FBO producer's Y orientation. NOT consumed
+    // by glGetTexImage: DSA storage_multisample, texture_barrier, and
+    // copy_image keep texture-image readback on the narrower
+    // wasViewportRenderedTo contract above.
+    bool wasFramebufferRenderedTo = false;
 };
 
 struct GLSamplerObject {
