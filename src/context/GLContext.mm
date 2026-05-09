@@ -28514,13 +28514,28 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         tessProgram->hasTessellation &&
         tessProgram->metalTessTier != GLProgramObject::MetalTessTier::None &&
         !tessProgram->geometryEmulated) {
-        if (impl_->tryMetalTessellationDraw(
-                *tessProgram, tessProgramName, mode, count, first)) {
-            APPGL_LOG(DRAW, @"drawArrays metal-tess ok: count=%d first=%d",
-                      count, first);
-            return true;
+        const bool preferCpuTessSsboSideEffects =
+            tessProgram == program &&
+            (tessProgram->tessControlInterpreted ||
+             tessProgram->tessellationInterpreted) &&
+            (!tessProgram->tessControlReflection.storageBuffers.empty() ||
+             !tessProgram->tessEvalAsComputeReflection.storageBuffers.empty());
+        // TCS-SSBO routing: the Metal tess encoder currently binds only
+        // its internal tess buffers (factors, per-CP/per-patch, indirect
+        // params). Keep interpreted SSBO side effects on the CPU path,
+        // sister to the GS-emul SSBO resolver, until arbitrary tess-stage
+        // storage-buffer slots are plumbed through Metal.
+        if (preferCpuTessSsboSideEffects) {
+            APPGL_LOG(SHADER, @"drawArrays metal-tess skipped for interpreted tess SSBO side effects");
+        } else {
+            if (impl_->tryMetalTessellationDraw(
+                    *tessProgram, tessProgramName, mode, count, first)) {
+                APPGL_LOG(DRAW, @"drawArrays metal-tess ok: count=%d first=%d",
+                          count, first);
+                return true;
+            }
+            APPGL_LOG(SHADER, @"drawArrays metal-tess encode failed — falling back to CPU interpreter");
         }
-        APPGL_LOG(SHADER, @"drawArrays metal-tess encode failed — falling back to CPU interpreter");
     }
 
     if (program != nullptr &&
