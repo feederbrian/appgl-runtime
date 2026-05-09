@@ -90,20 +90,19 @@ insertion point.
 
 ## 4. Enablement gating
 
-The emulator is opt-in behind environment variables:
+Sprint 18 flips the emulator default-on. The environment variables are
+kept as explicit fallback switches:
 
 | Env var | Purpose |
 |---|---|
-| `APPGL_ENABLE_TESS_EMUL=1` | Flips `tessellationEmulated` / `tessellationInterpreted` on in `detectTessellationEmulatable`. Without this, the whole code path is dead — the legacy translated pipeline handles the draw (which produces no tessellation). |
-| `APPGL_ENABLE_TESS_EMUL_GLIN=1` | Admits TES / TCS bodies that read `gl_in[]` into the classifier. Without this, bodies with gl_in[] reads reject and fall back to the passthrough matcher or legacy. |
+| `APPGL_ENABLE_TESS_EMUL=0` | Forces the legacy translated-no-tess fallback instead of flipping `tessellationEmulated` / `tessellationInterpreted` in `detectTessellationEmulatable`. |
+| `APPGL_ENABLE_TESS_EMUL_GLIN=0` | Rejects TES / TCS bodies that read `gl_in[]`, restoring the pre-Sprint-18 classifier fallback. |
 | `APPGL_TESS_EMUL_DEBUG=1` | Stream-of-one-reason-per-draw bail diagnostics to stderr. |
 
-Phase 3f arc never flipped any of these to default-on. Reason:
-tess_shader.* correctness gaps that surface only on the interpreter
-path would look like regressions in the main sweep. The CE cluster
-(`APPGL_ENABLE_TESS_EMUL=1` → 1392/1392 pass) is the stable
-reference; flipping the default would expose those 448 wins to the
-main sweep.
+Phase 3f originally kept these opt-in because tess_shader.* correctness
+gaps surfaced only on the interpreter path. Sprint 18's cull_distance
+closure keeps the escape hatches while making the reachable interpreter
+path part of default coverage.
 
 ---
 
@@ -420,7 +419,7 @@ Chronological, each commit scoped narrowly:
 | 2ac7fb2 | 3f-2 | Interpreter dispatch + TES classifier |
 | 7d15574 | 3f-3 | SSBO byte-level plumbing (+448 CE: 944 → 1392) |
 | bcef5d3 | 3f-4 | TCS interpreter (Stage::TessControl) |
-| e7bbb32 | 3f-5 | gl_in[] infrastructure (opt-in gated) |
+| e7bbb32 | 3f-5 | gl_in[] infrastructure (originally opt-in gated) |
 | db3e2f8 | 3f-6 | User varying capture on interpreter path |
 | 08e4120 | 3f-7 | XFB capture via writeGsXfbAndCheckDiscard reuse |
 | 5e6ce84 | 3f-8 | TCS runtime tess-level capture |
@@ -433,11 +432,11 @@ Chronological, each commit scoped narrowly:
 | a6b0912 | 3f-15 | Graceful interpreter bail |
 
 Total: 15 commits, roughly 1500 LOC added to the shader/
-directory. Net delta visible at `APPGL_ENABLE_TESS_EMUL=1`:
-+448 CE tests (944→1392), +4 tess_shader tests (37→41). Behind
-`APPGL_ENABLE_TESS_EMUL_GLIN=1`: another +12 tess tests reachable
-(23→35), gated off until perf is sufficient to complete a full
-sweep inside the harness timeout.
+directory. Pre-Sprint-18, net delta was visible by setting
+`APPGL_ENABLE_TESS_EMUL=1`: +448 CE tests (944→1392), +4
+tess_shader tests (37→41). `APPGL_ENABLE_TESS_EMUL_GLIN=1`
+exposed another +12 tess tests (23→35). Sprint 18 made both paths
+default-on while keeping `=0` fallback switches.
 
 ---
 
@@ -446,8 +445,8 @@ sweep inside the harness timeout.
 Ranked by blast radius if ignored:
 
 1. **Perf on deep-glin cluster**: full tessellation_shader.*
-   sweep under APPGL_ENABLE_TESS_EMUL_GLIN=1 doesn't complete in
-   the CTS harness timeout. Phase 3f-11/3f-12 took the biggest
+   sweep through the default-on gl_in[] interpreter path may not
+   complete in the CTS harness timeout. Phase 3f-11/3f-12 took the biggest
    static costs out (reparse + uniform rebuild) but per-invocation
    body-walk dominates. Next targets: Interpreter reuse across
    invocations of the same patch (avoid initVariables rebuild),
@@ -520,24 +519,23 @@ hasn't fully enumerated these but the shapes suggest):
 
 ## 14. Testing / probing a change
 
-CE regression (should always stay at 100% with EMUL=1):
+CE regression (should always stay at 100%; `APPGL_ENABLE_TESS_EMUL=0`
+is now only for fallback attribution):
 ```
-APPGL_ENABLE_TESS_EMUL=1 \
-  DYLD_LIBRARY_PATH=appgl-runtime/build \
+DYLD_LIBRARY_PATH=appgl-runtime/build \
   specs/VK-GL-CTS/build-appgl/external/openglcts/modules/glcts \
   --deqp-case='KHR-GL46.constant_expressions.*' \
   --deqp-log-filename=/tmp/ce.qpa
 ```
 
-tess_shader baseline (41/140 @ 3f-9):
+tess_shader baseline (historically 41/140 @ 3f-9 with the emulator
+enabled by env; Sprint 18 runs this path by default):
 ```
-APPGL_ENABLE_TESS_EMUL=1 \
-  ... --deqp-case='KHR-GL46.tessellation_shader.*' ...
+... --deqp-case='KHR-GL46.tessellation_shader.*' ...
 ```
 
 Interpreter bail tracing:
 ```
-APPGL_ENABLE_TESS_EMUL=1 \
 APPGL_TESS_EMUL_DEBUG=1 \
   ... 2>&1 | grep 'tess-emul'
 ```
@@ -554,10 +552,11 @@ GS regression (always 120/136 — safety net):
 Points where the current design is the simplest thing that works
 but not obviously the right long-term choice:
 
-1. **Gated environment variables vs. a runtime capability bit**:
-   `APPGL_ENABLE_TESS_EMUL=1` is a blunt instrument. A runtime
-   "advertise tess capability" would let Apps decide per-frame,
-   but it's a bigger API change and nothing outside CTS uses tess.
+1. **Environment fallback switches vs. a runtime capability bit**:
+   `APPGL_ENABLE_TESS_EMUL=0` and `APPGL_ENABLE_TESS_EMUL_GLIN=0`
+   are coarse attribution tools. A runtime "advertise tess capability"
+   would let apps decide per-frame, but it's a bigger API change and
+   nothing outside CTS uses tess.
 
 2. **Per-invocation Interpreter vs. per-draw reuse**: phase 3f-11
    cached the parsed module; 3f-12 hoisted the uniform map. Further

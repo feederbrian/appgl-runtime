@@ -27915,7 +27915,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // VS path the GS emulator uses.
     //
     // Detection happened at link time. If detectTessellationEmulatable
-    // returned false (or APPGL_ENABLE_TESS_EMUL is unset), the flag
+    // returned false (or APPGL_ENABLE_TESS_EMUL=0 was set), the flag
     // stays false and this branch is a no-op — the draw falls through
     // to the legacy translated path (which doesn't actually tessellate,
     // same behaviour as before the emulator existed).

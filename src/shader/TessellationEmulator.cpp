@@ -80,6 +80,11 @@ std::uint8_t baseTypeForTessType(
     }
 }
 
+bool appglEnvEnabledDefaultOn(const char* name) {
+    const char* v = std::getenv(name);
+    return v == nullptr || (v[0] != '0' && v[0] != '\0');
+}
+
 // TES execution modes we can handle (GL 4.6 §11.2.3 Table 11.8):
 //   ExecutionModeTriangles    → barycentric (u,v,w) with u+v+w = 1
 //   ExecutionModeQuads        → (u,v) with 0 <= u,v <= 1
@@ -531,21 +536,14 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
     //     gl_PatchVerticesIn (14).
     //   - gl_in[] arrays: Input variable typed Array-of-Struct where
     //     the struct has at least one BuiltIn-decorated member
-    //     (i.e. a gl_PerVertex block). Gated by a secondary
-    //     `APPGL_ENABLE_TESS_EMUL_GLIN=1` opt-in so bodies that
-    //     touch gl_in[] don't auto-route through the interpreter
-    //     before we're confident the body's other ops (mix, vec4
-    //     arithmetic, OpVectorTimesScalar, etc.) all execute
-    //     correctly. Phase 3f-5 landed the plumbing; phase 3f-6+
-    //     enables the default once the ops catalogue is stress-
-    //     tested against the full tessellation_shader.* matrix.
+    //     (i.e. a gl_PerVertex block). Default-on in Sprint 18 after
+    //     the R2 cull_distance metadata fix; set
+    //     APPGL_ENABLE_TESS_EMUL_GLIN=0 to force the old fallback.
     // Reject per-patch Input varyings (non-array Input struct) and
     // location-decorated user inputs — those still need dedicated
     // plumbing.
-    static const bool glInEnabled = []() {
-        const char* v = std::getenv("APPGL_ENABLE_TESS_EMUL_GLIN");
-        return v != nullptr && v[0] != '0' && v[0] != '\0';
-    }();
+    static const bool glInEnabled =
+        appglEnvEnabledDefaultOn("APPGL_ENABLE_TESS_EMUL_GLIN");
     for (const auto& [varId, info] : module.variables) {
         if (info.storageClass != spv::StorageClassInput) continue;
         auto dIt = module.decorations.find(varId);
@@ -575,12 +573,12 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
         if (dIt != module.decorations.end() && dIt->second.isPatch) {
             continue;
         }
-        // Non-builtin, non-patch Input. Only the gl_in[] opt-in
-        // admits per-vertex input arrays.
+        // Non-builtin, non-patch Input. The default-on gl_in[] gate
+        // admits per-vertex input arrays unless explicitly disabled.
         if (!glInEnabled) {
             out.diagnostic = "non-builtin Input variable (id=" +
                              std::to_string(varId) + "): " + info.name +
-                             " (gl_in[] path gated by APPGL_ENABLE_TESS_EMUL_GLIN)";
+                             " (gl_in[] path disabled by APPGL_ENABLE_TESS_EMUL_GLIN=0)";
             return out;
         }
         auto tIt = module.types.find(info.typeId);
@@ -614,9 +612,9 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
         // only knew the struct-array seeding path. Component 6
         // (Day 24+) extends initVariables to handle scalar-array
         // seeding; this gate (Component 5) just admits the shape so
-        // the chain plumbing engages. Gated behind the existing
-        // APPGL_ENABLE_TESS_EMUL_GLIN=1 opt-in (already required for
-        // any non-builtin Input array). Inert by default.
+        // the chain plumbing engages. Default-on with the other
+        // non-builtin Input array support; APPGL_ENABLE_TESS_EMUL_GLIN=0
+        // restores the pre-Sprint-18 fallback.
         using K = appgl::interp::TypeInfo::Kind;
         const K eKind = eIt->second.kind;
         const bool isScalarArray =
@@ -642,8 +640,7 @@ TessBodyInterpretabilityCheck classifyTessEvalInterpretable(
         // shapes —
         //   (a) gl_PerVertex block — at least one BuiltIn member
         //       (gl_Position / gl_PointSize / gl_ClipDistance / etc).
-        //       Original Sprint 5 supported shape; gated by
-        //       APPGL_ENABLE_TESS_EMUL_GLIN.
+        //       Original Sprint 5 supported shape.
         //   (b) Interface block (GLSL `in BLOCK { ... } name[];`) —
         //       struct is decorated `Block`. CTS data_pass_through-
         //       class shape: `in OUT_TC { vec4 tc_position; ... }
@@ -725,14 +722,11 @@ TessBodyInterpretabilityCheck classifyTessControlInterpretable(
 
     // TCS admits gl_PrimitiveID (7), gl_InvocationID (8), and
     // gl_PatchVerticesIn (14) on Input. Phase 3f-10 adds gl_in[]
-    // (Array of gl_PerVertex-style struct with BuiltIn members)
-    // gated behind the same APPGL_ENABLE_TESS_EMUL_GLIN opt-in as
-    // the TES classifier's gl_in[] arm. Per-patch varyings
-    // (`patch in`) still reject.
-    static const bool glInEnabled = []() {
-        const char* v = std::getenv("APPGL_ENABLE_TESS_EMUL_GLIN");
-        return v != nullptr && v[0] != '0' && v[0] != '\0';
-    }();
+    // (Array of gl_PerVertex-style struct with BuiltIn members),
+    // default-on with the TES classifier's gl_in[] arm. Per-patch
+    // varyings (`patch in`) still reject.
+    static const bool glInEnabled =
+        appglEnvEnabledDefaultOn("APPGL_ENABLE_TESS_EMUL_GLIN");
     for (const auto& [varId, info] : module.variables) {
         if (info.storageClass != spv::StorageClassInput) continue;
         auto dIt = module.decorations.find(varId);
@@ -747,12 +741,12 @@ TessBodyInterpretabilityCheck classifyTessControlInterpretable(
             return out;
         }
         // Non-builtin Input. Accept only when it's an array-of-struct
-        // with a BuiltIn-decorated member (gl_in[] shape) AND the
-        // gl_in[] opt-in is set. Otherwise reject.
+        // with a BuiltIn-decorated member (gl_in[] shape) unless the
+        // default-on gl_in[] gate is explicitly disabled.
         if (!glInEnabled) {
             out.diagnostic = "TCS non-builtin Input variable (id=" +
                              std::to_string(varId) + "): " + info.name +
-                             " (gl_in[] path gated by APPGL_ENABLE_TESS_EMUL_GLIN)";
+                             " (gl_in[] path disabled by APPGL_ENABLE_TESS_EMUL_GLIN=0)";
             return out;
         }
         auto tIt = module.types.find(info.typeId);
@@ -802,7 +796,7 @@ TessBodyInterpretabilityCheck classifyTessControlInterpretable(
             return out;
         }
         // Accepted — gl_in[] gl_PerVertex block, user interface block,
-        // or member-Location-decorated array (opt-in enabled).
+        // or member-Location-decorated array.
     }
 
     // Same 4096-opcode body-size guard as the TES classifier.
@@ -1740,26 +1734,13 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
         program.linkLog += "\n[tess-emul] TES is passthrough — phase-2b candidate";
     }
 
-    // Phase-2c enablement gate (opt-in):
-    //   APPGL_ENABLE_TESS_EMUL=1 → flip tessellationEmulated for
-    //                               matched passthrough TES bodies.
-    //   unset (default)           → stay on the legacy translated-
-    //                               no-tess path (zero-regression).
-    //
-    // Opt-in-by-env is the safe rollout ramp — flipping for every
-    // matched program by default would route currently-passing
-    // tess draws through our phase-2a EmulatedDraw (positions in
-    // parametric [0,1] range rather than clip-space), which almost
-    // certainly regresses the 37/140 tess tests currently passing.
-    // Future iters will replace the position-only EmulatedDraw
-    // with a real TES body walk that produces meaningful output;
-    // once the replacement lands we can drop the env gate.
+    // Phase-2c enablement gate (default-on in Sprint 18):
+    //   unset / nonzero APPGL_ENABLE_TESS_EMUL → use the emulated TES path.
+    //   APPGL_ENABLE_TESS_EMUL=0               → force the legacy fallback.
     (void)isSupportedTessMode;
     if (tePass.matched) {
-        static const bool emulEnabled = []() {
-            const char* v = std::getenv("APPGL_ENABLE_TESS_EMUL");
-            return v != nullptr && v[0] != '0' && v[0] != '\0';
-        }();
+        static const bool emulEnabled =
+            appglEnvEnabledDefaultOn("APPGL_ENABLE_TESS_EMUL");
         if (emulEnabled) {
             program.tessellationEmulated = true;
             // Copy the phase-3c/3d position mapping onto the program so
@@ -1788,7 +1769,7 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
                 program.tessVaryings.push_back(std::move(slot));
             }
             program.linkLog +=
-                "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — passthrough TES enabled ("
+                "\n[tess-emul] TES emulation enabled — passthrough TES ("
                 + std::to_string(tePass.varyings.size()) + " user varyings)";
         }
     }
@@ -1797,11 +1778,9 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
     // try the wider interpretability classifier. Shapes that only
     // read gl_TessCoord / gl_PrimitiveID / gl_PatchVerticesIn can
     // run through the GSE Interpreter per generated vertex. Same
-    // env gate (APPGL_ENABLE_TESS_EMUL=1).
-    static const bool emulEnabled = []() {
-        const char* v = std::getenv("APPGL_ENABLE_TESS_EMUL");
-        return v != nullptr && v[0] != '0' && v[0] != '\0';
-    }();
+    // default-on APPGL_ENABLE_TESS_EMUL gate.
+    static const bool emulEnabled =
+        appglEnvEnabledDefaultOn("APPGL_ENABLE_TESS_EMUL");
     if (emulEnabled && !program.tessellationEmulated) {
         TessBodyInterpretabilityCheck teInterp =
             classifyTessEvalInterpretable(
@@ -1810,7 +1789,7 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
         if (teInterp.interpretable) {
             program.tessellationInterpreted = true;
             program.linkLog +=
-                "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — interpreter TES enabled";
+                "\n[tess-emul] TES emulation enabled — interpreter TES";
 
             // Phase 3f-6: populate program.tessVaryings from the TES's
             // Output varyings so the interpreter path emits matching
@@ -1879,7 +1858,7 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
         if (tcInterp.interpretable) {
             program.tessControlInterpreted = true;
             program.linkLog +=
-                "\n[tess-emul] APPGL_ENABLE_TESS_EMUL=1 — interpreter TCS enabled";
+                "\n[tess-emul] TES emulation enabled — interpreter TCS";
         }
         if (!tcInterp.interpretable && !tcInterp.diagnostic.empty()) {
             program.linkLog +=
@@ -2565,13 +2544,9 @@ EmulatedDraw emulateTessellationDraw(
         }
     }
 
-    // Phase-2c enablement gate: only return ok=true when the
-    // program's `tessellationEmulated` flag was flipped at link
-    // time (currently opt-in via APPGL_ENABLE_TESS_EMUL=1).
-    // Without the flag, stay on the legacy translated path so
-    // the 37 currently-passing tess tests aren't disrupted by a
-    // position-only CPU replacement that produces parametric-
-    // space positions instead of clip-space.
+    // Phase-2c enablement gate: only return ok=true when link-time
+    // detection flipped one of the tess-emul flags. APPGL_ENABLE_TESS_EMUL=0
+    // keeps the old legacy translated path for attribution/debugging.
     if (program.tessellationEmulated || program.tessellationInterpreted) {
         // Phase 3f-15: if any TES invocation bailed, the output is
         // incorrect by construction. Return ok=false so drawArrays
@@ -2604,7 +2579,7 @@ EmulatedDraw emulateTessellationDraw(
                    " output verts = " + std::to_string(d.vertexCount) +
                    " (topology=0x" +
                    std::to_string(static_cast<unsigned>(domainOut.topology)) +
-                   ") — phase-2c disabled (APPGL_ENABLE_TESS_EMUL unset)";
+                   ") — phase-2c disabled (APPGL_ENABLE_TESS_EMUL=0)";
     return d;
 }
 
