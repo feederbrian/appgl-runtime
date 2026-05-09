@@ -2323,7 +2323,8 @@ struct GLContext::Impl {
             if (!hasPerChannelDecoder) return false;
         }
 
-        if (mtlFmt == MTLPixelFormatRGB10A2Uint) {
+        if (mtlFmt == MTLPixelFormatRGB10A2Unorm ||
+            mtlFmt == MTLPixelFormatRGB10A2Uint) {
             outBpp = 4u;
             const std::size_t totalPixels = static_cast<std::size_t>(width)
                                           * static_cast<std::size_t>(height)
@@ -2347,6 +2348,9 @@ struct GLContext::Impl {
                 + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
             const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
 
+            // RGB10_A2 unorm needs native upload for component-source
+            // paths too; the RGBA8 shadow loses enough precision to fail
+            // packed_pixels' 10-bit gradient comparisons.
             const bool asInteger = (mtlFmt == MTLPixelFormatRGB10A2Uint);
             const bool isBGR  = (format == GL_BGR  || format == GL_BGR_INTEGER);
             const bool isBGRA = (format == GL_BGRA || format == GL_BGRA_INTEGER);
