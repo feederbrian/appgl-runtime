@@ -323,6 +323,10 @@ struct TranslatedDrawInfo {
     // stays default false in ShaderTranslator. Combining shader-side
     // and viewport-side flip would double-flip on UPPER_LEFT.
     GLenum clipOrigin = GL_LOWER_LEFT;
+    // True only when the caller knows this draw used a GL Y-up producer path
+    // under LOWER_LEFT clip origin, so texture readback must undo that
+    // viewport Y-flip. Ordinary FBO draws leave this false.
+    bool markColorAttachmentReadbackFlip = false;
 
     // GL 4.6 §14.5.1 / GL_SCISSOR_TEST. When enabled, fragments outside
     // the box are discarded. Metal has no separate "scissor enabled"

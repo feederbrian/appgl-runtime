@@ -6244,25 +6244,9 @@ struct GLContext::Impl {
             if (level == texture->levels.end() || !level->second.defined) {
                 return false;
             }
-            // Sprint 17 Day 9+/10+ Bank-Group-A-2 narrow-gate sister fix
-            // (regression-debt #6 viewport_array.scissor_clear via
-            // b56aa9c): mark this color-texture FBO attachment as
-            // viewport-rendered so subsequent glReadPixels /
-            // glGetTexImage Y-flips. Sister to Path B Y-flip widening
-            // (commit `9f17b5a`'s encodeTranslatedDrawAndMarkFbo
-            // wrapper) for draws — this covers clear-only paths (no
-            // draw). Gate on clipOrigin == GL_LOWER_LEFT preserves
-            // Bank-Group-A-1 + Bank-Group-B narrowing precedent.
-            // Pre-narrow `b56aa9c` (Sprint 17 Day 1 CKPT236) the
-            // binding-time set in `framebufferTexture` covered clear-
-            // only textures; post-narrow only routeViewportIndex
-            // draws set the flag, regressing CTS
-            // `viewport_array.scissor_clear` (uses glClear without
-            // glDraw; 16-layer 2D_ARRAY readback returned
-            // uninitialized -1 SInt sentinel).
-            if (state->clipOrigin() == GL_LOWER_LEFT) {
-                texture->wasViewportRenderedTo = true;
-            }
+            // Defer readback-orientation marking until scissor state is
+            // known below. Full-surface clears keep Metal-storage
+            // orientation; only scissor clears need the Y-unflip marker.
             // CKPT127 (Sprint 12 Phase 1 Day 1 — β4 root-cause fix): MS
             // textures cannot be cleared via the rgba8-shadow + replaceMetalTexture
             // path because (a) the CPU shadow only stores 1 sample's worth of data
@@ -6349,6 +6333,15 @@ struct GLContext::Impl {
             const bool clearScissorActive =
                 scgot > 0 &&
                 (scarr[0].enabled || state->isEnabled(GL_SCISSOR_TEST));
+            // Sprint 17 Day 9+/10+ Bank-Group-A-2 narrow-gate sister fix:
+            // clear-only viewport_array.scissor_clear writes a GL Y-up
+            // scissor rectangle into Metal-storage rows below, so readback
+            // must unflip. Do not mark full-surface clears: DSA multisample
+            // storage clears then overwrites the texture via ordinary draws,
+            // and a sticky flip flag corrupts the final glGetTexImage.
+            if (clearScissorActive && state->clipOrigin() == GL_LOWER_LEFT) {
+                texture->wasViewportRenderedTo = true;
+            }
             GLsizei scissorMinX = 0, scissorMaxX = sourceWidth;
             GLsizei scissorMinY = 0, scissorMaxY = sourceHeight;
             if (clearScissorActive) {
@@ -8593,15 +8586,8 @@ struct GLContext::Impl {
 
     // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — wrapper around
     // `frameGraph->encodeTranslatedDraw` that marks the bound draw FBO's
-    // colour-texture attachments as having been viewport-rendered. Required
-    // for `glReadPixels` / `glGetTexImage` to apply the correct GL bottom-
-    // up Y-flip on readback. Sister to the encodeEmulatedGsDraw set-site
-    // at GLContext.mm:27115 (gated on routeViewportIndex for GS-emul
-    // layered draws) but generalised: applies for all VS+FS legacy +
-    // dispatchCullFilteredDraw paths that render to colour-texture FBO
-    // attachments. Gate on `clipOrigin == GL_LOWER_LEFT` preserves the
-    // Bank-Group-A-1 + Bank-Group-B + Sprint 17 Day 1 CKPT236 narrowing
-    // precedent (compute / image_store / blit paths still bypass).
+    // colour-texture attachments when the caller opted into readback Y-unflip
+    // via TranslatedDrawInfo::markColorAttachmentReadbackFlip.
     bool encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi);
 
     // Metal-native tessellation draw path (Phase 2 of the metal-tess
@@ -27467,6 +27453,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     }
 
     populateTranslatedDrawFixedFunctionState(tdi, *state);
+    tdi.markColorAttachmentReadbackFlip =
+        routeViewportIndex && tdi.clipOrigin == GL_LOWER_LEFT;
     tdi.vertexMSL = &program.gsPassThroughVertexMSL;
     // Post-process the FS MSL to redirect `gl_PrimitiveID` reads
     // to a user varying when the GS wrote BuiltInPrimitiveId.
@@ -27615,6 +27603,8 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     tdi.indexType = GL_UNSIGNED_INT;
 
     populateTranslatedDrawFixedFunctionState(tdi, *state);
+    tdi.markColorAttachmentReadbackFlip =
+        (tdi.clipOrigin == GL_LOWER_LEFT);
     tdi.vertexMSL = &program.vertexMSL;
     tdi.fragmentMSL = &program.fragmentMSL;
     tdi.vertexReflection = &program.vertexReflection;
@@ -27742,10 +27732,12 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
         if (fboName != 0) {
             if (GLFramebufferObject* fbo =
                     objects->framebuffers().get(fboName)) {
-                // Color-texture attachments — Y-flip widening per
-                // 9f17b5a (gated on clipOrigin == GL_LOWER_LEFT to
-                // preserve Bank-Group-A-1 + B narrowing).
-                if (state->clipOrigin() == GL_LOWER_LEFT) {
+                // Color-texture attachments need readback Y-unflip only
+                // for known GL Y-up producer paths: viewport-index-routed
+                // GS-emul draws and CPU cull-prepass filtered draws. Ordinary
+                // FBO draws such as DSA multisample storage and texture_barrier
+                // keep Metal-storage orientation end-to-end.
+                if (tdi.markColorAttachmentReadbackFlip) {
                     for (const auto& kv : fbo->attachments) {
                         if (!isColorAttachment(kv.first)) continue;
                         if (kv.second.kind !=
