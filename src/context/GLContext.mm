@@ -480,6 +480,18 @@ bool isStencilFormat(GLenum internalFormat) {
     }
 }
 
+bool isTexture3DRGTCFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_COMPRESSED_RED_RGTC1:
+        case GL_COMPRESSED_SIGNED_RED_RGTC1:
+        case GL_COMPRESSED_RG_RGTC2:
+        case GL_COMPRESSED_SIGNED_RG_RGTC2:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool isColorFormat(GLenum internalFormat) {
     return !isDepthFormat(internalFormat) && !isStencilFormat(internalFormat);
 }
@@ -12601,9 +12613,11 @@ bool GLContext::texImage(
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    const GLenum internalFormatEnum = static_cast<GLenum>(internalformat);
     if (target == GL_TEXTURE_3D &&
-        (isDepthFormat(static_cast<GLenum>(internalformat)) ||
-         isStencilFormat(static_cast<GLenum>(internalformat)))) {
+        (isDepthFormat(internalFormatEnum) ||
+         isStencilFormat(internalFormatEnum) ||
+         isTexture3DRGTCFormat(internalFormatEnum))) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
