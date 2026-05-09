@@ -9824,6 +9824,80 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
         if (impl_->frameGraph != nullptr) {
             impl_->frameGraph->flushForReadback();
         }
+        if (isDepthStencilReadback) {
+            const std::size_t pixelCount =
+                static_cast<std::size_t>(width) *
+                static_cast<std::size_t>(height);
+            std::vector<GLfloat> depthStage(pixelCount);
+            std::vector<std::uint8_t> stencilStage(pixelCount);
+            if (!impl_->readFramebufferPixels(GL_DEPTH_COMPONENT, x, y,
+                                              width, height,
+                                              depthStage.data()) ||
+                !impl_->readFramebufferPixels(GL_STENCIL_INDEX, x, y,
+                                              width, height,
+                                              stencilStage.data())) {
+                pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+                return false;
+            }
+
+            auto clamp01 = [](float v) {
+                return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            };
+            const std::size_t dstPixelBytes = bytesPerPixel(format, type);
+            const auto& packStore = impl_->state->pixelStore();
+            const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+            const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+                ? static_cast<std::size_t>(packStore.packRowLength)
+                : static_cast<std::size_t>(width);
+            const std::size_t dstRowBytes = alignByteCount(
+                dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+            auto* outBytes = static_cast<std::uint8_t*>(pixels)
+                + static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes
+                + static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+            if (type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV) {
+                for (GLsizei row = 0; row < height; ++row) {
+                    for (GLsizei col = 0; col < width; ++col) {
+                        const std::size_t i =
+                            static_cast<std::size_t>(row) *
+                            static_cast<std::size_t>(width) +
+                            static_cast<std::size_t>(col);
+                        std::uint8_t* dst = outBytes
+                            + static_cast<std::size_t>(row) * dstRowBytes
+                            + static_cast<std::size_t>(col) * dstPixelBytes;
+                        const float d = depthStage[i];
+                        const std::uint32_t stencilSlot =
+                            static_cast<std::uint32_t>(stencilStage[i]);
+                        std::memcpy(dst, &d, 4);
+                        std::memcpy(dst + 4, &stencilSlot, 4);
+                        if (packSwapBytes) {
+                            Impl::swapPixelStoreBytes(dst, dstPixelBytes);
+                        }
+                    }
+                }
+            } else {
+                for (GLsizei row = 0; row < height; ++row) {
+                    for (GLsizei col = 0; col < width; ++col) {
+                        const std::size_t i =
+                            static_cast<std::size_t>(row) *
+                            static_cast<std::size_t>(width) +
+                            static_cast<std::size_t>(col);
+                        std::uint8_t* dst = outBytes
+                            + static_cast<std::size_t>(row) * dstRowBytes
+                            + static_cast<std::size_t>(col) * dstPixelBytes;
+                        const float d = clamp01(depthStage[i]);
+                        const std::uint32_t depth24 =
+                            static_cast<std::uint32_t>(d * 16777215.0f + 0.5f) & 0x00FFFFFF;
+                        const std::uint32_t packed =
+                            (depth24 << 8) | static_cast<std::uint32_t>(stencilStage[i]);
+                        std::memcpy(dst, &packed, 4);
+                        if (packSwapBytes) {
+                            Impl::swapPixelStoreBytes(dst, dstPixelBytes);
+                        }
+                    }
+                }
+            }
+            return true;
+        }
         if (isDepthReadback || isStencilReadback) {
             // readFramebufferPixels writes 1 byte per stencil value or 4
             // bytes per depth float. When the caller requests a wider
@@ -9833,34 +9907,47 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
             const std::size_t pixelCount =
                 static_cast<std::size_t>(width) *
                 static_cast<std::size_t>(height);
-            if (isStencilReadback && type != GL_UNSIGNED_BYTE && type != GL_BYTE) {
+            const std::size_t dstPixelBytes =
+                std::max<std::size_t>(bytesPerComponent(type), 1);
+            const auto& packStore = impl_->state->pixelStore();
+            const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+            const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+                ? static_cast<std::size_t>(packStore.packRowLength)
+                : static_cast<std::size_t>(width);
+            const std::size_t dstRowBytes = alignByteCount(
+                dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+            auto* outBytes = static_cast<std::uint8_t*>(pixels)
+                + static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes
+                + static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
+            if (isStencilReadback) {
                 std::vector<std::uint8_t> stage(pixelCount);
                 if (!impl_->readFramebufferPixels(format, x, y, width, height,
                                                   stage.data())) {
                     pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
                     return false;
                 }
-                const std::size_t bpc = std::max<std::size_t>(bytesPerComponent(type), 1);
-                auto* out = static_cast<std::uint8_t*>(pixels);
-                for (std::size_t i = 0; i < pixelCount; ++i) {
-                    std::uint8_t v = stage[i];
-                    std::uint8_t* slot = out + i * bpc;
-                    // Little-endian write: low byte holds the stencil
-                    // value, high bytes are zero. All scalar GL types
-                    // at bpc >= 2 read the stencil as its LSB.
-                    std::memset(slot, 0, bpc);
-                    if (type == GL_SHORT || type == GL_INT) {
-                        // Signed types: cast unsigned-to-signed in the
-                        // low byte; stencil values [0, 255] fit in the
-                        // non-negative half of any signed type.
-                        slot[0] = v;
-                    } else {
-                        slot[0] = v;
+                for (GLsizei row = 0; row < height; ++row) {
+                    for (GLsizei col = 0; col < width; ++col) {
+                        const std::size_t i =
+                            static_cast<std::size_t>(row) *
+                            static_cast<std::size_t>(width) +
+                            static_cast<std::size_t>(col);
+                        std::uint8_t* slot = outBytes
+                            + static_cast<std::size_t>(row) * dstRowBytes
+                            + static_cast<std::size_t>(col) * dstPixelBytes;
+                        // Little-endian write: low byte holds the stencil
+                        // value, high bytes are zero. All scalar GL types
+                        // at bpc >= 2 read the stencil as its LSB.
+                        std::memset(slot, 0, dstPixelBytes);
+                        slot[0] = stage[i];
+                        if (packSwapBytes) {
+                            Impl::swapPixelStoreBytes(slot, dstPixelBytes);
+                        }
                     }
                 }
                 return true;
             }
-            if (isDepthReadback && type != GL_FLOAT) {
+            if (isDepthReadback) {
                 // readDepthAttachmentPixels writes 4-byte GLfloat per pixel.
                 // When the caller requests a narrower or wider integer type
                 // (e.g. GL_UNSIGNED_SHORT for DEPTH_COMPONENT16 readback), we
@@ -9875,87 +9962,87 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                 auto clamp01 = [](float v) {
                     return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
                 };
-                auto* outBytes = static_cast<std::uint8_t*>(pixels);
-                const bool packSwapBytes = (impl_->state->pixelStore().packSwapBytes == GL_TRUE);
-                for (std::size_t i = 0; i < pixelCount; ++i) {
-                    const float d = clamp01(stage[i]);
-                    std::uint8_t* out = outBytes + i * bytesPerComponent(type);
-                    switch (type) {
-                        case GL_UNSIGNED_BYTE: {
-                            const std::uint8_t v =
-                                static_cast<std::uint8_t>(d * 255.0f + 0.5f);
-                            std::memcpy(out, &v, 1);
-                            break;
-                        }
-                        case GL_BYTE: {
-                            const std::int8_t v =
-                                static_cast<std::int8_t>(d * 127.0f + 0.5f);
-                            std::memcpy(out, &v, 1);
-                            break;
-                        }
-                        case GL_UNSIGNED_SHORT: {
-                            const std::uint16_t v =
-                                static_cast<std::uint16_t>(d * 65535.0f + 0.5f);
-                            std::memcpy(out, &v, 2);
-                            break;
-                        }
-                        case GL_SHORT: {
-                            const std::int16_t v =
-                                static_cast<std::int16_t>(d * 32767.0f + 0.5f);
-                            std::memcpy(out, &v, 2);
-                            break;
-                        }
-                        case GL_UNSIGNED_INT: {
-                            const std::uint32_t v = static_cast<std::uint32_t>(
-                                static_cast<double>(d) * 4294967295.0 + 0.5);
-                            std::memcpy(out, &v, 4);
-                            break;
-                        }
-                        case GL_INT: {
-                            const std::int32_t v = static_cast<std::int32_t>(
-                                static_cast<double>(d) * 2147483647.0 + 0.5);
-                            std::memcpy(out, &v, 4);
-                            break;
-                        }
-                        case GL_HALF_FLOAT: {
-                            // IEEE-754 binary16 encoding (round-to-nearest,
-                            // ties-to-even via the rounding-bias trick).
-                            std::uint32_t f;
-                            std::memcpy(&f, &d, 4);
-                            const std::uint32_t sign = (f >> 16) & 0x8000;
-                            std::int32_t exp = static_cast<std::int32_t>((f >> 23) & 0xFF) - 127 + 15;
-                            std::uint32_t mant = f & 0x7FFFFF;
-                            std::uint16_t h;
-                            if (exp <= 0) {
-                                h = static_cast<std::uint16_t>(sign);
-                            } else if (exp >= 31) {
-                                h = static_cast<std::uint16_t>(sign | 0x7C00);
-                            } else {
-                                h = static_cast<std::uint16_t>(
-                                    sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
+                for (GLsizei row = 0; row < height; ++row) {
+                    for (GLsizei col = 0; col < width; ++col) {
+                        const std::size_t i =
+                            static_cast<std::size_t>(row) *
+                            static_cast<std::size_t>(width) +
+                            static_cast<std::size_t>(col);
+                        const float d = clamp01(stage[i]);
+                        std::uint8_t* out = outBytes
+                            + static_cast<std::size_t>(row) * dstRowBytes
+                            + static_cast<std::size_t>(col) * dstPixelBytes;
+                        switch (type) {
+                            case GL_UNSIGNED_BYTE: {
+                                const std::uint8_t v =
+                                    static_cast<std::uint8_t>(d * 255.0f + 0.5f);
+                                std::memcpy(out, &v, 1);
+                                break;
                             }
-                            std::memcpy(out, &h, 2);
-                            break;
+                            case GL_BYTE: {
+                                const std::int8_t v =
+                                    static_cast<std::int8_t>(d * 127.0f + 0.5f);
+                                std::memcpy(out, &v, 1);
+                                break;
+                            }
+                            case GL_UNSIGNED_SHORT: {
+                                const std::uint16_t v =
+                                    static_cast<std::uint16_t>(d * 65535.0f + 0.5f);
+                                std::memcpy(out, &v, 2);
+                                break;
+                            }
+                            case GL_SHORT: {
+                                const std::int16_t v =
+                                    static_cast<std::int16_t>(d * 32767.0f + 0.5f);
+                                std::memcpy(out, &v, 2);
+                                break;
+                            }
+                            case GL_UNSIGNED_INT: {
+                                const std::uint32_t v = static_cast<std::uint32_t>(
+                                    static_cast<double>(d) * 4294967295.0 + 0.5);
+                                std::memcpy(out, &v, 4);
+                                break;
+                            }
+                            case GL_INT: {
+                                const std::int32_t v = static_cast<std::int32_t>(
+                                    static_cast<double>(d) * 2147483647.0 + 0.5);
+                                std::memcpy(out, &v, 4);
+                                break;
+                            }
+                            case GL_FLOAT: {
+                                std::memcpy(out, &d, 4);
+                                break;
+                            }
+                            case GL_HALF_FLOAT: {
+                                // IEEE-754 binary16 encoding (round-to-nearest,
+                                // ties-to-even via the rounding-bias trick).
+                                std::uint32_t f;
+                                std::memcpy(&f, &d, 4);
+                                const std::uint32_t sign = (f >> 16) & 0x8000;
+                                std::int32_t exp = static_cast<std::int32_t>((f >> 23) & 0xFF) - 127 + 15;
+                                std::uint32_t mant = f & 0x7FFFFF;
+                                std::uint16_t h;
+                                if (exp <= 0) {
+                                    h = static_cast<std::uint16_t>(sign);
+                                } else if (exp >= 31) {
+                                    h = static_cast<std::uint16_t>(sign | 0x7C00);
+                                } else {
+                                    h = static_cast<std::uint16_t>(
+                                        sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
+                                }
+                                std::memcpy(out, &h, 2);
+                                break;
+                            }
+                            default:
+                                break;
                         }
-                        default: {
-                            // Packed types and unknowns: leave the slot
-                            // untouched. isFormatTypeCompatible filters
-                            // illegal combos earlier; this branch is
-                            // defensive only.
-                            break;
+                        if (packSwapBytes) {
+                            Impl::swapPixelStoreBytes(out, dstPixelBytes);
                         }
-                    }
-                    if (packSwapBytes) {
-                        Impl::swapPixelStoreBytes(out, bytesPerComponent(type));
                     }
                 }
                 return true;
             }
-            if (!impl_->readFramebufferPixels(format, x, y, width, height, pixels)) {
-                pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
-                return false;
-            }
-            return true;
         }
         // Try native-format readback first (preserves full precision for
         // R32F, RGBA32F, integer formats, etc.).
@@ -12512,6 +12599,12 @@ bool GLContext::texImage(
     if ((target == GL_TEXTURE_1D && (height != 1 || depth != 1))
         || (target == GL_TEXTURE_2D && depth != 1)) {
         pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (target == GL_TEXTURE_3D &&
+        (isDepthFormat(static_cast<GLenum>(internalformat)) ||
+         isStencilFormat(static_cast<GLenum>(internalformat)))) {
+        pushError(GL_INVALID_OPERATION);
         return false;
     }
     // GL 4.6 §8.5 — GL_TEXTURE_CUBE_MAP_ARRAY storage must be
@@ -36739,9 +36832,25 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                     default: return 0.0f;
                 }
             };
-            auto* outBytes = static_cast<std::uint8_t*>(pixels);
             const std::size_t pixCount = static_cast<std::size_t>(texWidth) *
                                          static_cast<std::size_t>(texHeight);
+            const std::size_t dstPixelBytes =
+                std::max<std::size_t>(bytesPerComponent(type), 1);
+            const auto& packStore = impl_->state->pixelStore();
+            const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+            const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+                ? static_cast<std::size_t>(packStore.packRowLength)
+                : static_cast<std::size_t>(texWidth);
+            const std::size_t dstRowBytes = alignByteCount(
+                dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+            const std::size_t dstSliceBytes = dstRowBytes *
+                (packStore.packImageHeight > 0
+                 ? static_cast<std::size_t>(packStore.packImageHeight)
+                 : static_cast<std::size_t>(texHeight));
+            auto* outBytes = static_cast<std::uint8_t*>(pixels)
+                + static_cast<std::size_t>(packStore.packSkipImages) * dstSliceBytes
+                + static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes
+                + static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
             auto clamp01 = [](float v) {
                 return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             };
@@ -36756,45 +36865,46 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                     const NSUInteger srcRow = yFlipReadbackDS
                         ? (texHeight - 1 - row) : row;
                     for (NSUInteger col = 0; col < texWidth; ++col) {
-                        const std::size_t i =
-                            static_cast<std::size_t>(slice) * pixCount +
-                            static_cast<std::size_t>(row) * texWidth + col;
+                        std::uint8_t* dst = outBytes
+                            + static_cast<std::size_t>(slice) * dstSliceBytes
+                            + static_cast<std::size_t>(row) * dstRowBytes
+                            + static_cast<std::size_t>(col) * dstPixelBytes;
                         const float d = clamp01(readDepthFloat(slice, col, srcRow));
                         switch (type) {
                             case GL_UNSIGNED_BYTE: {
                                 const std::uint8_t v = static_cast<std::uint8_t>(d * 255.0f + 0.5f);
-                                std::memcpy(outBytes + i, &v, 1);
+                                std::memcpy(dst, &v, 1);
                                 break;
                             }
                             case GL_BYTE: {
                                 const std::int8_t v = static_cast<std::int8_t>(d * 127.0f + 0.5f);
-                                std::memcpy(outBytes + i, &v, 1);
+                                std::memcpy(dst, &v, 1);
                                 break;
                             }
                             case GL_UNSIGNED_SHORT: {
                                 const std::uint16_t v = static_cast<std::uint16_t>(d * 65535.0f + 0.5f);
-                                std::memcpy(outBytes + i * 2, &v, 2);
+                                std::memcpy(dst, &v, 2);
                                 break;
                             }
                             case GL_SHORT: {
                                 const std::int16_t v = static_cast<std::int16_t>(d * 32767.0f + 0.5f);
-                                std::memcpy(outBytes + i * 2, &v, 2);
+                                std::memcpy(dst, &v, 2);
                                 break;
                             }
                             case GL_UNSIGNED_INT: {
                                 const std::uint32_t v = static_cast<std::uint32_t>(
                                     static_cast<double>(d) * 4294967295.0 + 0.5);
-                                std::memcpy(outBytes + i * 4, &v, 4);
+                                std::memcpy(dst, &v, 4);
                                 break;
                             }
                             case GL_INT: {
                                 const std::int32_t v = static_cast<std::int32_t>(
                                     static_cast<double>(d) * 2147483647.0 + 0.5);
-                                std::memcpy(outBytes + i * 4, &v, 4);
+                                std::memcpy(dst, &v, 4);
                                 break;
                             }
                             case GL_FLOAT: {
-                                std::memcpy(outBytes + i * 4, &d, 4);
+                                std::memcpy(dst, &d, 4);
                                 break;
                             }
                             case GL_HALF_FLOAT: {
@@ -36807,7 +36917,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                                 else if (exp >= 31) h = static_cast<std::uint16_t>(sign | 0x7C00);
                                 else h = static_cast<std::uint16_t>(
                                     sign | (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13));
-                                std::memcpy(outBytes + i * 2, &h, 2);
+                                std::memcpy(dst, &h, 2);
                                 break;
                             }
                             default:
@@ -36818,6 +36928,9 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                                 // types is filtered by isFormatType-
                                 // Compatible upstream.)
                                 break;
+                        }
+                        if (packSwapBytes) {
+                            Impl::swapPixelStoreBytes(dst, dstPixelBytes);
                         }
                     }
                 }
@@ -36913,11 +37026,24 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                            static_cast<float>(0x00FFFFFF);
                 }
             };
-            auto* outBytes = static_cast<std::uint8_t*>(pixels);
             const std::size_t pixCount = static_cast<std::size_t>(texWidth) *
                                          static_cast<std::size_t>(texHeight);
-            const std::size_t totalPixCount =
-                pixCount * static_cast<std::size_t>(numSlices);
+            const std::size_t dstPixelBytes = bytesPerPixel(format, type);
+            const auto& packStore = impl_->state->pixelStore();
+            const bool packSwapBytes = (packStore.packSwapBytes == GL_TRUE);
+            const std::size_t dstRowStridePixels = packStore.packRowLength > 0
+                ? static_cast<std::size_t>(packStore.packRowLength)
+                : static_cast<std::size_t>(texWidth);
+            const std::size_t dstRowBytes = alignByteCount(
+                dstRowStridePixels * dstPixelBytes, packStore.packAlignment);
+            const std::size_t dstSliceBytes = dstRowBytes *
+                (packStore.packImageHeight > 0
+                 ? static_cast<std::size_t>(packStore.packImageHeight)
+                 : static_cast<std::size_t>(texHeight));
+            auto* outBytes = static_cast<std::uint8_t*>(pixels)
+                + static_cast<std::size_t>(packStore.packSkipImages) * dstSliceBytes
+                + static_cast<std::size_t>(packStore.packSkipRows) * dstRowBytes
+                + static_cast<std::size_t>(packStore.packSkipPixels) * dstPixelBytes;
             auto clamp01 = [](float v) {
                 return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             };
@@ -36941,23 +37067,51 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 //   float depth (4 bytes), uint32 stencil-in-low-8 (4 bytes).
                 // Output layout matches GLSL's struct-of-arrays semantic;
                 // we just emit raw 8-byte slot per texel.
-                for (std::size_t i = 0; i < totalPixCount; ++i) {
-                    const float d = readDepthFloat(i);
-                    const std::uint32_t stencilSlot =
-                        static_cast<std::uint32_t>(stencilBytes[i]);
-                    std::memcpy(outBytes + i * 8, &d, 4);
-                    std::memcpy(outBytes + i * 8 + 4, &stencilSlot, 4);
+                for (NSUInteger slice = 0; slice < numSlices; ++slice) {
+                    for (NSUInteger row = 0; row < texHeight; ++row) {
+                        for (NSUInteger col = 0; col < texWidth; ++col) {
+                            const std::size_t i =
+                                static_cast<std::size_t>(slice) * pixCount +
+                                static_cast<std::size_t>(row) * texWidth + col;
+                            std::uint8_t* dst = outBytes
+                                + static_cast<std::size_t>(slice) * dstSliceBytes
+                                + static_cast<std::size_t>(row) * dstRowBytes
+                                + static_cast<std::size_t>(col) * dstPixelBytes;
+                            const float d = readDepthFloat(i);
+                            const std::uint32_t stencilSlot =
+                                static_cast<std::uint32_t>(stencilBytes[i]);
+                            std::memcpy(dst, &d, 4);
+                            std::memcpy(dst + 4, &stencilSlot, 4);
+                            if (packSwapBytes) {
+                                Impl::swapPixelStoreBytes(dst, dstPixelBytes);
+                            }
+                        }
+                    }
                 }
             } else {
                 // GL_UNSIGNED_INT_24_8 (4 bytes per texel, depth in high
                 // 24 bits, stencil in low 8 bits per Table 8.5).
-                for (std::size_t i = 0; i < totalPixCount; ++i) {
-                    const float d = clamp01(readDepthFloat(i));
-                    const std::uint32_t depth24 =
-                        static_cast<std::uint32_t>(d * 16777215.0f + 0.5f) & 0x00FFFFFF;
-                    const std::uint8_t stencil8 = stencilBytes[i];
-                    const std::uint32_t packed = (depth24 << 8) | stencil8;
-                    std::memcpy(outBytes + i * 4, &packed, 4);
+                for (NSUInteger slice = 0; slice < numSlices; ++slice) {
+                    for (NSUInteger row = 0; row < texHeight; ++row) {
+                        for (NSUInteger col = 0; col < texWidth; ++col) {
+                            const std::size_t i =
+                                static_cast<std::size_t>(slice) * pixCount +
+                                static_cast<std::size_t>(row) * texWidth + col;
+                            std::uint8_t* dst = outBytes
+                                + static_cast<std::size_t>(slice) * dstSliceBytes
+                                + static_cast<std::size_t>(row) * dstRowBytes
+                                + static_cast<std::size_t>(col) * dstPixelBytes;
+                            const float d = clamp01(readDepthFloat(i));
+                            const std::uint32_t depth24 =
+                                static_cast<std::uint32_t>(d * 16777215.0f + 0.5f) & 0x00FFFFFF;
+                            const std::uint8_t stencil8 = stencilBytes[i];
+                            const std::uint32_t packed = (depth24 << 8) | stencil8;
+                            std::memcpy(dst, &packed, 4);
+                            if (packSwapBytes) {
+                                Impl::swapPixelStoreBytes(dst, dstPixelBytes);
+                            }
+                        }
+                    }
                 }
             }
             return true;
