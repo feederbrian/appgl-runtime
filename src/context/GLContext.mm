@@ -2506,6 +2506,68 @@ struct GLContext::Impl {
         MTLPixelFormat mtlFmt = metalRenderbufferFormat(internalFormat);
         if (mtlFmt == MTLPixelFormatInvalid) return false;
 
+        // Sprint 18 texture_repeat_mode.depth24_stencil8: D24S8 native
+        // upload, sister to the existing Depth16/Depth32 native depth
+        // upload path. GL packs depth in high 24 bits and stencil in
+        // low 8; preserve the R3A/R3C pixel-store row/skip/swap
+        // discipline while keeping c196254 readback split-markers
+        // untouched. Without native bytes replaceMetalTexture allocates
+        // a shader-readable depth-stencil texture with empty levels, so
+        // sampler2DShadow compare reads fail every repeat-wrap variant.
+        if (internalFormat == GL_DEPTH24_STENCIL8 &&
+            format == GL_DEPTH_STENCIL &&
+            type == GL_UNSIGNED_INT_24_8 &&
+            (mtlFmt == MTLPixelFormatDepth32Float_Stencil8 ||
+             mtlFmt == MTLPixelFormatDepth24Unorm_Stencil8)) {
+            outBpp = (mtlFmt == MTLPixelFormatDepth32Float_Stencil8) ? 8u : 4u;
+            const std::size_t totalPixels = static_cast<std::size_t>(width)
+                                          * static_cast<std::size_t>(height)
+                                          * static_cast<std::size_t>(depth);
+            nativeData.assign(totalPixels * outBpp, 0);
+            if (pixels == nullptr || totalPixels == 0) return true;
+
+            const auto& store = state->pixelStore();
+            const bool unpackSwapBytes = (store.unpackSwapBytes == GL_TRUE);
+            constexpr std::size_t srcPixelBytes = 4u;
+            const std::size_t sourceWidth  = static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
+            const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
+            const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
+            const std::size_t imageBytes   = rowBytes * sourceHeight;
+            const std::size_t sourceOffset =
+                static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
+                + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
+            const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
+
+            for (GLsizei z = 0; z < depth; ++z) {
+                for (GLsizei y = 0; y < height; ++y) {
+                    const std::uint8_t* srcRow =
+                        source + static_cast<std::size_t>(z) * imageBytes
+                               + static_cast<std::size_t>(y) * rowBytes;
+                    std::uint8_t* dstRow = nativeData.data()
+                        + (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                           + static_cast<std::size_t>(y))
+                          * static_cast<std::size_t>(width) * outBpp;
+                    for (GLsizei x = 0; x < width; ++x) {
+                        const std::uint8_t* srcPixel = srcRow + static_cast<std::size_t>(x) * srcPixelBytes;
+                        std::uint8_t* dstPixel = dstRow + static_cast<std::size_t>(x) * outBpp;
+                        const std::uint32_t packed = readU32Value(srcPixel, unpackSwapBytes);
+                        const std::uint32_t depth24 = (packed >> 8) & 0x00FFFFFFu;
+                        const std::uint32_t stencil = packed & 0x000000FFu;
+                        if (mtlFmt == MTLPixelFormatDepth32Float_Stencil8) {
+                            const float depth32 = static_cast<float>(depth24) / static_cast<float>(0x00FFFFFFu);
+                            std::memcpy(dstPixel, &depth32, sizeof(depth32));
+                            std::memcpy(dstPixel + 4, &stencil, sizeof(stencil));
+                        } else {
+                            const std::uint32_t metalPacked = depth24 | (stencil << 24);
+                            std::memcpy(dstPixel, &metalPacked, sizeof(metalPacked));
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
         // GL 4.6 §8.5.2 Table 8.13: when the source packed type maps to
         // the Metal native layout, we can skip the per-channel decode and
         // upload 4-byte words (with PIXEL_STORE skip logic applied). The
@@ -3211,6 +3273,105 @@ struct GLContext::Impl {
         return {buf->shadowBytes.data() + offset, true};
     }
 
+    bool blitUpload2DRegion(id<MTLTexture> destination,
+                            id<MTLBlitCommandEncoder> blit,
+                            const std::uint8_t* bytes,
+                            NSUInteger bytesPerRow,
+                            NSUInteger bytesPerImage,
+                            const MTLRegion& region,
+                            NSUInteger mipLevel,
+                            NSUInteger slice,
+                            std::size_t sourceBpp) {
+        if (destination == nil || blit == nil || bytes == nullptr) {
+            return false;
+        }
+        const MTLPixelFormat pf = destination.pixelFormat;
+        const bool isDepthStencil =
+            pf == MTLPixelFormatDepth32Float_Stencil8 ||
+            pf == MTLPixelFormatDepth24Unorm_Stencil8;
+        if (!isDepthStencil) {
+            id<MTLBuffer> staging = [device newBufferWithBytes:bytes
+                                                        length:bytesPerImage
+                                                       options:MTLResourceStorageModeShared];
+            if (staging == nil) return false;
+            [blit copyFromBuffer:staging
+                    sourceOffset:0
+               sourceBytesPerRow:bytesPerRow
+             sourceBytesPerImage:bytesPerImage
+                      sourceSize:region.size
+                       toTexture:destination
+                destinationSlice:slice
+                destinationLevel:mipLevel
+               destinationOrigin:region.origin];
+            return true;
+        }
+
+        // Sprint 18 texture_repeat_mode.depth24_stencil8: component blit
+        // for D24S8 native upload, sister to Depth16/Depth32 depth upload.
+        // buildNativeUpload has already applied pixel-store row/skip/swap;
+        // split only the Metal DS staging here and leave c196254 readback
+        // split-markers untouched.
+        const NSUInteger width = region.size.width;
+        const NSUInteger height = region.size.height;
+        const NSUInteger srcRowStride =
+            bytesPerRow != 0 ? bytesPerRow : width * static_cast<NSUInteger>(sourceBpp);
+        const NSUInteger depthBpp = 4;
+        const NSUInteger depthRowBytes = width * depthBpp;
+        const NSUInteger depthImageBytes = depthRowBytes * height;
+        const NSUInteger stencilRowBytes = width;
+        const NSUInteger stencilImageBytes = stencilRowBytes * height;
+        std::vector<std::uint8_t> depthBytes(depthImageBytes, 0);
+        std::vector<std::uint8_t> stencilBytes(stencilImageBytes, 0);
+        for (NSUInteger row = 0; row < height; ++row) {
+            const auto* srcRow = bytes + static_cast<std::size_t>(row * srcRowStride);
+            auto* dstDepthRow = depthBytes.data() + static_cast<std::size_t>(row * depthRowBytes);
+            auto* dstStencilRow = stencilBytes.data() + static_cast<std::size_t>(row * stencilRowBytes);
+            for (NSUInteger col = 0; col < width; ++col) {
+                const auto* src = srcRow + static_cast<std::size_t>(col * sourceBpp);
+                if (pf == MTLPixelFormatDepth32Float_Stencil8) {
+                    std::memcpy(dstDepthRow + static_cast<std::size_t>(col * depthBpp), src, depthBpp);
+                    dstStencilRow[col] = sourceBpp > 4 ? src[4] : 0;
+                } else {
+                    std::uint32_t packed = 0;
+                    std::memcpy(&packed, src, std::min<std::size_t>(sourceBpp, sizeof(packed)));
+                    const std::uint32_t depth24 = packed & 0x00FFFFFFu;
+                    std::memcpy(dstDepthRow + static_cast<std::size_t>(col * depthBpp),
+                                &depth24, sizeof(depth24));
+                    dstStencilRow[col] = static_cast<std::uint8_t>((packed >> 24) & 0xFFu);
+                }
+            }
+        }
+
+        id<MTLBuffer> depthStaging = [device newBufferWithBytes:depthBytes.data()
+                                                         length:depthImageBytes
+                                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> stencilStaging = [device newBufferWithBytes:stencilBytes.data()
+                                                           length:stencilImageBytes
+                                                          options:MTLResourceStorageModeShared];
+        if (depthStaging == nil || stencilStaging == nil) return false;
+        [blit copyFromBuffer:depthStaging
+                sourceOffset:0
+           sourceBytesPerRow:depthRowBytes
+         sourceBytesPerImage:depthImageBytes
+                  sourceSize:region.size
+                   toTexture:destination
+            destinationSlice:slice
+            destinationLevel:mipLevel
+           destinationOrigin:region.origin
+                     options:MTLBlitOptionDepthFromDepthStencil];
+        [blit copyFromBuffer:stencilStaging
+                sourceOffset:0
+           sourceBytesPerRow:stencilRowBytes
+         sourceBytesPerImage:stencilImageBytes
+                  sourceSize:region.size
+                   toTexture:destination
+            destinationSlice:slice
+            destinationLevel:mipLevel
+           destinationOrigin:region.origin
+                     options:MTLBlitOptionStencilFromDepthStencil];
+        return true;
+    }
+
     // Phase 8X Group 4d follow-up¹⁰ — `texName` is diagnostic-only and
     // defaults to 0 (no log). The four user-facing upload call sites
     // (`texImage` / `texSubImage` / `texStorage` / `texStorageMultisample`)
@@ -3465,22 +3626,13 @@ struct GLContext::Impl {
                                           NSUInteger bytesPerImage,
                                           const MTLRegion& region,
                                           NSUInteger mipLevel,
-                                          NSUInteger slice) -> bool {
+                                          NSUInteger slice,
+                                          std::size_t sourceBpp) -> bool {
                     if (!fpEnsureBlitEnc()) return false;
-                    id<MTLBuffer> staging = [device newBufferWithBytes:bytes
-                                                                length:bytesPerImage
-                                                               options:MTLResourceStorageModeShared];
-                    if (staging == nil) return false;
-                    [fpBlitEnc copyFromBuffer:staging
-                                 sourceOffset:0
-                            sourceBytesPerRow:bytesPerRow
-                          sourceBytesPerImage:bytesPerImage
-                                   sourceSize:region.size
-                                    toTexture:existing
-                             destinationSlice:slice
-                             destinationLevel:mipLevel
-                            destinationOrigin:region.origin];
-                    return true;
+                    return blitUpload2DRegion(existing, fpBlitEnc, bytes,
+                                              bytesPerRow, bytesPerImage,
+                                              region, mipLevel, slice,
+                                              sourceBpp);
                 };
                 for (const auto& [levelIndex, image] : object.levels) {
                     if (levelIndex < 0 || !image.defined) continue;
@@ -3511,7 +3663,7 @@ struct GLContext::Impl {
                                     r.size.width, r.size.height, 1);
                                 fpBlitUpload2D(bytes + slice * imageStride,
                                                rowStride, imageStride, zr,
-                                               mipLevel, slice);
+                                               mipLevel, slice, bpp);
                             } else {
                                 [existing replaceRegion:r mipmapLevel:mipLevel
                                               withBytes:bytes + slice * imageStride
@@ -3527,7 +3679,7 @@ struct GLContext::Impl {
                             if (fastPathNeedsBlit) {
                                 fpBlitUpload2D(bytes + layer * imageStride,
                                                rowStride, imageStride, r,
-                                               mipLevel, layer);
+                                               mipLevel, layer, bpp);
                             } else {
                                 [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
                                               withBytes:bytes + layer * imageStride
@@ -3547,7 +3699,7 @@ struct GLContext::Impl {
                             if (fastPathNeedsBlit) {
                                 fpBlitUpload2D(bytes + layer * rowStride,
                                                rowStride, rowStride, r,
-                                               mipLevel, layer);
+                                               mipLevel, layer, bpp);
                             } else {
                                 [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
                                               withBytes:bytes + layer * rowStride
@@ -3565,7 +3717,7 @@ struct GLContext::Impl {
                                 is1D ? 1 : safeDimension(image.desc.height)));
                         if (fastPathNeedsBlit) {
                             fpBlitUpload2D(bytes, rowStride, imageStride, r,
-                                           mipLevel, 0);
+                                           mipLevel, 0, bpp);
                         } else {
                             [existing replaceRegion:r mipmapLevel:mipLevel
                                           withBytes:bytes
@@ -3706,6 +3858,7 @@ struct GLContext::Impl {
         const bool isDepthStencilFormat =
             chosenFormat == MTLPixelFormatDepth32Float ||
             chosenFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+            chosenFormat == MTLPixelFormatDepth24Unorm_Stencil8 ||
             chosenFormat == MTLPixelFormatDepth16Unorm ||
             chosenFormat == MTLPixelFormatStencil8 ||
             chosenFormat == MTLPixelFormatX32_Stencil8 ||
@@ -3756,22 +3909,12 @@ struct GLContext::Impl {
                                 NSUInteger bytesPerImage,
                                 const MTLRegion& region,
                                 NSUInteger mipLevel,
-                                NSUInteger slice) -> bool {
+                                NSUInteger slice,
+                                std::size_t sourceBpp) -> bool {
             if (!ensureBlitEnc()) return false;
-            id<MTLBuffer> staging = [device newBufferWithBytes:bytes
-                                                        length:bytesPerImage
-                                                       options:MTLResourceStorageModeShared];
-            if (staging == nil) return false;
-            [blitEnc copyFromBuffer:staging
-                       sourceOffset:0
-                  sourceBytesPerRow:bytesPerRow
-                sourceBytesPerImage:bytesPerImage
-                         sourceSize:region.size
-                          toTexture:texture
-                   destinationSlice:slice
-                   destinationLevel:mipLevel
-                  destinationOrigin:region.origin];
-            return true;
+            return blitUpload2DRegion(texture, blitEnc, bytes,
+                                      bytesPerRow, bytesPerImage,
+                                      region, mipLevel, slice, sourceBpp);
         };
 
         for (const auto& [levelIndex, image] : object.levels) {
@@ -3846,7 +3989,8 @@ struct GLContext::Impl {
                     const auto* sliceBytes = uploadBytes + static_cast<std::size_t>(slice * bytesPerImage);
                     if (needsBlitUpload) {
                         const MTLRegion fullSlice = MTLRegionMake3D(0, 0, 0, region.size.width, region.size.height, 1);
-                        blitUpload2D(sliceBytes, bytesPerRow, bytesPerImage, fullSlice, mipLevel, slice);
+                        blitUpload2D(sliceBytes, bytesPerRow, bytesPerImage,
+                                     fullSlice, mipLevel, slice, bpp);
                     } else {
                         [texture replaceRegion:sliceRegion mipmapLevel:mipLevel withBytes:sliceBytes bytesPerRow:bytesPerRow];
                     }
@@ -3858,7 +4002,8 @@ struct GLContext::Impl {
                 for (NSUInteger layer = 0; layer < layers; ++layer) {
                     const auto* layerBytes = uploadBytes + static_cast<std::size_t>(layer * bytesPerImage);
                     if (needsBlitUpload) {
-                        blitUpload2D(layerBytes, bytesPerRow, bytesPerImage, layerRegion, mipLevel, layer);
+                        blitUpload2D(layerBytes, bytesPerRow, bytesPerImage,
+                                     layerRegion, mipLevel, layer, bpp);
                     } else {
                         [texture replaceRegion:layerRegion
                                    mipmapLevel:mipLevel
@@ -3882,7 +4027,8 @@ struct GLContext::Impl {
                 for (NSUInteger layer = 0; layer < layers; ++layer) {
                     const auto* layerBytes = uploadBytes + static_cast<std::size_t>(layer * sourceRowStride);
                     if (needsBlitUpload) {
-                        blitUpload2D(layerBytes, sourceRowStride, sourceRowStride, layerRegion, mipLevel, layer);
+                        blitUpload2D(layerBytes, sourceRowStride, sourceRowStride,
+                                     layerRegion, mipLevel, layer, bpp);
                     } else {
                         [texture replaceRegion:layerRegion
                                    mipmapLevel:mipLevel
@@ -3895,7 +4041,8 @@ struct GLContext::Impl {
             } else {
                 if (needsBlitUpload) {
                     const MTLRegion region2D = MTLRegionMake2D(0, 0, region.size.width, region.size.height);
-                    blitUpload2D(uploadBytes, bytesPerRow, bytesPerImage, region2D, mipLevel, 0);
+                    blitUpload2D(uploadBytes, bytesPerRow, bytesPerImage,
+                                 region2D, mipLevel, 0, bpp);
                 } else {
                     [texture replaceRegion:region mipmapLevel:mipLevel withBytes:uploadBytes bytesPerRow:bytesPerRow];
                 }
