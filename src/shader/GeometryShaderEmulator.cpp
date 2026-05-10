@@ -35,7 +35,8 @@ namespace spv {
         OpTypeFunction = 33,
         OpConstant = 43, OpConstantTrue = 41, OpConstantFalse = 42,
         OpConstantComposite = 44,
-        OpFunction = 54, OpFunctionEnd = 56,
+        OpFunction = 54, OpFunctionParameter = 55, OpFunctionEnd = 56,
+        OpFunctionCall = 57,
         OpVariable = 59, OpLoad = 61, OpStore = 62, OpAccessChain = 65,
         OpArrayLength = 68,
         OpCompositeExtract = 81, OpCompositeConstruct = 80,
@@ -3214,24 +3215,45 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
         currentOutVaryings_.resize(outputVaryingNames_.size());
     }
 
-    // Build label → instruction offset map.
-    std::unordered_map<std::uint32_t, std::size_t> labelMap;
-    {
-        std::size_t i = module_.funcBodyStart;
-        while (i < module_.funcBodyEnd) {
+    // Build label → instruction offset map for the currently executing
+    // function. Sprint 18 Bank C-2 adds simple helper-function calls for
+    // viewport_array GS bodies, so the map follows the active call frame.
+    auto buildLabelMap = [&](std::size_t start, std::size_t end) {
+        std::unordered_map<std::uint32_t, std::size_t> labels;
+        std::size_t i = start;
+        while (i < end) {
             const std::uint32_t inst = module_.words[i];
             const std::uint16_t opcode = inst & 0xFFFF;
             const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
             if (opcode == spv::OpLabel && wc >= 2) {
-                labelMap[module_.words[i + 1]] = i + wc;  // first instr after label
+                labels[module_.words[i + 1]] = i + wc;  // first instr after label
             }
             i += wc;
         }
-    }
+        return labels;
+    };
 
     std::size_t pc = module_.funcBodyStart;
+    std::size_t currentFuncEnd = module_.funcBodyEnd;
+    std::unordered_map<std::uint32_t, std::size_t> labelMap =
+        buildLabelMap(pc, currentFuncEnd);
     std::uint32_t previousLabel = 0;
     std::uint32_t currentLabel = 0;
+    struct CallFrame {
+        std::size_t returnPc = 0;
+        std::size_t functionEnd = 0;
+        std::unordered_map<std::uint32_t, std::size_t> labels;
+        std::uint32_t previousLabel = 0;
+        std::uint32_t currentLabel = 0;
+        std::uint32_t calleeFunctionId = 0;
+        std::unordered_map<std::uint32_t, std::uint32_t> pointerAliases;
+    };
+    std::vector<CallFrame> callStack;
+    std::unordered_set<std::uint32_t> activeFunctions;
+    std::unordered_map<std::uint32_t, std::uint32_t> functionPointerAliases;
+    if (module_.entryPoint != 0) {
+        activeFunctions.insert(module_.entryPoint);
+    }
 
     auto truthy = [](const Value& v, int lane) -> bool {
         if (v.kind == Value::Kind::Bool) {
@@ -3285,7 +3307,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
         return r;
     };
 
-    while (pc < module_.funcBodyEnd && !errored_) {
+    while (pc < currentFuncEnd && !errored_) {
         const std::uint32_t inst = module_.words[pc];
         const std::uint16_t opcode = inst & 0xFFFF;
         const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
@@ -3296,6 +3318,12 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             case spv::OpLabel: {
                 previousLabel = currentLabel;
                 currentLabel = w[0];
+                pc += wc;
+                break;
+            }
+            case spv::OpFunctionParameter: {
+                // Parameter ids are pre-bound by the OpFunctionCall
+                // dispatcher before entering this helper body.
                 pc += wc;
                 break;
             }
@@ -3315,15 +3343,21 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpLoad: {
                 // w[0]=type, w[1]=resultId, w[2]=ptrId
+                const std::uint32_t ptrId = [&]() {
+                    auto aliasIt = functionPointerAliases.find(w[2]);
+                    return aliasIt != functionPointerAliases.end()
+                        ? aliasIt->second
+                        : w[2];
+                }();
                 // Sprint 6 P1 sub-task 3 day 3: sampler-image load.
                 // If ptrId is a non-array sampler variable in our
                 // sampledTextures_ map, propagate a handle (var_id, 0).
                 // If ptrId is itself a SampledImageHandle (came from
                 // OpAccessChain on a sampler array), forward the handle.
                 if (sampledTextures_ != nullptr &&
-                    sampledTextures_->count(w[2]) != 0) {
+                    sampledTextures_->count(ptrId) != 0) {
                     SampledImageHandle h;
-                    h.arrayVarId = w[2];
+                    h.arrayVarId = ptrId;
                     h.elementIdx = 0;
                     h.isStorage = false;
                     sampledImages_[w[1]] = h;
@@ -3335,9 +3369,9 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 // handle with isStorage=true so OpImageRead routes
                 // through storageImages_ rather than sampledTextures_.
                 if (storageImages_ != nullptr &&
-                    storageImages_->count(w[2]) != 0) {
+                    storageImages_->count(ptrId) != 0) {
                     SampledImageHandle h;
-                    h.arrayVarId = w[2];
+                    h.arrayVarId = ptrId;
                     h.elementIdx = 0;
                     h.isStorage = true;
                     sampledImages_[w[1]] = h;
@@ -3345,21 +3379,21 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     break;
                 }
                 {
-                    auto sImg = sampledImages_.find(w[2]);
+                    auto sImg = sampledImages_.find(ptrId);
                     if (sImg != sampledImages_.end()) {
                         sampledImages_[w[1]] = sImg->second;
                         pc += wc;
                         break;
                     }
                 }
-                auto vIt = module_.variables.find(w[2]);
+                auto vIt = module_.variables.find(ptrId);
                 if (vIt != module_.variables.end()) {
                     // Direct load from a variable (common for scalars).
                     const auto& tIt = module_.types.at(vIt->second.typeId);
-                    valueStore_[w[1]] = loadFromVar(w[2], 0, module_.scalarWidth(tIt.pointeeType), tIt.pointeeType);
+                    valueStore_[w[1]] = loadFromVar(ptrId, 0, module_.scalarWidth(tIt.pointeeType), tIt.pointeeType);
                 } else {
                     // Pointer came from OpAccessChain.
-                    auto acIt = accessChains_.find(w[2]);
+                    auto acIt = accessChains_.find(ptrId);
                     if (acIt != accessChains_.end()) {
                         if (acIt->second.isStorageBuffer) {
                             valueStore_[w[1]] = loadFromSSBO(
@@ -3393,11 +3427,17 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 // w[0]=ptrId, w[1]=valId
                 Value v;
                 if (!tryGetValue(w[1], v)) { bail("OpStore: unresolved value"); break; }
-                auto vIt = module_.variables.find(w[0]);
+                const std::uint32_t ptrId = [&]() {
+                    auto aliasIt = functionPointerAliases.find(w[0]);
+                    return aliasIt != functionPointerAliases.end()
+                        ? aliasIt->second
+                        : w[0];
+                }();
+                auto vIt = module_.variables.find(ptrId);
                 if (vIt != module_.variables.end()) {
-                    storeToVar(w[0], 0, v);
+                    storeToVar(ptrId, 0, v);
                     // Built-in: gl_Position scalar mirror.
-                    auto dIt = module_.decorations.find(w[0]);
+                    auto dIt = module_.decorations.find(ptrId);
                     if (dIt != module_.decorations.end() && dIt->second.hasBuiltIn
                         && dIt->second.builtIn == spv::BuiltInPosition) {
                         for (int k = 0; k < 4 && k < v.componentCount(); ++k) {
@@ -3405,7 +3445,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         }
                     }
                 } else {
-                    auto acIt = accessChains_.find(w[0]);
+                    auto acIt = accessChains_.find(ptrId);
                     if (acIt != accessChains_.end()) {
                         if (acIt->second.isStorageBuffer) {
                             storeToSSBO(acIt->second.binding,
@@ -4769,7 +4809,119 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            case spv::OpFunctionCall: {
+                // Sprint 18 Bank C-2 (`viewport_array.draw_mulitple...`):
+                // CTS uses a void helper `routine(int index)` whose only
+                // effects are stores to GS outputs plus EmitVertex /
+                // EndPrimitive. Support that narrow side-effect call shape
+                // without claiming general SPIR-V call-frame semantics.
+                if (wc < 4) {
+                    bail("OpFunctionCall: malformed");
+                    break;
+                }
+                const std::uint32_t resultTypeId = w[0];
+                const std::uint32_t resultId = w[1];
+                const std::uint32_t functionId = w[2];
+                (void)resultId;
+                auto typeIt = module_.types.find(resultTypeId);
+                if (typeIt == module_.types.end() ||
+                    typeIt->second.kind != TypeInfo::Kind::Void) {
+                    bail("OpFunctionCall: non-void return deferred");
+                    break;
+                }
+                auto fnIt = module_.functions.find(functionId);
+                if (fnIt == module_.functions.end()) {
+                    bail("OpFunctionCall: unknown function");
+                    break;
+                }
+                const auto& fn = fnIt->second;
+                const std::uint32_t argCount = wc - 4;
+                if (!callStack.empty()) {
+                    bail("OpFunctionCall: nested calls deferred");
+                    break;
+                }
+                if (argCount != 1) {
+                    bail("OpFunctionCall: only single-parameter helpers supported");
+                    break;
+                }
+                if (activeFunctions.count(functionId) != 0) {
+                    bail("OpFunctionCall: recursion deferred");
+                    break;
+                }
+                if (fn.parameters.size() != argCount) {
+                    bail("OpFunctionCall: parameter count mismatch");
+                    break;
+                }
+                if (fn.parameterTypeIds.size() != argCount) {
+                    bail("OpFunctionCall: parameter type count mismatch");
+                    break;
+                }
+                std::unordered_map<std::uint32_t, std::uint32_t> callPointerAliases;
+                for (std::uint32_t ai = 0; ai < argCount; ++ai) {
+                    const std::uint32_t paramId = fn.parameters[ai];
+                    const std::uint32_t paramTypeId = fn.parameterTypeIds[ai];
+                    auto paramTypeIt = module_.types.find(paramTypeId);
+                    if (paramTypeIt == module_.types.end()) {
+                        bail("OpFunctionCall: missing parameter type");
+                        break;
+                    }
+                    if (paramTypeIt->second.kind != TypeInfo::Kind::Pointer ||
+                        paramTypeIt->second.storageClass != spv::StorageClassFunction ||
+                        module_.scalarWidth(paramTypeIt->second.pointeeType) != 1) {
+                        bail("OpFunctionCall: non-scalar Function pointer parameter deferred");
+                        break;
+                    }
+                    const std::uint32_t argVarId = w[3 + ai];
+                    auto argVarIt = module_.variables.find(argVarId);
+                    if (argVarIt == module_.variables.end() ||
+                        argVarIt->second.storageClass != spv::StorageClassFunction) {
+                        bail("OpFunctionCall: non-Function pointer argument deferred");
+                        break;
+                    }
+                    auto argTypeIt = module_.types.find(argVarIt->second.typeId);
+                    if (argTypeIt == module_.types.end() ||
+                        argTypeIt->second.kind != TypeInfo::Kind::Pointer ||
+                        argTypeIt->second.storageClass != spv::StorageClassFunction ||
+                        argTypeIt->second.pointeeType != paramTypeIt->second.pointeeType ||
+                        module_.scalarWidth(argTypeIt->second.pointeeType) != 1) {
+                        bail("OpFunctionCall: incompatible pointer argument deferred");
+                        break;
+                    }
+                    callPointerAliases[paramId] = argVarId;
+                }
+                if (errored_) break;
+                CallFrame frame;
+                frame.returnPc = pc + wc;
+                frame.functionEnd = currentFuncEnd;
+                frame.labels = std::move(labelMap);
+                frame.previousLabel = previousLabel;
+                frame.currentLabel = currentLabel;
+                frame.calleeFunctionId = functionId;
+                frame.pointerAliases = std::move(functionPointerAliases);
+                callStack.push_back(std::move(frame));
+                functionPointerAliases = std::move(callPointerAliases);
+                activeFunctions.insert(functionId);
+
+                pc = fn.bodyStart;
+                currentFuncEnd = fn.bodyEnd;
+                labelMap = buildLabelMap(pc, currentFuncEnd);
+                previousLabel = 0;
+                currentLabel = 0;
+                break;
+            }
             case spv::OpReturn: {
+                if (!callStack.empty()) {
+                    CallFrame frame = std::move(callStack.back());
+                    callStack.pop_back();
+                    activeFunctions.erase(frame.calleeFunctionId);
+                    pc = frame.returnPc;
+                    currentFuncEnd = frame.functionEnd;
+                    labelMap = std::move(frame.labels);
+                    previousLabel = frame.previousLabel;
+                    currentLabel = frame.currentLabel;
+                    functionPointerAliases = std::move(frame.pointerAliases);
+                    break;
+                }
                 // Implicit EndPrimitive at function exit — GL 4.6 §11.3.4
                 // says the current strip (if any) ends when the shader
                 // returns. Record the boundary iff any vertex was
@@ -4918,6 +5070,8 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         // ─ Function ─
         case spv::OpReturn:
         case spv::OpFunction:
+        case spv::OpFunctionParameter:
+        case spv::OpFunctionCall:
         case spv::OpFunctionEnd:
         // ─ Sampler / texture (Sprint 6 P1 sub-task 3 day 3, CKPT43) ─
         case spv::OpSampledImage:               // 86
@@ -5133,20 +5287,32 @@ bool detectGeometryEmulatable(GLProgramObject& program) {
     // diagnostics can grep for "[GS-emul] reject" and enumerate which
     // opcodes are still missing. Gated behind APPGL_TRACE_GS_EMUL so
     // production runs stay quiet.
-    std::size_t pc = mod.funcBodyStart;
-    while (pc < mod.funcBodyEnd) {
-        const std::uint32_t inst = mod.words[pc];
-        const std::uint16_t opcode = static_cast<std::uint16_t>(inst & 0xFFFF);
-        const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
-        if (wc == 0) return false;   // malformed
-        if (!isSupportedGsOpcode(opcode)) {
-            if (std::getenv("APPGL_TRACE_GS_EMUL") != nullptr) {
-                std::fprintf(stderr, "[GS-emul] reject: unsupported opcode %u at pc=%zu\n",
-                             opcode, pc);
+    auto scanFunctionBody = [&](std::size_t start, std::size_t end) -> bool {
+        std::size_t pc = start;
+        while (pc < end) {
+            const std::uint32_t inst = mod.words[pc];
+            const std::uint16_t opcode = static_cast<std::uint16_t>(inst & 0xFFFF);
+            const std::uint16_t wc = static_cast<std::uint16_t>(inst >> 16);
+            if (wc == 0) return false;   // malformed
+            if (!isSupportedGsOpcode(opcode)) {
+                if (std::getenv("APPGL_TRACE_GS_EMUL") != nullptr) {
+                    std::fprintf(stderr, "[GS-emul] reject: unsupported opcode %u at pc=%zu\n",
+                                 opcode, pc);
+                }
+                return false;
             }
-            return false;
+            pc += wc;
         }
-        pc += wc;
+        return true;
+    };
+    if (!mod.functions.empty()) {
+        for (const auto& kv : mod.functions) {
+            if (!scanFunctionBody(kv.second.bodyStart, kv.second.bodyEnd)) {
+                return false;
+            }
+        }
+    } else if (!scanFunctionBody(mod.funcBodyStart, mod.funcBodyEnd)) {
+        return false;
     }
 
     program.geometryEmulated = true;

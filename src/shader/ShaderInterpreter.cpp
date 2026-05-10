@@ -29,7 +29,8 @@ namespace spv {
         OpTypeFunction = 33,
         OpConstant = 43, OpConstantTrue = 41, OpConstantFalse = 42,
         OpConstantComposite = 44,
-        OpFunction = 54, OpFunctionEnd = 56, OpVariable = 59,
+        OpFunction = 54, OpFunctionParameter = 55, OpFunctionEnd = 56,
+        OpVariable = 59,
     };
     enum Decoration : std::uint32_t {
         DecorationBlock = 2, DecorationBufferBlock = 3,
@@ -114,6 +115,8 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
     std::size_t i = 5;
     bool inFunctionBody = false;
     std::size_t currentFuncStart = 0;
+    std::uint32_t currentFuncId = 0;
+    FunctionInfo currentFunc;
     while (i < count) {
         const std::uint32_t inst = data[i];
         const std::uint16_t opcode = inst & 0xFFFF;
@@ -380,22 +383,52 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 if (!inFunctionBody) {
                     inFunctionBody = true;
                     currentFuncStart = i + wc;
+                    currentFunc = FunctionInfo{};
+                    if (wc >= 5) {
+                        currentFunc.returnTypeId = w[0];
+                        currentFuncId = w[1];
+                        currentFunc.functionTypeId = w[3];
+                    } else {
+                        currentFuncId = 0;
+                    }
+                }
+                break;
+            }
+            case spv::OpFunctionParameter: {
+                if (inFunctionBody && wc >= 3) {
+                    currentFunc.parameterTypeIds.push_back(w[0]);
+                    currentFunc.parameters.push_back(w[1]);
                 }
                 break;
             }
             case spv::OpFunctionEnd: {
-                if (inFunctionBody && !haveFuncBody) {
-                    funcBodyStart = currentFuncStart;
-                    funcBodyEnd = i;
-                    haveFuncBody = true;
+                if (inFunctionBody) {
+                    currentFunc.bodyStart = currentFuncStart;
+                    currentFunc.bodyEnd = i;
+                    if (currentFuncId != 0) {
+                        functions[currentFuncId] = currentFunc;
+                    }
+                    if (!haveFuncBody) {
+                        funcBodyStart = currentFuncStart;
+                        funcBodyEnd = i;
+                        haveFuncBody = true;
+                    }
                 }
                 inFunctionBody = false;
+                currentFuncId = 0;
+                currentFunc = FunctionInfo{};
                 break;
             }
             default:
                 break;
         }
         i += wc;
+    }
+    auto entryIt = functions.find(entryPoint);
+    if (entryIt != functions.end()) {
+        funcBodyStart = entryIt->second.bodyStart;
+        funcBodyEnd = entryIt->second.bodyEnd;
+        haveFuncBody = true;
     }
     return true;
 }

@@ -153,6 +153,16 @@ struct SpirvModule {
     std::vector<std::uint32_t> entryInterface;
     std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> executionModes;
 
+    struct FunctionInfo {
+        std::uint32_t returnTypeId = 0;
+        std::uint32_t functionTypeId = 0;
+        std::size_t bodyStart = 0;
+        std::size_t bodyEnd = 0;
+        std::vector<std::uint32_t> parameters;
+        std::vector<std::uint32_t> parameterTypeIds;
+    };
+    std::unordered_map<std::uint32_t, FunctionInfo> functions;
+
     std::size_t funcBodyStart = 0;
     std::size_t funcBodyEnd = 0;
     bool haveFuncBody = false;
