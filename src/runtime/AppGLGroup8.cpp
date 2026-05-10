@@ -1064,13 +1064,19 @@ static void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
         auto* tfObj = ctx->objects().transformFeedbacks().get(xfbId);
         if (tfObj) {
             tfObj->capturedPrimitiveMode = primitiveMode;
-            // Sprint 8 #9-C (CKPT68): reset captured vertex count for
-            // the new TF session. writeGsXfbAndCheckDiscard / VS-only-TF
-            // helper TF-write paths accumulate during this session.
+            // Sprint 8 #9-C (CKPT68): reset the in-progress captured
+            // vertex count for the new TF session. writeGsXfbAndCheckDiscard /
+            // VS-only-TF helper TF-write paths accumulate during this
+            // session.
             // CKPT94 foundation: capturedVertexCount is now per-stream
             // (kMaxTransformFeedbackStreams = 4); zero ALL streams on
             // BeginTransformFeedback so multi-stream GS captures start
             // each session at zero.
+            //
+            // Sprint 18 Bank D-2/G: keep lastCompletedVertexCount intact
+            // across Begin so DrawTransformFeedback* can feed back the
+            // previous completed capture while this same object is active
+            // for a new capture session.
             tfObj->capturedVertexCount.fill(0);
         }
     }
@@ -1090,6 +1096,11 @@ static void APIENTRY glEndTransformFeedback(void) {
         auto* tfObj = ctx->objects().transformFeedbacks().get(xfbId);
         if (tfObj) {
             tfObj->hasCompleted = true;
+            // Sprint 18 Bank D-2/G: snapshot the just-ended in-progress
+            // counters into the DrawTransformFeedback* source. The active
+            // accumulator is reset at the next Begin, but this completed
+            // count remains available for same-object feedback-loop draws.
+            tfObj->lastCompletedVertexCount = tfObj->capturedVertexCount;
         }
     }
     ctx->setTransformFeedbackActive(false);

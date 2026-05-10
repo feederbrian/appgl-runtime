@@ -320,7 +320,9 @@ public:
     bool invalidateTexSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
                                GLsizei width, GLsizei height, GLsizei depth);
 
-    // GL 4.2 — transform feedback instanced draw.
+    // GL 4.0/4.2 — transform feedback draw.
+    bool drawTransformFeedback(GLenum mode, GLuint id);
+    bool drawTransformFeedbackStream(GLenum mode, GLuint id, GLuint stream);
     bool drawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei instancecount);
     bool drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLuint stream, GLsizei instancecount);
 

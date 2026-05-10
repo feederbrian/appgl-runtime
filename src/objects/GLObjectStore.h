@@ -1338,12 +1338,24 @@ struct GLTransformFeedbackObject {
     bool hasCompleted = false;  // set to true when EndTransformFeedback is called
     GLenum capturedPrimitiveMode = GL_POINTS;  // mode from beginTransformFeedback
     GLsizei capturedPrimitives = 0;  // for glDrawTransformFeedback
-    // Sprint 8 #9-C (CKPT68): vertex count captured during the most
-    // recent EndTransformFeedback. Equals primsWritten × verts-per-prim
-    // of the captured mode. Read by glDrawTransformFeedback{,Instanced}
-    // {,Stream} as the `count` for the equivalent drawArrays draw.
-    // Reset to 0 on each glBeginTransformFeedback; accumulated by
-    // writeGsXfbAndCheckDiscard / VS-only-TF helper TF-write paths.
+    static constexpr std::size_t kMaxTransformFeedbackStreams = 4;
+    // Sprint 8 #9-C (CKPT68): vertex count captured during the active
+    // Begin/EndTransformFeedback session. Equals primsWritten ×
+    // verts-per-prim of the captured mode. Reset at Begin and
+    // accumulated by writeGsXfbAndCheckDiscard / VS-only-TF helper
+    // TF-write paths.
+    //
+    // Sprint 18 Bank D-2/G: DrawTransformFeedback* must read the most
+    // recently completed capture, even while the same object is active
+    // again for feedback-loop capture. Keep that completed draw count
+    // separate from this in-progress accumulator.
+    // lastCompletedVertexCount is copied from capturedVertexCount at
+    // EndTransformFeedback and is the source for DrawTransformFeedback*
+    // counts.
+    std::array<GLsizei, kMaxTransformFeedbackStreams> lastCompletedVertexCount{};
+    // Active-session per-stream accumulator below. Reset to 0 on each
+    // glBeginTransformFeedback; accumulated by writeGsXfbAndCheckDiscard /
+    // VS-only-TF helper TF-write paths, then snapshotted at End.
     //
     // Sprint 8 #9-C remainder (CKPT94): per-stream tracking. GL 4.0+
     // multi-stream geometry shaders (`EmitStreamVertex(N)` /
@@ -1360,7 +1372,6 @@ struct GLTransformFeedbackObject {
     // CTS `transform_feedback.draw_xfb_stream_instanced_test` is the
     // immediate consumer — its GS uses `EmitStreamVertex(0)` x4 +
     // `EmitStreamVertex(1)` x4 with `layout(stream=1) out vec4 color`.
-    static constexpr std::size_t kMaxTransformFeedbackStreams = 4;
     std::array<GLsizei, kMaxTransformFeedbackStreams> capturedVertexCount{};
     // Per-TF-object indexed buffer bindings recorded by the DSA
     // `glTransformFeedbackBufferBase` / `glTransformFeedbackBufferRange`

@@ -36479,8 +36479,45 @@ bool GLContext::invalidateTexSubImage(GLuint texture, GLint level, GLint xoffset
 }
 
 // ---------------------------------------------------------------------------
-// GL 4.2 — Transform Feedback Instanced Draw
+// GL 4.0/4.2 — Transform Feedback Draw
 // ---------------------------------------------------------------------------
+
+bool GLContext::drawTransformFeedback(GLenum mode, GLuint id) {
+    GLTransformFeedbackObject* tfObj = impl_->objects->transformFeedbacks().get(id);
+    if (tfObj == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    // Sprint 18 Bank D-2/G Mechanism 3: non-instanced
+    // DrawTransformFeedback is equivalent to DrawArrays(mode, 0,
+    // completedCount). Keep it separate from the Instanced helper so
+    // public DrawTransformFeedbackInstanced(..., 1) continues through
+    // the existing drawArraysInstanced path.
+    const GLsizei vertexCount = tfObj->lastCompletedVertexCount[0];
+    if (vertexCount <= 0) {
+        return true;
+    }
+    return drawArrays(mode, 0, vertexCount);
+}
+
+bool GLContext::drawTransformFeedbackStream(GLenum mode, GLuint id, GLuint stream) {
+    GLTransformFeedbackObject* tfObj = impl_->objects->transformFeedbacks().get(id);
+    if (tfObj == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const std::size_t streamIdx =
+        (stream < GLTransformFeedbackObject::kMaxTransformFeedbackStreams)
+            ? static_cast<std::size_t>(stream) : 0u;
+    // Sprint 18 Bank D-2/G Mechanism 3: same non-instanced
+    // DrawArrays routing as drawTransformFeedback(), but using the
+    // completed count for the requested stream.
+    const GLsizei vertexCount = tfObj->lastCompletedVertexCount[streamIdx];
+    if (vertexCount <= 0) {
+        return true;
+    }
+    return drawArrays(mode, 0, vertexCount);
+}
 
 bool GLContext::drawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei instancecount) {
     if (instancecount < 0) {
@@ -36495,15 +36532,20 @@ bool GLContext::drawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei i
     // Sprint 8 #9-C (CKPT68): GL 4.6 §10.5 — DrawTransformFeedbackInstanced
     // is equivalent to DrawArraysInstanced(mode, 0, count, instancecount)
     // where `count` is the number of vertices captured during the most
-    // recent EndTransformFeedback. capturedVertexCount is updated by
-    // writeGsXfbAndCheckDiscard / writeTessTFAndUpdateCounters during
-    // TF capture.
+    // recent EndTransformFeedback.
+    //
+    // Sprint 18 Bank D-2/G: read the last-completed snapshot, not the
+    // current-session accumulator. CTS draw_xfb_feedbackk_test begins a
+    // new capture on the same object and then draws the previous capture
+    // via glDrawTransformFeedback; glBeginTransformFeedback correctly
+    // reset capturedVertexCount for the new session, so the draw source
+    // has to be lastCompletedVertexCount.
     //
     // CKPT94 #9-C foundation: per-stream array (gl_MaxTransformFeedbackStreams
     // ≥ 4). Non-Stream variant always reads stream 0 per GL 4.6 §10.5 (the
     // non-Stream entry point is implicitly stream 0). Multi-stream
     // accumulators are added Day 23 via GS-emul EmitStreamVertex routing.
-    const GLsizei vertexCount = tfObj->capturedVertexCount[0];
+    const GLsizei vertexCount = tfObj->lastCompletedVertexCount[0];
     if (vertexCount <= 0 || instancecount == 0) {
         return true;  // zero-vertex / zero-instance draw is a no-op success
     }
@@ -36521,11 +36563,10 @@ bool GLContext::drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
         return false;
     }
     // Sprint 8 #9-C remainder (CKPT94 foundation): the stream parameter
-    // selects which captured vertex stream to draw from. The
-    // capturedVertexCount field is now an array indexed by stream
-    // (kMaxTransformFeedbackStreams = 4 per GL 4.0 spec floor). Streams
-    // beyond the per-object array bound are clamped down to 0 (graceful
-    // — matches GL spec validation expectations on out-of-range stream).
+    // selects which captured vertex stream to draw from. Sprint 18 Bank
+    // D-2/G keeps the DrawTransformFeedbackStream{,Instanced} source in
+    // the same last-completed snapshot used by the non-Stream variant;
+    // capturedVertexCount remains the in-progress accumulator.
     //
     // Day 23 adds GS-emul EmitStreamVertex routing that populates streams
     // 1..3 during capture; until then capturedVertexCount[1..3] stay at
@@ -36534,7 +36575,7 @@ bool GLContext::drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
     const std::size_t streamIdx =
         (stream < GLTransformFeedbackObject::kMaxTransformFeedbackStreams)
             ? static_cast<std::size_t>(stream) : 0u;
-    const GLsizei vertexCount = tfObj->capturedVertexCount[streamIdx];
+    const GLsizei vertexCount = tfObj->lastCompletedVertexCount[streamIdx];
     if (vertexCount <= 0 || instancecount == 0) {
         return true;
     }

@@ -7252,30 +7252,80 @@ void APIENTRY glDrawTransformFeedback(GLenum mode, GLuint id) {
                               "EndTransformFeedback has never been called for this object");
         return;
     }
-    // Sprint 8 #9-B (CKPT85): glDrawTransformFeedback(mode, id) is
-    // equivalent to glDrawTransformFeedbackInstanced(mode, id, 1) per
-    // GL 4.6 §10.5. Pre-CKPT85 was a stub that drew 0 primitives —
-    // CTS `transform_feedback.draw_xfb_test` calls this entry to
-    // verify the captured vertex stream rasterizes correctly.
-    if (!ctx->drawTransformFeedbackInstanced(mode, id, 1)) {
+    // Sprint 18 Bank D-2/G Mechanism 3: keep the non-instanced entry
+    // on the DrawArrays-equivalent helper. The public Instanced entry
+    // remains on drawTransformFeedbackInstanced / drawArraysInstanced.
+    if (!ctx->drawTransformFeedback(mode, id)) {
         return;
     }
-    markDrawFunction(FunctionId::glDrawTransformFeedback, "DrawTransformFeedback delegates to Instanced(.., 1).");
+    markDrawFunction(FunctionId::glDrawTransformFeedback, "DrawTransformFeedback delegates to non-instanced helper.");
     Runtime::shared().recordBootstrapTrace("glDrawTransformFeedback(mode=" + std::to_string(mode) + ", id=" + std::to_string(id) + ")");
 }
 
 void APIENTRY glDrawTransformFeedbackStream(GLenum mode, GLuint id, GLuint stream) {
     auto* ctx = requireCurrentContext("glDrawTransformFeedbackStream");
     if (!ctx) return;
+    if (!isValidDrawMode(mode)) {
+        recordValidationError(ctx, "glDrawTransformFeedbackStream", GL_INVALID_ENUM,
+                              "mode is not a recognized primitive type");
+        return;
+    }
     // GL 4.6 §10.5: INVALID_VALUE if stream >= GL_MAX_VERTEX_STREAMS.
     if (stream >= 4) {
         recordValidationError(ctx, "glDrawTransformFeedbackStream", GL_INVALID_VALUE,
                               "stream exceeds GL_MAX_VERTEX_STREAMS");
         return;
     }
-    (void)mode; (void)id;
-    // Stub: same as DrawTransformFeedback but with stream index. 0 primitives.
-    markStateFunction(FunctionId::glDrawTransformFeedbackStream, "DrawTransformFeedbackStream stub (0 primitives).");
+    // Sprint 18 Bank D-2/G transform_feedback: retire the zero-primitive
+    // stub by mirroring the StreamInstanced validation/delegation shape.
+    // CTS draw_xfb_stream_test captures GS stream 0 and stream 1, then
+    // calls this non-instanced entry point; the existing
+    // drawTransformFeedbackStreamInstanced path is the sister-pattern
+    // that already consumes per-stream completed counts.
+    {
+        auto* tfObjValid = (id != 0) ? ctx->objects().transformFeedbacks().get(id) : nullptr;
+        if (id != 0 && (tfObjValid == nullptr || !tfObjValid->instantiated)) {
+            recordValidationError(ctx, "glDrawTransformFeedbackStream", GL_INVALID_VALUE,
+                                  "id is not a valid transform feedback object");
+            return;
+        }
+    }
+    {
+        const GLuint progName = ctx->state().currentProgram();
+        if (progName != 0) {
+            auto* prog = ctx->objects().programs().get(progName);
+            if (prog && prog->gsPresent) {
+                auto compat = [](GLenum gsTopo, GLenum drawMode) -> bool {
+                    switch (gsTopo) {
+                        case GL_POINTS:           return drawMode == GL_POINTS;
+                        case GL_LINE_STRIP:       return drawMode == GL_LINES || drawMode == GL_LINE_STRIP || drawMode == GL_LINE_LOOP;
+                        case GL_TRIANGLE_STRIP:   return drawMode == GL_TRIANGLES || drawMode == GL_TRIANGLE_STRIP || drawMode == GL_TRIANGLE_FAN;
+                        default:                  return true;
+                    }
+                };
+                if (!compat(prog->gsOutputTopology, mode)) {
+                    recordValidationError(ctx, "glDrawTransformFeedbackStream", GL_INVALID_OPERATION,
+                                          "draw mode incompatible with active geometry shader output topology");
+                    return;
+                }
+            }
+            if (prog && prog->hasTessellation && mode != GL_PATCHES) {
+                recordValidationError(ctx, "glDrawTransformFeedbackStream", GL_INVALID_OPERATION,
+                                      "draw mode must be GL_PATCHES when tessellation is active");
+                return;
+            }
+        }
+    }
+    auto* tfObj = ctx->objects().transformFeedbacks().get(id);
+    if (tfObj && !tfObj->hasCompleted) {
+        recordValidationError(ctx, "glDrawTransformFeedbackStream", GL_INVALID_OPERATION,
+                              "EndTransformFeedback has never been called for this object");
+        return;
+    }
+    if (!ctx->drawTransformFeedbackStream(mode, id, stream)) {
+        return;
+    }
+    markDrawFunction(FunctionId::glDrawTransformFeedbackStream, "DrawTransformFeedbackStream delegates to non-instanced stream helper.");
     Runtime::shared().recordBootstrapTrace("glDrawTransformFeedbackStream(mode=" + std::to_string(mode) + ", id=" + std::to_string(id) + ", stream=" + std::to_string(stream) + ")");
 }
 
