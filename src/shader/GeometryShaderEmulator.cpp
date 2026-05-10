@@ -5337,15 +5337,18 @@ Interpreter::UniformValues buildUniformMap(const GLProgramObject& program) {
 void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
                                  GLObjectStore& objects,
                                  const GLStateTracker& state,
+                                 const GLProgramObject& program,
                                  Interpreter::UniformBufferMap& out) {
     if (spirv.empty()) return;
     SpirvModule mod;
     if (!mod.parse(spirv.data(), spirv.size())) return;
 
-    auto addBinding = [&](std::uint32_t binding) {
-        if (out.count(binding) != 0) return;
+    // Interpreter access chains still carry the SPIR-V binding, even when
+    // glUniformBlockBinding redirects the buffer slot at runtime.
+    auto addBinding = [&](std::uint32_t mapBinding, std::uint32_t boundBinding) {
+        if (out.count(mapBinding) != 0) return;
         GLIndexedBufferBinding bb =
-            state.indexedBufferBinding(GL_UNIFORM_BUFFER, binding);
+            state.indexedBufferBinding(GL_UNIFORM_BUFFER, boundBinding);
         if (bb.buffer == 0) return;
         const GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
         if (bufObj == nullptr || bufObj->shadowBytes.empty()) return;
@@ -5362,7 +5365,38 @@ void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
         UniformBufferRegion region;
         region.ptr = dataPtr;
         region.size = dataSize;
-        out[binding] = region;
+        out[mapBinding] = region;
+    };
+    auto remapBinding = [&](std::uint32_t baseBinding,
+                            const std::string& blockName,
+                            const std::string& varName,
+                            std::uint32_t inst,
+                            bool isArray) -> std::uint32_t {
+        std::array<std::string, 4> lookupNames{};
+        std::array<bool, 4> lookupAddsIndex{};
+        std::size_t count = 0;
+        auto pushName = [&](const std::string& name, bool addIndex) {
+            if (name.empty() || count >= lookupNames.size()) return;
+            lookupNames[count] = name;
+            lookupAddsIndex[count] = addIndex;
+            ++count;
+        };
+        if (isArray) {
+            pushName(blockName + "[" + std::to_string(inst) + "]", false);
+            pushName(varName + "[" + std::to_string(inst) + "]", false);
+        }
+        pushName(blockName, isArray);
+        pushName(varName, isArray);
+        for (const auto& rb : program.resourceUniformBlocks) {
+            if (rb.location < 0) continue;
+            for (std::size_t i = 0; i < count; ++i) {
+                if (rb.name == lookupNames[i]) {
+                    return static_cast<std::uint32_t>(rb.location) +
+                           (lookupAddsIndex[i] ? inst : 0u);
+                }
+            }
+        }
+        return baseBinding + (isArray ? inst : 0u);
     };
 
     for (const auto& [varId, info] : mod.variables) {
@@ -5380,7 +5414,11 @@ void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
             auto blockDec = mod.decorations.find(tIt->second.pointeeType);
             if (blockDec != mod.decorations.end() && blockDec->second.isBlock &&
                 !blockDec->second.isBufferBlock) {
-                addBinding(baseBinding);
+                std::string blockName;
+                auto nameIt = mod.names.find(tIt->second.pointeeType);
+                if (nameIt != mod.names.end()) blockName = nameIt->second;
+                addBinding(baseBinding,
+                           remapBinding(baseBinding, blockName, info.name, 0, false));
             }
         } else if (pT->second.kind == TypeInfo::Kind::Array) {
             auto innerT = mod.types.find(pT->second.componentType);
@@ -5396,8 +5434,12 @@ void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
             auto lenIt = mod.constants.find(pT->second.arrayLengthConstId);
             const std::uint32_t arrayLen = (lenIt != mod.constants.end())
                 ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0;
+            std::string blockName;
+            auto nameIt = mod.names.find(pT->second.componentType);
+            if (nameIt != mod.names.end()) blockName = nameIt->second;
             for (std::uint32_t inst = 0; inst < arrayLen; ++inst) {
-                addBinding(baseBinding + inst);
+                addBinding(baseBinding + inst,
+                           remapBinding(baseBinding, blockName, info.name, inst, true));
             }
         }
     }
@@ -6047,7 +6089,7 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     // UBO roots as well as UBO arrays now that broader bool-op
     // support lets more tess/GS shaders take the CPU interpreter path.
     Interpreter::UniformBufferMap vsUboMap;
-    addUniformBuffersFromModule(program.vertexSpirv, objects, state, vsUboMap);
+    addUniformBuffersFromModule(program.vertexSpirv, objects, state, program, vsUboMap);
     const Interpreter::UniformBufferMap* vsUboMapPtr =
         vsUboMap.empty() ? nullptr : &vsUboMap;
 
@@ -6729,8 +6771,8 @@ EmulatedDraw emulateGeometryDraw(
     // UBO reads in CPU VS/GS emulation. Includes both UBO arrays and
     // ordinary block roots; `binding_uniform_blocks` uses the latter.
     Interpreter::UniformBufferMap gsUboMap;
-    addUniformBuffersFromModule(program.geometrySpirv, objects, state, gsUboMap);
-    addUniformBuffersFromModule(program.vertexSpirv, objects, state, gsUboMap);
+    addUniformBuffersFromModule(program.geometrySpirv, objects, state, program, gsUboMap);
+    addUniformBuffersFromModule(program.vertexSpirv, objects, state, program, gsUboMap);
     const Interpreter::UniformBufferMap* gsUboMapPtr =
         gsUboMap.empty() ? nullptr : &gsUboMap;
 
