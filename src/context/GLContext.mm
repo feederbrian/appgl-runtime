@@ -6041,6 +6041,67 @@ struct GLContext::Impl {
             }
         }
         if (vars.empty()) return result;
+        // Sprint 18 Item 42: CPU emulated sampler map target-awareness.
+        // Mirror the native resolveSamplerBindings and compute resolver
+        // discipline here; 2D sampled-value residuals are a separate
+        // mechanism and intentionally remain outside this scope.
+        auto preferredTargetForSamplerType = [](GLenum samplerGLType) -> GLenum {
+            switch (samplerGLType) {
+                case GL_SAMPLER_1D:
+                case GL_INT_SAMPLER_1D:
+                case GL_UNSIGNED_INT_SAMPLER_1D:
+                case GL_SAMPLER_1D_SHADOW:
+                    return GL_TEXTURE_1D;
+                case GL_SAMPLER_2D:
+                case GL_INT_SAMPLER_2D:
+                case GL_UNSIGNED_INT_SAMPLER_2D:
+                case GL_SAMPLER_2D_SHADOW:
+                    return GL_TEXTURE_2D;
+                case GL_SAMPLER_3D:
+                case GL_INT_SAMPLER_3D:
+                case GL_UNSIGNED_INT_SAMPLER_3D:
+                    return GL_TEXTURE_3D;
+                case GL_SAMPLER_CUBE:
+                case GL_INT_SAMPLER_CUBE:
+                case GL_UNSIGNED_INT_SAMPLER_CUBE:
+                case GL_SAMPLER_CUBE_SHADOW:
+                    return GL_TEXTURE_CUBE_MAP;
+                case GL_SAMPLER_1D_ARRAY:
+                case GL_INT_SAMPLER_1D_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+                case GL_SAMPLER_1D_ARRAY_SHADOW:
+                    return GL_TEXTURE_1D_ARRAY;
+                case GL_SAMPLER_2D_ARRAY:
+                case GL_INT_SAMPLER_2D_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+                case GL_SAMPLER_2D_ARRAY_SHADOW:
+                    return GL_TEXTURE_2D_ARRAY;
+                case GL_SAMPLER_2D_RECT:
+                case GL_INT_SAMPLER_2D_RECT:
+                case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+                case GL_SAMPLER_2D_RECT_SHADOW:
+                    return GL_TEXTURE_RECTANGLE;
+                case GL_SAMPLER_BUFFER:
+                case GL_INT_SAMPLER_BUFFER:
+                case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+                    return GL_TEXTURE_BUFFER;
+                case GL_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+                case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                    return GL_TEXTURE_CUBE_MAP_ARRAY;
+                case GL_SAMPLER_2D_MULTISAMPLE:
+                case GL_INT_SAMPLER_2D_MULTISAMPLE:
+                case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+                    return GL_TEXTURE_2D_MULTISAMPLE;
+                case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                    return GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+                default:
+                    return 0;
+            }
+        };
         for (const auto& v : vars) {
             // Match SPIR-V variable name to a reflection sampler entry
             // by name (handle CompatShaderRewrite's `_appgl_` prefix).
@@ -6108,17 +6169,36 @@ struct GLContext::Impl {
                 }
             }
             // Resolve the bound texture per element.
+            const GLenum preferredTarget =
+                preferredTargetForSamplerType(samplerGLType);
             appgl::SampledTextureArray slots(samplerArraySize);
             for (GLint i = 0; i < samplerArraySize; ++i) {
                 const int unit = textureUnits[i];
                 if (unit < 0) continue;
-                // Prefer GL_TEXTURE_2D (covers the test's 2D R32UI case).
-                const GLuint texName =
-                    state->boundTextureOnUnit(static_cast<GLuint>(unit), GL_TEXTURE_2D);
+                GLuint texName = 0;
+                GLenum discoveredTarget = 0;
+                if (preferredTarget != 0) {
+                    texName = state->boundTextureOnUnit(
+                        static_cast<GLuint>(unit), preferredTarget);
+                    if (texName != 0) {
+                        discoveredTarget = preferredTarget;
+                    }
+                }
+                if (texName == 0) {
+                    texName = state->boundTextureOnUnit(
+                        static_cast<GLuint>(unit), GL_TEXTURE_2D);
+                    if (texName != 0) {
+                        discoveredTarget = GL_TEXTURE_2D;
+                    }
+                }
+                if (texName == 0) {
+                    texName = state->boundTextureOnUnitAny(
+                        static_cast<GLuint>(unit), &discoveredTarget);
+                }
                 if (trace) {
                     std::fprintf(stderr,
-                        "[GS-tex]   element %d unit=%d texName=%u\n",
-                        i, unit, texName);
+                        "[GS-tex]   element %d unit=%d prefTgt=0x%X texName=%u tgt=0x%X\n",
+                        i, unit, preferredTarget, texName, discoveredTarget);
                 }
                 if (texName == 0) continue;
                 GLTextureObject* texObject = objects->textures().get(texName);
