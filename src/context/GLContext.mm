@@ -4025,6 +4025,9 @@ struct GLContext::Impl {
             chosenFormat == MTLPixelFormatX24_Stencil8;
         if (!isMSAA && !isDepthStencilFormat) {
             usage |= MTLTextureUsageShaderWrite;
+            if (object.target != GL_TEXTURE_BUFFER) {
+                usage |= MTLTextureUsagePixelFormatView;
+            }
         }
         descriptor.usage = usage;
         descriptor.storageMode = isDepthStencilFormat
@@ -6598,9 +6601,11 @@ struct GLContext::Impl {
     void* resolveImageMetalTextureImpl(GLTextureObject* texObj,
                                        GLuint texName,
                                        GLint level,
+                                       GLenum imageFormat,
                                        void*& cachedView,
                                        GLuint& cachedTex,
-                                       GLint& cachedLev);
+                                       GLint& cachedLev,
+                                       GLenum& cachedFmt);
 
     // Graphics-stage storage-image binding (imageLoad/imageStore in VS/FS).
     // Mirrors the compute-dispatch storage-image path but appends to the
@@ -6691,6 +6696,12 @@ struct GLContext::Impl {
                     // CKPT119: prefer level-restricted view when ib.level > 0
                     // so imageSize() returns LEVEL-N dimensions.
                     tb.metalTexture = resolveImageMetalTexture(ib, texObj);
+                    if (tb.metalTexture == nullptr) {
+                        if (trace) std::fprintf(stderr,
+                            " SKIP=image_view_nil tex=%u fmt=0x%X\n",
+                            ib.texture, ib.format);
+                        continue;
+                    }
                     tb.metalSamplerState = nullptr;  // no sampler for storage images
                     tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
                     outList.push_back(tb);
@@ -10246,19 +10257,28 @@ struct GLContext::Impl {
         // GL 4.6 §8.26 Table 23.43 — initial value is GL_R8 per spec.
         // CTS `shader_image_load_store.basic-api-bind` verifies this.
         GLenum format = GL_R8;
-        // CKPT119 (Sprint 11 Phase 1 1b — Cluster F shader_image_size):
-        // when `level > 0` (or `layered=false` selecting one slice of an
-        // array), Metal needs a TEXTURE VIEW restricted to just that
-        // mip+slice so `texture.get_width()` returns the LEVEL-N
-        // dimensions per GL 4.6 §11.1.3.2 / §15.3.6 (`imageSize()`
-        // returns the size of the bound mip level / slice). Without a
-        // per-binding view, `texture.get_width()` returns base level 0
-        // dimensions and CTS shader_image_size.* tests see (W, H) for
-        // every level instead of (W>>level, H>>level). Cached lazily
-        // by `resolveImageMetalTexture` and invalidated by `bindImageTexture`.
+        // Sprint 18 Bucket 3 native storage image binding format:
+        // extend CKPT119's mip-level view cache to include the
+        // glBindImageTexture image format. GL image bindings may legally
+        // reinterpret a same-size texture (for example GL_R32I storage
+        // viewed as RG16F/RGBA8/SNORM), while SPIRV-Cross emits the MSL
+        // texture element type from the image uniform format. Without a
+        // PixelFormatView-backed Metal view, native VS/FS/compute paths
+        // bind the base R32Sint texture into float storage-image slots.
         void* metalLevelView = nullptr;
         GLuint cachedViewTexture = 0;  // texture name the view was created from
         GLint cachedViewLevel = -1;    // level the view was created for
+        GLenum cachedViewFormat = 0;   // image binding format used for the view
+
+        void invalidateMetalView() {
+            if (metalLevelView != nullptr) {
+                releaseRetainedMetalObject(metalLevelView);
+            }
+            metalLevelView = nullptr;
+            cachedViewTexture = 0;
+            cachedViewLevel = -1;
+            cachedViewFormat = 0;
+        }
     };
 
     // CKPT119 wrapper: type-aware adapter for resolveImageMetalTextureImpl
@@ -10266,9 +10286,11 @@ struct GLContext::Impl {
     // the type is in scope.
     void* resolveImageMetalTexture(ImageBinding& ib, GLTextureObject* texObj) {
         return resolveImageMetalTextureImpl(texObj, ib.texture, ib.level,
+                                            ib.format,
                                             ib.metalLevelView,
                                             ib.cachedViewTexture,
-                                            ib.cachedViewLevel);
+                                            ib.cachedViewLevel,
+                                            ib.cachedViewFormat);
     }
 
     bool imageBindingLevelAvailable(const ImageBinding& ib,
@@ -17090,18 +17112,25 @@ bool GLContext::isTransformFeedbackActive() const {
 void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
                                                     GLuint texName,
                                                     GLint level,
+                                                    GLenum imageFormat,
                                                     void*& cachedView,
                                                     GLuint& cachedTex,
-                                                    GLint& cachedLev) {
+                                                    GLint& cachedLev,
+                                                    GLenum& cachedFmt) {
     if (texObj == nullptr || texObj->metalTexture == nullptr) return nullptr;
-    if (level == 0) {
-        return texObj->metalTexture;
-    }
     if (level < 0) {
         return nullptr;
     }
-    (void)texName;  // reserved for future per-binding diagnostics
-    if (cachedView != nullptr && cachedTex == texName && cachedLev == level) {
+    const bool trace = std::getenv("APPGL_TRACE_IMG_BIND") != nullptr;
+    if (cachedView != nullptr &&
+        cachedTex == texName &&
+        cachedLev == level &&
+        cachedFmt == imageFormat) {
+        if (trace) {
+            std::fprintf(stderr,
+                "[IMG-VIEW] tex=%u level=%d fmt=0x%X cache-hit view=%p\n",
+                texName, level, imageFormat, cachedView);
+        }
         return cachedView;
     }
     id<MTLTexture> baseTex = (__bridge id<MTLTexture>)texObj->metalTexture;
@@ -17109,6 +17138,30 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
     const NSUInteger maxLevels = baseTex.mipmapLevelCount;
     if (static_cast<NSUInteger>(level) >= maxLevels) {
         return nullptr;
+    }
+    const MTLPixelFormat imagePixelFormat = metalRenderbufferFormat(imageFormat);
+    if (imagePixelFormat == MTLPixelFormatInvalid) {
+        if (trace) {
+            std::fprintf(stderr,
+                "[IMG-VIEW] tex=%u level=%d fmt=0x%X skip=invalid-metal-format\n",
+                texName, level, imageFormat);
+        }
+        return nullptr;
+    }
+    if (level == 0 && imagePixelFormat == baseTex.pixelFormat) {
+        if (trace) {
+            std::fprintf(stderr,
+                "[IMG-VIEW] tex=%u level=0 fmt=0x%X base-pf=%lu use=base\n",
+                texName, imageFormat, static_cast<unsigned long>(baseTex.pixelFormat));
+        }
+        return texObj->metalTexture;
+    }
+    if (cachedView != nullptr) {
+        releaseRetainedMetalObject(cachedView);
+        cachedView = nullptr;
+        cachedTex = 0;
+        cachedLev = -1;
+        cachedFmt = 0;
     }
     NSRange levelRange = NSMakeRange(static_cast<NSUInteger>(level), 1);
     // CKPT119: per-textureType slice range. Metal asserts:
@@ -17127,17 +17180,32 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
             break;
     }
     NSRange sliceRange = NSMakeRange(0, sliceCount);
-    id<MTLTexture> levelView = [baseTex newTextureViewWithPixelFormat:baseTex.pixelFormat
+    id<MTLTexture> levelView = [baseTex newTextureViewWithPixelFormat:imagePixelFormat
                                                           textureType:baseTex.textureType
                                                                levels:levelRange
                                                                slices:sliceRange];
-    if (levelView == nil) return texObj->metalTexture;
-    if (cachedView != nullptr) {
-        releaseRetainedMetalObject(cachedView);
+    if (levelView == nil) {
+        if (trace) {
+            std::fprintf(stderr,
+                "[IMG-VIEW] tex=%u level=%d fmt=0x%X base-pf=%lu view-pf=%lu result=nil\n",
+                texName, level, imageFormat,
+                static_cast<unsigned long>(baseTex.pixelFormat),
+                static_cast<unsigned long>(imagePixelFormat));
+        }
+        return nullptr;
     }
     cachedView = transferRetainedMetalObject(levelView);
     cachedTex = texName;
     cachedLev = level;
+    cachedFmt = imageFormat;
+    if (trace) {
+        std::fprintf(stderr,
+            "[IMG-VIEW] tex=%u level=%d fmt=0x%X base-pf=%lu view-pf=%lu view=%p\n",
+            texName, level, imageFormat,
+            static_cast<unsigned long>(baseTex.pixelFormat),
+            static_cast<unsigned long>(imagePixelFormat),
+            cachedView);
+    }
     return cachedView;
 }
 
@@ -33753,16 +33821,15 @@ bool GLContext::bindImageTexture(GLuint unit, GLuint texture, GLint level, GLboo
     }
 
     auto& binding = impl_->imageBindings[unit];
-    // CKPT119: invalidate the cached per-level texture view if the
-    // binding's identity (texture or level) changes, so the next
-    // `resolveImageMetalTexture` call re-creates a fresh view.
+    // Sprint 18 Bucket 3 / CKPT119: invalidate the cached image view if
+    // the binding identity changes. The image format is part of the
+    // identity because native storage images may need a PixelFormatView
+    // even when the mip level is zero.
     if (binding.metalLevelView != nullptr &&
         (binding.cachedViewTexture != texture ||
-         binding.cachedViewLevel != level)) {
-        releaseRetainedMetalObject(binding.metalLevelView);
-        binding.metalLevelView = nullptr;
-        binding.cachedViewTexture = 0;
-        binding.cachedViewLevel = -1;
+         binding.cachedViewLevel != level ||
+         binding.cachedViewFormat != format)) {
+        binding.invalidateMetalView();
     }
     binding.texture = texture;
     binding.level = level;
@@ -36605,6 +36672,7 @@ bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* tex
         if (unit >= impl_->imageBindings.size()) break;
         auto& binding = impl_->imageBindings[unit];
         if (tex == 0) {
+            binding.invalidateMetalView();
             binding.texture = 0;
             binding.level = 0;
             binding.layered = GL_FALSE;
@@ -36630,6 +36698,12 @@ bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* tex
         if (fmt == 0) {
             anyInvalid = true;
             continue;
+        }
+        if (binding.metalLevelView != nullptr &&
+            (binding.cachedViewTexture != tex ||
+             binding.cachedViewLevel != 0 ||
+             binding.cachedViewFormat != fmt)) {
+            binding.invalidateMetalView();
         }
         binding.texture = tex;
         binding.level = 0;
