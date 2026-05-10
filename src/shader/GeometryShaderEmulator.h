@@ -117,6 +117,7 @@ struct PendingImageWrite {
     std::int32_t coord[3] = {0, 0, 0};
     std::uint32_t value[4] = {0, 0, 0, 0};
     std::uint32_t internalFormat = 0;
+    bool valueIsFloat = false;
 };
 
 // Post-GS output topology + vertex buffer ready for GPU raster.
@@ -487,6 +488,7 @@ bool runVsForVertex(
     EmulatedVertex& outVertex,
     std::string* diagnostic = nullptr,
     const SampledTextureMap* sampledTextures = nullptr,
+    const SampledTextureMap* storageImages = nullptr,
     // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: caller-
     // supplied per-binding UBO buffer map for runtime UBO array
     // dynamic-indexing. Built once per draw in the caller (e.g.

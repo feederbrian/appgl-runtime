@@ -2041,7 +2041,9 @@ EmulatedDraw emulateTessellationDraw(
     const SampledTextureMap* tcsSampledTextures,
     const SampledTextureMap* tcsStorageImages,
     const SampledTextureMap* tesSampledTextures,
-    const SampledTextureMap* tesStorageImages)
+    const SampledTextureMap* tesStorageImages,
+    const SampledTextureMap* vsSampledTextures,
+    const SampledTextureMap* vsStorageImages)
 {
     (void)vao;
     (void)instanceCount;
@@ -2466,7 +2468,7 @@ EmulatedDraw emulateTessellationDraw(
                     program, vao, objects, vboSlot, 0 /*instanceID*/,
                     crossStageVsToTcs, crossStageVsToTcsWidths,
                     patchInputs[p][static_cast<std::size_t>(pv)], &vsDiag,
-                    nullptr, tessUboMapPtr);
+                    vsSampledTextures, vsStorageImages, tessUboMapPtr);
                 if (!vsOk) {
                     ++vsFailures;
                     auto& pos = patchInputs[p][static_cast<std::size_t>(pv)].position;

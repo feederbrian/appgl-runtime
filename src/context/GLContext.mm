@@ -123,6 +123,47 @@ inline bool lookupIndexedBufferPname(GLenum pname, IndexedBufferPname& out) {
     }
 }
 
+inline bool isImageUniformType(GLenum t) {
+    switch (t) {
+        case GL_IMAGE_1D:
+        case GL_IMAGE_2D:
+        case GL_IMAGE_3D:
+        case GL_IMAGE_2D_RECT:
+        case GL_IMAGE_CUBE:
+        case GL_IMAGE_BUFFER:
+        case GL_IMAGE_1D_ARRAY:
+        case GL_IMAGE_2D_ARRAY:
+        case GL_IMAGE_CUBE_MAP_ARRAY:
+        case GL_IMAGE_2D_MULTISAMPLE:
+        case GL_IMAGE_2D_MULTISAMPLE_ARRAY:
+        case GL_INT_IMAGE_1D:
+        case GL_INT_IMAGE_2D:
+        case GL_INT_IMAGE_3D:
+        case GL_INT_IMAGE_2D_RECT:
+        case GL_INT_IMAGE_CUBE:
+        case GL_INT_IMAGE_BUFFER:
+        case GL_INT_IMAGE_1D_ARRAY:
+        case GL_INT_IMAGE_2D_ARRAY:
+        case GL_INT_IMAGE_CUBE_MAP_ARRAY:
+        case GL_INT_IMAGE_2D_MULTISAMPLE:
+        case GL_INT_IMAGE_2D_MULTISAMPLE_ARRAY:
+        case GL_UNSIGNED_INT_IMAGE_1D:
+        case GL_UNSIGNED_INT_IMAGE_2D:
+        case GL_UNSIGNED_INT_IMAGE_3D:
+        case GL_UNSIGNED_INT_IMAGE_2D_RECT:
+        case GL_UNSIGNED_INT_IMAGE_CUBE:
+        case GL_UNSIGNED_INT_IMAGE_BUFFER:
+        case GL_UNSIGNED_INT_IMAGE_1D_ARRAY:
+        case GL_UNSIGNED_INT_IMAGE_2D_ARRAY:
+        case GL_UNSIGNED_INT_IMAGE_CUBE_MAP_ARRAY:
+        case GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE:
+        case GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Phase 8X Group 4d follow-up¹¹ — §Tertiary chokepoint-bypass warning
 // helper for DSA / copy entry points that currently drop data.
 // Mirrors AppGLGroup8.cpp's `warnDataDroppedOnce`; duplicated here
@@ -6233,8 +6274,7 @@ struct GLContext::Impl {
     {
         appgl::SampledTextureMap result;
         const bool trace = (std::getenv("APPGL_TRACE_GS_EMUL_TEX") != nullptr);
-        if (spirv.empty() || reflection == nullptr ||
-            reflection->storageImages.empty()) {
+        if (spirv.empty() || reflection == nullptr) {
             // CKPT162 (Sprint 14 Day 9): empty reflection.storageImages
             // observed for VS+GS shaders that use storage images (e.g.
             // shader_image_size.basic-nonMS-gs-* writes to g_result
@@ -6246,7 +6286,7 @@ struct GLContext::Impl {
             // forward them to.
             if (trace) {
                 std::fprintf(stderr,
-                    "[GS-img] buildStorageImageMap: empty (spirv=%zu refl=%d storageImages=%zu)\n",
+                    "[GS-img] buildStorageImageMap: empty input (spirv=%zu refl=%d storageImages=%zu)\n",
                     spirv.size(), reflection != nullptr,
                     reflection ? reflection->storageImages.size() : 0);
             }
@@ -6260,6 +6300,20 @@ struct GLContext::Impl {
             // entry by name (handle CompatShaderRewrite's `_appgl_`
             // prefix the same way as sampled textures).
             const ShaderReflection::ResourceBinding* imgRefl = nullptr;
+            ShaderReflection::ResourceBinding fallbackRefl;
+            std::string lookupName = v.name;
+            constexpr const char* kAppglPrefix = "_appgl_";
+            constexpr std::size_t kAppglPrefixLen = 7;
+            if (lookupName.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                lookupName = lookupName.substr(kAppglPrefixLen);
+            }
+            const GLProgramUniformInfo* uniformInfo = nullptr;
+            for (const auto& uinfo : program.uniforms) {
+                if (uinfo.name == lookupName) {
+                    uniformInfo = &uinfo;
+                    break;
+                }
+            }
             for (const auto& si : reflection->storageImages) {
                 if (si.name == v.name) {
                     imgRefl = &si;
@@ -6273,17 +6327,35 @@ struct GLContext::Impl {
                     break;
                 }
             }
+            if (imgRefl == nullptr &&
+                uniformInfo != nullptr &&
+                isImageUniformType(uniformInfo->type)) {
+                // Some linked graphics-stage SPIR-V blobs keep active
+                // imageLoad/imageStore instructions while SPIRV-Cross's
+                // stage reflection reports no storageImages (observed in
+                // 420pack TCS/TES bodies). CPU interpreters still need
+                // the slot data, so fall back to the program uniform's
+                // image metadata and the SPIR-V variable id.
+                fallbackRefl.name = lookupName;
+                fallbackRefl.glBinding =
+                    uniformInfo->explicitBinding >= 0
+                        ? static_cast<GLuint>(uniformInfo->explicitBinding)
+                        : 0u;
+                imgRefl = &fallbackRefl;
+                if (trace) {
+                    std::fprintf(stderr,
+                        "[GS-img]   fallback reflection for '%s' binding=%u\n",
+                        lookupName.c_str(), fallbackRefl.glBinding);
+                }
+            }
             if (imgRefl == nullptr) continue;
             // Resolve effective image unit: layout binding default,
             // override by glUniform1i if the app set one. GL 4.6 §7.6.
-            std::string lookupName = v.name;
-            constexpr const char* kAppglPrefix = "_appgl_";
-            constexpr std::size_t kAppglPrefixLen = 7;
-            if (lookupName.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
-                lookupName = lookupName.substr(kAppglPrefixLen);
-            }
             const GLint imgArraySize = std::max<GLint>(
-                static_cast<GLint>(v.arrayCount), 1);
+                std::max<GLint>(
+                    static_cast<GLint>(v.arrayCount),
+                    uniformInfo != nullptr ? uniformInfo->arraySize : 1),
+                1);
             // Default per element: layout binding + element index
             // (GL 4.6 §7.6 — image arrays consume consecutive units
             // starting at the layout binding). Overridden per-element
@@ -6293,19 +6365,18 @@ struct GLContext::Impl {
                 imageUnits[i] = imgRefl->glBinding +
                                 static_cast<GLuint>(i);
             }
-            for (const auto& uinfo : program.uniforms) {
-                if (uinfo.name != lookupName) continue;
-                auto uvIt = program.uniformValues.find(uinfo.location);
-                if (uvIt == program.uniformValues.end()) break;
-                for (GLint i = 0;
-                     i < imgArraySize &&
-                     i < static_cast<GLint>(uvIt->second.ints.size()); ++i) {
-                    if (uvIt->second.ints[i] >= 0) {
-                        imageUnits[i] =
-                            static_cast<GLuint>(uvIt->second.ints[i]);
+            if (uniformInfo != nullptr) {
+                auto uvIt = program.uniformValues.find(uniformInfo->location);
+                if (uvIt != program.uniformValues.end()) {
+                    for (GLint i = 0;
+                         i < imgArraySize &&
+                         i < static_cast<GLint>(uvIt->second.ints.size()); ++i) {
+                        if (uvIt->second.ints[i] >= 0) {
+                            imageUnits[i] =
+                                static_cast<GLuint>(uvIt->second.ints[i]);
+                        }
                     }
                 }
-                break;
             }
             if (trace) {
                 std::fprintf(stderr,
@@ -17641,13 +17712,29 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 texelBytes = 4;
                 break;
             }
-            case GL_RGBA8:
+            case GL_RGBA8: {
+                auto toUnorm8 = [&](std::uint32_t bits) -> std::uint8_t {
+                    if (!pw.valueIsFloat) {
+                        return static_cast<std::uint8_t>(bits & 0xFFu);
+                    }
+                    float f = 0.0f;
+                    std::memcpy(&f, &bits, sizeof(float));
+                    f = std::max(0.0f, std::min(1.0f, f));
+                    return static_cast<std::uint8_t>(std::lround(f * 255.0f));
+                };
+                buf[0] = toUnorm8(pw.value[0]);
+                buf[1] = toUnorm8(pw.value[1]);
+                buf[2] = toUnorm8(pw.value[2]);
+                buf[3] = toUnorm8(pw.value[3]);
+                texelBytes = 4;
+                break;
+            }
             case GL_RGBA8UI:
             case GL_RGBA8I: {
-                buf[0] = static_cast<std::uint8_t>(pw.value[0] & 0xFF);
-                buf[1] = static_cast<std::uint8_t>(pw.value[1] & 0xFF);
-                buf[2] = static_cast<std::uint8_t>(pw.value[2] & 0xFF);
-                buf[3] = static_cast<std::uint8_t>(pw.value[3] & 0xFF);
+                buf[0] = static_cast<std::uint8_t>(pw.value[0] & 0xFFu);
+                buf[1] = static_cast<std::uint8_t>(pw.value[1] & 0xFFu);
+                buf[2] = static_cast<std::uint8_t>(pw.value[2] & 0xFFu);
+                buf[3] = static_cast<std::uint8_t>(pw.value[3] & 0xFFu);
                 texelBytes = 4;
                 break;
             }
@@ -29887,7 +29974,15 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             // tessControlReflection is the TCS reflection; the TES
             // reflection data lives in tessEvalAsComputeReflection
             // (legacy naming — also used by pure CPU emul path).
-            appgl::SampledTextureMap tcsSamMap, tcsImgMap, tesSamMap, tesImgMap;
+            appgl::SampledTextureMap vsSamMap, vsImgMap, tcsSamMap, tcsImgMap, tesSamMap, tesImgMap;
+            if (!program->vertexSpirv.empty()) {
+                vsSamMap = impl_->buildSampledTextureMap(
+                    program->vertexSpirv,
+                    &program->vertexReflection, *program);
+                vsImgMap = impl_->buildStorageImageMap(
+                    program->vertexSpirv,
+                    &program->vertexReflection, *program);
+            }
             if (!program->tessControlSpirv.empty()) {
                 tcsSamMap = impl_->buildSampledTextureMap(
                     program->tessControlSpirv,
@@ -29911,7 +30006,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 tcsSamMap.empty() ? nullptr : &tcsSamMap,
                 tcsImgMap.empty() ? nullptr : &tcsImgMap,
                 tesSamMap.empty() ? nullptr : &tesSamMap,
-                tesImgMap.empty() ? nullptr : &tesImgMap);
+                tesImgMap.empty() ? nullptr : &tesImgMap,
+                vsSamMap.empty() ? nullptr : &vsSamMap,
+                vsImgMap.empty() ? nullptr : &vsImgMap);
             if (ted.ok) {
                 // Phase 3f-7: transform-feedback capture + rasterizer-
                 // discard early-out. The helper walks
@@ -30062,7 +30159,9 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     _tcsSam.empty() ? nullptr : &_tcsSam,
                     _tcsImg.empty() ? nullptr : &_tcsImg,
                     _tesSam.empty() ? nullptr : &_tesSam,
-                    _tesImg.empty() ? nullptr : &_tesImg);
+                    _tesImg.empty() ? nullptr : &_tesImg,
+                    vsTexMap.empty() ? nullptr : &vsTexMap,
+                    vsImgMap.empty() ? nullptr : &vsImgMap);
                 if (!priorStage.ok && !priorStage.diagnostic.empty()) {
                     APPGL_LOG(SHADER, @"drawArrays tess+GS: tess-emul: %s",
                               priorStage.diagnostic.c_str());

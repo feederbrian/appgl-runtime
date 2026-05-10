@@ -453,7 +453,9 @@ EmulatedDraw emulateTessellationDraw(
     const SampledTextureMap* tcsSampledTextures = nullptr,
     const SampledTextureMap* tcsStorageImages = nullptr,
     const SampledTextureMap* tesSampledTextures = nullptr,
-    const SampledTextureMap* tesStorageImages = nullptr);
+    const SampledTextureMap* tesStorageImages = nullptr,
+    const SampledTextureMap* vsSampledTextures = nullptr,
+    const SampledTextureMap* vsStorageImages = nullptr);
 
 }  // namespace appgl
 

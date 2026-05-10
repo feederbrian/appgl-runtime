@@ -3929,6 +3929,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 const SampledTextureSlot& slot = arrIt->second[h.elementIdx];
                 pw.internalFormat = slot.internalFormat;
                 const int texelCount = std::min(4, texelV.componentCount());
+                pw.valueIsFloat = texelV.isFloatKind();
                 if (texelV.isFloatKind()) {
                     for (int k = 0; k < texelCount; ++k) {
                         std::uint32_t bits = 0;
@@ -6133,6 +6134,7 @@ EmulatedDraw emulateVsOnlyDrawForTf(
                 capturedNames, capturedWidths,
                 outVertex, &vsDiag,
                 /*sampledTextures=*/ nullptr,
+                /*storageImages=*/ nullptr,
                 /*uniformBuffers=*/ vsUboMapPtr);
             if (!ok) {
                 d.ok = false;
@@ -6263,7 +6265,7 @@ bool emulateVsCullPrepass(
                         program.vertexSpirv.size(),
                         program, vao, objects, vboSlot, glInstanceID,
                         emptyNames, emptyWidths, outV, &vsDiag,
-                        nullptr, nullptr)) {
+                        nullptr, nullptr, nullptr)) {
                     if (diagnostic) *diagnostic =
                         "emulateVsCullPrepass: VS-pre-pass: " + vsDiag;
                     return false;
@@ -7975,6 +7977,7 @@ bool runVsForVertex(
     EmulatedVertex& outVertex,
     std::string* diagnostic,
     const SampledTextureMap* sampledTextures,
+    const SampledTextureMap* storageImages,
     const Interpreter::UniformBufferMap* uniformBuffers)
 {
     if (vsSpirv == nullptr || vsWordCount < 5) {
@@ -8055,6 +8058,9 @@ bool runVsForVertex(
     }
     if (sampledTextures != nullptr) {
         vsInterp.setSampledTextures(sampledTextures);
+    }
+    if (storageImages != nullptr) {
+        vsInterp.setStorageImages(storageImages);
     }
     // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: caller
     // can pass a pre-built UBO array map (per-binding shadow bytes

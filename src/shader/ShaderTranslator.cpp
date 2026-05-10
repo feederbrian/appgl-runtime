@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -21,6 +22,99 @@ namespace {
 
 std::once_flag g_glslangInitFlag;
 constexpr std::uint32_t kDefaultUniformSyntheticBinding = 1024u;
+
+bool isIdentifierChar(char ch) {
+    return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
+}
+
+void fixStorageImageSignedCoordinateCasts(std::string& msl) {
+    struct CoordVar {
+        std::string name;
+        const char* castType;
+    };
+    std::vector<CoordVar> coords;
+
+    std::size_t lineStart = 0;
+    while (lineStart < msl.size()) {
+        const std::size_t lineEnd = msl.find('\n', lineStart);
+        const std::size_t end =
+            (lineEnd == std::string::npos) ? msl.size() : lineEnd;
+        std::size_t p = lineStart;
+        while (p < end && std::isspace(static_cast<unsigned char>(msl[p]))) {
+            ++p;
+        }
+
+        const char* castType = nullptr;
+        std::size_t typeLen = 0;
+        if (p + 4 <= end && msl.compare(p, 4, "int ") == 0) {
+            castType = "uint";
+            typeLen = 3;
+        } else if (p + 5 <= end && msl.compare(p, 5, "int2 ") == 0) {
+            castType = "uint2";
+            typeLen = 4;
+        } else if (p + 5 <= end && msl.compare(p, 5, "int3 ") == 0) {
+            castType = "uint3";
+            typeLen = 4;
+        }
+        if (castType != nullptr) {
+            p += typeLen;
+            while (p < end && std::isspace(static_cast<unsigned char>(msl[p]))) {
+                ++p;
+            }
+            const std::size_t nameStart = p;
+            while (p < end && isIdentifierChar(msl[p])) {
+                ++p;
+            }
+            if (p > nameStart) {
+                coords.push_back({msl.substr(nameStart, p - nameStart), castType});
+            }
+        }
+
+        if (lineEnd == std::string::npos) break;
+        lineStart = lineEnd + 1;
+    }
+
+    auto replaceReadCoord = [&](const CoordVar& coord) {
+        const std::string needle = ".read(" + coord.name;
+        const std::string replacement =
+            ".read(" + std::string(coord.castType) + "(" + coord.name + ")";
+        std::size_t pos = 0;
+        while ((pos = msl.find(needle, pos)) != std::string::npos) {
+            const std::size_t after = pos + needle.size();
+            if (after < msl.size() && isIdentifierChar(msl[after])) {
+                pos = after;
+                continue;
+            }
+            msl.replace(pos, needle.size(), replacement);
+            pos += replacement.size();
+        }
+    };
+
+    auto replaceWriteCoord = [&](const CoordVar& coord) {
+        const std::string needle = ", " + coord.name;
+        const std::string replacement =
+            ", " + std::string(coord.castType) + "(" + coord.name + ")";
+        std::size_t pos = 0;
+        while ((pos = msl.find(needle, pos)) != std::string::npos) {
+            const std::size_t line = msl.rfind('\n', pos);
+            const std::size_t begin = (line == std::string::npos) ? 0 : line + 1;
+            const std::size_t writePos = msl.rfind(".write(", pos);
+            const std::size_t after = pos + needle.size();
+            if (writePos == std::string::npos || writePos < begin ||
+                (after < msl.size() && isIdentifierChar(msl[after]))) {
+                pos = after;
+                continue;
+            }
+            msl.replace(pos, needle.size(), replacement);
+            pos += replacement.size();
+        }
+    };
+
+    for (const auto& coord : coords) {
+        replaceReadCoord(coord);
+        replaceWriteCoord(coord);
+    }
+}
 
 void ensureGlslangInit() {
     std::call_once(g_glslangInitFlag, []() {
@@ -1622,6 +1716,16 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     setTextureAccess(fixup, "write");
                 }
             }
+        }
+
+        // SPIRV-Cross lowers GLSL image coordinates as signed integer
+        // temporaries (`int2`, `int3`), but Metal storage texture
+        // read/write APIs require unsigned coordinates. Apple Metal's
+        // compiler rejects `texture2d.read(int2)` outright, leaving the
+        // compute PSO null and graphics image reads returning the clear
+        // path. Cast only coordinates used in storage texture accessors.
+        if (!resources.storage_images.empty()) {
+            fixStorageImageSignedCoordinateCasts(msl);
         }
 
         // Sprint 18 Item 32 candidate: GL storage-image side effects
