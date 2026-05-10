@@ -3752,7 +3752,9 @@ struct GLContext::Impl {
                 ? static_cast<NSUInteger>(baseLevel.desc.height)
                 : (object.target == GL_TEXTURE_2D_ARRAY
                    ? static_cast<NSUInteger>(baseLevel.desc.depth)
-                   : 1);
+                   : (object.target == GL_TEXTURE_CUBE_MAP_ARRAY
+                      ? static_cast<NSUInteger>(std::max<GLsizei>(baseLevel.desc.depth, 6) / 6)
+                      : 1));
             const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
             // Pick the Metal format. There are three cases:
             //   1. Storage-only depth/stencil/stencil format
@@ -3895,7 +3897,8 @@ struct GLContext::Impl {
                                             bytesPerRow:rowStride];
                             }
                         }
-                    } else if (object.target == GL_TEXTURE_2D_ARRAY) {
+                    } else if (object.target == GL_TEXTURE_2D_ARRAY ||
+                               object.target == GL_TEXTURE_CUBE_MAP_ARRAY) {
                         const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.depth));
                         const MTLRegion r = MTLRegionMake2D(0, 0,
                             static_cast<NSUInteger>(safeDimension(image.desc.width)),
@@ -4223,7 +4226,8 @@ struct GLContext::Impl {
                         [texture replaceRegion:sliceRegion mipmapLevel:mipLevel withBytes:sliceBytes bytesPerRow:bytesPerRow];
                     }
                 }
-            } else if (object.target == GL_TEXTURE_2D_ARRAY) {
+            } else if (object.target == GL_TEXTURE_2D_ARRAY ||
+                       object.target == GL_TEXTURE_CUBE_MAP_ARRAY) {
                 // Each array layer is a separate Metal slice.
                 const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.depth));
                 const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, region.size.height);
@@ -8149,22 +8153,30 @@ struct GLContext::Impl {
             if (!isDepthFormat(level->second.desc.internalFormat)) {
                 return false;
             }
-            // Determine the slice count. For layered FramebufferTexture
-            // attachments we pass the full layer count so Metal clears
-            // every slice in a single pass. For FramebufferTextureLayer
-            // we'd only clear the attached slice; but the render pass
-            // has to reference the exact slice via the texture view or
-            // the attachment's `slice` property — a future refinement.
+            // Determine the target mip/slice. FramebufferTextureLayer clears
+            // one attached layer; whole-texture layered attachments clear all
+            // Metal slices at the selected mip level.
             std::uint32_t arrayLen = 0;
+            const std::uint32_t mipLevel =
+                static_cast<std::uint32_t>(std::max<GLint>(attachment.level, 0));
+            const std::uint32_t slice =
+                attachment.layered ? 0u
+                                   : static_cast<std::uint32_t>(std::max<GLint>(attachment.layer, 0));
             if (attachment.layered) {
-                const GLsizei layers = (texture->target == GL_TEXTURE_3D)
-                    ? std::max<GLsizei>(texture->desc.depth, 1)
-                    : std::max<GLsizei>(texture->desc.layers, 1);
+                GLsizei layers = std::max<GLsizei>(level->second.desc.depth, 1);
+                if (texture->target == GL_TEXTURE_CUBE_MAP) {
+                    layers = 6;
+                } else if (texture->target != GL_TEXTURE_3D &&
+                           texture->target != GL_TEXTURE_2D_ARRAY &&
+                           texture->target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY &&
+                           texture->target != GL_TEXTURE_CUBE_MAP_ARRAY) {
+                    layers = std::max<GLsizei>(texture->desc.layers, 1);
+                }
                 if (layers > 1) arrayLen = static_cast<std::uint32_t>(layers);
             }
             if (frameGraph != nullptr && texture->metalTexture != nullptr) {
-                return frameGraph->clearLayeredTextureDepth(
-                    texture->metalTexture, arrayLen, depth);
+                return frameGraph->clearTextureDepth(
+                    texture->metalTexture, mipLevel, slice, arrayLen, depth);
             }
             return true;
         }
@@ -8212,15 +8224,26 @@ struct GLContext::Impl {
                 return false;
             }
             std::uint32_t arrayLen = 0;
+            const std::uint32_t mipLevel =
+                static_cast<std::uint32_t>(std::max<GLint>(attachment.level, 0));
+            const std::uint32_t slice =
+                attachment.layered ? 0u
+                                   : static_cast<std::uint32_t>(std::max<GLint>(attachment.layer, 0));
             if (attachment.layered) {
-                const GLsizei layers = (texture->target == GL_TEXTURE_3D)
-                    ? std::max<GLsizei>(texture->desc.depth, 1)
-                    : std::max<GLsizei>(texture->desc.layers, 1);
+                GLsizei layers = std::max<GLsizei>(level->second.desc.depth, 1);
+                if (texture->target == GL_TEXTURE_CUBE_MAP) {
+                    layers = 6;
+                } else if (texture->target != GL_TEXTURE_3D &&
+                           texture->target != GL_TEXTURE_2D_ARRAY &&
+                           texture->target != GL_TEXTURE_2D_MULTISAMPLE_ARRAY &&
+                           texture->target != GL_TEXTURE_CUBE_MAP_ARRAY) {
+                    layers = std::max<GLsizei>(texture->desc.layers, 1);
+                }
                 if (layers > 1) arrayLen = static_cast<std::uint32_t>(layers);
             }
             if (frameGraph != nullptr && texture->metalTexture != nullptr) {
-                return frameGraph->clearLayeredTextureStencil(
-                    texture->metalTexture, arrayLen,
+                return frameGraph->clearTextureStencil(
+                    texture->metalTexture, mipLevel, slice, arrayLen,
                     static_cast<std::uint32_t>(value));
             }
             return true;
@@ -8460,6 +8483,54 @@ struct GLContext::Impl {
             }
         }
 
+        const bool yFlipReadback =
+            sourceNeedsFboYFlip &&
+            state->clipOrigin() != GL_UPPER_LEFT;
+        if (readTex.pixelFormat == MTLPixelFormatR8Unorm) {
+            const NSUInteger nativeBytesPerRow =
+                static_cast<NSUInteger>(sourceWidth);
+            std::vector<std::uint8_t> nativeLevel(
+                static_cast<std::size_t>(sourceWidth) *
+                static_cast<std::size_t>(sourceHeight));
+            MTLRegion nativeRegion = is3DTexture
+                ? MTLRegionMake3D(0, 0, depthSlice,
+                    static_cast<NSUInteger>(sourceWidth),
+                    static_cast<NSUInteger>(sourceHeight), 1)
+                : MTLRegionMake2D(0, 0,
+                    static_cast<NSUInteger>(sourceWidth),
+                    static_cast<NSUInteger>(sourceHeight));
+            [readTex getBytes:nativeLevel.data()
+                   bytesPerRow:nativeBytesPerRow
+                bytesPerImage:0
+                   fromRegion:nativeRegion
+                  mipmapLevel:metalMipLevel
+                        slice:metalSlice];
+
+            auto* out = static_cast<std::uint8_t*>(pixels);
+            for (GLsizei row = 0; row < height; ++row) {
+                for (GLsizei col = 0; col < width; ++col) {
+                    const GLint srcX = x + col;
+                    const GLint glY = y + row;
+                    const GLint srcY = yFlipReadback ? (sourceHeight - 1 - glY) : glY;
+                    const std::size_t dstOffset =
+                        static_cast<std::size_t>(row * width + col) * 4u;
+                    if (srcX < 0 || srcY < 0 ||
+                        srcX >= sourceWidth || srcY >= sourceHeight) {
+                        out[dstOffset + 0] = 0;
+                    } else {
+                        out[dstOffset + 0] = nativeLevel[
+                            static_cast<std::size_t>(srcY) *
+                            static_cast<std::size_t>(sourceWidth) +
+                            static_cast<std::size_t>(srcX)];
+                    }
+                    out[dstOffset + 1] = 0;
+                    out[dstOffset + 2] = 0;
+                    out[dstOffset + 3] = 255;
+                }
+            }
+            return true;
+        }
+
         // Read the entire mip level into a temporary buffer, then extract
         // the requested rectangle.
         std::vector<std::uint8_t> fullLevel(static_cast<std::size_t>(sourceWidth) * static_cast<std::size_t>(sourceHeight) * 4u);
@@ -8481,9 +8552,6 @@ struct GLContext::Impl {
         // rendered/cleared through an FBO producer under LOWER_LEFT.
         // Texture-kind attachments use wasFramebufferRenderedTo here;
         // glGetTexImage intentionally stays on wasViewportRenderedTo.
-        const bool yFlipReadback =
-            sourceNeedsFboYFlip &&
-            state->clipOrigin() != GL_UPPER_LEFT;
         auto* out = static_cast<std::uint8_t*>(pixels);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
@@ -8743,7 +8811,9 @@ struct GLContext::Impl {
             const MTLTextureType texType = metalTex.textureType;
             const NSUInteger sourceSlice =
                 (texType == MTLTextureType2DArray ||
-                 texType == MTLTextureType2DMultisampleArray)
+                 texType == MTLTextureType2DMultisampleArray ||
+                 texType == MTLTextureTypeCube ||
+                 texType == MTLTextureTypeCubeArray)
                     ? static_cast<NSUInteger>(std::max<GLint>(attachment.layer, 0))
                     : 0;
             return readDepthFromMetalTexture(metalTex, mipLevel, sourceSlice,
@@ -8857,7 +8927,8 @@ struct GLContext::Impl {
             if (tex == nullptr || tex->metalTexture == nullptr) return false;
             id<MTLTexture> metalTex = (__bridge id<MTLTexture>)tex->metalTexture;
             const MTLPixelFormat pf = metalTex.pixelFormat;
-            if (pf != MTLPixelFormatDepth24Unorm_Stencil8 &&
+            if (pf != MTLPixelFormatStencil8 &&
+                pf != MTLPixelFormatDepth24Unorm_Stencil8 &&
                 pf != MTLPixelFormatDepth32Float_Stencil8) {
                 return false;
             }
@@ -8871,7 +8942,9 @@ struct GLContext::Impl {
             const MTLTextureType texType = metalTex.textureType;
             const NSUInteger sourceSlice =
                 (texType == MTLTextureType2DArray ||
-                 texType == MTLTextureType2DMultisampleArray)
+                 texType == MTLTextureType2DMultisampleArray ||
+                 texType == MTLTextureTypeCube ||
+                 texType == MTLTextureTypeCubeArray)
                     ? static_cast<NSUInteger>(std::max<GLint>(attachment.layer, 0))
                     : 0;
             const NSUInteger stencilBytesPerRow = texW;
@@ -8883,12 +8956,16 @@ struct GLContext::Impl {
             id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
             id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
             MTLRegion region = MTLRegionMake2D(0, 0, texW, texH);
+            const MTLBlitOption stencilOption =
+                (pf == MTLPixelFormatStencil8)
+                    ? 0
+                    : MTLBlitOptionStencilFromDepthStencil;
             [blit copyFromTexture:metalTex sourceSlice:sourceSlice sourceLevel:metalMipLevel
                      sourceOrigin:region.origin sourceSize:region.size
                          toBuffer:stencilBuf destinationOffset:0
             destinationBytesPerRow:stencilBytesPerRow
           destinationBytesPerImage:stencilBytesPerImage
-                          options:MTLBlitOptionStencilFromDepthStencil];
+                          options:stencilOption];
             [blit endEncoding];
             [cmd commit];
             [cmd waitUntilCompleted];
@@ -8932,6 +9009,7 @@ struct GLContext::Impl {
         GLsizei destHeight = 0;
         GLsizei destLayer = 0;
         GLTextureObject* writableTexture = nullptr;
+        GLTextureImageLevel* writableImage = nullptr;
 
         if (attachment.kind == GLFramebufferAttachment::Kind::Texture) {
             writableTexture = objects->textures().get(attachment.object);
@@ -8948,6 +9026,7 @@ struct GLContext::Impl {
             if (level->second.rgba8.size() < rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth)) {
                 level->second.rgba8.assign(rgba8ByteCount(sourceWidth, sourceHeight, sourceDepth), 0);
             }
+            writableImage = &level->second;
             destLayer = writableTexture->target == GL_TEXTURE_3D ? attachment.layer : 0;
             if (destLayer < 0 || destLayer >= sourceDepth) {
                 return false;
@@ -9036,6 +9115,17 @@ struct GLContext::Impl {
             return false;
         }
 
+        if (writableImage != nullptr &&
+            writableImage->desc.internalFormat == GL_R8 &&
+            writableImage->nativeBpp == 1) {
+            const std::size_t nativeBytes =
+                static_cast<std::size_t>(destWidth) *
+                static_cast<std::size_t>(destHeight) *
+                static_cast<std::size_t>(std::max<GLsizei>(destLayer + 1, 1));
+            if (writableImage->nativeData.size() < nativeBytes) {
+                writableImage->nativeData.resize(nativeBytes, 0);
+            }
+        }
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
                 const GLint dstX = x + col;
@@ -9051,6 +9141,21 @@ struct GLContext::Impl {
                         + static_cast<std::size_t>(dstX))
                     * 4u;
                 std::memcpy(dest + dstOffset, pixels + srcOffset, 4);
+                if (writableImage != nullptr &&
+                    writableImage->desc.internalFormat == GL_R8 &&
+                    writableImage->nativeBpp == 1 &&
+                    !writableImage->nativeData.empty()) {
+                    const std::size_t nativeOffset =
+                        (static_cast<std::size_t>(destLayer) *
+                         static_cast<std::size_t>(destHeight) *
+                         static_cast<std::size_t>(destWidth)) +
+                        (static_cast<std::size_t>(dstY) *
+                         static_cast<std::size_t>(destWidth)) +
+                        static_cast<std::size_t>(dstX);
+                    if (nativeOffset < writableImage->nativeData.size()) {
+                        writableImage->nativeData[nativeOffset] = pixels[srcOffset];
+                    }
+                }
             }
         }
 

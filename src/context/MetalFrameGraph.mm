@@ -4444,6 +4444,7 @@ fragment float4 appgl_immediate_textured_fs(
     // texture) and the next draw's depth/stencil test reads that
     // junk value instead of the cleared one.
     bool clearLayeredTextureImpl(void* texVoid, std::uint32_t arrayLength,
+                                 std::uint32_t level, std::uint32_t slice,
                                  bool isColor, bool isDepth, bool isStencil,
                                  const float rgba[4], float depth, std::uint32_t stencil) {
         if (texVoid == nullptr || device == nil || commandQueue == nil) return false;
@@ -4463,18 +4464,24 @@ fragment float4 appgl_immediate_textured_fs(
         MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
         if (isColor) {
             pass.colorAttachments[0].texture = tex;
+            pass.colorAttachments[0].level = level;
+            pass.colorAttachments[0].slice = slice;
             pass.colorAttachments[0].loadAction = MTLLoadActionClear;
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
             pass.colorAttachments[0].clearColor = MTLClearColorMake(rgba[0], rgba[1], rgba[2], rgba[3]);
         }
         if (isDepth) {
             pass.depthAttachment.texture = tex;
+            pass.depthAttachment.level = level;
+            pass.depthAttachment.slice = slice;
             pass.depthAttachment.loadAction = MTLLoadActionClear;
             pass.depthAttachment.storeAction = MTLStoreActionStore;
             pass.depthAttachment.clearDepth = depth;
         }
         if (isStencil) {
             pass.stencilAttachment.texture = tex;
+            pass.stencilAttachment.level = level;
+            pass.stencilAttachment.slice = slice;
             pass.stencilAttachment.loadAction = MTLLoadActionClear;
             pass.stencilAttachment.storeAction = MTLStoreActionStore;
             pass.stencilAttachment.clearStencil = stencil & 0xFF;
@@ -4488,16 +4495,26 @@ fragment float4 appgl_immediate_textured_fs(
         return true;
     }
     bool clearLayeredTextureDepth(void* tex, std::uint32_t arrayLength, float depth) {
-        return clearLayeredTextureImpl(tex, arrayLength, false, true, false,
+        return clearLayeredTextureImpl(tex, arrayLength, 0, 0, false, true, false,
             nullptr, depth, 0);
     }
     bool clearLayeredTextureStencil(void* tex, std::uint32_t arrayLength, std::uint32_t stencil) {
-        return clearLayeredTextureImpl(tex, arrayLength, false, false, true,
+        return clearLayeredTextureImpl(tex, arrayLength, 0, 0, false, false, true,
             nullptr, 0.0f, stencil);
     }
     bool clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4]) {
-        return clearLayeredTextureImpl(tex, arrayLength, true, false, false,
+        return clearLayeredTextureImpl(tex, arrayLength, 0, 0, true, false, false,
             rgba, 0.0f, 0);
+    }
+    bool clearTextureDepth(void* tex, std::uint32_t level, std::uint32_t slice,
+                           std::uint32_t arrayLength, float depth) {
+        return clearLayeredTextureImpl(tex, arrayLength, level, slice,
+            false, true, false, nullptr, depth, 0);
+    }
+    bool clearTextureStencil(void* tex, std::uint32_t level, std::uint32_t slice,
+                             std::uint32_t arrayLength, std::uint32_t stencil) {
+        return clearLayeredTextureImpl(tex, arrayLength, level, slice,
+            false, false, true, nullptr, 0.0f, stencil);
     }
 
     bool encodeImmediateModeDraw(const ImmediateDrawInfo& info) {
@@ -8574,6 +8591,16 @@ bool MetalFrameGraph::clearLayeredTextureStencil(void* tex, std::uint32_t arrayL
 
 bool MetalFrameGraph::clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4]) {
     return impl_->clearLayeredTextureColor(tex, arrayLength, rgba);
+}
+
+bool MetalFrameGraph::clearTextureDepth(void* tex, std::uint32_t level, std::uint32_t slice,
+                                        std::uint32_t arrayLength, float depth) {
+    return impl_->clearTextureDepth(tex, level, slice, arrayLength, depth);
+}
+
+bool MetalFrameGraph::clearTextureStencil(void* tex, std::uint32_t level, std::uint32_t slice,
+                                          std::uint32_t arrayLength, std::uint32_t stencil) {
+    return impl_->clearTextureStencil(tex, level, slice, arrayLength, stencil);
 }
 
 void* MetalFrameGraph::buildComputePipelineState(const std::string& msl, std::string* outError,

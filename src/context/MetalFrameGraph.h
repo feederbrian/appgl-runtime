@@ -860,6 +860,10 @@ public:
     bool clearLayeredTextureDepth(void* tex, std::uint32_t arrayLength, float depth);
     bool clearLayeredTextureStencil(void* tex, std::uint32_t arrayLength, std::uint32_t stencil);
     bool clearLayeredTextureColor(void* tex, std::uint32_t arrayLength, const float rgba[4]);
+    bool clearTextureDepth(void* tex, std::uint32_t level, std::uint32_t slice,
+                           std::uint32_t arrayLength, float depth);
+    bool clearTextureStencil(void* tex, std::uint32_t level, std::uint32_t slice,
+                             std::uint32_t arrayLength, std::uint32_t stencil);
 
     // Compile a compute shader's MSL source into a retained
     // MTLComputePipelineState and return it as a type-erased void*
