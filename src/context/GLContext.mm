@@ -8176,6 +8176,18 @@ struct GLContext::Impl {
             return false;
         }
         renderbuffer->depth32.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), depth);
+        if (frameGraph != nullptr && renderbuffer->metalTexture != nullptr) {
+            id<MTLTexture> metalTex =
+                (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+            // Single-sample depth RB clears must reach Metal before a draw:
+            // clipped fragments leave the clear value behind. Keep MS RBs on
+            // the CPU-shadow path because depth MS readback is not resolved here.
+            if (metalTex.sampleCount <= 1 &&
+                frameGraph->clearLayeredTextureDepth(renderbuffer->metalTexture, 0, depth)) {
+                renderbuffer->wasMetalDepthRendered = true;
+                return true;
+            }
+        }
         (void)mirrorDepthRenderbufferRegionToMetal(
             *renderbuffer, 0, 0, renderbuffer->width, renderbuffer->height,
             renderbuffer->depth32.data());
