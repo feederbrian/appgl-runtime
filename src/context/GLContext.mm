@@ -2835,11 +2835,82 @@ struct GLContext::Impl {
             return true;
         }
 
+        // Sprint 18 Item 42 — shader_image_load_store R11F_G11F_B10F:
+        // component-source uploads such as
+        // `glTexImage2D(GL_R11F_G11F_B10F, ..., GL_RGBA, GL_FLOAT, ...)`
+        // must allocate MTLPixelFormatRG11B10Float native storage, not
+        // fall back to RGBA8Unorm. The RGBA8 path clamps components above
+        // 1.0, which breaks imageStore/imageLoad checks expecting the
+        // GL 11/11/10 packed unsigned-float layout. This mirrors the
+        // Depth16/Depth32/D24S8 native-upload discipline while relying on
+        // the 087d2c9 storage-image binding foundation to route shader
+        // access to the native Metal texture.
+        if (mtlFmt == MTLPixelFormatRG11B10Float) {
+            outBpp = 4u;
+            const std::size_t totalPixels = static_cast<std::size_t>(width)
+                                          * static_cast<std::size_t>(height)
+                                          * static_cast<std::size_t>(depth);
+            nativeData.assign(totalPixels * outBpp, 0);
+            if (pixels == nullptr || totalPixels == 0) return true;
+
+            const std::size_t srcComponents = componentCountForFormat(format);
+            const std::size_t srcPixelBytes = bytesPerPixel(format, type);
+            if (srcComponents == 0 || srcPixelBytes == 0) return false;
+
+            const auto& store = state->pixelStore();
+            const bool unpackSwapBytes = (store.unpackSwapBytes == GL_TRUE);
+            const std::size_t sourceWidth =
+                static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
+            const std::size_t sourceHeight =
+                static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
+            const std::size_t rowBytes =
+                alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
+            const std::size_t imageBytes = rowBytes * sourceHeight;
+            const std::size_t sourceOffset =
+                static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
+                + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
+            const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
+
+            for (GLsizei z = 0; z < depth; ++z) {
+                for (GLsizei y = 0; y < height; ++y) {
+                    const std::uint8_t* srcRow =
+                        source + static_cast<std::size_t>(z) * imageBytes
+                               + static_cast<std::size_t>(y) * rowBytes;
+                    std::uint8_t* dstRow = nativeData.data()
+                        + (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                           + static_cast<std::size_t>(y))
+                          * static_cast<std::size_t>(width) * outBpp;
+                    for (GLsizei x = 0; x < width; ++x) {
+                        const std::uint8_t* pixel =
+                            srcRow + static_cast<std::size_t>(x) * srcPixelBytes;
+                        double comps[3] = {0.0, 0.0, 0.0};
+                        if (format == GL_BGR || format == GL_BGRA) {
+                            if (srcComponents >= 3) {
+                                comps[0] = readSourceComponentDouble(pixel, type, 2, false, unpackSwapBytes);
+                                comps[1] = readSourceComponentDouble(pixel, type, 1, false, unpackSwapBytes);
+                                comps[2] = readSourceComponentDouble(pixel, type, 0, false, unpackSwapBytes);
+                            }
+                        } else {
+                            for (std::size_t c = 0; c < srcComponents && c < 3; ++c) {
+                                comps[c] = readSourceComponentDouble(pixel, type, c, false, unpackSwapBytes);
+                            }
+                        }
+                        const std::uint32_t word =
+                            packUF_10F11F11F_REV(comps[0], comps[1], comps[2]);
+                        std::memcpy(dstRow + static_cast<std::size_t>(x) * outBpp,
+                                    &word, sizeof(word));
+                    }
+                }
+            }
+            return true;
+        }
+
         // RGBA8Unorm is already handled perfectly by the rgba8 path.
         if (mtlFmt == MTLPixelFormatRGBA8Unorm) return false;
 
         auto info = nativeFormatInfo(mtlFmt);
-        // Skip packed Metal formats (RGB10A2, RG11B10F) — fall back.
+        // Skip remaining packed Metal formats that do not expose channels.
         if (info.channels == 0 || info.bytesPerPixel == 0) return false;
 
         outBpp = static_cast<std::size_t>(info.bytesPerPixel);
