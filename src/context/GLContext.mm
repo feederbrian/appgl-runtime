@@ -13655,6 +13655,216 @@ bool GLContext::texImage(
     return true;
 }
 
+bool GLContext::copyTexImage2D(
+    GLenum target,
+    GLint level,
+    GLenum internalformat,
+    GLint x,
+    GLint y,
+    GLsizei width,
+    GLsizei height,
+    GLint border
+) {
+    if (width < 0 || height < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+
+    GLenum uploadInternalFormat = internalformat;
+    GLenum uploadFormat = GL_RGBA;
+    GLenum uploadType = GL_UNSIGNED_BYTE;
+    std::size_t uploadPixelBytes = 4;
+    const bool isDepthStencilCopy =
+        internalformat == GL_DEPTH_STENCIL ||
+        internalformat == GL_DEPTH24_STENCIL8 ||
+        internalformat == GL_DEPTH32F_STENCIL8;
+    const bool isDepthCopy =
+        !isDepthStencilCopy &&
+        (internalformat == GL_DEPTH_COMPONENT ||
+         internalformat == GL_DEPTH_COMPONENT16 ||
+         internalformat == GL_DEPTH_COMPONENT24 ||
+         internalformat == GL_DEPTH_COMPONENT32 ||
+         internalformat == GL_DEPTH_COMPONENT32F);
+    const bool isStencilCopy =
+        !isDepthStencilCopy &&
+        (internalformat == GL_STENCIL_INDEX ||
+         internalformat == GL_STENCIL_INDEX8);
+
+    if (isDepthStencilCopy) {
+        uploadFormat = GL_DEPTH_STENCIL;
+        if (internalformat == GL_DEPTH32F_STENCIL8) {
+            uploadType = GL_FLOAT_32_UNSIGNED_INT_24_8_REV;
+            uploadPixelBytes = 8;
+        } else {
+            // Unsized GL_DEPTH_STENCIL is represented with a concrete
+            // D24S8 storage format so the native depth/stencil upload path
+            // has a sized internal format to key from.
+            uploadInternalFormat = GL_DEPTH24_STENCIL8;
+            uploadType = GL_UNSIGNED_INT_24_8;
+            uploadPixelBytes = 4;
+        }
+    } else if (isDepthCopy) {
+        uploadFormat = GL_DEPTH_COMPONENT;
+        uploadType = GL_FLOAT;
+        uploadPixelBytes = sizeof(GLfloat);
+    } else if (isStencilCopy) {
+        uploadFormat = GL_STENCIL_INDEX;
+        uploadType = GL_UNSIGNED_BYTE;
+        uploadPixelBytes = sizeof(std::uint8_t);
+    }
+
+    if (isDepthStencilCopy) {
+        const GLuint readFboName = impl_->state->boundReadFramebuffer();
+        const GLFramebufferObject* readFbo =
+            impl_->objects->framebuffers().get(readFboName);
+        if (readFboName == 0 || readFbo == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+
+        auto exactAttachment = [&](GLenum attachment)
+            -> const GLFramebufferAttachment* {
+            auto it = readFbo->attachments.find(attachment);
+            if (it == readFbo->attachments.end()) return nullptr;
+            if (it->second.kind == GLFramebufferAttachment::Kind::None ||
+                it->second.object == 0) {
+                return nullptr;
+            }
+            return &it->second;
+        };
+        const GLFramebufferAttachment* depthAttachment =
+            exactAttachment(GL_DEPTH_ATTACHMENT);
+        const GLFramebufferAttachment* stencilAttachment =
+            exactAttachment(GL_STENCIL_ATTACHMENT);
+        const GLFramebufferAttachment* combinedAttachment =
+            exactAttachment(GL_DEPTH_STENCIL_ATTACHMENT);
+        if (combinedAttachment != nullptr) {
+            depthAttachment = combinedAttachment;
+            stencilAttachment = combinedAttachment;
+        }
+        if (depthAttachment == nullptr || stencilAttachment == nullptr ||
+            depthAttachment->kind != stencilAttachment->kind ||
+            depthAttachment->object != stencilAttachment->object) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+
+        id<MTLTexture> srcTexture = nil;
+        NSUInteger srcLevel = 0;
+        NSUInteger srcSlice = 0;
+        NSUInteger srcZ = 0;
+        if (depthAttachment->kind == GLFramebufferAttachment::Kind::Texture) {
+            const GLTextureObject* srcObject =
+                impl_->objects->textures().get(depthAttachment->object);
+            if (srcObject == nullptr || srcObject->metalTexture == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            srcTexture = (__bridge id<MTLTexture>)srcObject->metalTexture;
+            srcLevel = static_cast<NSUInteger>(
+                std::max<GLint>(depthAttachment->level, 0));
+            if (srcObject->target == GL_TEXTURE_3D) {
+                srcZ = static_cast<NSUInteger>(
+                    std::max<GLint>(depthAttachment->layer, 0));
+            } else {
+                srcSlice = static_cast<NSUInteger>(
+                    std::max<GLint>(depthAttachment->layer, 0));
+            }
+        } else if (depthAttachment->kind ==
+                   GLFramebufferAttachment::Kind::Renderbuffer) {
+            const GLRenderbufferObject* srcRenderbuffer =
+                impl_->objects->renderbuffers().get(depthAttachment->object);
+            if (srcRenderbuffer == nullptr ||
+                srcRenderbuffer->metalTexture == nullptr) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            srcTexture = (__bridge id<MTLTexture>)srcRenderbuffer->metalTexture;
+        }
+        if (srcTexture == nil) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+
+        if (!texImage(target, level, static_cast<GLint>(uploadInternalFormat),
+                      width, height, 1, border, uploadFormat, uploadType,
+                      nullptr)) {
+            return false;
+        }
+        GLTextureObject* dstObject = impl_->currentTexture(target);
+        if (dstObject == nullptr || dstObject->metalTexture == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        id<MTLTexture> dstTexture =
+            (__bridge id<MTLTexture>)dstObject->metalTexture;
+        if (impl_->frameGraph != nullptr) {
+            impl_->frameGraph->flushForReadback();
+        }
+        if (impl_->device == nil || impl_->commandQueue == nil) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        id<MTLCommandBuffer> cmd = [impl_->commandQueue commandBuffer];
+        if (cmd == nil) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        if (blit == nil) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (width > 0 && height > 0) {
+            [blit copyFromTexture:srcTexture
+                      sourceSlice:srcSlice
+                      sourceLevel:srcLevel
+                     sourceOrigin:MTLOriginMake(
+                         static_cast<NSUInteger>(std::max<GLint>(x, 0)),
+                         static_cast<NSUInteger>(std::max<GLint>(y, 0)),
+                         srcZ)
+                       sourceSize:MTLSizeMake(
+                         static_cast<NSUInteger>(width),
+                         static_cast<NSUInteger>(height),
+                         1)
+                        toTexture:dstTexture
+                 destinationSlice:0
+                 destinationLevel:static_cast<NSUInteger>(level)
+                destinationOrigin:MTLOriginMake(0, 0, 0)];
+        }
+        [blit endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        return true;
+    }
+
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height);
+    std::vector<std::uint8_t> uploadBytes(pixelCount * uploadPixelBytes, 0);
+
+    if (impl_->frameGraph != nullptr) {
+        impl_->frameGraph->flushForReadback();
+    }
+
+    GLenum readFormat = GL_RGBA;
+    if (isDepthCopy) {
+        readFormat = GL_DEPTH_COMPONENT;
+    } else if (isStencilCopy) {
+        readFormat = GL_STENCIL_INDEX;
+    }
+    if (!impl_->readFramebufferPixels(readFormat, x, y,
+                                      width, height,
+                                      uploadBytes.data())) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    return texImage(target, level, static_cast<GLint>(uploadInternalFormat),
+                    width, height, 1, border, uploadFormat, uploadType,
+                    uploadBytes.data());
+}
+
 bool GLContext::texSubImage(
     GLenum target,
     GLint level,
@@ -14974,15 +15184,31 @@ bool GLContext::renderbufferStorage(GLenum target, GLenum internalformat, GLsize
             pushError(GL_INVALID_OPERATION);
             return false;
         }
-        // Metal's MTLDevice only supports a subset of sample counts (typically
-        // 1, 2, 4, 8). Passing unsupported values (e.g. samples=5) causes
-        // MTLTextureDescriptor validation to assert rather than return an
-        // error. Validate against the Metal device's reported support to
-        // surface the failure as GL_INVALID_OPERATION instead of abort.
+        // Metal only supports a sparse set of sample counts (typically
+        // powers of two), while GL callers are allowed to request any
+        // count up to GL_MAX_SAMPLES. Choose the next supported Metal
+        // count so renderbuffer storage behaves like the texture-MS path:
+        // the actual allocation has at least the requested samples, and
+        // GL_RENDERBUFFER_SAMPLES reports that actual count.
         id<MTLDevice> mtlDevice = impl_->device;
-        if (mtlDevice != nil && ![mtlDevice supportsTextureSampleCount:static_cast<NSUInteger>(samples)]) {
-            pushError(GL_INVALID_OPERATION);
-            return false;
+        if (mtlDevice != nil &&
+            ![mtlDevice supportsTextureSampleCount:
+                static_cast<NSUInteger>(samples)]) {
+            GLsizei chosenSamples = 0;
+            for (NSUInteger candidate : {2u, 4u, 8u, 16u, 32u}) {
+                if (candidate < static_cast<NSUInteger>(samples)) {
+                    continue;
+                }
+                if ([mtlDevice supportsTextureSampleCount:candidate]) {
+                    chosenSamples = static_cast<GLsizei>(candidate);
+                    break;
+                }
+            }
+            if (chosenSamples == 0) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            samples = chosenSamples;
         }
     }
     const GLuint name = impl_->state->boundRenderbuffer();
@@ -29287,12 +29513,37 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
 // comment at the Impl method declaration. Item 26 LIVE 19th-instance
 // candidate: sister-pattern leverage at the call-site-wrapper level.
 bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
+    const GLuint drawFboName = state->boundDrawFramebuffer();
+    if (drawFboName != 0) {
+        if (const GLFramebufferObject* drawFbo =
+                objects->framebuffers().get(drawFboName)) {
+            auto attachmentLiveExact = [&](GLenum attachment) {
+                auto it = drawFbo->attachments.find(attachment);
+                return it != drawFbo->attachments.end() &&
+                       it->second.kind != GLFramebufferAttachment::Kind::None &&
+                       it->second.object != 0;
+            };
+            const bool hasDepth =
+                attachmentLiveExact(GL_DEPTH_ATTACHMENT) ||
+                attachmentLiveExact(GL_DEPTH_STENCIL_ATTACHMENT);
+            const bool hasStencil =
+                attachmentLiveExact(GL_STENCIL_ATTACHMENT) ||
+                attachmentLiveExact(GL_DEPTH_STENCIL_ATTACHMENT);
+            if (!hasDepth) {
+                tdi.depthTestEnabled = false;
+                tdi.depthWriteMask = false;
+            }
+            if (!hasStencil) {
+                tdi.stencilTestEnabled = false;
+            }
+        }
+    }
+
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
     if (ok) {
-        const GLuint fboName = state->boundDrawFramebuffer();
-        if (fboName != 0) {
+        if (drawFboName != 0) {
             if (GLFramebufferObject* fbo =
-                    objects->framebuffers().get(fboName)) {
+                    objects->framebuffers().get(drawFboName)) {
                 // Split the two color-texture readback contracts:
                 // ordinary LOWER_LEFT FBO draws mark framebuffer readback
                 // only, while viewport-routed GS/cull paths also mark the

@@ -150,6 +150,7 @@ public:
     bool isTexture(GLuint texture) const;
     bool bindTexture(GLenum target, GLuint texture);
     bool texImage(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void* pixels);
+    bool copyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
     bool texSubImage(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels);
     // Sprint 17 Day 7+ Bank-Group-E: BC-format compressed texture upload.
     // Allocates a Metal texture with the matching MTLPixelFormat (per

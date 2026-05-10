@@ -450,15 +450,12 @@ static void APIENTRY glCopyTexImage1D(GLenum target, GLint level, GLenum interna
 }
 
 static void APIENTRY glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) {
-    (void)target;
-    (void)level;
-    (void)internalformat;
-    (void)x;
-    (void)y;
-    (void)width;
-    (void)height;
-    (void)border;
-    warnDataDroppedOnce("glCopyTexImage2D");
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    if (!context->copyTexImage2D(target, level, internalformat, x, y,
+                                 width, height, border)) {
+        return;
+    }
 }
 
 static void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
