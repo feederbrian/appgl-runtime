@@ -93,6 +93,71 @@ bool isFormatTypeCompatible_extern(GLenum format, GLenum type);
 
 namespace {
 
+bool sourceDeclaresFragCoordOriginUpperLeft(const std::string& source) {
+    std::string clean;
+    clean.reserve(source.size());
+    bool inLineComment = false;
+    bool inBlockComment = false;
+    for (std::size_t i = 0; i < source.size(); ++i) {
+        const char c = source[i];
+        const char next = (i + 1 < source.size()) ? source[i + 1] : '\0';
+        if (inLineComment) {
+            if (c == '\n') {
+                inLineComment = false;
+                clean.push_back(c);
+            } else {
+                clean.push_back(' ');
+            }
+            continue;
+        }
+        if (inBlockComment) {
+            if (c == '*' && next == '/') {
+                inBlockComment = false;
+                clean.push_back(' ');
+                clean.push_back(' ');
+                ++i;
+            } else {
+                clean.push_back(c == '\n' ? '\n' : ' ');
+            }
+            continue;
+        }
+        if (c == '/' && next == '/') {
+            inLineComment = true;
+            clean.push_back(' ');
+            clean.push_back(' ');
+            ++i;
+            continue;
+        }
+        if (c == '/' && next == '*') {
+            inBlockComment = true;
+            clean.push_back(' ');
+            clean.push_back(' ');
+            ++i;
+            continue;
+        }
+        clean.push_back(c);
+    }
+
+    std::size_t pos = 0;
+    while ((pos = clean.find("origin_upper_left", pos)) != std::string::npos) {
+        const std::size_t declEnd = clean.find(';', pos);
+        if (declEnd == std::string::npos) return false;
+        const std::size_t prevSemi = clean.rfind(';', pos);
+        const std::size_t prevBrace = clean.rfind('{', pos);
+        const std::size_t declStart =
+            std::max(prevSemi == std::string::npos ? 0 : prevSemi + 1,
+                     prevBrace == std::string::npos ? 0 : prevBrace + 1);
+        const std::string decl =
+            clean.substr(declStart, declEnd - declStart);
+        if (decl.find("layout") != std::string::npos &&
+            decl.find("gl_FragCoord") != std::string::npos) {
+            return true;
+        }
+        pos += std::strlen("origin_upper_left");
+    }
+    return false;
+}
+
 // Map GL_*_BUFFER_{BINDING,START,SIZE} pname pairs to the indexed-buffer
 // target they query and the field they extract. Used by all five
 // indexed-query paths (int/int64/float/double/boolean) — these pnames
@@ -23768,6 +23833,10 @@ bool GLContext::linkProgram(GLuint program) {
         // (e.g. tess opts, mesh-GS opts) preserved by copy-then-amend.
         appgl::TranslatorOptions options = optionsIn;
         options.clipDepthMode = impl_->state->clipDepthMode();
+        if (std::strcmp(stageName, "fragment") == 0) {
+            options.fragmentCoordOriginUpperLeft =
+                sourceDeclaresFragCoordOriginUpperLeft(sourceText);
+        }
 
         // Phase 8X Group 4d follow-up²³ — sub-step marker + C++ exception
         // guard around spirvToMSL. SPIRV-Cross can throw `spirv_cross_error`
@@ -25490,6 +25559,10 @@ bool GLContext::linkProgram(GLuint program) {
                 appgl::TranslatorOptions stageOptions;
                 stageOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
                     sh->spirv.data(), sh->spirv.size());
+                if (stageEnum == GL_FRAGMENT_SHADER) {
+                    stageOptions.fragmentCoordOriginUpperLeft =
+                        sourceDeclaresFragCoordOriginUpperLeft(sh->source);
+                }
                 outMSL = translator.spirvToMSL(sh->spirv.data(),
                     sh->spirv.size(), stageBindings, nullptr, stageOptions);
                 outRefl = translator.reflect(sh->spirv.data(),

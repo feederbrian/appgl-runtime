@@ -262,6 +262,13 @@ struct TranslatorOptions {
     // channels, would trigger unwanted [[clip_distance]] discard).
     bool disableCullDistanceClipRouting = false;
 
+    // Sprint 18 Bank D-3 (`textures_bind_unit`): source-level
+    // gl_FragCoord origin convention for fragment translation. The
+    // glslang Vulkan target can tag fragment SPIR-V as OriginUpperLeft
+    // even for GL-default source, so the translator must not use that
+    // execution mode as the GL convention authority.
+    bool fragmentCoordOriginUpperLeft = false;
+
     // Phase 3B.5 [metal-tess-TF]: per-patch control-point count to plumb
     // into SPIRV-Cross's TES compilation so the emitted
     //   gl_in = &spvIn[gl_PrimitiveID * N];

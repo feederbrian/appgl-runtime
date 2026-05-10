@@ -29,6 +29,8 @@
 
 namespace appgl {
 
+static constexpr NSUInteger kAppGLFragCoordParamsBufferSlot = 15;
+
 // Phase 4A [metal-tess-TF] — MSL source for the CPU-exact domain-gen
 // port. Shared between the production path (`ensureTessDomainPortLibrary`
 // on `Impl`) and the validation probe (`phaseAProbeTessDomainPort`).
@@ -1195,6 +1197,9 @@ struct MetalFrameGraph::Impl {
         const bool fragmentNeedsSSBOSizeBuffer =
             fragmentUsesArgBuf && info.fragmentMSL != nullptr &&
             info.fragmentMSL->find("spvBufferSizeConstants") != std::string::npos;
+        const bool fragmentNeedsFragCoordParams =
+            hasFragmentStage && info.fragmentMSL != nullptr &&
+            info.fragmentMSL->find("_appgl_FragCoordParams") != std::string::npos;
         id<MTLArgumentEncoder> fragArgEncoderSet0 = nil;
         id<MTLArgumentEncoder> vertArgEncoderSet0 = nil;
         id<MTLArgumentEncoder> fragArgEncoderSet1 = nil;
@@ -2606,6 +2611,55 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder setFragmentBytes:&glNumSamples
                                                 length:sizeof(glNumSamples)
                                                atIndex:0];
+            }
+            if (fragmentNeedsFragCoordParams) {
+                const float renderTargetHeight = colorTexture != nil
+                    ? static_cast<float>(colorTexture.height)
+                    : static_cast<float>(std::max<GLsizei>(info.viewportHeight, 1));
+                auto fragmentSamplesRenderTarget = [&](id<MTLTexture> target) {
+                    if (target == nil) return false;
+                    for (const auto& binding : info.fragmentTextures) {
+                        if (binding.metalTexture == nullptr) continue;
+                        id<MTLTexture> sampled =
+                            (__bridge id<MTLTexture>)binding.metalTexture;
+                        if (sampled == target) return true;
+                    }
+                    return false;
+                };
+                bool fragmentSamplesColorAttachment =
+                    fragmentSamplesRenderTarget(colorTexture);
+                if (!fragmentSamplesColorAttachment) {
+                    for (void* rawExtraTex : info.fboAdditionalColorTextures) {
+                        if (rawExtraTex == nullptr) continue;
+                        id<MTLTexture> extraTex =
+                            (__bridge id<MTLTexture>)rawExtraTex;
+                        if (fragmentSamplesRenderTarget(extraTex)) {
+                            fragmentSamplesColorAttachment = true;
+                            break;
+                        }
+                    }
+                }
+                const bool flipToLowerLeft =
+                    (info.clipOrigin != GL_UPPER_LEFT) &&
+                    !fragmentSamplesColorAttachment;
+                const float fragCoordParams[4] = {
+                    flipToLowerLeft ? renderTargetHeight : 0.0f,
+                    flipToLowerLeft ? -1.0f : 1.0f,
+                    flipToLowerLeft ? 1.0f : 0.0f,
+                    0.0f,
+                };
+                // Sprint 18 Bank D-3 (`textures_bind_unit`): fragment
+                // shader-side gl_FragCoord Y synthesis. This payload is
+                // intentionally independent of the 5930a4d/c196254 FBO
+                // readback flip markers, which stay responsible only for
+                // CPU-visible readback orientation. If the fragment shader
+                // samples the active color attachment, keep Metal's
+                // render-target texture coordinate space; texture_barrier
+                // self-feedback relies on that aliasing path and is not the
+                // D-3 sampled-input case.
+                [currentRenderEncoder setFragmentBytes:fragCoordParams
+                                                length:sizeof(fragCoordParams)
+                                               atIndex:kAppGLFragCoordParamsBufferSlot];
             }
 
             // Bind UBO data to the Metal encoder at the reflection-specified

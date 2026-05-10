@@ -22,6 +22,7 @@ namespace {
 
 std::once_flag g_glslangInitFlag;
 constexpr std::uint32_t kDefaultUniformSyntheticBinding = 1024u;
+constexpr std::uint32_t kFragCoordParamsBufferSlot = 15u;
 
 bool isIdentifierChar(char ch) {
     return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
@@ -114,6 +115,55 @@ void fixStorageImageSignedCoordinateCasts(std::string& msl) {
         replaceReadCoord(coord);
         replaceWriteCoord(coord);
     }
+}
+
+bool injectFragmentCoordYFixup(std::string& msl,
+                               bool pixelCenterInteger) {
+    static constexpr const char* kFragCoordParam =
+        "float4 gl_FragCoord [[position]]";
+    static constexpr const char* kParamsName = "_appgl_FragCoordParams";
+    if (msl.find(kFragCoordParam) == std::string::npos ||
+        msl.find(kParamsName) != std::string::npos) {
+        return false;
+    }
+
+    const std::size_t mainPos = msl.find("main0(");
+    if (mainPos == std::string::npos) return false;
+    const std::size_t paramStart = mainPos + 6;
+    std::size_t depth = 1;
+    std::size_t paramEnd = paramStart;
+    while (paramEnd < msl.size() && depth > 0) {
+        const char c = msl[paramEnd];
+        if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+            if (depth == 0) break;
+        }
+        ++paramEnd;
+    }
+    if (depth != 0 || paramEnd >= msl.size()) return false;
+
+    const std::size_t bodyOpen = msl.find('{', paramEnd);
+    if (bodyOpen == std::string::npos) return false;
+
+    const std::string param =
+        ", constant float4& " + std::string(kParamsName) +
+        " [[buffer(" + std::to_string(kFragCoordParamsBufferSlot) + ")]]";
+    msl.insert(paramEnd, param);
+    const std::size_t adjustedBodyOpen = bodyOpen + param.size();
+
+    const char* bias = pixelCenterInteger ? "-0.5f" : "0.0f";
+    const std::string injection =
+        "\n    // Sprint 18 Bank D-3: shader-side FragCoord-Y synthesis.\n"
+        "    // Metal [[position]].y is top-left; when GL clip origin is LOWER_LEFT,\n"
+        "    // buffer(15) flips it to GL bottom-left without touching the\n"
+        "    // 5930a4d/c196254 FBO readback orientation markers.\n"
+        "    gl_FragCoord.y = _appgl_FragCoordParams.x +\n"
+        "        (_appgl_FragCoordParams.y * gl_FragCoord.y) +\n"
+        "        (_appgl_FragCoordParams.z * " + std::string(bias) + ");";
+    msl.insert(adjustedBodyOpen + 1, injection);
+    return true;
 }
 
 void ensureGlslangInit() {
@@ -1609,6 +1659,25 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
 
         std::string msl = compiler.compile();
+
+        if (isFragment) {
+            // Sprint 18 Bank D-3 (`textures_bind_unit`): SPIRV-Cross
+            // maps GLSL gl_FragCoord to Metal's top-left
+            // `[[position]]`. For OpenGL's default LOWER_LEFT
+            // convention, flip the fragment-side built-in through a
+            // tiny per-draw buffer(15) payload. This is deliberately
+            // separate from the 5930a4d/c196254 FBO readback
+            // orientation markers: readback already unflips the
+            // rendered renderbuffer; the shader's texelFetch coordinate
+            // must be GL-space before the write happens.
+            const auto& execModes = compiler.get_execution_mode_bitset();
+            const bool originUpperLeft = options.fragmentCoordOriginUpperLeft;
+            const bool pixelCenterInteger =
+                execModes.get(spv::ExecutionModePixelCenterInteger);
+            if (!originUpperLeft) {
+                (void)injectFragmentCoordYFixup(msl, pixelCenterInteger);
+            }
+        }
 
         // Graphics SSBO block arrays are lowered through argument buffers
         // when storage buffers are present. SPIRV-Cross emits these as
