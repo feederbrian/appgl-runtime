@@ -654,7 +654,9 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // (writable images on macOS + higher resource limits). We
         // advertise + require Apple7-class GPUs, so Tier-2 is always
         // the right pick.
-        if (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr) {
+        const bool forceArgBuf = options.forceArgumentBuffers ||
+            (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
+        if (forceArgBuf) {
             // MSL 3.0 required for Tier-2 full mutable aliasing —
             // SPIRV-Cross throws "Full mutable aliasing of argument
             // buffer descriptors only works on Metal 3+" when this
@@ -1159,7 +1161,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // Push constants stay as a direct [[buffer(16)]] binding per
         // SPIRV-Cross's convention (they're never placed inside an
         // argument buffer by `analyze_argument_buffers`).
-        const bool useArgBuf = (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
+        const bool useArgBuf = forceArgBuf;
         if (useArgBuf) {
             // (a) Argument-buffer self-bindings. One per descriptor set
             // in use (0 = samplers/storage/SSBOs; 1 = UBOs). When a
@@ -1476,6 +1478,35 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
 
         std::string msl = compiler.compile();
+
+        // Sprint 18 Item42: graphics-stage argument buffers need SSBO
+        // `.length()` / OpArrayLength sizes, but Metal's argument-buffer
+        // encoding does not reliably surface SPIRV-Cross's
+        // `spvBufferSizeConstants` pointer member for this shape. Keep
+        // SSBO resources in the set-0 argbuf, but route the size sidecar
+        // through a direct graphics buffer slot. Slot 30 is outside the
+        // argbuf self-bindings (24/25) and the direct path is not active
+        // for these SSBOs.
+        if (useArgBuf &&
+            (execModel == spv::ExecutionModelVertex ||
+             execModel == spv::ExecutionModelFragment) &&
+            msl.find("spvBufferSizeConstants") != std::string::npos) {
+            auto replaceAll = [](std::string& text,
+                                 const std::string& needle,
+                                 const std::string& replacement) {
+                std::size_t pos = 0;
+                while ((pos = text.find(needle, pos)) != std::string::npos) {
+                    text.replace(pos, needle.size(), replacement);
+                    pos += replacement.size();
+                }
+            };
+            replaceAll(msl,
+                "spvBufferSizeConstants [[buffer(25)]]",
+                "spvBufferSizeConstants [[buffer(30)]]");
+            replaceAll(msl,
+                "spvDescriptorSet0.spvBufferSizeConstants",
+                "spvBufferSizeConstants");
+        }
 
         // Runtime-sized array handling for SSBOs: SPIRV-Cross emits MSL
         // with `[65536]` for trailing `OpTypeRuntimeArray` members
@@ -1964,6 +1995,10 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 }
 
 ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const {
+    return reflect(spirv, wordCount, bindings, log, TranslatorOptions{});
+}
+
+ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log, const TranslatorOptions& options) const {
     ShaderReflection result;
     try {
         spirv_cross::Compiler compiler(spirv, wordCount);
@@ -2383,7 +2418,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // translation always agree. If the env var were toggled mid-
         // process, new programs would pick up the new mode; already-
         // linked programs retain their old mode until relinked.
-        const bool useArgBufReflection =
+        const bool useArgBufReflection = options.forceArgumentBuffers ||
             (std::getenv("APPGL_ENABLE_ARGUMENT_BUFFERS") != nullptr);
         // Sprint 8 B Cluster F F1 Day 5 (CKPT77): mirror spirvToMSL's
         // sequential allocator for the direct-binding path so the
@@ -3024,6 +3059,10 @@ LinkedProgramSpirv ShaderTranslator::compileGLSLProgram(
 }
 
 ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const {
+    return reflect(spirv, wordCount, bindings, log, TranslatorOptions{});
+}
+
+ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log, const TranslatorOptions&) const {
     (void)spirv;
     (void)wordCount;
     (void)bindings;

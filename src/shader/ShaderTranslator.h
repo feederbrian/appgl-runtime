@@ -207,6 +207,12 @@ ComputeExecutionModes extractComputeModes(const std::uint32_t* spirv, std::size_
 // callers that need tess-stage MSL regardless of the `APPGL_ENABLE_METAL_TESS`
 // env gate (e.g. link-time tess-program translation) set `forceTessellation`.
 struct TranslatorOptions {
+    // Sprint 18 Item42: SSBO graphics-stage Option A argbuf. Force Metal
+    // argument-buffer emission for this stage even when the global debug
+    // env gate is unset. Used by graphics programs whose SSBO footprint can
+    // exceed Metal's direct buffer-index budget.
+    bool forceArgumentBuffers = false;
+
     // When true, SPIRV-Cross tess options are applied to TCS/TES stages
     // even if APPGL_ENABLE_METAL_TESS is unset. No effect on non-tess
     // stages. Env gate still forces the options on when set — this field
@@ -428,6 +434,7 @@ public:
     std::string spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const;
     std::string spirvToMSL(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log, const TranslatorOptions& options) const;
     ShaderReflection reflect(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log) const;
+    ShaderReflection reflect(const std::uint32_t* spirv, std::size_t wordCount, const BindingMap& bindings, std::string* log, const TranslatorOptions& options) const;
     // Phase 3B.5: reflect the TES output struct layout under the same
     // MSL options used by the TES-as-compute translation. Returns
     // `structSize == 0` + empty `members` on failure (or when the

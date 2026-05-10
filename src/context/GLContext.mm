@@ -6180,18 +6180,37 @@ struct GLContext::Impl {
                         break;
                     }
                 }
-                const GLIndexedBufferBinding binding =
-                    state->indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, effectiveBinding);
-                if (binding.buffer == 0) continue;
-                const GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
-                if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
-                TranslatedDrawInfo::SSBOBinding sb;
-                sb.metalSlot = ssbo.metalBinding;
-                sb.metalBuffer = bufObj->metalBuffer;
-                sb.offset = static_cast<std::size_t>(binding.offset);
-                sb.isVertex = isVertex;
-                sb.isFragment = isFragment;
-                info.ssboBindings.push_back(sb);
+                const int numInstances = (ssbo.blockArraySize > 0)
+                    ? static_cast<int>(ssbo.blockArraySize) : 1;
+                const bool isArray = (ssbo.blockArraySize > 0);
+                for (int inst = 0; inst < numInstances; ++inst) {
+                    std::string lookupName = ssbo.name;
+                    if (isArray) lookupName += "[" + std::to_string(inst) + "]";
+                    GLuint glBindingPoint = effectiveBinding + static_cast<GLuint>(inst);
+                    for (const auto& rb : program.resourceStorageBlocks) {
+                        if (rb.name == lookupName && rb.location >= 0) {
+                            glBindingPoint = static_cast<GLuint>(rb.location);
+                            break;
+                        }
+                    }
+                    const GLIndexedBufferBinding binding =
+                        state->indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, glBindingPoint);
+                    if (binding.buffer == 0) continue;
+                    const GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
+                    if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+                    TranslatedDrawInfo::SSBOBinding sb;
+                    sb.metalSlot = ssbo.metalBinding + static_cast<std::uint32_t>(inst);
+                    sb.metalBuffer = bufObj->metalBuffer;
+                    sb.offset = static_cast<std::size_t>(binding.offset);
+                    if (binding.size > 0) {
+                        sb.size = static_cast<std::size_t>(binding.size);
+                    } else if (binding.offset >= 0 && bufObj->size > binding.offset) {
+                        sb.size = static_cast<std::size_t>(bufObj->size - binding.offset);
+                    }
+                    sb.isVertex = isVertex;
+                    sb.isFragment = isFragment;
+                    info.ssboBindings.push_back(sb);
+                }
             }
         };
         resolveStage(info.vertexReflection, true, false);
@@ -23036,6 +23055,17 @@ bool GLContext::linkProgram(GLuint program) {
     ShaderTranslator translator;
     BindingMap bindings;
 
+    auto spirvUsesStorageBuffers = [](const std::uint32_t* spirvData,
+                                      std::size_t spirvWords) -> bool {
+        if (spirvData == nullptr || spirvWords == 0) return false;
+        try {
+            spirv_cross::Compiler compiler(spirvData, spirvWords);
+            return !compiler.get_shader_resources().storage_buffers.empty();
+        } catch (...) {
+            return false;
+        }
+    };
+
     // Translate one stage: spirvToMSL + reflect. Writes the result into the
     // provided output slots on success, records a diagnostic in both the
     // success and failure cases. Returns true iff MSL was produced.
@@ -23119,7 +23149,7 @@ bool GLContext::linkProgram(GLuint program) {
         fflush(stderr);
         try {
             reflectionOut = translator.reflect(
-                spirvData, spirvWords, bindings, nullptr);
+                spirvData, spirvWords, bindings, nullptr, options);
         } catch (const std::exception& e) {
             APPGL_LOG(SHADER, @"[GL] linkProgram-step=reflect program=%u stage=%s THREW: %s",
                   program, stageName, e.what());
@@ -23312,8 +23342,18 @@ bool GLContext::linkProgram(GLuint program) {
             // Option β (keep routing) refutation.
             const bool vsCullPrepass =
                 appgl::vsSpirvWritesCullDistance(vsSpirvData, vsSpirvWords);
+            // Sprint 18 Item42: graphics SSBOs use Metal argument buffers
+            // to avoid direct buffer-index overflow when slot expansion
+            // reaches past Metal's 0..30 range. Apply per-program so VS
+            // and FS share one resource-binding mode.
+            const bool forceRasterArgBuf =
+                spirvUsesStorageBuffers(vsSpirvData, vsSpirvWords) ||
+                spirvUsesStorageBuffers(fsSpirvData, fsSpirvWords);
             appgl::TranslatorOptions vsOptions;
             vsOptions.disableCullDistanceClipRouting = vsCullPrepass;
+            vsOptions.forceArgumentBuffers = forceRasterArgBuf;
+            appgl::TranslatorOptions fsOptions;
+            fsOptions.forceArgumentBuffers = forceRasterArgBuf;
 
             ShaderReflection vsRefl, fsRefl;
             const bool vsOk = translateStage(
@@ -23321,7 +23361,7 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->vertexMSL, vsRefl, vsOptions);
             const bool fsOk = translateStage(
                 "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
-                programObject->fragmentMSL, fsRefl);
+                programObject->fragmentMSL, fsRefl, fsOptions);
             if (vsOk && fsOk) {
                 programObject->vertexReflection = std::move(vsRefl);
                 programObject->fragmentReflection = std::move(fsRefl);
@@ -23527,8 +23567,14 @@ bool GLContext::linkProgram(GLuint program) {
         }
         case ProgramKind::VertexOnly: {
             ShaderReflection vsRefl;
+            appgl::TranslatorOptions vsOptions;
+            if (vertexShader != nullptr) {
+                vsOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    vertexShader->spirv.data(), vertexShader->spirv.size());
+            }
             const bool vsOk = translateCachedStage(
-                "vertex", vertexShader, programObject->vertexMSL, vsRefl);
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl,
+                vsOptions);
             if (vsOk) {
                 programObject->vertexReflection = std::move(vsRefl);
                 // A VS-only program is drawable when paired with
@@ -23556,8 +23602,14 @@ bool GLContext::linkProgram(GLuint program) {
         }
         case ProgramKind::FragmentOnly: {
             ShaderReflection fsRefl;
+            appgl::TranslatorOptions fsOptions;
+            if (fragmentShader != nullptr) {
+                fsOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    fragmentShader->spirv.data(), fragmentShader->spirv.size());
+            }
             const bool fsOk = translateCachedStage(
-                "fragment", fragmentShader, programObject->fragmentMSL, fsRefl);
+                "fragment", fragmentShader, programObject->fragmentMSL, fsRefl,
+                fsOptions);
             if (fsOk) {
                 programObject->fragmentReflection = std::move(fsRefl);
                 rasterTranslationOk = true;
@@ -23675,15 +23727,21 @@ bool GLContext::linkProgram(GLuint program) {
             // modifies cull values is rare and falls outside this gate.
             const bool vsCullPrepassVgf =
                 appgl::vsSpirvWritesCullDistance(vsSpirvData, vsSpirvWords);
+            const bool forceRasterArgBufVgf =
+                spirvUsesStorageBuffers(vsSpirvData, vsSpirvWords) ||
+                spirvUsesStorageBuffers(fsSpirvData, fsSpirvWords);
             appgl::TranslatorOptions vsOptionsVgf;
             vsOptionsVgf.disableCullDistanceClipRouting = vsCullPrepassVgf;
+            vsOptionsVgf.forceArgumentBuffers = forceRasterArgBufVgf;
+            appgl::TranslatorOptions fsOptionsVgf;
+            fsOptionsVgf.forceArgumentBuffers = forceRasterArgBufVgf;
             ShaderReflection vsRefl, fsRefl, gsRefl;
             const bool vsOk = translateStage(
                 "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
                 programObject->vertexMSL, vsRefl, vsOptionsVgf);
             const bool fsOk = translateStage(
                 "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
-                programObject->fragmentMSL, fsRefl);
+                programObject->fragmentMSL, fsRefl, fsOptionsVgf);
             // Sprint 17 Day 9+ R13 sub-bank item_5: commit
             // `needsCullDistancePrepass` for VertexGeometryFragment kind
             // when the VS writes gl_Clip/CullDistance. The drawArrays
@@ -23979,8 +24037,14 @@ bool GLContext::linkProgram(GLuint program) {
             // multi-day infrastructure; the surgical scope ended up tractable
             // because VertexOnly already wired the no-FS pipeline path.
             ShaderReflection vsRefl, gsRefl;
+            appgl::TranslatorOptions vsOptionsVg;
+            if (vertexShader != nullptr) {
+                vsOptionsVg.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    vertexShader->spirv.data(), vertexShader->spirv.size());
+            }
             const bool vsOk = translateCachedStage(
-                "vertex", vertexShader, programObject->vertexMSL, vsRefl);
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl,
+                vsOptionsVg);
             std::string unusedGsMSL;
             (void)translateCachedStage("geometry", geometryShader, unusedGsMSL, gsRefl);
             programObject->geometryReflection = gsRefl;
@@ -24049,12 +24113,19 @@ bool GLContext::linkProgram(GLuint program) {
                 fsSpirvWords = fragmentShader->spirv.size();
             }
             ShaderReflection vsRefl, fsRefl, tcRefl, teRefl;
+            const bool forceRasterArgBufVtf =
+                spirvUsesStorageBuffers(vsSpirvData, vsSpirvWords) ||
+                spirvUsesStorageBuffers(fsSpirvData, fsSpirvWords);
+            appgl::TranslatorOptions vsOptionsVtf;
+            vsOptionsVtf.forceArgumentBuffers = forceRasterArgBufVtf;
+            appgl::TranslatorOptions fsOptionsVtf;
+            fsOptionsVtf.forceArgumentBuffers = forceRasterArgBufVtf;
             const bool vsOk = translateStage(
                 "vertex", vsSpirvData, vsSpirvWords, vertexShader->source,
-                programObject->vertexMSL, vsRefl);
+                programObject->vertexMSL, vsRefl, vsOptionsVtf);
             const bool fsOk = translateStage(
                 "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
-                programObject->fragmentMSL, fsRefl);
+                programObject->fragmentMSL, fsRefl, fsOptionsVtf);
             // Sprint 5 Phase 1: Phase 3 gate widening via passthrough TCS
             // synthesis at link time. When source program has TES + FS
             // (no TCS) — GL spec §11.2.4: TES-only programs use VS outputs
@@ -24746,10 +24817,13 @@ bool GLContext::linkProgram(GLuint program) {
                                        ShaderReflection& outRefl) {
                 if (sh == nullptr || sh->spirv.empty()) return;
                 BindingMap stageBindings;
+                appgl::TranslatorOptions stageOptions;
+                stageOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    sh->spirv.data(), sh->spirv.size());
                 outMSL = translator.spirvToMSL(sh->spirv.data(),
-                    sh->spirv.size(), stageBindings, nullptr);
+                    sh->spirv.size(), stageBindings, nullptr, stageOptions);
                 outRefl = translator.reflect(sh->spirv.data(),
-                    sh->spirv.size(), stageBindings, nullptr);
+                    sh->spirv.size(), stageBindings, nullptr, stageOptions);
                 (void)stageEnum;
             };
             translateSingle(vertexShader, GL_VERTEX_SHADER,

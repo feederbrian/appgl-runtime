@@ -427,6 +427,9 @@ struct TranslatedDrawInfo {
         std::uint32_t metalSlot = 0;
         void* metalBuffer = nullptr;
         std::size_t offset = 0;
+        // Effective bound byte range. Used by the Sprint 18 Item42
+        // graphics argbuf sidecar for SSBO `.length()` / OpArrayLength.
+        std::size_t size = 0;
         bool isVertex = false;
         bool isFragment = false;
     };
