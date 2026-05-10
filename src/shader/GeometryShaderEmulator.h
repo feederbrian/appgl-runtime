@@ -625,7 +625,8 @@ bool runTesForVertex(
     // (lowers to OpImageSampleExplicitLod) hits the empty-map fallback
     // at GSE.cpp:2845-2853 and silently returns zeros.
     const SampledTextureMap* sampledTextures = nullptr,
-    const SampledTextureMap* storageImages = nullptr);
+    const SampledTextureMap* storageImages = nullptr,
+    const appgl::interp::UniformBufferMap* uniformBuffers = nullptr);
 
 // Run a single TCS invocation on CPU. One invocation per
 // (patch, invocationID) where invocationID ∈ [0, layout(vertices=N)).
@@ -683,7 +684,8 @@ bool runTcsForVertex(
     // Sprint 16 Day 6 (CKPT215) — Tess OpImage gap; sister to
     // runTesForVertex's new params. Same maps semantics.
     const SampledTextureMap* sampledTextures = nullptr,
-    const SampledTextureMap* storageImages = nullptr);
+    const SampledTextureMap* storageImages = nullptr,
+    const appgl::interp::UniformBufferMap* uniformBuffers = nullptr);
 
 // Synthesise a pass-through vertex-shader MSL source that reads
 // the expanded per-vertex payload (one buffer slot with gl_Position

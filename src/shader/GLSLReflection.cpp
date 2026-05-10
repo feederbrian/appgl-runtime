@@ -762,6 +762,17 @@ GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
             }
         };
         dropAuxQualifiers();
+        // CTS `shading_language_420pack.qualifier_order_uniform_test_id_2`
+        // uses `highp layout(location=N) uniform layout(location=N) vec4 u`.
+        // After dropping the precision qualifier, the pre-storage layout
+        // block becomes leading; consume it before looking for `uniform`.
+        while (!tokens.empty() && tokens.front() == "layout") {
+            const std::size_t before = tokens.size();
+            LayoutQualifiers one = extractLayoutQualifiers(tokens);
+            mergeLayout(layoutQ, one);
+            if (tokens.size() >= before) break;
+            dropAuxQualifiers();
+        }
         if (tokens.empty()) {
             return;
         }

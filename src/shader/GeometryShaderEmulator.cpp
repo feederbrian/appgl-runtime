@@ -60,7 +60,8 @@ namespace spv {
         OpFUnordLessThan = 185, OpFUnordGreaterThan = 187,
         OpFUnordLessThanEqual = 189, OpFUnordGreaterThanEqual = 191,
         OpLogicalAnd = 167, OpLogicalOr = 166, OpLogicalNot = 168,
-        OpLogicalNotEqual = 165, OpSelect = 169, OpAny = 154, OpAll = 155,
+        OpLogicalEqual = 164, OpLogicalNotEqual = 165,
+        OpSelect = 169, OpAny = 154, OpAll = 155,
         OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247,
         OpLabel = 248, OpBranch = 249, OpBranchConditional = 250, OpSwitch = 251,
         OpReturn = 253,
@@ -467,6 +468,12 @@ private:
     // OpAccessChain dispatch that resolves the first index to a
     // binding (= baseBinding + idx).
     std::unordered_map<std::uint32_t, UniformBufferArrayMeta> uboArrayVarMeta_;
+    // Same binding map for ordinary non-array UBO roots:
+    // `layout(binding=N) uniform Block { ... } instance;`. Once
+    // OpLogicalEqual made 420pack qualifier-order/binding shaders
+    // interpreter-eligible, these block reads needed the same byte-
+    // offset path as UBO arrays.
+    std::unordered_map<std::uint32_t, UniformBufferArrayMeta> uboVarMeta_;
 
     // Sprint 6 P1 sub-task 3 day 3 (CKPT43): caller-supplied sampler-
     // array texture data, populated by the runtime caller (e.g.
@@ -788,6 +795,8 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     // member-offset / array-stride rules (std140 layout for UBOs).
     auto uboMetaIt = uboArrayVarMeta_.find(base);
     const bool rootIsUboArray = (uboMetaIt != uboArrayVarMeta_.end());
+    auto uboBlockMetaIt = uboVarMeta_.find(base);
+    const bool rootIsUBO = (uboBlockMetaIt != uboVarMeta_.end());
     std::uint32_t uboArrayElemBinding = 0;
     bool uboFirstIndexResolved = false;
 
@@ -835,7 +844,7 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             // SSBO byte offset: use DecorationArrayStride on the array
             // type, else fall back to scalar-width * 4 bytes (covers
             // packed scalar arrays).
-            if (rootIsSSBO || rootIsUboArray) {
+            if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
                 std::uint32_t stride = 0;
                 auto dIt = module_.decorations.find(curType);
                 if (dIt != module_.decorations.end() && dIt->second.hasArrayStride) {
@@ -864,7 +873,7 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             // decorations. glslang always emits this for every SSBO /
             // UBO struct member (per spec — required for std140/std430
             // member layouts to be unambiguous).
-            if (rootIsSSBO || rootIsUboArray) {
+            if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
                 auto mdIt = module_.memberDecorations.find(curType);
                 if (mdIt != module_.memberDecorations.end()) {
                     auto pIt2 = mdIt->second.perMember.find(
@@ -879,7 +888,7 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
         } else if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
                    t.kind == TypeInfo::Kind::Vec4) {
             offset += static_cast<std::uint32_t>(idx);
-            if (rootIsSSBO || rootIsUboArray) {
+            if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
                 // std140/std430: vec component = 4 bytes for
                 // float/int/uint. Both layouts pack vec components
                 // identically; no layout-distinction needed here.
@@ -889,7 +898,7 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
         } else if (t.kind == TypeInfo::Kind::Matrix) {
             const std::uint32_t colW = module_.scalarWidth(t.componentType);
             offset += static_cast<std::uint32_t>(idx) * colW;
-            if (rootIsSSBO || rootIsUboArray) {
+            if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
                 // Matrix column stride: fall back to colW * 4 bytes
                 // (std430 vec-column-packed) when no MatrixStride
                 // decoration is parsed. Matrices in SSBO are rare in
@@ -919,6 +928,9 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     if (rootIsUboArray && uboFirstIndexResolved) {
         r.isUniformBuffer = true;
         r.binding = uboArrayElemBinding;
+    } else if (rootIsUBO) {
+        r.isUniformBuffer = true;
+        r.binding = uboBlockMetaIt->second.baseBinding;
     }
     return r;
 }
@@ -1420,26 +1432,47 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
         if (info.storageClass == spv::StorageClassUniform) {
             auto pT = module_.types.find(tIt->second.pointeeType);
             if (pT != module_.types.end() &&
-                pT->second.kind == TypeInfo::Kind::Array) {
+                pT->second.kind == TypeInfo::Kind::Struct) {
+                auto blockDec = module_.decorations.find(tIt->second.pointeeType);
+                if (blockDec != module_.decorations.end() &&
+                    blockDec->second.isBlock &&
+                    !blockDec->second.isBufferBlock) {
+                    auto vDec = module_.decorations.find(varId);
+                    if (vDec != module_.decorations.end() && vDec->second.hasBinding &&
+                        uniformBuffers_ != nullptr &&
+                        uniformBuffers_->count(vDec->second.binding) != 0) {
+                        UniformBufferArrayMeta uboMeta;
+                        uboMeta.baseBinding = vDec->second.binding;
+                        uboMeta.arrayLen = 1;
+                        uboVarMeta_[varId] = uboMeta;
+                        continue;   // read through loadFromUBO
+                    }
+                }
+            } else if (pT != module_.types.end() &&
+                       pT->second.kind == TypeInfo::Kind::Array) {
                 auto innerT = module_.types.find(pT->second.componentType);
                 if (innerT != module_.types.end() &&
                     innerT->second.kind == TypeInfo::Kind::Struct) {
                     auto blockDec = module_.decorations.find(pT->second.componentType);
-                    if (blockDec != module_.decorations.end() && blockDec->second.isBlock) {
-                        UniformBufferArrayMeta uboMeta;
+                    if (blockDec != module_.decorations.end() &&
+                        blockDec->second.isBlock &&
+                        !blockDec->second.isBufferBlock) {
                         auto vDec = module_.decorations.find(varId);
-                        if (vDec != module_.decorations.end() && vDec->second.hasBinding) {
+                        if (vDec != module_.decorations.end() && vDec->second.hasBinding &&
+                            uniformBuffers_ != nullptr &&
+                            uniformBuffers_->count(vDec->second.binding) != 0) {
+                            UniformBufferArrayMeta uboMeta;
                             uboMeta.baseBinding = vDec->second.binding;
+                            // OpTypeArray's length lives in
+                            // arrayLengthConstId (SPIR-V constant id);
+                            // resolve via module_.constants. Mirrors the
+                            // pattern in SpirvModule::scalarWidth.
+                            auto lenIt = module_.constants.find(pT->second.arrayLengthConstId);
+                            uboMeta.arrayLen = (lenIt != module_.constants.end())
+                                ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0;
+                            uboArrayVarMeta_[varId] = uboMeta;
+                            continue;   // skip varStorage_ seeding for UBO arrays
                         }
-                        // OpTypeArray's length lives in
-                        // arrayLengthConstId (SPIR-V constant id);
-                        // resolve via module_.constants. Mirrors the
-                        // pattern in SpirvModule::scalarWidth.
-                        auto lenIt = module_.constants.find(pT->second.arrayLengthConstId);
-                        uboMeta.arrayLen = (lenIt != module_.constants.end())
-                            ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0;
-                        uboArrayVarMeta_[varId] = uboMeta;
-                        continue;   // skip varStorage_ seeding for UBO arrays
                     }
                 }
             }
@@ -2915,6 +2948,58 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
     std::uint32_t previousLabel = 0;
     std::uint32_t currentLabel = 0;
 
+    auto truthy = [](const Value& v, int lane) -> bool {
+        if (v.kind == Value::Kind::Bool) {
+            return v.bval;
+        }
+        const int idx = std::min(lane, v.componentCount() - 1);
+        if (v.isIntKind()) {
+            return v.i[idx] != 0;
+        }
+        if (v.isFloatKind()) {
+            return v.f[idx] != 0.0f;
+        }
+        return false;
+    };
+    auto boolVectorWidthForType = [&](std::uint32_t typeId) -> int {
+        auto tIt = module_.types.find(typeId);
+        if (tIt == module_.types.end()) {
+            return 1;
+        }
+        const TypeInfo& t = tIt->second;
+        if (t.kind != TypeInfo::Kind::Vec2 &&
+            t.kind != TypeInfo::Kind::Vec3 &&
+            t.kind != TypeInfo::Kind::Vec4) {
+            return 1;
+        }
+        auto cIt = module_.types.find(t.componentType);
+        if (cIt == module_.types.end() ||
+            cIt->second.kind != TypeInfo::Kind::Bool) {
+            return 1;
+        }
+        return t.kind == TypeInfo::Kind::Vec2 ? 2 :
+               t.kind == TypeInfo::Kind::Vec3 ? 3 : 4;
+    };
+    auto makeBoolResult = [&](std::uint32_t typeId,
+                              const std::array<bool, 4>& lanes,
+                              int fallbackWidth) -> Value {
+        const int width = std::max(1, boolVectorWidthForType(typeId) > 1
+            ? boolVectorWidthForType(typeId)
+            : fallbackWidth);
+        Value r;
+        if (width <= 1) {
+            r.kind = Value::Kind::Bool;
+            r.bval = lanes[0];
+            return r;
+        }
+        r.kind = width == 2 ? Value::Kind::Int2 :
+                 width == 3 ? Value::Kind::Int3 : Value::Kind::Int4;
+        for (int k = 0; k < width && k < 4; ++k) {
+            r.i[k] = lanes[k] ? 1 : 0;
+        }
+        return r;
+    };
+
     while (pc < module_.funcBodyEnd && !errored_) {
         const std::uint32_t inst = module_.words[pc];
         const std::uint16_t opcode = inst & 0xFFFF;
@@ -4035,27 +4120,26 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             case spv::OpULessThan: case spv::OpULessThanEqual: {
                 Value a, b;
                 if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("int-cmp: unknown operand"); break; }
-                // For scalar comparisons the result is a scalar bool;
-                // we materialize it into bval for consumption by
-                // OpBranchConditional / OpSelect.
-                Value r;
-                r.kind = Value::Kind::Bool;
-                bool b0 = false;
-                const std::int32_t ai = a.i[0], bi = b.i[0];
-                const std::uint32_t au = static_cast<std::uint32_t>(ai);
-                const std::uint32_t bu = static_cast<std::uint32_t>(bi);
-                switch (opcode) {
-                    case spv::OpIEqual:             b0 = (ai == bi); break;
-                    case spv::OpINotEqual:          b0 = (ai != bi); break;
-                    case spv::OpSLessThan:          b0 = (ai <  bi); break;
-                    case spv::OpSGreaterThan:       b0 = (ai >  bi); break;
-                    case spv::OpSLessThanEqual:     b0 = (ai <= bi); break;
-                    case spv::OpSGreaterThanEqual:  b0 = (ai >= bi); break;
-                    case spv::OpULessThan:          b0 = (au <  bu); break;
-                    case spv::OpULessThanEqual:     b0 = (au <= bu); break;
+                std::array<bool, 4> lanes{};
+                const int n = std::max(a.componentCount(), b.componentCount());
+                for (int k = 0; k < n && k < 4; ++k) {
+                    const int ak = std::min(k, a.componentCount() - 1);
+                    const int bk = std::min(k, b.componentCount() - 1);
+                    const std::int32_t ai = a.i[ak], bi = b.i[bk];
+                    const std::uint32_t au = static_cast<std::uint32_t>(ai);
+                    const std::uint32_t bu = static_cast<std::uint32_t>(bi);
+                    switch (opcode) {
+                        case spv::OpIEqual:             lanes[k] = (ai == bi); break;
+                        case spv::OpINotEqual:          lanes[k] = (ai != bi); break;
+                        case spv::OpSLessThan:          lanes[k] = (ai <  bi); break;
+                        case spv::OpSGreaterThan:       lanes[k] = (ai >  bi); break;
+                        case spv::OpSLessThanEqual:     lanes[k] = (ai <= bi); break;
+                        case spv::OpSGreaterThanEqual:  lanes[k] = (ai >= bi); break;
+                        case spv::OpULessThan:          lanes[k] = (au <  bu); break;
+                        case spv::OpULessThanEqual:     lanes[k] = (au <= bu); break;
+                    }
                 }
-                r.bval = b0;
-                valueStore_[w[1]] = r;
+                valueStore_[w[1]] = makeBoolResult(w[0], lanes, n);
                 pc += wc;
                 break;
             }
@@ -4076,48 +4160,61 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             case spv::OpFUnordLessThanEqual: case spv::OpFUnordGreaterThanEqual: {
                 Value a, b;
                 if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("flt-cmp: unknown operand"); break; }
-                Value r;
-                r.kind = Value::Kind::Bool;
-                bool b0 = false;
-                const float af = a.f[0], bf = b.f[0];
-                switch (opcode) {
-                    case spv::OpFOrdEqual:
-                    case spv::OpFUnordEqual:            b0 = (af == bf); break;
-                    case spv::OpFOrdNotEqual:
-                    case spv::OpFUnordNotEqual:         b0 = (af != bf); break;
-                    case spv::OpFOrdLessThan:
-                    case spv::OpFUnordLessThan:         b0 = (af <  bf); break;
-                    case spv::OpFOrdGreaterThan:
-                    case spv::OpFUnordGreaterThan:      b0 = (af >  bf); break;
-                    case spv::OpFOrdLessThanEqual:
-                    case spv::OpFUnordLessThanEqual:    b0 = (af <= bf); break;
-                    case spv::OpFOrdGreaterThanEqual:
-                    case spv::OpFUnordGreaterThanEqual: b0 = (af >= bf); break;
+                std::array<bool, 4> lanes{};
+                const int n = std::max(a.componentCount(), b.componentCount());
+                for (int k = 0; k < n && k < 4; ++k) {
+                    const int ak = std::min(k, a.componentCount() - 1);
+                    const int bk = std::min(k, b.componentCount() - 1);
+                    const float af = a.f[ak], bf = b.f[bk];
+                    switch (opcode) {
+                        case spv::OpFOrdEqual:
+                        case spv::OpFUnordEqual:            lanes[k] = (af == bf); break;
+                        case spv::OpFOrdNotEqual:
+                        case spv::OpFUnordNotEqual:         lanes[k] = (af != bf); break;
+                        case spv::OpFOrdLessThan:
+                        case spv::OpFUnordLessThan:         lanes[k] = (af <  bf); break;
+                        case spv::OpFOrdGreaterThan:
+                        case spv::OpFUnordGreaterThan:      lanes[k] = (af >  bf); break;
+                        case spv::OpFOrdLessThanEqual:
+                        case spv::OpFUnordLessThanEqual:    lanes[k] = (af <= bf); break;
+                        case spv::OpFOrdGreaterThanEqual:
+                        case spv::OpFUnordGreaterThanEqual: lanes[k] = (af >= bf); break;
+                    }
                 }
-                r.bval = b0;
-                valueStore_[w[1]] = r;
+                valueStore_[w[1]] = makeBoolResult(w[0], lanes, n);
                 pc += wc;
                 break;
             }
             case spv::OpLogicalNot: {
                 Value a;
                 if (!tryGetValue(w[2], a)) { bail("OpLogicalNot: unknown operand"); break; }
-                Value r; r.kind = Value::Kind::Bool; r.bval = !a.bval;
-                valueStore_[w[1]] = r;
+                std::array<bool, 4> lanes{};
+                const int n = a.componentCount();
+                for (int k = 0; k < n && k < 4; ++k) {
+                    lanes[k] = !truthy(a, k);
+                }
+                valueStore_[w[1]] = makeBoolResult(w[0], lanes, n);
                 pc += wc;
                 break;
             }
             case spv::OpLogicalAnd: case spv::OpLogicalOr:
+            case spv::OpLogicalEqual:
             case spv::OpLogicalNotEqual: {
                 Value a, b;
                 if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("bool-op: unknown operand"); break; }
-                Value r; r.kind = Value::Kind::Bool;
-                switch (opcode) {
-                    case spv::OpLogicalAnd:       r.bval = a.bval && b.bval; break;
-                    case spv::OpLogicalOr:        r.bval = a.bval || b.bval; break;
-                    case spv::OpLogicalNotEqual:  r.bval = a.bval != b.bval; break;
+                std::array<bool, 4> lanes{};
+                const int n = std::max(a.componentCount(), b.componentCount());
+                for (int k = 0; k < n && k < 4; ++k) {
+                    const bool av = truthy(a, k);
+                    const bool bv = truthy(b, k);
+                    switch (opcode) {
+                        case spv::OpLogicalAnd:       lanes[k] = av && bv; break;
+                        case spv::OpLogicalOr:        lanes[k] = av || bv; break;
+                        case spv::OpLogicalEqual:     lanes[k] = av == bv; break;
+                        case spv::OpLogicalNotEqual:  lanes[k] = av != bv; break;
+                    }
                 }
-                valueStore_[w[1]] = r;
+                valueStore_[w[1]] = makeBoolResult(w[0], lanes, n);
                 pc += wc;
                 break;
             }
@@ -4137,7 +4234,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 Value r; r.kind = Value::Kind::Bool;
                 bool any = false, all = true;
                 for (int k = 0; k < a.componentCount(); ++k) {
-                    if (a.f[k] != 0.0f || a.i[k] != 0) any = true;
+                    if (truthy(a, k)) any = true;
                     else all = false;
                 }
                 r.bval = (opcode == spv::OpAny) ? any : all;
@@ -4379,6 +4476,7 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpLogicalNot:
         case spv::OpLogicalAnd:
         case spv::OpLogicalOr:
+        case spv::OpLogicalEqual:
         case spv::OpLogicalNotEqual:
         case spv::OpSelect:
         case spv::OpAny:
@@ -4936,6 +5034,75 @@ Interpreter::UniformValues buildUniformMap(const GLProgramObject& program) {
         if (!flat.empty()) out[u.name] = std::move(flat);
     }
     return out;
+}
+
+void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
+                                 GLObjectStore& objects,
+                                 const GLStateTracker& state,
+                                 Interpreter::UniformBufferMap& out) {
+    if (spirv.empty()) return;
+    SpirvModule mod;
+    if (!mod.parse(spirv.data(), spirv.size())) return;
+
+    auto addBinding = [&](std::uint32_t binding) {
+        if (out.count(binding) != 0) return;
+        GLIndexedBufferBinding bb =
+            state.indexedBufferBinding(GL_UNIFORM_BUFFER, binding);
+        if (bb.buffer == 0) return;
+        const GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
+        if (bufObj == nullptr || bufObj->shadowBytes.empty()) return;
+        const std::uint8_t* dataPtr = bufObj->shadowBytes.data();
+        std::size_t dataSize = bufObj->shadowBytes.size();
+        if (bb.offset > 0) {
+            if (static_cast<std::size_t>(bb.offset) >= dataSize) return;
+            dataPtr += bb.offset;
+            dataSize -= static_cast<std::size_t>(bb.offset);
+        }
+        if (bb.size > 0 && static_cast<std::size_t>(bb.size) < dataSize) {
+            dataSize = static_cast<std::size_t>(bb.size);
+        }
+        UniformBufferRegion region;
+        region.ptr = dataPtr;
+        region.size = dataSize;
+        out[binding] = region;
+    };
+
+    for (const auto& [varId, info] : mod.variables) {
+        if (info.storageClass != spv::StorageClassUniform) continue;
+        auto tIt = mod.types.find(info.typeId);
+        if (tIt == mod.types.end()) continue;
+        auto pT = mod.types.find(tIt->second.pointeeType);
+        if (pT == mod.types.end()) continue;
+
+        auto vDec = mod.decorations.find(varId);
+        if (vDec == mod.decorations.end() || !vDec->second.hasBinding) continue;
+        const std::uint32_t baseBinding = vDec->second.binding;
+
+        if (pT->second.kind == TypeInfo::Kind::Struct) {
+            auto blockDec = mod.decorations.find(tIt->second.pointeeType);
+            if (blockDec != mod.decorations.end() && blockDec->second.isBlock &&
+                !blockDec->second.isBufferBlock) {
+                addBinding(baseBinding);
+            }
+        } else if (pT->second.kind == TypeInfo::Kind::Array) {
+            auto innerT = mod.types.find(pT->second.componentType);
+            if (innerT == mod.types.end() ||
+                innerT->second.kind != TypeInfo::Kind::Struct) {
+                continue;
+            }
+            auto blockDec = mod.decorations.find(pT->second.componentType);
+            if (blockDec == mod.decorations.end() || !blockDec->second.isBlock ||
+                blockDec->second.isBufferBlock) {
+                continue;
+            }
+            auto lenIt = mod.constants.find(pT->second.arrayLengthConstId);
+            const std::uint32_t arrayLen = (lenIt != mod.constants.end())
+                ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0;
+            for (std::uint32_t inst = 0; inst < arrayLen; ++inst) {
+                addBinding(baseBinding + inst);
+            }
+        }
+    }
 }
 
 // Scan a SPIR-V module for OpStore instructions whose pointer
@@ -5578,66 +5745,11 @@ EmulatedDraw emulateVsOnlyDrawForTf(
                     static_cast<std::size_t>(effectiveInstances);
     d.expandedVertexData.assign(d.vertexCount * fpv, 0.0f);
 
-    // Sprint 17 Day 4+ BONUS-2 [gpu_shader5 array-indexing]: walk VS
-    // SPIR-V variables for UBO array shapes (`uniform Block { ... }
-    // arr[N]`) and populate a UniformBufferMap from the GL state's
-    // GL_UNIFORM_BUFFER indexed bindings + GLBufferObject shadow
-    // bytes. Sister to encodeEmulatedGsDraw's gsSsboMap walker.
-    // Built once per draw — every per-vertex runVsForVertex re-uses
-    // the same map. Skips BufferBlock-decorated structs (those are
-    // SSBOs handled by ssboVarMeta_ machinery in the Interpreter).
+    // Sprint 18 420pack qualifier_order_uniform: include ordinary
+    // UBO roots as well as UBO arrays now that broader bool-op
+    // support lets more tess/GS shaders take the CPU interpreter path.
     Interpreter::UniformBufferMap vsUboMap;
-    {
-        SpirvModule vsModForUbo;
-        if (vsModForUbo.parse(program.vertexSpirv.data(), program.vertexSpirv.size())) {
-            for (const auto& [varId, info] : vsModForUbo.variables) {
-                if (info.storageClass != spv::StorageClassUniform) continue;
-                auto tIt = vsModForUbo.types.find(info.typeId);
-                if (tIt == vsModForUbo.types.end()) continue;
-                auto pT = vsModForUbo.types.find(tIt->second.pointeeType);
-                if (pT == vsModForUbo.types.end() ||
-                    pT->second.kind != TypeInfo::Kind::Array) continue;
-                auto innerT = vsModForUbo.types.find(pT->second.componentType);
-                if (innerT == vsModForUbo.types.end() ||
-                    innerT->second.kind != TypeInfo::Kind::Struct) continue;
-                auto bDec = vsModForUbo.decorations.find(pT->second.componentType);
-                if (bDec == vsModForUbo.decorations.end() || !bDec->second.isBlock) continue;
-                if (bDec->second.isBufferBlock) continue;   // SSBO — skip
-                auto vDec = vsModForUbo.decorations.find(varId);
-                if (vDec == vsModForUbo.decorations.end() || !vDec->second.hasBinding) continue;
-                const std::uint32_t baseBinding = vDec->second.binding;
-                // Resolve array length from constant table (sister to
-                // initVariables UBO array detection).
-                auto lenIt = vsModForUbo.constants.find(pT->second.arrayLengthConstId);
-                const std::uint32_t arrayLen = (lenIt != vsModForUbo.constants.end())
-                    ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0;
-                if (arrayLen == 0) continue;
-                for (std::uint32_t inst = 0; inst < arrayLen; ++inst) {
-                    const std::uint32_t bp = baseBinding + inst;
-                    if (vsUboMap.count(bp) != 0) continue;
-                    GLIndexedBufferBinding bb =
-                        state.indexedBufferBinding(GL_UNIFORM_BUFFER, bp);
-                    if (bb.buffer == 0) continue;
-                    const GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
-                    if (bufObj == nullptr || bufObj->shadowBytes.empty()) continue;
-                    const std::uint8_t* dataPtr = bufObj->shadowBytes.data();
-                    std::size_t dataSize = bufObj->shadowBytes.size();
-                    if (bb.offset > 0) {
-                        if (static_cast<std::size_t>(bb.offset) >= dataSize) continue;
-                        dataPtr += bb.offset;
-                        dataSize -= static_cast<std::size_t>(bb.offset);
-                    }
-                    if (bb.size > 0 && static_cast<std::size_t>(bb.size) < dataSize) {
-                        dataSize = static_cast<std::size_t>(bb.size);
-                    }
-                    UniformBufferRegion region;
-                    region.ptr = dataPtr;
-                    region.size = dataSize;
-                    vsUboMap[bp] = region;
-                }
-            }
-        }
-    }
+    addUniformBuffersFromModule(program.vertexSpirv, objects, state, vsUboMap);
     const Interpreter::UniformBufferMap* vsUboMapPtr =
         vsUboMap.empty() ? nullptr : &vsUboMap;
 
@@ -6316,68 +6428,11 @@ EmulatedDraw emulateGeometryDraw(
     const Interpreter::StorageBufferMap* gsSsboMapPtr =
         gsSsboMap.empty() ? nullptr : &gsSsboMap;
 
-    // Sprint 17 Day 9+ regression-debt #4 [Day 4+ BONUS-2 cross-component]:
-    // mirror the SSBO walker for UBO arrays. The Interpreter's BONUS-2
-    // initVariables UBO array detection routes OpLoad through
-    // `loadFromUBO`, which requires `setUniformBuffers` to be called
-    // by the emulator host. Without this map, GS programs containing
-    // `uniform Block { ... } arr[N]` regress to zero reads (test
-    // `geometry_shader.limits.max_uniform_blocks` extracted 0 vs
-    // expected sum-1..N). Sister to emulateVsOnlyDrawForTf at line
-    // 5286 — same shape, walks both GS and VS SPIR-V like the SSBO
-    // walker above.
+    // UBO reads in CPU VS/GS emulation. Includes both UBO arrays and
+    // ordinary block roots; `binding_uniform_blocks` uses the latter.
     Interpreter::UniformBufferMap gsUboMap;
-    auto addUbosFromGsModule = [&](const std::vector<std::uint32_t>& spirv) {
-        if (spirv.empty()) return;
-        SpirvModule sMod;
-        if (!sMod.parse(spirv.data(), spirv.size())) return;
-        for (const auto& [varId, info] : sMod.variables) {
-            if (info.storageClass != spv::StorageClassUniform) continue;
-            auto tIt = sMod.types.find(info.typeId);
-            if (tIt == sMod.types.end()) continue;
-            auto pT = sMod.types.find(tIt->second.pointeeType);
-            if (pT == sMod.types.end() ||
-                pT->second.kind != TypeInfo::Kind::Array) continue;
-            auto innerT = sMod.types.find(pT->second.componentType);
-            if (innerT == sMod.types.end() ||
-                innerT->second.kind != TypeInfo::Kind::Struct) continue;
-            auto bDec = sMod.decorations.find(pT->second.componentType);
-            if (bDec == sMod.decorations.end() || !bDec->second.isBlock) continue;
-            if (bDec->second.isBufferBlock) continue;   // SSBO — handled above
-            auto vDec = sMod.decorations.find(varId);
-            if (vDec == sMod.decorations.end() || !vDec->second.hasBinding) continue;
-            const std::uint32_t baseBinding = vDec->second.binding;
-            auto lenIt = sMod.constants.find(pT->second.arrayLengthConstId);
-            const std::uint32_t arrayLen = (lenIt != sMod.constants.end())
-                ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0;
-            if (arrayLen == 0) continue;
-            for (std::uint32_t inst = 0; inst < arrayLen; ++inst) {
-                const std::uint32_t bp = baseBinding + inst;
-                if (gsUboMap.count(bp) != 0) continue;
-                GLIndexedBufferBinding bb =
-                    state.indexedBufferBinding(GL_UNIFORM_BUFFER, bp);
-                if (bb.buffer == 0) continue;
-                const GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
-                if (bufObj == nullptr || bufObj->shadowBytes.empty()) continue;
-                const std::uint8_t* dataPtr = bufObj->shadowBytes.data();
-                std::size_t dataSize = bufObj->shadowBytes.size();
-                if (bb.offset > 0) {
-                    if (static_cast<std::size_t>(bb.offset) >= dataSize) continue;
-                    dataPtr += bb.offset;
-                    dataSize -= static_cast<std::size_t>(bb.offset);
-                }
-                if (bb.size > 0 && static_cast<std::size_t>(bb.size) < dataSize) {
-                    dataSize = static_cast<std::size_t>(bb.size);
-                }
-                UniformBufferRegion region;
-                region.ptr = dataPtr;
-                region.size = dataSize;
-                gsUboMap[bp] = region;
-            }
-        }
-    };
-    addUbosFromGsModule(program.geometrySpirv);
-    addUbosFromGsModule(program.vertexSpirv);
+    addUniformBuffersFromModule(program.geometrySpirv, objects, state, gsUboMap);
+    addUniformBuffersFromModule(program.vertexSpirv, objects, state, gsUboMap);
     const Interpreter::UniformBufferMap* gsUboMapPtr =
         gsUboMap.empty() ? nullptr : &gsUboMap;
 
@@ -7703,7 +7758,8 @@ bool runTesForVertex(
     const std::vector<std::string>* inVaryingNames,
     const std::vector<std::uint32_t>* inVaryingWidths,
     const SampledTextureMap* sampledTextures,
-    const SampledTextureMap* storageImages)
+    const SampledTextureMap* storageImages,
+    const Interpreter::UniformBufferMap* uniformBuffers)
 {
     if (tesSpirv == nullptr || tesWordCount < 5) {
         if (diagnostic) *diagnostic = "runTesForVertex: empty SPIR-V";
@@ -7749,6 +7805,9 @@ bool runTesForVertex(
     Interpreter tesInterp(tesMod, Interpreter::Stage::TessEvaluation,
                           outVaryingNames, outVaryingWidths);
     tesInterp.setUniforms(&uniforms);
+    if (uniformBuffers != nullptr) {
+        tesInterp.setUniformBuffers(uniformBuffers);
+    }
     tesInterp.setTesInputs(tessCoord, primitiveID);
 
     // Sprint 8 #8 β.2 (CKPT69): wire cross-stage input varying names
@@ -7858,7 +7917,8 @@ bool runTcsForVertex(
     const std::vector<std::string>* outVaryingNames,
     const std::vector<std::uint32_t>* outVaryingWidths,
     const SampledTextureMap* sampledTextures,
-    const SampledTextureMap* storageImages)
+    const SampledTextureMap* storageImages,
+    const Interpreter::UniformBufferMap* uniformBuffers)
 {
     if (tcsSpirv == nullptr || tcsWordCount < 5) {
         if (diagnostic) *diagnostic = "runTcsForVertex: empty SPIR-V";
@@ -7906,6 +7966,9 @@ bool runTcsForVertex(
     Interpreter tcsInterp(tcsMod, Interpreter::Stage::TessControl,
                           tcsOutNames, tcsOutWidths);
     tcsInterp.setUniforms(&uniforms);
+    if (uniformBuffers != nullptr) {
+        tcsInterp.setUniformBuffers(uniformBuffers);
+    }
     tcsInterp.setTcsInputs(primitiveID, invocationID, patchVertices);
 
     // Sprint 8 #8 β.2 (CKPT69): cross-stage input varying interface for

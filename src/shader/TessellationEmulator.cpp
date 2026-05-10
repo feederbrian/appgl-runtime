@@ -85,6 +85,74 @@ bool appglEnvEnabledDefaultOn(const char* name) {
     return v == nullptr || (v[0] != '0' && v[0] != '\0');
 }
 
+void addTessUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
+                                     GLObjectStore& objects,
+                                     const GLStateTracker& state,
+                                     UniformBufferMap& out) {
+    if (spirv.empty()) return;
+    SpirvModule mod;
+    if (!mod.parse(spirv.data(), spirv.size())) return;
+
+    auto addBinding = [&](std::uint32_t binding) {
+        if (out.count(binding) != 0) return;
+        GLIndexedBufferBinding bb =
+            state.indexedBufferBinding(GL_UNIFORM_BUFFER, binding);
+        if (bb.buffer == 0) return;
+        const GLBufferObject* bufObj = objects.buffers().get(bb.buffer);
+        if (bufObj == nullptr || bufObj->shadowBytes.empty()) return;
+        const std::uint8_t* dataPtr = bufObj->shadowBytes.data();
+        std::size_t dataSize = bufObj->shadowBytes.size();
+        if (bb.offset > 0) {
+            if (static_cast<std::size_t>(bb.offset) >= dataSize) return;
+            dataPtr += bb.offset;
+            dataSize -= static_cast<std::size_t>(bb.offset);
+        }
+        if (bb.size > 0 && static_cast<std::size_t>(bb.size) < dataSize) {
+            dataSize = static_cast<std::size_t>(bb.size);
+        }
+        UniformBufferRegion region;
+        region.ptr = dataPtr;
+        region.size = dataSize;
+        out[binding] = region;
+    };
+
+    for (const auto& [varId, info] : mod.variables) {
+        if (info.storageClass != spv::StorageClassUniform) continue;
+        auto tIt = mod.types.find(info.typeId);
+        if (tIt == mod.types.end()) continue;
+        auto pT = mod.types.find(tIt->second.pointeeType);
+        if (pT == mod.types.end()) continue;
+        auto vDec = mod.decorations.find(varId);
+        if (vDec == mod.decorations.end() || !vDec->second.hasBinding) continue;
+        const std::uint32_t baseBinding = vDec->second.binding;
+
+        if (pT->second.kind == TypeInfo::Kind::Struct) {
+            auto blockDec = mod.decorations.find(tIt->second.pointeeType);
+            if (blockDec != mod.decorations.end() && blockDec->second.isBlock &&
+                !blockDec->second.isBufferBlock) {
+                addBinding(baseBinding);
+            }
+        } else if (pT->second.kind == TypeInfo::Kind::Array) {
+            auto innerT = mod.types.find(pT->second.componentType);
+            if (innerT == mod.types.end() ||
+                innerT->second.kind != TypeInfo::Kind::Struct) {
+                continue;
+            }
+            auto blockDec = mod.decorations.find(pT->second.componentType);
+            if (blockDec == mod.decorations.end() || !blockDec->second.isBlock ||
+                blockDec->second.isBufferBlock) {
+                continue;
+            }
+            auto lenIt = mod.constants.find(pT->second.arrayLengthConstId);
+            const std::uint32_t arrayLen = (lenIt != mod.constants.end())
+                ? static_cast<std::uint32_t>(lenIt->second.i[0]) : 0;
+            for (std::uint32_t inst = 0; inst < arrayLen; ++inst) {
+                addBinding(baseBinding + inst);
+            }
+        }
+    }
+}
+
 // TES execution modes we can handle (GL 4.6 §11.2.3 Table 11.8):
 //   ExecutionModeTriangles    → barycentric (u,v,w) with u+v+w = 1
 //   ExecutionModeQuads        → (u,v) with 0 <= u,v <= 1
@@ -2234,6 +2302,15 @@ EmulatedDraw emulateTessellationDraw(
         uniformMapPtr = &precomputedUniforms;
     }
 
+    UniformBufferMap tessUboMap;
+    if (needUniformMap) {
+        addTessUniformBuffersFromModule(program.vertexSpirv, objects, state, tessUboMap);
+        addTessUniformBuffersFromModule(program.tessControlSpirv, objects, state, tessUboMap);
+        addTessUniformBuffersFromModule(program.tessEvalSpirv, objects, state, tessUboMap);
+    }
+    const UniformBufferMap* tessUboMapPtr =
+        tessUboMap.empty() ? nullptr : &tessUboMap;
+
     // patchInputs[] + tcsOutputs[] declarations moved up so the TCS
     // pre-pass (below) can populate tcsOutputs and consult patchInputs
     // that the VS pre-pass (which runs BEFORE this block — order was
@@ -2345,7 +2422,8 @@ EmulatedDraw emulateTessellationDraw(
                     program.vertexSpirv.data(), program.vertexSpirv.size(),
                     program, vao, objects, vboSlot, 0 /*instanceID*/,
                     crossStageVsToTcs, crossStageVsToTcsWidths,
-                    patchInputs[p][static_cast<std::size_t>(pv)], &vsDiag);
+                    patchInputs[p][static_cast<std::size_t>(pv)], &vsDiag,
+                    nullptr, tessUboMapPtr);
                 if (!vsOk) {
                     ++vsFailures;
                     auto& pos = patchInputs[p][static_cast<std::size_t>(pv)].position;
@@ -2415,7 +2493,8 @@ EmulatedDraw emulateTessellationDraw(
                     /*outVaryingNames=*/ &crossStageTcsToTes,
                     /*outVaryingWidths=*/&crossStageTcsToTesWidths,
                     /*sampledTextures=*/tcsSampledTextures,
-                    /*storageImages=*/tcsStorageImages);
+                    /*storageImages=*/tcsStorageImages,
+                    /*uniformBuffers=*/tessUboMapPtr);
                 if (tcsDebug && !ok) {
                     std::fprintf(stderr, "[tess-emul] TCS bail (patch=%zu iv=%d): %s\n",
                         p, iv, diag.c_str());
@@ -2504,7 +2583,8 @@ EmulatedDraw emulateTessellationDraw(
             /*inVaryingNames=*/  &crossStageTcsToTes,
             /*inVaryingWidths=*/ &crossStageTcsToTesWidths,
             /*sampledTextures=*/tesSampledTextures,
-            /*storageImages=*/tesStorageImages);
+            /*storageImages=*/tesStorageImages,
+            /*uniformBuffers=*/tessUboMapPtr);
         if (!ok && tesDebug && !diag.empty() &&
             tesBailSeen->insert(diag).second) {
             std::fprintf(stderr, "[tess-emul] TES bail: %s\n", diag.c_str());
