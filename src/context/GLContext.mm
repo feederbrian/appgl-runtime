@@ -617,6 +617,7 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         case GL_RGB12:             return MTLPixelFormatRGBA16Unorm;
         case GL_RGBA12:            return MTLPixelFormatRGBA16Unorm;
         // RGB-only — promoted to RGBA counterpart (alpha padded at upload).
+        case GL_RGB8_SNORM:        return MTLPixelFormatRGBA8Snorm;
         case GL_RGB16:             return MTLPixelFormatRGBA16Unorm;
         case GL_RGB16_SNORM:       return MTLPixelFormatRGBA16Snorm;
         case GL_RGB16F:            return MTLPixelFormatRGBA16Float;
@@ -727,6 +728,48 @@ bool isTexture3DRGTCFormat(GLenum internalFormat) {
 
 bool isColorFormat(GLenum internalFormat) {
     return !isDepthFormat(internalFormat) && !isStencilFormat(internalFormat);
+}
+
+bool isRGBFamilyWithoutAlpha(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_RGB:
+        case GL_RGB8:
+        case GL_RGB8_SNORM:
+        case GL_RGB16:
+        case GL_RGB16_SNORM:
+        case GL_RGB16F:
+        case GL_RGB32F:
+        case GL_R3_G3_B2:
+        case GL_RGB4:
+        case GL_RGB5:
+        case GL_RGB565:
+        case GL_RGB10:
+        case GL_RGB12:
+        case GL_R11F_G11F_B10F:
+        case GL_RGB9_E5:
+        case GL_SRGB:
+        case GL_SRGB8:
+        case GL_RGB8I:
+        case GL_RGB8UI:
+        case GL_RGB16I:
+        case GL_RGB16UI:
+        case GL_RGB32I:
+        case GL_RGB32UI:
+        case GL_COMPRESSED_RGB:
+        case GL_COMPRESSED_SRGB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isSRGBTextureFormat(GLenum internalFormat) {
+    return internalFormat == GL_SRGB8 ||
+           internalFormat == GL_SRGB8_ALPHA8 ||
+           internalFormat == GL_SRGB ||
+           internalFormat == GL_SRGB_ALPHA ||
+           internalFormat == GL_COMPRESSED_SRGB ||
+           internalFormat == GL_COMPRESSED_SRGB_ALPHA;
 }
 
 bool isTextureTarget(GLenum target) {
@@ -3211,6 +3254,9 @@ struct GLContext::Impl {
         if (isMSTarget) {
             releaseRetainedMetalObject(object.metalTexture);
             object.metalTexture = nullptr;
+            releaseRetainedMetalObject(object.metalSwizzledView);
+            object.metalSwizzledView = nullptr;
+            object.swizzleDirty = true;
 
             // MS textures only accept renderable formats — use the same
             // mapping the renderbuffer path uses. Fall back to RGBA8Unorm
@@ -3219,6 +3265,19 @@ struct GLContext::Impl {
             // still match against the fallback format consistently.
             MTLPixelFormat chosenFormat = metalRenderbufferFormat(baseLevel.desc.internalFormat);
             if (chosenFormat == MTLPixelFormatInvalid) {
+                chosenFormat = MTLPixelFormatRGBA8Unorm;
+            }
+            // Sprint 18 texture_swizzle MS+MSAA Mode 2: GL_FRAMEBUFFER_SRGB
+            // is disabled by default, so rendering into an sRGB GL texture
+            // must store linear values. Metal render targets with an sRGB
+            // pixel format always encode on store; allocate MS storage as
+            // linear RGBA8 and create an sRGB sampling view in
+            // resolveSwizzledTexture instead. This is the Surface-A
+            // 2DMSArray-FBO sister path applied at MS allocation time.
+            const bool srgbMSNeedsLinearStorage =
+                baseLevel.desc.internalFormat == GL_SRGB8 ||
+                baseLevel.desc.internalFormat == GL_SRGB8_ALPHA8;
+            if (srgbMSNeedsLinearStorage) {
                 chosenFormat = MTLPixelFormatRGBA8Unorm;
             }
 
@@ -3264,6 +3323,9 @@ struct GLContext::Impl {
             // the `sample_shading.render.*` pattern — Metal exposes that
             // as `texture2d_ms<T>::read(coord, sample)`.
             desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            if (srgbMSNeedsLinearStorage) {
+                desc.usage |= MTLTextureUsagePixelFormatView;
+            }
             // Apple Silicon rejects MTLStorageModeShared on MS textures
             // (Metal validation "A texture with MTLTextureType2DMultisample
             // can only be created with MTLStorageModePrivate").
@@ -3531,6 +3593,9 @@ struct GLContext::Impl {
 
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
+        releaseRetainedMetalObject(object.metalSwizzledView);
+        object.metalSwizzledView = nullptr;
+        object.swizzleDirty = true;
 
         // Choose the native Metal pixel format. Three cases (mirror of
         // the fast-path above):
@@ -4552,12 +4617,15 @@ struct GLContext::Impl {
     // storage as the base texture (no data copy). Created lazily when
     // non-default swizzle is detected; cached on the texture object.
     //
-    static MTLTextureSwizzle metalTextureSwizzle(GLint glSwizzle) {
+    static MTLTextureSwizzle metalTextureSwizzle(GLint glSwizzle,
+                                                 bool alphaReadsOne) {
         switch (glSwizzle) {
             case GL_RED:   return MTLTextureSwizzleRed;
             case GL_GREEN: return MTLTextureSwizzleGreen;
             case GL_BLUE:  return MTLTextureSwizzleBlue;
-            case GL_ALPHA: return MTLTextureSwizzleAlpha;
+            case GL_ALPHA: return alphaReadsOne
+                ? MTLTextureSwizzleOne
+                : MTLTextureSwizzleAlpha;
             case GL_ZERO:  return MTLTextureSwizzleZero;
             case GL_ONE:   return MTLTextureSwizzleOne;
             default:       return MTLTextureSwizzleRed;
@@ -4574,10 +4642,29 @@ struct GLContext::Impl {
     // the swizzled view when `swizzleDirty` is set.
     void* resolveSwizzledTexture(GLTextureObject& texObj) {
         const auto& sw = texObj.params.swizzle;
+        id<MTLTexture> baseTex = (__bridge id<MTLTexture>)texObj.metalTexture;
+        if (baseTex == nil) {
+            texObj.swizzleDirty = false;
+            return texObj.metalTexture;
+        }
 
-        // Fast path: default swizzle — use base texture, release any
-        // stale view.
-        if (isDefaultSwizzle(sw)) {
+        const bool isMSTarget =
+            texObj.target == GL_TEXTURE_2D_MULTISAMPLE ||
+            texObj.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+        const bool msSRGBSamplingView =
+            isMSTarget &&
+            isSRGBTextureFormat(texObj.desc.internalFormat) &&
+            baseTex.pixelFormat == MTLPixelFormatRGBA8Unorm;
+        const MTLPixelFormat samplingPixelFormat = msSRGBSamplingView
+            ? MTLPixelFormatRGBA8Unorm_sRGB
+            : baseTex.pixelFormat;
+        const bool needsView =
+            !isDefaultSwizzle(sw) ||
+            samplingPixelFormat != baseTex.pixelFormat;
+
+        // Fast path: default swizzle and no sampling-format override —
+        // use the base texture, release any stale view.
+        if (!needsView) {
             if (texObj.metalSwizzledView != nullptr) {
                 releaseRetainedMetalObject(texObj.metalSwizzledView);
                 texObj.metalSwizzledView = nullptr;
@@ -4595,20 +4682,28 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(texObj.metalSwizzledView);
         texObj.metalSwizzledView = nullptr;
 
-        id<MTLTexture> baseTex = (__bridge id<MTLTexture>)texObj.metalTexture;
-        if (baseTex == nil) {
-            texObj.swizzleDirty = false;
-            return texObj.metalTexture;
-        }
-
+        // Sprint 18 texture_swizzle MS+MSAA Mode 1: RGB-family GL
+        // internal formats have no alpha channel, so GL §11.1.3.7 makes
+        // GL_ALPHA reads synthesize 1. The Metal storage is often
+        // promoted to RGBA for renderability; mapping GL_ALPHA to the
+        // physical alpha lane re-exposes that implementation detail.
+        // This mirrors the R4A getTextureImage swizzle sister pattern at
+        // texture-view creation time.
+        const bool alphaReadsOne =
+            isRGBFamilyWithoutAlpha(texObj.desc.internalFormat);
         MTLTextureSwizzleChannels channels;
-        channels.red   = metalTextureSwizzle(sw[0]);
-        channels.green = metalTextureSwizzle(sw[1]);
-        channels.blue  = metalTextureSwizzle(sw[2]);
-        channels.alpha = metalTextureSwizzle(sw[3]);
+        channels.red   = metalTextureSwizzle(sw[0], alphaReadsOne);
+        channels.green = metalTextureSwizzle(sw[1], alphaReadsOne);
+        channels.blue  = metalTextureSwizzle(sw[2], alphaReadsOne);
+        channels.alpha = metalTextureSwizzle(sw[3], alphaReadsOne);
 
+        // Mode 2: MS sRGB textures are allocated with linear storage so
+        // FBO writes do not get Metal's mandatory sRGB render-target
+        // encode while GL_FRAMEBUFFER_SRGB is disabled. Sampling binds
+        // an sRGB view so texture fetches still decode. Item 32 tracks
+        // this as a platform-blocked workaround.
         id<MTLTexture> swizzledView = [baseTex
-            newTextureViewWithPixelFormat:baseTex.pixelFormat
+            newTextureViewWithPixelFormat:samplingPixelFormat
                              textureType:baseTex.textureType
                                   levels:NSMakeRange(0, baseTex.mipmapLevelCount)
                                   slices:NSMakeRange(0, baseTex.arrayLength)
