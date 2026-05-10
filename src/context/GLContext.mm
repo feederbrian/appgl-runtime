@@ -23263,6 +23263,10 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->gsPassThroughPipelineStateCache.clear();
     programObject->gsPassThroughPipelineState = nullptr;
     programObject->gsPassThroughPipelineColorFormat = 0;
+    releaseRetainedMetalObject(programObject->gsPassThroughVertexFunction);
+    programObject->gsPassThroughVertexFunction = nullptr;
+    releaseRetainedMetalObject(programObject->gsPassThroughFragmentFunction);
+    programObject->gsPassThroughFragmentFunction = nullptr;
     programObject->gsPassThroughVertexMSL.clear();
     programObject->gsPassThroughReflection = ShaderReflection{};
     programObject->geometryEmulated = false;
@@ -27182,6 +27186,17 @@ namespace {
 // program's named GL uniform values.  Handles the mat3 column-padding case
 // (GL stores 9 floats; Metal/std140 stores 3 columns × 4 floats = 12).
 //
+static const ShaderReflection::ResourceBinding* defaultUniformBlock(
+    const ShaderReflection& reflection)
+{
+    for (const auto& block : reflection.uniformBlocks) {
+        if (block.name == "_DefaultUniforms") {
+            return &block;
+        }
+    }
+    return nullptr;
+}
+
 // ── OPT-7: precomputed uniform layout ──
 // computeStageUniformLayout() runs once per program per stage, mapping each
 // push-constant struct member to its GL uniform location.  This eliminates
@@ -27192,8 +27207,9 @@ static void computeStageUniformLayout(
     const std::vector<GLProgramUniformInfo>& uniforms)
 {
     layout.clear();
-    if (reflection.uniformBlocks.empty()) return;
-    const auto& block = reflection.uniformBlocks[0];
+    const auto* defaultBlock = defaultUniformBlock(reflection);
+    if (defaultBlock == nullptr) return;
+    const auto& block = *defaultBlock;
     if (block.byteSize == 0) return;
 
     layout.reserve(block.members.size());
@@ -27249,7 +27265,9 @@ static void computeStageUniformLayout(
         // and expects each glUniform1f(N+i, …) to land at u0[i].
         if (member.arraySize > 1 && member.size > 0 && entry.matPaddedCols == 0) {
             entry.arrayCount = member.arraySize;
-            entry.arrayStride = member.size / member.arraySize;
+            entry.arrayStride = member.arrayStride > 0
+                ? static_cast<std::size_t>(member.arrayStride)
+                : member.size / member.arraySize;
             // Compute the GL-packed element byte count from the element
             // type (array's declared type is the element type — for
             // arrays glslang reports the element type + arraySize > 0).
@@ -27394,8 +27412,9 @@ static void buildStageUniformBuffer(
     const std::vector<GLProgramObject::UniformLayoutEntry>& layout)
 {
     outBuffer.clear();
-    if (reflection.uniformBlocks.empty()) return;
-    const auto& block = reflection.uniformBlocks[0];
+    const auto* defaultBlock = defaultUniformBlock(reflection);
+    if (defaultBlock == nullptr) return;
+    const auto& block = *defaultBlock;
     if (block.byteSize == 0) return;
 
     const std::size_t paddedSize = (block.byteSize + 15u) & ~std::size_t(15u);
@@ -29060,6 +29079,10 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         program.gsPassThroughPipelineStateCache.clear();
         program.gsPassThroughPipelineState = nullptr;
         program.gsPassThroughPipelineColorFormat = 0;
+        releaseRetainedMetalObject(program.gsPassThroughVertexFunction);
+        program.gsPassThroughVertexFunction = nullptr;
+        releaseRetainedMetalObject(program.gsPassThroughFragmentFunction);
+        program.gsPassThroughFragmentFunction = nullptr;
         // Also invalidate the FS rewrite: its primitive-id input
         // location is derived from the synth-VS output layout; if
         // the VS rebuilds, the FS has to follow so MSL's
@@ -29259,6 +29282,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             program.gsPassThroughPipelineStateCache.clear();
             program.gsPassThroughPipelineState = nullptr;
             program.gsPassThroughPipelineColorFormat = 0;
+            releaseRetainedMetalObject(program.gsPassThroughFragmentFunction);
+            program.gsPassThroughFragmentFunction = nullptr;
             if (std::getenv("APPGL_GS_DUMP_MSL") != nullptr) {
                 std::fprintf(stderr, "\n[GS] rewritten FS MSL (primIdLoc=%u, %zu bytes)\n",
                     ed.primitiveIDLocation, program.gsPassThroughFragmentMSL.size());
@@ -29273,6 +29298,10 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     tdi.pipelineStateOut = &program.gsPassThroughPipelineState;
     tdi.pipelineColorFormatOut = &program.gsPassThroughPipelineColorFormat;
     tdi.pipelineStateCacheOut = &program.gsPassThroughPipelineStateCache;
+    tdi.metalVertexFunction = program.gsPassThroughVertexFunction;
+    tdi.metalFragmentFunction = program.gsPassThroughFragmentFunction;
+    tdi.metalVertexFunctionOut = &program.gsPassThroughVertexFunction;
+    tdi.metalFragmentFunctionOut = &program.gsPassThroughFragmentFunction;
     tdi.program = programName;
 
     if (!program.uniformLayoutComputed) {

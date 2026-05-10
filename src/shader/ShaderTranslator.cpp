@@ -20,6 +20,7 @@ namespace appgl {
 namespace {
 
 std::once_flag g_glslangInitFlag;
+constexpr std::uint32_t kDefaultUniformSyntheticBinding = 1024u;
 
 void ensureGlslangInit() {
     std::call_once(g_glslangInitFlag, []() {
@@ -107,6 +108,13 @@ GLenum spirvBaseTypeToGL(const spirv_cross::SPIRType& type) {
         return GL_SAMPLER_2D;
     }
     return GL_FLOAT;
+}
+
+bool isDefaultUniformBlockResource(spirv_cross::Compiler& compiler,
+                                   const spirv_cross::Resource& resource) {
+    const auto& blockType = compiler.get_type(resource.base_type_id);
+    const std::string typeName = compiler.get_name(blockType.self);
+    return resource.name == "_DefaultUniforms" || typeName == "_DefaultUniforms";
 }
 
 // Clone glslang's default TBuiltInResource and overwrite the limits
@@ -1091,34 +1099,36 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
             // UBOs and SSBOs live in separate binding namespaces in GL but
             // share (desc_set=0, binding=N) under the Vulkan-rules-relaxed
-            // glslang output we feed into SPIRV-Cross. When a UBO and an
-            // SSBO both use `layout(binding=0)`, SPIRV-Cross's MSL backend
-            // detects them as aliases (same descriptor slot) and collapses
-            // them into one `spvBufferAliasSet0Binding0` Metal slot —
-            // producing MSL whose `constant B0& b0` reference never appears
-            // in the kernel signature because it's folded into the alias
-            // cast.  CTS `multi_bind.dispatch_bind_buffers_base` plants 14
-            // UBOs all sharing (desc_set=0, binding=K) with an SSBO at
-            // binding=0 and hits this alias collapse at the binding=0 slot
-            // only — the aliased buffer then receives the SSBO pointer at
-            // dispatch time and every UBO read resolves to stale zeroes,
-            // `dispatchCompute` reports INVALID_OPERATION because the
-            // compute PSO ends up built against an aliased slot the runtime
-            // can't reconcile.
-            //
-            // Fix: reassign every UBO's SPIR-V `DescriptorSet` decoration
-            // to a different set (1), which keeps the (set, binding) pair
-            // globally unique even when binding numbers repeat across
-            // UBO/SSBO spaces. The MSL slot assignment via
-            // `add_msl_resource_binding` then lands on distinct Metal
-            // buffer slots without alias-collapse.
+            // glslang output we feed into SPIRV-Cross. Move user UBOs to
+            // set 1. The synthetic default-uniform block also appears in
+            // resources.uniform_buffers on some programs; give it a private
+            // binding inside set 1 so `uniform int x;` cannot alias a real
+            // `layout(binding=0) uniform Block`.
+            bool defaultUniformActive = false;
             for (auto& entry : sortedUBOs) {
-                compiler.set_decoration(entry.res->id,
-                    spv::DecorationDescriptorSet, 1);
+                if (!isDefaultUniformBlockResource(compiler, *entry.res)) {
+                    continue;
+                }
+                defaultUniformActive = true;
+                compiler.set_decoration(entry.res->id, spv::DecorationDescriptorSet, 1);
+                compiler.set_decoration(entry.res->id, spv::DecorationBinding,
+                                        kDefaultUniformSyntheticBinding);
+                spirv_cross::MSLResourceBinding binding;
+                binding.stage = compiler.get_execution_model();
+                binding.desc_set = 1;
+                binding.binding = kDefaultUniformSyntheticBinding;
+                binding.msl_buffer = bindings.uniformBufferBase;
+                compiler.add_msl_resource_binding(binding);
             }
 
-            std::uint32_t nextSlot = bindings.uniformBufferBase;
+            std::uint32_t nextSlot = bindings.uniformBufferBase +
+                (defaultUniformActive ? 1u : 0u);
             for (auto& entry : sortedUBOs) {
+                if (isDefaultUniformBlockResource(compiler, *entry.res)) {
+                    continue;
+                }
+                compiler.set_decoration(entry.res->id,
+                    spv::DecorationDescriptorSet, 1);
                 spirv_cross::MSLResourceBinding binding;
                 binding.stage = compiler.get_execution_model();
                 binding.desc_set = 1;  // UBO descriptor set (mirrors set_decoration above)
@@ -1505,6 +1515,38 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
 
         std::string msl = compiler.compile();
+
+        // Graphics SSBO block arrays are lowered through argument buffers
+        // when storage buffers are present. SPIRV-Cross emits these as
+        // `[1] /* unsized array hack */` inside the argument-buffer struct,
+        // but GL block arrays bind consecutive SSBO slots and the generated
+        // MSL indexes the full declared range. Patch the argument-buffer
+        // member declaration to the reflected fixed array size so indices
+        // beyond zero reach the slots populated by resolveSSBOBindings().
+        if (useArgBuf && isGraphicsStage) {
+            auto replaceAll = [](std::string& text,
+                                 const std::string& needle,
+                                 const std::string& replacement) {
+                std::size_t pos = 0;
+                while ((pos = text.find(needle, pos)) != std::string::npos) {
+                    text.replace(pos, needle.size(), replacement);
+                    pos += replacement.size();
+                }
+            };
+            for (auto& ssbo : resources.storage_buffers) {
+                const auto& varType = compiler.get_type(ssbo.type_id);
+                if (varType.array.empty() || varType.array[0] <= 1) {
+                    continue;
+                }
+                const std::uint32_t glBinding =
+                    compiler.get_decoration(ssbo.id, spv::DecorationBinding);
+                const std::string attr =
+                    "[[id(" + std::to_string(192 + glBinding) + ")]]";
+                replaceAll(msl,
+                    attr + "[1] /* unsized array hack */",
+                    attr + "[" + std::to_string(varType.array[0]) + "]");
+            }
+        }
 
         // Sprint 18 Item 42 / shader_image_load_store: storage-image MSL
         // post-process, matching the established R3B padded-array and
@@ -2231,9 +2273,20 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                       });
 
             // Assign Metal slots to ACTIVE UBOs with running offset
-            // (matching spirvToMSL). Inactive UBOs get a dummy slot (30)
-            // — data bound there is harmless (Metal ignores unmatched slots).
-            std::uint32_t nextSlot = bindings.uniformBufferBase;
+            // (matching spirvToMSL). If the default-uniform block is active,
+            // reserve slot 16 for it and start real UBOs at 17. Inactive
+            // UBOs get a dummy slot (30) — data bound there is harmless
+            // (Metal ignores unmatched slots).
+            bool defaultUniformActive = false;
+            for (auto& entry : sortedUBOs) {
+                if (entry.active &&
+                    isDefaultUniformBlockResource(compiler, *entry.res)) {
+                    defaultUniformActive = true;
+                    break;
+                }
+            }
+            std::uint32_t nextSlot = bindings.uniformBufferBase +
+                (defaultUniformActive ? 1u : 0u);
             for (auto& entry : sortedUBOs) {
                 auto& ubo = *entry.res;
             ShaderReflection::ResourceBinding rb;
@@ -2246,7 +2299,11 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             // implicit bindings give b[i] = 0 (default) for all i.
             rb.hasExplicitBinding =
                 compiler.has_decoration(ubo.id, spv::DecorationBinding);
-            if (entry.active) {
+            const bool isDefaultUniform =
+                isDefaultUniformBlockResource(compiler, ubo);
+            if (entry.active && isDefaultUniform) {
+                rb.metalBinding = bindings.uniformBufferBase;
+            } else if (entry.active) {
                 rb.metalBinding = nextSlot;
                 nextSlot += entry.arraySize;
             } else {
@@ -2501,7 +2558,20 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 // read stale zeros via uniform[i] accesses after the
                 // first element.
                 if (!memberType.array.empty() && memberType.array[0] > 0) {
+                    member.isArray = true;
                     member.arraySize = memberType.array[0];
+                }
+                if (compiler.has_member_decoration(type.self, mi,
+                        spv::DecorationArrayStride)) {
+                    member.arrayStride = static_cast<GLint>(
+                        compiler.get_member_decoration(type.self, mi,
+                            spv::DecorationArrayStride));
+                    if (member.arraySize > 0 && member.arrayStride > 0) {
+                        member.size = std::max<std::size_t>(
+                            member.size,
+                            static_cast<std::size_t>(member.arrayStride) *
+                                static_cast<std::size_t>(member.arraySize));
+                    }
                 }
                 // Detect row_major decoration on matrix members (same
                 // as the named-UBO path) so matrix-row iteration in
@@ -2511,6 +2581,10 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         type.self, mi, spv::DecorationRowMajor);
                 }
                 rb.members.push_back(std::move(member));
+            }
+            for (const auto& member : rb.members) {
+                rb.byteSize = std::max<std::size_t>(
+                    rb.byteSize, member.offset + member.size);
             }
 
             result.uniformBlocks.push_back(std::move(rb));

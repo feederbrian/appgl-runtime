@@ -1,5 +1,6 @@
 #include "GLSLReflection.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <string>
@@ -378,8 +379,11 @@ UniformScalarKind scalarKindForType(GLenum type) {
 // initializer of the form
 //   = <numeric-literal>
 //   = <typeword> ( <num-list> )
-// where <num-list> is one comma-separated numeric literal (scalar broadcast)
-// or exactly `components` comma-separated numeric literals. On recognition,
+//   = <typeword> [ <array-size> ] ( <num-list> )
+// where scalar/vector <num-list> is one comma-separated numeric literal
+// (scalar broadcast) or exactly `components` comma-separated numeric literals.
+// Array constructors must provide exactly one element's worth of components per
+// array entry; unsized arrays infer their size from the initializer. On recognition,
 // populates whichever of `out.defaultFloats` / `defaultInts` / `defaultUints`
 // matches the declared variable's scalar kind. On any unrecognized token the
 // function bails out silently, leaving the default vectors empty so
@@ -390,6 +394,55 @@ UniformScalarKind scalarKindForType(GLenum type) {
 // vector, and AppGL's compat-profile path already seeds synthesized matrix
 // uniforms through its own channel. Spring/BAR does not use matrix default
 // initializers in any shader we've seen.
+bool parseNumericDefaultLiteral(const std::string& tok, double& outValue) {
+    if (tok.empty()) {
+        return false;
+    }
+    const char first = tok[0];
+    if (first != '-' && first != '+' && first != '.' &&
+        !std::isdigit(static_cast<unsigned char>(first))) {
+        return false;
+    }
+
+    std::string literal = tok;
+    while (!literal.empty()) {
+        const char c = literal.back();
+        if (c == 'u' || c == 'U' || c == 'l' || c == 'L' || c == 'f' || c == 'F') {
+            literal.pop_back();
+        } else {
+            break;
+        }
+    }
+    if (literal.empty() || literal == "+" || literal == "-") {
+        return false;
+    }
+
+    char* endp = nullptr;
+    const double floatValue = std::strtod(literal.c_str(), &endp);
+    if (endp != literal.c_str() && *endp == '\0') {
+        outValue = floatValue;
+        return true;
+    }
+
+    if (literal.front() == '-') {
+        endp = nullptr;
+        const long long intValue = std::strtoll(literal.c_str(), &endp, 0);
+        if (endp != literal.c_str() && *endp == '\0') {
+            outValue = static_cast<double>(intValue);
+            return true;
+        }
+    } else {
+        endp = nullptr;
+        const unsigned long long uintValue = std::strtoull(literal.c_str(), &endp, 0);
+        if (endp != literal.c_str() && *endp == '\0') {
+            outValue = static_cast<double>(uintValue);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void parseDefaultInitializer(
     const std::vector<std::string>& tokens,
     std::size_t exprStart,
@@ -411,10 +464,32 @@ void parseDefaultInitializer(
     std::size_t argBegin = exprStart;
     std::size_t argEnd = tokens.size();
 
-    // Constructor form: `<typeword> ( ... )`. Skip the typeword and the
-    // opening paren, then scan forward to the matching close paren.
+    // Constructor forms: `<typeword> ( ... )` and
+    // `<typeword> [ <array-size> ] ( ... )`. Skip the type/array wrapper and
+    // scan forward to the matching close paren.
+    std::size_t openParen = tokens.size();
     if (exprStart + 1 < tokens.size() && tokens[exprStart + 1] == "(") {
-        argBegin = exprStart + 2;
+        openParen = exprStart + 1;
+    } else if (exprStart + 2 < tokens.size() && tokens[exprStart + 1] == "[") {
+        std::size_t closeBracket = exprStart + 2;
+        std::size_t bracketDepth = 1;
+        while (closeBracket < tokens.size() && bracketDepth > 0) {
+            if (tokens[closeBracket] == "[") {
+                ++bracketDepth;
+            } else if (tokens[closeBracket] == "]") {
+                --bracketDepth;
+                if (bracketDepth == 0) {
+                    break;
+                }
+            }
+            ++closeBracket;
+        }
+        if (closeBracket + 1 < tokens.size() && tokens[closeBracket + 1] == "(") {
+            openParen = closeBracket + 1;
+        }
+    }
+    if (openParen < tokens.size()) {
+        argBegin = openParen + 1;
         std::size_t depth = 1;
         argEnd = argBegin;
         while (argEnd < tokens.size() && depth > 0) {
@@ -432,22 +507,16 @@ void parseDefaultInitializer(
 
     // Collect numeric literals from the argument range, skipping punctuation.
     std::vector<double> values;
-    values.reserve(static_cast<std::size_t>(components));
+    values.reserve(static_cast<std::size_t>(components) *
+                   static_cast<std::size_t>(std::max<GLint>(out.arraySize, 1)));
     for (std::size_t i = argBegin; i < argEnd; ++i) {
         const std::string& tok = tokens[i];
-        if (tok.empty() || tok == "," || tok == "(" || tok == ")") {
+        if (tok.empty() || tok == "," || tok == "(" || tok == ")" ||
+            tok == "[" || tok == "]") {
             continue;
         }
-        const char first = tok[0];
-        if (first != '-' && first != '+' && first != '.' &&
-            !std::isdigit(static_cast<unsigned char>(first))) {
-            // Unrecognized token (nested ctor, identifier, operator, etc.).
-            // Bail out — linkProgram will zero-seed.
-            return;
-        }
-        char* endp = nullptr;
-        const double v = std::strtod(tok.c_str(), &endp);
-        if (endp == tok.c_str()) {
+        double v = 0.0;
+        if (!parseNumericDefaultLiteral(tok, v)) {
             return;
         }
         values.push_back(v);
@@ -456,30 +525,44 @@ void parseDefaultInitializer(
         return;
     }
 
-    // Scalar broadcast: `vec4(1.0)` → {1,1,1,1}. A single value always
-    // broadcasts; any other mismatch is treated as unrecognized.
-    if (values.size() == 1 && components > 1) {
+    std::size_t expectedComponents = static_cast<std::size_t>(components);
+    if (out.isArray) {
+        if (out.arraySize <= 0) {
+            if (values.size() % static_cast<std::size_t>(components) != 0) {
+                return;
+            }
+            out.arraySize = static_cast<GLint>(
+                values.size() / static_cast<std::size_t>(components));
+            if (out.arraySize <= 0) {
+                return;
+            }
+        }
+        expectedComponents = static_cast<std::size_t>(components) *
+                             static_cast<std::size_t>(out.arraySize);
+    } else if (values.size() == 1 && components > 1) {
+        // Scalar broadcast: `vec4(1.0)` -> {1,1,1,1}. Array constructors do
+        // not use this path because they must provide one value per element.
         values.resize(static_cast<std::size_t>(components), values[0]);
     }
-    if (values.size() != static_cast<std::size_t>(components)) {
+    if (values.size() != expectedComponents) {
         return;
     }
 
     switch (scalarKindForType(varEntry.type)) {
         case UniformScalarKind::Float:
-            out.defaultFloats.reserve(static_cast<std::size_t>(components));
+            out.defaultFloats.reserve(expectedComponents);
             for (double v : values) {
                 out.defaultFloats.push_back(static_cast<GLfloat>(v));
             }
             break;
         case UniformScalarKind::Int:
-            out.defaultInts.reserve(static_cast<std::size_t>(components));
+            out.defaultInts.reserve(expectedComponents);
             for (double v : values) {
                 out.defaultInts.push_back(static_cast<GLint>(v));
             }
             break;
         case UniformScalarKind::UInt:
-            out.defaultUints.reserve(static_cast<std::size_t>(components));
+            out.defaultUints.reserve(expectedComponents);
             for (double v : values) {
                 out.defaultUints.push_back(static_cast<GLuint>(v));
             }
@@ -556,9 +639,9 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
         return false;
     }
     // Phase 8X Group 4d follow-up¹⁵ — scan for `= <initializer>` after the
-    // name/array-suffix. Array defaults are not supported (would require
-    // per-element parsing); only scalar/vector uniforms receive defaults.
-    if (out.arraySize == 1 && postNameIdx < tokens.size() && tokens[postNameIdx] == "=") {
+    // name/array-suffix. Scalar/vector uniforms and flat numeric array
+    // constructors receive defaults; unsupported forms silently zero-seed.
+    if (postNameIdx < tokens.size() && tokens[postNameIdx] == "=") {
         parseDefaultInitializer(tokens, postNameIdx + 1, *entry, out);
     }
     return true;

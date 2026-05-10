@@ -896,6 +896,12 @@ struct GLProgramObject {
     void* gsPassThroughPipelineState = nullptr;
     std::uint32_t gsPassThroughPipelineColorFormat = 0;
     std::unordered_map<std::uint64_t, void*> gsPassThroughPipelineStateCache;
+    // Retained MTLFunction pair for the GS-emulation pass-through render path.
+    // Argument-buffer binding needs these functions on pipeline-cache hits to
+    // create per-stage MTLArgumentEncoders, just like the regular translated
+    // draw path's metalVertexFunction / metalFragmentFunction pair.
+    void* gsPassThroughVertexFunction = nullptr;
+    void* gsPassThroughFragmentFunction = nullptr;
 
     // Compute shader pipeline state. The MSL and reflection are populated
     // at link time for ProgramKind::Compute; the MTLComputePipelineState

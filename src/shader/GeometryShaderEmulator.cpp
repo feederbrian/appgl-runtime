@@ -50,7 +50,9 @@ namespace spv {
         OpBitcast = 124,
         OpBitwiseAnd = 199, OpShiftLeftLogical = 196,
         OpIEqual = 170, OpINotEqual = 171,
+        OpUGreaterThan = 172,
         OpSLessThan = 177, OpSGreaterThan = 173,
+        OpUGreaterThanEqual = 174,
         OpSLessThanEqual = 179, OpSGreaterThanEqual = 175,
         OpULessThan = 176, OpULessThanEqual = 178,
         OpFOrdEqual = 180, OpFOrdNotEqual = 182,
@@ -69,6 +71,14 @@ namespace spv {
         // Sprint 8 #9-C (CKPT95) — multi-stream GS emit. Stream operand is
         // an <id> referencing a constant Int specifying the target stream.
         OpEmitStreamVertex = 220, OpEndStreamPrimitive = 221,
+        OpAtomicLoad = 227, OpAtomicStore = 228,
+        OpAtomicExchange = 229, OpAtomicCompareExchange = 230,
+        OpAtomicCompareExchangeWeak = 231,
+        OpAtomicIIncrement = 232, OpAtomicIDecrement = 233,
+        OpAtomicIAdd = 234, OpAtomicISub = 235,
+        OpAtomicSMin = 236, OpAtomicUMin = 237,
+        OpAtomicSMax = 238, OpAtomicUMax = 239,
+        OpAtomicAnd = 240, OpAtomicOr = 241, OpAtomicXor = 242,
     };
     enum ExecutionMode : std::uint32_t {
         ExecutionModeInvocations = 0,
@@ -721,6 +731,17 @@ private:
                        std::uint32_t leafTypeId);
     void storeToSSBO(std::uint32_t binding, std::uint32_t byteOffset,
                      const Value& v, std::uint32_t leafTypeId);
+    bool loadSSBOScalarRaw(const AccessChainResult& ac, std::uint32_t& raw);
+    bool storeSSBOScalarRaw(const AccessChainResult& ac, std::uint32_t raw);
+    bool executeAtomicLoad(std::uint32_t resultTypeId, std::uint32_t resultId,
+                           std::uint32_t ptrId);
+    bool executeAtomicStore(std::uint32_t ptrId, std::uint32_t valueId);
+    bool executeAtomicRMW(std::uint32_t opcode, std::uint32_t resultTypeId,
+                          std::uint32_t resultId, std::uint32_t ptrId,
+                          std::uint32_t valueId,
+                          std::uint32_t comparatorId = 0);
+    Value atomicResultValue(std::uint32_t resultTypeId, std::uint32_t raw) const;
+    bool rawScalarFromValue(std::uint32_t valueId, std::uint32_t& raw);
 
     // Sprint 17 Day 4+ BONUS-2: byte-level UBO read via caller-supplied
     // binding → (const host ptr, size) map. Read-only — UBOs are
@@ -1324,6 +1345,209 @@ void Interpreter::storeToSSBO(std::uint32_t binding,
     } else {
         bail("storeToSSBO: unsupported value kind");
     }
+}
+
+bool Interpreter::loadSSBOScalarRaw(const AccessChainResult& ac,
+                                    std::uint32_t& raw)
+{
+    raw = 0;
+    if (!ac.isStorageBuffer) {
+        bail("atomicSSBO: pointer is not an SSBO access chain");
+        return false;
+    }
+    if (storageBuffers_ == nullptr) {
+        bail("atomicSSBO: no storage buffer map set");
+        return false;
+    }
+    auto bIt = storageBuffers_->find(ac.binding);
+    if (bIt == storageBuffers_->end() || bIt->second.ptr == nullptr) {
+        return true;
+    }
+    if (static_cast<std::size_t>(ac.byteOffset) + 4u > bIt->second.size) {
+        return true;
+    }
+    const auto* base = static_cast<const std::uint8_t*>(bIt->second.ptr);
+    std::memcpy(&raw, base + ac.byteOffset, 4);
+    return true;
+}
+
+bool Interpreter::storeSSBOScalarRaw(const AccessChainResult& ac,
+                                     std::uint32_t raw)
+{
+    if (!ac.isStorageBuffer) {
+        bail("atomicSSBO: pointer is not an SSBO access chain");
+        return false;
+    }
+    if (storageBuffers_ == nullptr) {
+        bail("atomicSSBO: no storage buffer map set");
+        return false;
+    }
+    auto bIt = storageBuffers_->find(ac.binding);
+    if (bIt == storageBuffers_->end() || bIt->second.ptr == nullptr) {
+        return true;
+    }
+    if (static_cast<std::size_t>(ac.byteOffset) + 4u > bIt->second.size) {
+        return true;
+    }
+    auto* base = static_cast<std::uint8_t*>(bIt->second.ptr);
+    std::memcpy(base + ac.byteOffset, &raw, 4);
+    return true;
+}
+
+Value Interpreter::atomicResultValue(std::uint32_t resultTypeId,
+                                     std::uint32_t raw) const
+{
+    Value v;
+    v.kind = Value::Kind::UInt;
+    auto tIt = module_.types.find(resultTypeId);
+    if (tIt != module_.types.end() && tIt->second.kind == TypeInfo::Kind::Int) {
+        v.kind = Value::Kind::Int;
+    }
+    v.i[0] = static_cast<std::int32_t>(raw);
+    return v;
+}
+
+bool Interpreter::rawScalarFromValue(std::uint32_t valueId,
+                                     std::uint32_t& raw)
+{
+    Value v;
+    if (!tryGetValue(valueId, v)) {
+        bail("atomicSSBO: unknown scalar operand");
+        return false;
+    }
+    if (v.isFloatKind()) {
+        std::memcpy(&raw, &v.f[0], 4);
+    } else if (v.isIntKind()) {
+        raw = static_cast<std::uint32_t>(v.i[0]);
+    } else if (v.kind == Value::Kind::Bool) {
+        raw = v.bval ? 1u : 0u;
+    } else {
+        bail("atomicSSBO: unsupported scalar operand");
+        return false;
+    }
+    return true;
+}
+
+bool Interpreter::executeAtomicLoad(std::uint32_t resultTypeId,
+                                    std::uint32_t resultId,
+                                    std::uint32_t ptrId)
+{
+    auto acIt = accessChains_.find(ptrId);
+    if (acIt == accessChains_.end()) {
+        bail("OpAtomicLoad: unresolved pointer");
+        return false;
+    }
+    std::uint32_t raw = 0;
+    if (!loadSSBOScalarRaw(acIt->second, raw)) {
+        return false;
+    }
+    valueStore_[resultId] = atomicResultValue(resultTypeId, raw);
+    return true;
+}
+
+bool Interpreter::executeAtomicStore(std::uint32_t ptrId,
+                                     std::uint32_t valueId)
+{
+    auto acIt = accessChains_.find(ptrId);
+    if (acIt == accessChains_.end()) {
+        bail("OpAtomicStore: unresolved pointer");
+        return false;
+    }
+    std::uint32_t raw = 0;
+    if (!rawScalarFromValue(valueId, raw)) {
+        return false;
+    }
+    return storeSSBOScalarRaw(acIt->second, raw);
+}
+
+bool Interpreter::executeAtomicRMW(std::uint32_t opcode,
+                                   std::uint32_t resultTypeId,
+                                   std::uint32_t resultId,
+                                   std::uint32_t ptrId,
+                                   std::uint32_t valueId,
+                                   std::uint32_t comparatorId)
+{
+    auto acIt = accessChains_.find(ptrId);
+    if (acIt == accessChains_.end()) {
+        bail("atomicSSBO: unresolved pointer");
+        return false;
+    }
+
+    std::uint32_t oldRaw = 0;
+    if (!loadSSBOScalarRaw(acIt->second, oldRaw)) {
+        return false;
+    }
+
+    std::uint32_t valueRaw = 0;
+    if (opcode != spv::OpAtomicIIncrement &&
+        opcode != spv::OpAtomicIDecrement &&
+        !rawScalarFromValue(valueId, valueRaw)) {
+        return false;
+    }
+
+    std::uint32_t newRaw = oldRaw;
+    switch (opcode) {
+        case spv::OpAtomicExchange:
+            newRaw = valueRaw;
+            break;
+        case spv::OpAtomicCompareExchange:
+        case spv::OpAtomicCompareExchangeWeak: {
+            std::uint32_t comparatorRaw = 0;
+            if (!rawScalarFromValue(comparatorId, comparatorRaw)) {
+                return false;
+            }
+            if (oldRaw == comparatorRaw) {
+                newRaw = valueRaw;
+            }
+            break;
+        }
+        case spv::OpAtomicIIncrement:
+            newRaw = oldRaw + 1u;
+            break;
+        case spv::OpAtomicIDecrement:
+            newRaw = oldRaw - 1u;
+            break;
+        case spv::OpAtomicIAdd:
+            newRaw = oldRaw + valueRaw;
+            break;
+        case spv::OpAtomicISub:
+            newRaw = oldRaw - valueRaw;
+            break;
+        case spv::OpAtomicSMin:
+            newRaw = static_cast<std::uint32_t>(std::min(
+                static_cast<std::int32_t>(oldRaw),
+                static_cast<std::int32_t>(valueRaw)));
+            break;
+        case spv::OpAtomicUMin:
+            newRaw = std::min(oldRaw, valueRaw);
+            break;
+        case spv::OpAtomicSMax:
+            newRaw = static_cast<std::uint32_t>(std::max(
+                static_cast<std::int32_t>(oldRaw),
+                static_cast<std::int32_t>(valueRaw)));
+            break;
+        case spv::OpAtomicUMax:
+            newRaw = std::max(oldRaw, valueRaw);
+            break;
+        case spv::OpAtomicAnd:
+            newRaw = oldRaw & valueRaw;
+            break;
+        case spv::OpAtomicOr:
+            newRaw = oldRaw | valueRaw;
+            break;
+        case spv::OpAtomicXor:
+            newRaw = oldRaw ^ valueRaw;
+            break;
+        default:
+            bail("atomicSSBO: unsupported atomic opcode " + std::to_string(opcode));
+            return false;
+    }
+
+    if (!storeSSBOScalarRaw(acIt->second, newRaw)) {
+        return false;
+    }
+    valueStore_[resultId] = atomicResultValue(resultTypeId, oldRaw);
+    return true;
 }
 
 void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
@@ -3173,6 +3397,57 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            case spv::OpAtomicLoad: {
+                // w[0]=type, w[1]=resultId, w[2]=ptrId,
+                // w[3]=scope, w[4]=memory semantics. CPU GS execution is
+                // single-threaded, so scope/semantics do not alter ordering;
+                // the byte-level SSBO helper still returns the pre-write value
+                // expected by GLSL atomic functions.
+                if (!executeAtomicLoad(w[0], w[1], w[2])) {
+                    break;
+                }
+                pc += wc;
+                break;
+            }
+            case spv::OpAtomicStore: {
+                // w[0]=ptrId, w[1]=scope, w[2]=memory semantics, w[3]=valueId.
+                if (wc < 5 || !executeAtomicStore(w[0], w[3])) {
+                    break;
+                }
+                pc += wc;
+                break;
+            }
+            case spv::OpAtomicExchange:
+            case spv::OpAtomicIIncrement:
+            case spv::OpAtomicIDecrement:
+            case spv::OpAtomicIAdd:
+            case spv::OpAtomicISub:
+            case spv::OpAtomicSMin:
+            case spv::OpAtomicUMin:
+            case spv::OpAtomicSMax:
+            case spv::OpAtomicUMax:
+            case spv::OpAtomicAnd:
+            case spv::OpAtomicOr:
+            case spv::OpAtomicXor: {
+                const std::uint32_t valueId =
+                    (opcode == spv::OpAtomicIIncrement ||
+                     opcode == spv::OpAtomicIDecrement) ? 0u : w[5];
+                if (!executeAtomicRMW(opcode, w[0], w[1], w[2], valueId)) {
+                    break;
+                }
+                pc += wc;
+                break;
+            }
+            case spv::OpAtomicCompareExchange:
+            case spv::OpAtomicCompareExchangeWeak: {
+                // w[6]=new value, w[7]=comparator. The return value is the
+                // original memory value regardless of whether the swap occurs.
+                if (wc < 9 || !executeAtomicRMW(opcode, w[0], w[1], w[2], w[6], w[7])) {
+                    break;
+                }
+                pc += wc;
+                break;
+            }
             case spv::OpAccessChain: {
                 // w[0]=type, w[1]=resultId, w[2]=base, w[3..]=indices
                 // Sprint 6 P1 sub-task 3 day 3: sampler-array element
@@ -4115,7 +4390,9 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             // ─ Comparisons ─
             case spv::OpIEqual: case spv::OpINotEqual:
+            case spv::OpUGreaterThan:
             case spv::OpSLessThan: case spv::OpSGreaterThan:
+            case spv::OpUGreaterThanEqual:
             case spv::OpSLessThanEqual: case spv::OpSGreaterThanEqual:
             case spv::OpULessThan: case spv::OpULessThanEqual: {
                 Value a, b;
@@ -4131,8 +4408,10 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     switch (opcode) {
                         case spv::OpIEqual:             lanes[k] = (ai == bi); break;
                         case spv::OpINotEqual:          lanes[k] = (ai != bi); break;
+                        case spv::OpUGreaterThan:       lanes[k] = (au >  bu); break;
                         case spv::OpSLessThan:          lanes[k] = (ai <  bi); break;
                         case spv::OpSGreaterThan:       lanes[k] = (ai >  bi); break;
+                        case spv::OpUGreaterThanEqual:  lanes[k] = (au >= bu); break;
                         case spv::OpSLessThanEqual:     lanes[k] = (ai <= bi); break;
                         case spv::OpSGreaterThanEqual:  lanes[k] = (ai >= bi); break;
                         case spv::OpULessThan:          lanes[k] = (au <  bu); break;
@@ -4445,6 +4724,23 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         // ─ Bit ops ─
         case spv::OpBitwiseAnd:
         case spv::OpShiftLeftLogical:
+        // ─ SSBO integer atomics ─
+        case spv::OpAtomicLoad:
+        case spv::OpAtomicStore:
+        case spv::OpAtomicExchange:
+        case spv::OpAtomicCompareExchange:
+        case spv::OpAtomicCompareExchangeWeak:
+        case spv::OpAtomicIIncrement:
+        case spv::OpAtomicIDecrement:
+        case spv::OpAtomicIAdd:
+        case spv::OpAtomicISub:
+        case spv::OpAtomicSMin:
+        case spv::OpAtomicUMin:
+        case spv::OpAtomicSMax:
+        case spv::OpAtomicUMax:
+        case spv::OpAtomicAnd:
+        case spv::OpAtomicOr:
+        case spv::OpAtomicXor:
         // ─ Conversions ─
         case spv::OpConvertFToS:
         case spv::OpConvertFToU:
@@ -4453,8 +4749,10 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         // ─ Int comparisons ─
         case spv::OpIEqual:
         case spv::OpINotEqual:
+        case spv::OpUGreaterThan:
         case spv::OpSLessThan:
         case spv::OpSGreaterThan:
+        case spv::OpUGreaterThanEqual:
         case spv::OpSLessThanEqual:
         case spv::OpSGreaterThanEqual:
         case spv::OpULessThan:

@@ -1308,10 +1308,12 @@ struct MetalFrameGraph::Impl {
             // creation. Only populated when the caller opts in by
             // supplying the out-slot (argbuf mode). CFBridgingRetain
             // transfers ownership; released at relink in GLContext.
+            if (useArgBuf) {
+                cachedVertFn = vertFn;
+            }
             if (useArgBuf && info.metalVertexFunctionOut != nullptr &&
                 *info.metalVertexFunctionOut == nullptr) {
                 *info.metalVertexFunctionOut = (void*)CFBridgingRetain(vertFn);
-                cachedVertFn = vertFn;
             }
 
             // ADV-2: compile fragment MSL via the library cache.
@@ -1351,10 +1353,12 @@ struct MetalFrameGraph::Impl {
                 }
                 // Step 7-4: cache the fragment MTLFunction. See the
                 // matching vertex-function block above.
+                if (useArgBuf) {
+                    cachedFragFn = fragFn;
+                }
                 if (useArgBuf && info.metalFragmentFunctionOut != nullptr &&
                     *info.metalFragmentFunctionOut == nullptr) {
                     *info.metalFragmentFunctionOut = (void*)CFBridgingRetain(fragFn);
-                    cachedFragFn = fragFn;
                 }
             }
 
