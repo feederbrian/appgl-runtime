@@ -6464,6 +6464,13 @@ struct GLContext::Impl {
                 GLTextureObject* texObj = objects->textures().get(ib.texture);
                 if (texObj == nullptr ||
                     texObj->metalTexture == nullptr) continue;
+                if (!imageBindingLevelAvailable(ib, texObj)) {
+                    if (trace) std::fprintf(stderr,
+                        "[GS-img]   element %d unit=%u tex=%u level=%d "
+                        "SKIP=incomplete_level\n",
+                        i, effUnit, ib.texture, ib.level);
+                    continue;
+                }
                 id<MTLTexture> mtlTex =
                     (__bridge id<MTLTexture>)texObj->metalTexture;
                 if (mtlTex.width == 0 || mtlTex.height == 0) continue;
@@ -6672,6 +6679,12 @@ struct GLContext::Impl {
                     GLTextureObject* texObj = objects->textures().get(ib.texture);
                     if (texObj == nullptr || texObj->metalTexture == nullptr) {
                         if (trace) std::fprintf(stderr, " SKIP=metalTexture_null tex=%u\n", ib.texture);
+                        continue;
+                    }
+                    if (!imageBindingLevelAvailable(ib, texObj)) {
+                        if (trace) std::fprintf(stderr,
+                            " SKIP=incomplete_level tex=%u level=%d\n",
+                            ib.texture, ib.level);
                         continue;
                     }
                     TranslatedDrawInfo::TextureBinding tb;
@@ -10256,6 +10269,30 @@ struct GLContext::Impl {
                                             ib.metalLevelView,
                                             ib.cachedViewTexture,
                                             ib.cachedViewLevel);
+    }
+
+    bool imageBindingLevelAvailable(const ImageBinding& ib,
+                                    const GLTextureObject* texObj) const {
+        if (texObj == nullptr || texObj->metalTexture == nullptr ||
+            ib.texture == 0 || ib.level < 0) {
+            return false;
+        }
+        if (texObj->target == GL_TEXTURE_BUFFER) {
+            return ib.level == 0;
+        }
+        const auto levelIt = texObj->levels.find(ib.level);
+        if (levelIt == texObj->levels.end() || !levelIt->second.defined) {
+            if (!texObj->desc.immutable) {
+                return false;
+            }
+            const GLsizei declaredLevels = std::max<GLsizei>(texObj->desc.levels, 1);
+            if (ib.level >= declaredLevels) {
+                return false;
+            }
+        }
+        id<MTLTexture> baseTex = (__bridge id<MTLTexture>)texObj->metalTexture;
+        return baseTex != nil &&
+               static_cast<NSUInteger>(ib.level) < baseTex.mipmapLevelCount;
     }
     static constexpr std::size_t kMaxImageUnits = 8;
     std::array<ImageBinding, kMaxImageUnits> imageBindings{};
@@ -17060,6 +17097,9 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
     if (level == 0) {
         return texObj->metalTexture;
     }
+    if (level < 0) {
+        return nullptr;
+    }
     (void)texName;  // reserved for future per-binding diagnostics
     if (cachedView != nullptr && cachedTex == texName && cachedLev == level) {
         return cachedView;
@@ -17068,7 +17108,7 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
     if (baseTex == nil) return nullptr;
     const NSUInteger maxLevels = baseTex.mipmapLevelCount;
     if (static_cast<NSUInteger>(level) >= maxLevels) {
-        return texObj->metalTexture;
+        return nullptr;
     }
     NSRange levelRange = NSMakeRange(static_cast<NSUInteger>(level), 1);
     // CKPT119: per-textureType slice range. Metal asserts:
@@ -33357,6 +33397,7 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             if (ib.texture == 0) continue;
             GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+            if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
             ComputeDispatchInfo::TextureBinding tb;
             // CKPT119: level-restricted view when ib.level > 0.
             tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
@@ -33624,6 +33665,7 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         if (ib.texture == 0) continue;
         GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
         if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+        if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
         ComputeDispatchInfo::TextureBinding tb;
         // CKPT119: level-restricted view when ib.level > 0.
         tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
