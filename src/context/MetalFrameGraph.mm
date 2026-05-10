@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -7108,6 +7109,36 @@ fragment float4 appgl_immediate_textured_fs(
                 }
             }
         } else {
+            // SSBO `.length()` / OpArrayLength support for direct compute.
+            // SPIRV-Cross emits `constant uint* spvBufferSizeConstants
+            // [[buffer(25)]]`; entries are keyed by the SSBO's reflected
+            // Metal buffer slot and contain the effective GL bound range.
+            if (info.needsSSBOSizeBuffer) {
+                std::uint32_t maxSlot = 0;
+                bool any = false;
+                for (const auto& bb : info.buffers) {
+                    if (bb.size == 0) continue;
+                    maxSlot = std::max(maxSlot, bb.metalSlot);
+                    any = true;
+                }
+                if (any) {
+                    std::vector<std::uint32_t> sizes(
+                        static_cast<std::size_t>(maxSlot) + 1u, 0u);
+                    for (const auto& bb : info.buffers) {
+                        if (bb.size == 0 || bb.metalSlot >= sizes.size()) continue;
+                        sizes[bb.metalSlot] = static_cast<std::uint32_t>(
+                            std::min<std::size_t>(
+                                bb.size,
+                                static_cast<std::size_t>(
+                                    std::numeric_limits<std::uint32_t>::max())));
+                    }
+                    [enc setBytes:sizes.data()
+                           length:static_cast<NSUInteger>(
+                                      sizes.size() * sizeof(std::uint32_t))
+                          atIndex:25];
+                }
+            }
+
             // Default-uniform push constants (bare GL uniforms packed into
             // one buffer at Metal index 16 — matches the graphics-stage
             // convention used by drawArrays/drawElements). Lets compute

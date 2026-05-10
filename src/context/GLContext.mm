@@ -31802,6 +31802,8 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     ComputeDispatchInfo info;
     info.metalComputePipelineState = programObject->metalComputePipelineState;
     info.metalComputeFunction = programObject->metalComputeFunction;
+    info.needsSSBOSizeBuffer =
+        programObject->computeMSL.find("spvBufferSizeConstants") != std::string::npos;
     info.groupsX = num_groups_x;
     info.groupsY = num_groups_y;
     info.groupsZ = num_groups_z;
@@ -31890,6 +31892,11 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             ComputeDispatchInfo::BufferBinding bb;
             bb.metalBuffer = bufObj->metalBuffer;
             bb.offset = static_cast<std::size_t>(binding.offset);
+            if (binding.size > 0) {
+                bb.size = static_cast<std::size_t>(binding.size);
+            } else if (binding.offset >= 0 && bufObj->size > binding.offset) {
+                bb.size = static_cast<std::size_t>(bufObj->size - binding.offset);
+            }
             bb.metalSlot = ssbo.metalBinding + static_cast<std::uint32_t>(inst);
             info.buffers.push_back(bb);
         }
@@ -32286,6 +32293,8 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
     ComputeDispatchInfo info;
     info.metalComputePipelineState = programObject->metalComputePipelineState;
     info.metalComputeFunction = programObject->metalComputeFunction;
+    info.needsSSBOSizeBuffer =
+        programObject->computeMSL.find("spvBufferSizeConstants") != std::string::npos;
     info.localX = programObject->computeLocalSizeX;
     info.localY = programObject->computeLocalSizeY;
     info.localZ = programObject->computeLocalSizeZ;
@@ -32304,6 +32313,11 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         ComputeDispatchInfo::BufferBinding bb;
         bb.metalBuffer = bufObj->metalBuffer;
         bb.offset = static_cast<std::size_t>(binding.offset);
+        if (binding.size > 0) {
+            bb.size = static_cast<std::size_t>(binding.size);
+        } else if (binding.offset >= 0 && bufObj->size > binding.offset) {
+            bb.size = static_cast<std::size_t>(bufObj->size - binding.offset);
+        }
         bb.metalSlot = ssbo.metalBinding;
         info.buffers.push_back(bb);
     }

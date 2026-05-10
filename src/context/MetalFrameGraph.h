@@ -591,10 +591,12 @@ struct ComputeDispatchInfo {
     std::uint32_t localX = 1;
     std::uint32_t localY = 1;
     std::uint32_t localZ = 1;
+    bool needsSSBOSizeBuffer = false;
 
     struct BufferBinding {
         void* metalBuffer = nullptr; // id<MTLBuffer>
         std::size_t offset = 0;
+        std::size_t size = 0;
         std::uint32_t metalSlot = 0;
     };
     // All non-argument buffers to bind: SSBOs at `storageBufferBase+N`,

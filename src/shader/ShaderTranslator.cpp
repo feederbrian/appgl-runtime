@@ -1212,6 +1212,11 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                       [](const SSBORef& a, const SSBORef& b) { return a.glBinding < b.glBinding; });
             std::uint32_t nextSSBOSlot = bindings.storageBufferBase;
             for (auto& entry : sortedSSBOs) {
+                std::uint32_t slotSpan = 1;
+                const auto& varType = compiler.get_type(entry.res->type_id);
+                if (!varType.array.empty() && varType.array[0] > 0) {
+                    slotSpan = varType.array[0];
+                }
                 spirv_cross::MSLResourceBinding binding;
                 binding.stage = compiler.get_execution_model();
                 binding.desc_set = compiler.get_decoration(entry.res->id, spv::DecorationDescriptorSet);
@@ -1225,7 +1230,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 if (useArgBuf) {
                     binding.msl_buffer = 192 + entry.glBinding;
                 } else {
-                    binding.msl_buffer = nextSSBOSlot++;
+                    binding.msl_buffer = nextSSBOSlot;
+                    nextSSBOSlot += slotSpan;
                 }
                 compiler.add_msl_resource_binding(binding);
             }
@@ -1481,6 +1487,21 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // fixed-size `[1]` members (e.g. `struct sC { uint3 mA[1]; };`)
         // keep their declared size because they take the `else if(size)`
         // branch in CompilerGLSL::to_array_size.
+        {
+            static constexpr const char* kPaddedArrayNeedle =
+                "template <typename T, int stride>\n"
+                "struct spvPaddedArrayElement { T data; char padding[stride - sizeof(T)]; };";
+            static constexpr const char* kPaddedArrayReplacement =
+                "template <typename T, int stride, bool hasPadding = (stride > sizeof(T))>\n"
+                "struct spvPaddedArrayElement { T data; char padding[stride - sizeof(T)]; };\n"
+                "\n"
+                "template <typename T, int stride>\n"
+                "struct spvPaddedArrayElement<T, stride, false> { T data; };";
+            const std::size_t pos = msl.find(kPaddedArrayNeedle);
+            if (pos != std::string::npos) {
+                msl.replace(pos, std::strlen(kPaddedArrayNeedle), kPaddedArrayReplacement);
+            }
+        }
 
         // gl_ClipDistance / gl_CullDistance array-to-flattened rewrite:
         // SPIRV-Cross's MSL backend declares ClipDistance/CullDistance as
@@ -2509,6 +2530,14 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             auto& ssbo = *ssboEntry.second;
             ShaderReflection::ResourceBinding rb;
             rb.glBinding = ssboEntry.first;
+            {
+                const auto& varType = compiler.get_type(ssbo.type_id);
+                if (!varType.array.empty()) {
+                    rb.blockArraySize = varType.array[0];
+                }
+            }
+            const std::uint32_t slotSpan =
+                rb.blockArraySize > 0 ? rb.blockArraySize : 1u;
             // Sprint 8 B Cluster F F1 Day 2 (CKPT74): track explicit
             // binding for SSBO block-array consecutive semantics.
             rb.hasExplicitBinding =
@@ -2520,7 +2549,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             if (useArgBufReflection) {
                 rb.metalBinding = 192 + rb.glBinding;
             } else {
-                rb.metalBinding = nextSSBOSlot++;
+                rb.metalBinding = nextSSBOSlot;
+                nextSSBOSlot += slotSpan;
             }
             rb.active = (ssboActive.find(ssbo.id) != ssboActive.end());
             const auto& ssboType = compiler.get_type(ssbo.base_type_id);
@@ -2529,13 +2559,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             rb.hasInstanceName = (!typeName.empty() && ssbo.name != typeName);
             // Block-array dimension: `buffer B { ... } e[2];` → 2.
             // Parallel to the UBO reflection path above. Drives the
-            // per-instance block-entry expansion in mergeStorageBlocks.
-            {
-                const auto& varType = compiler.get_type(ssbo.type_id);
-                if (!varType.array.empty()) {
-                    rb.blockArraySize = varType.array[0];
-                }
-            }
+            // per-instance block-entry expansion in mergeStorageBlocks and
+            // reserves consecutive Metal slots matching SPIRV-Cross MSL.
             // byteSize may be zero if the block contains a trailing
             // unbounded array (common for SSBOs) — callers must not
             // rely on it for draw-time binding size.
