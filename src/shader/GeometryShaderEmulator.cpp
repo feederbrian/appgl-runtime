@@ -188,6 +188,67 @@ namespace {
 // Interpreter class below still lives here until a later refactor.
 using namespace appgl::interp;
 
+float imageHalfToFloat(std::uint16_t h) {
+    const std::uint32_t sign = (static_cast<std::uint32_t>(h & 0x8000u)) << 16;
+    int exp = static_cast<int>((h >> 10) & 0x1Fu);
+    std::uint32_t mant = h & 0x03FFu;
+    std::uint32_t bits = 0;
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;
+        } else {
+            exp = 1;
+            while ((mant & 0x0400u) == 0) {
+                mant <<= 1;
+                --exp;
+            }
+            mant &= 0x03FFu;
+            bits = sign |
+                   (static_cast<std::uint32_t>(exp + (127 - 15)) << 23) |
+                   (mant << 13);
+        }
+    } else if (exp == 31) {
+        bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+        bits = sign |
+               (static_cast<std::uint32_t>(exp + (127 - 15)) << 23) |
+               (mant << 13);
+    }
+    float f = 0.0f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+float imageUnsignedFPToFloat(std::uint32_t bits, int mantissaBits) {
+    const std::uint32_t mantMask = (1u << mantissaBits) - 1u;
+    const std::uint32_t mant = bits & mantMask;
+    const std::uint32_t exp = (bits >> mantissaBits) & 0x1Fu;
+    if (exp == 0u) {
+        return std::ldexp(static_cast<float>(mant),
+                          -14 - mantissaBits);
+    }
+    if (exp == 31u) {
+        return mant ? NAN : INFINITY;
+    }
+    return std::ldexp(
+        static_cast<float>((1u << mantissaBits) + mant),
+        static_cast<int>(exp) - 15 - mantissaBits);
+}
+
+void decodeImageRG11B10F(std::uint32_t raw, float& r, float& g, float& b) {
+    r = imageUnsignedFPToFloat((raw >> 0) & 0x7FFu, 6);
+    g = imageUnsignedFPToFloat((raw >> 11) & 0x7FFu, 6);
+    b = imageUnsignedFPToFloat((raw >> 22) & 0x3FFu, 5);
+}
+
+float imageSnorm8(std::int8_t v) {
+    return std::max(static_cast<float>(v) / 127.0f, -1.0f);
+}
+
+float imageSnorm16(std::int16_t v) {
+    return std::max(static_cast<float>(v) / 32767.0f, -1.0f);
+}
+
 // ─── Interpreter ────────────────────────────────────────────────────
 
 class Interpreter {
@@ -3753,7 +3814,32 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 if (off + 4 <= slot.data.size()) {
                     std::uint32_t raw = 0;
                     std::memcpy(&raw, slot.data.data() + off, 4);
+                    const std::uint8_t* p = slot.data.data() + off;
+                    auto readU16 = [&](int component) -> std::uint16_t {
+                        std::uint16_t v = 0;
+                        std::memcpy(&v, p + component * 2, sizeof(v));
+                        return v;
+                    };
                     switch (slot.internalFormat) {
+                        // Sprint 18 Bucket 3 GS binding-format limb:
+                        // decode the first-8 same-size image formats
+                        // using the glBindImageTexture format carried
+                        // in slot.internalFormat, sister to the
+                        // existing R32*/RGBA8 imageLoad cases below.
+                        case 0x822F: { // GL_RG16F
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageHalfToFloat(readU16(0));
+                            out.f[1] = imageHalfToFloat(readU16(1));
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8C3A: { // GL_R11F_G11F_B10F
+                            out.kind = Value::Kind::Float4;
+                            decodeImageRG11B10F(raw, out.f[0], out.f[1], out.f[2]);
+                            out.f[3] = 1.0f;
+                            break;
+                        }
                         case 0x8236: { // GL_R32UI
                             out.kind = Value::Kind::UInt4;
                             out.i[0] = static_cast<std::int32_t>(raw);
@@ -3774,14 +3860,48 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.f[3] = 1.0f;
                             break;
                         }
+                        case 0x8059: { // GL_RGB10_A2
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>((raw >> 0) & 0x3FFu) / 1023.0f;
+                            out.f[1] = static_cast<float>((raw >> 10) & 0x3FFu) / 1023.0f;
+                            out.f[2] = static_cast<float>((raw >> 20) & 0x3FFu) / 1023.0f;
+                            out.f[3] = static_cast<float>((raw >> 30) & 0x3u) / 3.0f;
+                            break;
+                        }
                         case 0x8058: { // GL_RGBA8 — UNORM decode
                             out.kind = Value::Kind::Float4;
-                            const std::uint8_t* p =
-                                slot.data.data() + off;
                             out.f[0] = p[0] / 255.0f;
                             out.f[1] = p[1] / 255.0f;
                             out.f[2] = p[2] / 255.0f;
                             out.f[3] = p[3] / 255.0f;
+                            break;
+                        }
+                        case 0x822C: { // GL_RG16
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
+                            out.f[1] = static_cast<float>(readU16(1)) / 65535.0f;
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8F97: { // GL_RGBA8_SNORM
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageSnorm8(static_cast<std::int8_t>(p[0]));
+                            out.f[1] = imageSnorm8(static_cast<std::int8_t>(p[1]));
+                            out.f[2] = imageSnorm8(static_cast<std::int8_t>(p[2]));
+                            out.f[3] = imageSnorm8(static_cast<std::int8_t>(p[3]));
+                            break;
+                        }
+                        case 0x8F99: { // GL_RG16_SNORM
+                            out.kind = Value::Kind::Float4;
+                            std::int16_t x = 0;
+                            std::int16_t y = 0;
+                            std::memcpy(&x, p, sizeof(x));
+                            std::memcpy(&y, p + 2, sizeof(y));
+                            out.f[0] = imageSnorm16(x);
+                            out.f[1] = imageSnorm16(y);
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
                             break;
                         }
                         default: {

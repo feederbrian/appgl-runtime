@@ -6477,8 +6477,14 @@ struct GLContext::Impl {
                 id<MTLTexture> mtlTex =
                     (__bridge id<MTLTexture>)texObj->metalTexture;
                 if (mtlTex.width == 0 || mtlTex.height == 0) continue;
+                // Sprint 18 Bucket 3 CPU GS binding-format semantics:
+                // storage image reads/writes are interpreted through the
+                // glBindImageTexture image format, not the texture's base
+                // internal format. The bytes still come from the same
+                // Metal texture; only the per-texel decode/pack format
+                // changes for same-size image views.
                 const std::uint32_t intFmt =
-                    static_cast<std::uint32_t>(texObj->desc.internalFormat);
+                    static_cast<std::uint32_t>(ib.format);
                 std::uint32_t bpp = 0;
                 switch (intFmt) {
                     case GL_R32UI:
@@ -6514,6 +6520,8 @@ struct GLContext::Impl {
                         bpp = 8;
                         break;
                     case GL_RG16F:
+                    case GL_RG16:
+                    case GL_RG16_SNORM:
                     case GL_RG16I:
                     case GL_RG16UI:
                     case GL_RGBA8I:
@@ -17873,6 +17881,30 @@ void GLContext::Impl::flushPendingImageWritesForStage(
         // for g_result and friends.
         std::uint8_t buf[16] = {};
         std::size_t texelBytes = 0;
+        // Sprint 18 Bucket 3 GS binding-format limb: first-8 imageStore
+        // pack support mirrors OpImageRead's binding-format decode and
+        // extends the existing R32*/RGBA8 flush coverage without touching
+        // the deferred TCS/TES Metal binding-vector mechanism.
+        auto valueAsFloat = [&](int idx) -> float {
+            if (pw.valueIsFloat) {
+                float f = 0.0f;
+                std::memcpy(&f, &pw.value[idx], sizeof(f));
+                return f;
+            }
+            return static_cast<float>(
+                static_cast<std::int32_t>(pw.value[idx]));
+        };
+        auto packUnorm = [&](float f, std::uint32_t maxValue) -> std::uint32_t {
+            const float clamped = std::max(0.0f, std::min(1.0f, f));
+            return static_cast<std::uint32_t>(
+                std::lround(clamped * static_cast<float>(maxValue)));
+        };
+        auto packSnorm = [&](float f, double maxValue) -> std::int32_t {
+            const double clamped = std::max(-1.0, std::min(1.0, static_cast<double>(f)));
+            return static_cast<std::int32_t>(
+                clamped >= 0.0 ? (clamped * maxValue + 0.5)
+                               : (clamped * maxValue - 0.5));
+        };
         switch (pw.internalFormat) {
             case GL_RGBA32I:
             case GL_RGBA32UI:
@@ -17891,6 +17923,32 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 texelBytes = 4;
                 break;
             }
+            case GL_RG16F: {
+                const std::uint16_t x = floatToHalf(valueAsFloat(0));
+                const std::uint16_t y = floatToHalf(valueAsFloat(1));
+                std::memcpy(buf, &x, sizeof(x));
+                std::memcpy(buf + 2, &y, sizeof(y));
+                texelBytes = 4;
+                break;
+            }
+            case GL_R11F_G11F_B10F: {
+                const std::uint32_t packed = packUF_10F11F11F_REV(
+                    valueAsFloat(0), valueAsFloat(1), valueAsFloat(2));
+                std::memcpy(buf, &packed, sizeof(packed));
+                texelBytes = 4;
+                break;
+            }
+            case GL_RGB10_A2: {
+                const std::uint32_t r = packUnorm(valueAsFloat(0), 1023u);
+                const std::uint32_t g = packUnorm(valueAsFloat(1), 1023u);
+                const std::uint32_t b = packUnorm(valueAsFloat(2), 1023u);
+                const std::uint32_t a = packUnorm(valueAsFloat(3), 3u);
+                const std::uint32_t packed =
+                    (a << 30) | (b << 20) | (g << 10) | r;
+                std::memcpy(buf, &packed, sizeof(packed));
+                texelBytes = 4;
+                break;
+            }
             case GL_RGBA8: {
                 auto toUnorm8 = [&](std::uint32_t bits) -> std::uint8_t {
                     if (!pw.valueIsFloat) {
@@ -17905,6 +17963,42 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 buf[1] = toUnorm8(pw.value[1]);
                 buf[2] = toUnorm8(pw.value[2]);
                 buf[3] = toUnorm8(pw.value[3]);
+                texelBytes = 4;
+                break;
+            }
+            case GL_RG16: {
+                const std::uint16_t x =
+                    static_cast<std::uint16_t>(packUnorm(valueAsFloat(0), 65535u));
+                const std::uint16_t y =
+                    static_cast<std::uint16_t>(packUnorm(valueAsFloat(1), 65535u));
+                std::memcpy(buf, &x, sizeof(x));
+                std::memcpy(buf + 2, &y, sizeof(y));
+                texelBytes = 4;
+                break;
+            }
+            case GL_RGBA8_SNORM: {
+                const std::int8_t x = static_cast<std::int8_t>(
+                    std::max(-128, std::min(127, packSnorm(valueAsFloat(0), 127.0))));
+                const std::int8_t y = static_cast<std::int8_t>(
+                    std::max(-128, std::min(127, packSnorm(valueAsFloat(1), 127.0))));
+                const std::int8_t z = static_cast<std::int8_t>(
+                    std::max(-128, std::min(127, packSnorm(valueAsFloat(2), 127.0))));
+                const std::int8_t w = static_cast<std::int8_t>(
+                    std::max(-128, std::min(127, packSnorm(valueAsFloat(3), 127.0))));
+                std::memcpy(buf, &x, sizeof(x));
+                std::memcpy(buf + 1, &y, sizeof(y));
+                std::memcpy(buf + 2, &z, sizeof(z));
+                std::memcpy(buf + 3, &w, sizeof(w));
+                texelBytes = 4;
+                break;
+            }
+            case GL_RG16_SNORM: {
+                const std::int16_t x = static_cast<std::int16_t>(
+                    std::max(-32768, std::min(32767, packSnorm(valueAsFloat(0), 32767.0))));
+                const std::int16_t y = static_cast<std::int16_t>(
+                    std::max(-32768, std::min(32767, packSnorm(valueAsFloat(1), 32767.0))));
+                std::memcpy(buf, &x, sizeof(x));
+                std::memcpy(buf + 2, &y, sizeof(y));
                 texelBytes = 4;
                 break;
             }
