@@ -40,7 +40,7 @@ namespace spv {
         OpArrayLength = 68,
         OpCompositeExtract = 81, OpCompositeConstruct = 80,
         OpVectorShuffle = 79,
-        OpVectorTimesScalar = 142, OpDot = 148,
+        OpVectorTimesScalar = 142, OpMatrixTimesVector = 145, OpDot = 148,
         OpFNegate = 127,
         OpFAdd = 129, OpFSub = 131, OpFMul = 133, OpFDiv = 136, OpFMod = 141,
         OpIAdd = 128, OpISub = 130, OpIMul = 132,
@@ -522,6 +522,10 @@ private:
 
     // Per-id SSA values for loads/arithmetic results.
     std::unordered_map<std::uint32_t, Value> valueStore_;
+    // Matrix SSA values are stored as column vectors. The narrow
+    // interpreter Value model is four scalars wide, so mat3/mat4
+    // composites need side storage for OpMatrixTimesVector.
+    std::unordered_map<std::uint32_t, std::vector<Value>> matrixColumns_;
 
     // Per-variable flat float storage (indexed by access-chain
     // scalar offset). Float storage is universal — int/uint/bool
@@ -3632,6 +3636,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 Value r;
                 if (typeIt != module_.types.end()) {
                     const auto& t = typeIt->second;
+                    matrixColumns_.erase(w[1]);
                     if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
                         t.kind == TypeInfo::Kind::Vec4) {
                         // Pick result kind based on component scalar type.
@@ -3680,6 +3685,18 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                 }
                                 ++dstIdx;
                             }
+                        }
+                    } else if (t.kind == TypeInfo::Kind::Matrix) {
+                        std::vector<Value> columns;
+                        columns.reserve(wc > 2 ? wc - 2 : 0);
+                        for (std::uint32_t k = 2; k < wc; ++k) {
+                            Value cv;
+                            if (tryGetValue(w[k], cv) && cv.isFloatKind()) {
+                                columns.push_back(cv);
+                            }
+                        }
+                        if (!columns.empty()) {
+                            matrixColumns_[w[1]] = std::move(columns);
                         }
                     }
                 }
@@ -3733,6 +3750,50 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 if (!tryGetValue(w[2], v) || !tryGetValue(w[3], s)) { bail("OpVectorTimesScalar: unknown operand"); break; }
                 Value r = v;
                 for (int k = 0; k < v.componentCount(); ++k) r.f[k] = v.f[k] * s.f[0];
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpMatrixTimesVector: {
+                // Matrix values are column vectors; M * v is
+                // sum(column[i] * v[i]). This covers CTS
+                // cull_distance item6's TES mat3(position columns)
+                // * gl_TessCoord position formula.
+                auto mIt = matrixColumns_.find(w[2]);
+                Value v;
+                if (mIt == matrixColumns_.end() || !tryGetValue(w[3], v)) {
+                    bail("OpMatrixTimesVector: unknown operand");
+                    break;
+                }
+                int n = 1;
+                auto typeIt = module_.types.find(w[0]);
+                if (typeIt != module_.types.end()) {
+                    switch (typeIt->second.kind) {
+                        case TypeInfo::Kind::Vec2: n = 2; break;
+                        case TypeInfo::Kind::Vec3: n = 3; break;
+                        case TypeInfo::Kind::Vec4: n = 4; break;
+                        default: n = 1; break;
+                    }
+                } else if (!mIt->second.empty()) {
+                    n = mIt->second.front().componentCount();
+                }
+                Value r;
+                r.kind = (n == 2) ? Value::Kind::Float2 :
+                         (n == 3) ? Value::Kind::Float3 :
+                         (n == 4) ? Value::Kind::Float4 :
+                                    Value::Kind::Float;
+                const int cols = std::min<int>(
+                    static_cast<int>(mIt->second.size()), v.componentCount());
+                for (int row = 0; row < n; ++row) {
+                    float sum = 0.0f;
+                    for (int col = 0; col < cols; ++col) {
+                        const Value& c = mIt->second[static_cast<std::size_t>(col)];
+                        if (row < c.componentCount()) {
+                            sum += c.f[row] * v.f[col];
+                        }
+                    }
+                    r.f[row] = sum;
+                }
                 valueStore_[w[1]] = r;
                 pc += wc;
                 break;
@@ -4273,6 +4334,7 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpFMod:
         case spv::OpFNegate:
         case spv::OpVectorTimesScalar:
+        case spv::OpMatrixTimesVector:
         case spv::OpDot:
         // ─ Int arith ─
         case spv::OpIAdd:

@@ -1569,6 +1569,16 @@ static void tessellateTriangles(
         return;
     }
     out.topology = GL_TRIANGLES;
+    if (N == 1) {
+        // Single-segment triangle tessellation should reproduce the
+        // input patch vertices in TES barycentric order. The generic
+        // row walk stores them as (0,0,1), (1,0,0), (0,1,0), so remap
+        // the only primitive to gl_in[0], gl_in[1], gl_in[2].
+        out.indices.push_back(1);
+        out.indices.push_back(2);
+        out.indices.push_back(0);
+        return;
+    }
     // Triangulate: for row j, column i, form two triangles (upward
     // pointing from (i,j), (i+1,j), (i,j+1)) + (downward pointing from
     // (i+1,j), (i+1,j+1), (i,j+1)) when indices are valid in row j+1.
@@ -2061,9 +2071,38 @@ EmulatedDraw emulateTessellationDraw(
         d.varyingBaseType.push_back(v.baseType);
         varyingFloats += v.numComponents;
     }
-    const std::size_t floatsPerVertex = kPosFloats + varyingFloats;
+    const bool useInterpreter =
+        program.tessellationInterpreted && !program.tessellationEmulated;
+
+    // Sprint 18 cull_distance item6: TES interpreter outputs from
+    // gl_PerVertex need the same synth-VS handoff lanes as the
+    // Sprint17 R13 cull pre-pass path. Keep clip distances for
+    // Metal's clip planes, but cull distances are consumed by the
+    // primitive-level CPU filter below.
+    std::uint32_t tessClipLen = 0;
+    std::uint32_t tessCullLen = 0;
+    if (useInterpreter && !program.tessEvalSpirv.empty()) {
+        TessEvalInterface teIface = scanTessEvalInterface(
+            program.tessEvalSpirv.data(),
+            program.tessEvalSpirv.size());
+        if (teIface.parsed) {
+            for (const auto& ov : teIface.outputs) {
+                if (!ov.isBuiltIn) continue;
+                if (ov.builtIn == spv::BuiltInClipDistance) {
+                    tessClipLen = std::max(tessClipLen, ov.scalarCount);
+                } else if (ov.builtIn == spv::BuiltInCullDistance) {
+                    tessCullLen = std::max(tessCullLen, ov.scalarCount);
+                }
+            }
+        }
+    }
+    const std::size_t clipBase = kPosFloats + varyingFloats;
+    const std::size_t cullBase = clipBase + tessClipLen;
+    const std::size_t floatsPerVertex = cullBase + tessCullLen;
     d.vertexCount = totalVerts;
     d.floatsPerVertex = floatsPerVertex;
+    d.clipDistanceLen = tessClipLen;
+    d.cullDistanceLen = tessCullLen;
     d.expandedVertexData.assign(totalVerts * floatsPerVertex, 0.0f);
     d.topology = domainOut.topology;
 
@@ -2490,6 +2529,14 @@ EmulatedDraw emulateTessellationDraw(
                 vOff += vmap.numComponents;
                 src += vmap.numComponents;
             }
+            for (std::uint32_t c = 0; c < tessClipLen; ++c) {
+                d.expandedVertexData[dst + clipBase + c] =
+                    c < outV.clipDistance.size() ? outV.clipDistance[c] : 0.0f;
+            }
+            for (std::uint32_t c = 0; c < tessCullLen; ++c) {
+                d.expandedVertexData[dst + cullBase + c] =
+                    c < outV.cullDistance.size() ? outV.cullDistance[c] : 0.0f;
+            }
         } else {
             // Phase 3f-15: interpreter bailed. Mark the draw as
             // failed so the caller (emulateTessellationDraw's
@@ -2512,9 +2559,6 @@ EmulatedDraw emulateTessellationDraw(
     // Phase 3f-10 moved the VS pre-pass BEFORE the TCS pre-pass so
     // TCS's gl_in[] reads see real VS outputs. `vsFailures` was
     // computed up there.
-
-    const bool useInterpreter =
-        program.tessellationInterpreted && !program.tessellationEmulated;
 
     for (std::size_t p = 0; p < numPatches; ++p) {
         const std::size_t dstPatchBase = p * expandPerPatch;
@@ -2541,6 +2585,54 @@ EmulatedDraw emulateTessellationDraw(
                     emitVertex(dstPatchBase + i, u, v, w);
                 }
             }
+        }
+    }
+
+    if (useInterpreter && d.cullDistanceLen > 0 && d.vertexCount > 0) {
+        std::size_t primSize = 0;
+        switch (d.topology) {
+            case GL_POINTS:    primSize = 1; break;
+            case GL_LINES:     primSize = 2; break;
+            case GL_TRIANGLES: primSize = 3; break;
+            default:           primSize = 0; break;
+        }
+        if (primSize > 0) {
+            const std::size_t oldFpv = d.floatsPerVertex;
+            const std::size_t newFpv = cullBase;
+            std::vector<float> filtered;
+            filtered.reserve(d.expandedVertexData.size());
+            for (std::size_t base = 0; base < d.vertexCount; base += primSize) {
+                const std::size_t avail =
+                    std::min<std::size_t>(primSize, d.vertexCount - base);
+                bool primitiveCulled = false;
+                if (avail == primSize) {
+                    for (std::uint32_t c = 0; c < d.cullDistanceLen; ++c) {
+                        bool allNegative = true;
+                        for (std::size_t k = 0; k < primSize; ++k) {
+                            const float value =
+                                d.expandedVertexData[(base + k) * oldFpv + cullBase + c];
+                            if (value >= 0.0f) {
+                                allNegative = false;
+                                break;
+                            }
+                        }
+                        if (allNegative) {
+                            primitiveCulled = true;
+                            break;
+                        }
+                    }
+                }
+                if (primitiveCulled) continue;
+                for (std::size_t k = 0; k < avail; ++k) {
+                    const float* src =
+                        d.expandedVertexData.data() + (base + k) * oldFpv;
+                    filtered.insert(filtered.end(), src, src + newFpv);
+                }
+            }
+            d.vertexCount = newFpv > 0 ? filtered.size() / newFpv : 0;
+            d.floatsPerVertex = newFpv;
+            d.cullDistanceLen = 0;
+            d.expandedVertexData = std::move(filtered);
         }
     }
 
