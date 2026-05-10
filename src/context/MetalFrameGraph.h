@@ -1114,6 +1114,7 @@ public:
         std::size_t meshUniformSize = 0;
         const void* fsUniformData = nullptr;
         std::size_t fsUniformSize = 0;
+        std::vector<TranslatedDrawInfo::TextureBinding> fragmentTextures;
         // FBO state (matches encodeTranslatedDraw's fboColorTexture /
         // fboDepthStencilTexture / etc.).
         void* fboColorTexture = nullptr;

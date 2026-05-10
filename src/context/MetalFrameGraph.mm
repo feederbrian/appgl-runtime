@@ -6928,6 +6928,21 @@ fragment float4 appgl_immediate_textured_fs(
                             length:info.fsUniformSize
                            atIndex:16];
         }
+        for (const auto& binding : info.fragmentTextures) {
+            id<MTLTexture> tex =
+                (__bridge id<MTLTexture>)binding.metalTexture;
+            if (tex == nil) {
+                continue;
+            }
+            [renc setFragmentTexture:tex
+                              atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            if (binding.metalSamplerState != nullptr) {
+                id<MTLSamplerState> smp =
+                    (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                [renc setFragmentSamplerState:smp
+                                       atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            }
+        }
 
         // GL render-state plumbing — mirrors encodeTranslatedDraw's
         // depth/cull/winding/fill/scissor/viewport sequence so the

@@ -29053,19 +29053,33 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     }
     thread_local std::vector<std::uint8_t> meshGsVtxUniformScratch;
     thread_local std::vector<std::uint8_t> meshGsFragUniformScratch;
+    thread_local std::vector<std::uint8_t> meshGsGeomUniformScratch;
+    thread_local std::vector<GLProgramObject::UniformLayoutEntry> meshGsGeomUniformLayout;
     pushSynthesizedMatrixUniforms(program, matrixState);
+    computeStageUniformLayout(meshGsGeomUniformLayout,
+        program.geometryReflection, program.uniforms);
     buildStageUniformBuffer(meshGsVtxUniformScratch,
         program.vertexReflection, program.uniformValues,
         program.vertexUniformLayout);
     buildStageUniformBuffer(meshGsFragUniformScratch,
         program.fragmentReflection, program.uniformValues,
         program.fragmentUniformLayout);
+    buildStageUniformBuffer(meshGsGeomUniformScratch,
+        program.geometryReflection, program.uniformValues,
+        meshGsGeomUniformLayout);
     info.vsUniformData = meshGsVtxUniformScratch.data();
     info.vsUniformSize = meshGsVtxUniformScratch.size();
     info.fsUniformData = meshGsFragUniformScratch.data();
     info.fsUniformSize = meshGsFragUniformScratch.size();
-    info.meshUniformData = nullptr;
-    info.meshUniformSize = 0;
+    info.meshUniformData = meshGsGeomUniformScratch.data();
+    info.meshUniformSize = meshGsGeomUniformScratch.size();
+
+    TranslatedDrawInfo textureInfo;
+    textureInfo.program = programName;
+    textureInfo.fragmentReflection = &program.fragmentReflection;
+    resolveSamplerBindings(program, textureInfo);
+    resolveImageBindings(program, textureInfo);
+    info.fragmentTextures = std::move(textureInfo.fragmentTextures);
 
     // GL render state — mirror encodeTranslatedDraw's tdi setup
     // (GLContext.mm:22172-22217) for the fields the mesh-render
