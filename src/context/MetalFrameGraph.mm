@@ -1107,11 +1107,29 @@ struct MetalFrameGraph::Impl {
 
         // RC-A02: when an FBO render target is provided, use it instead of
         // the default framebuffer texture.
-        const bool isFBODraw = (info.fboColorTexture != nullptr);
-        id<MTLTexture> fboColorTex = isFBODraw
+        const bool isFBODraw =
+            info.fboColorTexture != nullptr ||
+            info.fboDepthStencilTexture != nullptr;
+        id<MTLTexture> fboColorTex = (info.fboColorTexture != nullptr)
             ? (__bridge id<MTLTexture>)info.fboColorTexture : nil;
         id<MTLTexture> fboDepthStencilTex = (info.fboDepthStencilTexture != nullptr)
             ? (__bridge id<MTLTexture>)info.fboDepthStencilTexture : nil;
+        id<MTLTexture> dsOnlyColorTex = nil;
+        if (isFBODraw && fboColorTex == nil && fboDepthStencilTex != nil) {
+            MTLTextureDescriptor* dummyDesc =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                    width:fboDepthStencilTex.width
+                                                                   height:fboDepthStencilTex.height
+                                                                mipmapped:NO];
+            dummyDesc.storageMode = MTLStorageModePrivate;
+            dummyDesc.usage = MTLTextureUsageRenderTarget;
+            if (fboDepthStencilTex.sampleCount > 1) {
+                dummyDesc.textureType = MTLTextureType2DMultisample;
+                dummyDesc.sampleCount = fboDepthStencilTex.sampleCount;
+            }
+            dsOnlyColorTex = [device newTextureWithDescriptor:dummyDesc];
+            fboColorTex = dsOnlyColorTex;
+        }
 
         // Lazily create the MTLRenderPipelineState from translated MSL.
         id<MTLTexture> colorTexture = isFBODraw ? fboColorTex

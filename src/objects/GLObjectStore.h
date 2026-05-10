@@ -282,6 +282,11 @@ struct GLRenderbufferObject {
     // `renderbuffers_storage` pre-fix behavior while preserving
     // `clip_control.depth_mode_one_to_one` post-fix behavior.
     bool wasMetalDepthRendered = false;
+    // Stencil companion to wasMetalDepthRendered. Renderbuffer stencil
+    // writes happen inside Metal render passes, so CPU shadow reads are
+    // stale after stencilOp updates unless this routes readback through
+    // the Metal stencil plane.
+    bool wasMetalStencilRendered = false;
 };
 
 struct GLFramebufferAttachment {

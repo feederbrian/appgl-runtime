@@ -1910,6 +1910,8 @@ struct GLContext::Impl {
         object.depth32.clear();
         object.stencil8.clear();
         object.storageDefined = false;
+        object.wasMetalDepthRendered = false;
+        object.wasMetalStencilRendered = false;
     }
 
     void releaseSamplerState(GLSamplerObject& object) {
@@ -2562,6 +2564,52 @@ struct GLContext::Impl {
                             const std::uint32_t metalPacked = depth24 | (stencil << 24);
                             std::memcpy(dstPixel, &metalPacked, sizeof(metalPacked));
                         }
+                    }
+                }
+            }
+            return true;
+        }
+
+        if (internalFormat == GL_DEPTH32F_STENCIL8 &&
+            format == GL_DEPTH_STENCIL &&
+            type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV &&
+            mtlFmt == MTLPixelFormatDepth32Float_Stencil8) {
+            outBpp = 8u;
+            const std::size_t totalPixels = static_cast<std::size_t>(width)
+                                          * static_cast<std::size_t>(height)
+                                          * static_cast<std::size_t>(depth);
+            nativeData.assign(totalPixels * outBpp, 0);
+            if (pixels == nullptr || totalPixels == 0) return true;
+
+            const auto& store = state->pixelStore();
+            const bool unpackSwapBytes = (store.unpackSwapBytes == GL_TRUE);
+            constexpr std::size_t srcPixelBytes = 8u;
+            const std::size_t sourceWidth  = static_cast<std::size_t>(store.unpackRowLength > 0 ? store.unpackRowLength : width);
+            const std::size_t sourceHeight = static_cast<std::size_t>(store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
+            const std::size_t rowBytes     = alignByteCount(sourceWidth * srcPixelBytes, store.unpackAlignment);
+            const std::size_t imageBytes   = rowBytes * sourceHeight;
+            const std::size_t sourceOffset =
+                static_cast<std::size_t>(store.unpackSkipImages) * imageBytes
+                + static_cast<std::size_t>(store.unpackSkipRows) * rowBytes
+                + static_cast<std::size_t>(store.unpackSkipPixels) * srcPixelBytes;
+            const auto* source = static_cast<const std::uint8_t*>(pixels) + sourceOffset;
+
+            for (GLsizei z = 0; z < depth; ++z) {
+                for (GLsizei y = 0; y < height; ++y) {
+                    const std::uint8_t* srcRow =
+                        source + static_cast<std::size_t>(z) * imageBytes
+                               + static_cast<std::size_t>(y) * rowBytes;
+                    std::uint8_t* dstRow = nativeData.data()
+                        + (static_cast<std::size_t>(z) * static_cast<std::size_t>(height)
+                           + static_cast<std::size_t>(y))
+                          * static_cast<std::size_t>(width) * outBpp;
+                    for (GLsizei x = 0; x < width; ++x) {
+                        const std::uint8_t* srcPixel = srcRow + static_cast<std::size_t>(x) * srcPixelBytes;
+                        std::uint8_t* dstPixel = dstRow + static_cast<std::size_t>(x) * outBpp;
+                        const std::uint32_t depthBits = readU32Value(srcPixel, unpackSwapBytes);
+                        const std::uint32_t stencilSlot = readU32Value(srcPixel + 4, unpackSwapBytes);
+                        std::memcpy(dstPixel, &depthBits, sizeof(depthBits));
+                        std::memcpy(dstPixel + 4, &stencilSlot, sizeof(stencilSlot));
                     }
                 }
             }
@@ -4784,6 +4832,111 @@ struct GLContext::Impl {
                sw[2] == GL_BLUE && sw[3] == GL_ALPHA;
     }
 
+    id<MTLTexture> buildFlippedDepthStencilSamplingTexture(id<MTLTexture> baseTex) {
+        if (baseTex == nil || device == nil || commandQueue == nil ||
+            baseTex.textureType != MTLTextureType2D ||
+            baseTex.sampleCount > 1) {
+            return nil;
+        }
+        const MTLPixelFormat pf = baseTex.pixelFormat;
+        if (pf != MTLPixelFormatDepth32Float_Stencil8 &&
+            pf != MTLPixelFormatDepth24Unorm_Stencil8) {
+            return nil;
+        }
+
+        const NSUInteger width = baseTex.width;
+        const NSUInteger height = baseTex.height;
+        if (width == 0 || height == 0) return nil;
+        const NSUInteger depthRowBytes = width * 4u;
+        const NSUInteger depthImageBytes = depthRowBytes * height;
+        const NSUInteger stencilRowBytes = width;
+        const NSUInteger stencilImageBytes = stencilRowBytes * height;
+
+        id<MTLBuffer> depthBuf =
+            [device newBufferWithLength:depthImageBytes
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> stencilBuf =
+            [device newBufferWithLength:stencilImageBytes
+                                options:MTLResourceStorageModeShared];
+        if (depthBuf == nil || stencilBuf == nil) return nil;
+
+        id<MTLCommandBuffer> readCmd = [commandQueue commandBuffer];
+        id<MTLBlitCommandEncoder> readBlit = [readCmd blitCommandEncoder];
+        if (readCmd == nil || readBlit == nil) return nil;
+        MTLRegion fullRegion = MTLRegionMake2D(0, 0, width, height);
+        [readBlit copyFromTexture:baseTex
+                       sourceSlice:0
+                       sourceLevel:0
+                      sourceOrigin:fullRegion.origin
+                        sourceSize:fullRegion.size
+                          toBuffer:depthBuf
+                 destinationOffset:0
+            destinationBytesPerRow:depthRowBytes
+          destinationBytesPerImage:depthImageBytes
+                           options:MTLBlitOptionDepthFromDepthStencil];
+        [readBlit copyFromTexture:baseTex
+                       sourceSlice:0
+                       sourceLevel:0
+                      sourceOrigin:fullRegion.origin
+                        sourceSize:fullRegion.size
+                          toBuffer:stencilBuf
+                 destinationOffset:0
+            destinationBytesPerRow:stencilRowBytes
+          destinationBytesPerImage:stencilImageBytes
+                           options:MTLBlitOptionStencilFromDepthStencil];
+        [readBlit endEncoding];
+        [readCmd commit];
+        [readCmd waitUntilCompleted];
+
+        const auto* depthBytes =
+            static_cast<const std::uint8_t*>([depthBuf contents]);
+        const auto* stencilBytes =
+            static_cast<const std::uint8_t*>([stencilBuf contents]);
+        constexpr std::size_t nativeBpp = 8u;
+        const std::size_t nativeRowBytes =
+            static_cast<std::size_t>(width) * nativeBpp;
+        std::vector<std::uint8_t> flipped(nativeRowBytes *
+                                          static_cast<std::size_t>(height), 0);
+        for (NSUInteger row = 0; row < height; ++row) {
+            const NSUInteger srcRow = height - 1u - row;
+            for (NSUInteger col = 0; col < width; ++col) {
+                auto* dst = flipped.data() +
+                    (static_cast<std::size_t>(row) * static_cast<std::size_t>(width) +
+                     static_cast<std::size_t>(col)) * nativeBpp;
+                const auto* srcDepth = depthBytes +
+                    (static_cast<std::size_t>(srcRow) * static_cast<std::size_t>(width) +
+                     static_cast<std::size_t>(col)) * 4u;
+                std::memcpy(dst, srcDepth, 4u);
+                dst[4] = stencilBytes[
+                    static_cast<std::size_t>(srcRow) * static_cast<std::size_t>(width) +
+                    static_cast<std::size_t>(col)];
+            }
+        }
+
+        MTLTextureDescriptor* desc =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf
+                                                               width:width
+                                                              height:height
+                                                           mipmapped:NO];
+        desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        desc.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> flippedTex = [device newTextureWithDescriptor:desc];
+        if (flippedTex == nil) return nil;
+
+        id<MTLCommandBuffer> uploadCmd = [commandQueue commandBuffer];
+        id<MTLBlitCommandEncoder> uploadBlit = [uploadCmd blitCommandEncoder];
+        if (uploadCmd == nil || uploadBlit == nil) return nil;
+        const bool uploaded = blitUpload2DRegion(
+            flippedTex, uploadBlit, flipped.data(),
+            static_cast<NSUInteger>(nativeRowBytes),
+            static_cast<NSUInteger>(flipped.size()),
+            fullRegion, 0, 0, nativeBpp);
+        [uploadBlit endEncoding];
+        [uploadCmd commit];
+        [uploadCmd waitUntilCompleted];
+        return uploaded ? flippedTex : nil;
+    }
+
     // Returns the texture to bind — either the swizzled view (if
     // non-default swizzle) or the base metalTexture. Lazily rebuilds
     // the swizzled view when `swizzleDirty` is set.
@@ -4805,9 +4958,15 @@ struct GLContext::Impl {
         const MTLPixelFormat samplingPixelFormat = msSRGBSamplingView
             ? MTLPixelFormatRGBA8Unorm_sRGB
             : baseTex.pixelFormat;
+        const bool depthStencilNeedsSamplingFlip =
+            (baseTex.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ||
+             baseTex.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8) &&
+            (texObj.wasFramebufferRenderedTo || texObj.wasViewportRenderedTo) &&
+            state->clipOrigin() != GL_UPPER_LEFT;
         const bool needsView =
             !isDefaultSwizzle(sw) ||
-            samplingPixelFormat != baseTex.pixelFormat;
+            samplingPixelFormat != baseTex.pixelFormat ||
+            depthStencilNeedsSamplingFlip;
 
         // Fast path: default swizzle and no sampling-format override —
         // use the base texture, release any stale view.
@@ -4818,6 +4977,22 @@ struct GLContext::Impl {
             }
             texObj.swizzleDirty = false;
             return texObj.metalTexture;
+        }
+
+        if (depthStencilNeedsSamplingFlip) {
+            if (!texObj.swizzleDirty && texObj.metalSwizzledView != nullptr) {
+                return texObj.metalSwizzledView;
+            }
+            releaseRetainedMetalObject(texObj.metalSwizzledView);
+            texObj.metalSwizzledView = nullptr;
+            if (id<MTLTexture> flipped =
+                    buildFlippedDepthStencilSamplingTexture(baseTex)) {
+                texObj.metalSwizzledView = transferRetainedMetalObject(flipped);
+            }
+            texObj.swizzleDirty = false;
+            return texObj.metalSwizzledView != nullptr
+                ? texObj.metalSwizzledView
+                : texObj.metalTexture;
         }
 
         // Non-default swizzle — rebuild view if dirty.
@@ -4973,6 +5148,133 @@ struct GLContext::Impl {
             }
         }
         return false;
+    }
+
+    bool mirrorDepthRenderbufferRegionToMetal(GLRenderbufferObject& renderbuffer,
+                                              GLint x, GLint y,
+                                              GLsizei width, GLsizei height,
+                                              const GLfloat* pixels) {
+        if (pixels == nullptr || renderbuffer.metalTexture == nullptr ||
+            width <= 0 || height <= 0 || x < 0 || y < 0 ||
+            x + width > renderbuffer.width ||
+            y + height > renderbuffer.height ||
+            device == nil || commandQueue == nil) {
+            return false;
+        }
+        id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer.metalTexture;
+        if (metalTex.sampleCount > 1) return false;
+        const MTLPixelFormat pf = metalTex.pixelFormat;
+        if (pf != MTLPixelFormatDepth24Unorm_Stencil8 &&
+            pf != MTLPixelFormatDepth32Float_Stencil8) {
+            return false;
+        }
+
+        const NSUInteger depthBpp = 4;
+        const NSUInteger depthRowBytes = static_cast<NSUInteger>(width) * depthBpp;
+        const NSUInteger depthImageBytes = depthRowBytes * static_cast<NSUInteger>(height);
+        std::vector<std::uint8_t> depthBytes(depthImageBytes, 0);
+        for (GLsizei row = 0; row < height; ++row) {
+            std::uint8_t* dstRow = depthBytes.data()
+                + static_cast<std::size_t>(height - 1 - row) * depthRowBytes;
+            for (GLsizei col = 0; col < width; ++col) {
+                const float d = std::clamp(
+                    pixels[static_cast<std::size_t>(row) *
+                           static_cast<std::size_t>(width) +
+                           static_cast<std::size_t>(col)],
+                    0.0f, 1.0f);
+                if (pf == MTLPixelFormatDepth32Float_Stencil8) {
+                    std::memcpy(dstRow + static_cast<std::size_t>(col) * depthBpp,
+                                &d, sizeof(d));
+                } else {
+                    const std::uint32_t depth24 =
+                        packReadbackBits(static_cast<double>(d), 0x00FFFFFFu, false);
+                    std::memcpy(dstRow + static_cast<std::size_t>(col) * depthBpp,
+                                &depth24, sizeof(depth24));
+                }
+            }
+        }
+
+        id<MTLBuffer> staging = [device newBufferWithBytes:depthBytes.data()
+                                                    length:depthImageBytes
+                                                   options:MTLResourceStorageModeShared];
+        if (staging == nil) return false;
+        id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        if (cmd == nil || blit == nil) return false;
+        const NSUInteger metalY = static_cast<NSUInteger>(
+            renderbuffer.height - (y + height));
+        [blit copyFromBuffer:staging
+                sourceOffset:0
+           sourceBytesPerRow:depthRowBytes
+         sourceBytesPerImage:depthImageBytes
+                  sourceSize:MTLSizeMake(static_cast<NSUInteger>(width),
+                                         static_cast<NSUInteger>(height), 1)
+                   toTexture:metalTex
+            destinationSlice:0
+            destinationLevel:0
+           destinationOrigin:MTLOriginMake(static_cast<NSUInteger>(x), metalY, 0)
+                     options:MTLBlitOptionDepthFromDepthStencil];
+        [blit endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        renderbuffer.wasMetalDepthRendered = true;
+        return true;
+    }
+
+    bool mirrorStencilRenderbufferRegionToMetal(GLRenderbufferObject& renderbuffer,
+                                                GLint x, GLint y,
+                                                GLsizei width, GLsizei height,
+                                                const std::uint8_t* pixels) {
+        if (pixels == nullptr || renderbuffer.metalTexture == nullptr ||
+            width <= 0 || height <= 0 || x < 0 || y < 0 ||
+            x + width > renderbuffer.width ||
+            y + height > renderbuffer.height ||
+            device == nil || commandQueue == nil) {
+            return false;
+        }
+        id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer.metalTexture;
+        if (metalTex.sampleCount > 1) return false;
+        const MTLPixelFormat pf = metalTex.pixelFormat;
+        if (pf != MTLPixelFormatDepth24Unorm_Stencil8 &&
+            pf != MTLPixelFormatDepth32Float_Stencil8) {
+            return false;
+        }
+
+        const NSUInteger stencilRowBytes = static_cast<NSUInteger>(width);
+        const NSUInteger stencilImageBytes = stencilRowBytes * static_cast<NSUInteger>(height);
+        std::vector<std::uint8_t> stencilBytes(stencilImageBytes, 0);
+        for (GLsizei row = 0; row < height; ++row) {
+            const std::uint8_t* srcRow = pixels
+                + static_cast<std::size_t>(row) * static_cast<std::size_t>(width);
+            std::uint8_t* dstRow = stencilBytes.data()
+                + static_cast<std::size_t>(height - 1 - row) * stencilRowBytes;
+            std::memcpy(dstRow, srcRow, static_cast<std::size_t>(width));
+        }
+
+        id<MTLBuffer> staging = [device newBufferWithBytes:stencilBytes.data()
+                                                    length:stencilImageBytes
+                                                   options:MTLResourceStorageModeShared];
+        if (staging == nil) return false;
+        id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        if (cmd == nil || blit == nil) return false;
+        const NSUInteger metalY = static_cast<NSUInteger>(
+            renderbuffer.height - (y + height));
+        [blit copyFromBuffer:staging
+                sourceOffset:0
+           sourceBytesPerRow:stencilRowBytes
+         sourceBytesPerImage:stencilImageBytes
+                  sourceSize:MTLSizeMake(static_cast<NSUInteger>(width),
+                                         static_cast<NSUInteger>(height), 1)
+                   toTexture:metalTex
+            destinationSlice:0
+            destinationLevel:0
+           destinationOrigin:MTLOriginMake(static_cast<NSUInteger>(x), metalY, 0)
+                     options:MTLBlitOptionStencilFromDepthStencil];
+        [blit endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        return true;
     }
 
     void resolveSamplerBindings(
@@ -6783,11 +7085,26 @@ struct GLContext::Impl {
             if (att == nullptr) return nullptr;
             if (att->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
                 const GLRenderbufferObject* rb = objects->renderbuffers().get(att->object);
-                return (rb != nullptr) ? rb->metalTexture : nullptr;
+                if (rb == nullptr || rb->metalTexture == nullptr) return nullptr;
+                if (!primarySet) {
+                    outWidth = rb->width;
+                    outHeight = rb->height;
+                    primarySet = true;
+                }
+                return rb->metalTexture;
             }
             if (att->kind == GLFramebufferAttachment::Kind::Texture) {
                 const GLTextureObject* tex = objects->textures().get(att->object);
-                return (tex != nullptr) ? tex->metalTexture : nullptr;
+                if (tex == nullptr || tex->metalTexture == nullptr) return nullptr;
+                if (!primarySet) {
+                    const auto lvl = tex->levels.find(att->level);
+                    if (lvl != tex->levels.end()) {
+                        outWidth = lvl->second.desc.width;
+                        outHeight = tex->target == GL_TEXTURE_1D ? 1 : lvl->second.desc.height;
+                        primarySet = true;
+                    }
+                }
+                return tex->metalTexture;
             }
             return nullptr;
         };
@@ -7521,6 +7838,9 @@ struct GLContext::Impl {
             return false;
         }
         renderbuffer->depth32.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height), depth);
+        (void)mirrorDepthRenderbufferRegionToMetal(
+            *renderbuffer, 0, 0, renderbuffer->width, renderbuffer->height,
+            renderbuffer->depth32.data());
         return true;
     }
 
@@ -7566,6 +7886,9 @@ struct GLContext::Impl {
             static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height),
             static_cast<std::uint8_t>(value & 0xff)
         );
+        (void)mirrorStencilRenderbufferRegionToMetal(
+            *renderbuffer, 0, 0, renderbuffer->width, renderbuffer->height,
+            renderbuffer->stencil8.data());
         return true;
     }
 
@@ -7859,13 +8182,23 @@ struct GLContext::Impl {
         if (frameGraph != nullptr) {
             frameGraph->flushForReadback();
         }
-        // Raw-bytes read depends on the depth format width.
+        // Raw-bytes read depends on the extracted depth-plane width. Metal
+        // depth-stencil textures must be blitted with the depth-plane option;
+        // copying them as an interleaved texture gives undefined packed bytes
+        // and broke GL_DEPTH_STENCIL glReadPixels/readback staging.
         NSUInteger srcBpp = 0;
+        MTLBlitOption depthStencilBlitOptions = 0;
         switch (pf) {
             case MTLPixelFormatDepth32Float:                srcBpp = 4; break;
             case MTLPixelFormatDepth16Unorm:                srcBpp = 2; break;
-            case MTLPixelFormatDepth32Float_Stencil8:       srcBpp = 8; break;
-            case MTLPixelFormatDepth24Unorm_Stencil8:       srcBpp = 4; break;
+            case MTLPixelFormatDepth32Float_Stencil8:
+                srcBpp = 4;
+                depthStencilBlitOptions = MTLBlitOptionDepthFromDepthStencil;
+                break;
+            case MTLPixelFormatDepth24Unorm_Stencil8:
+                srcBpp = 4;
+                depthStencilBlitOptions = MTLBlitOptionDepthFromDepthStencil;
+                break;
             default:
                 // Unknown depth-format mapping — bail safely so
                 // the caller reports INVALID_FRAMEBUFFER_OPERATION
@@ -7874,6 +8207,7 @@ struct GLContext::Impl {
         }
         const NSUInteger bytesPerRow = texWidth * srcBpp;
         std::vector<std::uint8_t> raw(bytesPerRow * texHeight);
+        const bool requiresDepthPlaneBlit = (depthStencilBlitOptions != 0);
         // Two read paths depending on the Metal storage mode:
         //   - Shared/Managed: direct `getBytes:` works.
         //   - Private: can't read directly on the CPU; blit the
@@ -7881,7 +8215,8 @@ struct GLContext::Impl {
         //     blitCommandEncoder, then memcpy the contents.
         //   (Apple Silicon Metal defaults depth textures to
         //   Private, so the blit path is the common one here.)
-        if (metalTex.storageMode != MTLStorageModePrivate) {
+        if (metalTex.storageMode != MTLStorageModePrivate &&
+            !requiresDepthPlaneBlit) {
             MTLRegion region = MTLRegionMake2D(0, 0, texWidth, texHeight);
             if (sourceSlice == 0 &&
                 metalTex.textureType != MTLTextureType2DArray &&
@@ -7921,7 +8256,8 @@ struct GLContext::Impl {
                          toBuffer:staging
                 destinationOffset:0
            destinationBytesPerRow:bytesPerRow
-         destinationBytesPerImage:stagingSize];
+         destinationBytesPerImage:stagingSize
+                         options:depthStencilBlitOptions];
             [blit endEncoding];
             [cmd commit];
             [cmd waitUntilCompleted];
@@ -8072,6 +8408,74 @@ struct GLContext::Impl {
             if (renderbuffer == nullptr || !renderbuffer->storageDefined || renderbuffer->stencil8.empty()) {
                 return false;
             }
+            if (renderbuffer->metalTexture != nullptr &&
+                renderbuffer->wasMetalStencilRendered &&
+                device != nil && commandQueue != nil) {
+                id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                const MTLPixelFormat pf = metalTex.pixelFormat;
+                if (metalTex.sampleCount <= 1 &&
+                    (pf == MTLPixelFormatStencil8 ||
+                     pf == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                     pf == MTLPixelFormatDepth32Float_Stencil8)) {
+                    const NSUInteger texW = static_cast<NSUInteger>(renderbuffer->width);
+                    const NSUInteger texH = static_cast<NSUInteger>(renderbuffer->height);
+                    const NSUInteger stencilBytesPerRow = texW;
+                    const NSUInteger stencilBytesPerImage = stencilBytesPerRow * texH;
+                    id<MTLBuffer> stencilBuf =
+                        [device newBufferWithLength:stencilBytesPerImage
+                                            options:MTLResourceStorageModeShared];
+                    if (stencilBuf != nil) {
+                        id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+                        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+                        if (cmd != nil && blit != nil) {
+                            MTLRegion region = MTLRegionMake2D(0, 0, texW, texH);
+                            MTLBlitOption stencilOption =
+                                (pf == MTLPixelFormatStencil8)
+                                    ? 0
+                                    : MTLBlitOptionStencilFromDepthStencil;
+                            [blit copyFromTexture:metalTex
+                                      sourceSlice:0
+                                      sourceLevel:0
+                                     sourceOrigin:region.origin
+                                       sourceSize:region.size
+                                         toBuffer:stencilBuf
+                                destinationOffset:0
+                           destinationBytesPerRow:stencilBytesPerRow
+                         destinationBytesPerImage:stencilBytesPerImage
+                                          options:stencilOption];
+                            [blit endEncoding];
+                            [cmd commit];
+                            [cmd waitUntilCompleted];
+                            const auto* stencilBytes =
+                                static_cast<const std::uint8_t*>([stencilBuf contents]);
+                            const bool yFlipStencilReadback =
+                                state->clipOrigin() != GL_UPPER_LEFT;
+                            auto* out = static_cast<std::uint8_t*>(pixels);
+                            for (GLsizei row = 0; row < height; ++row) {
+                                for (GLsizei col = 0; col < width; ++col) {
+                                    const GLint srcX = x + col;
+                                    const GLint glY = y + row;
+                                    const GLint srcY = yFlipStencilReadback
+                                        ? (renderbuffer->height - 1 - glY)
+                                        : glY;
+                                    const std::size_t dstOffset =
+                                        static_cast<std::size_t>(row * width + col);
+                                    if (srcX < 0 || srcY < 0 ||
+                                        srcX >= renderbuffer->width ||
+                                        srcY >= renderbuffer->height) {
+                                        out[dstOffset] = 0;
+                                        continue;
+                                    }
+                                    out[dstOffset] = stencilBytes[
+                                        static_cast<std::size_t>(srcY) * texW +
+                                        static_cast<std::size_t>(srcX)];
+                                }
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
             auto* out = static_cast<std::uint8_t*>(pixels);
             for (GLsizei row = 0; row < height; ++row) {
                 for (GLsizei col = 0; col < width; ++col) {
@@ -8140,11 +8544,17 @@ struct GLContext::Impl {
             [cmd waitUntilCompleted];
             const std::uint8_t* stencilBytes =
                 static_cast<const std::uint8_t*>([stencilBuf contents]);
+            const bool yFlipStencilReadback =
+                (tex->wasFramebufferRenderedTo || tex->wasViewportRenderedTo) &&
+                state->clipOrigin() != GL_UPPER_LEFT;
             auto* out = static_cast<std::uint8_t*>(pixels);
             for (GLsizei row = 0; row < height; ++row) {
                 for (GLsizei col = 0; col < width; ++col) {
                     const GLint srcX = x + col;
-                    const GLint srcY = y + row;
+                    const GLint glY = y + row;
+                    const GLint srcY = yFlipStencilReadback
+                        ? (static_cast<GLint>(texH) - 1 - glY)
+                        : glY;
                     const std::size_t dstOffset =
                         static_cast<std::size_t>(row * width + col);
                     if (srcX < 0 || srcY < 0 ||
@@ -8323,6 +8733,7 @@ struct GLContext::Impl {
                 ] = pixels[static_cast<std::size_t>(row * width + col)];
             }
         }
+        (void)mirrorDepthRenderbufferRegionToMetal(*renderbuffer, x, y, width, height, pixels);
         return true;
     }
 
@@ -8349,6 +8760,7 @@ struct GLContext::Impl {
                 ] = pixels[static_cast<std::size_t>(row * width + col)];
             }
         }
+        (void)mirrorStencilRenderbufferRegionToMetal(*renderbuffer, x, y, width, height, pixels);
         return true;
     }
 
@@ -10373,7 +10785,8 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
                             + static_cast<std::size_t>(col) * dstPixelBytes;
                         const float d = clamp01(depthStage[i]);
                         const std::uint32_t depth24 =
-                            static_cast<std::uint32_t>(d * 16777215.0f + 0.5f) & 0x00FFFFFF;
+                            Impl::packReadbackBits(static_cast<double>(d),
+                                                   0x00FFFFFFu, false);
                         const std::uint32_t packed =
                             (depth24 << 8) | static_cast<std::uint32_t>(stencilStage[i]);
                         std::memcpy(dst, &packed, 4);
@@ -15157,8 +15570,45 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
         const_cast<GLContext*>(this)->pushError(GL_INVALID_OPERATION);
         return false;
     }
-    const auto found = framebuffer->attachments.find(attachment);
-    const GLFramebufferAttachment attachmentState = found == framebuffer->attachments.end() ? GLFramebufferAttachment{} : found->second;
+    auto sameFramebufferImage = [](const GLFramebufferAttachment& a,
+                                   const GLFramebufferAttachment& b) {
+        if (a.kind != b.kind || a.object != b.object) return false;
+        if (a.kind == GLFramebufferAttachment::Kind::Texture) {
+            return a.level == b.level &&
+                   a.layer == b.layer &&
+                   a.textureTarget == b.textureTarget &&
+                   a.layered == b.layered;
+        }
+        return true;
+    };
+
+    GLFramebufferAttachment attachmentState;
+    if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+        const auto direct = framebuffer->attachments.find(GL_DEPTH_STENCIL_ATTACHMENT);
+        if (direct != framebuffer->attachments.end()) {
+            attachmentState = direct->second;
+        } else {
+            const auto depthIt = framebuffer->attachments.find(GL_DEPTH_ATTACHMENT);
+            const auto stencilIt = framebuffer->attachments.find(GL_STENCIL_ATTACHMENT);
+            const bool haveDepth = depthIt != framebuffer->attachments.end()
+                && depthIt->second.kind != GLFramebufferAttachment::Kind::None
+                && depthIt->second.object != 0;
+            const bool haveStencil = stencilIt != framebuffer->attachments.end()
+                && stencilIt->second.kind != GLFramebufferAttachment::Kind::None
+                && stencilIt->second.object != 0;
+            if (haveDepth && haveStencil) {
+                if (!sameFramebufferImage(depthIt->second, stencilIt->second)) {
+                    const_cast<GLContext*>(this)->pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+                attachmentState = depthIt->second;
+            }
+        }
+    } else {
+        const auto found = framebuffer->attachments.find(attachment);
+        attachmentState = found == framebuffer->attachments.end()
+            ? GLFramebufferAttachment{} : found->second;
+    }
     const auto attachmentInfo = impl_->framebufferAttachmentInfo(attachmentState);
 
     // GL 4.6 §9.2.3: when the attachment object type is GL_NONE, only
@@ -15223,7 +15673,17 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
             params[0] = attachmentInfo.complete && (attachmentInfo.internalFormat == GL_RGBA || attachmentInfo.internalFormat == GL_RGBA8) ? 8 : 0;
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
-            params[0] = attachmentInfo.complete && isDepthFormat(attachmentInfo.internalFormat) ? 24 : 0;
+            if (!attachmentInfo.complete || !isDepthFormat(attachmentInfo.internalFormat)) {
+                params[0] = 0;
+            } else if (attachmentInfo.internalFormat == GL_DEPTH_COMPONENT16) {
+                params[0] = 16;
+            } else if (attachmentInfo.internalFormat == GL_DEPTH_COMPONENT32 ||
+                       attachmentInfo.internalFormat == GL_DEPTH_COMPONENT32F ||
+                       attachmentInfo.internalFormat == GL_DEPTH32F_STENCIL8) {
+                params[0] = 32;
+            } else {
+                params[0] = 24;
+            }
             return true;
         case GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
             params[0] = attachmentInfo.complete && isStencilFormat(attachmentInfo.internalFormat) ? 8 : 0;
@@ -15236,6 +15696,9 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
             // vs DSA and expects matching values on user FBOs.
             if (!attachmentInfo.complete) {
                 params[0] = GL_NONE;
+            } else if (attachmentInfo.internalFormat == GL_DEPTH_COMPONENT32F ||
+                       attachmentInfo.internalFormat == GL_DEPTH32F_STENCIL8) {
+                params[0] = GL_FLOAT;
             } else if (isStencilFormat(attachmentInfo.internalFormat)
                        && !isDepthFormat(attachmentInfo.internalFormat)
                        && !isColorFormat(attachmentInfo.internalFormat)) {
@@ -15248,8 +15711,10 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
             // Only meaningful for color attachments; GL_LINEAR for plain
             // RGBA8 / RGBA16 / …, GL_SRGB for *_SRGB_* formats, GL_NONE
             // otherwise.
-            if (!attachmentInfo.complete || !isColorFormat(attachmentInfo.internalFormat)) {
+            if (!attachmentInfo.complete) {
                 params[0] = GL_NONE;
+            } else if (!isColorFormat(attachmentInfo.internalFormat)) {
+                params[0] = GL_LINEAR;
             } else {
                 const GLenum fmt = attachmentInfo.internalFormat;
                 params[0] = (fmt == GL_SRGB || fmt == GL_SRGB8
@@ -27910,7 +28375,7 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     GLsizei fboW = 0, fboH = 0;
     void* fboDSTex = nullptr;
     void* fboColTex = resolveFBOColorTarget(fboW, fboH, fboDSTex);
-    if (fboColTex != nullptr) {
+    if (fboColTex != nullptr || fboDSTex != nullptr) {
         info.fboColorTexture = fboColTex;
         info.fboDepthStencilTexture = fboDSTex;
     }
@@ -28531,7 +28996,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     resolveSSBOBindings(program, tdi);
     resolveImageBindings(program, tdi);
 
-    if (preFboColTex != nullptr) {
+    if (preFboColTex != nullptr || preFboDSTex != nullptr) {
         tdi.fboColorTexture = preFboColTex;
         tdi.fboDepthStencilTexture = preFboDSTex;
         tdi.fboWidth = preFboW;
@@ -28727,7 +29192,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
         std::array<std::uint32_t, 8> colSlices = {};
         void* fboColTex = resolveFBOColorTarget(
             fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
-        if (fboColTex != nullptr) {
+        if (fboColTex != nullptr || fboDSTex != nullptr) {
             tdi.fboColorTexture = fboColTex;
             tdi.fboAdditionalColorTextures = extraColTex;
             tdi.fboColorSlices = colSlices;
@@ -28794,6 +29259,35 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                 };
                 markDepthAttachment(GL_DEPTH_ATTACHMENT);
                 markDepthAttachment(GL_DEPTH_STENCIL_ATTACHMENT);
+                auto markStencilAttachment = [&](GLenum attEnum) {
+                    auto it = fbo->attachments.find(attEnum);
+                    if (it == fbo->attachments.end()) return;
+                    if (it->second.kind !=
+                            GLFramebufferAttachment::Kind::Renderbuffer) return;
+                    if (GLRenderbufferObject* rb =
+                            objects->renderbuffers().get(it->second.object)) {
+                        rb->wasMetalStencilRendered = true;
+                    }
+                };
+                markStencilAttachment(GL_STENCIL_ATTACHMENT);
+                markStencilAttachment(GL_DEPTH_STENCIL_ATTACHMENT);
+                auto markDepthStencilTextureAttachment = [&](GLenum attEnum) {
+                    auto it = fbo->attachments.find(attEnum);
+                    if (it == fbo->attachments.end()) return;
+                    if (it->second.kind !=
+                            GLFramebufferAttachment::Kind::Texture) return;
+                    if (GLTextureObject* tex =
+                            objects->textures().get(it->second.object)) {
+                        if (tdi.clipOrigin == GL_LOWER_LEFT) {
+                            tex->wasFramebufferRenderedTo = true;
+                            tex->wasViewportRenderedTo = true;
+                            tex->swizzleDirty = true;
+                        }
+                    }
+                };
+                markDepthStencilTextureAttachment(GL_DEPTH_ATTACHMENT);
+                markDepthStencilTextureAttachment(GL_STENCIL_ATTACHMENT);
+                markDepthStencilTextureAttachment(GL_DEPTH_STENCIL_ATTACHMENT);
             }
         }
     }
@@ -29550,7 +30044,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 std::array<void*, 7> extraColTex = {};
                 std::array<std::uint32_t, 8> colSlices = {};
                 void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
-                if (fboColTex != nullptr) {
+                if (fboColTex != nullptr || fboDSTex != nullptr) {
                     tdi.fboColorTexture = fboColTex;
                     tdi.fboAdditionalColorTextures = extraColTex;
                     tdi.fboColorSlices = colSlices;
@@ -29770,7 +30264,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
                         void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
-                        if (fboColTex != nullptr) {
+                        if (fboColTex != nullptr || fboDSTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
@@ -30032,7 +30526,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 std::array<void*, 7> extraColTex = {};
                 std::array<std::uint32_t, 8> colSlices = {};
                 void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
-                if (fboColTex != nullptr) {
+                if (fboColTex != nullptr || fboDSTex != nullptr) {
                     tdi.fboColorTexture = fboColTex;
                     tdi.fboAdditionalColorTextures = extraColTex;
                     tdi.fboColorSlices = colSlices;
@@ -30241,7 +30735,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
                         void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
-                        if (fboColTex != nullptr) {
+                        if (fboColTex != nullptr || fboDSTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
@@ -30790,7 +31284,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             std::array<void*, 7> extraColTex = {};
             std::array<std::uint32_t, 8> colSlices = {};
             void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
-            if (fboColTex != nullptr) {
+            if (fboColTex != nullptr || fboDSTex != nullptr) {
                 tdi.fboColorTexture = fboColTex;
                 tdi.fboAdditionalColorTextures = extraColTex;
                 tdi.fboColorSlices = colSlices;
@@ -30992,7 +31486,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
                         void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
-                        if (fboColTex != nullptr) {
+                        if (fboColTex != nullptr || fboDSTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
@@ -31297,7 +31791,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
                         void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
-                        if (fboColTex != nullptr) {
+                        if (fboColTex != nullptr || fboDSTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
@@ -31713,7 +32207,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         std::array<void*, 7> extraColTex = {};
                         std::array<std::uint32_t, 8> colSlices = {};
                         void* fboColTex = impl_->resolveFBOColorTarget(fboW, fboH, fboDSTex, nullptr, &extraColTex, &colSlices);
-                        if (fboColTex != nullptr) {
+                        if (fboColTex != nullptr || fboDSTex != nullptr) {
                             tdi.fboColorTexture = fboColTex;
                             tdi.fboAdditionalColorTextures = extraColTex;
                             tdi.fboColorSlices = colSlices;
@@ -37444,7 +37938,8 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             // depth/stencil textures need source rows reversed when
             // their writes went through the viewport-flipped path.
             // See `GLTextureObject::wasViewportRenderedTo` for rationale.
-            const bool yFlipReadbackDS = obj->wasViewportRenderedTo;
+            const bool yFlipReadbackDS =
+                obj->wasViewportRenderedTo || obj->wasFramebufferRenderedTo;
             for (NSUInteger slice = 0; slice < numSlices; ++slice) {
                 for (NSUInteger row = 0; row < texHeight; ++row) {
                     const NSUInteger srcRow = yFlipReadbackDS
@@ -37632,6 +38127,7 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
             auto clamp01 = [](float v) {
                 return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             };
+            const bool yFlipReadbackDS = obj->wasViewportRenderedTo;
             // Sprint 16 Day 1 EMERGENCY (CKPT210): branch on type to
             // emit the correct packed layout. Pre-EMERGENCY we only
             // handled GL_UNSIGNED_INT_24_8 (4 bytes per texel); CTS
@@ -37654,10 +38150,12 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 // we just emit raw 8-byte slot per texel.
                 for (NSUInteger slice = 0; slice < numSlices; ++slice) {
                     for (NSUInteger row = 0; row < texHeight; ++row) {
+                        const NSUInteger srcRow = yFlipReadbackDS
+                            ? (texHeight - 1 - row) : row;
                         for (NSUInteger col = 0; col < texWidth; ++col) {
                             const std::size_t i =
                                 static_cast<std::size_t>(slice) * pixCount +
-                                static_cast<std::size_t>(row) * texWidth + col;
+                                static_cast<std::size_t>(srcRow) * texWidth + col;
                             std::uint8_t* dst = outBytes
                                 + static_cast<std::size_t>(slice) * dstSliceBytes
                                 + static_cast<std::size_t>(row) * dstRowBytes
@@ -37678,17 +38176,20 @@ bool GLContext::getTextureImage(GLuint texture, GLint level, GLenum format, GLen
                 // 24 bits, stencil in low 8 bits per Table 8.5).
                 for (NSUInteger slice = 0; slice < numSlices; ++slice) {
                     for (NSUInteger row = 0; row < texHeight; ++row) {
+                        const NSUInteger srcRow = yFlipReadbackDS
+                            ? (texHeight - 1 - row) : row;
                         for (NSUInteger col = 0; col < texWidth; ++col) {
                             const std::size_t i =
                                 static_cast<std::size_t>(slice) * pixCount +
-                                static_cast<std::size_t>(row) * texWidth + col;
+                                static_cast<std::size_t>(srcRow) * texWidth + col;
                             std::uint8_t* dst = outBytes
                                 + static_cast<std::size_t>(slice) * dstSliceBytes
                                 + static_cast<std::size_t>(row) * dstRowBytes
                                 + static_cast<std::size_t>(col) * dstPixelBytes;
                             const float d = clamp01(readDepthFloat(i));
                             const std::uint32_t depth24 =
-                                static_cast<std::uint32_t>(d * 16777215.0f + 0.5f) & 0x00FFFFFF;
+                                Impl::packReadbackBits(static_cast<double>(d),
+                                                       0x00FFFFFFu, false);
                             const std::uint8_t stencil8 = stencilBytes[i];
                             const std::uint32_t packed = (depth24 << 8) | stencil8;
                             std::memcpy(dst, &packed, 4);
