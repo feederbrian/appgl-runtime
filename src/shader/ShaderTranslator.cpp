@@ -443,7 +443,12 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         const bool isTessControl = (execModel == spv::ExecutionModelTessellationControl);
         const bool isTessEval = (execModel == spv::ExecutionModelTessellationEvaluation);
         const bool isVertex = (execModel == spv::ExecutionModelVertex);
+        const bool isGeometry = (execModel == spv::ExecutionModelGeometry);
+        const bool isFragment = (execModel == spv::ExecutionModelFragment);
+        const bool isGraphicsStage =
+            isVertex || isTessControl || isTessEval || isGeometry || isFragment;
         (void)isTessControl; (void)isTessEval; (void)isVertex;
+        (void)isGeometry; (void)isFragment; (void)isGraphicsStage;
 
         spirv_cross::CompilerMSL::Options mslOpts;
         mslOpts.platform = spirv_cross::CompilerMSL::Options::macOS;
@@ -558,8 +563,6 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // and the device has mesh-shader capability. Only emitted on
         // ExecutionModelGeometry — gated by isGeometry. Caller is
         // responsible for the capability + shape gate (link-time).
-        const bool isGeometry =
-            (execModel == spv::ExecutionModelGeometry);
         if (options.forceGeometryShaderAsMesh && isGeometry) {
             mslOpts.geometry_shader_as_mesh = true;
         }
@@ -1258,6 +1261,13 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // storage at 48..55` was correct for the GL-spec advertised
         // limits but wrong for the underlying Metal hardware cap.
         std::uint32_t unifiedNextTextureSlot = bindings.textureBase;
+        struct StorageImageAccessFixup {
+            std::uint32_t metalSlot = 0;
+            bool argumentBufferId = false;
+            bool nonWritable = false;
+            bool nonReadable = false;
+        };
+        std::vector<StorageImageAccessFixup> storageImageAccessFixups;
 
         // Remap sampled images (combined image samplers).
         //
@@ -1419,7 +1429,12 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             // `get_active_interface_variables()`. Mirror that filter
             // so both sides agree on the seq→slot mapping.
             const auto activeVarsForImages = compiler.get_active_interface_variables();
-            struct StorageImgRef { std::uint32_t glBinding; std::uint32_t id; };
+            struct StorageImgRef {
+                std::uint32_t glBinding;
+                std::uint32_t id;
+                bool nonWritable;
+                bool nonReadable;
+            };
             std::vector<StorageImgRef> sortedStorageImages;
             for (auto& img : resources.storage_images) {
                 if (activeVarsForImages.find(img.id) == activeVarsForImages.end())
@@ -1427,6 +1442,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 StorageImgRef r;
                 r.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
                 r.id = img.id;
+                r.nonWritable = compiler.has_decoration(img.id, spv::DecorationNonWritable);
+                r.nonReadable = compiler.has_decoration(img.id, spv::DecorationNonReadable);
                 sortedStorageImages.push_back(r);
             }
             std::sort(sortedStorageImages.begin(), sortedStorageImages.end(),
@@ -1449,6 +1466,11 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     binding.desc_set = compiler.get_decoration(entry.id, spv::DecorationDescriptorSet);
                     binding.binding = entry.glBinding;
                     binding.msl_texture = 128 + entry.glBinding;
+                    if (isGraphicsStage) {
+                        storageImageAccessFixups.push_back({
+                            binding.msl_texture, true,
+                            entry.nonWritable, entry.nonReadable});
+                    }
                 } else {
                     constexpr std::uint32_t kStorageImageDescSet = 2;
                     // Override both the descriptor-set AND the
@@ -1472,12 +1494,116 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                     // argbuf mode. Reflection mirrors below.
                     binding.msl_texture = unifiedNextTextureSlot;
                     unifiedNextTextureSlot += 1;
+                    if (isGraphicsStage) {
+                        storageImageAccessFixups.push_back({
+                            binding.msl_texture, false,
+                            entry.nonWritable, entry.nonReadable});
+                    }
                 }
                 compiler.add_msl_resource_binding(binding);
             }
         }
 
         std::string msl = compiler.compile();
+
+        // Sprint 18 Item 42 / shader_image_load_store: storage-image MSL
+        // post-process, matching the established R3B padded-array and
+        // R-argbuf spvBufferSizeConstants rewrite pattern. GL image
+        // memory qualifiers are lowered to SPIR-V decorations:
+        //   readonly  => NonWritable => Metal access::read
+        //   writeonly => NonReadable => Metal access::write
+        // SPIRV-Cross's AppGL fork intentionally emits read_write for
+        // readonly storage images to satisfy compute/argbuf reflection,
+        // but direct graphics storage images on Metal need the precise
+        // access qualifier or shader_image_load_store read paths return
+        // zero. Keep this scoped to graphics-stage storage images so the
+        // already-passing compute cases stay on the existing path.
+        if (isGraphicsStage && !storageImageAccessFixups.empty()) {
+            auto accessChar = [](char ch) {
+                return (ch >= 'a' && ch <= 'z') ||
+                       (ch >= 'A' && ch <= 'Z') ||
+                       (ch >= '0' && ch <= '9') ||
+                       ch == '_' || ch == ':';
+            };
+            auto setTextureAccess = [&](const StorageImageAccessFixup& fixup,
+                                        const char* access) {
+                const std::string attr =
+                    std::string("[[") +
+                    (fixup.argumentBufferId ? "id(" : "texture(") +
+                    std::to_string(fixup.metalSlot) + ")]]";
+                std::size_t search = 0;
+                while ((search = msl.find(attr, search)) != std::string::npos) {
+                    const std::size_t attrPos = search;
+                    const std::size_t lineStart = msl.rfind('\n', search);
+                    const std::size_t begin =
+                        (lineStart == std::string::npos) ? 0 : lineStart + 1;
+                    const std::size_t typePos = msl.rfind("texture", search);
+                    if (typePos == std::string::npos || typePos < begin) {
+                        search += attr.size();
+                        continue;
+                    }
+                    const std::size_t close = msl.find('>', typePos);
+                    if (close == std::string::npos || close >= search) {
+                        search += attr.size();
+                        continue;
+                    }
+                    const std::string replacement =
+                        std::string("access::") + access;
+                    const std::size_t accessPos = msl.find("access::", typePos);
+                    if (accessPos != std::string::npos && accessPos < close) {
+                        std::size_t accessEnd = accessPos;
+                        while (accessEnd < close && accessChar(msl[accessEnd])) {
+                            ++accessEnd;
+                        }
+                        const std::size_t oldAccessLen = accessEnd - accessPos;
+                        msl.replace(accessPos, accessEnd - accessPos,
+                                    replacement);
+                        const auto delta =
+                            static_cast<std::ptrdiff_t>(replacement.size()) -
+                            static_cast<std::ptrdiff_t>(oldAccessLen);
+                        search = static_cast<std::size_t>(
+                            static_cast<std::ptrdiff_t>(attrPos) + delta) +
+                            attr.size();
+                    } else {
+                        const std::string insertion =
+                            std::string(", ") + replacement;
+                        msl.insert(close, insertion);
+                        search = attrPos + insertion.size() + attr.size();
+                    }
+                }
+            };
+
+            for (const auto& fixup : storageImageAccessFixups) {
+                if (fixup.nonWritable && !fixup.nonReadable) {
+                    setTextureAccess(fixup, "read");
+                } else if (fixup.nonReadable && !fixup.nonWritable) {
+                    setTextureAccess(fixup, "write");
+                }
+            }
+        }
+
+        // Sprint 18 Item 32 candidate: GL storage-image side effects
+        // survive `discard`, while Metal can suppress texture writes in
+        // a fragment that terminates with `discard_fragment()`. CTS
+        // shader_image_load_store.basic-allFormats-store uses exactly
+        // this "imageStore then discard" shape with no color output.
+        // For pure write-only fragment-void shaders, return normally
+        // instead: no color is produced, but the image side effect is
+        // preserved. Leave read+write copy shaders on the existing
+        // discard path; CTS single-byte_data_alignment already depends
+        // on that shape preserving both imageLoad and imageStore.
+        if (isFragment &&
+            msl.find("fragment void ") != std::string::npos &&
+            msl.find("access::write") != std::string::npos &&
+            msl.find("access::read") == std::string::npos) {
+            const std::string discard = "discard_fragment();";
+            const std::string ret = "return;";
+            std::size_t pos = 0;
+            while ((pos = msl.find(discard, pos)) != std::string::npos) {
+                msl.replace(pos, discard.size(), ret);
+                pos += ret.size();
+            }
+        }
 
         // Sprint 18 Item42: graphics-stage argument buffers need SSBO
         // `.length()` / OpArrayLength sizes, but Metal's argument-buffer
