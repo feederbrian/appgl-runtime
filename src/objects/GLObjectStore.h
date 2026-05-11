@@ -91,10 +91,6 @@ struct GLTextureDesc {
     GLsizei layers = 1;
     GLsizei samples = 0;
     bool immutable = false;
-    // ARB_sparse_texture scaffold: populated by the sparse allocation path
-    // once Metal sparse texture creation lands. Until then the default zero
-    // keeps NUM_SPARSE_LEVELS_ARB queryable without advertising support.
-    GLsizei sparseLevels = 0;
     // Buffer-texture (glTexBufferRange) state.
     GLuint sourceBuffer = 0;
     GLintptr bufferOffset = 0;
@@ -113,16 +109,6 @@ struct GLTextureImageLevel {
     std::vector<std::uint8_t> nativeData;
     std::size_t nativeBpp = 0; // bytes-per-pixel for nativeData (0 = not available)
     bool defined = false;
-};
-
-struct GLSparseCommittedRegion {
-    GLint level = 0;
-    GLint xoffset = 0;
-    GLint yoffset = 0;
-    GLint zoffset = 0;
-    GLsizei width = 0;
-    GLsizei height = 0;
-    GLsizei depth = 0;
 };
 
 struct GLTextureParameters {
@@ -147,18 +133,14 @@ struct GLTextureParameters {
     // query them for a full default round-trip.
     GLfloat lodBias = 0.0f;
     GLfloat maxAnisotropy = 1.0f;
-    GLint sparse = GL_FALSE;
-    GLint virtualPageSizeIndex = 0;
 };
 
 struct GLTextureObject {
     void* metalTexture = nullptr;
-    void* sparseHeap = nullptr;
     GLenum target = 0;
     GLTextureDesc desc;
     GLTextureParameters params;
     std::unordered_map<GLint, GLTextureImageLevel> levels;
-    std::vector<GLSparseCommittedRegion> sparseCommittedRegions;
     bool instantiated = false;
 
     // Phase 8X Group 4d follow-up⁷ — lazy MTLSamplerState cached on the

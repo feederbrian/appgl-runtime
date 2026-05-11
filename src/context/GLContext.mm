@@ -7,6 +7,7 @@
 #include "../runtime/AppGLRuntime.h"
 #include "../extensions/ExtensionContext.h"
 #include "../extensions/ExtensionRegistry.h"
+#include "../extensions/sparse_texture/SparseTextureAlloc.h"
 #include "../shader/CompatShaderRewrite.h"
 #include "../shader/GeometryShaderEmulator.h"
 #include "../shader/ShaderInterpreter.h"  // phase 3f-11: SpirvModule complete-type for unique_ptr<SpirvModule> .reset() calls
@@ -1004,23 +1005,11 @@ bool isTextureTarget(GLenum target) {
 }
 
 bool isSparseTextureAllocationTarget(GLenum target) {
-    switch (target) {
-        case GL_TEXTURE_2D:
-        case GL_TEXTURE_2D_ARRAY:
-        case GL_TEXTURE_CUBE_MAP:
-        case GL_TEXTURE_CUBE_MAP_ARRAY:
-        case GL_TEXTURE_3D:
-        case GL_TEXTURE_RECTANGLE:
-            return true;
-        default:
-            return false;
-    }
+    return extensions::sparse_texture::isAllocationTarget(target);
 }
 
 static bool sparseTextureTargetUsesSlices(GLenum target) {
-    return target == GL_TEXTURE_2D_ARRAY ||
-           target == GL_TEXTURE_CUBE_MAP ||
-           target == GL_TEXTURE_CUBE_MAP_ARRAY;
+    return extensions::sparse_texture::targetUsesSlices(target);
 }
 
 static MTLSize sparsePageSizeForFormat(id<MTLDevice> device, GLenum target, GLenum internalformat) {
@@ -1779,10 +1768,6 @@ static bool isValidTexParameterEnumValue(GLenum pname, GLint v) {
                    v == GL_ALWAYS || v == GL_NEVER;
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return v == GL_DEPTH_COMPONENT || v == GL_STENCIL_INDEX;
-        case GL_TEXTURE_SPARSE_ARB:
-            return v == GL_FALSE || v == GL_TRUE;
-        case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
-            return true;
         case GL_TEXTURE_SWIZZLE_R:
         case GL_TEXTURE_SWIZZLE_G:
         case GL_TEXTURE_SWIZZLE_B:
@@ -1888,12 +1873,6 @@ bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const
             return true;
         case GL_TEXTURE_MAX_ANISOTROPY:
             params.maxAnisotropy = static_cast<GLfloat>(values[0]);
-            return true;
-        case GL_TEXTURE_SPARSE_ARB:
-            params.sparse = values[0];
-            return true;
-        case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
-            params.virtualPageSizeIndex = values[0];
             return true;
         default:
             return false;
@@ -2018,12 +1997,6 @@ bool getTextureParameterInteger(const GLTextureParameters& params, GLenum pname,
         case GL_TEXTURE_MAX_ANISOTROPY:
             values[0] = static_cast<GLint>(params.maxAnisotropy);
             return true;
-        case GL_TEXTURE_SPARSE_ARB:
-            values[0] = params.sparse;
-            return true;
-        case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
-            values[0] = params.virtualPageSizeIndex;
-            return true;
         default:
             return false;
     }
@@ -2088,7 +2061,12 @@ struct GLContext::Impl {
         });
     }
 
-    Impl(void* rawLayer, GLsizei initialWidth, GLsizei initialHeight, bool offscreen) {
+    Impl(GLContext* ownerContext,
+         void* rawLayer,
+         GLsizei initialWidth,
+         GLsizei initialHeight,
+         bool offscreen)
+        : owner(ownerContext) {
         layer = (__bridge CAMetalLayer*)rawLayer;
         device = MTLCreateSystemDefaultDevice();
         if (layer != nil && device != nil) {
@@ -2158,9 +2136,10 @@ struct GLContext::Impl {
     void releaseTextureStorage(GLTextureObject& object) {
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
-        releaseRetainedMetalObject(object.sparseHeap);
-        object.sparseHeap = nullptr;
-        object.sparseCommittedRegions.clear();
+        if (owner != nullptr) {
+            ExtensionContext extensionContext(*owner);
+            extensions::sparse_texture::resetStorage(extensionContext, object);
+        }
         // Phase 8X Group 4d follow-up⁷ — the per-texture MTLSamplerState
         // (see GLTextureObject.metalSampler in GLObjectStore.h) lives
         // alongside the Metal storage and is rebuilt lazily from params
@@ -3785,9 +3764,10 @@ struct GLContext::Impl {
         if (baseIt == object.levels.end()) {
             releaseRetainedMetalObject(object.metalTexture);
             object.metalTexture = nullptr;
-            releaseRetainedMetalObject(object.sparseHeap);
-            object.sparseHeap = nullptr;
-            object.sparseCommittedRegions.clear();
+            if (owner != nullptr) {
+                ExtensionContext extensionContext(*owner);
+                extensions::sparse_texture::resetStorage(extensionContext, object);
+            }
             return true;
         }
         const GLTextureImageLevel& baseLevel = baseIt->second;
@@ -3795,12 +3775,16 @@ struct GLContext::Impl {
             return true;
         }
 
-        if (object.params.sparse == GL_TRUE && object.desc.immutable) {
+        ExtensionContext extensionContext(*owner);
+        if (extensions::sparse_texture::textureSparse(extensionContext, &object) == GL_TRUE &&
+            object.desc.immutable) {
             id<MTLTexture> sparseTexture = (__bridge id<MTLTexture>)object.metalTexture;
             if (sparseTexture == nil) {
                 return true;
             }
-            if (object.sparseCommittedRegions.empty()) {
+            const auto& sparseCommittedRegions =
+                extensions::sparse_texture::committedRegions(extensionContext, object);
+            if (sparseCommittedRegions.empty()) {
                 object.instantiated = true;
                 return true;
             }
@@ -3821,7 +3805,7 @@ struct GLContext::Impl {
             auto uploadCommitted2DSlice = [&](const GLTextureImageLevel& image,
                                               const std::uint8_t* source,
                                               std::size_t bpp,
-                                              const GLSparseCommittedRegion& committed,
+                                              const extensions::sparse_texture::CommittedRegion& committed,
                                               GLsizei sourceZ,
                                               NSUInteger destinationSlice,
                                               NSUInteger destinationZ) -> bool {
@@ -3875,7 +3859,7 @@ struct GLContext::Impl {
                                           bpp);
             };
 
-            for (const GLSparseCommittedRegion& committed : object.sparseCommittedRegions) {
+            for (const extensions::sparse_texture::CommittedRegion& committed : sparseCommittedRegions) {
                 const auto levelIt = object.levels.find(committed.level);
                 if (levelIt == object.levels.end() || !levelIt->second.defined) {
                     continue;
@@ -3948,9 +3932,10 @@ struct GLContext::Impl {
         if (isMSTarget) {
             releaseRetainedMetalObject(object.metalTexture);
             object.metalTexture = nullptr;
-            releaseRetainedMetalObject(object.sparseHeap);
-            object.sparseHeap = nullptr;
-            object.sparseCommittedRegions.clear();
+            if (owner != nullptr) {
+                ExtensionContext extensionContext(*owner);
+                extensions::sparse_texture::resetStorage(extensionContext, object);
+            }
             releaseRetainedMetalObject(object.metalSwizzledView);
             object.metalSwizzledView = nullptr;
             object.swizzleDirty = true;
@@ -4284,9 +4269,10 @@ struct GLContext::Impl {
 
         releaseRetainedMetalObject(object.metalTexture);
         object.metalTexture = nullptr;
-        releaseRetainedMetalObject(object.sparseHeap);
-        object.sparseHeap = nullptr;
-        object.sparseCommittedRegions.clear();
+        if (owner != nullptr) {
+            ExtensionContext extensionContext(*owner);
+            extensions::sparse_texture::resetStorage(extensionContext, object);
+        }
         releaseRetainedMetalObject(object.metalSwizzledView);
         object.metalSwizzledView = nullptr;
         object.swizzleDirty = true;
@@ -10919,6 +10905,7 @@ struct GLContext::Impl {
     static constexpr std::size_t kMaxImageUnits = 8;
     std::array<ImageBinding, kMaxImageUnits> imageBindings{};
 
+    GLContext* owner = nullptr;
     std::string vendorString = "AppGL";
     std::string rendererString = "AppGL on Metal";
     // Declarative GL version strings. glGetString(GL_VERSION) returns the
@@ -10936,14 +10923,14 @@ struct GLContext::Impl {
 };
 
 GLContext::GLContext(void* layer)
-    : impl_(std::make_unique<Impl>(layer, 1280, 720, false)) {
+    : impl_(std::make_unique<Impl>(this, layer, 1280, 720, false)) {
     Runtime::shared().registerContext(this);
     ExtensionContext extensionContext(*this);
     extensions::ExtensionRegistry::initializeAll(extensionContext);
 }
 
 GLContext::GLContext(GLsizei offscreenWidth, GLsizei offscreenHeight)
-    : impl_(std::make_unique<Impl>(nullptr, offscreenWidth, offscreenHeight, true)) {
+    : impl_(std::make_unique<Impl>(this, nullptr, offscreenWidth, offscreenHeight, true)) {
     Runtime::shared().registerContext(this);
     ExtensionContext extensionContext(*this);
     extensions::ExtensionRegistry::initializeAll(extensionContext);
@@ -10951,6 +10938,9 @@ GLContext::GLContext(GLsizei offscreenWidth, GLsizei offscreenHeight)
 
 GLContext::~GLContext() {
     Runtime::shared().unregisterContext(this);
+    impl_.reset();
+    ExtensionContext extensionContext(*this);
+    extensions::sparse_texture::destroyContext(extensionContext);
 }
 
 void GLContext::setClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha) {
@@ -14242,6 +14232,8 @@ bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
         }
         if (GLTextureObject* object = impl_->objects->textures().get(name); object != nullptr) {
             impl_->releaseTextureStorage(*object);
+            ExtensionContext extensionContext(*this);
+            extensions::sparse_texture::destroyTexture(extensionContext, *object);
         }
         if (impl_->objects->textures().erase(name)) {
             impl_->state->deleteTextureBindings(name);
@@ -14741,8 +14733,9 @@ bool GLContext::texSubImage(
     }
     GLTextureImageLevel& image = levelIt->second;
     GLint effectiveZoffset = zoffset;
+    ExtensionContext extensionContext(*this);
     const int sparseCubeFace =
-        (object->params.sparse == GL_TRUE &&
+        (extensions::sparse_texture::textureSparse(extensionContext, object) == GL_TRUE &&
          object->target == GL_TEXTURE_CUBE_MAP &&
          image.desc.depth >= 6)
             ? Impl::cubeFaceIndexForTarget(target)
@@ -15062,16 +15055,7 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
 }
 
 static GLsizei sparseStoredDepthForTarget(GLenum target, GLsizei depth) {
-    switch (target) {
-        case GL_TEXTURE_3D:
-        case GL_TEXTURE_2D_ARRAY:
-        case GL_TEXTURE_CUBE_MAP_ARRAY:
-            return std::max<GLsizei>(depth, 1);
-        case GL_TEXTURE_CUBE_MAP:
-            return 6;
-        default:
-            return 1;
-    }
+    return extensions::sparse_texture::storedDepthForTarget(target, depth);
 }
 
 static GLsizei sparseLevelCountForStorage(GLenum target,
@@ -15120,8 +15104,10 @@ static bool validateSparseTexStorageRequest(GLContext* ctx,
 
     const MTLSize page = sparsePageSizeForFormat(device, target, internalformat);
     const GLint pageCount = (page.width > 0 && page.height > 0) ? 1 : 0;
-    if (object.params.virtualPageSizeIndex < 0 ||
-        object.params.virtualPageSizeIndex >= pageCount) {
+    ExtensionContext extensionContext(*ctx);
+    const GLint pageSizeIndex =
+        extensions::sparse_texture::virtualPageSizeIndex(extensionContext, &object);
+    if (pageSizeIndex < 0 || pageSizeIndex >= pageCount) {
         ctx->pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -15226,7 +15212,8 @@ static NSUInteger sparseTexturePhysicalPageEstimate(const GLTextureObject& objec
     return std::max<NSUInteger>(totalPages, 1u);
 }
 
-static bool createSparseMetalTextureForObject(id<MTLDevice> device,
+static bool createSparseMetalTextureForObject(ExtensionContext& extensionContext,
+                                              id<MTLDevice> device,
                                               GLTextureObject& object) {
     if (device == nil) {
         return false;
@@ -15291,17 +15278,21 @@ static bool createSparseMetalTextureForObject(id<MTLDevice> device,
 
     releaseRetainedMetalObject(object.metalTexture);
     object.metalTexture = nullptr;
-    releaseRetainedMetalObject(object.sparseHeap);
-    object.sparseHeap = nullptr;
     releaseRetainedMetalObject(object.metalSwizzledView);
     object.metalSwizzledView = nullptr;
     object.swizzleDirty = true;
-    object.sparseHeap = transferRetainedMetalObject(heap);
+    extensions::sparse_texture::replaceSparseHeap(extensionContext,
+                                                  object,
+                                                  transferRetainedMetalObject(heap));
     object.metalTexture = transferRetainedMetalObject(texture);
     if (texture.firstMipmapInTail > 0) {
-        object.desc.sparseLevels = std::min<GLsizei>(
-            object.desc.sparseLevels,
-            static_cast<GLsizei>(texture.firstMipmapInTail));
+        const GLsizei currentSparseLevels =
+            extensions::sparse_texture::sparseLevels(extensionContext, &object);
+        extensions::sparse_texture::setSparseLevels(
+            extensionContext,
+            object,
+            std::min<GLsizei>(currentSparseLevels,
+                              static_cast<GLsizei>(texture.firstMipmapInTail)));
     }
     object.instantiated = true;
     return true;
@@ -15413,7 +15404,9 @@ bool GLContext::texStorage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    const bool allocateSparse = object->params.sparse == GL_TRUE;
+    ExtensionContext extensionContext(*this);
+    const bool allocateSparse =
+        extensions::sparse_texture::textureSparse(extensionContext, object) == GL_TRUE;
     if (allocateSparse && !validateSparseTexStorageRequest(this,
                                                            impl_->capabilities.get(),
                                                            impl_->device,
@@ -15449,13 +15442,15 @@ bool GLContext::texStorage(
     object->desc.immutable = true;
     if (allocateSparse) {
         const MTLSize page = sparsePageSizeForFormat(impl_->device, target, internalformat);
-        object->desc.sparseLevels =
-            sparseLevelCountForStorage(target, levels, width, height, depth, page);
+        extensions::sparse_texture::setSparseLevels(
+            extensionContext,
+            *object,
+            sparseLevelCountForStorage(target, levels, width, height, depth, page));
     } else {
-        object->desc.sparseLevels = 0;
+        extensions::sparse_texture::setSparseLevels(extensionContext, *object, 0);
     }
     object->target = target;
-    object->sparseCommittedRegions.clear();
+    extensions::sparse_texture::clearCommittedRegions(extensionContext, *object);
     // Sprint 17 Day 8+ FANTASTIC #9 cube fix — texStorage* on a cube
     // target allocates all 6 faces' immutable storage in a single call
     // (GL 4.6 §8.19). Mark `cubeFacesDefined` complete here so the
@@ -15510,7 +15505,7 @@ bool GLContext::texStorage(
     }
 
     if (allocateSparse) {
-        if (!createSparseMetalTextureForObject(impl_->device, *object)) {
+        if (!createSparseMetalTextureForObject(extensionContext, impl_->device, *object)) {
             pushError(GL_OUT_OF_MEMORY);
             return false;
         }
@@ -15582,7 +15577,8 @@ bool GLContext::texStorageMultisample(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    if (object->params.sparse == GL_TRUE) {
+    ExtensionContext extensionContext(*this);
+    if (extensions::sparse_texture::textureSparse(extensionContext, object) == GL_TRUE) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -15622,8 +15618,8 @@ bool GLContext::texStorageMultisample(
     return true;
 }
 
-static bool sparseRegionsOverlap(const GLSparseCommittedRegion& a,
-                                 const GLSparseCommittedRegion& b) {
+static bool sparseRegionsOverlap(const extensions::sparse_texture::CommittedRegion& a,
+                                 const extensions::sparse_texture::CommittedRegion& b) {
     if (a.level != b.level) {
         return false;
     }
@@ -15638,7 +15634,7 @@ static bool sparseRegionsOverlap(const GLSparseCommittedRegion& a,
 
 static bool updateSparseTextureMapping(id<MTLCommandQueue> commandQueue,
                                        GLTextureObject& object,
-                                       const GLSparseCommittedRegion& region,
+                                       const extensions::sparse_texture::CommittedRegion& region,
                                        bool commit) {
     if (commandQueue == nil || object.metalTexture == nullptr) {
         return false;
@@ -15737,7 +15733,9 @@ static bool validateSparseCommitmentRequest(GLContext* ctx,
         ctx->pushError(GL_INVALID_VALUE);
         return false;
     }
-    if (!object.desc.immutable || object.params.sparse != GL_TRUE) {
+    ExtensionContext extensionContext(*ctx);
+    if (!object.desc.immutable ||
+        extensions::sparse_texture::textureSparse(extensionContext, &object) != GL_TRUE) {
         ctx->pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -15802,7 +15800,7 @@ static bool validateSparseCommitmentRequest(GLContext* ctx,
         return false;
     }
 
-    GLSparseCommittedRegion region;
+    extensions::sparse_texture::CommittedRegion region;
     region.level = level;
     region.xoffset = xoffset;
     region.yoffset = yoffset;
@@ -15817,10 +15815,12 @@ static bool validateSparseCommitmentRequest(GLContext* ctx,
     }
 
     if (commit == GL_TRUE) {
+        auto& committedRegions =
+            extensions::sparse_texture::committedRegions(extensionContext, object);
         const bool alreadyTracked =
-            std::any_of(object.sparseCommittedRegions.begin(),
-                        object.sparseCommittedRegions.end(),
-                        [&](const GLSparseCommittedRegion& existing) {
+            std::any_of(committedRegions.begin(),
+                        committedRegions.end(),
+                        [&](const extensions::sparse_texture::CommittedRegion& existing) {
                             return existing.level == region.level &&
                                    existing.xoffset == region.xoffset &&
                                    existing.yoffset == region.yoffset &&
@@ -15830,16 +15830,18 @@ static bool validateSparseCommitmentRequest(GLContext* ctx,
                                    existing.depth == region.depth;
                         });
         if (!alreadyTracked) {
-            object.sparseCommittedRegions.push_back(region);
+            committedRegions.push_back(region);
         }
     } else {
-        object.sparseCommittedRegions.erase(
-            std::remove_if(object.sparseCommittedRegions.begin(),
-                           object.sparseCommittedRegions.end(),
-                           [&](const GLSparseCommittedRegion& existing) {
+        auto& committedRegions =
+            extensions::sparse_texture::committedRegions(extensionContext, object);
+        committedRegions.erase(
+            std::remove_if(committedRegions.begin(),
+                           committedRegions.end(),
+                           [&](const extensions::sparse_texture::CommittedRegion& existing) {
                                return sparseRegionsOverlap(existing, region);
                            }),
-            object.sparseCommittedRegions.end());
+            committedRegions.end());
     }
     return true;
 }
@@ -16177,6 +16179,25 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (pname == GL_TEXTURE_SPARSE_ARB || pname == GL_VIRTUAL_PAGE_SIZE_INDEX_ARB) {
+        if (params == nullptr) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (pname == GL_TEXTURE_SPARSE_ARB &&
+            params[0] != GL_FALSE && params[0] != GL_TRUE) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+        ExtensionContext extensionContext(*this);
+        if (pname == GL_TEXTURE_SPARSE_ARB) {
+            extensions::sparse_texture::setTextureSparse(extensionContext, *object, params[0]);
+        } else {
+            extensions::sparse_texture::setVirtualPageSizeIndex(extensionContext, *object, params[0]);
+        }
+        object->samplerDirty = true;
+        return true;
+    }
     if (!setTextureParameterInteger(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
         return false;
@@ -16317,6 +16338,26 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (pname == GL_TEXTURE_SPARSE_ARB || pname == GL_VIRTUAL_PAGE_SIZE_INDEX_ARB) {
+        if (params == nullptr) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        const GLint converted = static_cast<GLint>(params[0]);
+        if (pname == GL_TEXTURE_SPARSE_ARB &&
+            converted != GL_FALSE && converted != GL_TRUE) {
+            pushError(GL_INVALID_ENUM);
+            return false;
+        }
+        ExtensionContext extensionContext(*this);
+        if (pname == GL_TEXTURE_SPARSE_ARB) {
+            extensions::sparse_texture::setTextureSparse(extensionContext, *object, converted);
+        } else {
+            extensions::sparse_texture::setVirtualPageSizeIndex(extensionContext, *object, converted);
+        }
+        object->samplerDirty = true;
+        return true;
+    }
     if (!setTextureParameterFloat(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
         return false;
@@ -16348,6 +16389,14 @@ bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* param
             case GL_TEXTURE_VIEW_NUM_LAYERS:
             case GL_NUM_SPARSE_LEVELS_ARB:
                 if (params) *params = 0;
+                return true;
+            case GL_TEXTURE_SPARSE_ARB:
+            case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
+                if (params == nullptr) {
+                    pushError(GL_INVALID_VALUE);
+                    return false;
+                }
+                params[0] = (pname == GL_TEXTURE_SPARSE_ARB) ? GL_FALSE : 0;
                 return true;
             case GL_TEXTURE_TARGET:
                 if (params) *params = static_cast<GLint>(target);
@@ -16382,7 +16431,12 @@ bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* param
             if (params) *params = object->desc.layers > 0 ? object->desc.layers : 1;
             return true;
         case GL_NUM_SPARSE_LEVELS_ARB:
-            if (params) *params = object->desc.sparseLevels;
+            {
+                ExtensionContext extensionContext(*this);
+                if (params) {
+                    *params = extensions::sparse_texture::sparseLevels(extensionContext, object);
+                }
+            }
             return true;
         case GL_TEXTURE_TARGET:
             if (params) *params = static_cast<GLint>(object->target != 0 ? object->target : target);
@@ -16396,6 +16450,17 @@ bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* param
         case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE:
             if (params) *params = static_cast<GLint>(GL_IMAGE_FORMAT_COMPATIBILITY_BY_SIZE);
             return true;
+    }
+    if (pname == GL_TEXTURE_SPARSE_ARB || pname == GL_VIRTUAL_PAGE_SIZE_INDEX_ARB) {
+        if (params == nullptr) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        ExtensionContext extensionContext(*this);
+        params[0] = (pname == GL_TEXTURE_SPARSE_ARB)
+            ? extensions::sparse_texture::textureSparse(extensionContext, object)
+            : extensions::sparse_texture::virtualPageSizeIndex(extensionContext, object);
+        return true;
     }
     if (!getTextureParameterInteger(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
@@ -16437,6 +16502,8 @@ bool GLContext::getTexParameterFloat(GLenum target, GLenum pname, GLfloat* param
         case GL_TEXTURE_VIEW_NUM_LAYERS:
         case GL_TEXTURE_TARGET:
         case GL_NUM_SPARSE_LEVELS_ARB:
+        case GL_TEXTURE_SPARSE_ARB:
+        case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
         case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE: {
             GLint ival = 0;
             if (!getTexParameterInteger(target, pname, &ival)) {
