@@ -12093,6 +12093,26 @@ GLenum currentFragmentShadingRateForContext(GLContext& context) {
     return extensions::fragment_shading_rate::currentDrawRate(extensionContext);
 }
 
+bool programUsesFragmentShadingRateBuiltins(const GLProgramObject& program) {
+    return program.vertexReflection.usesFragmentShadingRateBuiltins ||
+           program.fragmentReflection.usesFragmentShadingRateBuiltins ||
+           program.geometryReflection.usesFragmentShadingRateBuiltins ||
+           program.tessControlReflection.usesFragmentShadingRateBuiltins ||
+           program.tessVertexAsComputeReflection.usesFragmentShadingRateBuiltins ||
+           program.tessEvalAsComputeReflection.usesFragmentShadingRateBuiltins ||
+           program.computeReflection.usesFragmentShadingRateBuiltins ||
+           program.vsTfAsComputeReflection.usesFragmentShadingRateBuiltins;
+}
+
+GLenum effectiveFragmentShadingRateForProgram(
+        GLContext& context,
+        const GLProgramObject* program) {
+    if (program == nullptr || !programUsesFragmentShadingRateBuiltins(*program)) {
+        return GL_SHADING_RATE_1X1_PIXELS_EXT;
+    }
+    return currentFragmentShadingRateForContext(context);
+}
+
 bool queryFragmentShadingRateBoolean(GLContext& context, GLenum pname, GLboolean* data, bool& handled) {
     ExtensionContext extensionContext(context);
     const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
@@ -18037,7 +18057,7 @@ void GLContext::endImmediate() {
     info.vertexStride = sizeof(Impl::ImmediateModeVertex);
     info.mvp = mvp;
     info.metalTexture = metalTexture;
-    info.fragmentShadingRate = currentFragmentShadingRateForContext(*this);
+    info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
 
     const bool ok = impl_->frameGraph->encodeImmediateModeDraw(info);
     if (!ok) {
@@ -30944,11 +30964,10 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         if (ed.hasPrimitiveID)  offset += sizeof(std::int32_t);
     }
 
-    populateTranslatedDrawFixedFunctionState(tdi, *state, currentFragmentShadingRateForContext(*owner));
+    populateTranslatedDrawFixedFunctionState(tdi, *state, GL_SHADING_RATE_1X1_PIXELS_EXT);
     // The CPU GS path replays GS output through a synthetic VS/FS pair.
     // Keep that replay at the GL default rate so FSR state from a prior
     // suite cannot attach a Metal rate map to the emulated GS render pass.
-    tdi.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     tdi.markColorAttachmentReadbackFlip =
         routeViewportIndex && tdi.clipOrigin == GL_LOWER_LEFT;
     tdi.vertexMSL = &program.gsPassThroughVertexMSL;
@@ -31104,7 +31123,8 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     tdi.indexCount = static_cast<GLsizei>(filteredIndices.size());
     tdi.indexType = GL_UNSIGNED_INT;
 
-    populateTranslatedDrawFixedFunctionState(tdi, *state, currentFragmentShadingRateForContext(*owner));
+    populateTranslatedDrawFixedFunctionState(
+        tdi, *state, effectiveFragmentShadingRateForProgram(*owner, &program));
     tdi.markColorAttachmentReadbackFlip =
         (tdi.clipOrigin == GL_LOWER_LEFT);
     tdi.vertexMSL = &program.vertexMSL;
@@ -32052,7 +32072,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             tdi.vertexData = nullptr;
             tdi.vertexDataByteCount = 0;
             tdi.vertexStride = 0;
-            populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
+            populateTranslatedDrawFixedFunctionState(
+                tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program));
             tdi.vertexMSL = &program->vertexMSL;
             tdi.fragmentMSL = &program->fragmentMSL;
             tdi.vertexReflection = &program->vertexReflection;
@@ -32175,7 +32196,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // wireframe/blend). Replaces the prior inline reads
                     // so drawArrays / drawArraysInstanced / drawElements
                     // all capture identical state.
-                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
+                    populateTranslatedDrawFixedFunctionState(
+                        tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program));
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -32361,7 +32383,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         *impl_->objects,
         mode,
         "glDrawArrays",
-        currentFragmentShadingRateForContext(*this)
+        GL_SHADING_RATE_1X1_PIXELS_EXT
     );
     if (!setup.ok) {
         emitDebugMessage(
@@ -32545,7 +32567,8 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             tdi.vertexData = nullptr;
             tdi.vertexDataByteCount = 0;
             tdi.vertexStride = 0;
-            populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
+            populateTranslatedDrawFixedFunctionState(
+                tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program));
             tdi.vertexMSL = &program->vertexMSL;
             tdi.fragmentMSL = &program->fragmentMSL;
             tdi.vertexReflection = &program->vertexReflection;
@@ -32658,7 +32681,8 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     tdi.metalVertexBufferOffset = startOff;
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot. See drawArrays.
-                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
+                    populateTranslatedDrawFixedFunctionState(
+                        tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program));
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -33298,7 +33322,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             tdi.metalIndexBuffer = elementBuffer->metalBuffer;
             tdi.metalIndexBufferOffset = indexOffset;
         }
-        populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
+        populateTranslatedDrawFixedFunctionState(
+            tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program));
         tdi.vertexMSL = &program->vertexMSL;
         tdi.fragmentMSL = &program->fragmentMSL;
         tdi.vertexReflection = &program->vertexReflection;
@@ -33431,7 +33456,8 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     }
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot. See drawArrays.
-                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
+                    populateTranslatedDrawFixedFunctionState(
+                        tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program));
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -33587,7 +33613,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         *impl_->objects,
         mode,
         "glDrawElements",
-        currentFragmentShadingRateForContext(*this)
+        GL_SHADING_RATE_1X1_PIXELS_EXT
     );
     if (!setup.ok) {
         emitDebugMessage(
@@ -33799,7 +33825,8 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
-                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
+                    populateTranslatedDrawFixedFunctionState(
+                        tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program));
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -33894,7 +33921,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
         *impl_->objects,
         mode,
         "glDrawElementsBaseVertex",
-        currentFragmentShadingRateForContext(*this)
+        GL_SHADING_RATE_1X1_PIXELS_EXT
     );
     if (!setup.ok) {
         emitDebugMessage(
@@ -34163,7 +34190,8 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
-                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
+                    populateTranslatedDrawFixedFunctionState(
+                        tdi, *impl_->state, effectiveFragmentShadingRateForProgram(*this, program));
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -34316,7 +34344,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
         *impl_->objects,
         mode,
         "glDrawElementsInstancedBaseVertex",
-        currentFragmentShadingRateForContext(*this)
+        GL_SHADING_RATE_1X1_PIXELS_EXT
     );
     if (!setup.ok) {
         emitDebugMessage(

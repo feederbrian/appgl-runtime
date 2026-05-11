@@ -254,6 +254,21 @@ GLenum spirvBaseTypeToGL(const spirv_cross::SPIRType& type) {
     return GL_FLOAT;
 }
 
+bool resourcesUseFragmentShadingRateBuiltins(
+        const spirv_cross::ShaderResources& resources) {
+    auto contains = [](const auto& builtins) {
+        for (const auto& builtin : builtins) {
+            if (builtin.builtin == spv::BuiltInShadingRateKHR ||
+                builtin.builtin == spv::BuiltInPrimitiveShadingRateKHR) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return contains(resources.builtin_inputs) ||
+           contains(resources.builtin_outputs);
+}
+
 bool isDefaultUniformBlockResource(spirv_cross::Compiler& compiler,
                                    const spirv_cross::Resource& resource) {
     const auto& blockType = compiler.get_type(resource.base_type_id);
@@ -787,21 +802,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // long-held MSL 2.3 ABI so unrelated translated/GS pass-through
         // pipelines do not inherit FSR-specific compiler behavior.
         const auto versionResources = compiler.get_shader_resources();
-        auto usesFragmentShadingRateBuiltins =
-            [](const spirv_cross::ShaderResources& resources) {
-                auto contains = [](const auto& builtins) {
-                    for (const auto& builtin : builtins) {
-                        if (builtin.builtin == spv::BuiltInShadingRateKHR ||
-                            builtin.builtin == spv::BuiltInPrimitiveShadingRateKHR) {
-                            return true;
-                        }
-                    }
-                    return false;
-                };
-                return contains(resources.builtin_inputs) ||
-                       contains(resources.builtin_outputs);
-            };
-        if (usesFragmentShadingRateBuiltins(versionResources)) {
+        if (resourcesUseFragmentShadingRateBuiltins(versionResources)) {
             mslOpts.set_msl_version(2, 4);
         } else {
             mslOpts.set_msl_version(2, 3);
@@ -2369,6 +2370,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
     try {
         spirv_cross::Compiler compiler(spirv, wordCount);
         auto resources = compiler.get_shader_resources();
+        result.usesFragmentShadingRateBuiltins =
+            resourcesUseFragmentShadingRateBuiltins(resources);
 
         // Vertex inputs (stage_inputs). SPIR-V assigns one OpDecorate
         // Location per input, but SPIRV-Cross MSL EXPANDS arrays into

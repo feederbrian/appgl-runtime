@@ -140,6 +140,7 @@ struct ShaderReflection {
     // sampler uniform value.
     std::vector<ResourceBinding> storageImages;
     bool usesPointSize = false;
+    bool usesFragmentShadingRateBuiltins = false;
 };
 
 // Compute shader execution modes extracted from SPIR-V.
