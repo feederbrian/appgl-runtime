@@ -1,5 +1,7 @@
 #include "SparseTextureModule.h"
 
+#include "SparseTextureAlloc.h"
+#include "SparseTextureBind.h"
 #include "../ExtensionContext.h"
 #include "../ExtensionRegistry.h"
 #include "../../../include/AppGL/extensions/sparse_texture.h"
@@ -19,7 +21,14 @@ const ExtensionModuleDescriptor kDescriptor = {
     isAvailable,
     initialize,
     shutdown,
-    {},
+    {
+        handleTextureParameter,
+        handleTextureParameterQuery,
+        nullptr,
+        uploadCommittedRegions,
+        nullptr,
+        handleInternalFormatQuery,
+    },
     {}
 };
 

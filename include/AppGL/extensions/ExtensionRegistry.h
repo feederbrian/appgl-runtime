@@ -19,6 +19,11 @@ struct SparseTextureHooks {
                                    GLenum pname,
                                    const GLint* params,
                                    bool& handled) = nullptr;
+    bool (*handleTextureParameterQuery)(ExtensionContext& ctx,
+                                        GLenum target,
+                                        GLenum pname,
+                                        GLint* params,
+                                        bool& handled) = nullptr;
     bool (*handleTextureStorage)(ExtensionContext& ctx,
                                  GLenum target,
                                  GLsizei levels,

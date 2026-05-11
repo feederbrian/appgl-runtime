@@ -34,12 +34,45 @@ void setVirtualPageSizeIndex(ExtensionContext& ctx, GLTextureObject& texture, GL
 GLsizei sparseLevels(ExtensionContext& ctx, const GLTextureObject* texture);
 void setSparseLevels(ExtensionContext& ctx, GLTextureObject& texture, GLsizei levels);
 
+bool validateStorageRequest(ExtensionContext& ctx,
+                            const GLTextureObject& texture,
+                            GLenum target,
+                            GLenum internalformat,
+                            GLsizei levels,
+                            GLsizei width,
+                            GLsizei height,
+                            GLsizei depth);
+GLsizei levelCountForStorage(ExtensionContext& ctx,
+                             GLenum target,
+                             GLsizei levels,
+                             GLsizei width,
+                             GLsizei height,
+                             GLsizei depth,
+                             GLenum internalformat);
+bool allocateStorage(ExtensionContext& ctx, GLTextureObject& texture);
+
 void* sparseHeap(ExtensionContext& ctx, const GLTextureObject& texture);
 void replaceSparseHeap(ExtensionContext& ctx, GLTextureObject& texture, void* retainedHeap);
 
 std::vector<CommittedRegion>& committedRegions(ExtensionContext& ctx, GLTextureObject& texture);
 const std::vector<CommittedRegion>& committedRegions(ExtensionContext& ctx, const GLTextureObject& texture);
 void clearCommittedRegions(ExtensionContext& ctx, GLTextureObject& texture);
+
+bool uploadCommittedRegions(ExtensionContext& ctx,
+                            GLTextureObject& texture,
+                            GLuint textureName,
+                            bool& handled);
+bool pageCommitment(ExtensionContext& ctx,
+                    GLTextureObject& texture,
+                    GLuint textureName,
+                    GLint level,
+                    GLint xoffset,
+                    GLint yoffset,
+                    GLint zoffset,
+                    GLsizei width,
+                    GLsizei height,
+                    GLsizei depth,
+                    GLboolean commit);
 
 void resetStorage(ExtensionContext& ctx, GLTextureObject& texture);
 void destroyTexture(ExtensionContext& ctx, GLTextureObject& texture);

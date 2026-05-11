@@ -122,6 +122,7 @@ void ensureInitializedLocked(RegistryState& state) {
 
 void mergeSparseHooks(SparseTextureHooks& destination, const SparseTextureHooks& source) {
     if (source.handleTextureParameter != nullptr) destination.handleTextureParameter = source.handleTextureParameter;
+    if (source.handleTextureParameterQuery != nullptr) destination.handleTextureParameterQuery = source.handleTextureParameterQuery;
     if (source.handleTextureStorage != nullptr) destination.handleTextureStorage = source.handleTextureStorage;
     if (source.handleTextureUpload != nullptr) destination.handleTextureUpload = source.handleTextureUpload;
     if (source.handleTextureReadback != nullptr) destination.handleTextureReadback = source.handleTextureReadback;
