@@ -1,5 +1,6 @@
 #include "SparseTextureAlloc.h"
 
+#include "MultisampleStorageImageEmulation.h"
 #include "../ExtensionContext.h"
 #include "../../caps/GLCapabilities.h"
 #include "../../context/GLContext.h"
@@ -942,6 +943,8 @@ bool pageCommitment(ExtensionContext& ctx,
 }
 
 void resetStorage(ExtensionContext& ctx, GLTextureObject& texture) {
+    resetMultisampleStorageImageSidecar(ctx, texture);
+
     std::lock_guard<std::mutex> lock(stateMutex());
     TextureState* state = findStateLocked(ctx, &texture);
     if (state != nullptr) {
@@ -950,6 +953,8 @@ void resetStorage(ExtensionContext& ctx, GLTextureObject& texture) {
 }
 
 void destroyTexture(ExtensionContext& ctx, GLTextureObject& texture) {
+    destroyMultisampleStorageImageSidecar(ctx, texture);
+
     std::lock_guard<std::mutex> lock(stateMutex());
     auto contextIt = contextStates().find(&ctx.context());
     if (contextIt == contextStates().end()) {
@@ -964,6 +969,8 @@ void destroyTexture(ExtensionContext& ctx, GLTextureObject& texture) {
 }
 
 void destroyContext(ExtensionContext& ctx) {
+    destroyMultisampleStorageImageSidecars(ctx);
+
     std::lock_guard<std::mutex> lock(stateMutex());
     auto contextIt = contextStates().find(&ctx.context());
     if (contextIt == contextStates().end()) {

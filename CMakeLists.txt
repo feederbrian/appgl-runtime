@@ -75,6 +75,7 @@ set(APPGL_SOURCES
   src/extensions/fragment_shading_rate/FragmentShadingRateExtension.mm
   src/extensions/fragment_shading_rate/FragmentShadingRateModule.mm
   src/extensions/fragment_shading_rate/RasterizationRateMap.mm
+  src/extensions/sparse_texture/MultisampleStorageImageEmulation.mm
   src/extensions/sparse_texture/SparseTextureAlloc.mm
   src/extensions/sparse_texture/SparseTextureBind.mm
   src/extensions/sparse_texture/SparseTextureExtension.mm
