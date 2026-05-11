@@ -738,7 +738,8 @@ struct MetalFrameGraph::Impl {
         id<MTLTexture> colorTexture,
         NSUInteger renderTargetLayerCount
     ) {
-        if (owner == nullptr || pass == nil || colorTexture == nil || renderTargetLayerCount > 1) {
+        if (rate == GL_SHADING_RATE_1X1_PIXELS_EXT ||
+            owner == nullptr || pass == nil || colorTexture == nil || renderTargetLayerCount > 1) {
             return;
         }
         ExtensionContext extensionContext(*owner);

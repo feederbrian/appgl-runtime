@@ -30856,6 +30856,10 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     }
 
     populateTranslatedDrawFixedFunctionState(tdi, *state, currentFragmentShadingRateForContext(*owner));
+    // The CPU GS path replays GS output through a synthetic VS/FS pair.
+    // Keep that replay at the GL default rate so FSR state from a prior
+    // suite cannot attach a Metal rate map to the emulated GS render pass.
+    tdi.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     tdi.markColorAttachmentReadbackFlip =
         routeViewportIndex && tdi.clipOrigin == GL_LOWER_LEFT;
     tdi.vertexMSL = &program.gsPassThroughVertexMSL;

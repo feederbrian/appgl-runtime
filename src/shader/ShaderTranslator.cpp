@@ -781,12 +781,31 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // matches macOS 11 Big Sur (Nov 2020), well below our 12.0+
         // host minimum.
         //
-        // Sprint 19: bump to MSL 2.4 so the SPIRV-Cross fork can emit
-        // GL_EXT_fragment_shading_rate builtins as native Metal attributes:
-        // `[[shading_rate]]` and mesh-stage `[[primitive_shading_rate]]`.
-        // MSL 2.4 maps to macOS 11/iOS 14-era Metal and remains below the
-        // runtime host floor.
-        mslOpts.set_msl_version(2, 4);
+        // Sprint 19: only shaders that actually use GL_EXT_fragment_shading_rate
+        // builtins need MSL 2.4 (`[[shading_rate]]` /
+        // `[[primitive_shading_rate]]`). Keep the rest of the runtime on the
+        // long-held MSL 2.3 ABI so unrelated translated/GS pass-through
+        // pipelines do not inherit FSR-specific compiler behavior.
+        const auto versionResources = compiler.get_shader_resources();
+        auto usesFragmentShadingRateBuiltins =
+            [](const spirv_cross::ShaderResources& resources) {
+                auto contains = [](const auto& builtins) {
+                    for (const auto& builtin : builtins) {
+                        if (builtin.builtin == spv::BuiltInShadingRateKHR ||
+                            builtin.builtin == spv::BuiltInPrimitiveShadingRateKHR) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                return contains(resources.builtin_inputs) ||
+                       contains(resources.builtin_outputs);
+            };
+        if (usesFragmentShadingRateBuiltins(versionResources)) {
+            mslOpts.set_msl_version(2, 4);
+        } else {
+            mslOpts.set_msl_version(2, 3);
+        }
         mslOpts.enable_decoration_binding = true;
         // Pad fragment outputs to vec4 so Metal doesn't reject pipelines
         // where the shader outputs fewer components than the render target
