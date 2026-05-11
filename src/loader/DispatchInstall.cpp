@@ -409,7 +409,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glGetInternalformativ = &impl::glGetInternalformativ;
     dispatch.glGetInternalformati64v = &impl::glGetInternalformati64v;
     coverage.markImplemented(FunctionId::glTexPageCommitmentARB,
-                             "ARB_sparse_texture commitment entry point is wired; Metal sparse mapping deferred.");
+                             "ARB_sparse_texture commitment entry point is wired to Metal sparse mapping.");
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");

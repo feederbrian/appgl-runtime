@@ -115,6 +115,16 @@ struct GLTextureImageLevel {
     bool defined = false;
 };
 
+struct GLSparseCommittedRegion {
+    GLint level = 0;
+    GLint xoffset = 0;
+    GLint yoffset = 0;
+    GLint zoffset = 0;
+    GLsizei width = 0;
+    GLsizei height = 0;
+    GLsizei depth = 0;
+};
+
 struct GLTextureParameters {
     GLint minFilter = GL_NEAREST_MIPMAP_LINEAR;
     GLint magFilter = GL_LINEAR;
@@ -143,10 +153,12 @@ struct GLTextureParameters {
 
 struct GLTextureObject {
     void* metalTexture = nullptr;
+    void* sparseHeap = nullptr;
     GLenum target = 0;
     GLTextureDesc desc;
     GLTextureParameters params;
     std::unordered_map<GLint, GLTextureImageLevel> levels;
+    std::vector<GLSparseCommittedRegion> sparseCommittedRegions;
     bool instantiated = false;
 
     // Phase 8X Group 4d follow-up⁷ — lazy MTLSamplerState cached on the

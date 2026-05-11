@@ -3660,7 +3660,7 @@ void APIENTRY glTexPageCommitmentARB(GLenum target,
     }
     if (context->texPageCommitment(target, level, xoffset, yoffset, zoffset, width, height, depth, commit)) {
         markTextureFunction(FunctionId::glTexPageCommitmentARB,
-                            "ARB_sparse_texture commitment scaffold reached; Metal sparse mapping deferred.");
+                            "ARB_sparse_texture commitment reached Metal sparse mapping.");
     }
 }
 
@@ -8285,7 +8285,7 @@ void APIENTRY glTexturePageCommitmentEXT(GLuint texture, GLint level, GLint xoff
     auto* ctx = requireCurrentContext("glTexturePageCommitmentEXT");
     if (!ctx) return;
     if (!ctx->texturePageCommitment(texture, level, xoffset, yoffset, zoffset, width, height, depth, commit)) return;
-    markTextureFunction(FunctionId::glTexturePageCommitmentEXT, "DSA sparse commitment scaffold reached; Metal sparse mapping deferred.");
+    markTextureFunction(FunctionId::glTexturePageCommitmentEXT, "DSA sparse commitment reached Metal sparse mapping.");
 }
 void APIENTRY glGetTextureParameterfv(GLuint texture, GLenum pname, GLfloat* params) {
     DSA_TEX_FN(glGetTextureParameterfv, getTextureParameterfv(texture, pname, params))
