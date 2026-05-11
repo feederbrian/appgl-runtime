@@ -9,6 +9,7 @@
 #include "../extensions/ExtensionRegistry.h"
 #include "../extensions/fragment_shading_rate/FragmentShadingRateModule.h"
 #include "../extensions/sparse_texture/MultisampleStorageImageEmulation.h"
+#include "../extensions/sparse_texture/SparseStorageImageEmulation.h"
 #include "../extensions/sparse_texture/SparseTextureAlloc.h"
 #include "../extensions/sparse_texture/SparseTextureBind.h"
 #include "../shader/CompatShaderRewrite.h"
@@ -35113,6 +35114,10 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                     static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
                 hasMSImageSampleCounts = true;
             } else {
+                if (ib.access != GL_READ_ONLY) {
+                    (void)extensions::sparse_texture::ensureSparseStorageImageSidecar(
+                        extensionContext, *texObj);
+                }
                 // CKPT119: level-restricted view when ib.level > 0.
                 tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
             }
@@ -35453,6 +35458,10 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
                     static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
                 hasMSImageSampleCountsIndirect = true;
             } else {
+                if (ib.access != GL_READ_ONLY) {
+                    (void)extensions::sparse_texture::ensureSparseStorageImageSidecar(
+                        extensionContext, *texObj);
+                }
                 // CKPT119: level-restricted view when ib.level > 0.
                 tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
             }
@@ -35550,6 +35559,13 @@ bool GLContext::bindImageTexture(GLuint unit, GLuint texture, GLint level, GLboo
     binding.layer = layer;
     binding.access = access;
     binding.format = format;
+    if (texture != 0 && access != GL_READ_ONLY) {
+        if (GLTextureObject* object = impl_->objects->textures().get(texture)) {
+            ExtensionContext extensionContext(*this);
+            (void)extensions::sparse_texture::ensureSparseStorageImageSidecar(
+                extensionContext, *object);
+        }
+    }
     return true;
 }
 
@@ -38512,6 +38528,11 @@ bool GLContext::bindImageTextures(GLuint first, GLsizei count, const GLuint* tex
         binding.layer = 0;
         binding.access = GL_READ_WRITE;
         binding.format = fmt;
+        {
+            ExtensionContext extensionContext(*this);
+            (void)extensions::sparse_texture::ensureSparseStorageImageSidecar(
+                extensionContext, *obj);
+        }
     }
     if (anyInvalid) {
         pushError(GL_INVALID_OPERATION);
