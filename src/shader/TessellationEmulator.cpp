@@ -379,7 +379,8 @@ void walkTessInterface(
 
         auto pointeeIt = module.types.find(pointee);
         if (pointeeIt != module.types.end() &&
-            pointeeIt->second.kind == TypeInfo::Kind::Array) {
+            (pointeeIt->second.kind == TypeInfo::Kind::Array ||
+             pointeeIt->second.kind == TypeInfo::Kind::RuntimeArray)) {
             isPerVertex = true;
             pointee = pointeeIt->second.componentType;
         }

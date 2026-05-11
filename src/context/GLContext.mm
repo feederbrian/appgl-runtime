@@ -6087,8 +6087,7 @@ struct GLContext::Impl {
     {
         appgl::SampledTextureMap result;
         const bool trace = (std::getenv("APPGL_TRACE_GS_EMUL_TEX") != nullptr);
-        if (spirv.empty() || reflection == nullptr ||
-            reflection->sampledTextures.empty()) {
+        if (spirv.empty()) {
             if (trace) {
                 std::fprintf(stderr,
                     "[GS-tex] buildSampledTextureMap: empty input "
@@ -6175,23 +6174,20 @@ struct GLContext::Impl {
             // Match SPIR-V variable name to a reflection sampler entry
             // by name (handle CompatShaderRewrite's `_appgl_` prefix).
             const ShaderReflection::ResourceBinding* sampledTex = nullptr;
-            for (const auto& st : reflection->sampledTextures) {
-                if (st.name == v.name) {
-                    sampledTex = &st;
-                    break;
+            if (reflection != nullptr) {
+                for (const auto& st : reflection->sampledTextures) {
+                    if (st.name == v.name) {
+                        sampledTex = &st;
+                        break;
+                    }
+                    constexpr const char* kAppglPrefix = "_appgl_";
+                    constexpr std::size_t kAppglPrefixLen = 7;
+                    if (v.name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0 &&
+                        st.name == v.name.substr(kAppglPrefixLen)) {
+                        sampledTex = &st;
+                        break;
+                    }
                 }
-                constexpr const char* kAppglPrefix = "_appgl_";
-                constexpr std::size_t kAppglPrefixLen = 7;
-                if (v.name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0 &&
-                    st.name == v.name.substr(kAppglPrefixLen)) {
-                    sampledTex = &st;
-                    break;
-                }
-            }
-            if (sampledTex == nullptr) {
-                if (trace) std::fprintf(stderr,
-                    "[GS-tex]   no reflection match for '%s'\n", v.name.c_str());
-                continue;
             }
             // Find the GL uniform's runtime ints[i] values (set by
             // glUniform1i) — the texture-unit indices for each
@@ -6220,6 +6216,20 @@ struct GLContext::Impl {
                     "[GS-tex]   no uniform match for '%s'\n", lookupName.c_str());
                 continue;
             }
+            const GLenum preferredTarget =
+                preferredTargetForSamplerType(samplerGLType);
+            if (sampledTex == nullptr) {
+                if (preferredTarget == 0) {
+                    if (trace) std::fprintf(stderr,
+                        "[GS-tex]   no reflection match for '%s'\n", v.name.c_str());
+                    continue;
+                }
+                if (trace) {
+                    std::fprintf(stderr,
+                        "[GS-tex]   fallback reflection for '%s' uniformLoc=%d type=0x%X\n",
+                        lookupName.c_str(), uniformLocation, samplerGLType);
+                }
+            }
             if (trace) {
                 std::fprintf(stderr,
                     "[GS-tex]   matched '%s' refl-arrSize=%u uniformLoc=%d arrSize=%d type=0x%X\n",
@@ -6238,8 +6248,6 @@ struct GLContext::Impl {
                 }
             }
             // Resolve the bound texture per element.
-            const GLenum preferredTarget =
-                preferredTargetForSamplerType(samplerGLType);
             appgl::SampledTextureArray slots(samplerArraySize);
             for (GLint i = 0; i < samplerArraySize; ++i) {
                 const int unit = textureUnits[i];

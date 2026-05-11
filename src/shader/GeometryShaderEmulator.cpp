@@ -1025,7 +1025,13 @@ Value Interpreter::loadFromVar(std::uint32_t varId, std::uint32_t off,
     if (sIt == varStorage_.end()) return v;
     const auto& storage = sIt->second;
     auto tIt = module_.types.find(leafTypeId);
-    if (tIt == module_.types.end()) { bail("load: unknown leaf type"); return v; }
+    if (tIt == module_.types.end()) {
+        auto vIt = module_.variables.find(varId);
+        std::string name = (vIt != module_.variables.end()) ? vIt->second.name : std::string();
+        bail("load: unknown leaf type var=" + std::to_string(varId) +
+             " name='" + name + "' leaf=" + std::to_string(leafTypeId));
+        return v;
+    }
     const TypeInfo& t = tIt->second;
     if (off >= storage.size()) { bail("load: offset OOB"); return v; }
 
@@ -1675,7 +1681,18 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
     for (const auto& [varId, info] : module_.variables) {
         auto tIt = module_.types.find(info.typeId);
         if (tIt == module_.types.end()) continue;
-        const std::uint32_t width = module_.scalarWidth(tIt->second.pointeeType);
+        std::uint32_t width = module_.scalarWidth(tIt->second.pointeeType);
+        auto inputPointeeIt = module_.types.find(tIt->second.pointeeType);
+        if ((stage_ == Stage::Geometry ||
+             stage_ == Stage::TessEvaluation ||
+             stage_ == Stage::TessControl) &&
+            info.storageClass == spv::StorageClassInput &&
+            inputPointeeIt != module_.types.end() &&
+            inputPointeeIt->second.kind == TypeInfo::Kind::RuntimeArray) {
+            const std::uint32_t elemW =
+                module_.scalarWidth(inputPointeeIt->second.componentType);
+            width = static_cast<std::uint32_t>(inputs.size()) * elemW;
+        }
         auto& storage = varStorage_[varId];
         storage.assign(width, 0.0f);
 
@@ -1723,15 +1740,23 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                 if (blockDec != module_.decorations.end() &&
                     blockDec->second.isBlock &&
                     !blockDec->second.isBufferBlock) {
-                    auto vDec = module_.decorations.find(varId);
-                    if (vDec != module_.decorations.end() && vDec->second.hasBinding &&
-                        uniformBuffers_ != nullptr &&
-                        uniformBuffers_->count(vDec->second.binding) != 0) {
-                        UniformBufferArrayMeta uboMeta;
-                        uboMeta.baseBinding = vDec->second.binding;
-                        uboMeta.arrayLen = 1;
-                        uboVarMeta_[varId] = uboMeta;
-                        continue;   // read through loadFromUBO
+                    std::string blockName;
+                    auto nameIt = module_.names.find(tIt->second.pointeeType);
+                    if (nameIt != module_.names.end()) blockName = nameIt->second;
+                    if (blockName != "_DefaultUniforms") {
+                        auto vDec = module_.decorations.find(varId);
+                        const std::uint32_t baseBinding =
+                            (vDec != module_.decorations.end() &&
+                             vDec->second.hasBinding)
+                                ? vDec->second.binding : 0u;
+                        if (uniformBuffers_ != nullptr &&
+                            uniformBuffers_->count(baseBinding) != 0) {
+                            UniformBufferArrayMeta uboMeta;
+                            uboMeta.baseBinding = baseBinding;
+                            uboMeta.arrayLen = 1;
+                            uboVarMeta_[varId] = uboMeta;
+                            continue;   // read through loadFromUBO
+                        }
                     }
                 }
             } else if (pT != module_.types.end() &&
@@ -1743,12 +1768,21 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                     if (blockDec != module_.decorations.end() &&
                         blockDec->second.isBlock &&
                         !blockDec->second.isBufferBlock) {
+                        std::string blockName;
+                        auto nameIt = module_.names.find(pT->second.componentType);
+                        if (nameIt != module_.names.end()) blockName = nameIt->second;
+                        if (blockName == "_DefaultUniforms") {
+                            continue;
+                        }
                         auto vDec = module_.decorations.find(varId);
-                        if (vDec != module_.decorations.end() && vDec->second.hasBinding &&
-                            uniformBuffers_ != nullptr &&
-                            uniformBuffers_->count(vDec->second.binding) != 0) {
+                        const std::uint32_t baseBinding =
+                            (vDec != module_.decorations.end() &&
+                             vDec->second.hasBinding)
+                                ? vDec->second.binding : 0u;
+                        if (uniformBuffers_ != nullptr &&
+                            uniformBuffers_->count(baseBinding) != 0) {
                             UniformBufferArrayMeta uboMeta;
-                            uboMeta.baseBinding = vDec->second.binding;
+                            uboMeta.baseBinding = baseBinding;
                             // OpTypeArray's length lives in
                             // arrayLengthConstId (SPIR-V constant id);
                             // resolve via module_.constants. Mirrors the
@@ -2056,7 +2090,8 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
             //   `inputs` is the VS pre-pass output per input patch
             //   vertex (same as what TES uses when no TCS is present).
             const auto& pointeeType = module_.types.at(tIt->second.pointeeType);
-            if (pointeeType.kind == TypeInfo::Kind::Array) {
+            if (pointeeType.kind == TypeInfo::Kind::Array ||
+                pointeeType.kind == TypeInfo::Kind::RuntimeArray) {
                 // Determine per-vertex struct / element width.
                 const std::uint32_t perVertexW = module_.scalarWidth(pointeeType.componentType);
                 const auto& elemT = module_.types.at(pointeeType.componentType);
@@ -2593,8 +2628,9 @@ bool Interpreter::captureTcsOutputForInvocation(std::int32_t invocationID,
         if (tIt == module_.types.end()) continue;
         auto pIt = module_.types.find(tIt->second.pointeeType);
         if (pIt == module_.types.end()) continue;
-        // Must be Array-of-Struct (gl_out[gl_PerVertex]).
-        if (pIt->second.kind != TypeInfo::Kind::Array) continue;
+        // Must be Array/RuntimeArray-of-Struct (gl_out[gl_PerVertex]).
+        if (pIt->second.kind != TypeInfo::Kind::Array &&
+            pIt->second.kind != TypeInfo::Kind::RuntimeArray) continue;
         auto eIt = module_.types.find(pIt->second.componentType);
         if (eIt == module_.types.end() ||
             eIt->second.kind != TypeInfo::Kind::Struct) continue;
@@ -2692,11 +2728,43 @@ bool Interpreter::captureTcsOutputForInvocation(std::int32_t invocationID,
         for (const auto& [varId, info] : module_.variables) {
             if (resolved) break;
             if (info.storageClass != spv::StorageClassOutput) continue;
+            if (info.name == wantName) {
+                auto tIt = module_.types.find(info.typeId);
+                if (tIt != module_.types.end()) {
+                    auto pIt = module_.types.find(tIt->second.pointeeType);
+                    if (pIt != module_.types.end() &&
+                        (pIt->second.kind == TypeInfo::Kind::Array ||
+                         pIt->second.kind == TypeInfo::Kind::RuntimeArray)) {
+                        auto eIt = module_.types.find(pIt->second.componentType);
+                        if (eIt != module_.types.end() &&
+                            eIt->second.kind != TypeInfo::Kind::Struct) {
+                            auto sIt = varStorage_.find(varId);
+                            if (sIt != varStorage_.end()) {
+                                const auto& storage = sIt->second;
+                                const std::uint32_t elemW =
+                                    module_.scalarWidth(pIt->second.componentType);
+                                const std::uint32_t base =
+                                    static_cast<std::uint32_t>(invocationID) * elemW;
+                                const std::uint32_t copyW =
+                                    std::min(elemW, expectedW);
+                                for (std::uint32_t kk = 0;
+                                     kk < copyW && base + kk < storage.size();
+                                     ++kk) {
+                                    v[kk] = storage[base + kk];
+                                }
+                                resolved = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             auto tIt = module_.types.find(info.typeId);
             if (tIt == module_.types.end()) continue;
             auto pIt = module_.types.find(tIt->second.pointeeType);
             if (pIt == module_.types.end() ||
-                pIt->second.kind != TypeInfo::Kind::Array) continue;
+                (pIt->second.kind != TypeInfo::Kind::Array &&
+                 pIt->second.kind != TypeInfo::Kind::RuntimeArray)) continue;
             auto eIt = module_.types.find(pIt->second.componentType);
             if (eIt == module_.types.end() ||
                 eIt->second.kind != TypeInfo::Kind::Struct) continue;
@@ -3590,7 +3658,24 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 }
                 const std::uint32_t nIdx = wc - 4;
                 AccessChainResult r = resolveAccessChain(w[2], &w[3], nIdx);
-                if (r.ok) accessChains_[w[1]] = r;
+                if (r.ok) {
+                    // SPIR-V's OpAccessChain result type is already the
+                    // pointer-to-leaf. Keep it as a fallback for tess-stage
+                    // per-vertex arrays whose root walk can lose the leaf id.
+                    auto resultPtrIt = module_.types.find(w[0]);
+                    if (resultPtrIt != module_.types.end() &&
+                        resultPtrIt->second.kind == TypeInfo::Kind::Pointer) {
+                        const std::uint32_t pointee =
+                            resultPtrIt->second.pointeeType;
+                        if (pointee != 0 &&
+                            module_.types.find(r.leafTypeId) == module_.types.end() &&
+                            module_.types.find(pointee) != module_.types.end()) {
+                            r.leafTypeId = pointee;
+                            r.scalarCount = module_.scalarWidth(pointee);
+                        }
+                    }
+                    accessChains_[w[1]] = r;
+                }
                 pc += wc;
                 break;
             }
@@ -5694,8 +5779,9 @@ void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
         if (pT == mod.types.end()) continue;
 
         auto vDec = mod.decorations.find(varId);
-        if (vDec == mod.decorations.end() || !vDec->second.hasBinding) continue;
-        const std::uint32_t baseBinding = vDec->second.binding;
+        const std::uint32_t baseBinding =
+            (vDec != mod.decorations.end() && vDec->second.hasBinding)
+                ? vDec->second.binding : 0u;
 
         if (pT->second.kind == TypeInfo::Kind::Struct) {
             auto blockDec = mod.decorations.find(tIt->second.pointeeType);
@@ -5704,6 +5790,7 @@ void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
                 std::string blockName;
                 auto nameIt = mod.names.find(tIt->second.pointeeType);
                 if (nameIt != mod.names.end()) blockName = nameIt->second;
+                if (blockName == "_DefaultUniforms") continue;
                 addBinding(baseBinding,
                            remapBinding(baseBinding, blockName, info.name, 0, false));
             }
@@ -5724,6 +5811,7 @@ void addUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
             std::string blockName;
             auto nameIt = mod.names.find(pT->second.componentType);
             if (nameIt != mod.names.end()) blockName = nameIt->second;
+            if (blockName == "_DefaultUniforms") continue;
             for (std::uint32_t inst = 0; inst < arrayLen; ++inst) {
                 addBinding(baseBinding + inst,
                            remapBinding(baseBinding, blockName, info.name, inst, true));
