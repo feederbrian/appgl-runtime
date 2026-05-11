@@ -47,6 +47,10 @@ bool sparseTexture2OrClampActive() {
            ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp");
 }
 
+bool sparseTextureClampActive() {
+    return ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp");
+}
+
 bool isDepthInternalFormat(GLenum internalformat) {
     switch (internalformat) {
         case GL_DEPTH_COMPONENT:
@@ -165,6 +169,28 @@ MTLSize sparsePageSizeForFormat(ExtensionContext& ctx, GLenum target, GLenum int
         return MTLSizeMake(0, 0, 0);
     }
     return MTLSizeMake(tile.width, tile.height, std::max<NSUInteger>(tile.depth, 1));
+}
+
+std::optional<PageSize> clampDepthSizingPageSize(ExtensionContext& ctx,
+                                                 GLenum target,
+                                                 GLenum internalformat) {
+    if (!sparseTextureClampActive() || !isDepthInternalFormat(internalformat)) {
+        return std::nullopt;
+    }
+    if (!isAllocationTarget(target)) {
+        return std::nullopt;
+    }
+
+    MTLSize tile = sparsePageSizeForFormat(ctx, target, internalformat);
+    if (tile.width == 0 || tile.height == 0) {
+        return std::nullopt;
+    }
+
+    return PageSize{
+        static_cast<GLint>(tile.width),
+        static_cast<GLint>(std::max<NSUInteger>(tile.height, 1)),
+        static_cast<GLint>(std::max<NSUInteger>(tile.depth, 1)),
+    };
 }
 
 }  // namespace
@@ -308,6 +334,14 @@ bool handleInternalFormatQuery(ExtensionContext& ctx,
                 params[i] = 0;
             }
             if (sparse2DepthExcluded) {
+                const std::optional<PageSize> clampDepthPage =
+                    clampDepthSizingPageSize(ctx, target, internalformat);
+                if (clampDepthPage.has_value()) {
+                    params[0] =
+                        (pname == GL_VIRTUAL_PAGE_SIZE_X_ARB) ? clampDepthPage->x :
+                        (pname == GL_VIRTUAL_PAGE_SIZE_Y_ARB) ? clampDepthPage->y :
+                                                                clampDepthPage->z;
+                }
                 return true;
             }
             if (standardPage.has_value()) {

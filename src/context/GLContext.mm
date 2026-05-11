@@ -15269,7 +15269,16 @@ bool GLContext::texStorage(
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    if (levels < 1 || width < 1 || height < 1 || depth < 1) {
+    if (levels < 1) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (width < 1 || height < 1 || depth < 1) {
+        if (extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp") &&
+            isDepthFormat(internalformat) &&
+            (target == GL_TEXTURE_1D || target == GL_TEXTURE_1D_ARRAY)) {
+            return true;
+        }
         pushError(GL_INVALID_VALUE);
         return false;
     }
