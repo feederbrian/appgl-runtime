@@ -1,0 +1,3 @@
+#pragma once
+
+#define APPGL_EXTENSION_EXT_FRAGMENT_SHADING_RATE "GL_EXT_fragment_shading_rate"

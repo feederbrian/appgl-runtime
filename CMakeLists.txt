@@ -72,6 +72,9 @@ set(APPGL_SOURCES
   src/context/MetalFrameGraph.mm
   src/extensions/ExtensionContext.mm
   src/extensions/ExtensionRegistry.mm
+  src/extensions/fragment_shading_rate/FragmentShadingRateExtension.mm
+  src/extensions/fragment_shading_rate/FragmentShadingRateModule.mm
+  src/extensions/fragment_shading_rate/RasterizationRateMap.mm
   src/extensions/sparse_texture/SparseTextureAlloc.mm
   src/extensions/sparse_texture/SparseTextureBind.mm
   src/extensions/sparse_texture/SparseTextureExtension.mm
@@ -105,6 +108,7 @@ set(APPGL_TEST_SUPPORT_SOURCES
 set(APPGL_PUBLIC_HEADERS
   include/AppGL/AppGL.h
   include/AppGL/extensions/ExtensionRegistry.h
+  include/AppGL/extensions/fragment_shading_rate.h
   include/AppGL/extensions/sparse_texture.h
   include/AppGL/glcorearb.h
   include/AppGL/khrplatform.h
