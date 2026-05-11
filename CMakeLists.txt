@@ -72,6 +72,10 @@ set(APPGL_SOURCES
   src/context/MetalFrameGraph.mm
   src/extensions/ExtensionContext.mm
   src/extensions/ExtensionRegistry.mm
+  src/extensions/sparse_texture/SparseTextureAlloc.mm
+  src/extensions/sparse_texture/SparseTextureBind.mm
+  src/extensions/sparse_texture/SparseTextureExtension.mm
+  src/extensions/sparse_texture/SparseTextureModule.mm
   src/debug/CoverageStore.cpp
   src/debug/TraceLog.cpp
   src/loader/DispatchInstall.cpp
@@ -101,6 +105,7 @@ set(APPGL_TEST_SUPPORT_SOURCES
 set(APPGL_PUBLIC_HEADERS
   include/AppGL/AppGL.h
   include/AppGL/extensions/ExtensionRegistry.h
+  include/AppGL/extensions/sparse_texture.h
   include/AppGL/glcorearb.h
   include/AppGL/khrplatform.h
 )
