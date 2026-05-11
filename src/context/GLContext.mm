@@ -7,6 +7,7 @@
 #include "../runtime/AppGLRuntime.h"
 #include "../extensions/ExtensionContext.h"
 #include "../extensions/ExtensionRegistry.h"
+#include "../extensions/fragment_shading_rate/FragmentShadingRateModule.h"
 #include "../extensions/sparse_texture/SparseTextureAlloc.h"
 #include "../shader/CompatShaderRewrite.h"
 #include "../shader/GeometryShaderEmulator.h"
@@ -10825,6 +10826,7 @@ GLContext::~GLContext() {
     Runtime::shared().unregisterContext(this);
     impl_.reset();
     ExtensionContext extensionContext(*this);
+    extensions::fragment_shading_rate::destroyContext(extensionContext);
     extensions::sparse_texture::destroyContext(extensionContext);
 }
 
@@ -12003,6 +12005,79 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     return true;
 }
 
+namespace {
+
+GLenum currentFragmentShadingRateForContext(GLContext& context) {
+    ExtensionContext extensionContext(context);
+    const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+    if (hooks.currentDrawRate != nullptr) {
+        return hooks.currentDrawRate(extensionContext);
+    }
+    return extensions::fragment_shading_rate::currentDrawRate(extensionContext);
+}
+
+bool queryFragmentShadingRateBoolean(GLContext& context, GLenum pname, GLboolean* data, bool& handled) {
+    ExtensionContext extensionContext(context);
+    const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+    if (hooks.queryBoolean != nullptr && !hooks.queryBoolean(extensionContext, pname, data, handled)) {
+        return false;
+    }
+    if (handled) {
+        return true;
+    }
+    return extensions::fragment_shading_rate::queryBoolean(extensionContext, pname, data, handled);
+}
+
+bool queryFragmentShadingRateInteger(GLContext& context, GLenum pname, GLint* data, bool& handled) {
+    ExtensionContext extensionContext(context);
+    const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+    if (hooks.queryInteger != nullptr && !hooks.queryInteger(extensionContext, pname, data, handled)) {
+        return false;
+    }
+    if (handled) {
+        return true;
+    }
+    return extensions::fragment_shading_rate::queryInteger(extensionContext, pname, data, handled);
+}
+
+bool queryFragmentShadingRateInteger64(GLContext& context, GLenum pname, GLint64* data, bool& handled) {
+    ExtensionContext extensionContext(context);
+    const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+    if (hooks.queryInteger64 != nullptr && !hooks.queryInteger64(extensionContext, pname, data, handled)) {
+        return false;
+    }
+    if (handled) {
+        return true;
+    }
+    return extensions::fragment_shading_rate::queryInteger64(extensionContext, pname, data, handled);
+}
+
+bool queryFragmentShadingRateFloat(GLContext& context, GLenum pname, GLfloat* data, bool& handled) {
+    ExtensionContext extensionContext(context);
+    const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+    if (hooks.queryFloat != nullptr && !hooks.queryFloat(extensionContext, pname, data, handled)) {
+        return false;
+    }
+    if (handled) {
+        return true;
+    }
+    return extensions::fragment_shading_rate::queryFloat(extensionContext, pname, data, handled);
+}
+
+bool queryFragmentShadingRateDouble(GLContext& context, GLenum pname, GLdouble* data, bool& handled) {
+    ExtensionContext extensionContext(context);
+    const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+    if (hooks.queryDouble != nullptr && !hooks.queryDouble(extensionContext, pname, data, handled)) {
+        return false;
+    }
+    if (handled) {
+        return true;
+    }
+    return extensions::fragment_shading_rate::queryDouble(extensionContext, pname, data, handled);
+}
+
+}  // namespace
+
 bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
     if (data == nullptr) {
         pushError(GL_INVALID_VALUE);
@@ -12043,6 +12118,13 @@ bool GLContext::queryBoolean(GLenum pname, GLboolean* data) {
     // GL_PATCHES branch instead of raising INVALID_ENUM and aborting.
     if (pname == GL_PRIMITIVE_RESTART_FOR_PATCHES_SUPPORTED) {
         *data = GL_FALSE;
+        return true;
+    }
+    bool fragmentShadingRateHandled = false;
+    if (!queryFragmentShadingRateBoolean(*this, pname, data, fragmentShadingRateHandled)) {
+        return false;
+    }
+    if (fragmentShadingRateHandled) {
         return true;
     }
     if (impl_->state->queryBoolean(pname, data)) {
@@ -12199,6 +12281,13 @@ bool GLContext::queryInteger(GLenum pname, GLint* data) {
         *data = static_cast<GLint>(pname == GL_IMPLEMENTATION_COLOR_READ_TYPE ? type : fmt);
         return true;
     }
+    bool fragmentShadingRateHandled = false;
+    if (!queryFragmentShadingRateInteger(*this, pname, data, fragmentShadingRateHandled)) {
+        return false;
+    }
+    if (fragmentShadingRateHandled) {
+        return true;
+    }
     if (impl_->state->queryInteger(pname, data)) {
         return true;
     }
@@ -12229,6 +12318,13 @@ bool GLContext::queryInteger64(GLenum pname, GLint64* data) {
             return false;
         }
         *data = static_cast<GLint64>(integerValue);
+        return true;
+    }
+    bool fragmentShadingRateHandled = false;
+    if (!queryFragmentShadingRateInteger64(*this, pname, data, fragmentShadingRateHandled)) {
+        return false;
+    }
+    if (fragmentShadingRateHandled) {
         return true;
     }
     if (impl_->state->queryInteger64(pname, data)) {
@@ -12453,6 +12549,13 @@ bool GLContext::queryFloat(GLenum pname, GLfloat* data) {
         *data = static_cast<GLfloat>(integerValue);
         return true;
     }
+    bool fragmentShadingRateHandled = false;
+    if (!queryFragmentShadingRateFloat(*this, pname, data, fragmentShadingRateHandled)) {
+        return false;
+    }
+    if (fragmentShadingRateHandled) {
+        return true;
+    }
     if (impl_->state->queryFloat(pname, data)) {
         return true;
     }
@@ -12493,6 +12596,13 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
         *data = static_cast<GLdouble>(integerValue);
         return true;
     }
+    bool fragmentShadingRateHandled = false;
+    if (!queryFragmentShadingRateDouble(*this, pname, data, fragmentShadingRateHandled)) {
+        return false;
+    }
+    if (fragmentShadingRateHandled) {
+        return true;
+    }
     if (impl_->state->queryDouble(pname, data)) {
         return true;
     }
@@ -12523,6 +12633,76 @@ bool GLContext::queryDouble(GLenum pname, GLdouble* data) {
     }
     pushError(GL_INVALID_ENUM);
     return false;
+}
+
+bool GLContext::getFragmentShadingRatesEXT(GLsizei samples, GLsizei maxCount, GLsizei* count, GLenum* shadingRates) {
+    ExtensionContext extensionContext(*this);
+    const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+    if (hooks.getFragmentShadingRates != nullptr) {
+        return hooks.getFragmentShadingRates(extensionContext, samples, maxCount, count, shadingRates);
+    }
+    return extensions::fragment_shading_rate::getFragmentShadingRates(
+        extensionContext,
+        samples,
+        maxCount,
+        count,
+        shadingRates
+    );
+}
+
+bool GLContext::shadingRateEXT(GLenum rate) {
+    ExtensionContext extensionContext(*this);
+    const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+    if (hooks.shadingRate != nullptr) {
+        return hooks.shadingRate(extensionContext, rate);
+    }
+    return extensions::fragment_shading_rate::shadingRate(extensionContext, rate);
+}
+
+bool GLContext::shadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1) {
+    ExtensionContext extensionContext(*this);
+    const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+    if (hooks.shadingRateCombinerOps != nullptr) {
+        return hooks.shadingRateCombinerOps(extensionContext, combinerOp0, combinerOp1);
+    }
+    return extensions::fragment_shading_rate::shadingRateCombinerOps(
+        extensionContext,
+        combinerOp0,
+        combinerOp1
+    );
+}
+
+bool GLContext::framebufferShadingRateEXT(GLenum target,
+                                          GLenum attachment,
+                                          GLuint texture,
+                                          GLint baseLayer,
+                                          GLsizei numLayers,
+                                          GLsizei texelWidth,
+                                          GLsizei texelHeight) {
+    ExtensionContext extensionContext(*this);
+    const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+    if (hooks.framebufferShadingRate != nullptr) {
+        return hooks.framebufferShadingRate(
+            extensionContext,
+            target,
+            attachment,
+            texture,
+            baseLayer,
+            numLayers,
+            texelWidth,
+            texelHeight
+        );
+    }
+    return extensions::fragment_shading_rate::framebufferShadingRate(
+        extensionContext,
+        target,
+        attachment,
+        texture,
+        baseLayer,
+        numLayers,
+        texelWidth,
+        texelHeight
+    );
 }
 
 void GLContext::setEnabled(GLenum cap, bool enabled) {
@@ -17780,7 +17960,7 @@ void GLContext::endImmediate() {
     info.vertexStride = sizeof(Impl::ImmediateModeVertex);
     info.mvp = mvp;
     info.metalTexture = metalTexture;
-    info.fragmentShadingRate = impl_->state->fragmentShadingRateState().rate;
+    info.fragmentShadingRate = currentFragmentShadingRateForContext(*this);
 
     const bool ok = impl_->frameGraph->encodeImmediateModeDraw(info);
     if (!ok) {
@@ -28954,7 +29134,7 @@ struct SolidColorDrawSetup {
 // separately ask `isEnabled(GL_BLEND)` for the enable bit (which lives
 // in `enabledCaps_`, not the blend struct itself).
 static void populateTranslatedDrawFixedFunctionState(
-    TranslatedDrawInfo& tdi, GLStateTracker& state)
+    TranslatedDrawInfo& tdi, GLStateTracker& state, GLenum fragmentShadingRate)
 {
     tdi.depthTestEnabled = state.isEnabled(GL_DEPTH_TEST);
     tdi.depthFunc = state.depthState().func;
@@ -28995,7 +29175,7 @@ static void populateTranslatedDrawFixedFunctionState(
     // captured so the correct values are available when we need them.
     tdi.sampleShadingEnabled = state.isEnabled(GL_SAMPLE_SHADING);
     tdi.minSampleShading = state.blendState().minSampleShading;
-    tdi.fragmentShadingRate = state.fragmentShadingRateState().rate;
+    tdi.fragmentShadingRate = fragmentShadingRate;
 
     // GL 4.6 §14.6.5 — polygon offset enabled under GL_POLYGON_OFFSET_FILL
     // (relevant for triangle rasterization) plus LINE / POINT variants.
@@ -29151,7 +29331,11 @@ static void populateVertexAttributeLayoutVAOFields(
     layout.glIsInteger = attr.integer;
 }
 
-SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStore& objects, GLenum mode, const char* debugLabel) {
+SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state,
+                                             GLObjectStore& objects,
+                                             GLenum mode,
+                                             const char* debugLabel,
+                                             GLenum fragmentShadingRate) {
     SolidColorDrawSetup setup;
 
     if (mode != GL_TRIANGLES && mode != GL_TRIANGLE_STRIP && mode != GL_TRIANGLE_FAN) {
@@ -29236,7 +29420,7 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStor
     setup.info.cullFaceMode = state.rasterState().cullFaceMode;
     setup.info.frontFace = state.rasterState().frontFace;
     setup.info.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
-    setup.info.fragmentShadingRate = state.fragmentShadingRateState().rate;
+    setup.info.fragmentShadingRate = fragmentShadingRate;
     // Sprint 7 Phase 1 #11 (CKPT57): stencil state for solid-color path.
     {
         const auto& gs = state.stencilState();
@@ -30668,7 +30852,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         if (ed.hasPrimitiveID)  offset += sizeof(std::int32_t);
     }
 
-    populateTranslatedDrawFixedFunctionState(tdi, *state);
+    populateTranslatedDrawFixedFunctionState(tdi, *state, currentFragmentShadingRateForContext(*owner));
     tdi.markColorAttachmentReadbackFlip =
         routeViewportIndex && tdi.clipOrigin == GL_LOWER_LEFT;
     tdi.vertexMSL = &program.gsPassThroughVertexMSL;
@@ -30824,7 +31008,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     tdi.indexCount = static_cast<GLsizei>(filteredIndices.size());
     tdi.indexType = GL_UNSIGNED_INT;
 
-    populateTranslatedDrawFixedFunctionState(tdi, *state);
+    populateTranslatedDrawFixedFunctionState(tdi, *state, currentFragmentShadingRateForContext(*owner));
     tdi.markColorAttachmentReadbackFlip =
         (tdi.clipOrigin == GL_LOWER_LEFT);
     tdi.vertexMSL = &program.vertexMSL;
@@ -31768,7 +31952,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             tdi.vertexData = nullptr;
             tdi.vertexDataByteCount = 0;
             tdi.vertexStride = 0;
-            populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+            populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
             tdi.vertexMSL = &program->vertexMSL;
             tdi.fragmentMSL = &program->fragmentMSL;
             tdi.vertexReflection = &program->vertexReflection;
@@ -31891,7 +32075,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // wireframe/blend). Replaces the prior inline reads
                     // so drawArrays / drawArraysInstanced / drawElements
                     // all capture identical state.
-                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -32072,7 +32256,13 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     }
 
     // Fallback: solid-color draw path (hardcoded appgl_solid pipeline).
-    SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawArrays");
+    SolidColorDrawSetup setup = buildSolidColorDrawSetup(
+        *impl_->state,
+        *impl_->objects,
+        mode,
+        "glDrawArrays",
+        currentFragmentShadingRateForContext(*this)
+    );
     if (!setup.ok) {
         emitDebugMessage(
             GL_DEBUG_SOURCE_API,
@@ -32255,7 +32445,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             tdi.vertexData = nullptr;
             tdi.vertexDataByteCount = 0;
             tdi.vertexStride = 0;
-            populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+            populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
             tdi.vertexMSL = &program->vertexMSL;
             tdi.fragmentMSL = &program->fragmentMSL;
             tdi.vertexReflection = &program->vertexReflection;
@@ -32368,7 +32558,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     tdi.metalVertexBufferOffset = startOff;
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot. See drawArrays.
-                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -33008,7 +33198,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             tdi.metalIndexBuffer = elementBuffer->metalBuffer;
             tdi.metalIndexBufferOffset = indexOffset;
         }
-        populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+        populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
         tdi.vertexMSL = &program->vertexMSL;
         tdi.fragmentMSL = &program->fragmentMSL;
         tdi.vertexReflection = &program->vertexReflection;
@@ -33141,7 +33331,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     }
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot. See drawArrays.
-                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -33292,7 +33482,13 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     }
 
     // Fallback: solid-color draw path (hardcoded appgl_solid pipeline).
-    SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawElements");
+    SolidColorDrawSetup setup = buildSolidColorDrawSetup(
+        *impl_->state,
+        *impl_->objects,
+        mode,
+        "glDrawElements",
+        currentFragmentShadingRateForContext(*this)
+    );
     if (!setup.ok) {
         emitDebugMessage(
             GL_DEBUG_SOURCE_API,
@@ -33503,7 +33699,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
-                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -33593,7 +33789,13 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     }
 
     // Fallback: solid-color draw path.
-    SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawElementsBaseVertex");
+    SolidColorDrawSetup setup = buildSolidColorDrawSetup(
+        *impl_->state,
+        *impl_->objects,
+        mode,
+        "glDrawElementsBaseVertex",
+        currentFragmentShadingRateForContext(*this)
+    );
     if (!setup.ok) {
         emitDebugMessage(
             GL_DEBUG_SOURCE_API,
@@ -33861,7 +34063,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                         tdi.metalIndexBuffer = elementBuffer->metalBuffer;
                         tdi.metalIndexBufferOffset = indexOffset;
                     }
-                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state);
+                    populateTranslatedDrawFixedFunctionState(tdi, *impl_->state, currentFragmentShadingRateForContext(*this));
                     tdi.vertexMSL = &program->vertexMSL;
                     tdi.fragmentMSL = &program->fragmentMSL;
                     tdi.vertexReflection = &program->vertexReflection;
@@ -34009,7 +34211,13 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     }
 
     // Fallback: solid-color draw path (no instancing support in solid-color).
-    SolidColorDrawSetup setup = buildSolidColorDrawSetup(*impl_->state, *impl_->objects, mode, "glDrawElementsInstancedBaseVertex");
+    SolidColorDrawSetup setup = buildSolidColorDrawSetup(
+        *impl_->state,
+        *impl_->objects,
+        mode,
+        "glDrawElementsInstancedBaseVertex",
+        currentFragmentShadingRateForContext(*this)
+    );
     if (!setup.ok) {
         emitDebugMessage(
             GL_DEBUG_SOURCE_API,

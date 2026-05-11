@@ -132,6 +132,15 @@ void mergeSparseHooks(SparseTextureHooks& destination, const SparseTextureHooks&
 void mergeFragmentShadingRateHooks(FragmentShadingRateHooks& destination,
                                    const FragmentShadingRateHooks& source) {
     if (source.currentDrawRate != nullptr) destination.currentDrawRate = source.currentDrawRate;
+    if (source.getFragmentShadingRates != nullptr) destination.getFragmentShadingRates = source.getFragmentShadingRates;
+    if (source.shadingRate != nullptr) destination.shadingRate = source.shadingRate;
+    if (source.shadingRateCombinerOps != nullptr) destination.shadingRateCombinerOps = source.shadingRateCombinerOps;
+    if (source.framebufferShadingRate != nullptr) destination.framebufferShadingRate = source.framebufferShadingRate;
+    if (source.queryBoolean != nullptr) destination.queryBoolean = source.queryBoolean;
+    if (source.queryInteger != nullptr) destination.queryInteger = source.queryInteger;
+    if (source.queryInteger64 != nullptr) destination.queryInteger64 = source.queryInteger64;
+    if (source.queryFloat != nullptr) destination.queryFloat = source.queryFloat;
+    if (source.queryDouble != nullptr) destination.queryDouble = source.queryDouble;
     if (source.attachRenderPass != nullptr) destination.attachRenderPass = source.attachRenderPass;
 }
 

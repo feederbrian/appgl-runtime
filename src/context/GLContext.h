@@ -81,6 +81,16 @@ public:
     bool queryInteger64Indexed(GLenum pname, GLuint index, GLint64* data);
     bool queryFloat(GLenum pname, GLfloat* data);
     bool queryDouble(GLenum pname, GLdouble* data);
+    bool getFragmentShadingRatesEXT(GLsizei samples, GLsizei maxCount, GLsizei* count, GLenum* shadingRates);
+    bool shadingRateEXT(GLenum rate);
+    bool shadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1);
+    bool framebufferShadingRateEXT(GLenum target,
+                                   GLenum attachment,
+                                   GLuint texture,
+                                   GLint baseLayer,
+                                   GLsizei numLayers,
+                                   GLsizei texelWidth,
+                                   GLsizei texelHeight);
     void setEnabled(GLenum cap, bool enabled);
     bool isEnabled(GLenum cap) const;
 

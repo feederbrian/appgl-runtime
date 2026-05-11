@@ -136,12 +136,6 @@ struct GLIndexedBufferBinding {
     GLsizeiptr size = 0;
 };
 
-struct GLFragmentShadingRateState {
-    GLenum rate = GL_SHADING_RATE_1X1_PIXELS_EXT;
-    GLenum combinerOp0 = GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT;
-    GLenum combinerOp1 = GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT;
-};
-
 class GLStateTracker {
 public:
     GLStateTracker();
@@ -210,12 +204,6 @@ public:
     void setPatchParameteri(GLenum pname, GLint value);
     void setPatchParameterfv(GLenum pname, const GLfloat* values);
     const GLTessellationState& tessellationState() const;
-
-    // GL_EXT_fragment_shading_rate base state. Draw-time Metal rate-map
-    // application is live; attachment/non-trivial-combiner surfaces remain gated.
-    void setFragmentShadingRate(GLenum rate);
-    void setFragmentShadingRateCombinerOps(GLenum combinerOp0, GLenum combinerOp1);
-    const GLFragmentShadingRateState& fragmentShadingRateState() const;
 
     // Primitive-restart index (GL 3.1). Used by the drawElements
     // paths to skip restart indices when crediting
@@ -376,7 +364,6 @@ private:
     // only slot i. Initial state per spec: all slots FALSE.
     std::array<bool, kMaxViewports> indexedScissorTest_{};
     GLTessellationState tessellation_;
-    GLFragmentShadingRateState fragmentShadingRate_;
     GLuint primitiveRestartIndex_ = 0;
     // GL_ARB/KHR_parallel_shader_compile. Our compile path is
     // synchronous so this is purely a round-trippable setting.

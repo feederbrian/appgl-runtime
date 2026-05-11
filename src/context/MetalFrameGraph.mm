@@ -892,6 +892,7 @@ struct MetalFrameGraph::Impl {
     }
 
     void beginRenderPass(GLStateTracker& state, GLObjectStore& objects) {
+        (void)state;
         (void)objects;
         if (device == nil || commandQueue == nil) {
             return;
@@ -921,7 +922,7 @@ struct MetalFrameGraph::Impl {
         pass.stencilAttachment.texture = depthStencilTexture;
         pass.stencilAttachment.loadAction = MTLLoadActionLoad;
         pass.stencilAttachment.storeAction = MTLStoreActionStore;
-        const GLenum fragmentRate = state.fragmentShadingRateState().rate;
+        const GLenum fragmentRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         attachFragmentShadingRateMap(pass, fragmentRate, colorTexture, 1);
         currentRenderEncoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         activeRenderPassFragmentShadingRate = fragmentRate;

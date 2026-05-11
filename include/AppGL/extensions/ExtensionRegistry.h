@@ -50,6 +50,28 @@ struct SparseTextureHooks {
 
 struct FragmentShadingRateHooks {
     GLenum (*currentDrawRate)(ExtensionContext& ctx) = nullptr;
+    bool (*getFragmentShadingRates)(ExtensionContext& ctx,
+                                    GLsizei samples,
+                                    GLsizei maxCount,
+                                    GLsizei* count,
+                                    GLenum* shadingRates) = nullptr;
+    bool (*shadingRate)(ExtensionContext& ctx, GLenum rate) = nullptr;
+    bool (*shadingRateCombinerOps)(ExtensionContext& ctx,
+                                   GLenum combinerOp0,
+                                   GLenum combinerOp1) = nullptr;
+    bool (*framebufferShadingRate)(ExtensionContext& ctx,
+                                   GLenum target,
+                                   GLenum attachment,
+                                   GLuint texture,
+                                   GLint baseLayer,
+                                   GLsizei numLayers,
+                                   GLsizei texelWidth,
+                                   GLsizei texelHeight) = nullptr;
+    bool (*queryBoolean)(ExtensionContext& ctx, GLenum pname, GLboolean* data, bool& handled) = nullptr;
+    bool (*queryInteger)(ExtensionContext& ctx, GLenum pname, GLint* data, bool& handled) = nullptr;
+    bool (*queryInteger64)(ExtensionContext& ctx, GLenum pname, GLint64* data, bool& handled) = nullptr;
+    bool (*queryFloat)(ExtensionContext& ctx, GLenum pname, GLfloat* data, bool& handled) = nullptr;
+    bool (*queryDouble)(ExtensionContext& ctx, GLenum pname, GLdouble* data, bool& handled) = nullptr;
     void (*attachRenderPass)(ExtensionContext& ctx,
                              void* renderPassDescriptor,
                              GLenum rate,
