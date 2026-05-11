@@ -15,6 +15,7 @@ struct State {
 };
 
 const char* extensionString();
+const char* attachmentExtensionString();
 bool isAvailable(ExtensionContext& ctx);
 void initialize(ExtensionContext& ctx);
 void shutdown();
@@ -29,6 +30,14 @@ State currentState(ExtensionContext& ctx);
 GLenum currentDrawRate(ExtensionContext& ctx);
 void setDrawRate(ExtensionContext& ctx, GLenum rate);
 void setCombinerOps(ExtensionContext& ctx, GLenum combinerOp0, GLenum combinerOp1);
+void setFramebufferAttachment(ExtensionContext& ctx,
+                              GLuint framebuffer,
+                              GLuint texture,
+                              GLint baseLayer,
+                              GLsizei numLayers,
+                              GLsizei texelWidth,
+                              GLsizei texelHeight);
+void clearFramebufferAttachment(ExtensionContext& ctx, GLuint framebuffer);
 
 bool queryBoolean(ExtensionContext& ctx, GLenum pname, GLboolean* data, bool& handled);
 bool queryInteger(ExtensionContext& ctx, GLenum pname, GLint* data, bool& handled);

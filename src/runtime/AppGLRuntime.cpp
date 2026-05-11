@@ -2491,7 +2491,7 @@ void APIENTRY glShadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1
     }
     markStateFunction(
         FunctionId::glShadingRateCombinerOpsEXT,
-        "GL_EXT_fragment_shading_rate combiner ops track KEEP/KEEP; non-trivial and attachment paths remain gated."
+        "GL_EXT_fragment_shading_rate combiner ops track attachment-side non-trivial ops; primitive remains gated."
     );
     Runtime::shared().recordBootstrapTrace("glShadingRateCombinerOpsEXT()");
 }

@@ -1,6 +1,8 @@
 #include "FragmentShadingRateModule.h"
 
 #include "../ExtensionContext.h"
+#include "../../objects/GLObjectStore.h"
+#include "../../state/GLStateTracker.h"
 
 #include <algorithm>
 
@@ -64,28 +66,10 @@ bool shadingRateCombinerOps(ExtensionContext& ctx, GLenum combinerOp0, GLenum co
                       "combinerOp1 is not a valid fragment shading rate combiner");
         return false;
     }
-    if (!isTrivialFragmentShadingRateCombinerOp(combinerOp0)) {
-        ctx.pushError(GL_INVALID_OPERATION,
-                      "glShadingRateCombinerOpsEXT",
-                      "non-trivial fragment shading rate combinerOp0 is not supported");
-        return false;
-    }
-    if (!isTrivialFragmentShadingRateCombinerOp(combinerOp1)) {
-        ctx.pushError(GL_INVALID_OPERATION,
-                      "glShadingRateCombinerOpsEXT",
-                      "non-trivial fragment shading rate combinerOp1 is not supported");
-        return false;
-    }
     if (combinerOp0 != GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT) {
         ctx.pushError(GL_INVALID_OPERATION,
                       "glShadingRateCombinerOpsEXT",
                       "primitive fragment shading rate combinerOp0 is not supported");
-        return false;
-    }
-    if (combinerOp1 != GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT) {
-        ctx.pushError(GL_INVALID_OPERATION,
-                      "glShadingRateCombinerOpsEXT",
-                      "attachment fragment shading rate combinerOp1 is not supported");
         return false;
     }
     setCombinerOps(ctx, combinerOp0, combinerOp1);
@@ -100,11 +84,6 @@ bool framebufferShadingRate(ExtensionContext& ctx,
                             GLsizei numLayers,
                             GLsizei texelWidth,
                             GLsizei texelHeight) {
-    (void)texture;
-    (void)baseLayer;
-    (void)numLayers;
-    (void)texelWidth;
-    (void)texelHeight;
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
         ctx.pushError(GL_INVALID_ENUM, "glFramebufferShadingRateEXT", "target is not a framebuffer target");
         return false;
@@ -115,10 +94,72 @@ bool framebufferShadingRate(ExtensionContext& ctx,
                       "attachment is not GL_SHADING_RATE_ATTACHMENT_EXT");
         return false;
     }
-    ctx.pushError(GL_INVALID_OPERATION,
-                  "glFramebufferShadingRateEXT",
-                  "GL_EXT_fragment_shading_rate_attachment is not advertised or implemented");
-    return false;
+
+    const GLuint framebuffer = target == GL_READ_FRAMEBUFFER
+        ? ctx.state().boundReadFramebuffer()
+        : ctx.state().boundDrawFramebuffer();
+    if (framebuffer == 0) {
+        ctx.pushError(GL_INVALID_OPERATION,
+                      "glFramebufferShadingRateEXT",
+                      "default framebuffer shading-rate attachment is not supported");
+        return false;
+    }
+    if (ctx.objects().framebuffers().get(framebuffer) == nullptr) {
+        ctx.pushError(GL_INVALID_OPERATION,
+                      "glFramebufferShadingRateEXT",
+                      "framebuffer target is not backed by a framebuffer object");
+        return false;
+    }
+
+    if (texture == 0) {
+        clearFramebufferAttachment(ctx, framebuffer);
+        return true;
+    }
+
+    const GLTextureObject* textureObject = ctx.objects().textures().get(texture);
+    if (textureObject == nullptr || !textureObject->instantiated || !textureObject->desc.immutable) {
+        ctx.pushError(GL_INVALID_VALUE,
+                      "glFramebufferShadingRateEXT",
+                      "texture must name an immutable shading-rate texture");
+        return false;
+    }
+    if (textureObject->target != GL_TEXTURE_2D && textureObject->target != GL_TEXTURE_2D_ARRAY) {
+        ctx.pushError(GL_INVALID_OPERATION,
+                      "glFramebufferShadingRateEXT",
+                      "texture target is not valid for a shading-rate attachment");
+        return false;
+    }
+    if (textureObject->desc.internalFormat != GL_R8UI) {
+        ctx.pushError(GL_INVALID_OPERATION,
+                      "glFramebufferShadingRateEXT",
+                      "texture internal format is not GL_R8UI");
+        return false;
+    }
+
+    constexpr GLsizei kAttachmentTexelWidth = 256;
+    constexpr GLsizei kAttachmentTexelHeight = 256;
+    constexpr GLsizei kAttachmentLayers = 1;
+    if (baseLayer < 0 || baseLayer >= kAttachmentLayers) {
+        ctx.pushError(GL_INVALID_VALUE,
+                      "glFramebufferShadingRateEXT",
+                      "baseLayer exceeds the supported attachment layer count");
+        return false;
+    }
+    if (numLayers <= 0 || numLayers > kAttachmentLayers || baseLayer + numLayers > kAttachmentLayers) {
+        ctx.pushError(GL_INVALID_VALUE,
+                      "glFramebufferShadingRateEXT",
+                      "numLayers exceeds the supported attachment layer count");
+        return false;
+    }
+    if (texelWidth != kAttachmentTexelWidth || texelHeight != kAttachmentTexelHeight) {
+        ctx.pushError(GL_INVALID_VALUE,
+                      "glFramebufferShadingRateEXT",
+                      "texel size must match the advertised shading-rate attachment granularity");
+        return false;
+    }
+
+    setFramebufferAttachment(ctx, framebuffer, texture, baseLayer, numLayers, texelWidth, texelHeight);
+    return true;
 }
 
 }  // namespace appgl::extensions::fragment_shading_rate

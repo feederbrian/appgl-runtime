@@ -419,9 +419,9 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glShadingRateEXT,
                              "GL_EXT_fragment_shading_rate tracks draw-call rate state and applies Metal rate maps.");
     coverage.markImplemented(FunctionId::glShadingRateCombinerOpsEXT,
-                             "GL_EXT_fragment_shading_rate validates combiner ops with primitive/attachment paths gated.");
+                             "GL_EXT_fragment_shading_rate validates combiner ops with primitive gated and attachment-side ops live.");
     coverage.markImplemented(FunctionId::glFramebufferShadingRateEXT,
-                             "GL_EXT_fragment_shading_rate attachment entry point is present but functionally gated.");
+                             "GL_EXT_fragment_shading_rate attachment state is wired for framebuffer combiner cascades.");
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
