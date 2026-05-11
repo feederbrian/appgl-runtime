@@ -2,19 +2,107 @@
 
 #include "SparseTextureAlloc.h"
 #include "../ExtensionContext.h"
+#include "../ExtensionRegistry.h"
 #include "../../caps/GLCapabilities.h"
 #include "../../objects/GLObjectStore.h"
 
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <optional>
 
 namespace appgl::extensions::sparse_texture {
 
 namespace {
 
+struct PageSize {
+    GLint x;
+    GLint y;
+    GLint z;
+};
+
 id<MTLDevice> metalDevice(ExtensionContext& ctx) {
     return (__bridge id<MTLDevice>)ctx.metalDevice();
+}
+
+bool isStandardSparseTexture2Target(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_1D:
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_BUFFER:
+        case GL_RENDERBUFFER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::optional<PageSize> standardSparseTexture2PageSize(GLenum target, GLenum internalformat) {
+    if (!ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture2") ||
+        !isStandardSparseTexture2Target(target)) {
+        return std::nullopt;
+    }
+
+    switch (internalformat) {
+        case GL_R8:
+        case GL_R8_SNORM:
+        case GL_R8I:
+        case GL_R8UI:
+            return PageSize{256, 256, 1};
+
+        case GL_R16:
+        case GL_R16_SNORM:
+        case GL_RG8:
+        case GL_RG8_SNORM:
+        case GL_RGB565:
+        case GL_R16F:
+        case GL_R16I:
+        case GL_R16UI:
+        case GL_RG8I:
+        case GL_RG8UI:
+            return PageSize{256, 128, 1};
+
+        case GL_RG16:
+        case GL_RG16_SNORM:
+        case GL_RGBA8:
+        case GL_RGBA8_SNORM:
+        case GL_RGB10_A2:
+        case GL_RGB10_A2UI:
+        case GL_RG16F:
+        case GL_R32F:
+        case GL_R11F_G11F_B10F:
+        case GL_RGB9_E5:
+        case GL_R32I:
+        case GL_R32UI:
+        case GL_RG16I:
+        case GL_RG16UI:
+        case GL_RGBA8I:
+        case GL_RGBA8UI:
+            return PageSize{128, 128, 1};
+
+        case GL_RGBA16:
+        case GL_RGBA16_SNORM:
+        case GL_RGBA16F:
+        case GL_RG32F:
+        case GL_RG32I:
+        case GL_RG32UI:
+        case GL_RGBA16I:
+        case GL_RGBA16UI:
+            return PageSize{128, 64, 1};
+
+        case GL_RGBA32F:
+        case GL_RGBA32I:
+        case GL_RGBA32UI:
+            return PageSize{64, 64, 1};
+
+        default:
+            return std::nullopt;
+    }
 }
 
 MTLTextureType metalTextureTypeForTarget(GLenum target) {
@@ -168,9 +256,15 @@ bool handleInternalFormatQuery(ExtensionContext& ctx,
     if (count <= 0) {
         return true;
     }
-    const auto capability = ctx.capabilities().format(internalformat);
+    const std::optional<PageSize> standardPage =
+        standardSparseTexture2PageSize(target, internalformat);
     switch (pname) {
         case GL_NUM_VIRTUAL_PAGE_SIZES_ARB: {
+            if (standardPage.has_value()) {
+                params[0] = 1;
+                return true;
+            }
+            const auto capability = ctx.capabilities().format(internalformat);
             const MTLSize tile = sparsePageSizeForFormat(ctx, target, internalformat);
             params[0] = (tile.width > 0 && capability.has_value()) ? 1 : 0;
             return true;
@@ -181,6 +275,14 @@ bool handleInternalFormatQuery(ExtensionContext& ctx,
             for (GLsizei i = 0; i < count; ++i) {
                 params[i] = 0;
             }
+            if (standardPage.has_value()) {
+                params[0] =
+                    (pname == GL_VIRTUAL_PAGE_SIZE_X_ARB) ? standardPage->x :
+                    (pname == GL_VIRTUAL_PAGE_SIZE_Y_ARB) ? standardPage->y :
+                                                            standardPage->z;
+                return true;
+            }
+            const auto capability = ctx.capabilities().format(internalformat);
             if (!capability.has_value()) {
                 return true;
             }
