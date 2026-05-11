@@ -4952,7 +4952,26 @@ public:
         gl.glGetCompressedTextureSubImage(tex2d, 0, 0, 0, 0, 4, 4, 1, sizeof(imgBuf), imgBuf);
 
         gl.glGenerateTextureMipmap(tex2d);
+        while (gl.glGetError() != GL_NO_ERROR) {}
+
+        gl.glActiveTexture(GL_TEXTURE3);
         gl.glBindTextureUnit(0, tex2d);
+        GLint activeTexture = 0;
+        gl.glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+        expectCondition(activeTexture == GL_TEXTURE3, "glBindTextureUnit preserves active texture");
+
+        GLint maxTextureUnits = 0;
+        gl.glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxTextureUnits);
+        gl.glBindTextureUnit(static_cast<GLuint>(maxTextureUnits), tex2d);
+        expectGLError(gl, GL_INVALID_VALUE, "glBindTextureUnit rejects out-of-range unit");
+        gl.glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+        expectCondition(activeTexture == GL_TEXTURE3, "invalid glBindTextureUnit preserves active texture");
+
+        gl.glBindTextureUnit(0, 0);
+        gl.glActiveTexture(GL_TEXTURE0);
+        GLint boundTexture2D = -1;
+        gl.glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture2D);
+        expectCondition(boundTexture2D == 0, "glBindTextureUnit zero unbinds 2D target");
 
         // Cleanup
         gl.glDeleteBuffers(1, &buf);

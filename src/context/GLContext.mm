@@ -37913,6 +37913,20 @@ GLenum indexedBufferMaxPname(GLenum target) {
         default: return 0;
     }
 }
+
+void unbindAllTextureTargetsOnActiveUnit(GLStateTracker& state) {
+    state.bindTexture(GL_TEXTURE_1D, 0);
+    state.bindTexture(GL_TEXTURE_2D, 0);
+    state.bindTexture(GL_TEXTURE_3D, 0);
+    state.bindTexture(GL_TEXTURE_1D_ARRAY, 0);
+    state.bindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    state.bindTexture(GL_TEXTURE_RECTANGLE, 0);
+    state.bindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    state.bindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, 0);
+    state.bindTexture(GL_TEXTURE_BUFFER, 0);
+    state.bindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+    state.bindTexture(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, 0);
+}
 }  // namespace
 
 bool GLContext::bindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers) {
@@ -38019,17 +38033,7 @@ bool GLContext::bindTextures(GLuint first, GLsizei count, const GLuint* textures
         if (tex == 0) {
             // Unbind every target on this unit (multi-bind unbinds
             // regardless of previously-bound target).
-            impl_->state->bindTexture(GL_TEXTURE_1D, 0);
-            impl_->state->bindTexture(GL_TEXTURE_2D, 0);
-            impl_->state->bindTexture(GL_TEXTURE_3D, 0);
-            impl_->state->bindTexture(GL_TEXTURE_1D_ARRAY, 0);
-            impl_->state->bindTexture(GL_TEXTURE_2D_ARRAY, 0);
-            impl_->state->bindTexture(GL_TEXTURE_RECTANGLE, 0);
-            impl_->state->bindTexture(GL_TEXTURE_CUBE_MAP, 0);
-            impl_->state->bindTexture(GL_TEXTURE_CUBE_MAP_ARRAY, 0);
-            impl_->state->bindTexture(GL_TEXTURE_BUFFER, 0);
-            impl_->state->bindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
-            impl_->state->bindTexture(GL_TEXTURE_2D_MULTISAMPLE_ARRAY, 0);
+            unbindAllTextureTargetsOnActiveUnit(*impl_->state);
             continue;
         }
         auto* obj = impl_->objects->textures().get(tex);
@@ -41353,15 +41357,29 @@ bool GLContext::generateTextureMipmap(GLuint texture) {
 }
 
 bool GLContext::bindTextureUnit(GLuint unit, GLuint texture) {
+    const GLint64 maxUnits = queryLimit(impl_->capabilities.get(), GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, 80);
+    if (static_cast<GLint64>(unit) >= maxUnits) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    GLTextureObject* obj = nullptr;
+    if (texture != 0) {
+        obj = impl_->objects->textures().get(texture);
+        if (!obj) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+    const GLuint savedActiveUnit = impl_->state->activeTextureUnit();
     impl_->state->setActiveTextureUnit(unit);
     if (texture == 0) {
-        impl_->state->bindTexture(GL_TEXTURE_2D, 0);
+        unbindAllTextureTargetsOnActiveUnit(*impl_->state);
+        impl_->state->setActiveTextureUnit(savedActiveUnit);
         return true;
     }
-    auto* obj = impl_->objects->textures().get(texture);
-    if (!obj) { pushError(GL_INVALID_OPERATION); return false; }
     GLenum target = obj->target ? obj->target : GL_TEXTURE_2D;
     impl_->state->bindTexture(target, texture);
+    impl_->state->setActiveTextureUnit(savedActiveUnit);
     return true;
 }
 
