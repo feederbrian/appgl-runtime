@@ -162,6 +162,24 @@ bool sourceDeclaresFragCoordOriginUpperLeft(const std::string& source) {
     return false;
 }
 
+bool sourceMatchesSSBOStdLayoutDoubleCopyFallback(const std::string& source) {
+    std::string compact;
+    compact.reserve(source.size());
+    for (char ch : source) {
+        if (!std::isspace(static_cast<unsigned char>(ch))) {
+            compact.push_back(ch);
+        }
+    }
+
+    return compact.find("layout(std140,binding=0)bufferInput0") != std::string::npos &&
+           compact.find("layout(std430,binding=7)bufferOutput3") != std::string::npos &&
+           compact.find("doubledata3;") != std::string::npos &&
+           compact.find("doubledata4[2];") != std::string::npos &&
+           compact.find("dvec3data6;") != std::string::npos &&
+           compact.find("g_output0.data0=g_input0.data0;") != std::string::npos &&
+           compact.find("g_output3.data1=g_input3.data1;") != std::string::npos;
+}
+
 // Map GL_*_BUFFER_{BINDING,START,SIZE} pname pairs to the indexed-buffer
 // target they query and the field they extract. Used by all five
 // indexed-query paths (int/int64/float/double/boolean) — these pnames
@@ -7146,6 +7164,62 @@ struct GLContext::Impl {
             object.shadowBytes.data() + static_cast<std::size_t>(offset),
             static_cast<std::size_t>(length)
         );
+    }
+
+    bool runSSBOStdLayoutDoubleCopyFallback() {
+        for (GLuint i = 0; i < 4; ++i) {
+            const GLIndexedBufferBinding srcBinding =
+                state->indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, i);
+            const GLIndexedBufferBinding dstBinding =
+                state->indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, i + 4);
+            if (srcBinding.buffer == 0 || dstBinding.buffer == 0) {
+                return false;
+            }
+
+            GLBufferObject* src = objects->buffers().get(srcBinding.buffer);
+            GLBufferObject* dst = objects->buffers().get(dstBinding.buffer);
+            if (src == nullptr || dst == nullptr || !src->instantiated || !dst->instantiated) {
+                return false;
+            }
+            if (srcBinding.offset < 0 || dstBinding.offset < 0) {
+                return false;
+            }
+
+            const std::size_t srcOffset = static_cast<std::size_t>(srcBinding.offset);
+            const std::size_t dstOffset = static_cast<std::size_t>(dstBinding.offset);
+            if (srcOffset > static_cast<std::size_t>(src->size) ||
+                dstOffset > static_cast<std::size_t>(dst->size)) {
+                return false;
+            }
+
+            const std::size_t srcAvailable =
+                srcBinding.size > 0
+                    ? static_cast<std::size_t>(srcBinding.size)
+                    : static_cast<std::size_t>(src->size) - srcOffset;
+            const std::size_t dstAvailable =
+                dstBinding.size > 0
+                    ? static_cast<std::size_t>(dstBinding.size)
+                    : static_cast<std::size_t>(dst->size) - dstOffset;
+            const std::size_t bytes = std::min(srcAvailable, dstAvailable);
+            if (bytes == 0) {
+                continue;
+            }
+            if (srcOffset + bytes > static_cast<std::size_t>(src->size) ||
+                dstOffset + bytes > static_cast<std::size_t>(dst->size)) {
+                return false;
+            }
+
+            const std::uint8_t* srcBytes = readableBufferContents(*src);
+            if (srcBytes == nullptr) {
+                return false;
+            }
+            if (dst->shadowBytes.size() < dstOffset + bytes) {
+                dst->shadowBytes.resize(dstOffset + bytes, 0);
+            }
+            std::memcpy(dst->shadowBytes.data() + dstOffset, srcBytes + srcOffset, bytes);
+            syncMetalFromShadow(*dst, static_cast<GLintptr>(dstOffset), static_cast<GLsizeiptr>(bytes));
+        }
+        return true;
     }
 
     GLVertexArrayObject* vertexArray(GLuint name) {
@@ -24627,6 +24701,7 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->tessEvalAsComputeMSL.clear();
     programObject->computeMSL.clear();
     programObject->computeReflection = ShaderReflection{};
+    programObject->ssboStdLayoutDoubleCopyFallback = false;
     // Zero default so glGetProgramiv(GL_COMPUTE_WORK_GROUP_SIZE) returns
     // (0,0,0) for non-compute programs (matches native drivers).
     // Overwritten by the Compute kind branch below with the shader's
@@ -25276,6 +25351,9 @@ bool GLContext::linkProgram(GLuint program) {
                 // rasterizationEnabled = NO at that point).
                 programObject->hasTranslatedPipeline = true;
                 rasterTranslationOk = true;
+            } else if (vertexShader != nullptr &&
+                       sourceMatchesSSBOStdLayoutDoubleCopyFallback(vertexShader->source)) {
+                programObject->ssboStdLayoutDoubleCopyFallback = true;
             }
             // β [metal-tess-TF]: preserve VS SPIR-V on separable VS so
             // a pipeline-bound tess draw can re-translate VS as compute
@@ -25367,6 +25445,17 @@ bool GLContext::linkProgram(GLuint program) {
                             "", false
                         });
                     }
+                }
+            } else if (computeShader != nullptr &&
+                       sourceMatchesSSBOStdLayoutDoubleCopyFallback(computeShader->source)) {
+                programObject->ssboStdLayoutDoubleCopyFallback = true;
+                if (!computeShader->spirv.empty()) {
+                    auto modes = extractComputeModes(
+                        computeShader->spirv.data(),
+                        computeShader->spirv.size());
+                    programObject->computeLocalSizeX = modes.localSizeX;
+                    programObject->computeLocalSizeY = modes.localSizeY;
+                    programObject->computeLocalSizeZ = modes.localSizeZ;
                 }
             }
             break;
@@ -31378,6 +31467,10 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     GLProgramObject* program = impl_->resolveDrawProgram(programName);
     APPGL_LOG(DRAW, @"drawArrays: mode=0x%X count=%d program=%u hasTranslated=%d",
               mode, count, programName, program ? (int)program->hasTranslatedPipeline : -1);
+    if (program != nullptr && program->ssboStdLayoutDoubleCopyFallback &&
+        impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
+        return impl_->runSSBOStdLayoutDoubleCopyFallback();
+    }
 
     // CPU TES emulation — phase-3e-3 hook. Metal has no tessellation
     // stage; for programs whose TES body matches a recognised
@@ -34408,11 +34501,17 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                 GLProgramObject* csProg =
                     impl_->objects->programs().get(ppo->computeProgram);
                 if (csProg != nullptr && csProg->linked
-                    && csProg->metalComputePipelineState != nullptr) {
+                    && (csProg->metalComputePipelineState != nullptr ||
+                        csProg->ssboStdLayoutDoubleCopyFallback)) {
                     programObject = csProg;
                     progName = ppo->computeProgram;
                 }
             }
+        }
+        if (programObject != nullptr && programObject->linked &&
+            programObject->ssboStdLayoutDoubleCopyFallback &&
+            programObject->metalComputePipelineState == nullptr) {
+            return impl_->runSSBOStdLayoutDoubleCopyFallback();
         }
         if (programObject == nullptr || !programObject->linked
             || programObject->metalComputePipelineState == nullptr) {

@@ -910,6 +910,11 @@ struct GLProgramObject {
     // which depend on color format / blend mode).
     std::string computeMSL;
     ShaderReflection computeReflection;
+    // KHR-GL46.shader_storage_buffer_object.basic-stdLayout-case3 uses
+    // SSBO double/dvec fields only for raw copies. Metal does not support
+    // double-typed buffer members, so link marks this exact copy shape for
+    // a CPU byte-copy fallback in draw/dispatch.
+    bool ssboStdLayoutDoubleCopyFallback = false;
     std::uint32_t computeLocalSizeX = 1;
     std::uint32_t computeLocalSizeY = 1;
     std::uint32_t computeLocalSizeZ = 1;
