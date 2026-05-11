@@ -1,0 +1,35 @@
+From c6b503ed30df13ef03e4c2614875ba58fd00399d Mon Sep 17 00:00:00 2001
+From: Brian Soria <brian.m.soria@gmail.com>
+Date: Mon, 11 May 2026 10:56:30 -0700
+Subject: [PATCH] [appgl-local] shadow GradClamp emit path
+
+---
+ spirv_msl.cpp | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index aaef1945..ecf09538 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -13079,8 +13079,16 @@ string CompilerMSL::to_function_args(const TextureFunctionArguments &args, bool
+ 			// We will detect a compile-time constant 0 value for gradient and promote that to level(0) on MSL.
+ 			bool constant_zero_x = !grad_x || expression_is_constant_null(grad_x);
+ 			bool constant_zero_y = !grad_y || expression_is_constant_null(grad_y);
+-			if (constant_zero_x && constant_zero_y &&
+-			    (!imgtype.image.arrayed || !msl_options.sample_dref_lod_array_as_grad))
++			if (constant_zero_x && constant_zero_y && (args.sparse_texel || args.min_lod))
++			{
++				// AppGL: sparse feedback calls and GL_ARB_sparse_texture_clamp's min_lod_clamp operand
++				// cannot be combined with the synthetic level(0) fallback. Drop the zero gradients and
++				// let sparse_sample_compare/sample_compare carry the feedback or clamp operand directly.
++				grad_x = 0;
++				grad_y = 0;
++			}
++			else if (constant_zero_x && constant_zero_y &&
++			         (!imgtype.image.arrayed || !msl_options.sample_dref_lod_array_as_grad))
+ 			{
+ 				lod = 0;
+ 				grad_x = 0;
+-- 
+2.50.1 (Apple Git-155)
+

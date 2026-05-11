@@ -38,6 +38,51 @@ git apply ../../third_party/patches/<patch-name>.patch
 
 ## Patches
 
+### `spirv-cross-msl-atomic-3d-dispatch.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — MSL image
+atomic coordinate lowering for emulated image atomics.
+
+**Summary:** Extends the R32I/R32UI image-atomic linearization helper
+from 2D-only addressing to 3D/layered addressing. `OpImageTexelPointer`
+now routes 2D array, 3D, and cube/cube-array coordinates through a
+height-aware linear index, and the atomic preprocessor emits the helper
+for `Dim2D`, `Dim3D`, `DimCube`, and `DimRect` images.
+
+**Why:** CTS sparse_texture2 uncommitted-region verification binds
+R32I/R32UI cube, cube-array, and 3D sparse textures as storage images
+and runs atomic operations through `OpImageTexelPointer`. The previous
+2D-only helper left non-2D coordinates in an invalid shape for Metal's
+linear atomic backing buffer, causing compute pipeline creation to fail
+and surfacing as `glDispatchCompute` `GL_INVALID_OPERATION`.
+
+**CTS tests unlocked:** Sprint 19 Phase 7.4
+`KHR-GL46.sparse_texture2_tests.UncommittedRegionsAccess_texture_{cube_map,cube_map_array,3d}_r32{i,ui}`
+cluster (6 tests).
+
+### `spirv-cross-msl-shadow-grad-clamp.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` —
+`CompilerMSL::to_function_args()` shadow-compare gradient handling.
+
+**Summary:** Keeps the existing macOS zero-gradient shadow-compare
+fallback for ordinary calls, but suppresses the synthetic `level(0)`
+argument when the texture operation already carries sparse feedback or
+a `min_lod_clamp` operand. For GL_ARB_sparse_texture_clamp this drops
+the zero gradients and lets `sample_compare` / `sparse_sample_compare`
+carry the clamp operand directly.
+
+**Why:** Metal's shadow compare overload accepts `min_lod_clamp`, but
+the previous zero-gradient fallback also appended `level(0)`. In CTS
+depth clamp Color paths that made `textureGradClampARB` differ from the
+passing `textureClampARB` path and returned zeros for 2D, 2D-array, and
+cube targets at level 0.
+
+**CTS tests unlocked:** Sprint 19 Phase 7.5
+`KHR-GL46.sparse_texture_clamp_tests.SparseTextureClampLookupColor_*_depth_component16`
+depth cluster under temporary sparse_texture_clamp advertisement (8/8
+after pairing with the AppGL clamp-depth sizing gate).
+
 ### `spirv-cross-msl-tcs-output-classification.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.{hpp,cpp}` — adds

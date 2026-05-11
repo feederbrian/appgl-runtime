@@ -1,0 +1,82 @@
+From 2352d715b1ae58f8afa4e38312f34beb6d0b2503 Mon Sep 17 00:00:00 2001
+From: Brian Soria <brian.m.soria@gmail.com>
+Date: Mon, 11 May 2026 10:56:07 -0700
+Subject: [PATCH] [appgl-local] R32I/R32UI atomic 3D dispatch path
+
+---
+ spirv_msl.cpp | 27 +++++++++++++++++++--------
+ 1 file changed, 19 insertions(+), 8 deletions(-)
+
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index eaabb640..aaef1945 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -6311,7 +6311,7 @@ void CompilerMSL::emit_custom_functions()
+ 			break;
+ 		}
+ 
+-		// Emulate texture2D atomic operations
++		// Emulate image atomic operations
+ 		case SPVFuncImplImage2DAtomicCoords:
+ 		{
+ 			if (msl_options.supports_msl_version(1, 2))
+@@ -6329,10 +6329,13 @@ void CompilerMSL::emit_custom_functions()
+ 				statement("constant uint spvLinearTextureAlignment = ", msl_options.r32ui_linear_texture_alignment,
+ 				          ";");
+ 			}
+-			statement("// Returns buffer coords corresponding to 2D texture coords for emulating 2D texture atomics");
+-			statement("#define spvImage2DAtomicCoord(tc, tex) (((((tex).get_width() + ",
++			statement("#define spvImageAtomicAlignedWidth(tex) (((tex).get_width() + ",
+ 			          " spvLinearTextureAlignment / 4 - 1) & ~(",
+-			          " spvLinearTextureAlignment / 4 - 1)) * (tc).y) + (tc).x)");
++			          " spvLinearTextureAlignment / 4 - 1))");
++			statement("// Returns buffer coords corresponding to texture coords for emulating image atomics");
++			statement("#define spvImage2DAtomicCoord(tc, tex) ((spvImageAtomicAlignedWidth(tex) * (tc).y) + (tc).x)");
++			statement("#define spvImage3DAtomicCoord(tc, tex) (((spvImageAtomicAlignedWidth(tex) * "
++			          "(tex).get_height()) * (tc).z) + (spvImageAtomicAlignedWidth(tex) * (tc).y) + (tc).x)");
+ 			statement("");
+ 			break;
+ 		}
+@@ -9913,7 +9916,7 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+ 		break;
+ 	}
+ 
+-	// Emulate texture2D atomic operations
++	// Emulate image atomic operations
+ 	case OpImageTexelPointer:
+ 	{
+ 		// When using the pointer, we need to know which variable it is actually loaded from.
+@@ -9925,10 +9928,14 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+ 
+ 			std::string coord = to_expression(ops[3]);
+ 			auto &type = expression_type(ops[2]);
+-			if (type.image.dim == Dim2D)
++			if ((type.image.dim == Dim2D || type.image.dim == DimRect) && !type.image.arrayed)
+ 			{
+ 				coord = join("spvImage2DAtomicCoord(", coord, ", ", to_expression(ops[2]), ")");
+ 			}
++			else if (type.image.dim == Dim2D || type.image.dim == Dim3D || type.image.dim == DimCube)
++			{
++				coord = join("spvImage3DAtomicCoord(", coord, ", ", to_expression(ops[2]), ")");
++			}
+ 
+ 			auto &e = set<SPIRExpression>(id, join(to_expression(ops[2]), "_atomic[", coord, "]"), result_type, true);
+ 			e.loaded_from = var ? var->self : ID(0);
+@@ -19709,8 +19716,12 @@ CompilerMSL::SPVFuncImpl CompilerMSL::OpCodePreprocessor::get_spv_func_impl(Op o
+ 		if (it != image_pointers_emulated.end())
+ 		{
+ 			uint32_t tid = get<SPIRVariable>(it->second).basetype;
+-			if (tid && get<SPIRType>(tid).image.dim == Dim2D)
+-				return SPVFuncImplImage2DAtomicCoords;
++			if (tid)
++			{
++				const auto dim = get<SPIRType>(tid).image.dim;
++				if (dim == Dim2D || dim == Dim3D || dim == DimCube || dim == DimRect)
++					return SPVFuncImplImage2DAtomicCoords;
++			}
+ 		}
+ 		break;
+ 	}
+-- 
+2.50.1 (Apple Git-155)
+
