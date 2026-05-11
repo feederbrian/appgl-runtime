@@ -91,6 +91,7 @@ void APIENTRY glTexStorage2D(GLenum target, GLsizei levels, GLenum internalforma
 void APIENTRY glTexStorage3D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
 void APIENTRY glTexStorage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations);
 void APIENTRY glTexStorage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations);
+void APIENTRY glTexPageCommitmentARB(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit);
 void APIENTRY glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size);
 void APIENTRY glPixelStorei(GLenum pname, GLint param);
 void APIENTRY glPixelStoref(GLenum pname, GLfloat param);
@@ -488,6 +489,7 @@ void APIENTRY glTextureParameteri(GLuint texture, GLenum pname, GLint param);
 void APIENTRY glTextureParameteriv(GLuint texture, GLenum pname, const GLint* param);
 void APIENTRY glTextureParameterIiv(GLuint texture, GLenum pname, const GLint* params);
 void APIENTRY glTextureParameterIuiv(GLuint texture, GLenum pname, const GLuint* params);
+void APIENTRY glTexturePageCommitmentEXT(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit);
 void APIENTRY glGetTextureParameterfv(GLuint texture, GLenum pname, GLfloat* params);
 void APIENTRY glGetTextureParameteriv(GLuint texture, GLenum pname, GLint* params);
 void APIENTRY glGetTextureParameterIiv(GLuint texture, GLenum pname, GLint* params);

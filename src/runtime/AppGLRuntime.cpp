@@ -1156,6 +1156,11 @@ bool isValidTextureParameterPname(GLenum pname) {
         case GL_TEXTURE_LOD_BIAS:
         case GL_TEXTURE_MAX_ANISOTROPY:
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
+        // ARB_sparse_texture scaffold. These are per-texture state, not
+        // sampler-object state, and remain queryable even while runtime
+        // extension advertising is held.
+        case GL_TEXTURE_SPARSE_ARB:
+        case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
         // GL 4.6 §8.11 storage-state pnames — valid for GetTexParameter*
         // only. The SetTextureParameter path rejects them via the
         // inner switch in `setTextureParameterInteger` (they don't
@@ -1175,6 +1180,7 @@ bool isValidTextureParameterPname(GLenum pname) {
         // Query-only (set path rejects via setTextureParameter's inner
         // switch). Accepted on getTexParameter*.
         case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE:
+        case GL_NUM_SPARSE_LEVELS_ARB:
             return true;
         default:
             return false;
@@ -1244,6 +1250,13 @@ bool validateTextureParameterValues(GLenum pname, const GLint* params) {
             return true;
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return params[0] == GL_DEPTH_COMPONENT || params[0] == GL_STENCIL_INDEX;
+        case GL_TEXTURE_SPARSE_ARB:
+            return params[0] == GL_FALSE || params[0] == GL_TRUE;
+        case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
+            // Negative values raise INVALID_VALUE in GLContext so the
+            // dispatch-level validator does not misclassify them as
+            // INVALID_ENUM.
+            return true;
         // GL 4.6 §8.11 storage-state pnames — read-only, valid for
         // GetTexParameter* but SET paths must reject with INVALID_ENUM.
         // CTS texture_border_clamp.texparameteri_errors asserts this.
@@ -1254,6 +1267,7 @@ bool validateTextureParameterValues(GLenum pname, const GLint* params) {
         case GL_TEXTURE_VIEW_NUM_LEVELS:
         case GL_TEXTURE_VIEW_NUM_LAYERS:
         case GL_TEXTURE_TARGET:
+        case GL_NUM_SPARSE_LEVELS_ARB:
             return false;
         default:
             return false;
@@ -3628,6 +3642,25 @@ void APIENTRY glTexStorage3DMultisample(GLenum target, GLsizei samples, GLenum i
     if (context->texStorageMultisample(target, samples, internalformat, width, height, depth, fixedsamplelocations)) {
         markTextureFunction(FunctionId::glTexStorage3DMultisample, "3D multisample immutable texture storage is live.");
         Runtime::shared().recordBootstrapTrace("glTexStorage3DMultisample(" + std::to_string(width) + "x" + std::to_string(height) + "x" + std::to_string(depth) + ", " + std::to_string(samples) + " samples)");
+    }
+}
+
+void APIENTRY glTexPageCommitmentARB(GLenum target,
+                                     GLint level,
+                                     GLint xoffset,
+                                     GLint yoffset,
+                                     GLint zoffset,
+                                     GLsizei width,
+                                     GLsizei height,
+                                     GLsizei depth,
+                                     GLboolean commit) {
+    auto* context = requireCurrentContext("glTexPageCommitmentARB");
+    if (context == nullptr) {
+        return;
+    }
+    if (context->texPageCommitment(target, level, xoffset, yoffset, zoffset, width, height, depth, commit)) {
+        markTextureFunction(FunctionId::glTexPageCommitmentARB,
+                            "ARB_sparse_texture commitment scaffold reached; Metal sparse mapping deferred.");
     }
 }
 
@@ -8247,6 +8280,12 @@ void APIENTRY glTextureParameterIiv(GLuint texture, GLenum pname, const GLint* p
 }
 void APIENTRY glTextureParameterIuiv(GLuint texture, GLenum pname, const GLuint* params) {
     DSA_TEX_FN(glTextureParameterIuiv, textureParameterIuiv(texture, pname, params))
+}
+void APIENTRY glTexturePageCommitmentEXT(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit) {
+    auto* ctx = requireCurrentContext("glTexturePageCommitmentEXT");
+    if (!ctx) return;
+    if (!ctx->texturePageCommitment(texture, level, xoffset, yoffset, zoffset, width, height, depth, commit)) return;
+    markTextureFunction(FunctionId::glTexturePageCommitmentEXT, "DSA sparse commitment scaffold reached; Metal sparse mapping deferred.");
 }
 void APIENTRY glGetTextureParameterfv(GLuint texture, GLenum pname, GLfloat* params) {
     DSA_TEX_FN(glGetTextureParameterfv, getTextureParameterfv(texture, pname, params))

@@ -1001,6 +1001,20 @@ bool isTextureTarget(GLenum target) {
     }
 }
 
+bool isSparseTextureAllocationTarget(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_RECTANGLE:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool isSupportedInternalTextureFormat(const GLCapabilities& caps, GLenum internalFormat) {
     // Accept the unsized "named color" formats that desktop GL 4.6 spec
     // still considers valid as internal-format aliases on texture
@@ -1722,6 +1736,10 @@ static bool isValidTexParameterEnumValue(GLenum pname, GLint v) {
                    v == GL_ALWAYS || v == GL_NEVER;
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return v == GL_DEPTH_COMPONENT || v == GL_STENCIL_INDEX;
+        case GL_TEXTURE_SPARSE_ARB:
+            return v == GL_FALSE || v == GL_TRUE;
+        case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
+            return true;
         case GL_TEXTURE_SWIZZLE_R:
         case GL_TEXTURE_SWIZZLE_G:
         case GL_TEXTURE_SWIZZLE_B:
@@ -1827,6 +1845,12 @@ bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const
             return true;
         case GL_TEXTURE_MAX_ANISOTROPY:
             params.maxAnisotropy = static_cast<GLfloat>(values[0]);
+            return true;
+        case GL_TEXTURE_SPARSE_ARB:
+            params.sparse = values[0];
+            return true;
+        case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
+            params.virtualPageSizeIndex = values[0];
             return true;
         default:
             return false;
@@ -1950,6 +1974,12 @@ bool getTextureParameterInteger(const GLTextureParameters& params, GLenum pname,
             return true;
         case GL_TEXTURE_MAX_ANISOTROPY:
             values[0] = static_cast<GLint>(params.maxAnisotropy);
+            return true;
+        case GL_TEXTURE_SPARSE_ARB:
+            values[0] = params.sparse;
+            return true;
+        case GL_VIRTUAL_PAGE_SIZE_INDEX_ARB:
+            values[0] = params.virtualPageSizeIndex;
             return true;
         default:
             return false;
@@ -14947,6 +14977,10 @@ bool GLContext::texStorage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (object->params.sparse == GL_TRUE) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
 
     object->desc.target = target;
     object->desc.internalFormat = internalformat;
@@ -15083,6 +15117,10 @@ bool GLContext::texStorageMultisample(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (object->params.sparse == GL_TRUE) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
 
     // Clamp sample count to Metal maximum (typically 4 on Apple Silicon).
     GLsizei clampedSamples = std::min<GLsizei>(samples, 4);
@@ -15117,6 +15155,76 @@ bool GLContext::texStorageMultisample(
         return false;
     }
     return true;
+}
+
+static bool validateSparseCommitmentRequest(GLContext* ctx,
+                                            const GLTextureObject& object,
+                                            GLint level,
+                                            GLint xoffset,
+                                            GLint yoffset,
+                                            GLint zoffset,
+                                            GLsizei width,
+                                            GLsizei height,
+                                            GLsizei depth) {
+    if (level < 0 || xoffset < 0 || yoffset < 0 || zoffset < 0 ||
+        width < 0 || height < 0 || depth < 0) {
+        ctx->pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!object.desc.immutable || object.params.sparse != GL_TRUE) {
+        ctx->pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    // Dispatch #1 deliberately stops before Metal sparse storage creation.
+    // A texture cannot have real sparse page mappings yet, so commitment is
+    // wired for loader/validation reachability but fails before mutating data.
+    ctx->pushError(GL_INVALID_OPERATION);
+    return false;
+}
+
+bool GLContext::texPageCommitment(GLenum target,
+                                  GLint level,
+                                  GLint xoffset,
+                                  GLint yoffset,
+                                  GLint zoffset,
+                                  GLsizei width,
+                                  GLsizei height,
+                                  GLsizei depth,
+                                  GLboolean commit) {
+    (void)commit;
+    if (!isSparseTextureAllocationTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    GLTextureObject* object = impl_->currentTexture(target);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    return validateSparseCommitmentRequest(this, *object, level, xoffset, yoffset, zoffset, width, height, depth);
+}
+
+bool GLContext::texturePageCommitment(GLuint texture,
+                                      GLint level,
+                                      GLint xoffset,
+                                      GLint yoffset,
+                                      GLint zoffset,
+                                      GLsizei width,
+                                      GLsizei height,
+                                      GLsizei depth,
+                                      GLboolean commit) {
+    (void)commit;
+    GLTextureObject* object = impl_->objects->textures().get(texture);
+    if (object == nullptr || !object->instantiated) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    const GLenum target = object->target != 0 ? object->target : GL_TEXTURE_2D;
+    if (!isSparseTextureAllocationTarget(target)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    return validateSparseCommitmentRequest(this, *object, level, xoffset, yoffset, zoffset, width, height, depth);
 }
 
 // GL 4.6 Table 8.12 — sized internal formats allowed for
@@ -15274,6 +15382,15 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
     // CTS's gluStateReset because its reset sequence never touches
     // the buffer / MS targets with disallowed pnames.
     if (params != nullptr) {
+        if (pname == GL_VIRTUAL_PAGE_SIZE_INDEX_ARB && params[0] < 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (pname == GL_TEXTURE_SPARSE_ARB && params[0] == GL_TRUE &&
+            !isSparseTextureAllocationTarget(target)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
         // (a) Negative BASE_LEVEL / MAX_LEVEL → INVALID_VALUE.
         if ((pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
             && params[0] < 0) {
@@ -15376,6 +15493,11 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if ((pname == GL_TEXTURE_SPARSE_ARB || pname == GL_VIRTUAL_PAGE_SIZE_INDEX_ARB) &&
+        object->desc.immutable) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     if (!setTextureParameterInteger(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
         return false;
@@ -15421,6 +15543,20 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
     // GL 4.6 §8.10 target-aware validation runs FIRST — see
     // texParameterInteger for the rationale.
     if (params != nullptr) {
+        if (!std::isfinite(params[0])) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (pname == GL_VIRTUAL_PAGE_SIZE_INDEX_ARB && params[0] < 0.0f) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+        if (pname == GL_TEXTURE_SPARSE_ARB &&
+            static_cast<GLint>(params[0]) == GL_TRUE &&
+            !isSparseTextureAllocationTarget(target)) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
         if ((pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
             && params[0] < 0.0f) {
             pushError(GL_INVALID_VALUE);
@@ -15497,6 +15633,11 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if ((pname == GL_TEXTURE_SPARSE_ARB || pname == GL_VIRTUAL_PAGE_SIZE_INDEX_ARB) &&
+        object->desc.immutable) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     if (!setTextureParameterFloat(object->params, pname, params)) {
         pushError(params == nullptr ? GL_INVALID_VALUE : GL_INVALID_ENUM);
         return false;
@@ -15526,6 +15667,7 @@ bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* param
             case GL_TEXTURE_VIEW_MIN_LAYER:
             case GL_TEXTURE_VIEW_NUM_LEVELS:
             case GL_TEXTURE_VIEW_NUM_LAYERS:
+            case GL_NUM_SPARSE_LEVELS_ARB:
                 if (params) *params = 0;
                 return true;
             case GL_TEXTURE_TARGET:
@@ -15559,6 +15701,9 @@ bool GLContext::getTexParameterInteger(GLenum target, GLenum pname, GLint* param
             return true;
         case GL_TEXTURE_VIEW_NUM_LAYERS:
             if (params) *params = object->desc.layers > 0 ? object->desc.layers : 1;
+            return true;
+        case GL_NUM_SPARSE_LEVELS_ARB:
+            if (params) *params = object->desc.sparseLevels;
             return true;
         case GL_TEXTURE_TARGET:
             if (params) *params = static_cast<GLint>(object->target != 0 ? object->target : target);
@@ -15612,6 +15757,7 @@ bool GLContext::getTexParameterFloat(GLenum target, GLenum pname, GLfloat* param
         case GL_TEXTURE_VIEW_NUM_LEVELS:
         case GL_TEXTURE_VIEW_NUM_LAYERS:
         case GL_TEXTURE_TARGET:
+        case GL_NUM_SPARSE_LEVELS_ARB:
         case GL_IMAGE_FORMAT_COMPATIBILITY_TYPE: {
             GLint ival = 0;
             if (!getTexParameterInteger(target, pname, &ival)) {
@@ -37112,6 +37258,23 @@ bool GLContext::drawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLu
 // GL 4.2/4.3 — Internal Format Query
 // ---------------------------------------------------------------------------
 
+static MTLSize sparsePageSizeForFormat(id<MTLDevice> device, GLenum target, GLenum internalformat) {
+    if (device == nil || !isSparseTextureAllocationTarget(target)) {
+        return MTLSizeMake(0, 0, 0);
+    }
+    const MTLPixelFormat pixelFormat = metalRenderbufferFormat(internalformat);
+    if (pixelFormat == MTLPixelFormatInvalid) {
+        return MTLSizeMake(0, 0, 0);
+    }
+    MTLSize tile = [device sparseTileSizeWithTextureType:metalTextureTypeForTarget(target)
+                                             pixelFormat:pixelFormat
+                                             sampleCount:1];
+    if (tile.width == 0 || tile.height == 0) {
+        return MTLSizeMake(0, 0, 0);
+    }
+    return MTLSizeMake(tile.width, tile.height, std::max<NSUInteger>(tile.depth, 1));
+}
+
 bool GLContext::getInternalformativ(GLenum target, GLenum internalformat, GLenum pname, GLsizei count, GLint* params) {
     if (count < 0 || params == nullptr) {
         pushError(GL_INVALID_VALUE);
@@ -37126,6 +37289,31 @@ bool GLContext::getInternalformativ(GLenum target, GLenum internalformat, GLenum
     // on the device, rather than returning GL_FULL_SUPPORT unconditionally.
     std::optional<GLFormatCapability> capability = impl_->capabilities->format(internalformat);
     switch (pname) {
+        case GL_NUM_VIRTUAL_PAGE_SIZES_ARB: {
+            const MTLSize tile = sparsePageSizeForFormat(impl_->device, target, internalformat);
+            params[0] = (tile.width > 0 && capability.has_value()) ? 1 : 0;
+            return true;
+        }
+        case GL_VIRTUAL_PAGE_SIZE_X_ARB:
+        case GL_VIRTUAL_PAGE_SIZE_Y_ARB:
+        case GL_VIRTUAL_PAGE_SIZE_Z_ARB: {
+            for (GLsizei i = 0; i < count; ++i) {
+                params[i] = 0;
+            }
+            if (!capability.has_value()) {
+                return true;
+            }
+            const MTLSize tile = sparsePageSizeForFormat(impl_->device, target, internalformat);
+            if (tile.width == 0) {
+                return true;
+            }
+            const NSUInteger value =
+                (pname == GL_VIRTUAL_PAGE_SIZE_X_ARB) ? tile.width :
+                (pname == GL_VIRTUAL_PAGE_SIZE_Y_ARB) ? tile.height :
+                                                        tile.depth;
+            params[0] = static_cast<GLint>(value);
+            return true;
+        }
         case GL_NUM_SAMPLE_COUNTS:
             params[0] = 3; // Metal typically supports 1, 2, 4 samples
             return true;

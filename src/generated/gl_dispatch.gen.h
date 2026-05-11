@@ -663,6 +663,8 @@ struct GLDispatchTable {
     PFNGLMULTIDRAWARRAYSINDIRECTCOUNTPROC glMultiDrawArraysIndirectCount = nullptr;
     PFNGLMULTIDRAWELEMENTSINDIRECTCOUNTPROC glMultiDrawElementsIndirectCount = nullptr;
     PFNGLPOLYGONOFFSETCLAMPPROC glPolygonOffsetClamp = nullptr;
+    PFNGLTEXPAGECOMMITMENTARBPROC glTexPageCommitmentARB = nullptr;
+    PFNGLTEXTUREPAGECOMMITMENTEXTPROC glTexturePageCommitmentEXT = nullptr;
 };
 
 }  // namespace appgl

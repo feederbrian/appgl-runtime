@@ -570,6 +570,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     GLint64 maxUniformBlockSize = 64 * 1024;
     GLint64 maxViewportDimension = 8192;
     GLint64 maxBufferLength = 256 * 1024 * 1024;
+    bool sparseColorTexturesSupported = false;
 
     if (device != nil) {
         maxBufferLength = static_cast<GLint64>(device.maxBufferLength);
@@ -596,12 +597,32 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
                 break;
             }
         }
+        // ARB_sparse_texture scaffold. Apple documents sparse color
+        // textures from Apple6 onward; this runtime was empirically probed
+        // on Apple7/M1 Max with sparseTileSizeInBytes=16384 and successful
+        // sparse heap/texture map+unmap. Keep these caps queryable while
+        // holding the extension-string gate until sparse allocation lands.
+        sparseColorTexturesSupported =
+            [device supportsFamily:MTLGPUFamilyApple6] ||
+            [device supportsFamily:MTLGPUFamilyApple7] ||
+            [device supportsFamily:MTLGPUFamilyApple8] ||
+            [device supportsFamily:MTLGPUFamilyApple9] ||
+            [device supportsFamily:MTLGPUFamilyApple10];
     }
 
     integerLimits_[GL_MAX_TEXTURE_SIZE] = maxTextureSize;
     integerLimits_[GL_MAX_CUBE_MAP_TEXTURE_SIZE] = maxTextureSize;
     integerLimits_[GL_MAX_3D_TEXTURE_SIZE] = max3DTextureSize;
     integerLimits_[GL_MAX_ARRAY_TEXTURE_LAYERS] = maxArrayLayers;
+    integerLimits_[GL_MAX_SPARSE_TEXTURE_SIZE_ARB] =
+        sparseColorTexturesSupported ? maxTextureSize : 0;
+    integerLimits_[GL_MAX_SPARSE_3D_TEXTURE_SIZE_ARB] =
+        sparseColorTexturesSupported ? max3DTextureSize : 0;
+    integerLimits_[GL_MAX_SPARSE_ARRAY_TEXTURE_LAYERS_ARB] =
+        sparseColorTexturesSupported ? maxArrayLayers : 0;
+    // Metal reports a mip tail for sparse textures, so conservatively
+    // expose FALSE until dispatch #2 maps tail commitment semantics.
+    integerLimits_[GL_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS_ARB] = 0;
     integerLimits_[GL_MAX_COLOR_ATTACHMENTS] = 8;
     integerLimits_[GL_MAX_DRAW_BUFFERS] = 8;
     // GL 4.6 spec §23.4 floor is 16, but most desktop drivers expose 32

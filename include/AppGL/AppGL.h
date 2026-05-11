@@ -32,7 +32,7 @@ typedef void (*AppGLProc)(void);
  * tables against the AppGL runtime without linking against the generated
  * entry points directly.
  *
- * Resolution is O(log N) across the 657-entry sorted table and does not
+ * Resolution is O(log N) across the generated sorted table and does not
  * require a current AppGL context — the loader pattern wants to run at
  * program startup before any context is made current.
  */

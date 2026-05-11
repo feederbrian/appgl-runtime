@@ -662,6 +662,8 @@ enum class FunctionId : std::size_t {
     glMultiDrawArraysIndirectCount,
     glMultiDrawElementsIndirectCount,
     glPolygonOffsetClamp,
+    glTexPageCommitmentARB,
+    glTexturePageCommitmentEXT,
     Count,
 };
 
@@ -1330,6 +1332,8 @@ inline constexpr GLFunctionMetadata kGLFunctionMetadata[] = {
     {FunctionId::glMultiDrawArraysIndirectCount, "glMultiDrawArraysIndirectCount", "vertex input and drawing", "4.6"},
     {FunctionId::glMultiDrawElementsIndirectCount, "glMultiDrawElementsIndirectCount", "vertex input and drawing", "4.6"},
     {FunctionId::glPolygonOffsetClamp, "glPolygonOffsetClamp", "context and state", "4.6"},
+    {FunctionId::glTexPageCommitmentARB, "glTexPageCommitmentARB", "textures and samplers", "ARB_sparse_texture"},
+    {FunctionId::glTexturePageCommitmentEXT, "glTexturePageCommitmentEXT", "direct state access", "ARB_sparse_texture"},
 };
 
 inline constexpr std::size_t kGLFunctionCount = static_cast<std::size_t>(FunctionId::Count);

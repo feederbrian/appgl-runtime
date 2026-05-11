@@ -4272,6 +4272,39 @@ typedef void(APIENTRY *GLVULKANPROCNV)(void);
 #ifndef GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW
 #define GL_TRANSFORM_FEEDBACK_STREAM_OVERFLOW 0x82ED
 #endif
+#ifndef GL_VIRTUAL_PAGE_SIZE_X_ARB
+#define GL_VIRTUAL_PAGE_SIZE_X_ARB 0x9195
+#endif
+#ifndef GL_VIRTUAL_PAGE_SIZE_Y_ARB
+#define GL_VIRTUAL_PAGE_SIZE_Y_ARB 0x9196
+#endif
+#ifndef GL_VIRTUAL_PAGE_SIZE_Z_ARB
+#define GL_VIRTUAL_PAGE_SIZE_Z_ARB 0x9197
+#endif
+#ifndef GL_MAX_SPARSE_TEXTURE_SIZE_ARB
+#define GL_MAX_SPARSE_TEXTURE_SIZE_ARB 0x9198
+#endif
+#ifndef GL_MAX_SPARSE_3D_TEXTURE_SIZE_ARB
+#define GL_MAX_SPARSE_3D_TEXTURE_SIZE_ARB 0x9199
+#endif
+#ifndef GL_MAX_SPARSE_ARRAY_TEXTURE_LAYERS_ARB
+#define GL_MAX_SPARSE_ARRAY_TEXTURE_LAYERS_ARB 0x919A
+#endif
+#ifndef GL_TEXTURE_SPARSE_ARB
+#define GL_TEXTURE_SPARSE_ARB 0x91A6
+#endif
+#ifndef GL_VIRTUAL_PAGE_SIZE_INDEX_ARB
+#define GL_VIRTUAL_PAGE_SIZE_INDEX_ARB 0x91A7
+#endif
+#ifndef GL_NUM_VIRTUAL_PAGE_SIZES_ARB
+#define GL_NUM_VIRTUAL_PAGE_SIZES_ARB 0x91A8
+#endif
+#ifndef GL_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS_ARB
+#define GL_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS_ARB 0x91A9
+#endif
+#ifndef GL_NUM_SPARSE_LEVELS_ARB
+#define GL_NUM_SPARSE_LEVELS_ARB 0x91AA
+#endif
 
 typedef void (APIENTRYP PFNGLCULLFACEPROC)(GLenum mode);
 typedef void (APIENTRYP PFNGLFRONTFACEPROC)(GLenum mode);
@@ -4930,6 +4963,8 @@ typedef void (APIENTRYP PFNGLSPECIALIZESHADERPROC)(GLuint shader, const GLchar *
 typedef void (APIENTRYP PFNGLMULTIDRAWARRAYSINDIRECTCOUNTPROC)(GLenum mode, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
 typedef void (APIENTRYP PFNGLMULTIDRAWELEMENTSINDIRECTCOUNTPROC)(GLenum mode, GLenum type, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
 typedef void (APIENTRYP PFNGLPOLYGONOFFSETCLAMPPROC)(GLfloat factor, GLfloat units, GLfloat clamp);
+typedef void (APIENTRYP PFNGLTEXPAGECOMMITMENTARBPROC)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit);
+typedef void (APIENTRYP PFNGLTEXTUREPAGECOMMITMENTEXTPROC)(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit);
 
 GLAPI void APIENTRY glCullFace(GLenum mode);
 GLAPI void APIENTRY glFrontFace(GLenum mode);
@@ -5588,6 +5623,8 @@ GLAPI void APIENTRY glSpecializeShader(GLuint shader, const GLchar *pEntryPoint,
 GLAPI void APIENTRY glMultiDrawArraysIndirectCount(GLenum mode, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
 GLAPI void APIENTRY glMultiDrawElementsIndirectCount(GLenum mode, GLenum type, const void *indirect, GLintptr drawcount, GLsizei maxdrawcount, GLsizei stride);
 GLAPI void APIENTRY glPolygonOffsetClamp(GLfloat factor, GLfloat units, GLfloat clamp);
+GLAPI void APIENTRY glTexPageCommitmentARB(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit);
+GLAPI void APIENTRY glTexturePageCommitmentEXT(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit);
 
 #ifdef __cplusplus
 }

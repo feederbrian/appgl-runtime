@@ -78,6 +78,44 @@ MANUAL_EXTENSION_COMMANDS = [
     ("glMaxShaderCompilerThreadsKHR", "void", "GLuint count"),
 ]
 
+# Extension commands that are intentionally promoted into the generated
+# public header, dispatch table, entry-point wrappers, function IDs, and
+# proc-address table even though the generator's core-feature walk would not
+# discover them. The real implementation lives in hand-written runtime code
+# and is installed into GLDispatchTable like any core command.
+#
+# This is scaffold-only: adding a command here does not advertise the
+# corresponding extension at runtime. The extension string remains owned by
+# GLCapabilities::initializeExtensions() and kAppGLExtensionList.
+EXTRA_EXTENSION_COMMANDS = [
+    (
+        "glTexPageCommitmentARB",
+        "void",
+        "GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit",
+        "ARB_sparse_texture",
+    ),
+    (
+        "glTexturePageCommitmentEXT",
+        "void",
+        "GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit",
+        "ARB_sparse_texture",
+    ),
+]
+
+EXTRA_EXTENSION_ENUMS = [
+    ("GL_VIRTUAL_PAGE_SIZE_X_ARB", "0x9195"),
+    ("GL_VIRTUAL_PAGE_SIZE_Y_ARB", "0x9196"),
+    ("GL_VIRTUAL_PAGE_SIZE_Z_ARB", "0x9197"),
+    ("GL_MAX_SPARSE_TEXTURE_SIZE_ARB", "0x9198"),
+    ("GL_MAX_SPARSE_3D_TEXTURE_SIZE_ARB", "0x9199"),
+    ("GL_MAX_SPARSE_ARRAY_TEXTURE_LAYERS_ARB", "0x919A"),
+    ("GL_TEXTURE_SPARSE_ARB", "0x91A6"),
+    ("GL_VIRTUAL_PAGE_SIZE_INDEX_ARB", "0x91A7"),
+    ("GL_NUM_VIRTUAL_PAGE_SIZES_ARB", "0x91A8"),
+    ("GL_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS_ARB", "0x91A9"),
+    ("GL_NUM_SPARSE_LEVELS_ARB", "0x91AA"),
+]
+
 # Fixed-function entry points whose silent-stub bodies in
 # gl_fixed_function.gen.cpp must be SUPPRESSED so a hand-written file
 # elsewhere in the runtime can provide the real `extern "C" APIENTRY`
@@ -294,6 +332,30 @@ def extract_command_signature(command: ET.Element) -> dict[str, object]:
     }
 
 
+def make_manual_command_signature(
+    name: str,
+    return_type: str,
+    args_decl: str,
+    introduced_version: str,
+) -> dict[str, object]:
+    params: list[dict[str, str]] = []
+    if args_decl != "void":
+        for raw_decl in args_decl.split(","):
+            declaration = normalize_c_decl(raw_decl)
+            match = IDENTIFIER_RE.search(declaration)
+            if match is None:
+                raise RuntimeError(f"Manual command {name} has an unparsable argument: {raw_decl}")
+            params.append({"decl": declaration, "name": match.group(0)})
+    return {
+        "name": name,
+        "return_type": return_type,
+        "args_decl": args_decl,
+        "params": params,
+        "pfn": f"PFN{name.upper()}PROC",
+        "introduced_version": introduced_version,
+    }
+
+
 def parse_registry() -> tuple[
     ET.Element,
     list[dict[str, object]],
@@ -375,6 +437,13 @@ def parse_registry() -> tuple[
         signature = extract_command_signature(commands_by_name[name])
         signature["introduced_version"] = feature_version_string(feature_name)
         commands.append(signature)
+
+    command_names = {command["name"] for command in commands}
+    for name, return_type, args_decl, introduced_version in EXTRA_EXTENSION_COMMANDS:
+        if name in command_names:
+            continue
+        commands.append(make_manual_command_signature(name, return_type, args_decl, introduced_version))
+        command_names.add(name)
 
     core_names = set(ordered_commands.keys())
     fixed_function_names = all_feature_commands - core_names
@@ -511,6 +580,10 @@ def parse_registry() -> tuple[
             )
         signature = extract_command_signature(command)
         fixed_function.append(signature)
+
+    for enum_name, enum_value in EXTRA_EXTENSION_ENUMS:
+        ordered_enums.pop(enum_name, None)
+        ordered_enums[enum_name] = enum_value
 
     enums = [{"name": name, "value": value} for name, value in ordered_enums.items()]
     return (
@@ -1356,7 +1429,7 @@ def main() -> None:
     MANIFEST_JSON.write_text(generate_manifest(commands))
 
     print(
-        f"Generated {len(commands)} OpenGL 4.6 core entry points, "
+        f"Generated {len(commands)} entry points, "
         f"{len(aliases)} EXT/ARB alias forwarders, "
         f"{len(fixed_function)} fixed-function stubs."
     )

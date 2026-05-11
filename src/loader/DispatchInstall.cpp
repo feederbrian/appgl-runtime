@@ -81,6 +81,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glTexStorage3D = &impl::glTexStorage3D;
     dispatch.glTexStorage2DMultisample = &impl::glTexStorage2DMultisample;
     dispatch.glTexStorage3DMultisample = &impl::glTexStorage3DMultisample;
+    dispatch.glTexPageCommitmentARB = &impl::glTexPageCommitmentARB;
     dispatch.glTexBufferRange = &impl::glTexBufferRange;
     dispatch.glPixelStorei = &impl::glPixelStorei;
     dispatch.glPixelStoref = &impl::glPixelStoref;
@@ -407,6 +408,8 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     // GL 4.2/4.3 — internal format query.
     dispatch.glGetInternalformativ = &impl::glGetInternalformativ;
     dispatch.glGetInternalformati64v = &impl::glGetInternalformati64v;
+    coverage.markImplemented(FunctionId::glTexPageCommitmentARB,
+                             "ARB_sparse_texture commitment entry point is wired; Metal sparse mapping deferred.");
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
@@ -875,6 +878,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glTextureParameteriv = &impl::glTextureParameteriv;
     dispatch.glTextureParameterIiv = &impl::glTextureParameterIiv;
     dispatch.glTextureParameterIuiv = &impl::glTextureParameterIuiv;
+    dispatch.glTexturePageCommitmentEXT = &impl::glTexturePageCommitmentEXT;
     dispatch.glGetTextureParameterfv = &impl::glGetTextureParameterfv;
     dispatch.glGetTextureParameteriv = &impl::glGetTextureParameteriv;
     dispatch.glGetTextureParameterIiv = &impl::glGetTextureParameterIiv;
@@ -896,6 +900,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
                     FunctionId::glTextureParameterf, FunctionId::glTextureParameterfv,
                     FunctionId::glTextureParameteri, FunctionId::glTextureParameteriv,
                     FunctionId::glTextureParameterIiv, FunctionId::glTextureParameterIuiv,
+                    FunctionId::glTexturePageCommitmentEXT,
                     FunctionId::glGetTextureParameterfv, FunctionId::glGetTextureParameteriv,
                     FunctionId::glGetTextureParameterIiv, FunctionId::glGetTextureParameterIuiv,
                     FunctionId::glGetTextureLevelParameterfv, FunctionId::glGetTextureLevelParameteriv,

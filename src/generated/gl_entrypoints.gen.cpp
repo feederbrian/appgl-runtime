@@ -5873,3 +5873,21 @@ extern "C" void APIENTRY glPolygonOffsetClamp(GLfloat factor, GLfloat units, GLf
     }
     appgl::unimplementedReturn<void>(appgl::FunctionId::glPolygonOffsetClamp, "glPolygonOffsetClamp");
 }
+
+extern "C" void APIENTRY glTexPageCommitmentARB(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glTexPageCommitmentARB, "glTexPageCommitmentARB");
+    if (auto fn = appgl::Runtime::shared().dispatch().glTexPageCommitmentARB) {
+        fn(target, level, xoffset, yoffset, zoffset, width, height, depth, commit);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glTexPageCommitmentARB, "glTexPageCommitmentARB");
+}
+
+extern "C" void APIENTRY glTexturePageCommitmentEXT(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glTexturePageCommitmentEXT, "glTexturePageCommitmentEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glTexturePageCommitmentEXT) {
+        fn(texture, level, xoffset, yoffset, zoffset, width, height, depth, commit);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glTexturePageCommitmentEXT, "glTexturePageCommitmentEXT");
+}

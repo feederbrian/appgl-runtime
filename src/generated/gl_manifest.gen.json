@@ -5919,6 +5919,24 @@
       "firstPassingTestId": "",
       "firstPassingBenchmarkId": "",
       "notes": ""
+    },
+    {
+      "name": "glTexPageCommitmentARB",
+      "subsystem": "textures and samplers",
+      "introducedVersion": "ARB_sparse_texture",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glTexturePageCommitmentEXT",
+      "subsystem": "direct state access",
+      "introducedVersion": "ARB_sparse_texture",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
     }
   ]
 }
