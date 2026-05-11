@@ -8,6 +8,7 @@
 #include "AppGLRuntime.h"
 
 #include "../context/GLContext.h"
+#include "../extensions/ExtensionRegistry.h"
 #include "../state/GLStateTracker.h"
 #include "../debug/CoverageStore.h"
 #include "../generated/gl_dispatch.gen.h"
@@ -1455,153 +1456,14 @@ static void APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat de
     context->clearNamedFramebufferfi(context->boundDrawFramebuffer(), buffer, drawbuffer, depth, stencil);
 }
 
-// AppGL extension surface as exposed to host loaders. GL 3.0+ replaced the
-// monolithic glGetString(GL_EXTENSIONS) blob with an indexed query, and
-// loaders like GLAD enumerate this list to populate per-extension bool flags
-// (GLAD_GL_ARB_*, GLAD_GL_EXT_*). The list must therefore include every
-// extension the host engine probes — even ones that are core in 4.6, because
-// loaders don't auto-promote ARB/EXT flags from the parsed version. Keep in
-// sync with GLCapabilities::initializeExtensions() and the GL_NUM_EXTENSIONS
-// integer limit reported there.
-static const char* const kAppGLExtensionList[] = {
-    "GL_KHR_debug",
-    "GL_ARB_debug_output",
-    "GL_ARB_multitexture",
-    "GL_ARB_texture_env_combine",
-    "GL_ARB_texture_compression",
-    "GL_ARB_texture_float",
-    "GL_ARB_texture_non_power_of_two",
-    "GL_ARB_texture_query_lod",
-    "GL_ARB_framebuffer_object",
-    "GL_EXT_framebuffer_object",
-    "GL_EXT_framebuffer_multisample",
-    "GL_EXT_texture_filter_anisotropic",
-    "GL_ARB_vertex_shader",
-    "GL_ARB_fragment_shader",
-    "GL_ARB_geometry_shader4",
-    "GL_ARB_uniform_buffer_object",
-    // Phase 8X Group 4d follow-up¹⁶ — `glMapBufferRange` /
-    // `glUnmapBuffer` / `glFlushMappedBufferRange` are fully implemented
-    // in `GLContext::mapBufferRange` (validation, access-flag checks,
-    // CPU-visible Metal buffer pointer return, shadow→Metal sync on
-    // unmap), but the extension string was never advertised. BAR's
-    // `VBO::IsSupported(GL_UNIFORM_BUFFER)` early-returns when
-    // `GLAD_GL_ARB_map_buffer_range == 0`, which made spring's
-    // `UniformConstants::Init` bail at startup with the misleading
-    // "Important OpenGL extensions are not supported" log even though
-    // every named extension on that line was actually live. Advertising
-    // here flips the GLAD bool so spring's UBO path stops bailing.
-    "GL_ARB_map_buffer_range",
-    // Phase 8X Group 4d follow-up²² — BAR's `VBO::IsSupported(GLenum)`
-    // (`rts/Rendering/GL/VBO.cpp:38`) dispatches buffer-target probes
-    // through per-target `GLAD_GL_*_buffer_object` bools, and
-    // `LuaVAOs::LuaVAOs()` (`rts/Lua/LuaVAO.cpp:89`) logs a compound
-    // "Important OpenGL extensions are not supported" line listing
-    // `ARB_vertex_buffer_object` / `ARB_draw_elements_base_vertex` when
-    // either flag is zero. Before fw²² none of the four strings below
-    // were advertised, so Recoil's `GL_ARRAY_BUFFER`/
-    // `GL_ELEMENT_ARRAY_BUFFER` path short-circuited inside
-    // `VBO::IsSupported` and `LuaVBOs::CheckAndReportSupported` raised
-    // 74 errors at startup on the fw²¹ smoke run — gating BAR's entire
-    // HUD widget stack behind Lua VBOs. Advertising all four here
-    // flips every GLAD bool that BAR's buffer-support matrix reads:
-    //
-    //   `GL_ARB_vertex_buffer_object`        — GL_ARRAY_BUFFER,
-    //                                          GL_ELEMENT_ARRAY_BUFFER
-    //   `GL_EXT_pixel_buffer_object`         — GL_PIXEL_PACK_BUFFER,
-    //                                          GL_PIXEL_UNPACK_BUFFER
-    //                                          (EXT, not ARB — GLAD's
-    //                                          `GLAD_GL_EXT_pixel_buffer_object`
-    //                                          is the specific flag
-    //                                          VBO.cpp:43 reads; the
-    //                                          ARB spelling would not
-    //                                          flip it)
-    //   `GL_ARB_copy_buffer`                 — GL_COPY_READ_BUFFER,
-    //                                          GL_COPY_WRITE_BUFFER
-    //   `GL_ARB_draw_elements_base_vertex`   — silences the LuaVAO
-    //                                          compound error log line
-    //                                          and leaves base-vertex
-    //                                          paths free to dispatch
-    //                                          (AppGL already accepts
-    //                                          `glDrawElementsBaseVertex`
-    //                                          at the dispatch layer).
-    //
-    // The underlying entry points are either core in GL 3.3+ (VBO,
-    // copy_buffer, draw_elements_base_vertex) or implemented via the
-    // same shadow-buffer path that the ARB map_buffer_range family
-    // already uses (PBO). No new code path is added; only the
-    // discoverability string table is widened.
-    "GL_ARB_vertex_buffer_object",
-    "GL_ARB_copy_buffer",
-    "GL_ARB_draw_elements_base_vertex",
-    "GL_EXT_pixel_buffer_object",
-    "GL_ARB_shader_storage_buffer_object",
-    "GL_ARB_explicit_attrib_location",
-    "GL_ARB_explicit_uniform_location",
-    "GL_ARB_buffer_storage",
-    "GL_ARB_multi_draw_indirect",
-    "GL_ARB_clip_control",
-    "GL_ARB_seamless_cube_map",
-    "GL_ARB_conservative_depth",
-    "GL_ARB_timer_query",
-    "GL_ARB_multisample",
-    "GL_ARB_vertex_array_object",
-    "GL_ARB_instanced_arrays",
-    "GL_ARB_draw_instanced",
-    "GL_ARB_base_instance",
-    "GL_ARB_sampler_objects",
-    "GL_ARB_texture_storage",
-    // Sprint 19: advertise base sparse textures after Metal heap/page
-    // mapping covered CTS base allocation and commitment across all base
-    // sparse targets and formats. sparse_texture2/clamp remain gated.
-    "GL_ARB_sparse_texture",
-    "GL_ARB_texture_swizzle",
-    "GL_ARB_separate_shader_objects",
-    "GL_ARB_program_interface_query",
-    "GL_ARB_shading_language_420pack",
-    "GL_ARB_shading_language_packing",
-    // Sprint 19: base GL_EXT_fragment_shading_rate is backed by the Metal
-    // rasterization-rate map path. Primitive, attachment, non-trivial
-    // combiner, and multiview surfaces remain separately gated.
-    "GL_EXT_fragment_shading_rate",
-    // CKPT157 (Sprint 14 Day 4): GL_ARB_texture_view — re-enabled after
-    // CKPT156 Day 3 deferral. The Metal-side per-target mipmap clamp
-    // (MTLTextureType1D/1DArray/TextureBuffer → mipmapLevelCount=1) now
-    // lives in `replaceMetalTexture` (GLContext.mm). CTS texture_view.*
-    // gates use honest tcu::NotSupportedError so no Extension-advertisement-
-    // paradox risk (CKPT155 audit). Functional impl: glTextureView records
-    // view metadata + uses Metal newTextureViewWithPixelFormat: backing.
-    "GL_ARB_texture_view",
-    // CKPT146 (Sprint 13 Day 10): GL_ARB_gpu_shader5 — extension's
-    // functional surface (precise qualifier, fma(), sampler array dynamic
-    // indexing) is already live; advertising flips the GLAD bool that
-    // gates the gpu_shader5_gl.* tests' early-bail check.
-    "GL_ARB_gpu_shader5",
-    // GL_ARB_compute_shader DELIBERATELY NOT ADVERTISED — CKPT155 (Sprint
-    // 14 Day 2) characterized the advertisement: 1 NS→Fail (basic-allFormats-
-    // loadStoreComputeStage now exercises Read() and image data comes back
-    // [0,0,0,0]) plus 2 deceptive-Pass→Fail regressions (basic-allTargets-
-    // {atomicCS,loadStoreCS} skipped via `return NO_ERROR` which CTS counts
-    // as Pass; advertising forces them to run RunStage(4) which hits the
-    // same image-data-zeroes bug on non-2D targets — TEXTURE_CUBE_MAP_ARRAY
-    // / TEXTURE_3D / TEXTURE_1D_ARRAY image bindings drop their writes).
-    // Net delta: −2 Pass / +3 Fail / −1 NS. Re-enable once compute-stage
-    // image load/store on non-2D targets is fixed (likely a missing usage
-    // bit + view/face-aware MTLTexture binding in resolveImageBindings for
-    // compute, similar to Session 13 bd39bb9 but for cube/array/3D).
-    // GL_ARB_parallel_shader_compile / GL_KHR_parallel_shader_compile
-    // — see GLCapabilities.mm for rationale (synchronous-compile
-    // no-op implementation satisfies the CTS query surface).
-    "GL_ARB_parallel_shader_compile",
-    "GL_KHR_parallel_shader_compile",
-};
-static constexpr GLuint kAppGLExtensionCount =
-    static_cast<GLuint>(sizeof(kAppGLExtensionList) / sizeof(kAppGLExtensionList[0]));
+// AppGL extension advertising is centralized in ExtensionRegistry so the
+// monolithic blob, indexed list, and GL_NUM_EXTENSIONS count share one
+// Decision H4 source of truth.
 
 static const GLubyte * APIENTRY glGetStringi(GLenum name, GLuint index) {
     if (name == 0x1F03 /* GL_EXTENSIONS */) {
-        if (index < kAppGLExtensionCount) {
-            return reinterpret_cast<const GLubyte*>(kAppGLExtensionList[index]);
+        if (const char* extension = extensions::ExtensionRegistry::extensionAt(index)) {
+            return reinterpret_cast<const GLubyte*>(extension);
         }
         return nullptr;
     }

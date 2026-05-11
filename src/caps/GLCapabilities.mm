@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "../extensions/ExtensionRegistry.h"
 #include "../shader/ShaderTranslator.h"
 
 // Compat-profile internal format enums. These were removed from the
@@ -67,11 +68,10 @@ namespace appgl {
 GLCapabilities::GLCapabilities(void* metalDevice) {
     initializeFormatTable(metalDevice);
     initializeLimits(metalDevice);
-    initializeExtensions();
 }
 
 const std::string& GLCapabilities::extensionString() const {
-    return extensions_;
+    return extensions::ExtensionRegistry::extensionString();
 }
 
 bool GLCapabilities::queryInteger(GLenum pname, GLint* out) const {
@@ -85,6 +85,10 @@ bool GLCapabilities::queryInteger(GLenum pname, GLint* out) const {
         }
         out[0] = static_cast<GLint>(value->second);
         out[1] = static_cast<GLint>(value->second);
+        return true;
+    }
+    if (pname == GL_NUM_EXTENSIONS) {
+        *out = static_cast<GLint>(extensions::ExtensionRegistry::extensionCount());
         return true;
     }
     // GL 4.6 §22.2 — {min,max} float-pair pnames are also queryable
@@ -143,6 +147,10 @@ bool GLCapabilities::queryInteger(GLenum pname, GLint* out) const {
 bool GLCapabilities::queryInteger64(GLenum pname, GLint64* out) const {
     if (out == nullptr) {
         return false;
+    }
+    if (pname == GL_NUM_EXTENSIONS) {
+        *out = static_cast<GLint64>(extensions::ExtensionRegistry::extensionCount());
+        return true;
     }
     if (pname == GL_MAX_VIEWPORT_DIMS) {
         const auto value = integerLimits_.find(GL_MAX_VIEWPORT_DIMS);
@@ -701,34 +709,9 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_MAX_DEBUG_GROUP_STACK_DEPTH] = 64;
     integerLimits_[GL_MAX_LABEL_LENGTH] = 1024;
     integerLimits_[GL_MIN_MAP_BUFFER_ALIGNMENT] = 64;
-    // GL 3.0+ core: glGetIntegerv(GL_NUM_EXTENSIONS) is the canonical way to
-    // probe the indexed-extension list. Loaders such as GLAD rely on this
-    // returning a non-zero count before they will populate the extension
-    // table; without it they treat the context as "no GL symbols visible".
-    // Bumped from 37 → 38 in Phase 8X Group 4d follow-up¹⁶ when
-    // GL_ARB_map_buffer_range was added to both extension tables.
-    // Bumped from 38 → 42 in Phase 8X Group 4d follow-up²² when the
-    // buffer-family ARB/EXT aliases (vertex_buffer_object, copy_buffer,
-    // draw_elements_base_vertex, EXT_pixel_buffer_object) were added so
-    // GLAD's string-matched has_ext() flips Recoil's VBO::IsSupported
-    // gates from their default-false state.
-    // Bumped from 42 → 44 for GL_ARB_parallel_shader_compile +
-    // GL_KHR_parallel_shader_compile. Our implementation is
-    // synchronous (single-threaded shader compile), but advertising
-    // the extension lets CTS `parallel_shader_compile.simple_queries`
-    // and `.max_shader_compile_threads` exercise the API surface.
-    // CKPT146 (Sprint 13 Day 10): bumped 44 → 45 for GL_ARB_gpu_shader5.
-    // CKPT157 (Sprint 14 Day 4): bumped 45 → 46 for GL_ARB_texture_view
-    // (re-enabled after CKPT156 deferral; Metal-side per-target mipmap
-    // clamp implemented in replaceMetalTexture).
-    // Sprint 19: bumped 46 → 47 for base GL_ARB_sparse_texture after CTS
-    // base sparse allocation/commitment passed; sparse_texture2/clamp stay
-    // deliberately unadvertised.
-    // Sprint 19: bumped 47 → 48 for GL_EXT_fragment_shading_rate base
-    // after base API/runtime passed. The primitive subextension remains held
-    // pending a backed primitive combiner path; ShaderTranslator still targets
-    // MSL 2.4 so the fragment shading-rate builtin can emit natively.
-    integerLimits_[GL_NUM_EXTENSIONS] = 48;
+    // GL_NUM_EXTENSIONS is served dynamically by ExtensionRegistry so the
+    // monolithic string, indexed list, and count stay in one Decision H4
+    // source of truth.
     // GL 4.6 SPIR-V extension queries.  The SPIR-V extensions CTS test
     // (KHR-GL46.spirv_extensions.spirv_extensions_queries) calls
     // glGetIntegerv(GL_NUM_SPIR_V_EXTENSIONS) and then iterates with
@@ -1115,115 +1098,6 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
 
     // Sync / server wait timeout (int64).
     integerLimits_[GL_MAX_SERVER_WAIT_TIMEOUT] = 0;
-}
-
-void GLCapabilities::initializeExtensions() {
-    // Advertise the full extension set that the AppGL surface emulates on
-    // top of Metal. GL loaders (GLAD in particular) wire their per-extension
-    // bool flags from the strings returned by glGetStringi(GL_EXTENSIONS, i),
-    // so this list must include every extension the host engine probes —
-    // even the ones that are core in 4.6, because loaders don't auto-promote
-    // ARB/EXT flags from the version number.
-    //
-    // Keep in sync with kAppGLExtensionList in AppGLGroup8.cpp and the
-    // GL_NUM_EXTENSIONS limit above.
-    extensions_ =
-        "GL_KHR_debug "
-        "GL_ARB_debug_output "
-        "GL_ARB_multitexture "
-        "GL_ARB_texture_env_combine "
-        "GL_ARB_texture_compression "
-        "GL_ARB_texture_float "
-        "GL_ARB_texture_non_power_of_two "
-        "GL_ARB_texture_query_lod "
-        "GL_ARB_framebuffer_object "
-        "GL_EXT_framebuffer_object "
-        "GL_EXT_framebuffer_multisample "
-        "GL_EXT_texture_filter_anisotropic "
-        "GL_ARB_vertex_shader "
-        "GL_ARB_fragment_shader "
-        "GL_ARB_geometry_shader4 "
-        "GL_ARB_uniform_buffer_object "
-        // Phase 8X Group 4d follow-up¹⁶ — see the matching entry and
-        // the longer comment in `kAppGLExtensionList` (AppGLGroup8.cpp).
-        // The `glMapBufferRange` family is implemented; this advertises
-        // the extension so loaders set GLAD_GL_ARB_map_buffer_range = 1.
-        "GL_ARB_map_buffer_range "
-        // Phase 8X Group 4d follow-up²² — buffer-family aliases that
-        // BAR/Recoil's `VBO::IsSupported` gate reads through GLAD's
-        // string-matched `has_ext()`. All four correspond to features
-        // that are either core since GL 2.1/3.1/3.2 or otherwise fully
-        // implemented on the AppGL surface; advertising them here flips
-        // the GLAD bool so Recoil's buffer path stops short-circuiting.
-        // See the matching block in `kAppGLExtensionList` for the full
-        // gate analysis.
-        "GL_ARB_vertex_buffer_object "
-        "GL_ARB_copy_buffer "
-        "GL_ARB_draw_elements_base_vertex "
-        "GL_EXT_pixel_buffer_object "
-        "GL_ARB_shader_storage_buffer_object "
-        "GL_ARB_explicit_attrib_location "
-        "GL_ARB_explicit_uniform_location "
-        "GL_ARB_buffer_storage "
-        "GL_ARB_multi_draw_indirect "
-        "GL_ARB_clip_control "
-        "GL_ARB_seamless_cube_map "
-        "GL_ARB_conservative_depth "
-        "GL_ARB_timer_query "
-        "GL_ARB_multisample "
-        "GL_ARB_vertex_array_object "
-        "GL_ARB_instanced_arrays "
-        "GL_ARB_draw_instanced "
-        "GL_ARB_base_instance "
-        "GL_ARB_sampler_objects "
-        "GL_ARB_texture_storage "
-        // Sprint 19: base sparse texture allocation/commitment is live for
-        // CTS base targets/formats. sparse_texture2/clamp remain gated.
-        "GL_ARB_sparse_texture "
-        "GL_ARB_texture_swizzle "
-        "GL_ARB_separate_shader_objects "
-        "GL_ARB_program_interface_query "
-        "GL_ARB_shading_language_420pack "
-        "GL_ARB_shading_language_packing "
-        // Sprint 19: advertise base fragment shading rate. Primitive,
-        // attachment, non-trivial combiner, and multiview surfaces remain
-        // gated by their own extension/capability checks.
-        "GL_EXT_fragment_shading_rate "
-        // GL_ARB_texture_view — CKPT157 (Sprint 14 Day 4): re-enabled
-        // after CKPT156 deferral. The Metal-side per-target mipmap
-        // clamp (MTLTextureType1D / 1DArray / TextureBuffer →
-        // mipmapLevelCount = 1) now lives in replaceMetalTexture
-        // (GLContext.mm). CTS texture_view.* gates use honest
-        // tcu::NotSupportedError so no Extension-advertisement-paradox
-        // risk (CKPT155 audit). Functional impl: glTextureView records
-        // view metadata + Metal newTextureViewWithPixelFormat: backing.
-        "GL_ARB_texture_view "
-        // GL_ARB_gpu_shader5 — CKPT146 (Sprint 13 Day 10): advertise the
-        // extension for the gpu_shader5_gl.{implicit_conversions,
-        // function_overloading,float_encoding} tests which gate-bail on
-        // !isExtensionSupported("GL_ARB_gpu_shader5"). Functional surface
-        // already in place: gpu_shader5.precise_qualifier passes,
-        // gpu_shader5.fma_accuracy passes, gpu_shader5.sampler_array_indexing
-        // passes. The extension's dynamic-indexing additions align with
-        // GL 4.0 core, which our SPIRV-Cross MSL emit covers.
-        "GL_ARB_gpu_shader5 "
-        // GL_ARB_compute_shader DELIBERATELY NOT ADVERTISED — CKPT155
-        // (Sprint 14 Day 2) found 2 deceptive-Pass→Fail regressions:
-        // basic-allTargets-{atomicCS,loadStoreCS} return NO_ERROR (= Pass)
-        // from their unsupported-skip branch, but advertising forces the
-        // RunStage(4) compute path that fails with [0,0,0,0] image data
-        // for TEXTURE_CUBE_MAP_ARRAY / TEXTURE_3D / TEXTURE_1D_ARRAY
-        // image bindings + GL_INVALID_OPERATION post-test. Re-enable
-        // once compute-stage image load/store on non-2D targets is
-        // implemented (likely view-aware MTLTexture face/slice binding
-        // in resolveImageBindings, sister to Session 13 bd39bb9 for 2D).
-        // GL_ARB_parallel_shader_compile / GL_KHR_parallel_shader_compile —
-        // our compile is synchronous (one thread) so the API surface is a
-        // spec-correct no-op: MAX_SHADER_COMPILER_THREADS tracks whatever
-        // glMaxShaderCompilerThreads sets, and COMPLETION_STATUS on a
-        // shader/program is always GL_TRUE (compile already finished).
-        "GL_ARB_parallel_shader_compile "
-        "GL_KHR_parallel_shader_compile";
 }
 
 }  // namespace appgl

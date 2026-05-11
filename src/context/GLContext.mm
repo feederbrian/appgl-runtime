@@ -5,6 +5,8 @@
 #include "../caps/GLCapabilities.h"
 #include "../objects/GLObjectStore.h"
 #include "../runtime/AppGLRuntime.h"
+#include "../extensions/ExtensionContext.h"
+#include "../extensions/ExtensionRegistry.h"
 #include "../shader/CompatShaderRewrite.h"
 #include "../shader/GeometryShaderEmulator.h"
 #include "../shader/ShaderInterpreter.h"  // phase 3f-11: SpirvModule complete-type for unique_ptr<SpirvModule> .reset() calls
@@ -2131,7 +2133,6 @@ struct GLContext::Impl {
         // (see `anyIndexedViewportSet_` in GLStateTracker.h). Depth
         // range already has the correct default (0, 1) in every
         // slot via the struct default — no setDepthRange needed.
-        extensionsString = capabilities != nullptr ? capabilities->extensionString() : "";
         // Initialize per-context immediate double attribs to {0,0,0,1} (OpenGL default).
         for (auto& slot : immediateDoubleAttribs) {
             slot = {0.0, 0.0, 0.0, 1.0};
@@ -10932,17 +10933,20 @@ struct GLContext::Impl {
     // translator is actually capable of accepting.
     std::string versionString = "4.6 AppGL core";
     std::string shadingLanguageVersion = "4.60";
-    std::string extensionsString;
 };
 
 GLContext::GLContext(void* layer)
     : impl_(std::make_unique<Impl>(layer, 1280, 720, false)) {
     Runtime::shared().registerContext(this);
+    ExtensionContext extensionContext(*this);
+    extensions::ExtensionRegistry::initializeAll(extensionContext);
 }
 
 GLContext::GLContext(GLsizei offscreenWidth, GLsizei offscreenHeight)
     : impl_(std::make_unique<Impl>(nullptr, offscreenWidth, offscreenHeight, true)) {
     Runtime::shared().registerContext(this);
+    ExtensionContext extensionContext(*this);
+    extensions::ExtensionRegistry::initializeAll(extensionContext);
 }
 
 GLContext::~GLContext() {
@@ -18062,7 +18066,7 @@ const GLubyte* GLContext::getString(GLenum name) {
         case GL_SHADING_LANGUAGE_VERSION:
             return reinterpret_cast<const GLubyte*>(impl_->shadingLanguageVersion.c_str());
         case GL_EXTENSIONS:
-            return reinterpret_cast<const GLubyte*>(impl_->extensionsString.c_str());
+            return reinterpret_cast<const GLubyte*>(extensions::ExtensionRegistry::extensionString().c_str());
         default:
             pushError(GL_INVALID_ENUM);
             return nullptr;
@@ -18088,12 +18092,40 @@ GLCapabilities& GLContext::capabilities() {
     return *impl_->capabilities;
 }
 
+const GLCapabilities& GLContext::capabilities() const {
+    return *impl_->capabilities;
+}
+
 GLObjectStore& GLContext::objects() {
+    return *impl_->objects;
+}
+
+const GLObjectStore& GLContext::objects() const {
     return *impl_->objects;
 }
 
 GLStateTracker& GLContext::state() {
     return *impl_->state;
+}
+
+const GLStateTracker& GLContext::state() const {
+    return *impl_->state;
+}
+
+void* GLContext::extensionMetalDevice() const {
+    return (__bridge void*)impl_->device;
+}
+
+void* GLContext::extensionMetalCommandQueue() const {
+    return (__bridge void*)impl_->commandQueue;
+}
+
+GLTextureObject* GLContext::extensionCurrentTexture(GLenum target) {
+    return impl_->currentTexture(target);
+}
+
+bool GLContext::extensionReplaceMetalTexture(GLTextureObject& texture, GLuint textureName) {
+    return impl_->replaceMetalTexture(texture, textureName);
 }
 
 MatrixStateMirror& GLContext::matrixState() {

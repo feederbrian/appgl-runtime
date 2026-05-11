@@ -66,7 +66,6 @@ public:
 private:
     void initializeFormatTable(void* metalDevice);
     void initializeLimits(void* metalDevice);
-    void initializeExtensions();
 
     // Static scalar cap values keyed by GL enum. Populated once at context
     // creation from the Metal device feature set + AppGL's binding layout.
@@ -84,7 +83,6 @@ private:
     std::unordered_map<GLenum, std::array<GLint64, 3>> indexedIntegerLimits_;
 
     std::unordered_map<GLenum, GLFormatCapability> formats_;
-    std::string extensions_;
 
     // Sprint 3 [metal-mesh-GS]: cached at format-table init time so
     // link-time GS tier classification doesn't repeat the family probe.

@@ -70,6 +70,8 @@ set(APPGL_SOURCES
   src/caps/GLCapabilities.mm
   src/context/GLContext.mm
   src/context/MetalFrameGraph.mm
+  src/extensions/ExtensionContext.mm
+  src/extensions/ExtensionRegistry.mm
   src/debug/CoverageStore.cpp
   src/debug/TraceLog.cpp
   src/loader/DispatchInstall.cpp
@@ -98,6 +100,7 @@ set(APPGL_TEST_SUPPORT_SOURCES
 
 set(APPGL_PUBLIC_HEADERS
   include/AppGL/AppGL.h
+  include/AppGL/extensions/ExtensionRegistry.h
   include/AppGL/glcorearb.h
   include/AppGL/khrplatform.h
 )

@@ -15,6 +15,7 @@ class GLCapabilities;
 class GLObjectStore;
 class GLStateTracker;
 class MatrixStateMirror;
+struct GLTextureObject;
 
 class GLContext {
 public:
@@ -550,8 +551,18 @@ public:
     const std::string& rendererString() const;
     void setClaimedVersionString(std::string value);
     GLCapabilities& capabilities();
+    const GLCapabilities& capabilities() const;
     GLObjectStore& objects();
+    const GLObjectStore& objects() const;
     GLStateTracker& state();
+    const GLStateTracker& state() const;
+
+    // Decision H4 extension facade: ExtensionContext exposes these instead
+    // of letting modules reach through GLContext internals directly.
+    void* extensionMetalDevice() const;
+    void* extensionMetalCommandQueue() const;
+    GLTextureObject* extensionCurrentTexture(GLenum target);
+    bool extensionReplaceMetalTexture(GLTextureObject& texture, GLuint textureName = 0);
 
     // Per-context fixed-function matrix mirror. Compat-profile entry
     // points (glMatrixMode / glLoadIdentity / glLoadMatrix* / glMult* /
