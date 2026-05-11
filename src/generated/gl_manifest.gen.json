@@ -5975,6 +5975,24 @@
       "notes": ""
     },
     {
+      "name": "glBlendBarrier",
+      "subsystem": "context and state",
+      "introducedVersion": "GL_KHR_blend_equation_advanced",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glBlendBarrierKHR",
+      "subsystem": "context and state",
+      "introducedVersion": "GL_KHR_blend_equation_advanced",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
       "name": "glFramebufferTextureMultiviewOVR",
       "subsystem": "framebuffers and renderbuffers",
       "introducedVersion": "GL_OVR_multiview",

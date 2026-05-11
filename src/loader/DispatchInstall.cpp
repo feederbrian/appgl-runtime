@@ -140,6 +140,8 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glBlendEquationSeparate = &impl::glBlendEquationSeparate;
     dispatch.glBlendEquationi = &impl::glBlendEquationi;
     dispatch.glBlendEquationSeparatei = &impl::glBlendEquationSeparatei;
+    dispatch.glBlendBarrier = &impl::glBlendBarrier;
+    dispatch.glBlendBarrierKHR = &impl::glBlendBarrierKHR;
     dispatch.glMinSampleShading = &impl::glMinSampleShading;
     dispatch.glBlendColor = &impl::glBlendColor;
     dispatch.glColorMask = &impl::glColorMask;
@@ -551,6 +553,8 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glBlendFuncSeparate, "Separate blend function tracking is live.");
     coverage.markImplemented(FunctionId::glBlendEquation, "Blend equation tracking is live.");
     coverage.markImplemented(FunctionId::glBlendEquationSeparate, "Separate blend equation tracking is live.");
+    coverage.markImplemented(FunctionId::glBlendBarrier, "Advanced blend barrier is accepted for KHR_blend_equation_advanced.");
+    coverage.markImplemented(FunctionId::glBlendBarrierKHR, "KHR advanced blend barrier alias is accepted.");
     coverage.markImplemented(FunctionId::glBlendColor, "Constant blend color tracking is live.");
     coverage.markImplemented(FunctionId::glColorMask, "Color write-mask tracking is live.");
     coverage.markImplemented(FunctionId::glColorMaski, "Indexed color write-mask tracking is live.");

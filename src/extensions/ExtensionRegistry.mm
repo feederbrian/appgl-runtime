@@ -13,7 +13,7 @@ namespace appgl::extensions {
 
 namespace {
 
-constexpr std::array<const char*, 48> kBaseExtensions = {
+constexpr std::array<const char*, 50> kBaseExtensions = {
     "GL_KHR_debug",
     "GL_ARB_debug_output",
     "GL_ARB_multitexture",
@@ -62,6 +62,8 @@ constexpr std::array<const char*, 48> kBaseExtensions = {
     "GL_ARB_gpu_shader5",
     "GL_ARB_parallel_shader_compile",
     "GL_KHR_parallel_shader_compile",
+    "GL_KHR_blend_equation_advanced",
+    "GL_KHR_blend_equation_advanced_coherent",
 };
 
 const char* s3tcExtensionString() {

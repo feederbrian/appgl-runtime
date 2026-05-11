@@ -460,6 +460,8 @@ struct GLShaderObject {
     std::vector<GLShaderDeclaration> declaredUniforms;
     std::vector<GLShaderDeclaration> declaredInputs;
     std::vector<GLShaderDeclaration> declaredOutputs;
+    std::uint32_t advancedBlendSupportMask = 0;
+    bool advancedBlendSupportAll = false;
 };
 
 struct GLProgramUniformInfo {
@@ -741,6 +743,8 @@ struct GLProgramObject {
     // answers.
     ShaderReflection geometryReflection;
     bool hasTranslatedPipeline = false;
+    std::uint32_t advancedBlendSupportMask = 0;
+    bool advancedBlendSupportAll = false;
 
     // CPU GS emulation. Set at link time by
     // `detectGeometryEmulatable` when the program has a GS stage

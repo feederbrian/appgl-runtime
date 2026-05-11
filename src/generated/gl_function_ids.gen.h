@@ -668,6 +668,8 @@ enum class FunctionId : std::size_t {
     glShadingRateEXT,
     glShadingRateCombinerOpsEXT,
     glFramebufferShadingRateEXT,
+    glBlendBarrier,
+    glBlendBarrierKHR,
     glFramebufferTextureMultiviewOVR,
     glNamedFramebufferTextureMultiviewOVR,
     Count,
@@ -1344,6 +1346,8 @@ inline constexpr GLFunctionMetadata kGLFunctionMetadata[] = {
     {FunctionId::glShadingRateEXT, "glShadingRateEXT", "context and state", "GL_EXT_fragment_shading_rate"},
     {FunctionId::glShadingRateCombinerOpsEXT, "glShadingRateCombinerOpsEXT", "context and state", "GL_EXT_fragment_shading_rate"},
     {FunctionId::glFramebufferShadingRateEXT, "glFramebufferShadingRateEXT", "framebuffers and renderbuffers", "GL_EXT_fragment_shading_rate"},
+    {FunctionId::glBlendBarrier, "glBlendBarrier", "context and state", "GL_KHR_blend_equation_advanced"},
+    {FunctionId::glBlendBarrierKHR, "glBlendBarrierKHR", "context and state", "GL_KHR_blend_equation_advanced"},
     {FunctionId::glFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR", "framebuffers and renderbuffers", "GL_OVR_multiview"},
     {FunctionId::glNamedFramebufferTextureMultiviewOVR, "glNamedFramebufferTextureMultiviewOVR", "direct state access", "GL_OVR_multiview"},
 };

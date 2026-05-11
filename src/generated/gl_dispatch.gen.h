@@ -669,6 +669,8 @@ struct GLDispatchTable {
     PFNGLSHADINGRATEEXTPROC glShadingRateEXT = nullptr;
     PFNGLSHADINGRATECOMBINEROPSEXTPROC glShadingRateCombinerOpsEXT = nullptr;
     PFNGLFRAMEBUFFERSHADINGRATEEXTPROC glFramebufferShadingRateEXT = nullptr;
+    PFNGLBLENDBARRIERPROC glBlendBarrier = nullptr;
+    PFNGLBLENDBARRIERKHRPROC glBlendBarrierKHR = nullptr;
     PFNGLFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC glFramebufferTextureMultiviewOVR = nullptr;
     PFNGLNAMEDFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC glNamedFramebufferTextureMultiviewOVR = nullptr;
 };

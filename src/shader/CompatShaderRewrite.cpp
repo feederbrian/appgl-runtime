@@ -792,6 +792,59 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
         }
     }
 
+    // ---- 2c. GL_KHR_blend_equation_advanced front-end shim --------------
+    //
+    // AppGL implements the extension's draw-time semantics outside SPIR-V:
+    // the fragment shader qualifier is metadata for validation, not a value
+    // that needs to survive into MSL. Glslang's Vulkan front-end does not
+    // reliably accept the KHR directive/layout vocabulary, so keep the GLSL
+    // preprocessor contract (`GL_KHR_blend_equation_advanced == 1`) and strip
+    // the extension-only declarations before translation.
+    bool didAdvancedBlendFixup = false;
+    {
+        const std::string defineLine =
+            "#ifndef GL_KHR_blend_equation_advanced\n"
+            "#define GL_KHR_blend_equation_advanced 1\n"
+            "#endif\n";
+        if (result.source.find("#define GL_KHR_blend_equation_advanced") ==
+            std::string::npos) {
+            std::size_t insertAt = 0;
+            const std::size_t versionPos = result.source.find("#version");
+            if (versionPos != std::string::npos) {
+                const std::size_t eol = result.source.find('\n', versionPos);
+                insertAt = (eol == std::string::npos) ? result.source.size() : eol + 1;
+            }
+            result.source.insert(insertAt, defineLine);
+            didAdvancedBlendFixup = true;
+        }
+
+        std::size_t pos = 0;
+        while ((pos = result.source.find("#extension GL_KHR_blend_equation_advanced", pos)) !=
+               std::string::npos) {
+            result.source.replace(pos, 10, "// xtensio");
+            didAdvancedBlendFixup = true;
+            pos += 10;
+        }
+
+        pos = 0;
+        while ((pos = result.source.find("blend_support_", pos)) != std::string::npos) {
+            std::size_t lineStart = result.source.rfind('\n', pos);
+            lineStart = (lineStart == std::string::npos) ? 0 : lineStart + 1;
+            std::size_t lineEnd = result.source.find('\n', pos);
+            if (lineEnd == std::string::npos) lineEnd = result.source.size();
+            const std::string_view line(
+                result.source.data() + lineStart, lineEnd - lineStart);
+            if (line.find("layout") != std::string_view::npos &&
+                line.find("out") != std::string_view::npos) {
+                result.source.insert(lineStart, "//");
+                didAdvancedBlendFixup = true;
+                pos = lineEnd + 2;
+            } else {
+                pos += sizeof("blend_support_") - 1;
+            }
+        }
+    }
+
     // ---- 3. Decide whether to inject preamble ----------------------------
     // We inject when EITHER the original source was compat profile, OR
     // the fw¹⁹ version-floor upgrade triggered, OR any matrix identifier
@@ -799,7 +852,8 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     // paths mean the preamble has something to contribute.
     const bool needPreamble = result.usage.any() || legacy.any();
     const bool didAnyRewrite =
-        result.wasCompatProfile || legacy.upgradedVersion || needPreamble;
+        result.wasCompatProfile || legacy.upgradedVersion || needPreamble ||
+        didAdvancedBlendFixup;
     // ---- 3b. Unconditional CTS fixups — run before early-return ----------
     // `sampler` is used as a plain variable name in CTS shaders (e.g.
     // `uniform usampler2DArray sampler;`). glslang rejects it as a

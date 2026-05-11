@@ -4494,6 +4494,54 @@ typedef void(APIENTRY *GLVULKANPROCNV)(void);
 #ifndef GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR
 #define GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR 0x93DD
 #endif
+#ifndef GL_BLEND_ADVANCED_COHERENT_KHR
+#define GL_BLEND_ADVANCED_COHERENT_KHR 0x9285
+#endif
+#ifndef GL_MULTIPLY_KHR
+#define GL_MULTIPLY_KHR 0x9294
+#endif
+#ifndef GL_SCREEN_KHR
+#define GL_SCREEN_KHR 0x9295
+#endif
+#ifndef GL_OVERLAY_KHR
+#define GL_OVERLAY_KHR 0x9296
+#endif
+#ifndef GL_DARKEN_KHR
+#define GL_DARKEN_KHR 0x9297
+#endif
+#ifndef GL_LIGHTEN_KHR
+#define GL_LIGHTEN_KHR 0x9298
+#endif
+#ifndef GL_COLORDODGE_KHR
+#define GL_COLORDODGE_KHR 0x9299
+#endif
+#ifndef GL_COLORBURN_KHR
+#define GL_COLORBURN_KHR 0x929A
+#endif
+#ifndef GL_HARDLIGHT_KHR
+#define GL_HARDLIGHT_KHR 0x929B
+#endif
+#ifndef GL_SOFTLIGHT_KHR
+#define GL_SOFTLIGHT_KHR 0x929C
+#endif
+#ifndef GL_DIFFERENCE_KHR
+#define GL_DIFFERENCE_KHR 0x929E
+#endif
+#ifndef GL_EXCLUSION_KHR
+#define GL_EXCLUSION_KHR 0x92A0
+#endif
+#ifndef GL_HSL_HUE_KHR
+#define GL_HSL_HUE_KHR 0x92AD
+#endif
+#ifndef GL_HSL_SATURATION_KHR
+#define GL_HSL_SATURATION_KHR 0x92AE
+#endif
+#ifndef GL_HSL_COLOR_KHR
+#define GL_HSL_COLOR_KHR 0x92AF
+#endif
+#ifndef GL_HSL_LUMINOSITY_KHR
+#define GL_HSL_LUMINOSITY_KHR 0x92B0
+#endif
 
 typedef void (APIENTRYP PFNGLCULLFACEPROC)(GLenum mode);
 typedef void (APIENTRYP PFNGLFRONTFACEPROC)(GLenum mode);
@@ -5158,6 +5206,8 @@ typedef void (APIENTRYP PFNGLGETFRAGMENTSHADINGRATESEXTPROC)(GLsizei samples, GL
 typedef void (APIENTRYP PFNGLSHADINGRATEEXTPROC)(GLenum rate);
 typedef void (APIENTRYP PFNGLSHADINGRATECOMBINEROPSEXTPROC)(GLenum combinerOp0, GLenum combinerOp1);
 typedef void (APIENTRYP PFNGLFRAMEBUFFERSHADINGRATEEXTPROC)(GLenum target, GLenum attachment, GLuint texture, GLint baseLayer, GLsizei numLayers, GLsizei texelWidth, GLsizei texelHeight);
+typedef void (APIENTRYP PFNGLBLENDBARRIERPROC)(void);
+typedef void (APIENTRYP PFNGLBLENDBARRIERKHRPROC)(void);
 typedef void (APIENTRYP PFNGLFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC)(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
 typedef void (APIENTRYP PFNGLNAMEDFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC)(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
 
@@ -5824,6 +5874,8 @@ GLAPI void APIENTRY glGetFragmentShadingRatesEXT(GLsizei samples, GLsizei maxCou
 GLAPI void APIENTRY glShadingRateEXT(GLenum rate);
 GLAPI void APIENTRY glShadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1);
 GLAPI void APIENTRY glFramebufferShadingRateEXT(GLenum target, GLenum attachment, GLuint texture, GLint baseLayer, GLsizei numLayers, GLsizei texelWidth, GLsizei texelHeight);
+GLAPI void APIENTRY glBlendBarrier(void);
+GLAPI void APIENTRY glBlendBarrierKHR(void);
 GLAPI void APIENTRY glFramebufferTextureMultiviewOVR(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
 GLAPI void APIENTRY glNamedFramebufferTextureMultiviewOVR(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
 

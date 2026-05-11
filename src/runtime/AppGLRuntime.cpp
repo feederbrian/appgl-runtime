@@ -224,6 +224,7 @@ bool isValidEnableCap(GLenum cap) {
         // updates the state mirror without affecting the Metal pass.
         case GL_SAMPLE_SHADING:
         case GL_DEPTH_CLAMP:
+        case GL_BLEND_ADVANCED_COHERENT_KHR:
             return true;
         default:
             return false;
@@ -436,6 +437,29 @@ bool isValidBlendEquation(GLenum equation) {
         case GL_FUNC_REVERSE_SUBTRACT:
         case GL_MIN:
         case GL_MAX:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isAdvancedBlendEquation(GLenum equation) {
+    switch (equation) {
+        case GL_MULTIPLY_KHR:
+        case GL_SCREEN_KHR:
+        case GL_OVERLAY_KHR:
+        case GL_DARKEN_KHR:
+        case GL_LIGHTEN_KHR:
+        case GL_COLORDODGE_KHR:
+        case GL_COLORBURN_KHR:
+        case GL_HARDLIGHT_KHR:
+        case GL_SOFTLIGHT_KHR:
+        case GL_DIFFERENCE_KHR:
+        case GL_EXCLUSION_KHR:
+        case GL_HSL_HUE_KHR:
+        case GL_HSL_SATURATION_KHR:
+        case GL_HSL_COLOR_KHR:
+        case GL_HSL_LUMINOSITY_KHR:
             return true;
         default:
             return false;
@@ -4474,7 +4498,7 @@ void APIENTRY glBlendEquation(GLenum mode) {
     if (context == nullptr) {
         return;
     }
-    if (!isValidBlendEquation(mode)) {
+    if (!isValidBlendEquation(mode) && !isAdvancedBlendEquation(mode)) {
         recordValidationError(context, "glBlendEquation", GL_INVALID_ENUM, "blend equation is invalid");
         return;
     }
@@ -4564,6 +4588,24 @@ void APIENTRY glBlendEquationSeparatei(GLuint buf, GLenum modeRGB, GLenum modeAl
     }
     context->setBlendEquationSeparatei(buf, modeRGB, modeAlpha);
     markStateFunction(FunctionId::glBlendEquationSeparatei, "Indexed separate blend equation state is tracked per draw buffer.");
+}
+
+void APIENTRY glBlendBarrier(void) {
+    auto* context = requireCurrentContext("glBlendBarrier");
+    if (context == nullptr) {
+        return;
+    }
+    markStateFunction(FunctionId::glBlendBarrier, "Advanced blend barrier is accepted.");
+    Runtime::shared().recordBootstrapTrace("glBlendBarrier()");
+}
+
+void APIENTRY glBlendBarrierKHR(void) {
+    auto* context = requireCurrentContext("glBlendBarrierKHR");
+    if (context == nullptr) {
+        return;
+    }
+    markStateFunction(FunctionId::glBlendBarrierKHR, "KHR advanced blend barrier alias is accepted.");
+    Runtime::shared().recordBootstrapTrace("glBlendBarrierKHR()");
 }
 
 void APIENTRY glMinSampleShading(GLfloat value) {

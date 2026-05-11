@@ -485,6 +485,7 @@ GLStateTracker::GLStateTracker() {
     for (auto& mask : blend_.indexedColorMasks) {
         mask = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
     }
+    enabledCaps_.insert(GL_BLEND_ADVANCED_COHERENT_KHR);
     drawBuffers_.fill(GL_NONE);
     drawBuffers_[0] = GL_BACK;
 }

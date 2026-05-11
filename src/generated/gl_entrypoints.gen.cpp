@@ -5928,6 +5928,24 @@ extern "C" void APIENTRY glFramebufferShadingRateEXT(GLenum target, GLenum attac
     appgl::unimplementedReturn<void>(appgl::FunctionId::glFramebufferShadingRateEXT, "glFramebufferShadingRateEXT");
 }
 
+extern "C" void APIENTRY glBlendBarrier(void) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glBlendBarrier, "glBlendBarrier");
+    if (auto fn = appgl::Runtime::shared().dispatch().glBlendBarrier) {
+        fn();
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glBlendBarrier, "glBlendBarrier");
+}
+
+extern "C" void APIENTRY glBlendBarrierKHR(void) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glBlendBarrierKHR, "glBlendBarrierKHR");
+    if (auto fn = appgl::Runtime::shared().dispatch().glBlendBarrierKHR) {
+        fn();
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glBlendBarrierKHR, "glBlendBarrierKHR");
+}
+
 extern "C" void APIENTRY glFramebufferTextureMultiviewOVR(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews) {
     appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR");
     if (auto fn = appgl::Runtime::shared().dispatch().glFramebufferTextureMultiviewOVR) {

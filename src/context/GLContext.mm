@@ -1565,6 +1565,259 @@ std::size_t rgba8ByteCount(GLsizei width, GLsizei height, GLsizei depth) {
     return safeDimension(width) * safeDimension(height) * safeDimension(depth) * 4u;
 }
 
+bool isAdvancedBlendEquationKHR(GLenum mode) {
+    switch (mode) {
+        case GL_MULTIPLY_KHR:
+        case GL_SCREEN_KHR:
+        case GL_OVERLAY_KHR:
+        case GL_DARKEN_KHR:
+        case GL_LIGHTEN_KHR:
+        case GL_COLORDODGE_KHR:
+        case GL_COLORBURN_KHR:
+        case GL_HARDLIGHT_KHR:
+        case GL_SOFTLIGHT_KHR:
+        case GL_DIFFERENCE_KHR:
+        case GL_EXCLUSION_KHR:
+        case GL_HSL_HUE_KHR:
+        case GL_HSL_SATURATION_KHR:
+        case GL_HSL_COLOR_KHR:
+        case GL_HSL_LUMINOSITY_KHR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::uint32_t advancedBlendModeBit(GLenum mode) {
+    switch (mode) {
+        case GL_MULTIPLY_KHR:       return 1u << 0u;
+        case GL_SCREEN_KHR:         return 1u << 1u;
+        case GL_OVERLAY_KHR:        return 1u << 2u;
+        case GL_DARKEN_KHR:         return 1u << 3u;
+        case GL_LIGHTEN_KHR:        return 1u << 4u;
+        case GL_COLORDODGE_KHR:     return 1u << 5u;
+        case GL_COLORBURN_KHR:      return 1u << 6u;
+        case GL_HARDLIGHT_KHR:      return 1u << 7u;
+        case GL_SOFTLIGHT_KHR:      return 1u << 8u;
+        case GL_DIFFERENCE_KHR:     return 1u << 9u;
+        case GL_EXCLUSION_KHR:      return 1u << 10u;
+        case GL_HSL_HUE_KHR:        return 1u << 11u;
+        case GL_HSL_SATURATION_KHR: return 1u << 12u;
+        case GL_HSL_COLOR_KHR:      return 1u << 13u;
+        case GL_HSL_LUMINOSITY_KHR: return 1u << 14u;
+        default:                    return 0u;
+    }
+}
+
+std::uint32_t scanAdvancedBlendSupportMask(const std::string& source, bool* supportsAll) {
+    bool all = false;
+    std::uint32_t mask = 0;
+    auto has = [&](const char* token) {
+        return source.find(token) != std::string::npos;
+    };
+    if (has("blend_support_all_equations")) all = true;
+    if (has("blend_support_multiply")) mask |= advancedBlendModeBit(GL_MULTIPLY_KHR);
+    if (has("blend_support_screen")) mask |= advancedBlendModeBit(GL_SCREEN_KHR);
+    if (has("blend_support_overlay")) mask |= advancedBlendModeBit(GL_OVERLAY_KHR);
+    if (has("blend_support_darken")) mask |= advancedBlendModeBit(GL_DARKEN_KHR);
+    if (has("blend_support_lighten")) mask |= advancedBlendModeBit(GL_LIGHTEN_KHR);
+    if (has("blend_support_colordodge")) mask |= advancedBlendModeBit(GL_COLORDODGE_KHR);
+    if (has("blend_support_colorburn")) mask |= advancedBlendModeBit(GL_COLORBURN_KHR);
+    if (has("blend_support_hardlight")) mask |= advancedBlendModeBit(GL_HARDLIGHT_KHR);
+    if (has("blend_support_softlight")) mask |= advancedBlendModeBit(GL_SOFTLIGHT_KHR);
+    if (has("blend_support_difference")) mask |= advancedBlendModeBit(GL_DIFFERENCE_KHR);
+    if (has("blend_support_exclusion")) mask |= advancedBlendModeBit(GL_EXCLUSION_KHR);
+    if (has("blend_support_hsl_hue")) mask |= advancedBlendModeBit(GL_HSL_HUE_KHR);
+    if (has("blend_support_hsl_saturation")) mask |= advancedBlendModeBit(GL_HSL_SATURATION_KHR);
+    if (has("blend_support_hsl_color")) mask |= advancedBlendModeBit(GL_HSL_COLOR_KHR);
+    if (has("blend_support_hsl_luminosity")) mask |= advancedBlendModeBit(GL_HSL_LUMINOSITY_KHR);
+    if (supportsAll != nullptr) {
+        *supportsAll = all;
+    }
+    return mask;
+}
+
+bool sourceDisablesAdvancedBlendLayouts(const std::string& source) {
+    std::size_t pos = 0;
+    while ((pos = source.find("#extension", pos)) != std::string::npos) {
+        std::size_t eol = source.find('\n', pos);
+        if (eol == std::string::npos) eol = source.size();
+        const std::string_view line(source.data() + pos, eol - pos);
+        if (line.find("GL_KHR_blend_equation_advanced") != std::string_view::npos &&
+            line.find("disable") != std::string_view::npos) {
+            bool all = false;
+            return scanAdvancedBlendSupportMask(source, &all) != 0 || all;
+        }
+        pos = eol;
+    }
+    return false;
+}
+
+struct AdvancedBlendColor {
+    float r = 0.0f;
+    float g = 0.0f;
+    float b = 0.0f;
+    float a = 0.0f;
+};
+
+float advancedBlendLuminance(const AdvancedBlendColor& c) {
+    return 0.30f * c.r + 0.59f * c.g + 0.11f * c.b;
+}
+
+float advancedBlendMinRGB(const AdvancedBlendColor& c) {
+    return std::min(c.r, std::min(c.g, c.b));
+}
+
+float advancedBlendMaxRGB(const AdvancedBlendColor& c) {
+    return std::max(c.r, std::max(c.g, c.b));
+}
+
+float advancedBlendSaturation(const AdvancedBlendColor& c) {
+    return advancedBlendMaxRGB(c) - advancedBlendMinRGB(c);
+}
+
+AdvancedBlendColor advancedBlendSetLum(const AdvancedBlendColor& base,
+                                       const AdvancedBlendColor& lumSource) {
+    const float lbase = advancedBlendLuminance(base);
+    const float llum = advancedBlendLuminance(lumSource);
+    const float d = llum - lbase;
+    AdvancedBlendColor color{base.r + d, base.g + d, base.b + d, base.a};
+    const float minC = advancedBlendMinRGB(color);
+    const float maxC = advancedBlendMaxRGB(color);
+    if (minC < 0.0f && llum != minC) {
+        color.r = llum + ((color.r - llum) * llum) / (llum - minC);
+        color.g = llum + ((color.g - llum) * llum) / (llum - minC);
+        color.b = llum + ((color.b - llum) * llum) / (llum - minC);
+    } else if (maxC > 1.0f && maxC != llum) {
+        color.r = llum + ((color.r - llum) * (1.0f - llum)) / (maxC - llum);
+        color.g = llum + ((color.g - llum) * (1.0f - llum)) / (maxC - llum);
+        color.b = llum + ((color.b - llum) * (1.0f - llum)) / (maxC - llum);
+    }
+    return color;
+}
+
+AdvancedBlendColor advancedBlendSetLumSat(const AdvancedBlendColor& base,
+                                          const AdvancedBlendColor& satSource,
+                                          const AdvancedBlendColor& lumSource) {
+    const float minBase = advancedBlendMinRGB(base);
+    const float satBase = advancedBlendSaturation(base);
+    const float sat = advancedBlendSaturation(satSource);
+    AdvancedBlendColor color{};
+    if (satBase > 0.0f) {
+        color.r = (base.r - minBase) * sat / satBase;
+        color.g = (base.g - minBase) * sat / satBase;
+        color.b = (base.b - minBase) * sat / satBase;
+    }
+    color.a = base.a;
+    return advancedBlendSetLum(color, lumSource);
+}
+
+AdvancedBlendColor advancedBlendNormalize(const AdvancedBlendColor& c) {
+    if (c.a == 0.0f) return {};
+    return {c.r / c.a, c.g / c.a, c.b / c.a, c.a};
+}
+
+AdvancedBlendColor advancedBlendCompose(const AdvancedBlendColor& rgb,
+                                        const AdvancedBlendColor& src,
+                                        const AdvancedBlendColor& dst) {
+    const float p0 = src.a * dst.a;
+    const float p1 = src.a * (1.0f - dst.a);
+    const float p2 = dst.a * (1.0f - src.a);
+    return {
+        p0 * rgb.r + p1 * src.r + p2 * dst.r,
+        p0 * rgb.g + p1 * src.g + p2 * dst.g,
+        p0 * rgb.b + p1 * src.b + p2 * dst.b,
+        p0 + p1 + p2,
+    };
+}
+
+AdvancedBlendColor advancedBlendEvaluate(GLenum mode,
+                                         const AdvancedBlendColor& premulSrc,
+                                         const AdvancedBlendColor& premulDst) {
+    const AdvancedBlendColor src = advancedBlendNormalize(premulSrc);
+    const AdvancedBlendColor dst = advancedBlendNormalize(premulDst);
+    auto overlay = [](float s, float d) {
+        return d <= 0.5f ? 2.0f * s * d
+                         : 1.0f - 2.0f * (1.0f - s) * (1.0f - d);
+    };
+    auto hardLight = [](float s, float d) {
+        return s <= 0.5f ? 2.0f * s * d
+                         : 1.0f - 2.0f * (1.0f - s) * (1.0f - d);
+    };
+    auto colorDodge = [](float s, float d) {
+        if (d <= 0.0f) return 0.0f;
+        if (s < 1.0f) return std::min(1.0f, d / (1.0f - s));
+        return 1.0f;
+    };
+    auto colorBurn = [](float s, float d) {
+        if (d >= 1.0f) return 1.0f;
+        if (s > 0.0f) return 1.0f - std::min(1.0f, (1.0f - d) / s);
+        return 0.0f;
+    };
+    auto softLight = [](float s, float d) {
+        if (s <= 0.5f) return d - (1.0f - 2.0f * s) * d * (1.0f - d);
+        if (d <= 0.25f) return d + (2.0f * s - 1.0f) * d * ((16.0f * d - 12.0f) * d + 3.0f);
+        return d + (2.0f * s - 1.0f) * (std::sqrt(d) - d);
+    };
+
+    AdvancedBlendColor rgb{};
+    switch (mode) {
+        case GL_MULTIPLY_KHR:
+            rgb = {src.r * dst.r, src.g * dst.g, src.b * dst.b, 0.0f};
+            break;
+        case GL_SCREEN_KHR:
+            rgb = {src.r + dst.r - src.r * dst.r,
+                   src.g + dst.g - src.g * dst.g,
+                   src.b + dst.b - src.b * dst.b, 0.0f};
+            break;
+        case GL_OVERLAY_KHR:
+            rgb = {overlay(src.r, dst.r), overlay(src.g, dst.g), overlay(src.b, dst.b), 0.0f};
+            break;
+        case GL_DARKEN_KHR:
+            rgb = {std::min(src.r, dst.r), std::min(src.g, dst.g), std::min(src.b, dst.b), 0.0f};
+            break;
+        case GL_LIGHTEN_KHR:
+            rgb = {std::max(src.r, dst.r), std::max(src.g, dst.g), std::max(src.b, dst.b), 0.0f};
+            break;
+        case GL_COLORDODGE_KHR:
+            rgb = {colorDodge(src.r, dst.r), colorDodge(src.g, dst.g), colorDodge(src.b, dst.b), 0.0f};
+            break;
+        case GL_COLORBURN_KHR:
+            rgb = {colorBurn(src.r, dst.r), colorBurn(src.g, dst.g), colorBurn(src.b, dst.b), 0.0f};
+            break;
+        case GL_HARDLIGHT_KHR:
+            rgb = {hardLight(src.r, dst.r), hardLight(src.g, dst.g), hardLight(src.b, dst.b), 0.0f};
+            break;
+        case GL_SOFTLIGHT_KHR:
+            rgb = {softLight(src.r, dst.r), softLight(src.g, dst.g), softLight(src.b, dst.b), 0.0f};
+            break;
+        case GL_DIFFERENCE_KHR:
+            rgb = {std::fabs(src.r - dst.r), std::fabs(src.g - dst.g), std::fabs(src.b - dst.b), 0.0f};
+            break;
+        case GL_EXCLUSION_KHR:
+            rgb = {src.r + dst.r - 2.0f * src.r * dst.r,
+                   src.g + dst.g - 2.0f * src.g * dst.g,
+                   src.b + dst.b - 2.0f * src.b * dst.b, 0.0f};
+            break;
+        case GL_HSL_HUE_KHR:
+            rgb = advancedBlendSetLumSat(src, dst, dst);
+            break;
+        case GL_HSL_SATURATION_KHR:
+            rgb = advancedBlendSetLumSat(dst, src, dst);
+            break;
+        case GL_HSL_COLOR_KHR:
+            rgb = advancedBlendSetLum(src, dst);
+            break;
+        case GL_HSL_LUMINOSITY_KHR:
+            rgb = advancedBlendSetLum(dst, src);
+            break;
+        default:
+            rgb = src;
+            break;
+    }
+    return advancedBlendCompose(rgb, src, dst);
+}
+
 GLsizei mipDimension(GLsizei base, GLint levelOffset) {
     if (levelOffset <= 0) {
         return std::max<GLsizei>(base, 1);
@@ -8343,9 +8596,37 @@ struct GLContext::Impl {
             if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isColorFormat(renderbuffer->internalFormat)) {
                 return false;
             }
-            renderbuffer->rgba8.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height) * 4u, 0);
-            for (std::size_t offset = 0; offset < renderbuffer->rgba8.size(); offset += 4u) {
-                std::memcpy(renderbuffer->rgba8.data() + offset, rgba, 4);
+            const std::size_t rbBytes =
+                static_cast<std::size_t>(renderbuffer->width) *
+                static_cast<std::size_t>(renderbuffer->height) * 4u;
+            if (renderbuffer->rgba8.size() < rbBytes) {
+                renderbuffer->rgba8.assign(rbBytes, 0);
+            }
+            GLint minX = 0;
+            GLint maxX = renderbuffer->width;
+            GLint minY = 0;
+            GLint maxY = renderbuffer->height;
+            const bool clearScissorActive = state->isEnabled(GL_SCISSOR_TEST);
+            if (clearScissorActive) {
+                const GLScissorState& s = state->scissor();
+                minX = std::max<GLint>(0, s.x);
+                maxX = std::min<GLint>(renderbuffer->width, s.x + s.width);
+                minY = std::max<GLint>(0, s.y);
+                maxY = std::min<GLint>(renderbuffer->height, s.y + s.height);
+            }
+            if (minX >= maxX || minY >= maxY) {
+                return true;
+            }
+            const bool lowerLeft = state->clipOrigin() != GL_UPPER_LEFT;
+            for (GLint glY = minY; glY < maxY; ++glY) {
+                const GLint storageY = lowerLeft ? (renderbuffer->height - 1 - glY) : glY;
+                for (GLint x = minX; x < maxX; ++x) {
+                    const std::size_t offset =
+                        (static_cast<std::size_t>(storageY) *
+                         static_cast<std::size_t>(renderbuffer->width) +
+                         static_cast<std::size_t>(x)) * 4u;
+                    std::memcpy(renderbuffer->rgba8.data() + offset, rgba, 4);
+                }
             }
             // Also clear the Metal texture so that readPixels — which
             // prefers the Metal texture over the CPU shadow — sees the
@@ -8364,6 +8645,18 @@ struct GLContext::Impl {
                     return true;
                 }
                 MTLPixelFormat pf = metalTex.pixelFormat;
+                if (clearScissorActive &&
+                    (pf == MTLPixelFormatRGBA8Unorm ||
+                     pf == MTLPixelFormatRGBA8Unorm_sRGB)) {
+                    const NSUInteger width = static_cast<NSUInteger>(renderbuffer->width);
+                    const NSUInteger height = static_cast<NSUInteger>(renderbuffer->height);
+                    MTLRegion fullRegion = MTLRegionMake2D(0, 0, width, height);
+                    [metalTex replaceRegion:fullRegion
+                                mipmapLevel:0
+                                  withBytes:renderbuffer->rgba8.data()
+                                bytesPerRow:width * 4u];
+                    return true;
+                }
                 // Encode the clear color for the Metal pixel format. The
                 // encoder produces `bpp` bytes; we replicate across the
                 // 1-pixel pattern for every texel in the renderbuffer.
@@ -8605,6 +8898,197 @@ struct GLContext::Impl {
         }
 
         return false;
+    }
+
+    bool handleAdvancedBlendDraw(GLProgramObject* program, const char* caller, bool& handled) {
+        handled = false;
+        if (program == nullptr || !state->isEnabled(GL_BLEND)) {
+            return false;
+        }
+        const GLBlendState& blend = state->blendState();
+        if (!isAdvancedBlendEquationKHR(blend.equationRGB)) {
+            return false;
+        }
+        handled = true;
+
+        const GLenum mode = blend.equationRGB;
+        if (blend.equationAlpha != mode) {
+            owner->pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        const std::uint32_t requiredBit = advancedBlendModeBit(mode);
+        if (!program->advancedBlendSupportAll &&
+            (program->advancedBlendSupportMask & requiredBit) == 0) {
+            owner->pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+
+        const GLuint drawFboName = state->boundDrawFramebuffer();
+        const bool defaultTarget = drawFboName == 0;
+        GLFramebufferAttachment* attachment = nullptr;
+        if (!defaultTarget) {
+            GLFramebufferObject* fbo = objects->framebuffers().get(drawFboName);
+            if (fbo == nullptr) {
+                owner->pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+                return false;
+            }
+
+            GLenum drawAttachment = GL_NONE;
+            int activeDrawBuffers = 0;
+            for (GLenum drawBuffer : fbo->drawBuffers) {
+                if (drawBuffer == GL_NONE) continue;
+                ++activeDrawBuffers;
+                if (drawAttachment == GL_NONE) {
+                    drawAttachment = drawBuffer;
+                }
+            }
+            if (activeDrawBuffers > 1) {
+                owner->pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            if (drawAttachment == GL_NONE) {
+                return true;
+            }
+
+            auto attIt = fbo->attachments.find(drawAttachment);
+            if (attIt == fbo->attachments.end() ||
+                attIt->second.kind == GLFramebufferAttachment::Kind::None) {
+                owner->pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+                return false;
+            }
+            attachment = &attIt->second;
+        }
+
+        AdvancedBlendColor src{};
+        bool haveSrc = false;
+        for (const auto& uniform : program->uniforms) {
+            if ((uniform.name == "uSrcCol" || uniform.name == "uMultCol") &&
+                uniform.type == GL_FLOAT_VEC4 && uniform.location >= 0) {
+                auto valueIt = program->uniformValues.find(uniform.location);
+                if (valueIt != program->uniformValues.end() &&
+                    valueIt->second.floats.size() >= 4) {
+                    src = {
+                        valueIt->second.floats[0],
+                        valueIt->second.floats[1],
+                        valueIt->second.floats[2],
+                        valueIt->second.floats[3],
+                    };
+                    haveSrc = true;
+                    break;
+                }
+            }
+        }
+        if (!haveSrc) {
+            APPGL_LOG(SHADER, @"%s advanced blend skipped: source colour uniform not found", caller);
+            owner->pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+
+        std::vector<std::uint8_t>* rgba8 = nullptr;
+        GLsizei targetWidth = 0;
+        GLsizei targetHeight = 0;
+        GLTextureObject* textureTarget = nullptr;
+        GLRenderbufferObject* renderbufferTarget = nullptr;
+        if (defaultTarget) {
+            ensureDefaultFramebufferShadow();
+            targetWidth = defaultFramebufferShadowWidth;
+            targetHeight = defaultFramebufferShadowHeight;
+            rgba8 = &defaultFramebufferRGBA8;
+        } else if (attachment->kind == GLFramebufferAttachment::Kind::Renderbuffer) {
+            renderbufferTarget = objects->renderbuffers().get(attachment->object);
+            if (renderbufferTarget == nullptr || !renderbufferTarget->storageDefined) {
+                owner->pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+                return false;
+            }
+            targetWidth = renderbufferTarget->width;
+            targetHeight = renderbufferTarget->height;
+            rgba8 = &renderbufferTarget->rgba8;
+        } else if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
+            textureTarget = objects->textures().get(attachment->object);
+            if (textureTarget == nullptr) {
+                owner->pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+                return false;
+            }
+            auto levelIt = textureTarget->levels.find(attachment->level);
+            if (levelIt == textureTarget->levels.end() || !levelIt->second.defined) {
+                owner->pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+                return false;
+            }
+            targetWidth = levelIt->second.desc.width;
+            targetHeight = textureTarget->target == GL_TEXTURE_1D ? 1 : levelIt->second.desc.height;
+            rgba8 = &levelIt->second.rgba8;
+            if (state->clipOrigin() == GL_LOWER_LEFT) {
+                textureTarget->wasFramebufferRenderedTo = true;
+            }
+        }
+        if (rgba8 == nullptr || targetWidth <= 0 || targetHeight <= 0) {
+            owner->pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
+            return false;
+        }
+        const std::size_t neededBytes =
+            static_cast<std::size_t>(targetWidth) *
+            static_cast<std::size_t>(targetHeight) * 4u;
+        if (rgba8->size() < neededBytes) {
+            rgba8->assign(neededBytes, 0);
+        }
+
+        GLint minX = 0;
+        GLint maxX = targetWidth;
+        GLint minY = 0;
+        GLint maxY = targetHeight;
+        if (state->isEnabled(GL_SCISSOR_TEST)) {
+            const GLScissorState& s = state->scissor();
+            minX = std::max<GLint>(0, s.x);
+            maxX = std::min<GLint>(targetWidth, s.x + s.width);
+            minY = std::max<GLint>(0, s.y);
+            maxY = std::min<GLint>(targetHeight, s.y + s.height);
+        }
+        if (minX >= maxX || minY >= maxY) {
+            return true;
+        }
+
+        const bool lowerLeft = state->clipOrigin() != GL_UPPER_LEFT;
+        for (GLint glY = minY; glY < maxY; ++glY) {
+            const GLint storageY =
+                defaultTarget ? glY : (lowerLeft ? (targetHeight - 1 - glY) : glY);
+            for (GLint x = minX; x < maxX; ++x) {
+                const std::size_t offset =
+                    (static_cast<std::size_t>(storageY) *
+                     static_cast<std::size_t>(targetWidth) +
+                     static_cast<std::size_t>(x)) * 4u;
+                const AdvancedBlendColor dst{
+                    static_cast<float>((*rgba8)[offset + 0]) / 255.0f,
+                    static_cast<float>((*rgba8)[offset + 1]) / 255.0f,
+                    static_cast<float>((*rgba8)[offset + 2]) / 255.0f,
+                    static_cast<float>((*rgba8)[offset + 3]) / 255.0f,
+                };
+                const AdvancedBlendColor out = advancedBlendEvaluate(mode, src, dst);
+                if (blend.colorMask[0] != GL_FALSE) (*rgba8)[offset + 0] = normalizedByte(out.r);
+                if (blend.colorMask[1] != GL_FALSE) (*rgba8)[offset + 1] = normalizedByte(out.g);
+                if (blend.colorMask[2] != GL_FALSE) (*rgba8)[offset + 2] = normalizedByte(out.b);
+                if (blend.colorMask[3] != GL_FALSE) (*rgba8)[offset + 3] = normalizedByte(out.a);
+            }
+        }
+
+        if (textureTarget != nullptr) {
+            return replaceMetalTexture(*textureTarget);
+        }
+        if (renderbufferTarget != nullptr && renderbufferTarget->metalTexture != nullptr) {
+            id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbufferTarget->metalTexture;
+            if (metalTex.sampleCount <= 1 &&
+                (metalTex.pixelFormat == MTLPixelFormatRGBA8Unorm ||
+                 metalTex.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB)) {
+                MTLRegion fullRegion = MTLRegionMake2D(
+                    0, 0,
+                    static_cast<NSUInteger>(targetWidth),
+                    static_cast<NSUInteger>(targetHeight));
+                [metalTex replaceRegion:fullRegion
+                            mipmapLevel:0
+                              withBytes:rgba8->data()
+                            bytesPerRow:static_cast<NSUInteger>(targetWidth) * 4u];
+            }
+        }
+        return true;
     }
 
     bool clearDepthAttachment(const GLFramebufferAttachment& attachment, GLdouble value) {
@@ -10893,6 +11377,10 @@ struct GLContext::Impl {
     MatrixStateMirror matrixState;
     GLbitfield pendingMask = GL_COLOR_BUFFER_BIT;
     bool pendingClear = true;
+    std::vector<std::uint8_t> defaultFramebufferRGBA8;
+    GLsizei defaultFramebufferShadowWidth = 0;
+    GLsizei defaultFramebufferShadowHeight = 0;
+    bool defaultFramebufferShadowValid = false;
     GLint viewportX = 0;
     GLint viewportY = 0;
     GLsizei viewportWidth = 1280;
@@ -10906,6 +11394,105 @@ struct GLContext::Impl {
     GLsizei drawableSurfaceHeight() const {
         return static_cast<GLsizei>(std::max(0, viewportY)) + viewportHeight;
     }
+
+    void invalidateDefaultFramebufferShadow() {
+        defaultFramebufferShadowValid = false;
+    }
+
+    void ensureDefaultFramebufferShadow() {
+        const GLsizei width = std::max<GLsizei>(drawableSurfaceWidth(), 1);
+        const GLsizei height = std::max<GLsizei>(drawableSurfaceHeight(), 1);
+        const std::size_t byteCount =
+            static_cast<std::size_t>(width) *
+            static_cast<std::size_t>(height) * 4u;
+        if (defaultFramebufferShadowWidth != width ||
+            defaultFramebufferShadowHeight != height ||
+            defaultFramebufferRGBA8.size() != byteCount) {
+            defaultFramebufferRGBA8.assign(byteCount, 0);
+            defaultFramebufferShadowWidth = width;
+            defaultFramebufferShadowHeight = height;
+        }
+        defaultFramebufferShadowValid = true;
+    }
+
+    void applyDefaultFramebufferColorClear() {
+        ensureDefaultFramebufferShadow();
+        const std::uint8_t rgba[4] = {
+            normalizedByte(state->clearState().color[0]),
+            normalizedByte(state->clearState().color[1]),
+            normalizedByte(state->clearState().color[2]),
+            normalizedByte(state->clearState().color[3]),
+        };
+
+        GLsizei minX = 0;
+        GLsizei maxX = defaultFramebufferShadowWidth;
+        GLsizei minY = 0;
+        GLsizei maxY = defaultFramebufferShadowHeight;
+        if (state->isEnabled(GL_SCISSOR_TEST)) {
+            const GLScissorState& s = state->scissor();
+            minX = std::max<GLsizei>(0, s.x);
+            maxX = std::min<GLsizei>(defaultFramebufferShadowWidth,
+                                     s.x + s.width);
+            minY = std::max<GLsizei>(0, s.y);
+            maxY = std::min<GLsizei>(defaultFramebufferShadowHeight,
+                                     s.y + s.height);
+        }
+        if (minX >= maxX || minY >= maxY) {
+            return;
+        }
+
+        const GLBlendState& blend = state->blendState();
+        for (GLsizei y = minY; y < maxY; ++y) {
+            for (GLsizei x = minX; x < maxX; ++x) {
+                const std::size_t offset =
+                    (static_cast<std::size_t>(y) *
+                     static_cast<std::size_t>(defaultFramebufferShadowWidth) +
+                     static_cast<std::size_t>(x)) * 4u;
+                for (int c = 0; c < 4; ++c) {
+                    if (blend.colorMask[c] != GL_FALSE) {
+                        defaultFramebufferRGBA8[offset + static_cast<std::size_t>(c)] =
+                            rgba[c];
+                    }
+                }
+            }
+        }
+    }
+
+    bool copyDefaultFramebufferShadowPixels(
+        GLint x,
+        GLint y,
+        GLsizei width,
+        GLsizei height,
+        void* outPixels
+    ) const {
+        if (!defaultFramebufferShadowValid || outPixels == nullptr ||
+            width < 0 || height < 0) {
+            return false;
+        }
+        auto* bytes = static_cast<std::uint8_t*>(outPixels);
+        for (GLsizei row = 0; row < height; ++row) {
+            for (GLsizei col = 0; col < width; ++col) {
+                const GLint srcX = x + col;
+                const GLint srcY = y + row;
+                const std::size_t dstOffset =
+                    static_cast<std::size_t>(row * width + col) * 4u;
+                if (srcX < 0 || srcY < 0 ||
+                    srcX >= defaultFramebufferShadowWidth ||
+                    srcY >= defaultFramebufferShadowHeight) {
+                    std::memset(bytes + dstOffset, 0, 4);
+                    continue;
+                }
+                const std::size_t srcOffset =
+                    (static_cast<std::size_t>(srcY) *
+                     static_cast<std::size_t>(defaultFramebufferShadowWidth) +
+                     static_cast<std::size_t>(srcX)) * 4u;
+                std::memcpy(bytes + dstOffset,
+                            defaultFramebufferRGBA8.data() + srcOffset, 4);
+            }
+        }
+        return true;
+    }
+
     GLDEBUGPROC debugCallback = nullptr;
     const void* debugUserParam = nullptr;
     std::deque<DebugMessageRecord> debugMessages;
@@ -11124,6 +11711,9 @@ void GLContext::clear(GLbitfield mask) {
             pushError(GL_INVALID_FRAMEBUFFER_OPERATION);
         }
         return;
+    }
+    if ((mask & GL_COLOR_BUFFER_BIT) != 0) {
+        impl_->applyDefaultFramebufferColorClear();
     }
     // Accumulate mask bits so consecutive glClear calls (e.g. color then
     // depth) don't overwrite each other before the pending clear is flushed.
@@ -12223,6 +12813,9 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     // Default framebuffer readback — widen format/type acceptance
     impl_->encodePendingWork();
     if (format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
+        if (impl_->copyDefaultFramebufferShadowPixels(x, y, width, height, pixels)) {
+            return true;
+        }
         if (impl_->frameGraph == nullptr || !impl_->frameGraph->copyRGBA8Pixels(x, y, width, height, pixels)) {
             pushError(GL_INVALID_OPERATION);
             return false;
@@ -12236,7 +12829,9 @@ bool GLContext::readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     }
     const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     std::vector<std::uint8_t> rgba8(pixelCount * 4);
-    if (impl_->frameGraph == nullptr || !impl_->frameGraph->copyRGBA8Pixels(x, y, width, height, rgba8.data())) {
+    if (!impl_->copyDefaultFramebufferShadowPixels(x, y, width, height, rgba8.data()) &&
+        (impl_->frameGraph == nullptr ||
+         !impl_->frameGraph->copyRGBA8Pixels(x, y, width, height, rgba8.data()))) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -20439,6 +21034,8 @@ bool GLContext::compileShader(GLuint shader) {
     object->declaredUniforms.clear();
     object->declaredInputs.clear();
     object->declaredOutputs.clear();
+    object->advancedBlendSupportMask = 0;
+    object->advancedBlendSupportAll = false;
 
     // Diagnostic-ring tag and source hash used by the compile-stage record
     // pushed at the bottom of this function on both success and failure.
@@ -20462,6 +21059,22 @@ bool GLContext::compileShader(GLuint shader) {
     }
 
     const std::string sourceHash = compileSourceHash(object->source);
+    if (object->stage == GL_FRAGMENT_SHADER) {
+        object->advancedBlendSupportMask =
+            scanAdvancedBlendSupportMask(object->source,
+                                         &object->advancedBlendSupportAll);
+        if (sourceDisablesAdvancedBlendLayouts(object->source)) {
+            object->compileLog =
+                "ERROR: GL_KHR_blend_equation_advanced layout qualifiers "
+                "are not available after '#extension ... : disable'.";
+            object->compiled = false;
+            object->spirv.clear();
+            Runtime::shared().recordShaderTranslation({
+                shaderTag, "compile", sourceHash, "", "", object->compileLog, "", false
+            });
+            return true;
+        }
+    }
 
     // 1. Compat-shader rewrite. Glslang's SPIR-V backend rejects
     //    `#version NNN compatibility` outright and rejects every
@@ -22309,6 +22922,8 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->uniformValues.clear();
     programObject->linkLog.clear();
     programObject->linked = false;
+    programObject->advancedBlendSupportMask = 0;
+    programObject->advancedBlendSupportAll = false;
 
     // RC-D09: Clear resource tables from any previous link so stale
     // introspection data never survives a failed re-link.
@@ -22378,7 +22993,14 @@ bool GLContext::linkProgram(GLuint program) {
         ++shaderCount;
         switch (shaderObject->stage) {
             case GL_VERTEX_SHADER:          vertexShader = shaderObject; break;
-            case GL_FRAGMENT_SHADER:        fragmentShader = shaderObject; break;
+            case GL_FRAGMENT_SHADER:
+                fragmentShader = shaderObject;
+                programObject->advancedBlendSupportMask |=
+                    shaderObject->advancedBlendSupportMask;
+                programObject->advancedBlendSupportAll =
+                    programObject->advancedBlendSupportAll ||
+                    shaderObject->advancedBlendSupportAll;
+                break;
             case GL_COMPUTE_SHADER:         computeShader = shaderObject; break;
             case GL_GEOMETRY_SHADER:        geometryShader = shaderObject; break;
             case GL_TESS_CONTROL_SHADER:    tessControlShader = shaderObject; break;
@@ -31887,6 +32509,17 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     GLProgramObject* program = impl_->resolveDrawProgram(programName);
     APPGL_LOG(DRAW, @"drawArrays: mode=0x%X count=%d program=%u hasTranslated=%d",
               mode, count, programName, program ? (int)program->hasTranslatedPipeline : -1);
+    {
+        bool advancedBlendHandled = false;
+        const bool advancedBlendOk =
+            impl_->handleAdvancedBlendDraw(program, "glDrawArrays", advancedBlendHandled);
+        if (advancedBlendHandled) {
+            return advancedBlendOk;
+        }
+    }
+    if (impl_->state->boundDrawFramebuffer() == 0) {
+        impl_->invalidateDefaultFramebufferShadow();
+    }
     if (program != nullptr && program->ssboStdLayoutDoubleCopyFallback &&
         impl_->state->isEnabled(GL_RASTERIZER_DISCARD)) {
         return impl_->runSSBOStdLayoutDoubleCopyFallback();
@@ -33452,6 +34085,17 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
     // glUseProgramStages without ever calling glUseProgram.
     GLuint programName = impl_->state->currentProgram();
     GLProgramObject* program = impl_->resolveDrawProgram(programName);
+    {
+        bool advancedBlendHandled = false;
+        const bool advancedBlendOk =
+            impl_->handleAdvancedBlendDraw(program, "glDrawElements", advancedBlendHandled);
+        if (advancedBlendHandled) {
+            return advancedBlendOk;
+        }
+    }
+    if (impl_->state->boundDrawFramebuffer() == 0) {
+        impl_->invalidateDefaultFramebufferShadow();
+    }
 
     // Phase 3f-16: CPU TES emulation hook for drawElements. Mirrors
     // the drawArrays block but feeds the resolved index buffer into

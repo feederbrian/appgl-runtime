@@ -1049,6 +1049,8 @@ const ProcEntry kProcTable[] = {
     {"glBindVertexBuffer", reinterpret_cast<AppGLProc>(&::glBindVertexBuffer)},
     {"glBindVertexBuffers", reinterpret_cast<AppGLProc>(&::glBindVertexBuffers)},
     {"glBitmap", reinterpret_cast<AppGLProc>(&::glBitmap)},
+    {"glBlendBarrier", reinterpret_cast<AppGLProc>(&::glBlendBarrier)},
+    {"glBlendBarrierKHR", reinterpret_cast<AppGLProc>(&::glBlendBarrierKHR)},
     {"glBlendColor", reinterpret_cast<AppGLProc>(&::glBlendColor)},
     {"glBlendColorEXT", reinterpret_cast<AppGLProc>(&::glBlendColorEXT)},
     {"glBlendEquation", reinterpret_cast<AppGLProc>(&::glBlendEquation)},

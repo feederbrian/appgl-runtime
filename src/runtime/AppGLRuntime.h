@@ -151,6 +151,8 @@ void APIENTRY glBlendEquation(GLenum mode);
 void APIENTRY glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha);
 void APIENTRY glBlendEquationi(GLuint buf, GLenum mode);
 void APIENTRY glBlendEquationSeparatei(GLuint buf, GLenum modeRGB, GLenum modeAlpha);
+void APIENTRY glBlendBarrier(void);
+void APIENTRY glBlendBarrierKHR(void);
 void APIENTRY glBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
 void APIENTRY glColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
 void APIENTRY glColorMaski(GLuint index, GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
