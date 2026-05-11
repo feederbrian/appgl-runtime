@@ -19,6 +19,7 @@ struct BindingMap {
     std::uint32_t vertexBufferBase = 0;    // [ 0..16) — VBOs
     std::uint32_t uniformBufferBase = 16;  // [16..28) — UBOs
     std::uint32_t storageBufferBase = 28;  // [28..30) — SSBOs (GL 4.3+, deferred)
+    std::uint32_t multisampleStorageImageSampleBuffer = 30;
     std::uint32_t textureBase = 0;         // [ 0..48) — sampled textures (GL_MAX_TEXTURE_IMAGE_UNITS)
     std::uint32_t samplerBase = 0;         // sampler state slots track textureBase 1:1
     // Storage images (imageLoad/imageStore) must live in a Metal
@@ -48,6 +49,7 @@ inline BindingMap makeComputeBindingMap() {
     m.storageBufferBase = 0;   // [ 0..16) — SSBOs: 16 slots (spec floor 8)
     m.uniformBufferBase = 16;  // [16..31) — default uniform (16) + UBOs (17..30)
     m.vertexBufferBase = 0;    // unused for compute
+    m.multisampleStorageImageSampleBuffer = 30;
     return m;
 }
 
@@ -123,6 +125,8 @@ struct ShaderReflection {
         // the per-stage referenced bit so unused blocks don't look
         // used.
         bool active = true;
+        bool multisampleStorageImage = false;
+        bool multisampleStorageImageArray = false;
         std::vector<UniformMember> members;
     };
 

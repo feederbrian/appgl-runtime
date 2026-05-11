@@ -624,6 +624,9 @@ struct ComputeDispatchInfo {
     // location-based glUniform* updates.
     const void* computeUniformData = nullptr;
     std::size_t computeUniformSize = 0;
+    const void* multisampleStorageImageSampleCounts = nullptr;
+    std::size_t multisampleStorageImageSampleCountBytes = 0;
+    std::uint32_t multisampleStorageImageSampleCountSlot = 30;
 
     // Indirect dispatch: when indirectBuffer != nullptr the work-group
     // counts (groupsX/Y/Z above) are ignored and Metal reads them from

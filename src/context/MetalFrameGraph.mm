@@ -7425,7 +7425,6 @@ fragment float4 appgl_immediate_textured_fs(
                        length:info.computeUniformSize
                       atIndex:16];
             }
-
             for (const auto& bb : info.buffers) {
                 id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bb.metalBuffer;
                 if (buf == nil) continue;
@@ -7443,6 +7442,14 @@ fragment float4 appgl_immediate_textured_fs(
                     [enc setSamplerState:smp atIndex:static_cast<NSUInteger>(tb.metalSlot)];
                 }
             }
+        }
+        if (info.multisampleStorageImageSampleCounts != nullptr &&
+            info.multisampleStorageImageSampleCountBytes > 0) {
+            [enc setBytes:info.multisampleStorageImageSampleCounts
+                   length:static_cast<NSUInteger>(
+                              info.multisampleStorageImageSampleCountBytes)
+                  atIndex:static_cast<NSUInteger>(
+                              info.multisampleStorageImageSampleCountSlot)];
         }
 
         // GL's glDispatchCompute(gx, gy, gz) spec: (gx, gy, gz) is the

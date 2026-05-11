@@ -23,6 +23,7 @@ namespace {
 std::once_flag g_glslangInitFlag;
 constexpr std::uint32_t kDefaultUniformSyntheticBinding = 1024u;
 constexpr std::uint32_t kFragCoordParamsBufferSlot = 15u;
+constexpr std::uint32_t kMultisampleStorageImageSampleCountsBufferSlot = 30u;
 
 bool isIdentifierChar(char ch) {
     return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
@@ -163,6 +164,41 @@ bool injectFragmentCoordYFixup(std::string& msl,
         "        (_appgl_FragCoordParams.y * gl_FragCoord.y) +\n"
         "        (_appgl_FragCoordParams.z * " + std::string(bias) + ");";
     msl.insert(adjustedBodyOpen + 1, injection);
+    return true;
+}
+
+bool injectMultisampleStorageImageSampleCounts(std::string& msl) {
+    static constexpr const char* kSampleCountsName =
+        "appgl_ms_storage_image_samples";
+    static constexpr const char* kSampleCountsParam =
+        "constant uint* appgl_ms_storage_image_samples";
+    if (msl.find(kSampleCountsName) == std::string::npos ||
+        msl.find(kSampleCountsParam) != std::string::npos) {
+        return false;
+    }
+
+    const std::size_t mainPos = msl.find("main0(");
+    if (mainPos == std::string::npos) return false;
+    const std::size_t paramStart = mainPos + 6;
+    std::size_t depth = 1;
+    std::size_t paramEnd = paramStart;
+    while (paramEnd < msl.size() && depth > 0) {
+        const char c = msl[paramEnd];
+        if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+            if (depth == 0) break;
+        }
+        ++paramEnd;
+    }
+    if (depth != 0 || paramEnd >= msl.size()) return false;
+
+    const std::string param =
+        ", constant uint* " + std::string(kSampleCountsName) +
+        " [[buffer(" +
+        std::to_string(kMultisampleStorageImageSampleCountsBufferSlot) + ")]]";
+    msl.insert(paramEnd, param);
     return true;
 }
 
@@ -1813,6 +1849,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             }
         }
 
+        (void)injectMultisampleStorageImageSampleCounts(msl);
+
         // SPIRV-Cross lowers GLSL image coordinates as signed integer
         // temporaries (`int2`, `int3`), but Metal storage texture
         // read/write APIs require unsigned coordinates. Apple Metal's
@@ -2908,6 +2946,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             struct StorageImgRef {
                 std::uint32_t glBinding;
                 std::uint32_t id;
+                bool multisample = false;
+                bool multisampleArray = false;
                 spirv_cross::Resource* res;
             };
             std::vector<StorageImgRef> sortedStorageImages;
@@ -2917,6 +2957,17 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 StorageImgRef r;
                 r.glBinding = compiler.get_decoration(img.id, spv::DecorationBinding);
                 r.id = img.id;
+                const auto& varType = compiler.get_type(img.type_id);
+                const auto& baseType = compiler.get_type(img.base_type_id);
+                const auto& imageType =
+                    varType.basetype == spirv_cross::SPIRType::Image
+                        ? varType : baseType;
+                r.multisample =
+                    imageType.basetype == spirv_cross::SPIRType::Image &&
+                    imageType.image.ms &&
+                    imageType.image.dim == spv::Dim2D &&
+                    imageType.image.sampled == 2;
+                r.multisampleArray = r.multisample && imageType.image.arrayed;
                 r.res = &img;
                 sortedStorageImages.push_back(r);
             }
@@ -2941,6 +2992,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     unifiedNextTextureSlotR += 1;
                 }
                 rb.name = entry.res->name;
+                rb.multisampleStorageImage = entry.multisample;
+                rb.multisampleStorageImageArray = entry.multisampleArray;
                 result.storageImages.push_back(std::move(rb));
             }
         }

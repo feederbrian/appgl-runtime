@@ -8,6 +8,7 @@
 #include "../extensions/ExtensionContext.h"
 #include "../extensions/ExtensionRegistry.h"
 #include "../extensions/fragment_shading_rate/FragmentShadingRateModule.h"
+#include "../extensions/sparse_texture/MultisampleStorageImageEmulation.h"
 #include "../extensions/sparse_texture/SparseTextureAlloc.h"
 #include "../shader/CompatShaderRewrite.h"
 #include "../shader/GeometryShaderEmulator.h"
@@ -34913,6 +34914,10 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     // shading_language_420pack.binding_images_* relies on this — only
     // one of the three images has an explicit layout binding, and the
     // others rely on glUniform1i to set the unit.
+    thread_local std::vector<std::uint32_t> msImageSampleCounts;
+    msImageSampleCounts.assign(128, 1u);
+    bool hasMSImageSampleCounts = false;
+    ExtensionContext extensionContext(*this);
     for (const auto& img : programObject->computeReflection.storageImages) {
         // CKPT145 (Sprint 13 Day 9): storage image array iteration. SPIRV-
         // Cross emits an image array (`uniform image2D goku[7]`) as N
@@ -34949,12 +34954,36 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
             if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
             ComputeDispatchInfo::TextureBinding tb;
-            // CKPT119: level-restricted view when ib.level > 0.
-            tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
+            if (img.multisampleStorageImage) {
+                extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                if (!extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
+                        extensionContext, *texObj, &sidecarInfo)) {
+                    continue;
+                }
+                tb.metalTexture = sidecarInfo.metalTexture;
+                const std::uint32_t slot =
+                    img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                if (slot >= msImageSampleCounts.size()) {
+                    msImageSampleCounts.resize(static_cast<std::size_t>(slot) + 1u, 1u);
+                }
+                msImageSampleCounts[slot] =
+                    static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
+                hasMSImageSampleCounts = true;
+            } else {
+                // CKPT119: level-restricted view when ib.level > 0.
+                tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
+            }
             tb.metalSamplerState = nullptr;  // no sampler for storage images
             tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
             info.textures.push_back(tb);
         }
+    }
+    if (hasMSImageSampleCounts) {
+        info.multisampleStorageImageSampleCounts = msImageSampleCounts.data();
+        info.multisampleStorageImageSampleCountBytes =
+            msImageSampleCounts.size() * sizeof(std::uint32_t);
+        info.multisampleStorageImageSampleCountSlot =
+            makeComputeBindingMap().multisampleStorageImageSampleBuffer;
     }
 
     (void)impl_->frameGraph->encodeComputeDispatch(info);
@@ -35209,6 +35238,10 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         }
     }
     // Storage images for the indirect path — mirror the direct path.
+    thread_local std::vector<std::uint32_t> msImageSampleCountsIndirect;
+    msImageSampleCountsIndirect.assign(128, 1u);
+    bool hasMSImageSampleCountsIndirect = false;
+    ExtensionContext extensionContext(*this);
     for (const auto& img : programObject->computeReflection.storageImages) {
         if (img.glBinding >= Impl::kMaxImageUnits) continue;
         auto& ib = impl_->imageBindings[img.glBinding];
@@ -35217,11 +35250,34 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
         if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
         ComputeDispatchInfo::TextureBinding tb;
-        // CKPT119: level-restricted view when ib.level > 0.
-        tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
+        if (img.multisampleStorageImage) {
+            extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+            if (!extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
+                    extensionContext, *texObj, &sidecarInfo)) {
+                continue;
+            }
+            tb.metalTexture = sidecarInfo.metalTexture;
+            if (img.metalBinding >= msImageSampleCountsIndirect.size()) {
+                msImageSampleCountsIndirect.resize(
+                    static_cast<std::size_t>(img.metalBinding) + 1u, 1u);
+            }
+            msImageSampleCountsIndirect[img.metalBinding] =
+                static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
+            hasMSImageSampleCountsIndirect = true;
+        } else {
+            // CKPT119: level-restricted view when ib.level > 0.
+            tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
+        }
         tb.metalSamplerState = nullptr;
         tb.metalSlot = img.metalBinding;
         info.textures.push_back(tb);
+    }
+    if (hasMSImageSampleCountsIndirect) {
+        info.multisampleStorageImageSampleCounts = msImageSampleCountsIndirect.data();
+        info.multisampleStorageImageSampleCountBytes =
+            msImageSampleCountsIndirect.size() * sizeof(std::uint32_t);
+        info.multisampleStorageImageSampleCountSlot =
+            makeComputeBindingMap().multisampleStorageImageSampleBuffer;
     }
 
     (void)impl_->frameGraph->encodeComputeDispatch(info);
