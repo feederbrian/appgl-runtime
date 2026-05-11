@@ -97,10 +97,14 @@ MTLTextureType metalTextureTypeForTarget(GLenum target) {
         case GL_TEXTURE_2D:
         case GL_TEXTURE_RECTANGLE:
             return MTLTextureType2D;
+        case GL_TEXTURE_2D_MULTISAMPLE:
+            return MTLTextureType2DMultisample;
         case GL_TEXTURE_3D:
             return MTLTextureType3D;
         case GL_TEXTURE_2D_ARRAY:
             return MTLTextureType2DArray;
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return MTLTextureType2DMultisampleArray;
         case GL_TEXTURE_CUBE_MAP:
             return MTLTextureTypeCube;
         case GL_TEXTURE_CUBE_MAP_ARRAY:
@@ -118,7 +122,17 @@ MTLPixelFormat metalPixelFormatForInternalFormat(ExtensionContext& ctx, GLenum i
     return static_cast<MTLPixelFormat>(capability->metalPixelFormat);
 }
 
-MTLSize sparsePageSizeForFormat(ExtensionContext& ctx, GLenum target, GLenum internalformat) {
+NSUInteger sparseTileSampleCount(GLenum target, GLsizei samples) {
+    if (!isMultisampleStorageImageTarget(target)) {
+        return 1u;
+    }
+    return static_cast<NSUInteger>(std::max<GLsizei>(samples, 2));
+}
+
+MTLSize sparsePageSizeForFormat(ExtensionContext& ctx,
+                                GLenum target,
+                                GLenum internalformat,
+                                GLsizei samples = 1) {
     id<MTLDevice> device = metalDevice(ctx);
     if (device == nil || !isAllocationTarget(target)) {
         return MTLSizeMake(0, 0, 0);
@@ -129,7 +143,7 @@ MTLSize sparsePageSizeForFormat(ExtensionContext& ctx, GLenum target, GLenum int
     }
     MTLSize tile = [device sparseTileSizeWithTextureType:metalTextureTypeForTarget(target)
                                              pixelFormat:pixelFormat
-                                             sampleCount:1];
+                                             sampleCount:sparseTileSampleCount(target, samples)];
     if (tile.width == 0 || tile.height == 0) {
         return MTLSizeMake(0, 0, 0);
     }
@@ -311,7 +325,10 @@ bool updateTextureMapping(ExtensionContext& ctx,
         return false;
     }
     const MTLSize page =
-        sparsePageSizeForFormat(ctx, textureObject.target, textureObject.desc.internalFormat);
+        sparsePageSizeForFormat(ctx,
+                                textureObject.target,
+                                textureObject.desc.internalFormat,
+                                textureObject.desc.samples);
     if (page.width == 0 || page.height == 0) {
         return false;
     }
@@ -382,6 +399,8 @@ bool isAllocationTarget(GLenum target) {
         case GL_TEXTURE_CUBE_MAP_ARRAY:
         case GL_TEXTURE_3D:
         case GL_TEXTURE_RECTANGLE:
+        case GL_TEXTURE_2D_MULTISAMPLE:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
             return true;
         default:
             return false;
@@ -390,6 +409,7 @@ bool isAllocationTarget(GLenum target) {
 
 bool targetUsesSlices(GLenum target) {
     return target == GL_TEXTURE_2D_ARRAY ||
+           target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
            target == GL_TEXTURE_CUBE_MAP ||
            target == GL_TEXTURE_CUBE_MAP_ARRAY;
 }
@@ -398,6 +418,7 @@ GLsizei storedDepthForTarget(GLenum target, GLsizei depth) {
     switch (target) {
         case GL_TEXTURE_3D:
         case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
         case GL_TEXTURE_CUBE_MAP_ARRAY:
             return std::max<GLsizei>(depth, 1);
         case GL_TEXTURE_CUBE_MAP:
@@ -447,7 +468,8 @@ bool validateStorageRequest(ExtensionContext& ctx,
                             GLsizei levels,
                             GLsizei width,
                             GLsizei height,
-                            GLsizei depth) {
+                            GLsizei depth,
+                            GLsizei samples) {
     if (!isAllocationTarget(target)) {
         ctx.pushError(GL_INVALID_OPERATION);
         return false;
@@ -457,7 +479,7 @@ bool validateStorageRequest(ExtensionContext& ctx,
         return false;
     }
 
-    const MTLSize page = sparsePageSizeForFormat(ctx, target, internalformat);
+    const MTLSize page = sparsePageSizeForFormat(ctx, target, internalformat, samples);
     const GLint pageCount = (page.width > 0 && page.height > 0) ? 1 : 0;
     const GLint pageSizeIndex = virtualPageSizeIndex(ctx, &texture);
     if (pageSizeIndex < 0 || pageSizeIndex >= pageCount) {
@@ -484,7 +506,9 @@ bool validateStorageRequest(ExtensionContext& ctx,
         ctx.pushError(GL_INVALID_VALUE);
         return false;
     }
-    if ((target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_CUBE_MAP_ARRAY) &&
+    if ((target == GL_TEXTURE_2D_ARRAY ||
+         target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+         target == GL_TEXTURE_CUBE_MAP_ARRAY) &&
         depth > maxSparseLayers) {
         ctx.pushError(GL_INVALID_VALUE);
         return false;
@@ -500,6 +524,7 @@ bool validateStorageRequest(ExtensionContext& ctx,
     const bool depthMustAlign =
         target == GL_TEXTURE_3D ||
         target == GL_TEXTURE_2D_ARRAY ||
+        target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
         target == GL_TEXTURE_CUBE_MAP_ARRAY;
     if (depthMustAlign && !pageAligned(depth, page.depth)) {
         ctx.pushError(GL_INVALID_VALUE);
@@ -517,7 +542,14 @@ bool validateStorageRequest(ExtensionContext& ctx,
          target == GL_TEXTURE_CUBE_MAP_ARRAY);
     if (needsFullArrayCube) {
         const GLsizei sparseLevelCount =
-            levelCountForStorage(ctx, target, levels, width, height, depth, internalformat);
+            levelCountForStorage(ctx,
+                                 target,
+                                 levels,
+                                 width,
+                                 height,
+                                 depth,
+                                 internalformat,
+                                 samples);
         const std::uint64_t levelScale = sparseLevelCount >= 63
             ? std::numeric_limits<std::uint64_t>::max()
             : (1ull << static_cast<unsigned>(sparseLevelCount - 1));
@@ -541,8 +573,9 @@ GLsizei levelCountForStorage(ExtensionContext& ctx,
                              GLsizei width,
                              GLsizei height,
                              GLsizei depth,
-                             GLenum internalformat) {
-    const MTLSize page = sparsePageSizeForFormat(ctx, target, internalformat);
+                             GLenum internalformat,
+                             GLsizei samples) {
+    const MTLSize page = sparsePageSizeForFormat(ctx, target, internalformat, samples);
     const GLsizei pageX = static_cast<GLsizei>(std::max<NSUInteger>(page.width, 1u));
     const GLsizei pageY = static_cast<GLsizei>(std::max<NSUInteger>(page.height, 1u));
     const GLsizei pageZ = static_cast<GLsizei>(std::max<NSUInteger>(page.depth, 1u));
@@ -571,28 +604,52 @@ bool allocateStorage(ExtensionContext& ctx, GLTextureObject& textureObject) {
     if (format == MTLPixelFormatInvalid) {
         return false;
     }
+    const GLsizei sparseSamples =
+        isMultisampleStorageImageTarget(textureObject.target)
+            ? std::max<GLsizei>(textureObject.desc.samples, 2)
+            : 1;
     const MTLSize page =
-        sparsePageSizeForFormat(ctx, textureObject.target, textureObject.desc.internalFormat);
+        sparsePageSizeForFormat(ctx,
+                                textureObject.target,
+                                textureObject.desc.internalFormat,
+                                sparseSamples);
     if (page.width == 0 || page.height == 0) {
         return false;
     }
 
     MTLTextureDescriptor* textureDesc = [[MTLTextureDescriptor alloc] init];
     textureDesc.textureType = metalTextureTypeForTarget(textureObject.target);
-    textureDesc.pixelFormat = format;
+    const bool isMSTarget = isMultisampleStorageImageTarget(textureObject.target);
+    const bool srgbMSNeedsLinearStorage =
+        isMSTarget &&
+        (textureObject.desc.internalFormat == GL_SRGB8 ||
+         textureObject.desc.internalFormat == GL_SRGB8_ALPHA8);
+    textureDesc.pixelFormat = srgbMSNeedsLinearStorage ? MTLPixelFormatRGBA8Unorm : format;
     textureDesc.width = static_cast<NSUInteger>(textureObject.desc.width);
     textureDesc.height = static_cast<NSUInteger>(textureObject.desc.height);
     textureDesc.depth = static_cast<NSUInteger>(
         textureObject.target == GL_TEXTURE_3D ? textureObject.desc.depth : 1);
     if (textureObject.target == GL_TEXTURE_2D_ARRAY) {
         textureDesc.arrayLength = static_cast<NSUInteger>(textureObject.desc.depth);
+    } else if (textureObject.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+        textureDesc.arrayLength =
+            static_cast<NSUInteger>(std::max<GLsizei>(textureObject.desc.depth, 1));
     } else if (textureObject.target == GL_TEXTURE_CUBE_MAP_ARRAY) {
         textureDesc.arrayLength =
             static_cast<NSUInteger>(std::max<GLsizei>(textureObject.desc.depth, 6) / 6);
     }
-    textureDesc.mipmapLevelCount = static_cast<NSUInteger>(
+    textureDesc.mipmapLevelCount = isMSTarget ? 1u : static_cast<NSUInteger>(
         std::max<GLsizei>(textureObject.desc.levels, 1));
-    textureDesc.usage = MTLTextureUsageShaderRead;
+    textureDesc.sampleCount = isMSTarget ? static_cast<NSUInteger>(sparseSamples) : 1u;
+    if (isMSTarget && textureObject.desc.samples < static_cast<GLsizei>(sparseSamples)) {
+        textureObject.desc.samples = static_cast<GLsizei>(sparseSamples);
+    }
+    textureDesc.usage = isMSTarget
+        ? (MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget)
+        : MTLTextureUsageShaderRead;
+    if (srgbMSNeedsLinearStorage) {
+        textureDesc.usage |= MTLTextureUsagePixelFormatView;
+    }
     textureDesc.storageMode = MTLStorageModePrivate;
     textureDesc.allowGPUOptimizedContents = NO;
 
@@ -682,6 +739,11 @@ bool uploadCommittedRegions(ExtensionContext& ctx,
     handled = true;
     id<MTLTexture> sparseTexture = (__bridge id<MTLTexture>)textureObject.metalTexture;
     if (sparseTexture == nil) {
+        return true;
+    }
+    if (isMultisampleStorageImageTarget(textureObject.target)) {
+        textureObject.instantiated = true;
+        (void)textureName;
         return true;
     }
     const auto& regions = committedRegions(ctx, textureObject);
@@ -862,7 +924,10 @@ bool pageCommitment(ExtensionContext& ctx,
     }
 
     const MTLSize page =
-        sparsePageSizeForFormat(ctx, textureObject.target, textureObject.desc.internalFormat);
+        sparsePageSizeForFormat(ctx,
+                                textureObject.target,
+                                textureObject.desc.internalFormat,
+                                textureObject.desc.samples);
     if (page.width == 0 || page.height == 0) {
         ctx.pushError(GL_INVALID_OPERATION);
         return false;

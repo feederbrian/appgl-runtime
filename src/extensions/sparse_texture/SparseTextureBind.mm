@@ -47,8 +47,24 @@ bool sparseTexture2OrClampActive() {
            ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp");
 }
 
+bool sparseTexture2Active() {
+    return ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture2");
+}
+
 bool sparseTextureClampActive() {
     return ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp");
+}
+
+bool isMultisampleSparseTarget(GLenum target) {
+    return target == GL_TEXTURE_2D_MULTISAMPLE ||
+           target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+}
+
+bool isSparseTextureParameterTarget(GLenum target) {
+    if (!isAllocationTarget(target)) {
+        return false;
+    }
+    return !isMultisampleSparseTarget(target) || sparseTexture2Active();
 }
 
 bool isDepthInternalFormat(GLenum internalformat) {
@@ -135,10 +151,14 @@ MTLTextureType metalTextureTypeForTarget(GLenum target) {
         case GL_TEXTURE_2D:
         case GL_TEXTURE_RECTANGLE:
             return MTLTextureType2D;
+        case GL_TEXTURE_2D_MULTISAMPLE:
+            return MTLTextureType2DMultisample;
         case GL_TEXTURE_3D:
             return MTLTextureType3D;
         case GL_TEXTURE_2D_ARRAY:
             return MTLTextureType2DArray;
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return MTLTextureType2DMultisampleArray;
         case GL_TEXTURE_CUBE_MAP:
             return MTLTextureTypeCube;
         case GL_TEXTURE_CUBE_MAP_ARRAY:
@@ -146,6 +166,10 @@ MTLTextureType metalTextureTypeForTarget(GLenum target) {
         default:
             return MTLTextureType2D;
     }
+}
+
+NSUInteger sparseTileSampleCount(GLenum target) {
+    return isMultisampleSparseTarget(target) ? 2u : 1u;
 }
 
 MTLSize sparsePageSizeForFormat(ExtensionContext& ctx, GLenum target, GLenum internalformat) {
@@ -164,7 +188,7 @@ MTLSize sparsePageSizeForFormat(ExtensionContext& ctx, GLenum target, GLenum int
     }
     MTLSize tile = [device sparseTileSizeWithTextureType:metalTextureTypeForTarget(target)
                                              pixelFormat:pixelFormat
-                                             sampleCount:1];
+                                             sampleCount:sparseTileSampleCount(target)];
     if (tile.width == 0 || tile.height == 0) {
         return MTLSizeMake(0, 0, 0);
     }
@@ -177,7 +201,7 @@ std::optional<PageSize> clampDepthSizingPageSize(ExtensionContext& ctx,
     if (!sparseTextureClampActive() || !isDepthInternalFormat(internalformat)) {
         return std::nullopt;
     }
-    if (!isAllocationTarget(target)) {
+    if (!isSparseTextureParameterTarget(target)) {
         return std::nullopt;
     }
 
@@ -232,7 +256,7 @@ bool handleTextureParameter(ExtensionContext& ctx,
             ctx.pushError(GL_INVALID_ENUM);
             return false;
         }
-        if (params[0] == GL_TRUE && !isAllocationTarget(target)) {
+        if (params[0] == GL_TRUE && !isSparseTextureParameterTarget(target)) {
             ctx.pushError(GL_INVALID_VALUE);
             return false;
         }
@@ -312,9 +336,11 @@ bool handleInternalFormatQuery(ExtensionContext& ctx,
         standardSparseTexture2PageSize(target, internalformat);
     const bool sparse2DepthExcluded =
         sparseTexture2OrClampActive() && isDepthInternalFormat(internalformat);
+    const bool multisampleTargetDisabled =
+        isMultisampleSparseTarget(target) && !sparseTexture2Active();
     switch (pname) {
         case GL_NUM_VIRTUAL_PAGE_SIZES_ARB: {
-            if (sparse2DepthExcluded) {
+            if (sparse2DepthExcluded || multisampleTargetDisabled) {
                 params[0] = 0;
                 return true;
             }
@@ -332,6 +358,9 @@ bool handleInternalFormatQuery(ExtensionContext& ctx,
         case GL_VIRTUAL_PAGE_SIZE_Z_ARB: {
             for (GLsizei i = 0; i < count; ++i) {
                 params[i] = 0;
+            }
+            if (multisampleTargetDisabled) {
+                return true;
             }
             if (sparse2DepthExcluded) {
                 const std::optional<PageSize> clampDepthPage =

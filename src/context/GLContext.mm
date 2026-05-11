@@ -1063,6 +1063,19 @@ bool isSparseTextureAllocationTarget(GLenum target) {
     return extensions::sparse_texture::isAllocationTarget(target);
 }
 
+static bool isSparseTextureMultisampleTarget(GLenum target) {
+    return target == GL_TEXTURE_2D_MULTISAMPLE ||
+           target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+}
+
+static bool isSparseTextureParameterTarget(GLenum target) {
+    if (!isSparseTextureAllocationTarget(target)) {
+        return false;
+    }
+    return !isSparseTextureMultisampleTarget(target) ||
+           extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture2");
+}
+
 static bool sparseTextureTargetUsesSlices(GLenum target) {
     return extensions::sparse_texture::targetUsesSlices(target);
 }
@@ -15529,12 +15542,26 @@ bool GLContext::texStorageMultisample(
         pushError(GL_INVALID_ENUM);
         return false;
     }
+    // Clamp sample count to Metal's supported sparse/MS storage shape.
+    // Metal requires sampleCount > 1 for multisample texture types; GL
+    // permits samples=1 on MS targets and allows implementations to choose
+    // an actual count >= requested, so use 2 as the minimum storage count.
+    GLsizei clampedSamples = std::min<GLsizei>(samples, 4);
+    if (clampedSamples < 2) {
+        clampedSamples = 2;
+    }
+
     // Metal only supports specific sample counts (typically 1, 2, 4, 8).
     // Unsupported values trigger MTLTextureDescriptor validation abort if
     // we pass them through. Check via MTLDevice.supportsTextureSampleCount.
     {
         id<MTLDevice> mtlDevice = impl_->device;
         if (mtlDevice != nil && samples > 1 && ![mtlDevice supportsTextureSampleCount:static_cast<NSUInteger>(samples)]) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        if (mtlDevice != nil &&
+            ![mtlDevice supportsTextureSampleCount:static_cast<NSUInteger>(clampedSamples)]) {
             pushError(GL_INVALID_OPERATION);
             return false;
         }
@@ -15550,13 +15577,20 @@ bool GLContext::texStorageMultisample(
         return false;
     }
     ExtensionContext extensionContext(*this);
-    if (extensions::sparse_texture::textureSparse(extensionContext, object) == GL_TRUE) {
-        pushError(GL_INVALID_OPERATION);
+    const bool allocateSparse =
+        extensions::sparse_texture::textureSparse(extensionContext, object) == GL_TRUE;
+    if (allocateSparse &&
+        !extensions::sparse_texture::validateStorageRequest(extensionContext,
+                                                            *object,
+                                                            target,
+                                                            internalformat,
+                                                            1,
+                                                            width,
+                                                            height,
+                                                            depth,
+                                                            clampedSamples)) {
         return false;
     }
-
-    // Clamp sample count to Metal maximum (typically 4 on Apple Silicon).
-    GLsizei clampedSamples = std::min<GLsizei>(samples, 4);
 
     object->desc.target = target;
     object->desc.internalFormat = internalformat;
@@ -15574,6 +15608,23 @@ bool GLContext::texStorageMultisample(
     object->desc.samples = clampedSamples;
     object->desc.immutable = true;
     object->target = target;
+    if (allocateSparse) {
+        extensions::sparse_texture::setSparseLevels(
+            extensionContext,
+            *object,
+            extensions::sparse_texture::levelCountForStorage(extensionContext,
+                                                             target,
+                                                             1,
+                                                             width,
+                                                             height,
+                                                             depth,
+                                                             internalformat,
+                                                             clampedSamples));
+    } else {
+        extensions::sparse_texture::setSparseLevels(extensionContext, *object, 0);
+    }
+    extensions::sparse_texture::clearCommittedRegions(extensionContext, *object);
+    extensions::sparse_texture::resetMultisampleStorageImageSidecar(extensionContext, *object);
 
     // Create a base-level entry for Metal texture creation.
     GLTextureImageLevel baseLevel;
@@ -15582,6 +15633,14 @@ bool GLContext::texStorageMultisample(
     const std::size_t byteCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * static_cast<std::size_t>(object->desc.depth) * 4u;
     baseLevel.rgba8.resize(byteCount, 0);
     object->levels[0] = std::move(baseLevel);
+
+    if (allocateSparse) {
+        if (!extensions::sparse_texture::allocateStorage(extensionContext, *object)) {
+            pushError(GL_OUT_OF_MEMORY);
+            return false;
+        }
+        return true;
+    }
 
     if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
         pushError(GL_OUT_OF_MEMORY);
@@ -15599,7 +15658,7 @@ bool GLContext::texPageCommitment(GLenum target,
                                   GLsizei height,
                                   GLsizei depth,
                                   GLboolean commit) {
-    if (!isSparseTextureAllocationTarget(target)) {
+    if (!isSparseTextureParameterTarget(target)) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -15637,7 +15696,7 @@ bool GLContext::texturePageCommitment(GLuint texture,
         return false;
     }
     const GLenum target = object->target != 0 ? object->target : GL_TEXTURE_2D;
-    if (!isSparseTextureAllocationTarget(target)) {
+    if (!isSparseTextureParameterTarget(target)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -15815,7 +15874,7 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
             return false;
         }
         if (pname == GL_TEXTURE_SPARSE_ARB && params[0] == GL_TRUE &&
-            !isSparseTextureAllocationTarget(target)) {
+            !isSparseTextureParameterTarget(target)) {
             pushError(GL_INVALID_VALUE);
             return false;
         }
@@ -15994,7 +16053,7 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
         }
         if (pname == GL_TEXTURE_SPARSE_ARB &&
             static_cast<GLint>(params[0]) == GL_TRUE &&
-            !isSparseTextureAllocationTarget(target)) {
+            !isSparseTextureParameterTarget(target)) {
             pushError(GL_INVALID_VALUE);
             return false;
         }

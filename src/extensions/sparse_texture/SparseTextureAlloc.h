@@ -41,14 +41,16 @@ bool validateStorageRequest(ExtensionContext& ctx,
                             GLsizei levels,
                             GLsizei width,
                             GLsizei height,
-                            GLsizei depth);
+                            GLsizei depth,
+                            GLsizei samples = 1);
 GLsizei levelCountForStorage(ExtensionContext& ctx,
                              GLenum target,
                              GLsizei levels,
                              GLsizei width,
                              GLsizei height,
                              GLsizei depth,
-                             GLenum internalformat);
+                             GLenum internalformat,
+                             GLsizei samples = 1);
 bool allocateStorage(ExtensionContext& ctx, GLTextureObject& texture);
 
 void* sparseHeap(ExtensionContext& ctx, const GLTextureObject& texture);
