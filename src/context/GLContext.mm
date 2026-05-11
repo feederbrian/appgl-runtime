@@ -6741,6 +6741,23 @@ struct GLContext::Impl {
                     static_cast<std::uint32_t>(ib.format);
                 std::uint32_t bpp = 0;
                 switch (intFmt) {
+                    case GL_R8:
+                    case GL_R8I:
+                    case GL_R8UI:
+                    case GL_R8_SNORM:
+                        bpp = 1;
+                        break;
+                    case GL_RG8:
+                    case GL_RG8I:
+                    case GL_RG8UI:
+                    case GL_RG8_SNORM:
+                    case GL_R16F:
+                    case GL_R16:
+                    case GL_R16_SNORM:
+                    case GL_R16I:
+                    case GL_R16UI:
+                        bpp = 2;
+                        break;
                     case GL_R32UI:
                     case GL_R32I:
                     case GL_R32F:
@@ -10218,7 +10235,8 @@ struct GLContext::Impl {
         const std::vector<appgl::PendingImageWrite>& writes,
         const ShaderReflection* reflection,
         const std::vector<std::uint32_t>& spirv,
-        GLProgramObject& program);
+        GLProgramObject& program,
+        GLenum stageFilter = 0);
     // Synthesise a pass-through VS and encode the expanded vertex
     // buffer through the normal translated-draw encoder. Shared by
     // drawArrays and drawElements — the expanded buffer is already
@@ -18181,7 +18199,8 @@ void GLContext::Impl::flushPendingImageWritesForStage(
     const std::vector<appgl::PendingImageWrite>& writes,
     const ShaderReflection* reflection,
     const std::vector<std::uint32_t>& spirv,
-    GLProgramObject& program)
+    GLProgramObject& program,
+    GLenum stageFilter)
 {
     if (writes.empty() || reflection == nullptr || spirv.empty()) return;
     // Walk SPIR-V vars to map varId -> reflection storage-image entry
@@ -18189,6 +18208,9 @@ void GLContext::Impl::flushPendingImageWritesForStage(
     const auto vars = appgl::collectSamplerVarsFromSpirv(
         spirv.data(), spirv.size());
     for (const auto& pw : writes) {
+        if (stageFilter != 0 && pw.stage != static_cast<std::uint32_t>(stageFilter)) {
+            continue;
+        }
         // Find SPIR-V var matching pw.arrayVarId.
         const appgl::SamplerVarInfo* matchingVar = nullptr;
         for (const auto& v : vars) {
@@ -18283,11 +18305,27 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 texelBytes = 16;
                 break;
             }
+            case GL_RG32I:
+            case GL_RG32UI:
+            case GL_RG32F: {
+                std::memcpy(buf,     &pw.value[0], 4);
+                std::memcpy(buf + 4, &pw.value[1], 4);
+                texelBytes = 8;
+                break;
+            }
             case GL_R32I:
             case GL_R32UI:
             case GL_R32F: {
                 std::memcpy(buf, &pw.value[0], 4);
                 texelBytes = 4;
+                break;
+            }
+            case GL_RGBA16F: {
+                for (int k = 0; k < 4; ++k) {
+                    const std::uint16_t h = floatToHalf(valueAsFloat(k));
+                    std::memcpy(buf + k * 2, &h, sizeof(h));
+                }
+                texelBytes = 8;
                 break;
             }
             case GL_RG16F: {
@@ -18298,9 +18336,25 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 texelBytes = 4;
                 break;
             }
+            case GL_R16F: {
+                const std::uint16_t x = floatToHalf(valueAsFloat(0));
+                std::memcpy(buf, &x, sizeof(x));
+                texelBytes = 2;
+                break;
+            }
             case GL_R11F_G11F_B10F: {
                 const std::uint32_t packed = packUF_10F11F11F_REV(
                     valueAsFloat(0), valueAsFloat(1), valueAsFloat(2));
+                std::memcpy(buf, &packed, sizeof(packed));
+                texelBytes = 4;
+                break;
+            }
+            case GL_RGB10_A2UI: {
+                const std::uint32_t packed =
+                    ((pw.value[3] & 0x3u) << 30) |
+                    ((pw.value[2] & 0x3FFu) << 20) |
+                    ((pw.value[1] & 0x3FFu) << 10) |
+                    (pw.value[0] & 0x3FFu);
                 std::memcpy(buf, &packed, sizeof(packed));
                 texelBytes = 4;
                 break;
@@ -18333,6 +18387,51 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 texelBytes = 4;
                 break;
             }
+            case GL_RG8: {
+                buf[0] = static_cast<std::uint8_t>(packUnorm(valueAsFloat(0), 255u));
+                buf[1] = static_cast<std::uint8_t>(packUnorm(valueAsFloat(1), 255u));
+                texelBytes = 2;
+                break;
+            }
+            case GL_R8: {
+                buf[0] = static_cast<std::uint8_t>(packUnorm(valueAsFloat(0), 255u));
+                texelBytes = 1;
+                break;
+            }
+            case GL_RGBA16I:
+            case GL_RGBA16UI: {
+                for (int k = 0; k < 4; ++k) {
+                    const std::uint16_t v = static_cast<std::uint16_t>(pw.value[k] & 0xFFFFu);
+                    std::memcpy(buf + k * 2, &v, sizeof(v));
+                }
+                texelBytes = 8;
+                break;
+            }
+            case GL_RG16I:
+            case GL_RG16UI: {
+                const std::uint16_t x = static_cast<std::uint16_t>(pw.value[0] & 0xFFFFu);
+                const std::uint16_t y = static_cast<std::uint16_t>(pw.value[1] & 0xFFFFu);
+                std::memcpy(buf, &x, sizeof(x));
+                std::memcpy(buf + 2, &y, sizeof(y));
+                texelBytes = 4;
+                break;
+            }
+            case GL_R16I:
+            case GL_R16UI: {
+                const std::uint16_t x = static_cast<std::uint16_t>(pw.value[0] & 0xFFFFu);
+                std::memcpy(buf, &x, sizeof(x));
+                texelBytes = 2;
+                break;
+            }
+            case GL_RGBA16: {
+                for (int k = 0; k < 4; ++k) {
+                    const std::uint16_t v =
+                        static_cast<std::uint16_t>(packUnorm(valueAsFloat(k), 65535u));
+                    std::memcpy(buf + k * 2, &v, sizeof(v));
+                }
+                texelBytes = 8;
+                break;
+            }
             case GL_RG16: {
                 const std::uint16_t x =
                     static_cast<std::uint16_t>(packUnorm(valueAsFloat(0), 65535u));
@@ -18341,6 +18440,22 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 std::memcpy(buf, &x, sizeof(x));
                 std::memcpy(buf + 2, &y, sizeof(y));
                 texelBytes = 4;
+                break;
+            }
+            case GL_R16: {
+                const std::uint16_t x =
+                    static_cast<std::uint16_t>(packUnorm(valueAsFloat(0), 65535u));
+                std::memcpy(buf, &x, sizeof(x));
+                texelBytes = 2;
+                break;
+            }
+            case GL_RGBA16_SNORM: {
+                for (int k = 0; k < 4; ++k) {
+                    const std::int16_t v = static_cast<std::int16_t>(
+                        std::max(-32768, std::min(32767, packSnorm(valueAsFloat(k), 32767.0))));
+                    std::memcpy(buf + k * 2, &v, sizeof(v));
+                }
+                texelBytes = 8;
                 break;
             }
             case GL_RGBA8_SNORM: {
@@ -18359,6 +18474,23 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 texelBytes = 4;
                 break;
             }
+            case GL_RG8_SNORM: {
+                const std::int8_t x = static_cast<std::int8_t>(
+                    std::max(-128, std::min(127, packSnorm(valueAsFloat(0), 127.0))));
+                const std::int8_t y = static_cast<std::int8_t>(
+                    std::max(-128, std::min(127, packSnorm(valueAsFloat(1), 127.0))));
+                std::memcpy(buf, &x, sizeof(x));
+                std::memcpy(buf + 1, &y, sizeof(y));
+                texelBytes = 2;
+                break;
+            }
+            case GL_R8_SNORM: {
+                const std::int8_t x = static_cast<std::int8_t>(
+                    std::max(-128, std::min(127, packSnorm(valueAsFloat(0), 127.0))));
+                std::memcpy(buf, &x, sizeof(x));
+                texelBytes = 1;
+                break;
+            }
             case GL_RG16_SNORM: {
                 const std::int16_t x = static_cast<std::int16_t>(
                     std::max(-32768, std::min(32767, packSnorm(valueAsFloat(0), 32767.0))));
@@ -18369,6 +18501,13 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 texelBytes = 4;
                 break;
             }
+            case GL_R16_SNORM: {
+                const std::int16_t x = static_cast<std::int16_t>(
+                    std::max(-32768, std::min(32767, packSnorm(valueAsFloat(0), 32767.0))));
+                std::memcpy(buf, &x, sizeof(x));
+                texelBytes = 2;
+                break;
+            }
             case GL_RGBA8UI:
             case GL_RGBA8I: {
                 buf[0] = static_cast<std::uint8_t>(pw.value[0] & 0xFFu);
@@ -18376,6 +18515,19 @@ void GLContext::Impl::flushPendingImageWritesForStage(
                 buf[2] = static_cast<std::uint8_t>(pw.value[2] & 0xFFu);
                 buf[3] = static_cast<std::uint8_t>(pw.value[3] & 0xFFu);
                 texelBytes = 4;
+                break;
+            }
+            case GL_RG8UI:
+            case GL_RG8I: {
+                buf[0] = static_cast<std::uint8_t>(pw.value[0] & 0xFFu);
+                buf[1] = static_cast<std::uint8_t>(pw.value[1] & 0xFFu);
+                texelBytes = 2;
+                break;
+            }
+            case GL_R8UI:
+            case GL_R8I: {
+                buf[0] = static_cast<std::uint8_t>(pw.value[0] & 0xFFu);
+                texelBytes = 1;
                 break;
             }
             default:
@@ -18429,9 +18581,28 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     if (!ed.pendingImageWrites.empty()) {
         flushPendingImageWritesForStage(
             ed.pendingImageWrites,
+            &program.vertexReflection,
+            program.vertexSpirv,
+            program,
+            GL_VERTEX_SHADER);
+        flushPendingImageWritesForStage(
+            ed.pendingImageWrites,
+            &program.tessControlReflection,
+            program.tessControlSpirv,
+            program,
+            GL_TESS_CONTROL_SHADER);
+        flushPendingImageWritesForStage(
+            ed.pendingImageWrites,
+            &program.tessEvalAsComputeReflection,
+            program.tessEvalSpirv,
+            program,
+            GL_TESS_EVALUATION_SHADER);
+        flushPendingImageWritesForStage(
+            ed.pendingImageWrites,
             &program.geometryReflection,
             program.geometrySpirv,
-            program);
+            program,
+            GL_GEOMETRY_SHADER);
     }
     // Vertices-per-primitive for the emulator's *expanded*
     // topology. Strip outputs were decomposed to list form in
@@ -21311,6 +21482,11 @@ bool GLContext::linkProgram(GLuint program) {
         // path handle the no-FS draw — same shape that ProgramKind::VertexOnly
         // relies on for SSBO-VS tests.
         VertexGeometry,
+        // Sprint 19: VS+TCS+TES+GS with no fragment shader. SILS
+        // basic-allFormats-*GeometryStages enables GL_RASTERIZER_DISCARD
+        // and communicates through storage images, so this can share the
+        // existing CPU tessellation -> CPU GS path once link accepts it.
+        VertexTessellationGeometry,
         // Separable multi-stage combination that doesn't match any
         // of the above — accepted only when GL_PROGRAM_SEPARABLE is
         // set. The program is linked for introspection; the actual
@@ -21339,6 +21515,10 @@ bool GLContext::linkProgram(GLuint program) {
     } else if (vertexShader != nullptr && fragmentShader != nullptr &&
                geometryShader != nullptr && computeShader == nullptr) {
         kind = ProgramKind::VertexGeometryFragment;
+    } else if (vertexShader != nullptr && geometryShader != nullptr &&
+               tessControlShader != nullptr && tessEvalShader != nullptr &&
+               fragmentShader == nullptr && computeShader == nullptr) {
+        kind = ProgramKind::VertexTessellationGeometry;
     } else if (vertexShader != nullptr && geometryShader != nullptr &&
                fragmentShader == nullptr && computeShader == nullptr &&
                tessControlShader == nullptr && tessEvalShader == nullptr) {
@@ -25057,6 +25237,115 @@ bool GLContext::linkProgram(GLuint program) {
                 // Empty fragmentMSL signals the no-FS pipeline path. The
                 // draw-time encoder treats this as legitimate when
                 // rasterizerDiscard is set (matches VertexOnly behaviour).
+                programObject->fragmentMSL.clear();
+                programObject->hasTranslatedPipeline = true;
+                rasterTranslationOk = true;
+            }
+            break;
+        }
+        case ProgramKind::VertexTessellationGeometry: {
+            ShaderReflection vsRefl, gsRefl;
+            appgl::TranslatorOptions vsOptionsVtg;
+            if (vertexShader != nullptr) {
+                vsOptionsVtg.forceArgumentBuffers = spirvUsesStorageBuffers(
+                    vertexShader->spirv.data(), vertexShader->spirv.size());
+            }
+            const bool vsOk = translateCachedStage(
+                "vertex", vertexShader, programObject->vertexMSL, vsRefl,
+                vsOptionsVtg);
+
+            std::string unusedGsMSL;
+            (void)translateCachedStage("geometry", geometryShader,
+                                       unusedGsMSL, gsRefl);
+            programObject->geometryReflection = gsRefl;
+
+            auto reflectOnly = [&](GLShaderObject* shader,
+                                   const appgl::TranslatorOptions& options)
+                -> ShaderReflection {
+                ShaderReflection refl;
+                if (shader == nullptr || shader->spirv.empty()) {
+                    return refl;
+                }
+                try {
+                    refl = translator.reflect(shader->spirv.data(),
+                                              shader->spirv.size(),
+                                              bindings, nullptr,
+                                              options);
+                } catch (...) {
+                    // CPU emulation can still run with empty reflection;
+                    // buildStorageImageMap has a uniform-scanner fallback.
+                }
+                return refl;
+            };
+
+            if (geometryShader != nullptr && !geometryShader->spirv.empty() &&
+                programObject->geometryReflection.storageImages.empty() &&
+                programObject->geometryReflection.sampledTextures.empty() &&
+                programObject->geometryReflection.uniformBlocks.empty()) {
+                programObject->geometryReflection =
+                    reflectOnly(geometryShader, appgl::TranslatorOptions{});
+            }
+
+            appgl::TranslatorOptions tessOpts;
+            tessOpts.forceTessellation = true;
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                tessOpts.siblingTesInputSpirv = tessEvalShader->spirv.data();
+                tessOpts.siblingTesInputWordCount = tessEvalShader->spirv.size();
+            }
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tessOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
+                tessOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
+            }
+            programObject->tessControlReflection =
+                reflectOnly(tessControlShader, tessOpts);
+
+            appgl::TranslatorOptions tesComputeOpts;
+            tesComputeOpts.forceTessellation = true;
+            tesComputeOpts.forceTessEvalAsCompute = true;
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                tesComputeOpts.siblingTcsOutputSpirv = tessControlShader->spirv.data();
+                tesComputeOpts.siblingTcsOutputWordCount = tessControlShader->spirv.size();
+                auto tcModes = extractTessellationModes(
+                    tessControlShader->spirv.data(),
+                    tessControlShader->spirv.size());
+                programObject->tessControlOutputVertices =
+                    static_cast<GLint>(tcModes.outputVertices);
+                tesComputeOpts.tesePatchVertices = tcModes.outputVertices;
+            }
+            programObject->tessEvalAsComputeReflection =
+                reflectOnly(tessEvalShader, tesComputeOpts);
+
+            programObject->hasTessellation = true;
+            if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                programObject->vertexSpirv = vertexShader->spirv;
+            }
+            if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
+                programObject->tessControlSpirv = tessControlShader->spirv;
+                programObject->tessControlParsedModule.reset();
+            }
+            if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                programObject->tessEvalSpirv = tessEvalShader->spirv;
+                programObject->tessEvalParsedModule.reset();
+                auto teModes = extractTessellationModes(
+                    tessEvalShader->spirv.data(),
+                    tessEvalShader->spirv.size());
+                programObject->tessGenMode = teModes.genMode;
+                programObject->tessGenSpacing = teModes.genSpacing;
+                programObject->tessGenVertexOrder = teModes.genVertexOrder;
+                programObject->tessGenPointMode = teModes.pointMode ? GL_TRUE : GL_FALSE;
+            }
+            if (geometryShader != nullptr && !geometryShader->spirv.empty()) {
+                programObject->geometrySpirv = geometryShader->spirv;
+                (void)appgl::detectGeometryEmulatable(*programObject);
+            }
+            (void)appgl::detectTessellationEmulatable(*programObject);
+            if (programObject->metalGSTier == GLProgramObject::MetalGSTier::None &&
+                programObject->geometryEmulated) {
+                programObject->metalGSTier =
+                    GLProgramObject::MetalGSTier::CPUInterpreter;
+            }
+            if (vsOk) {
+                programObject->vertexReflection = std::move(vsRefl);
                 programObject->fragmentMSL.clear();
                 programObject->hasTranslatedPipeline = true;
                 rasterTranslationOk = true;

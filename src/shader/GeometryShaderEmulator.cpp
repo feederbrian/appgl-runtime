@@ -178,6 +178,12 @@ enum GLSLstd450 : std::uint32_t {
 #ifndef GL_GEOMETRY_SHADER
 #define GL_GEOMETRY_SHADER 0x8DD9
 #endif
+#ifndef GL_TESS_CONTROL_SHADER
+#define GL_TESS_CONTROL_SHADER 0x8E88
+#endif
+#ifndef GL_TESS_EVALUATION_SHADER
+#define GL_TESS_EVALUATION_SHADER 0x8E87
+#endif
 
 namespace appgl {
 namespace {
@@ -3933,16 +3939,57 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 const std::uint32_t bpr =
                     slot.bytesPerRow != 0 ? slot.bytesPerRow
                                           : slot.width * 4u;
+                const std::uint32_t bytesPerTexel =
+                    (slot.width != 0 && bpr >= slot.width)
+                        ? std::max<std::uint32_t>(1u, bpr / slot.width)
+                        : 4u;
                 const std::size_t off =
                     static_cast<std::size_t>(v) * bpr +
-                    static_cast<std::size_t>(u) * 4u;
-                if (off + 4 <= slot.data.size()) {
+                    static_cast<std::size_t>(u) * bytesPerTexel;
+                if (off < slot.data.size()) {
                     std::uint32_t raw = 0;
-                    std::memcpy(&raw, slot.data.data() + off, 4);
                     const std::uint8_t* p = slot.data.data() + off;
+                    auto have = [&](std::size_t bytes) -> bool {
+                        return off + bytes <= slot.data.size();
+                    };
+                    if (have(4)) {
+                        std::memcpy(&raw, p, 4);
+                    }
+                    auto readU8 = [&](int component) -> std::uint8_t {
+                        return have(static_cast<std::size_t>(component) + 1u)
+                            ? p[component] : 0u;
+                    };
+                    auto readI8 = [&](int component) -> std::int8_t {
+                        return static_cast<std::int8_t>(readU8(component));
+                    };
                     auto readU16 = [&](int component) -> std::uint16_t {
                         std::uint16_t v = 0;
-                        std::memcpy(&v, p + component * 2, sizeof(v));
+                        if (have(static_cast<std::size_t>(component) * 2u + sizeof(v))) {
+                            std::memcpy(&v, p + component * 2, sizeof(v));
+                        }
+                        return v;
+                    };
+                    auto readI16 = [&](int component) -> std::int16_t {
+                        std::int16_t v = 0;
+                        if (have(static_cast<std::size_t>(component) * 2u + sizeof(v))) {
+                            std::memcpy(&v, p + component * 2, sizeof(v));
+                        }
+                        return v;
+                    };
+                    auto readU32 = [&](int component) -> std::uint32_t {
+                        std::uint32_t v = 0;
+                        if (have(static_cast<std::size_t>(component) * 4u + sizeof(v))) {
+                            std::memcpy(&v, p + component * 4, sizeof(v));
+                        }
+                        return v;
+                    };
+                    auto readI32 = [&](int component) -> std::int32_t {
+                        return static_cast<std::int32_t>(readU32(component));
+                    };
+                    auto readF32 = [&](int component) -> float {
+                        float v = 0.0f;
+                        const std::uint32_t bits = readU32(component);
+                        std::memcpy(&v, &bits, sizeof(v));
                         return v;
                     };
                     switch (slot.internalFormat) {
@@ -3951,10 +3998,42 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         // using the glBindImageTexture format carried
                         // in slot.internalFormat, sister to the
                         // existing R32*/RGBA8 imageLoad cases below.
+                        case 0x8814: { // GL_RGBA32F
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = readF32(0);
+                            out.f[1] = readF32(1);
+                            out.f[2] = readF32(2);
+                            out.f[3] = readF32(3);
+                            break;
+                        }
+                        case 0x8230: { // GL_RG32F
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = readF32(0);
+                            out.f[1] = readF32(1);
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x881A: { // GL_RGBA16F
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageHalfToFloat(readU16(0));
+                            out.f[1] = imageHalfToFloat(readU16(1));
+                            out.f[2] = imageHalfToFloat(readU16(2));
+                            out.f[3] = imageHalfToFloat(readU16(3));
+                            break;
+                        }
                         case 0x822F: { // GL_RG16F
                             out.kind = Value::Kind::Float4;
                             out.f[0] = imageHalfToFloat(readU16(0));
                             out.f[1] = imageHalfToFloat(readU16(1));
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x822D: { // GL_R16F
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageHalfToFloat(readU16(0));
+                            out.f[1] = 0.0f;
                             out.f[2] = 0.0f;
                             out.f[3] = 1.0f;
                             break;
@@ -3965,11 +4044,43 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.f[3] = 1.0f;
                             break;
                         }
+                        case 0x8D70: { // GL_RGBA32UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU32(0));
+                            out.i[1] = static_cast<std::int32_t>(readU32(1));
+                            out.i[2] = static_cast<std::int32_t>(readU32(2));
+                            out.i[3] = static_cast<std::int32_t>(readU32(3));
+                            break;
+                        }
+                        case 0x823C: { // GL_RG32UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU32(0));
+                            out.i[1] = static_cast<std::int32_t>(readU32(1));
+                            out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
                         case 0x8236: { // GL_R32UI
                             out.kind = Value::Kind::UInt4;
                             out.i[0] = static_cast<std::int32_t>(raw);
                             out.i[1] = 0; out.i[2] = 0;
                             out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8D82: { // GL_RGBA32I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = readI32(0);
+                            out.i[1] = readI32(1);
+                            out.i[2] = readI32(2);
+                            out.i[3] = readI32(3);
+                            break;
+                        }
+                        case 0x823B: { // GL_RG32I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = readI32(0);
+                            out.i[1] = readI32(1);
+                            out.i[2] = 0;
+                            out.i[3] = 1;
                             break;
                         }
                         case 0x8235: { // GL_R32I
@@ -3993,12 +4104,134 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.f[3] = static_cast<float>((raw >> 30) & 0x3u) / 3.0f;
                             break;
                         }
+                        case 0x906F: { // GL_RGB10_A2UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>((raw >> 0) & 0x3FFu);
+                            out.i[1] = static_cast<std::int32_t>((raw >> 10) & 0x3FFu);
+                            out.i[2] = static_cast<std::int32_t>((raw >> 20) & 0x3FFu);
+                            out.i[3] = static_cast<std::int32_t>((raw >> 30) & 0x3u);
+                            break;
+                        }
+                        case 0x805B: { // GL_RGBA16
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
+                            out.f[1] = static_cast<float>(readU16(1)) / 65535.0f;
+                            out.f[2] = static_cast<float>(readU16(2)) / 65535.0f;
+                            out.f[3] = static_cast<float>(readU16(3)) / 65535.0f;
+                            break;
+                        }
                         case 0x8058: { // GL_RGBA8 — UNORM decode
                             out.kind = Value::Kind::Float4;
-                            out.f[0] = p[0] / 255.0f;
-                            out.f[1] = p[1] / 255.0f;
-                            out.f[2] = p[2] / 255.0f;
-                            out.f[3] = p[3] / 255.0f;
+                            out.f[0] = static_cast<float>(readU8(0)) / 255.0f;
+                            out.f[1] = static_cast<float>(readU8(1)) / 255.0f;
+                            out.f[2] = static_cast<float>(readU8(2)) / 255.0f;
+                            out.f[3] = static_cast<float>(readU8(3)) / 255.0f;
+                            break;
+                        }
+                        case 0x822B: { // GL_RG8
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>(readU8(0)) / 255.0f;
+                            out.f[1] = static_cast<float>(readU8(1)) / 255.0f;
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8229: { // GL_R8
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>(readU8(0)) / 255.0f;
+                            out.f[1] = 0.0f;
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8D76: { // GL_RGBA16UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU16(0));
+                            out.i[1] = static_cast<std::int32_t>(readU16(1));
+                            out.i[2] = static_cast<std::int32_t>(readU16(2));
+                            out.i[3] = static_cast<std::int32_t>(readU16(3));
+                            break;
+                        }
+                        case 0x823A: { // GL_RG16UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU16(0));
+                            out.i[1] = static_cast<std::int32_t>(readU16(1));
+                            out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8234: { // GL_R16UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU16(0));
+                            out.i[1] = 0; out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8D88: { // GL_RGBA16I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI16(0));
+                            out.i[1] = static_cast<std::int32_t>(readI16(1));
+                            out.i[2] = static_cast<std::int32_t>(readI16(2));
+                            out.i[3] = static_cast<std::int32_t>(readI16(3));
+                            break;
+                        }
+                        case 0x8239: { // GL_RG16I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI16(0));
+                            out.i[1] = static_cast<std::int32_t>(readI16(1));
+                            out.i[2] = 0;
+                            out.i[3] = 1;
+                            break;
+                        }
+                        case 0x8233: { // GL_R16I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI16(0));
+                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+                            break;
+                        }
+                        case 0x8D7C: { // GL_RGBA8UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU8(0));
+                            out.i[1] = static_cast<std::int32_t>(readU8(1));
+                            out.i[2] = static_cast<std::int32_t>(readU8(2));
+                            out.i[3] = static_cast<std::int32_t>(readU8(3));
+                            break;
+                        }
+                        case 0x8238: { // GL_RG8UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU8(0));
+                            out.i[1] = static_cast<std::int32_t>(readU8(1));
+                            out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8232: { // GL_R8UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(readU8(0));
+                            out.i[1] = 0; out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8D8E: { // GL_RGBA8I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI8(0));
+                            out.i[1] = static_cast<std::int32_t>(readI8(1));
+                            out.i[2] = static_cast<std::int32_t>(readI8(2));
+                            out.i[3] = static_cast<std::int32_t>(readI8(3));
+                            break;
+                        }
+                        case 0x8237: { // GL_RG8I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI8(0));
+                            out.i[1] = static_cast<std::int32_t>(readI8(1));
+                            out.i[2] = 0;
+                            out.i[3] = 1;
+                            break;
+                        }
+                        case 0x8231: { // GL_R8I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(readI8(0));
+                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
                             break;
                         }
                         case 0x822C: { // GL_RG16
@@ -4009,22 +4242,58 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             out.f[3] = 1.0f;
                             break;
                         }
+                        case 0x822A: { // GL_R16
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = static_cast<float>(readU16(0)) / 65535.0f;
+                            out.f[1] = 0.0f;
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8F9B: { // GL_RGBA16_SNORM
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageSnorm16(readI16(0));
+                            out.f[1] = imageSnorm16(readI16(1));
+                            out.f[2] = imageSnorm16(readI16(2));
+                            out.f[3] = imageSnorm16(readI16(3));
+                            break;
+                        }
                         case 0x8F97: { // GL_RGBA8_SNORM
                             out.kind = Value::Kind::Float4;
-                            out.f[0] = imageSnorm8(static_cast<std::int8_t>(p[0]));
-                            out.f[1] = imageSnorm8(static_cast<std::int8_t>(p[1]));
-                            out.f[2] = imageSnorm8(static_cast<std::int8_t>(p[2]));
-                            out.f[3] = imageSnorm8(static_cast<std::int8_t>(p[3]));
+                            out.f[0] = imageSnorm8(readI8(0));
+                            out.f[1] = imageSnorm8(readI8(1));
+                            out.f[2] = imageSnorm8(readI8(2));
+                            out.f[3] = imageSnorm8(readI8(3));
+                            break;
+                        }
+                        case 0x8F95: { // GL_RG8_SNORM
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageSnorm8(readI8(0));
+                            out.f[1] = imageSnorm8(readI8(1));
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8F94: { // GL_R8_SNORM
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageSnorm8(readI8(0));
+                            out.f[1] = 0.0f;
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
                             break;
                         }
                         case 0x8F99: { // GL_RG16_SNORM
                             out.kind = Value::Kind::Float4;
-                            std::int16_t x = 0;
-                            std::int16_t y = 0;
-                            std::memcpy(&x, p, sizeof(x));
-                            std::memcpy(&y, p + 2, sizeof(y));
-                            out.f[0] = imageSnorm16(x);
-                            out.f[1] = imageSnorm16(y);
+                            out.f[0] = imageSnorm16(readI16(0));
+                            out.f[1] = imageSnorm16(readI16(1));
+                            out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8F98: { // GL_R16_SNORM
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = imageSnorm16(readI16(0));
+                            out.f[1] = 0.0f;
                             out.f[2] = 0.0f;
                             out.f[3] = 1.0f;
                             break;
@@ -6761,6 +7030,9 @@ EmulatedDraw emulateGeometryDraw(
     // chunk of `vpp` vertices as one primitive matching its input
     // topology (so use a discrete drawMode that maps 1:1 to vpp).
     if (priorStageOutput != nullptr && priorStageOutput->ok) {
+        d.pendingImageWrites.insert(d.pendingImageWrites.end(),
+                                    priorStageOutput->pendingImageWrites.begin(),
+                                    priorStageOutput->pendingImageWrites.end());
         count = static_cast<GLsizei>(priorStageOutput->vertexCount);
         first = 0;
         elementIndices = nullptr;
@@ -7357,6 +7629,9 @@ EmulatedDraw emulateGeometryDraw(
                 {
                     auto writes = interp.takePendingImageWrites();
                     if (!writes.empty()) {
+                        for (auto& write : writes) {
+                            write.stage = GL_GEOMETRY_SHADER;
+                        }
                         d.pendingImageWrites.insert(
                             d.pendingImageWrites.end(),
                             std::make_move_iterator(writes.begin()),
@@ -8352,7 +8627,8 @@ bool runVsForVertex(
     std::string* diagnostic,
     const SampledTextureMap* sampledTextures,
     const SampledTextureMap* storageImages,
-    const Interpreter::UniformBufferMap* uniformBuffers)
+    const Interpreter::UniformBufferMap* uniformBuffers,
+    std::vector<PendingImageWrite>* pendingImageWrites)
 {
     if (vsSpirv == nullptr || vsWordCount < 5) {
         if (diagnostic) *diagnostic = "runVsForVertex: empty SPIR-V";
@@ -8451,6 +8727,15 @@ bool runVsForVertex(
         if (diagnostic) *diagnostic = "runVsForVertex: VS body: " + vsInterp.diagnostic();
         return false;
     }
+    if (pendingImageWrites != nullptr) {
+        auto writes = vsInterp.takePendingImageWrites();
+        for (auto& write : writes) {
+            write.stage = GL_VERTEX_SHADER;
+        }
+        pendingImageWrites->insert(pendingImageWrites->end(),
+                                   std::make_move_iterator(writes.begin()),
+                                   std::make_move_iterator(writes.end()));
+    }
     return true;
 }
 
@@ -8479,7 +8764,8 @@ bool runTesForVertex(
     const std::vector<std::uint32_t>* inVaryingWidths,
     const SampledTextureMap* sampledTextures,
     const SampledTextureMap* storageImages,
-    const Interpreter::UniformBufferMap* uniformBuffers)
+    const Interpreter::UniformBufferMap* uniformBuffers,
+    std::vector<PendingImageWrite>* pendingImageWrites)
 {
     if (tesSpirv == nullptr || tesWordCount < 5) {
         if (diagnostic) *diagnostic = "runTesForVertex: empty SPIR-V";
@@ -8614,6 +8900,15 @@ bool runTesForVertex(
         if (diagnostic) *diagnostic = "runTesForVertex: TES body: " + tesInterp.diagnostic();
         return false;
     }
+    if (pendingImageWrites != nullptr) {
+        auto writes = tesInterp.takePendingImageWrites();
+        for (auto& write : writes) {
+            write.stage = GL_TESS_EVALUATION_SHADER;
+        }
+        pendingImageWrites->insert(pendingImageWrites->end(),
+                                   std::make_move_iterator(writes.begin()),
+                                   std::make_move_iterator(writes.end()));
+    }
     return true;
 }
 
@@ -8638,7 +8933,8 @@ bool runTcsForVertex(
     const std::vector<std::uint32_t>* outVaryingWidths,
     const SampledTextureMap* sampledTextures,
     const SampledTextureMap* storageImages,
-    const Interpreter::UniformBufferMap* uniformBuffers)
+    const Interpreter::UniformBufferMap* uniformBuffers,
+    std::vector<PendingImageWrite>* pendingImageWrites)
 {
     if (tcsSpirv == nullptr || tcsWordCount < 5) {
         if (diagnostic) *diagnostic = "runTcsForVertex: empty SPIR-V";
@@ -8757,6 +9053,15 @@ bool runTcsForVertex(
     if (!ok) {
         if (diagnostic) *diagnostic = "runTcsForVertex: TCS body: " + tcsInterp.diagnostic();
         return false;
+    }
+    if (pendingImageWrites != nullptr) {
+        auto writes = tcsInterp.takePendingImageWrites();
+        for (auto& write : writes) {
+            write.stage = GL_TESS_CONTROL_SHADER;
+        }
+        pendingImageWrites->insert(pendingImageWrites->end(),
+                                   std::make_move_iterator(writes.begin()),
+                                   std::make_move_iterator(writes.end()));
     }
 
     // Phase 3f-10: capture gl_out[invocationID] — position + clip/cull

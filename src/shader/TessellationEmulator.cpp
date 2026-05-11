@@ -2469,7 +2469,8 @@ EmulatedDraw emulateTessellationDraw(
                     program, vao, objects, vboSlot, 0 /*instanceID*/,
                     crossStageVsToTcs, crossStageVsToTcsWidths,
                     patchInputs[p][static_cast<std::size_t>(pv)], &vsDiag,
-                    vsSampledTextures, vsStorageImages, tessUboMapPtr);
+                    vsSampledTextures, vsStorageImages, tessUboMapPtr,
+                    &d.pendingImageWrites);
                 if (!vsOk) {
                     ++vsFailures;
                     auto& pos = patchInputs[p][static_cast<std::size_t>(pv)].position;
@@ -2540,7 +2541,8 @@ EmulatedDraw emulateTessellationDraw(
                     /*outVaryingWidths=*/&crossStageTcsToTesWidths,
                     /*sampledTextures=*/tcsSampledTextures,
                     /*storageImages=*/tcsStorageImages,
-                    /*uniformBuffers=*/tessUboMapPtr);
+                    /*uniformBuffers=*/tessUboMapPtr,
+                    /*pendingImageWrites=*/&d.pendingImageWrites);
                 if (tcsDebug && !ok) {
                     std::fprintf(stderr, "[tess-emul] TCS bail (patch=%zu iv=%d): %s\n",
                         p, iv, diag.c_str());
@@ -2630,7 +2632,8 @@ EmulatedDraw emulateTessellationDraw(
             /*inVaryingWidths=*/ &crossStageTcsToTesWidths,
             /*sampledTextures=*/tesSampledTextures,
             /*storageImages=*/tesStorageImages,
-            /*uniformBuffers=*/tessUboMapPtr);
+            /*uniformBuffers=*/tessUboMapPtr,
+            /*pendingImageWrites=*/&d.pendingImageWrites);
         if (!ok && tesDebug && !diag.empty() &&
             tesBailSeen->insert(diag).second) {
             std::fprintf(stderr, "[tess-emul] TES bail: %s\n", diag.c_str());

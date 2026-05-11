@@ -114,6 +114,7 @@ struct EmulatedVertex {
 struct PendingImageWrite {
     std::uint32_t arrayVarId = 0;
     std::uint32_t elementIdx = 0;
+    std::uint32_t stage = 0;
     std::int32_t coord[3] = {0, 0, 0};
     std::uint32_t value[4] = {0, 0, 0, 0};
     std::uint32_t internalFormat = 0;
@@ -496,7 +497,8 @@ bool runVsForVertex(
     // GL_UNIFORM_BUFFER, baseBinding+i)` for each `uniform Block { }
     // arr[N]` declared in the VS. Default nullptr preserves
     // backward-compat (programs without UBO arrays don't need it).
-    const appgl::interp::UniformBufferMap* uniformBuffers = nullptr);
+    const appgl::interp::UniformBufferMap* uniformBuffers = nullptr,
+    std::vector<PendingImageWrite>* pendingImageWrites = nullptr);
 
 // Run a single TES invocation on CPU for the vertex whose tess-space
 // barycentric / parametric coord is `tessCoord`. Exposed so the tess-
@@ -628,7 +630,8 @@ bool runTesForVertex(
     // at GSE.cpp:2845-2853 and silently returns zeros.
     const SampledTextureMap* sampledTextures = nullptr,
     const SampledTextureMap* storageImages = nullptr,
-    const appgl::interp::UniformBufferMap* uniformBuffers = nullptr);
+    const appgl::interp::UniformBufferMap* uniformBuffers = nullptr,
+    std::vector<PendingImageWrite>* pendingImageWrites = nullptr);
 
 // Run a single TCS invocation on CPU. One invocation per
 // (patch, invocationID) where invocationID ∈ [0, layout(vertices=N)).
@@ -687,7 +690,8 @@ bool runTcsForVertex(
     // runTesForVertex's new params. Same maps semantics.
     const SampledTextureMap* sampledTextures = nullptr,
     const SampledTextureMap* storageImages = nullptr,
-    const appgl::interp::UniformBufferMap* uniformBuffers = nullptr);
+    const appgl::interp::UniformBufferMap* uniformBuffers = nullptr,
+    std::vector<PendingImageWrite>* pendingImageWrites = nullptr);
 
 // Synthesise a pass-through vertex-shader MSL source that reads
 // the expanded per-vertex payload (one buffer slot with gl_Position
