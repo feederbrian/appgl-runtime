@@ -10,6 +10,7 @@ namespace appgl::extensions::sparse_texture {
 
 bool isTextureParameterPname(GLenum pname);
 bool isInternalFormatQueryPname(GLenum pname);
+bool shouldSkipDepthImageViewCast(GLenum textureInternalFormat, GLenum imageFormat);
 
 bool handleTextureParameter(ExtensionContext& ctx,
                             GLenum target,

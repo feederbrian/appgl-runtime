@@ -42,6 +42,27 @@ bool isStandardSparseTexture2Target(GLenum target) {
     }
 }
 
+bool sparseTexture2OrClampActive() {
+    return ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture2") ||
+           ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp");
+}
+
+bool isDepthInternalFormat(GLenum internalformat) {
+    switch (internalformat) {
+        case GL_DEPTH_COMPONENT:
+        case GL_DEPTH_COMPONENT16:
+        case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32:
+        case GL_DEPTH_COMPONENT32F:
+        case GL_DEPTH_STENCIL:
+        case GL_DEPTH24_STENCIL8:
+        case GL_DEPTH32F_STENCIL8:
+            return true;
+        default:
+            return false;
+    }
+}
+
 std::optional<PageSize> standardSparseTexture2PageSize(GLenum target, GLenum internalformat) {
     if (!ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture2") ||
         !isStandardSparseTexture2Target(target)) {
@@ -161,6 +182,11 @@ bool isInternalFormatQueryPname(GLenum pname) {
            pname == GL_VIRTUAL_PAGE_SIZE_Z_ARB;
 }
 
+bool shouldSkipDepthImageViewCast(GLenum textureInternalFormat, GLenum imageFormat) {
+    return isDepthInternalFormat(textureInternalFormat) &&
+           !isDepthInternalFormat(imageFormat);
+}
+
 bool handleTextureParameter(ExtensionContext& ctx,
                             GLenum target,
                             GLenum pname,
@@ -258,8 +284,14 @@ bool handleInternalFormatQuery(ExtensionContext& ctx,
     }
     const std::optional<PageSize> standardPage =
         standardSparseTexture2PageSize(target, internalformat);
+    const bool sparse2DepthExcluded =
+        sparseTexture2OrClampActive() && isDepthInternalFormat(internalformat);
     switch (pname) {
         case GL_NUM_VIRTUAL_PAGE_SIZES_ARB: {
+            if (sparse2DepthExcluded) {
+                params[0] = 0;
+                return true;
+            }
             if (standardPage.has_value()) {
                 params[0] = 1;
                 return true;
@@ -274,6 +306,9 @@ bool handleInternalFormatQuery(ExtensionContext& ctx,
         case GL_VIRTUAL_PAGE_SIZE_Z_ARB: {
             for (GLsizei i = 0; i < count; ++i) {
                 params[i] = 0;
+            }
+            if (sparse2DepthExcluded) {
+                return true;
             }
             if (standardPage.has_value()) {
                 params[0] =

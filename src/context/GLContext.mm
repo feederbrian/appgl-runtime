@@ -10,6 +10,7 @@
 #include "../extensions/fragment_shading_rate/FragmentShadingRateModule.h"
 #include "../extensions/sparse_texture/MultisampleStorageImageEmulation.h"
 #include "../extensions/sparse_texture/SparseTextureAlloc.h"
+#include "../extensions/sparse_texture/SparseTextureBind.h"
 #include "../shader/CompatShaderRewrite.h"
 #include "../shader/GeometryShaderEmulator.h"
 #include "../shader/ShaderInterpreter.h"  // phase 3f-11: SpirvModule complete-type for unique_ptr<SpirvModule> .reset() calls
@@ -14428,6 +14429,11 @@ bool GLContext::deleteTextures(GLsizei count, const GLuint* textures) {
             continue;
         }
         if (GLTextureObject* object = impl_->objects->textures().get(name); object != nullptr) {
+            for (auto& ib : impl_->imageBindings) {
+                if (ib.texture == name) {
+                    ib.invalidateMetalView();
+                }
+            }
             impl_->releaseTextureStorage(*object);
             ExtensionContext extensionContext(*this);
             extensions::sparse_texture::destroyTexture(extensionContext, *object);
@@ -18211,6 +18217,17 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
                 texName, imageFormat, static_cast<unsigned long>(baseTex.pixelFormat));
         }
         return texObj->metalTexture;
+    }
+    if (extensions::sparse_texture::shouldSkipDepthImageViewCast(texObj->desc.internalFormat,
+                                                                 imageFormat)) {
+        if (trace) {
+            std::fprintf(stderr,
+                "[IMG-VIEW] tex=%u level=%d fmt=0x%X base-ifmt=0x%X base-pf=%lu view-pf=%lu skip=depth-color-cast\n",
+                texName, level, imageFormat, texObj->desc.internalFormat,
+                static_cast<unsigned long>(baseTex.pixelFormat),
+                static_cast<unsigned long>(imagePixelFormat));
+        }
+        return nullptr;
     }
     if (cachedView != nullptr) {
         releaseRetainedMetalObject(cachedView);
