@@ -21,6 +21,7 @@
 
 namespace appgl {
 
+class GLContext;
 class GLObjectStore;
 class GLStateTracker;
 
@@ -808,7 +809,7 @@ struct MetalTessDrawInfo {
 
 class MetalFrameGraph {
 public:
-    MetalFrameGraph(void* layer, void* device, void* commandQueue);
+    MetalFrameGraph(GLContext* context, void* layer, void* device, void* commandQueue);
     ~MetalFrameGraph();
 
     MetalFrameGraph(const MetalFrameGraph&) = delete;

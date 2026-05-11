@@ -2089,7 +2089,10 @@ struct GLContext::Impl {
         } else {
             rendererString = "AppGL on Metal (No Metal Device)";
         }
-        frameGraph = std::make_unique<MetalFrameGraph>((__bridge void*)layer, (__bridge void*)device, (__bridge void*)commandQueue);
+        frameGraph = std::make_unique<MetalFrameGraph>(ownerContext,
+                                                       (__bridge void*)layer,
+                                                       (__bridge void*)device,
+                                                       (__bridge void*)commandQueue);
         capabilities = std::make_unique<GLCapabilities>((__bridge void*)device);
         // Must match GL_MAX_VERTEX_ATTRIBS reported via GLCapabilities (32).
         // CTS cull_distance uses 17+ attributes (8 clip + 8 cull + 1 pos),

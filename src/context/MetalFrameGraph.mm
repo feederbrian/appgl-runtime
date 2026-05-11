@@ -1,5 +1,7 @@
 #include "MetalFrameGraph.h"
 
+#include "../extensions/ExtensionContext.h"
+#include "../extensions/ExtensionRegistry.h"
 #include "../objects/GLObjectStore.h"
 #include "../runtime/AppGLLog.h"
 #include "../shader/TessellationEmulator.h"
@@ -692,8 +694,9 @@ static std::string rewriteFragmentMSLForPerSample(const std::string& fsMsl)
 }
 
 struct MetalFrameGraph::Impl {
-    Impl(void* rawLayer, void* rawDevice, void* rawCommandQueue)
-        : layer((__bridge CAMetalLayer*)rawLayer),
+    Impl(GLContext* ownerContext, void* rawLayer, void* rawDevice, void* rawCommandQueue)
+        : owner(ownerContext),
+          layer((__bridge CAMetalLayer*)rawLayer),
           device((__bridge id<MTLDevice>)rawDevice),
           commandQueue((__bridge id<MTLCommandQueue>)rawCommandQueue) {
         if (layer != nil && device != nil) {
@@ -729,96 +732,23 @@ struct MetalFrameGraph::Impl {
         savePipelineArchive();
     }
 
-    static bool fragmentShadingRateQuality(GLenum rate, float& horizontal, float& vertical) {
-        unsigned width = 1;
-        unsigned height = 1;
-        switch (rate) {
-            case GL_SHADING_RATE_1X1_PIXELS_EXT: width = 1; height = 1; break;
-            case GL_SHADING_RATE_1X2_PIXELS_EXT: width = 1; height = 2; break;
-            case GL_SHADING_RATE_1X4_PIXELS_EXT: width = 1; height = 4; break;
-            case GL_SHADING_RATE_2X1_PIXELS_EXT: width = 2; height = 1; break;
-            case GL_SHADING_RATE_2X2_PIXELS_EXT: width = 2; height = 2; break;
-            case GL_SHADING_RATE_2X4_PIXELS_EXT: width = 2; height = 4; break;
-            case GL_SHADING_RATE_4X1_PIXELS_EXT: width = 4; height = 1; break;
-            case GL_SHADING_RATE_4X2_PIXELS_EXT: width = 4; height = 2; break;
-            case GL_SHADING_RATE_4X4_PIXELS_EXT: width = 4; height = 4; break;
-            default:
-                return false;
-        }
-        horizontal = 1.0f / static_cast<float>(width);
-        vertical = 1.0f / static_cast<float>(height);
-        return true;
-    }
-
-    id<MTLRasterizationRateMap> rasterizationRateMapForFragmentShadingRate(
-        GLenum rate,
-        NSUInteger width,
-        NSUInteger height
-    ) {
-        float horizontalQuality = 1.0f;
-        float verticalQuality = 1.0f;
-        if (!fragmentShadingRateQuality(rate, horizontalQuality, verticalQuality)) {
-            return nil;
-        }
-        if (rate == GL_SHADING_RATE_1X1_PIXELS_EXT || width == 0 || height == 0) {
-            return nil;
-        }
-        if (device == nil) {
-            return nil;
-        }
-
-        if (@available(macOS 10.15.4, *)) {
-            if (![device supportsRasterizationRateMapWithLayerCount:1]) {
-                return nil;
-            }
-            if (cachedRasterizationRateMap != nil &&
-                cachedRasterizationRateMapWidth == width &&
-                cachedRasterizationRateMapHeight == height &&
-                cachedRasterizationRateMapRate == rate) {
-                return cachedRasterizationRateMap;
-            }
-
-            const MTLSize sampleCount = MTLSizeMake(2, 2, 0);
-            const float horizontalSamples[2] = {horizontalQuality, horizontalQuality};
-            const float verticalSamples[2] = {verticalQuality, verticalQuality};
-            MTLRasterizationRateLayerDescriptor* layer =
-                [[MTLRasterizationRateLayerDescriptor alloc]
-                    initWithSampleCount:sampleCount
-                             horizontal:horizontalSamples
-                               vertical:verticalSamples];
-            MTLRasterizationRateMapDescriptor* desc =
-                [MTLRasterizationRateMapDescriptor
-                    rasterizationRateMapDescriptorWithScreenSize:MTLSizeMake(width, height, 0)
-                                                           layer:layer];
-            desc.label = @"AppGL GL_EXT_fragment_shading_rate";
-            id<MTLRasterizationRateMap> map = [device newRasterizationRateMapWithDescriptor:desc];
-            if (map == nil) {
-                return nil;
-            }
-            cachedRasterizationRateMap = map;
-            cachedRasterizationRateMapWidth = width;
-            cachedRasterizationRateMapHeight = height;
-            cachedRasterizationRateMapRate = rate;
-            return cachedRasterizationRateMap;
-        }
-        return nil;
-    }
-
     void attachFragmentShadingRateMap(
         MTLRenderPassDescriptor* pass,
         GLenum rate,
         id<MTLTexture> colorTexture,
         NSUInteger renderTargetLayerCount
     ) {
-        if (pass == nil || colorTexture == nil || renderTargetLayerCount > 1) {
+        if (owner == nullptr || pass == nil || colorTexture == nil || renderTargetLayerCount > 1) {
             return;
         }
-        if (@available(macOS 10.15.4, *)) {
-            id<MTLRasterizationRateMap> map =
-                rasterizationRateMapForFragmentShadingRate(rate, colorTexture.width, colorTexture.height);
-            if (map != nil) {
-                pass.rasterizationRateMap = map;
-            }
+        ExtensionContext extensionContext(*owner);
+        const auto& hooks = extensions::ExtensionRegistry::fragmentShadingRateHooks();
+        if (hooks.attachRenderPass != nullptr) {
+            hooks.attachRenderPass(extensionContext,
+                                   (__bridge void*)pass,
+                                   rate,
+                                   (__bridge void*)colorTexture,
+                                   renderTargetLayerCount);
         }
     }
 
@@ -7719,6 +7649,7 @@ private:
         resetCachedEncoderState();
     }
 
+    GLContext* owner = nullptr;
     CAMetalLayer* layer = nil;
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> commandQueue = nil;
@@ -7818,11 +7749,6 @@ private:
     // fresh autoreleased ObjC object at each of the five call sites.
     // Reset fields before each use (attachments overwrite previous).
     MTLRenderPassDescriptor* reusablePassDescriptor = nil;
-    id<MTLRasterizationRateMap> cachedRasterizationRateMap = nil;
-    NSUInteger cachedRasterizationRateMapWidth = 0;
-    NSUInteger cachedRasterizationRateMapHeight = 0;
-    GLenum cachedRasterizationRateMapRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
-
     MTLRenderPassDescriptor* getReusablePassDescriptor() {
         if (reusablePassDescriptor == nil) {
             reusablePassDescriptor = [MTLRenderPassDescriptor new];
@@ -8681,8 +8607,8 @@ using namespace metal;
     std::fprintf(stderr, "[APPGL probe] done\n");
 }
 
-MetalFrameGraph::MetalFrameGraph(void* layer, void* device, void* commandQueue)
-    : impl_(std::make_unique<Impl>(layer, device, commandQueue)) {
+MetalFrameGraph::MetalFrameGraph(GLContext* context, void* layer, void* device, void* commandQueue)
+    : impl_(std::make_unique<Impl>(context, layer, device, commandQueue)) {
     startMetalCaptureIfRequested((__bridge id<MTLDevice>)device);
     phase5ProbeMetalNativeTess((__bridge id<MTLDevice>)device,
                                 (__bridge id<MTLCommandQueue>)commandQueue);

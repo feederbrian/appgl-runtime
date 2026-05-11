@@ -1,10 +1,9 @@
 #include "FragmentShadingRateModule.h"
+#include "RasterizationRateMap.h"
 
 #include "../ExtensionContext.h"
 #include "../ExtensionRegistry.h"
 #include "../../../include/AppGL/extensions/fragment_shading_rate.h"
-
-#import <Metal/Metal.h>
 
 #include <mutex>
 #include <unordered_map>
@@ -46,7 +45,7 @@ const ExtensionModuleDescriptor kDescriptor = {
         queryInteger64,
         queryFloat,
         queryDouble,
-        nullptr
+        attachRenderPass
     }
 };
 
@@ -65,14 +64,7 @@ const char* extensionString() {
 }
 
 bool isAvailable(ExtensionContext& ctx) {
-    id<MTLDevice> device = (__bridge id<MTLDevice>)ctx.metalDevice();
-    if (device == nil) {
-        return false;
-    }
-    if (@available(macOS 10.15.4, *)) {
-        return [device supportsRasterizationRateMapWithLayerCount:1];
-    }
-    return false;
+    return isRasterizationRateMapAvailable(ctx);
 }
 
 void initialize(ExtensionContext& ctx) {
@@ -88,6 +80,7 @@ bool isActive() {
 }
 
 void destroyContext(ExtensionContext& ctx) {
+    clearRasterizationRateMapCache(ctx);
     std::lock_guard<std::mutex> lock(stateMutex());
     contextStates().erase(&ctx.context());
 }
