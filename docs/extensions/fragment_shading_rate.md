@@ -13,10 +13,13 @@ Module split:
   for the base EXT_fragment_shading_rate API.
 
 Current migration checkpoint:
-- The module is registered with ExtensionRegistry and advertises
-  `GL_EXT_fragment_shading_rate` without changing the existing extension list.
-- Functional behavior remains in Core until the state and Metal render-pass
-  hooks move behind the module boundary.
+- The module is registered with ExtensionRegistry and preserves the existing
+  `GL_EXT_fragment_shading_rate` extension list position.
+- Per-context FSR state, typed FSR queries, base EXT entry-point behavior, and
+  Metal rasterization-rate-map cache ownership live in this module.
+- Core keeps thin runtime/GLContext/MetalFrameGraph routing points so existing
+  dispatch, coverage marking, draw snapshots, and render-pass setup can call
+  the module hooks without owning extension behavior.
 
 Cross-extension dependency:
 - `ShaderTranslator` currently uses a global MSL 2.4 target so the SPIRV-Cross
