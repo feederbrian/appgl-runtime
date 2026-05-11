@@ -633,6 +633,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     integerLimits_[GL_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS_ARB] = 0;
     integerLimits_[GL_MAX_COLOR_ATTACHMENTS] = 8;
     integerLimits_[GL_MAX_DRAW_BUFFERS] = 8;
+    integerLimits_[GL_MAX_VIEWS_OVR] = 2;
     // GL 4.6 spec §23.4 floor is 16, but most desktop drivers expose 32
     // and CTS tests like cull_distance use 17+ attributes (8 clip + 8 cull
     // + 1 position). Metal supports 31 vertex attributes via

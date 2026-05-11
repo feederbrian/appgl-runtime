@@ -5927,3 +5927,21 @@ extern "C" void APIENTRY glFramebufferShadingRateEXT(GLenum target, GLenum attac
     }
     appgl::unimplementedReturn<void>(appgl::FunctionId::glFramebufferShadingRateEXT, "glFramebufferShadingRateEXT");
 }
+
+extern "C" void APIENTRY glFramebufferTextureMultiviewOVR(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR");
+    if (auto fn = appgl::Runtime::shared().dispatch().glFramebufferTextureMultiviewOVR) {
+        fn(target, attachment, texture, level, baseViewIndex, numViews);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR");
+}
+
+extern "C" void APIENTRY glNamedFramebufferTextureMultiviewOVR(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glNamedFramebufferTextureMultiviewOVR, "glNamedFramebufferTextureMultiviewOVR");
+    if (auto fn = appgl::Runtime::shared().dispatch().glNamedFramebufferTextureMultiviewOVR) {
+        fn(framebuffer, attachment, texture, level, baseViewIndex, numViews);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glNamedFramebufferTextureMultiviewOVR, "glNamedFramebufferTextureMultiviewOVR");
+}

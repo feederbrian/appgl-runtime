@@ -4386,6 +4386,18 @@ typedef void(APIENTRY *GLVULKANPROCNV)(void);
 #ifndef GL_FRAGMENT_SHADING_RATE_PRIMITIVE_RATE_WITH_MULTI_VIEWPORT_SUPPORTED_EXT
 #define GL_FRAGMENT_SHADING_RATE_PRIMITIVE_RATE_WITH_MULTI_VIEWPORT_SUPPORTED_EXT 0x9780
 #endif
+#ifndef GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_NUM_VIEWS_OVR
+#define GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_NUM_VIEWS_OVR 0x9630
+#endif
+#ifndef GL_MAX_VIEWS_OVR
+#define GL_MAX_VIEWS_OVR 0x9631
+#endif
+#ifndef GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_BASE_VIEW_INDEX_OVR
+#define GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_BASE_VIEW_INDEX_OVR 0x9632
+#endif
+#ifndef GL_FRAMEBUFFER_INCOMPLETE_VIEW_TARGETS_OVR
+#define GL_FRAMEBUFFER_INCOMPLETE_VIEW_TARGETS_OVR 0x9633
+#endif
 
 typedef void (APIENTRYP PFNGLCULLFACEPROC)(GLenum mode);
 typedef void (APIENTRYP PFNGLFRONTFACEPROC)(GLenum mode);
@@ -5050,6 +5062,8 @@ typedef void (APIENTRYP PFNGLGETFRAGMENTSHADINGRATESEXTPROC)(GLsizei samples, GL
 typedef void (APIENTRYP PFNGLSHADINGRATEEXTPROC)(GLenum rate);
 typedef void (APIENTRYP PFNGLSHADINGRATECOMBINEROPSEXTPROC)(GLenum combinerOp0, GLenum combinerOp1);
 typedef void (APIENTRYP PFNGLFRAMEBUFFERSHADINGRATEEXTPROC)(GLenum target, GLenum attachment, GLuint texture, GLint baseLayer, GLsizei numLayers, GLsizei texelWidth, GLsizei texelHeight);
+typedef void (APIENTRYP PFNGLFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC)(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
+typedef void (APIENTRYP PFNGLNAMEDFRAMEBUFFERTEXTUREMULTIVIEWOVRPROC)(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
 
 GLAPI void APIENTRY glCullFace(GLenum mode);
 GLAPI void APIENTRY glFrontFace(GLenum mode);
@@ -5714,6 +5728,8 @@ GLAPI void APIENTRY glGetFragmentShadingRatesEXT(GLsizei samples, GLsizei maxCou
 GLAPI void APIENTRY glShadingRateEXT(GLenum rate);
 GLAPI void APIENTRY glShadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1);
 GLAPI void APIENTRY glFramebufferShadingRateEXT(GLenum target, GLenum attachment, GLuint texture, GLint baseLayer, GLsizei numLayers, GLsizei texelWidth, GLsizei texelHeight);
+GLAPI void APIENTRY glFramebufferTextureMultiviewOVR(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
+GLAPI void APIENTRY glNamedFramebufferTextureMultiviewOVR(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
 
 #ifdef __cplusplus
 }

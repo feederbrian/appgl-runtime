@@ -668,6 +668,8 @@ enum class FunctionId : std::size_t {
     glShadingRateEXT,
     glShadingRateCombinerOpsEXT,
     glFramebufferShadingRateEXT,
+    glFramebufferTextureMultiviewOVR,
+    glNamedFramebufferTextureMultiviewOVR,
     Count,
 };
 
@@ -1342,6 +1344,8 @@ inline constexpr GLFunctionMetadata kGLFunctionMetadata[] = {
     {FunctionId::glShadingRateEXT, "glShadingRateEXT", "context and state", "GL_EXT_fragment_shading_rate"},
     {FunctionId::glShadingRateCombinerOpsEXT, "glShadingRateCombinerOpsEXT", "context and state", "GL_EXT_fragment_shading_rate"},
     {FunctionId::glFramebufferShadingRateEXT, "glFramebufferShadingRateEXT", "framebuffers and renderbuffers", "GL_EXT_fragment_shading_rate"},
+    {FunctionId::glFramebufferTextureMultiviewOVR, "glFramebufferTextureMultiviewOVR", "framebuffers and renderbuffers", "GL_OVR_multiview"},
+    {FunctionId::glNamedFramebufferTextureMultiviewOVR, "glNamedFramebufferTextureMultiviewOVR", "direct state access", "GL_OVR_multiview"},
 };
 
 inline constexpr std::size_t kGLFunctionCount = static_cast<std::size_t>(FunctionId::Count);

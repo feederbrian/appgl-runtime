@@ -302,6 +302,9 @@ struct GLFramebufferAttachment {
     GLint layer = 0;
     GLenum textureTarget = 0;
     bool layered = false;
+    bool multiview = false;
+    GLint baseViewIndex = 0;
+    GLsizei numViews = 1;
 };
 
 struct GLFramebufferObject {

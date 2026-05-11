@@ -7692,6 +7692,9 @@ struct GLContext::Impl {
                         } else if (texObj->target == GL_TEXTURE_CUBE_MAP_ARRAY) {
                             layers = 6 * std::max<GLsizei>(texObj->desc.layers, 1);
                         }
+                        if (att->multiview) {
+                            layers = std::max<GLsizei>(att->numViews, 1);
+                        }
                         if (layers > 1) {
                             *outColorArrayLength = static_cast<std::uint32_t>(layers);
                         }
@@ -16943,6 +16946,65 @@ bool GLContext::framebufferTexture(GLenum target, GLenum attachment, GLenum text
     return true;
 }
 
+bool GLContext::framebufferTextureMultiviewOVR(GLenum target,
+                                               GLenum attachment,
+                                               GLuint texture,
+                                               GLint level,
+                                               GLint baseViewIndex,
+                                               GLsizei numViews) {
+    if (baseViewIndex < 0 || numViews <= 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (impl_->capabilities != nullptr) {
+        GLint maxViews = 0;
+        if (impl_->capabilities->queryInteger(GL_MAX_VIEWS_OVR, &maxViews) &&
+            maxViews > 0 &&
+            numViews > maxViews) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
+    if (texture != 0) {
+        const GLTextureObject* textureObject = impl_->objects->textures().get(texture);
+        if (textureObject != nullptr && textureObject->instantiated) {
+            if (textureObject->target != GL_TEXTURE_2D_ARRAY) {
+                pushError(GL_INVALID_OPERATION);
+                return false;
+            }
+            const GLsizei layers = std::max<GLsizei>(textureObject->desc.layers, 1);
+            if (baseViewIndex + numViews > layers) {
+                pushError(GL_INVALID_VALUE);
+                return false;
+            }
+        }
+    }
+    const bool ok = framebufferTexture(
+        target,
+        attachment,
+        0,
+        texture,
+        level,
+        baseViewIndex,
+        true);
+    if (!ok || texture == 0) {
+        return ok;
+    }
+    const GLuint framebufferName = target == GL_READ_FRAMEBUFFER
+        ? impl_->state->boundReadFramebuffer()
+        : impl_->state->boundDrawFramebuffer();
+    if (GLFramebufferObject* framebuffer =
+            impl_->objects->framebuffers().get(framebufferName)) {
+        auto found = framebuffer->attachments.find(attachment);
+        if (found != framebuffer->attachments.end()) {
+            found->second.multiview = true;
+            found->second.baseViewIndex = baseViewIndex;
+            found->second.numViews = numViews;
+        }
+    }
+    return true;
+}
+
 bool GLContext::framebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
         pushError(GL_INVALID_ENUM);
@@ -17125,7 +17187,10 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
             return a.level == b.level &&
                    a.layer == b.layer &&
                    a.textureTarget == b.textureTarget &&
-                   a.layered == b.layered;
+                   a.layered == b.layered &&
+                   a.multiview == b.multiview &&
+                   a.baseViewIndex == b.baseViewIndex &&
+                   a.numViews == b.numViews;
         }
         return true;
     };
@@ -17192,6 +17257,8 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
         case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
         case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
         case GL_FRAMEBUFFER_ATTACHMENT_LAYERED:
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_NUM_VIEWS_OVR:
+        case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_BASE_VIEW_INDEX_OVR:
             // GL 4.6 §9.2.3: these pnames are only valid when
             // FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE is GL_TEXTURE. For a
             // renderbuffer attachment they generate INVALID_ENUM.
@@ -17204,6 +17271,10 @@ bool GLContext::getFramebufferAttachmentParameterInteger(GLenum target, GLenum a
                 params[0] = attachmentState.level;
             } else if (pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER) {
                 params[0] = attachmentState.layer;
+            } else if (pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_NUM_VIEWS_OVR) {
+                params[0] = attachmentState.multiview ? attachmentState.numViews : 1;
+            } else if (pname == GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_BASE_VIEW_INDEX_OVR) {
+                params[0] = attachmentState.multiview ? attachmentState.baseViewIndex : 0;
             } else {
                 params[0] = attachmentState.layered ? GL_TRUE : GL_FALSE;
             }
@@ -41919,6 +41990,26 @@ bool GLContext::namedFramebufferTextureLayer(GLuint framebuffer, GLenum attachme
     // earlier on target mismatch or skipping the layer check entirely
     // (framebuffers_texture_attachment_errors).
     bool ok = framebufferTexture(GL_DRAW_FRAMEBUFFER, attachment, 0, texture, level, layer, false);
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+    return ok;
+}
+
+bool GLContext::namedFramebufferTextureMultiviewOVR(GLuint framebuffer,
+                                                    GLenum attachment,
+                                                    GLuint texture,
+                                                    GLint level,
+                                                    GLint baseViewIndex,
+                                                    GLsizei numViews) {
+    DSA_FB_CHECK(framebuffer)
+    GLuint prev = impl_->state->boundDrawFramebuffer();
+    bindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    bool ok = framebufferTextureMultiviewOVR(
+        GL_DRAW_FRAMEBUFFER,
+        attachment,
+        texture,
+        level,
+        baseViewIndex,
+        numViews);
     bindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
     return ok;
 }

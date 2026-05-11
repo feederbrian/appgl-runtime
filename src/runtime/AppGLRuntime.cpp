@@ -4060,6 +4060,26 @@ void APIENTRY glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint
     }
 }
 
+void APIENTRY glFramebufferTextureMultiviewOVR(GLenum target,
+                                               GLenum attachment,
+                                               GLuint texture,
+                                               GLint level,
+                                               GLint baseViewIndex,
+                                               GLsizei numViews) {
+    auto* context = requireCurrentContext("glFramebufferTextureMultiviewOVR");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isValidFramebufferAttachment(attachment)) {
+        recordValidationError(context, "glFramebufferTextureMultiviewOVR", GL_INVALID_ENUM, "attachment is invalid");
+        return;
+    }
+    if (context->framebufferTextureMultiviewOVR(target, attachment, texture, level, baseViewIndex, numViews)) {
+        markFramebufferFunction(FunctionId::glFramebufferTextureMultiviewOVR, "OVR multiview framebuffer texture attachments are tracked.");
+        Runtime::shared().recordBootstrapTrace("glFramebufferTextureMultiviewOVR(" + std::to_string(attachment) + ")");
+    }
+}
+
 void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
     auto* context = requireCurrentContext("glFramebufferRenderbuffer");
     if (context == nullptr) {
@@ -8411,6 +8431,14 @@ void APIENTRY glNamedFramebufferTexture(GLuint framebuffer, GLenum attachment, G
 }
 void APIENTRY glNamedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer) {
     DSA_FB_FN(glNamedFramebufferTextureLayer, namedFramebufferTextureLayer(framebuffer, attachment, texture, level, layer))
+}
+void APIENTRY glNamedFramebufferTextureMultiviewOVR(GLuint framebuffer,
+                                                    GLenum attachment,
+                                                    GLuint texture,
+                                                    GLint level,
+                                                    GLint baseViewIndex,
+                                                    GLsizei numViews) {
+    DSA_FB_FN(glNamedFramebufferTextureMultiviewOVR, namedFramebufferTextureMultiviewOVR(framebuffer, attachment, texture, level, baseViewIndex, numViews))
 }
 void APIENTRY glNamedFramebufferDrawBuffer(GLuint framebuffer, GLenum buf) {
     DSA_FB_FN(glNamedFramebufferDrawBuffer, namedFramebufferDrawBuffer(framebuffer, buf))

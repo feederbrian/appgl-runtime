@@ -111,6 +111,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glRenderbufferStorageMultisample = &impl::glRenderbufferStorageMultisample;
     dispatch.glFramebufferTextureLayer = &impl::glFramebufferTextureLayer;
     dispatch.glFramebufferTexture = &impl::glFramebufferTexture;
+    dispatch.glFramebufferTextureMultiviewOVR = &impl::glFramebufferTextureMultiviewOVR;
     dispatch.glGenSamplers = &impl::glGenSamplers;
     dispatch.glDeleteSamplers = &impl::glDeleteSamplers;
     dispatch.glIsSampler = &impl::glIsSampler;
@@ -422,6 +423,8 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
                              "GL_EXT_fragment_shading_rate validates combiner ops with primitive gated and attachment-side ops live.");
     coverage.markImplemented(FunctionId::glFramebufferShadingRateEXT,
                              "GL_EXT_fragment_shading_rate attachment state is wired for framebuffer combiner cascades.");
+    coverage.markImplemented(FunctionId::glFramebufferTextureMultiviewOVR,
+                             "GL_OVR_multiview framebuffer attachment entry point delegates to layered FBO routing.");
 
     coverage.markImplemented(FunctionId::glClearColor, "Bootstrap clear-color plumbing is live.");
     coverage.markImplemented(FunctionId::glDrawBuffer, "Single draw-buffer state tracking is live.");
@@ -926,6 +929,7 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glNamedFramebufferRenderbuffer = &impl::glNamedFramebufferRenderbuffer;
     dispatch.glNamedFramebufferTexture = &impl::glNamedFramebufferTexture;
     dispatch.glNamedFramebufferTextureLayer = &impl::glNamedFramebufferTextureLayer;
+    dispatch.glNamedFramebufferTextureMultiviewOVR = &impl::glNamedFramebufferTextureMultiviewOVR;
     dispatch.glNamedFramebufferDrawBuffer = &impl::glNamedFramebufferDrawBuffer;
     dispatch.glNamedFramebufferDrawBuffers = &impl::glNamedFramebufferDrawBuffers;
     dispatch.glNamedFramebufferReadBuffer = &impl::glNamedFramebufferReadBuffer;
@@ -944,7 +948,8 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glNamedRenderbufferStorageMultisample = &impl::glNamedRenderbufferStorageMultisample;
     dispatch.glGetNamedRenderbufferParameteriv = &impl::glGetNamedRenderbufferParameteriv;
     for (auto id : {FunctionId::glNamedFramebufferRenderbuffer, FunctionId::glNamedFramebufferTexture,
-                    FunctionId::glNamedFramebufferTextureLayer, FunctionId::glNamedFramebufferDrawBuffer,
+                    FunctionId::glNamedFramebufferTextureLayer, FunctionId::glNamedFramebufferTextureMultiviewOVR,
+                    FunctionId::glNamedFramebufferDrawBuffer,
                     FunctionId::glNamedFramebufferDrawBuffers, FunctionId::glNamedFramebufferReadBuffer,
                     FunctionId::glNamedFramebufferParameteri, FunctionId::glGetNamedFramebufferParameteriv,
                     FunctionId::glGetNamedFramebufferAttachmentParameteriv, FunctionId::glCheckNamedFramebufferStatus,

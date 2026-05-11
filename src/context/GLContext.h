@@ -196,6 +196,7 @@ public:
     bool bindFramebuffer(GLenum target, GLuint framebuffer);
     GLenum checkFramebufferStatus(GLenum target) const;
     bool framebufferTexture(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint layer, bool layered);
+    bool framebufferTextureMultiviewOVR(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
     bool framebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
     bool blitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
     bool getFramebufferAttachmentParameterInteger(GLenum target, GLenum attachment, GLenum pname, GLint* params) const;
@@ -446,6 +447,7 @@ public:
     bool namedFramebufferRenderbuffer(GLuint framebuffer, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
     bool namedFramebufferTexture(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level);
     bool namedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer);
+    bool namedFramebufferTextureMultiviewOVR(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews);
     bool namedFramebufferDrawBuffer(GLuint framebuffer, GLenum buf);
     bool namedFramebufferDrawBuffers(GLuint framebuffer, GLsizei n, const GLenum* bufs);
     bool namedFramebufferReadBuffer(GLuint framebuffer, GLenum src);

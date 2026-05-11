@@ -671,6 +671,20 @@ bool resourcesUseFragmentShadingRateBuiltins(
            contains(resources.builtin_outputs);
 }
 
+bool resourcesUseMultiviewBuiltins(
+        const spirv_cross::ShaderResources& resources) {
+    auto contains = [](const auto& builtins) {
+        for (const auto& builtin : builtins) {
+            if (builtin.builtin == spv::BuiltInViewIndex) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return contains(resources.builtin_inputs) ||
+           contains(resources.builtin_outputs);
+}
+
 bool isDefaultUniformBlockResource(spirv_cross::Compiler& compiler,
                                    const spirv_cross::Resource& resource) {
     const auto& blockType = compiler.get_type(resource.base_type_id);
@@ -1204,6 +1218,10 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // long-held MSL 2.3 ABI so unrelated translated/GS pass-through
         // pipelines do not inherit FSR-specific compiler behavior.
         const auto versionResources = compiler.get_shader_resources();
+        if (resourcesUseMultiviewBuiltins(versionResources)) {
+            mslOpts.multiview = true;
+            mslOpts.multiview_layered_rendering = true;
+        }
         if (resourcesUseFragmentShadingRateBuiltins(versionResources)) {
             mslOpts.set_msl_version(2, 4);
         } else {

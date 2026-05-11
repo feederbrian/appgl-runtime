@@ -124,6 +124,18 @@ EXTRA_EXTENSION_COMMANDS = [
         "GLenum target, GLenum attachment, GLuint texture, GLint baseLayer, GLsizei numLayers, GLsizei texelWidth, GLsizei texelHeight",
         "GL_EXT_fragment_shading_rate",
     ),
+    (
+        "glFramebufferTextureMultiviewOVR",
+        "void",
+        "GLenum target, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews",
+        "GL_OVR_multiview",
+    ),
+    (
+        "glNamedFramebufferTextureMultiviewOVR",
+        "void",
+        "GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint baseViewIndex, GLsizei numViews",
+        "GL_OVR_multiview",
+    ),
 ]
 
 EXTRA_EXTENSION_ENUMS = [
@@ -165,6 +177,10 @@ EXTRA_EXTENSION_ENUMS = [
     ("GL_FRAGMENT_SHADING_RATE_ATTACHMENT_WITH_DEFAULT_FRAMEBUFFER_SUPPORTED_EXT", "0x96DF"),
     ("GL_FRAGMENT_SHADING_RATE_NON_TRIVIAL_COMBINERS_SUPPORTED_EXT", "0x8F6F"),
     ("GL_FRAGMENT_SHADING_RATE_PRIMITIVE_RATE_WITH_MULTI_VIEWPORT_SUPPORTED_EXT", "0x9780"),
+    ("GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_NUM_VIEWS_OVR", "0x9630"),
+    ("GL_MAX_VIEWS_OVR", "0x9631"),
+    ("GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_BASE_VIEW_INDEX_OVR", "0x9632"),
+    ("GL_FRAMEBUFFER_INCOMPLETE_VIEW_TARGETS_OVR", "0x9633"),
 ]
 
 # Fixed-function entry points whose silent-stub bodies in

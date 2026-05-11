@@ -1229,6 +1229,21 @@ struct MetalFrameGraph::Impl {
         const bool fragmentNeedsFragCoordParams =
             hasFragmentStage && info.fragmentMSL != nullptr &&
             info.fragmentMSL->find("_appgl_FragCoordParams") != std::string::npos;
+        auto mslUsesMultiviewViewMask = [](const std::string* msl) -> bool {
+            return msl != nullptr &&
+                msl->find("spvViewMask") != std::string::npos;
+        };
+        const bool vertexUsesMultiviewViewMask =
+            mslUsesMultiviewViewMask(info.vertexMSL);
+        const bool fragmentUsesMultiviewViewMask =
+            mslUsesMultiviewViewMask(info.fragmentMSL);
+        constexpr std::uint32_t kOVRMultiviewViewCount = 2;
+        const std::uint32_t ovrViewMask[2] = {0u, kOVRMultiviewViewCount};
+        const GLsizei effectiveInstanceCount =
+            vertexUsesMultiviewViewMask
+                ? std::max<GLsizei>(info.instanceCount, 1) *
+                      static_cast<GLsizei>(kOVRMultiviewViewCount)
+                : info.instanceCount;
         id<MTLArgumentEncoder> fragArgEncoderSet0 = nil;
         id<MTLArgumentEncoder> vertArgEncoderSet0 = nil;
         id<MTLArgumentEncoder> fragArgEncoderSet1 = nil;
@@ -2222,7 +2237,7 @@ struct MetalFrameGraph::Impl {
             // descriptor to match the attachment's slice count.
             // Non-layered draws leave this at 0 (Metal's default
             // non-layered behaviour).
-            if (info.fboColorArrayLength > 0) {
+            if (info.fboColorArrayLength > 0 || vertexUsesMultiviewViewMask) {
                 // Sprint 17 Day 1 (CKPT236) [Probe A 2DMSArray
                 // clamp]: Apple Silicon's AGX driver asserts
                 // `slice < getNumSlices() && Specified slice OOB`
@@ -2237,6 +2252,17 @@ struct MetalFrameGraph::Impl {
                 // keep the texture's full arrayLength behaviour.
                 NSUInteger rtal = static_cast<NSUInteger>(
                     info.fboColorArrayLength);
+                if (rtal == 0 && vertexUsesMultiviewViewMask &&
+                    colorTexture != nil) {
+                    const bool layeredColorTarget =
+                        colorTexture.textureType == MTLTextureType2DArray ||
+                        colorTexture.textureType == MTLTextureType2DMultisampleArray ||
+                        colorTexture.textureType == MTLTextureTypeCube ||
+                        colorTexture.textureType == MTLTextureTypeCubeArray;
+                    if (layeredColorTarget) {
+                        rtal = std::max<NSUInteger>(colorTexture.arrayLength, 1u);
+                    }
+                }
                 if (info.maxEmittedLayer > 0 &&
                     info.fboColorTexture != nullptr) {
                     id<MTLTexture> colTex = (__bridge id<MTLTexture>)
@@ -2756,6 +2782,17 @@ struct MetalFrameGraph::Impl {
             if (ssbo.isFragment && !fragmentUsesArgBuf) {
                 [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
             }
+        }
+
+        if (vertexUsesMultiviewViewMask && !vertexUsesArgBuf) {
+            [currentRenderEncoder setVertexBytes:ovrViewMask
+                                          length:sizeof(ovrViewMask)
+                                         atIndex:24];
+        }
+        if (fragmentUsesMultiviewViewMask && !fragmentUsesArgBuf) {
+            [currentRenderEncoder setFragmentBytes:ovrViewMask
+                                            length:sizeof(ovrViewMask)
+                                           atIndex:24];
         }
 
         // Phase 8X Group 4d follow-up⁷ — bind textures and samplers for
@@ -3374,13 +3411,13 @@ struct MetalFrameGraph::Impl {
             if (iAlloc.buffer == nil) {
                 return false;
             }
-            if (info.instanceCount > 1 || info.baseVertex != 0 || info.baseInstance != 0) {
+            if (effectiveInstanceCount > 1 || info.baseVertex != 0 || info.baseInstance != 0) {
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(expandedIndices.size())
                                      indexType:MTLIndexTypeUInt32
                                    indexBuffer:iAlloc.buffer
                              indexBufferOffset:iAlloc.offset
-                                 instanceCount:static_cast<NSUInteger>(info.instanceCount)
+                                 instanceCount:static_cast<NSUInteger>(effectiveInstanceCount)
                                     baseVertex:static_cast<NSUInteger>(info.baseVertex)
                                   baseInstance:static_cast<NSUInteger>(info.baseInstance)];
             } else {
@@ -3414,13 +3451,13 @@ struct MetalFrameGraph::Impl {
                 idxOffset = iAlloc.offset;
             }
 
-            if (info.instanceCount > 1 || info.baseVertex != 0 || info.baseInstance != 0) {
+            if (effectiveInstanceCount > 1 || info.baseVertex != 0 || info.baseInstance != 0) {
                 [currentRenderEncoder drawIndexedPrimitives:primitive
                                     indexCount:static_cast<NSUInteger>(info.indexCount)
                                      indexType:metalIndexType
                                    indexBuffer:idxBuffer
                              indexBufferOffset:idxOffset
-                                 instanceCount:static_cast<NSUInteger>(info.instanceCount)
+                                 instanceCount:static_cast<NSUInteger>(effectiveInstanceCount)
                                     baseVertex:static_cast<NSUInteger>(info.baseVertex)
                                   baseInstance:static_cast<NSUInteger>(info.baseInstance)];
             } else {
@@ -3431,11 +3468,11 @@ struct MetalFrameGraph::Impl {
                              indexBufferOffset:idxOffset];
             }
         } else {
-            if (info.instanceCount > 1) {
+            if (effectiveInstanceCount > 1) {
                 [currentRenderEncoder drawPrimitives:primitive
                             vertexStart:0
                             vertexCount:static_cast<NSUInteger>(info.vertexCount)
-                          instanceCount:static_cast<NSUInteger>(info.instanceCount)
+                          instanceCount:static_cast<NSUInteger>(effectiveInstanceCount)
                            baseInstance:static_cast<NSUInteger>(info.baseInstance)];
             } else {
                 [currentRenderEncoder drawPrimitives:primitive

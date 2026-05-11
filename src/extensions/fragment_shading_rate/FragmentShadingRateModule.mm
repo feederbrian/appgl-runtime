@@ -63,6 +63,15 @@ struct Registrar {
             {},
             {}
         });
+        ExtensionRegistry::registerModule({
+            "ovr_multiview",
+            multiviewExtensionString,
+            isAvailable,
+            nullptr,
+            nullptr,
+            {},
+            {}
+        });
     }
 };
 
@@ -165,6 +174,10 @@ const char* extensionString() {
 
 const char* attachmentExtensionString() {
     return APPGL_EXTENSION_EXT_FRAGMENT_SHADING_RATE_ATTACHMENT;
+}
+
+const char* multiviewExtensionString() {
+    return APPGL_EXTENSION_OVR_MULTIVIEW;
 }
 
 bool isAvailable(ExtensionContext& ctx) {
