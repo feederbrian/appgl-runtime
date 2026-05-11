@@ -359,6 +359,18 @@ bool queryValue(
         case GL_PACK_SKIP_IMAGES:
             writeScalar(out, pixelStore.packSkipImages);
             return true;
+        case GL_PACK_COMPRESSED_BLOCK_WIDTH:
+            writeScalar(out, pixelStore.packCompressedBlockWidth);
+            return true;
+        case GL_PACK_COMPRESSED_BLOCK_HEIGHT:
+            writeScalar(out, pixelStore.packCompressedBlockHeight);
+            return true;
+        case GL_PACK_COMPRESSED_BLOCK_DEPTH:
+            writeScalar(out, pixelStore.packCompressedBlockDepth);
+            return true;
+        case GL_PACK_COMPRESSED_BLOCK_SIZE:
+            writeScalar(out, pixelStore.packCompressedBlockSize);
+            return true;
         case GL_UNPACK_SWAP_BYTES:
             writeBooleanScalar(out, pixelStore.unpackSwapBytes == GL_TRUE);
             return true;
@@ -382,6 +394,18 @@ bool queryValue(
             return true;
         case GL_UNPACK_SKIP_IMAGES:
             writeScalar(out, pixelStore.unpackSkipImages);
+            return true;
+        case GL_UNPACK_COMPRESSED_BLOCK_WIDTH:
+            writeScalar(out, pixelStore.unpackCompressedBlockWidth);
+            return true;
+        case GL_UNPACK_COMPRESSED_BLOCK_HEIGHT:
+            writeScalar(out, pixelStore.unpackCompressedBlockHeight);
+            return true;
+        case GL_UNPACK_COMPRESSED_BLOCK_DEPTH:
+            writeScalar(out, pixelStore.unpackCompressedBlockDepth);
+            return true;
+        case GL_UNPACK_COMPRESSED_BLOCK_SIZE:
+            writeScalar(out, pixelStore.unpackCompressedBlockSize);
             return true;
         case GL_ARRAY_BUFFER_BINDING:
             writeScalar(out, boundBuffer(GL_ARRAY_BUFFER));
@@ -1532,6 +1556,18 @@ void GLStateTracker::setPixelStore(GLenum pname, GLint value) {
         case GL_PACK_SKIP_IMAGES:
             pixelStore_.packSkipImages = value;
             break;
+        case GL_PACK_COMPRESSED_BLOCK_WIDTH:
+            pixelStore_.packCompressedBlockWidth = value;
+            break;
+        case GL_PACK_COMPRESSED_BLOCK_HEIGHT:
+            pixelStore_.packCompressedBlockHeight = value;
+            break;
+        case GL_PACK_COMPRESSED_BLOCK_DEPTH:
+            pixelStore_.packCompressedBlockDepth = value;
+            break;
+        case GL_PACK_COMPRESSED_BLOCK_SIZE:
+            pixelStore_.packCompressedBlockSize = value;
+            break;
         case GL_UNPACK_SWAP_BYTES:
             pixelStore_.unpackSwapBytes = value;
             break;
@@ -1555,6 +1591,18 @@ void GLStateTracker::setPixelStore(GLenum pname, GLint value) {
             break;
         case GL_UNPACK_SKIP_IMAGES:
             pixelStore_.unpackSkipImages = value;
+            break;
+        case GL_UNPACK_COMPRESSED_BLOCK_WIDTH:
+            pixelStore_.unpackCompressedBlockWidth = value;
+            break;
+        case GL_UNPACK_COMPRESSED_BLOCK_HEIGHT:
+            pixelStore_.unpackCompressedBlockHeight = value;
+            break;
+        case GL_UNPACK_COMPRESSED_BLOCK_DEPTH:
+            pixelStore_.unpackCompressedBlockDepth = value;
+            break;
+        case GL_UNPACK_COMPRESSED_BLOCK_SIZE:
+            pixelStore_.unpackCompressedBlockSize = value;
             break;
         default:
             break;

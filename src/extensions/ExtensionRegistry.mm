@@ -7,6 +7,8 @@
 #include <mutex>
 #include <vector>
 
+#import <Metal/Metal.h>
+
 namespace appgl::extensions {
 
 namespace {
@@ -61,6 +63,56 @@ constexpr std::array<const char*, 48> kBaseExtensions = {
     "GL_ARB_parallel_shader_compile",
     "GL_KHR_parallel_shader_compile",
 };
+
+const char* s3tcExtensionString() {
+    return "GL_EXT_texture_compression_s3tc";
+}
+
+bool isS3TCAvailable(ExtensionContext& ctx) {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)ctx.metalDevice();
+    if (device == nil) {
+        return false;
+    }
+    bool supportsBC = [device supportsFamily:MTLGPUFamilyMac2];
+    if ([device respondsToSelector:@selector(supportsBCTextureCompression)]) {
+        supportsBC = supportsBC || [device supportsBCTextureCompression];
+    }
+    return supportsBC;
+}
+
+const char* astcLdrExtensionString() {
+    return "GL_KHR_texture_compression_astc_ldr";
+}
+
+bool isASTCLDRAvailable(ExtensionContext& ctx) {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)ctx.metalDevice();
+    return device != nil && [device supportsFamily:MTLGPUFamilyApple1];
+}
+
+struct CompressionExtensionRegistrar {
+    CompressionExtensionRegistrar() {
+        ExtensionRegistry::registerModule({
+            "texture_compression_s3tc",
+            s3tcExtensionString,
+            isS3TCAvailable,
+            nullptr,
+            nullptr,
+            {},
+            {},
+        });
+        ExtensionRegistry::registerModule({
+            "texture_compression_astc_ldr",
+            astcLdrExtensionString,
+            isASTCLDRAvailable,
+            nullptr,
+            nullptr,
+            {},
+            {},
+        });
+    }
+};
+
+const CompressionExtensionRegistrar kCompressionExtensionRegistrar;
 
 struct RegistryState {
     bool initialized = false;

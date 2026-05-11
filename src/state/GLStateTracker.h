@@ -114,6 +114,10 @@ struct GLPixelStoreState {
     GLint packAlignment = 4;
     GLint packImageHeight = 0;
     GLint packSkipImages = 0;
+    GLint packCompressedBlockWidth = 0;
+    GLint packCompressedBlockHeight = 0;
+    GLint packCompressedBlockDepth = 0;
+    GLint packCompressedBlockSize = 0;
     GLint unpackSwapBytes = GL_FALSE;
     GLint unpackLsbFirst = GL_FALSE;
     GLint unpackRowLength = 0;
@@ -122,6 +126,10 @@ struct GLPixelStoreState {
     GLint unpackAlignment = 4;
     GLint unpackImageHeight = 0;
     GLint unpackSkipImages = 0;
+    GLint unpackCompressedBlockWidth = 0;
+    GLint unpackCompressedBlockHeight = 0;
+    GLint unpackCompressedBlockDepth = 0;
+    GLint unpackCompressedBlockSize = 0;
 };
 
 struct GLTessellationState {

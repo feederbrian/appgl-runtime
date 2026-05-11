@@ -511,15 +511,32 @@ static void APIENTRY glSampleCoverage(GLfloat value, GLboolean invert) {
 }
 
 static void APIENTRY glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, const void *data) {
-    (void)target;
-    (void)level;
-    (void)internalformat;
-    (void)width;
-    (void)height;
-    (void)depth;
     (void)border;
-    (void)imageSize;
-    (void)data;
+    auto* ctx = currentContextOrNull();
+    if (ctx == nullptr) return;
+    if (level >= 0 && width > 0 && height > 0 && depth > 0) {
+        if (ctx->compressedTexImage(target, level, internalformat,
+                                    width, height, depth,
+                                    imageSize, data)) {
+            return;
+        }
+    }
+    if (level == 0 && width > 0 && height > 0 && depth > 0) {
+        GLuint tex = ctx->state().boundTexture(target);
+        if (tex != 0) {
+            auto* obj = ctx->objects().textures().get(tex);
+            if (obj != nullptr) {
+                obj->target = target;
+                obj->desc.target = target;
+                obj->desc.width = width;
+                obj->desc.height = height;
+                obj->desc.depth = depth;
+                obj->desc.layers = depth;
+                obj->desc.internalFormat = internalformat;
+                obj->instantiated = true;
+            }
+        }
+    }
     warnDataDroppedOnce("glCompressedTexImage3D");
 }
 
@@ -528,13 +545,10 @@ static void APIENTRY glCompressedTexImage2D(GLenum target, GLint level, GLenum i
     auto* ctx = currentContextOrNull();
     if (ctx == nullptr) return;
     // Sprint 17 Day 7+ Bank-Group-E: actual compressed-texture upload
-    // for the BPTC + RGTC family (4×4-block formats). The
+    // for native Metal compressed formats. The
     // `compressedTexImage` helper allocates a Metal texture with the
     // matching pixel format and uploads the payload via
-    // replaceRegion. CTS `direct_state_access.textures_get_image`
-    // (compressed sub-test) exercises this with BC7. Other compressed
-    // formats (ETC2 / EAC / ASTC) keep the legacy drop-data path until
-    // Bank-Group-E follow-up.
+    // replaceRegion using block-aware pixel-store state.
     if (level >= 0 && width > 0 && height > 0) {
         if (ctx->compressedTexImage(target, level, internalformat,
                                     width, height, /*depth*/1,

@@ -814,6 +814,38 @@ MTLPixelFormat metalRenderbufferFormat(GLenum internalFormat) {
         case GL_COMPRESSED_RGBA:         return MTLPixelFormatRGBA8Unorm;
         case GL_COMPRESSED_SRGB:         return MTLPixelFormatRGBA8Unorm_sRGB;
         case GL_COMPRESSED_SRGB_ALPHA:   return MTLPixelFormatRGBA8Unorm_sRGB;
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:  return MTLPixelFormatBC1_RGBA;
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT: return MTLPixelFormatBC1_RGBA;
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT: return MTLPixelFormatBC2_RGBA;
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT: return MTLPixelFormatBC3_RGBA;
+        case GL_COMPRESSED_RGBA_ASTC_4x4_KHR:  return MTLPixelFormatASTC_4x4_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_5x4_KHR:  return MTLPixelFormatASTC_5x4_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_5x5_KHR:  return MTLPixelFormatASTC_5x5_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_6x5_KHR:  return MTLPixelFormatASTC_6x5_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_6x6_KHR:  return MTLPixelFormatASTC_6x6_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_8x5_KHR:  return MTLPixelFormatASTC_8x5_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_8x6_KHR:  return MTLPixelFormatASTC_8x6_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_8x8_KHR:  return MTLPixelFormatASTC_8x8_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_10x5_KHR: return MTLPixelFormatASTC_10x5_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_10x6_KHR: return MTLPixelFormatASTC_10x6_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_10x8_KHR: return MTLPixelFormatASTC_10x8_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_10x10_KHR: return MTLPixelFormatASTC_10x10_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_12x10_KHR: return MTLPixelFormatASTC_12x10_LDR;
+        case GL_COMPRESSED_RGBA_ASTC_12x12_KHR: return MTLPixelFormatASTC_12x12_LDR;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR:  return MTLPixelFormatASTC_4x4_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR:  return MTLPixelFormatASTC_5x4_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR:  return MTLPixelFormatASTC_5x5_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR:  return MTLPixelFormatASTC_6x5_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR:  return MTLPixelFormatASTC_6x6_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR:  return MTLPixelFormatASTC_8x5_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR:  return MTLPixelFormatASTC_8x6_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR:  return MTLPixelFormatASTC_8x8_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR: return MTLPixelFormatASTC_10x5_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR: return MTLPixelFormatASTC_10x6_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR: return MTLPixelFormatASTC_10x8_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR: return MTLPixelFormatASTC_10x10_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR: return MTLPixelFormatASTC_12x10_sRGB;
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR: return MTLPixelFormatASTC_12x12_sRGB;
         case GL_DEPTH_COMPONENT:
         case GL_DEPTH_COMPONENT16:
         case GL_DEPTH_COMPONENT24:
@@ -988,6 +1020,105 @@ bool isTexture3DRGTCFormat(GLenum internalFormat) {
     }
 }
 
+struct CompressedBlockInfo {
+    NSUInteger width = 0;
+    NSUInteger height = 0;
+    NSUInteger depth = 0;
+    NSUInteger bytes = 0;
+};
+
+static NSUInteger ceilDivBlocks(NSUInteger value, NSUInteger divisor) {
+    return divisor == 0 ? 0 : (value + divisor - 1) / divisor;
+}
+
+CompressedBlockInfo compressedBlockInfoForInternalFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+        case GL_COMPRESSED_RED_RGTC1:
+        case GL_COMPRESSED_SIGNED_RED_RGTC1:
+            return {4, 4, 1, 8};
+        case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+        case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+        case GL_COMPRESSED_RG_RGTC2:
+        case GL_COMPRESSED_SIGNED_RG_RGTC2:
+        case GL_COMPRESSED_RGBA_BPTC_UNORM:
+        case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+        case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+        case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+            return {4, 4, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_4x4_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR:
+            return {4, 4, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_5x4_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR:
+            return {5, 4, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_5x5_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR:
+            return {5, 5, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_6x5_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR:
+            return {6, 5, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_6x6_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR:
+            return {6, 6, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_8x5_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR:
+            return {8, 5, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_8x6_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR:
+            return {8, 6, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_8x8_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR:
+            return {8, 8, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_10x5_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR:
+            return {10, 5, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_10x6_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR:
+            return {10, 6, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_10x8_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR:
+            return {10, 8, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_10x10_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR:
+            return {10, 10, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_12x10_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR:
+            return {12, 10, 1, 16};
+        case GL_COMPRESSED_RGBA_ASTC_12x12_KHR:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR:
+            return {12, 12, 1, 16};
+        default:
+            return {};
+    }
+}
+
+bool isCompressedInternalFormat(GLenum internalFormat) {
+    switch (internalFormat) {
+        case GL_COMPRESSED_RED:
+        case GL_COMPRESSED_RG:
+        case GL_COMPRESSED_RGB:
+        case GL_COMPRESSED_RGBA:
+        case GL_COMPRESSED_SRGB:
+        case GL_COMPRESSED_SRGB_ALPHA:
+        case GL_COMPRESSED_RGB8_ETC2:
+        case GL_COMPRESSED_SRGB8_ETC2:
+        case GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2:
+        case GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2:
+        case GL_COMPRESSED_RGBA8_ETC2_EAC:
+        case GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC:
+        case GL_COMPRESSED_R11_EAC:
+        case GL_COMPRESSED_SIGNED_R11_EAC:
+        case GL_COMPRESSED_RG11_EAC:
+        case GL_COMPRESSED_SIGNED_RG11_EAC:
+            return true;
+        default:
+            break;
+    }
+    return compressedBlockInfoForInternalFormat(internalFormat).bytes != 0;
+}
+
 bool isColorFormat(GLenum internalFormat) {
     return !isDepthFormat(internalFormat) && !isStencilFormat(internalFormat);
 }
@@ -1019,6 +1150,7 @@ bool isRGBFamilyWithoutAlpha(GLenum internalFormat) {
         case GL_RGB32UI:
         case GL_COMPRESSED_RGB:
         case GL_COMPRESSED_SRGB:
+        case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
             return true;
         default:
             return false;
@@ -1031,7 +1163,21 @@ bool isSRGBTextureFormat(GLenum internalFormat) {
            internalFormat == GL_SRGB ||
            internalFormat == GL_SRGB_ALPHA ||
            internalFormat == GL_COMPRESSED_SRGB ||
-           internalFormat == GL_COMPRESSED_SRGB_ALPHA;
+           internalFormat == GL_COMPRESSED_SRGB_ALPHA ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR ||
+           internalFormat == GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR;
 }
 
 bool isTextureTarget(GLenum target) {
@@ -15119,7 +15265,7 @@ bool GLContext::texSubImage(
     return true;
 }
 
-// Sprint 17 Day 7+ Bank-Group-E: 4×4-block compressed-texture upload.
+// Sprint 17 Day 7+ Bank-Group-E: compressed-texture upload.
 //
 // Pre-fix `glCompressedTexImage2D` was a drop-data stub at
 // AppGLGroup8.cpp:528 — only desc.width/height/internalFormat were
@@ -15134,15 +15280,13 @@ bool GLContext::texSubImage(
 // 2. Allocate MTLTexture with that format + width/height + level
 //    count (single mipLevel for now; multi-level arrives via
 //    compressedTexSubImage on subsequent calls).
-// 3. Upload via replaceRegion:mipmapLevel:withBytes:bytesPerRow: with
-//    block-aware byte counts ((W+3)/4)*bytesPerBlock per row of
-//    blocks).
+// 3. Upload via replaceRegion with block-aware byte counts and
+//    GL_UNPACK_COMPRESSED_BLOCK_* pixel-store layout.
 // 4. Stash MTLTexture pointer on the GLTextureObject so subsequent
 //    sample / readback paths see it.
 //
-// 4×4-block BPTC + RGTC family: BC1/BC4 = 8 bytes/block;
-// BC2/BC3/BC5/BC6H/BC7 = 16 bytes/block. Other compressed formats
-// (ETC2 / EAC / ASTC) deferred to Bank-Group-E follow-up.
+// BC/RGTC/BPTC/S3TC and ASTC LDR route through native Metal compressed
+// pixel formats when the capability table registers them.
 bool GLContext::compressedTexImage(GLenum target, GLint level,
                                    GLenum internalformat,
                                    GLsizei width, GLsizei height,
@@ -15187,33 +15331,17 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
         pushError(GL_INVALID_ENUM);
         return false;
     }
-    const MTLPixelFormat pf = static_cast<MTLPixelFormat>(fmtCap->metalPixelFormat);
-    NSUInteger bytesPerBlock = 0;
-    switch (pf) {
-        case MTLPixelFormatBC1_RGBA:
-        case MTLPixelFormatBC1_RGBA_sRGB:
-        case MTLPixelFormatBC4_RUnorm:
-        case MTLPixelFormatBC4_RSnorm:
-            bytesPerBlock = 8;
-            break;
-        case MTLPixelFormatBC2_RGBA:
-        case MTLPixelFormatBC2_RGBA_sRGB:
-        case MTLPixelFormatBC3_RGBA:
-        case MTLPixelFormatBC3_RGBA_sRGB:
-        case MTLPixelFormatBC5_RGUnorm:
-        case MTLPixelFormatBC5_RGSnorm:
-        case MTLPixelFormatBC6H_RGBFloat:
-        case MTLPixelFormatBC6H_RGBUfloat:
-        case MTLPixelFormatBC7_RGBAUnorm:
-        case MTLPixelFormatBC7_RGBAUnorm_sRGB:
-            bytesPerBlock = 16;
-            break;
-        default:
-            // Other compressed formats (ETC2 / EAC / ASTC) — fall back
-            // to the legacy drop-data path. Caller already recorded
-            // dimensions in AppGLGroup8.cpp:528.
-            return true;
+    const CompressedBlockInfo block = compressedBlockInfoForInternalFormat(internalformat);
+    if (block.bytes == 0) {
+        // ETC2/EAC and generic compressed formats still use the legacy
+        // dimension-recording path until their uploads get native backing.
+        return true;
     }
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_2D_ARRAY) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    const MTLPixelFormat pf = static_cast<MTLPixelFormat>(fmtCap->metalPixelFormat);
     id<MTLDevice> mtlDevice = impl_->device;
     if (mtlDevice == nil) {
         // No Metal device — silently accept; downstream sampling /
@@ -15228,22 +15356,25 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     object->desc.width = width;
     object->desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
     object->desc.depth = depth;
+    object->desc.layers = (target == GL_TEXTURE_2D_ARRAY) ? depth : 1;
     object->desc.internalFormat = internalformat;
     // Allocate Metal texture if missing OR if format/size changed.
     id<MTLTexture> existing = (__bridge id<MTLTexture>)object->metalTexture;
+    const bool arrayTexture = target == GL_TEXTURE_2D_ARRAY;
+    const NSUInteger arrayLength = arrayTexture ? static_cast<NSUInteger>(depth) : 1u;
     bool needAlloc = (existing == nil) ||
                      existing.pixelFormat != pf ||
                      existing.width != static_cast<NSUInteger>(width) ||
-                     existing.height != static_cast<NSUInteger>(height);
+                     existing.height != static_cast<NSUInteger>(height) ||
+                     existing.arrayLength != arrayLength;
     if (needAlloc) {
         MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
-        desc.textureType = (target == GL_TEXTURE_2D)
-            ? MTLTextureType2D
-            : MTLTextureType2D;  // 1D / 3D BC are unusual; default 2D
+        desc.textureType = arrayTexture ? MTLTextureType2DArray : MTLTextureType2D;
         desc.pixelFormat = pf;
         desc.width = static_cast<NSUInteger>(width);
         desc.height = static_cast<NSUInteger>(height);
         desc.depth = 1;
+        desc.arrayLength = arrayLength;
         desc.mipmapLevelCount = static_cast<NSUInteger>(level + 1);
         desc.usage = MTLTextureUsageShaderRead;
         desc.storageMode = MTLStorageModeShared;
@@ -15258,18 +15389,62 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
         object->metalTexture = transferRetainedMetalObject(newTex);
         existing = newTex;
     }
-    // Upload payload (if provided). Block-aware bytesPerRow.
+    // Upload payload (if provided). GL_UNPACK_* values are specified in
+    // texels; compressed row/image strides are derived in blocks.
     if (data != nullptr && imageSize > 0) {
-        const NSUInteger blocksX = (static_cast<NSUInteger>(width) + 3) / 4;
-        const NSUInteger bytesPerRow = blocksX * bytesPerBlock;
+        const GLPixelStoreState& store = impl_->state->pixelStore();
+        const NSUInteger layoutBlockW = store.unpackCompressedBlockWidth > 0
+            ? static_cast<NSUInteger>(store.unpackCompressedBlockWidth)
+            : block.width;
+        const NSUInteger layoutBlockH = store.unpackCompressedBlockHeight > 0
+            ? static_cast<NSUInteger>(store.unpackCompressedBlockHeight)
+            : block.height;
+        const NSUInteger layoutBlockD = store.unpackCompressedBlockDepth > 0
+            ? static_cast<NSUInteger>(store.unpackCompressedBlockDepth)
+            : block.depth;
+        const NSUInteger layoutBlockBytes = store.unpackCompressedBlockSize > 0
+            ? static_cast<NSUInteger>(store.unpackCompressedBlockSize)
+            : block.bytes;
+        if (layoutBlockW == 0 || layoutBlockH == 0 || layoutBlockD == 0 || layoutBlockBytes == 0) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        const NSUInteger srcWidth = static_cast<NSUInteger>(
+            store.unpackRowLength > 0 ? store.unpackRowLength : width);
+        const NSUInteger srcHeight = static_cast<NSUInteger>(
+            store.unpackImageHeight > 0 ? store.unpackImageHeight : height);
+        const NSUInteger srcBlocksX = ceilDivBlocks(srcWidth, layoutBlockW);
+        const NSUInteger srcBlocksY = ceilDivBlocks(srcHeight, layoutBlockH);
+        const NSUInteger srcRowBytes = srcBlocksX * layoutBlockBytes;
+        const NSUInteger srcImageBytes = srcRowBytes * srcBlocksY;
+        const NSUInteger skipBlockX = static_cast<NSUInteger>(store.unpackSkipPixels) / layoutBlockW;
+        const NSUInteger skipBlockY = static_cast<NSUInteger>(store.unpackSkipRows) / layoutBlockH;
+        const NSUInteger skipBlockZ = static_cast<NSUInteger>(store.unpackSkipImages) / layoutBlockD;
+        const std::uint8_t* baseBytes = static_cast<const std::uint8_t*>(data) +
+            skipBlockZ * srcImageBytes +
+            skipBlockY * srcRowBytes +
+            skipBlockX * layoutBlockBytes;
         MTLRegion region = MTLRegionMake2D(
             0, 0,
             static_cast<NSUInteger>(width),
             static_cast<NSUInteger>(height));
-        [existing replaceRegion:region
-                    mipmapLevel:static_cast<NSUInteger>(level)
-                      withBytes:data
-                    bytesPerRow:bytesPerRow];
+        const NSUInteger mipLevel = static_cast<NSUInteger>(level);
+        if (arrayTexture) {
+            for (NSUInteger slice = 0; slice < arrayLength; ++slice) {
+                const std::uint8_t* sliceBytes = baseBytes + slice * srcImageBytes;
+                [existing replaceRegion:region
+                             mipmapLevel:mipLevel
+                                   slice:slice
+                               withBytes:sliceBytes
+                             bytesPerRow:srcRowBytes
+                           bytesPerImage:srcImageBytes];
+            }
+        } else {
+            [existing replaceRegion:region
+                        mipmapLevel:mipLevel
+                          withBytes:baseBytes
+                        bytesPerRow:srcRowBytes];
+        }
     }
     return true;
 }
@@ -40007,39 +40182,8 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
     // GL 4.6 §8.11: TEXTURE_COMPRESSED_IMAGE_SIZE on uncompressed
     // textures is INVALID_OPERATION. Compressed textures have a
     // GL_COMPRESSED_* internal format; everything else is uncompressed.
-    auto isCompressed = [](GLenum f) -> bool {
-        // Catch the two canonical prefixes used by GL 4.6 §8.5.3 /
-        // §8.14 / §8.15: GL_COMPRESSED_* (ARB_texture_compression)
-        // and GL_*_ATC_* / GL_ETC1_RGB8_OES (ES compatibility).
-        // The bitmask below is a compact version of the switch since
-        // all compressed internal formats fall in the same
-        // enum-range block (0x83F0..0x93F7, 0x8C92..0x8D70,
-        // 0x9274..0x937B). Fall back to the generic GL_COMPRESSED
-        // classifier used by glTexImage internally.
-        switch (f) {
-            case GL_COMPRESSED_RED: case GL_COMPRESSED_RG:
-            case GL_COMPRESSED_RGB: case GL_COMPRESSED_RGBA:
-            case GL_COMPRESSED_SRGB: case GL_COMPRESSED_SRGB_ALPHA:
-            case GL_COMPRESSED_RED_RGTC1: case GL_COMPRESSED_SIGNED_RED_RGTC1:
-            case GL_COMPRESSED_RG_RGTC2: case GL_COMPRESSED_SIGNED_RG_RGTC2:
-            case GL_COMPRESSED_RGBA_BPTC_UNORM:
-            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
-            case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
-            case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
-            case GL_COMPRESSED_RGB8_ETC2: case GL_COMPRESSED_SRGB8_ETC2:
-            case GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2:
-            case GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2:
-            case GL_COMPRESSED_RGBA8_ETC2_EAC:
-            case GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC:
-            case GL_COMPRESSED_R11_EAC: case GL_COMPRESSED_SIGNED_R11_EAC:
-            case GL_COMPRESSED_RG11_EAC: case GL_COMPRESSED_SIGNED_RG11_EAC:
-                return true;
-            default:
-                return false;
-        }
-    };
     if (pname == GL_TEXTURE_COMPRESSED_IMAGE_SIZE &&
-        !isCompressed(obj->desc.internalFormat)) {
+        !isCompressedInternalFormat(obj->desc.internalFormat)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -40286,8 +40430,21 @@ bool GLContext::getTextureLevelParameteriv(GLuint texture, GLint level, GLenum p
         }
         case GL_TEXTURE_SAMPLES:                 *params = desc.samples; return true;
         case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:  *params = GL_TRUE; return true;
-        case GL_TEXTURE_COMPRESSED:              *params = GL_FALSE; return true;
-        case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:   *params = 0; return true;
+        case GL_TEXTURE_COMPRESSED:
+            *params = isCompressedInternalFormat(desc.internalFormat) ? GL_TRUE : GL_FALSE;
+            return true;
+        case GL_TEXTURE_COMPRESSED_IMAGE_SIZE: {
+            const CompressedBlockInfo block = compressedBlockInfoForInternalFormat(desc.internalFormat);
+            if (block.bytes == 0) {
+                *params = 0;
+                return true;
+            }
+            const NSUInteger blocksX = ceilDivBlocks(static_cast<NSUInteger>(std::max<GLsizei>(desc.width, 1)), block.width);
+            const NSUInteger blocksY = ceilDivBlocks(static_cast<NSUInteger>(std::max<GLsizei>(desc.height, 1)), block.height);
+            const NSUInteger blocksZ = ceilDivBlocks(static_cast<NSUInteger>(std::max<GLsizei>(desc.depth, 1)), block.depth);
+            *params = static_cast<GLint>(blocksX * blocksY * blocksZ * block.bytes);
+            return true;
+        }
         case GL_TEXTURE_BUFFER_DATA_STORE_BINDING:
             // Per GL 4.6 Table 8.23 — returns the name of the buffer
             // object used as the data store for this texture.
@@ -41826,32 +41983,14 @@ bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei b
             return false;
         }
     }
-    // GL 4.6 §8.11.4: must be a compressed internal format.
-    auto isCompressedInternal = [](GLenum f) {
-        switch (f) {
-            case GL_COMPRESSED_RED:
-            case GL_COMPRESSED_RG:
-            case GL_COMPRESSED_RGB:
-            case GL_COMPRESSED_RGBA:
-            case GL_COMPRESSED_SRGB:
-            case GL_COMPRESSED_SRGB_ALPHA:
-            case GL_COMPRESSED_RED_RGTC1:
-            case GL_COMPRESSED_SIGNED_RED_RGTC1:
-            case GL_COMPRESSED_RG_RGTC2:
-            case GL_COMPRESSED_SIGNED_RG_RGTC2:
-            case GL_COMPRESSED_RGBA_BPTC_UNORM:
-            case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
-            case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
-            case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
-                return true;
-            default:
-                return false;
-        }
-    };
-    if (!isCompressedInternal(obj->desc.internalFormat)) {
+    if (!isCompressedInternalFormat(obj->desc.internalFormat)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    const CompressedBlockInfo block = compressedBlockInfoForInternalFormat(obj->desc.internalFormat);
+    const NSUInteger blockW = block.width != 0 ? block.width : 4u;
+    const NSUInteger blockH = block.height != 0 ? block.height : 4u;
+    const NSUInteger blockBytes = block.bytes != 0 ? block.bytes : 16u;
     // GL 4.6 §8.11.4: PBO validation mirrors getTextureImage. Note the
     // PBO-bound path runs regardless of whether `pixels` is nullptr —
     // a nullptr with a PBO bound means "offset 0 into the PBO". The
@@ -41863,9 +42002,10 @@ bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei b
         if (pboName != 0) {
             const GLsizei w = std::max<GLsizei>(obj->desc.width >> level, 1);
             const GLsizei h = std::max<GLsizei>(obj->desc.height >> level, 1);
-            const std::size_t blocksX = (w + 3) / 4;
-            const std::size_t blocksY = (h + 3) / 4;
-            const std::size_t requiredBytes = blocksX * blocksY * 16;
+            const std::size_t blocksX = ceilDivBlocks(static_cast<NSUInteger>(w), blockW);
+            const std::size_t blocksY = ceilDivBlocks(static_cast<NSUInteger>(h), blockH);
+            const std::size_t slices = std::max<GLsizei>(obj->desc.depth, 1);
+            const std::size_t requiredBytes = blocksX * blocksY * slices * blockBytes;
             auto [packDest, packOk] = impl_->resolvePackPBO(pixels, requiredBytes, 1);
             (void)packDest;
             if (!packOk) {
@@ -41887,54 +42027,42 @@ bool GLContext::getCompressedTextureImage(GLuint texture, GLint level, GLsizei b
     // path validated args + returned true with `pixels` untouched, so
     // the test saw 16 zeros instead of the input bytes.
     //
-    // We support the 4×4-block BC family (BPTC + RGTC) on Apple Mac2
-    // family. Block dimensions are always 4×4; bytesPerBlock differs
-    // per format (16 for BC7/BC6H/BC5/BC2/BC3; 8 for BC1/BC4).
     if (pixels != nullptr && obj->metalTexture != nullptr) {
         id<MTLTexture> metalTex = (__bridge id<MTLTexture>)obj->metalTexture;
-        const MTLPixelFormat pf = metalTex.pixelFormat;
-        NSUInteger bytesPerBlock = 0;
-        switch (pf) {
-            case MTLPixelFormatBC1_RGBA:
-            case MTLPixelFormatBC1_RGBA_sRGB:
-            case MTLPixelFormatBC4_RUnorm:
-            case MTLPixelFormatBC4_RSnorm:
-                bytesPerBlock = 8;
-                break;
-            case MTLPixelFormatBC2_RGBA:
-            case MTLPixelFormatBC2_RGBA_sRGB:
-            case MTLPixelFormatBC3_RGBA:
-            case MTLPixelFormatBC3_RGBA_sRGB:
-            case MTLPixelFormatBC5_RGUnorm:
-            case MTLPixelFormatBC5_RGSnorm:
-            case MTLPixelFormatBC6H_RGBFloat:
-            case MTLPixelFormatBC6H_RGBUfloat:
-            case MTLPixelFormatBC7_RGBAUnorm:
-            case MTLPixelFormatBC7_RGBAUnorm_sRGB:
-                bytesPerBlock = 16;
-                break;
-            default:
-                bytesPerBlock = 0;
-                break;
-        }
-        if (bytesPerBlock != 0) {
+        if (block.bytes != 0) {
             const NSUInteger lvl = static_cast<NSUInteger>(level);
             const NSUInteger w = std::max<NSUInteger>(metalTex.width >> lvl, 1);
             const NSUInteger h = std::max<NSUInteger>(metalTex.height >> lvl, 1);
-            const NSUInteger blocksX = (w + 3) / 4;
-            const NSUInteger blocksY = (h + 3) / 4;
-            const NSUInteger bytesPerRow = blocksX * bytesPerBlock;
-            const NSUInteger required = bytesPerRow * blocksY;
+            const NSUInteger blocksX = ceilDivBlocks(w, block.width);
+            const NSUInteger blocksY = ceilDivBlocks(h, block.height);
+            const NSUInteger bytesPerRow = blocksX * block.bytes;
+            const NSUInteger bytesPerImage = bytesPerRow * blocksY;
+            const NSUInteger slices = metalTex.textureType == MTLTextureType2DArray
+                ? metalTex.arrayLength
+                : 1u;
+            const NSUInteger required = bytesPerImage * slices;
             if (bufSize >= 0 &&
                 static_cast<NSUInteger>(bufSize) < required) {
                 pushError(GL_INVALID_OPERATION);
                 return false;
             }
             MTLRegion region = MTLRegionMake2D(0, 0, w, h);
-            [metalTex getBytes:pixels
-                   bytesPerRow:bytesPerRow
-                    fromRegion:region
-                   mipmapLevel:lvl];
+            if (metalTex.textureType == MTLTextureType2DArray) {
+                auto* out = static_cast<std::uint8_t*>(pixels);
+                for (NSUInteger slice = 0; slice < slices; ++slice) {
+                    [metalTex getBytes:out + slice * bytesPerImage
+                           bytesPerRow:bytesPerRow
+                         bytesPerImage:bytesPerImage
+                            fromRegion:region
+                           mipmapLevel:lvl
+                                 slice:slice];
+                }
+            } else {
+                [metalTex getBytes:pixels
+                       bytesPerRow:bytesPerRow
+                        fromRegion:region
+                       mipmapLevel:lvl];
+            }
         }
     }
     return true;
@@ -41949,15 +42077,14 @@ bool GLContext::getCompressedTextureSubImage(GLuint texture, GLint level, GLint 
                                            width, height, depth)) {
         return false;
     }
-    // For compressed formats we don't have per-format block-size
-    // metadata wired up; use a conservative 16 bytes/4×4-block (DXT5 /
-    // BPTC / ASTC 4×4) which is the common worst case the CTS error
-    // tests plant. A real-readback path would query the specific
-    // internal format's block dimensions + bytes-per-block.
-    const GLsizei blocksX = (width  + 3) / 4;
-    const GLsizei blocksY = (height + 3) / 4;
+    const CompressedBlockInfo block = compressedBlockInfoForInternalFormat(obj->desc.internalFormat);
+    const GLsizei blockW = block.width != 0 ? static_cast<GLsizei>(block.width) : 4;
+    const GLsizei blockH = block.height != 0 ? static_cast<GLsizei>(block.height) : 4;
+    const GLsizei blockBytes = block.bytes != 0 ? static_cast<GLsizei>(block.bytes) : 16;
+    const GLsizei blocksX = (width + blockW - 1) / blockW;
+    const GLsizei blocksY = (height + blockH - 1) / blockH;
     const GLsizei blocksZ = std::max<GLsizei>(depth, 1);
-    const GLsizei requiredLow = 8 * blocksX * blocksY * blocksZ;
+    const GLsizei requiredLow = blockBytes * blocksX * blocksY * blocksZ;
     if (bufSize < requiredLow) {
         pushError(GL_INVALID_OPERATION);
         return false;

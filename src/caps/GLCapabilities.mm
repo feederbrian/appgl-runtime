@@ -544,10 +544,12 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
         add(GL_COMPRESSED_RG_RGTC2, MTLPixelFormatBC5_RGUnorm, false, true, false, false, true);
         add(GL_COMPRESSED_SIGNED_RG_RGTC2, MTLPixelFormatBC5_RGSnorm, false, true, false, false, true);
 
-        // S3TC (BC1/BC2/BC3) is not in the AppGL generated enum header yet
-        // — S3TC is an optional extension that BAR doesn't currently use.
-        // Skipping registration here keeps the cap table aligned with the
-        // symbols the engine can actually reference.
+        // S3TC / DXT (BC1/BC2/BC3), exposed only when the device reports
+        // BC texture compression support.
+        add(GL_COMPRESSED_RGB_S3TC_DXT1_EXT, MTLPixelFormatBC1_RGBA, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, MTLPixelFormatBC1_RGBA, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, MTLPixelFormatBC2_RGBA, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, MTLPixelFormatBC3_RGBA, false, true, false, false, true);
     }
 
     if (supportsApple) {
@@ -565,6 +567,37 @@ void GLCapabilities::initializeFormatTable(void* rawMetalDevice) {
         add(GL_COMPRESSED_SIGNED_R11_EAC, MTLPixelFormatEAC_R11Snorm, false, true, false, false, true);
         add(GL_COMPRESSED_RG11_EAC, MTLPixelFormatEAC_RG11Unorm, false, true, false, false, true);
         add(GL_COMPRESSED_SIGNED_RG11_EAC, MTLPixelFormatEAC_RG11Snorm, false, true, false, false, true);
+
+        // ASTC LDR — native on Apple-family GPUs. GL_KHR_texture_compression_astc_ldr
+        // covers both linear RGBA and sRGB variants.
+        add(GL_COMPRESSED_RGBA_ASTC_4x4_KHR, MTLPixelFormatASTC_4x4_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_5x4_KHR, MTLPixelFormatASTC_5x4_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_5x5_KHR, MTLPixelFormatASTC_5x5_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_6x5_KHR, MTLPixelFormatASTC_6x5_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_6x6_KHR, MTLPixelFormatASTC_6x6_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_8x5_KHR, MTLPixelFormatASTC_8x5_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_8x6_KHR, MTLPixelFormatASTC_8x6_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_8x8_KHR, MTLPixelFormatASTC_8x8_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_10x5_KHR, MTLPixelFormatASTC_10x5_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_10x6_KHR, MTLPixelFormatASTC_10x6_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_10x8_KHR, MTLPixelFormatASTC_10x8_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_10x10_KHR, MTLPixelFormatASTC_10x10_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_12x10_KHR, MTLPixelFormatASTC_12x10_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_RGBA_ASTC_12x12_KHR, MTLPixelFormatASTC_12x12_LDR, false, true, false, false, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR, MTLPixelFormatASTC_4x4_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR, MTLPixelFormatASTC_5x4_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR, MTLPixelFormatASTC_5x5_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR, MTLPixelFormatASTC_6x5_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR, MTLPixelFormatASTC_6x6_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR, MTLPixelFormatASTC_8x5_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR, MTLPixelFormatASTC_8x6_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR, MTLPixelFormatASTC_8x8_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR, MTLPixelFormatASTC_10x5_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR, MTLPixelFormatASTC_10x6_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR, MTLPixelFormatASTC_10x8_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR, MTLPixelFormatASTC_10x10_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR, MTLPixelFormatASTC_12x10_sRGB, false, true, false, true, true);
+        add(GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR, MTLPixelFormatASTC_12x12_sRGB, false, true, false, true, true);
     }
 }
 

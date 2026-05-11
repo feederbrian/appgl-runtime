@@ -163,11 +163,10 @@ public:
     bool texImage(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void* pixels);
     bool copyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
     bool texSubImage(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels);
-    // Sprint 17 Day 7+ Bank-Group-E: BC-format compressed texture upload.
+    // Sprint 17 Day 7+ Bank-Group-E: compressed texture upload.
     // Allocates a Metal texture with the matching MTLPixelFormat (per
     // GLCapabilities format table) and uploads the user payload via
-    // replaceRegion. Sister to texImage but specialised for the 4×4-block
-    // BPTC + RGTC family on Mac2.
+    // replaceRegion with compressed-block pixel-store layout.
     bool compressedTexImage(GLenum target, GLint level, GLenum internalformat,
                             GLsizei width, GLsizei height, GLsizei depth,
                             GLsizei imageSize, const void* data);
