@@ -729,6 +729,99 @@ struct MetalFrameGraph::Impl {
         savePipelineArchive();
     }
 
+    static bool fragmentShadingRateQuality(GLenum rate, float& horizontal, float& vertical) {
+        unsigned width = 1;
+        unsigned height = 1;
+        switch (rate) {
+            case GL_SHADING_RATE_1X1_PIXELS_EXT: width = 1; height = 1; break;
+            case GL_SHADING_RATE_1X2_PIXELS_EXT: width = 1; height = 2; break;
+            case GL_SHADING_RATE_1X4_PIXELS_EXT: width = 1; height = 4; break;
+            case GL_SHADING_RATE_2X1_PIXELS_EXT: width = 2; height = 1; break;
+            case GL_SHADING_RATE_2X2_PIXELS_EXT: width = 2; height = 2; break;
+            case GL_SHADING_RATE_2X4_PIXELS_EXT: width = 2; height = 4; break;
+            case GL_SHADING_RATE_4X1_PIXELS_EXT: width = 4; height = 1; break;
+            case GL_SHADING_RATE_4X2_PIXELS_EXT: width = 4; height = 2; break;
+            case GL_SHADING_RATE_4X4_PIXELS_EXT: width = 4; height = 4; break;
+            default:
+                return false;
+        }
+        horizontal = 1.0f / static_cast<float>(width);
+        vertical = 1.0f / static_cast<float>(height);
+        return true;
+    }
+
+    id<MTLRasterizationRateMap> rasterizationRateMapForFragmentShadingRate(
+        GLenum rate,
+        NSUInteger width,
+        NSUInteger height
+    ) {
+        float horizontalQuality = 1.0f;
+        float verticalQuality = 1.0f;
+        if (!fragmentShadingRateQuality(rate, horizontalQuality, verticalQuality)) {
+            return nil;
+        }
+        if (rate == GL_SHADING_RATE_1X1_PIXELS_EXT || width == 0 || height == 0) {
+            return nil;
+        }
+        if (device == nil) {
+            return nil;
+        }
+
+        if (@available(macOS 10.15.4, *)) {
+            if (![device supportsRasterizationRateMapWithLayerCount:1]) {
+                return nil;
+            }
+            if (cachedRasterizationRateMap != nil &&
+                cachedRasterizationRateMapWidth == width &&
+                cachedRasterizationRateMapHeight == height &&
+                cachedRasterizationRateMapRate == rate) {
+                return cachedRasterizationRateMap;
+            }
+
+            const MTLSize sampleCount = MTLSizeMake(2, 2, 0);
+            const float horizontalSamples[2] = {horizontalQuality, horizontalQuality};
+            const float verticalSamples[2] = {verticalQuality, verticalQuality};
+            MTLRasterizationRateLayerDescriptor* layer =
+                [[MTLRasterizationRateLayerDescriptor alloc]
+                    initWithSampleCount:sampleCount
+                             horizontal:horizontalSamples
+                               vertical:verticalSamples];
+            MTLRasterizationRateMapDescriptor* desc =
+                [MTLRasterizationRateMapDescriptor
+                    rasterizationRateMapDescriptorWithScreenSize:MTLSizeMake(width, height, 0)
+                                                           layer:layer];
+            desc.label = @"AppGL GL_EXT_fragment_shading_rate";
+            id<MTLRasterizationRateMap> map = [device newRasterizationRateMapWithDescriptor:desc];
+            if (map == nil) {
+                return nil;
+            }
+            cachedRasterizationRateMap = map;
+            cachedRasterizationRateMapWidth = width;
+            cachedRasterizationRateMapHeight = height;
+            cachedRasterizationRateMapRate = rate;
+            return cachedRasterizationRateMap;
+        }
+        return nil;
+    }
+
+    void attachFragmentShadingRateMap(
+        MTLRenderPassDescriptor* pass,
+        GLenum rate,
+        id<MTLTexture> colorTexture,
+        NSUInteger renderTargetLayerCount
+    ) {
+        if (pass == nil || colorTexture == nil || renderTargetLayerCount > 1) {
+            return;
+        }
+        if (@available(macOS 10.15.4, *)) {
+            id<MTLRasterizationRateMap> map =
+                rasterizationRateMapForFragmentShadingRate(rate, colorTexture.width, colorTexture.height);
+            if (map != nil) {
+                pass.rasterizationRateMap = map;
+            }
+        }
+    }
+
     void resize(GLsizei width, GLsizei height) {
         GLsizei newW = width > 0 ? width : 1;
         GLsizei newH = height > 0 ? height : 1;
@@ -799,7 +892,6 @@ struct MetalFrameGraph::Impl {
     }
 
     void beginRenderPass(GLStateTracker& state, GLObjectStore& objects) {
-        (void)state;
         (void)objects;
         if (device == nil || commandQueue == nil) {
             return;
@@ -829,7 +921,10 @@ struct MetalFrameGraph::Impl {
         pass.stencilAttachment.texture = depthStencilTexture;
         pass.stencilAttachment.loadAction = MTLLoadActionLoad;
         pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        const GLenum fragmentRate = state.fragmentShadingRateState().rate;
+        attachFragmentShadingRateMap(pass, fragmentRate, colorTexture, 1);
         currentRenderEncoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+        activeRenderPassFragmentShadingRate = fragmentRate;
         resetCachedEncoderState();
     }
 
@@ -855,6 +950,7 @@ struct MetalFrameGraph::Impl {
             FG_TRACE(@"endRenderPass: ending encoder %p on cmdBuf %p", currentRenderEncoder, currentCommandBuffer);
             [currentRenderEncoder endEncoding];
             currentRenderEncoder = nil;
+            activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             pendingPresent = true;
         }
     }
@@ -986,6 +1082,7 @@ struct MetalFrameGraph::Impl {
         }
         hasPendingClear = false;
 
+        attachFragmentShadingRateMap(pass, info.fragmentShadingRate, colorTexture, 1);
         id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         if (encoder == nil) {
             return false;
@@ -2033,6 +2130,13 @@ struct MetalFrameGraph::Impl {
         if (isFBODraw && currentRenderEncoder != nil) {
             [currentRenderEncoder endEncoding];
             currentRenderEncoder = nil;
+            activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+            resetCachedEncoderState();
+        }
+        if (!isFBODraw &&
+            currentRenderEncoder != nil &&
+            activeRenderPassFragmentShadingRate != info.fragmentShadingRate) {
+            endRenderPass();
             resetCachedEncoderState();
         }
 
@@ -2134,6 +2238,7 @@ struct MetalFrameGraph::Impl {
             // Build the render pass, merging any pending clear into the load
             // action so clear+draws share a single render pass (OPT-4).
             MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];  // ADV-4
+            NSUInteger rateMapLayerCount = 1;
             pass.colorAttachments[0].texture = colorTexture;
             pass.colorAttachments[0].storeAction = MTLStoreActionStore;
             // Phase 6-5: honour FramebufferTextureLayer slice selection
@@ -2213,6 +2318,7 @@ struct MetalFrameGraph::Impl {
                     }
                 }
                 pass.renderTargetArrayLength = rtal;
+                rateMapLayerCount = rtal;
             }
             if (passDepthStencil != nil) {
                 // CKPT168 (Sprint 14 Day 15): attach to depth/stencil
@@ -2259,10 +2365,12 @@ struct MetalFrameGraph::Impl {
                 hasPendingClear = false;
             }
 
+            attachFragmentShadingRateMap(pass, info.fragmentShadingRate, colorTexture, rateMapLayerCount);
             currentRenderEncoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
             if (currentRenderEncoder == nil) {
                 return false;
             }
+            activeRenderPassFragmentShadingRate = info.fragmentShadingRate;
             readbackSourceTexture = colorTexture;
             readbackSourceIsBGRA = colorTexture.pixelFormat == MTLPixelFormatBGRA8Unorm;
             resetCachedEncoderState();
@@ -3409,6 +3517,7 @@ struct MetalFrameGraph::Impl {
         if (isFBODraw) {
             [currentRenderEncoder endEncoding];
             currentRenderEncoder = nil;
+            activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             resetCachedEncoderState();
 
             [currentCommandBuffer commit];
@@ -4454,6 +4563,7 @@ fragment float4 appgl_immediate_textured_fs(
         if (currentRenderEncoder != nil) {
             [currentRenderEncoder endEncoding];
             currentRenderEncoder = nil;
+            activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
             resetCachedEncoderState();
         }
         if (currentCommandBuffer == nil) {
@@ -4603,6 +4713,7 @@ fragment float4 appgl_immediate_textured_fs(
         }
         hasPendingClear = false;
 
+        attachFragmentShadingRateMap(pass, info.fragmentShadingRate, colorTexture, 1);
         id<MTLRenderCommandEncoder> encoder = [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
         if (encoder == nil) {
             return false;
@@ -6877,6 +6988,7 @@ fragment float4 appgl_immediate_textured_fs(
         if (currentRenderEncoder != nil) {
             [currentRenderEncoder endEncoding];
             currentRenderEncoder = nil;
+            activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
         }
         id<MTLCommandBuffer> rcmd = [commandQueue commandBuffer];
         if (rcmd == nil) {
@@ -7614,6 +7726,7 @@ private:
     id<MTLTexture> readbackSourceTexture = nil;
     id<MTLCommandBuffer> currentCommandBuffer = nil;
     id<MTLRenderCommandEncoder> currentRenderEncoder = nil;
+    GLenum activeRenderPassFragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     id<CAMetalDrawable> currentDrawable = nil;
     id<MTLLibrary> solidColorLibrary = nil;
     id<MTLFunction> solidColorVertexFn = nil;
@@ -7704,6 +7817,10 @@ private:
     // fresh autoreleased ObjC object at each of the five call sites.
     // Reset fields before each use (attachments overwrite previous).
     MTLRenderPassDescriptor* reusablePassDescriptor = nil;
+    id<MTLRasterizationRateMap> cachedRasterizationRateMap = nil;
+    NSUInteger cachedRasterizationRateMapWidth = 0;
+    NSUInteger cachedRasterizationRateMapHeight = 0;
+    GLenum cachedRasterizationRateMapRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
 
     MTLRenderPassDescriptor* getReusablePassDescriptor() {
         if (reusablePassDescriptor == nil) {

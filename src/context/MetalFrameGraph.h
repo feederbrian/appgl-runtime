@@ -51,6 +51,7 @@ struct MetalDrawInfo {
     GLenum cullFaceMode = GL_BACK;
     GLenum frontFace = GL_CCW;
     bool wireframe = false;
+    GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
     // Sprint 7 Phase 1 #11 (CKPT57): GL_STENCIL_TEST + glStencilFunc /
     // glStencilOp / glStencilMask plumb-through. Default state matches
     // GL spec: test disabled, ALWAYS compare, all-KEEP ops, full masks.
@@ -280,6 +281,7 @@ struct TranslatedDrawInfo {
     // pipeline-build time.
     bool sampleShadingEnabled = false;
     float minSampleShading = 0.0f;
+    GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
 
     // RC-A02: viewport state.  Plumbed from glViewport so Metal's render
     // encoder receives the correct viewport rectangle.
@@ -575,6 +577,7 @@ struct ImmediateDrawInfo {
     std::size_t vertexStride = 0;
     Matrix4 mvp = Matrix4::identity();
     void* metalTexture = nullptr;  // id<MTLTexture> or nullptr
+    GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
 };
 
 // Compute dispatch descriptor. Populated by GLContext::dispatchCompute

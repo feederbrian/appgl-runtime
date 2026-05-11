@@ -18251,6 +18251,7 @@ void GLContext::endImmediate() {
     info.vertexStride = sizeof(Impl::ImmediateModeVertex);
     info.mvp = mvp;
     info.metalTexture = metalTexture;
+    info.fragmentShadingRate = impl_->state->fragmentShadingRateState().rate;
 
     const bool ok = impl_->frameGraph->encodeImmediateModeDraw(info);
     if (!ok) {
@@ -29465,6 +29466,7 @@ static void populateTranslatedDrawFixedFunctionState(
     // captured so the correct values are available when we need them.
     tdi.sampleShadingEnabled = state.isEnabled(GL_SAMPLE_SHADING);
     tdi.minSampleShading = state.blendState().minSampleShading;
+    tdi.fragmentShadingRate = state.fragmentShadingRateState().rate;
 
     // GL 4.6 §14.6.5 — polygon offset enabled under GL_POLYGON_OFFSET_FILL
     // (relevant for triangle rasterization) plus LINE / POINT variants.
@@ -29705,6 +29707,7 @@ SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state, GLObjectStor
     setup.info.cullFaceMode = state.rasterState().cullFaceMode;
     setup.info.frontFace = state.rasterState().frontFace;
     setup.info.wireframe = (state.rasterState().polygonFillMode == GL_LINE);
+    setup.info.fragmentShadingRate = state.fragmentShadingRateState().rate;
     // Sprint 7 Phase 1 #11 (CKPT57): stencil state for solid-color path.
     {
         const auto& gs = state.stencilState();
