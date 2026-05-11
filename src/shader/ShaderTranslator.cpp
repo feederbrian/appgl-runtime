@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <mutex>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -26,6 +28,141 @@ constexpr std::uint32_t kFragCoordParamsBufferSlot = 15u;
 constexpr std::uint32_t kMultisampleStorageImageSampleCountsBufferSlot = 30u;
 constexpr std::uint32_t kMaxMetalBufferSlot = 30u;
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
+
+GLenum storageImageTargetForType(const spirv_cross::SPIRType& imageType) {
+    if (imageType.basetype != spirv_cross::SPIRType::Image ||
+        imageType.image.sampled != 2) {
+        return 0;
+    }
+    switch (imageType.image.dim) {
+        case spv::Dim2D:
+            if (imageType.image.ms) {
+                return imageType.image.arrayed
+                    ? GL_TEXTURE_2D_MULTISAMPLE_ARRAY
+                    : GL_TEXTURE_2D_MULTISAMPLE;
+            }
+            return imageType.image.arrayed
+                ? GL_TEXTURE_2D_ARRAY
+                : GL_TEXTURE_2D;
+        case spv::Dim3D:
+            return imageType.image.ms ? 0 : GL_TEXTURE_3D;
+        case spv::DimCube:
+            if (imageType.image.ms) {
+                return 0;
+            }
+            return imageType.image.arrayed
+                ? GL_TEXTURE_CUBE_MAP_ARRAY
+                : GL_TEXTURE_CUBE_MAP;
+        case spv::DimRect:
+            return imageType.image.ms ? 0 : GL_TEXTURE_RECTANGLE;
+        default:
+            return 0;
+    }
+}
+
+bool sparseStorageImageWriteTarget(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_2D:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_RECTANGLE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+template <typename ResourceList>
+std::unordered_set<std::uint32_t> storageImageWriteVariables(
+    const std::uint32_t* spirv,
+    std::size_t wordCount,
+    const ResourceList& storageImages) {
+    std::unordered_set<std::uint32_t> storageIds;
+    std::unordered_map<std::uint32_t, std::uint32_t> baseForId;
+    for (const auto& image : storageImages) {
+        storageIds.insert(image.id);
+        baseForId[image.id] = image.id;
+    }
+
+    std::unordered_set<std::uint32_t> writes;
+    std::size_t cursor = 5;  // SPIR-V header.
+    while (spirv != nullptr && cursor < wordCount) {
+        const std::uint32_t first = spirv[cursor];
+        const std::uint16_t op = static_cast<std::uint16_t>(first & 0xffffu);
+        const std::uint16_t length = static_cast<std::uint16_t>(first >> 16u);
+        if (length == 0 || cursor + length > wordCount) {
+            break;
+        }
+        const std::uint32_t* inst = spirv + cursor;
+        auto baseFor = [&](std::uint32_t id) -> std::uint32_t {
+            auto it = baseForId.find(id);
+            return it == baseForId.end() ? 0u : it->second;
+        };
+        auto mapResultFrom = [&](std::uint32_t resultId,
+                                 std::uint32_t sourceId) {
+            const std::uint32_t base = baseFor(sourceId);
+            if (base != 0) {
+                baseForId[resultId] = base;
+            }
+        };
+
+        switch (static_cast<spv::Op>(op)) {
+            case spv::OpLoad:
+                if (length >= 4) {
+                    mapResultFrom(inst[2], inst[3]);
+                }
+                break;
+            case spv::OpAccessChain:
+            case spv::OpInBoundsAccessChain:
+            case spv::OpPtrAccessChain:
+                if (length >= 4) {
+                    mapResultFrom(inst[2], inst[3]);
+                }
+                break;
+            case spv::OpCopyObject:
+            case spv::OpImage:
+                if (length >= 4) {
+                    mapResultFrom(inst[2], inst[3]);
+                }
+                break;
+            case spv::OpPhi:
+                if (length >= 5) {
+                    for (std::uint16_t i = 3; i + 1 < length; i += 2) {
+                        const std::uint32_t base = baseFor(inst[i]);
+                        if (base != 0) {
+                            baseForId[inst[2]] = base;
+                            break;
+                        }
+                    }
+                }
+                break;
+            case spv::OpSelect:
+                if (length >= 6) {
+                    const std::uint32_t trueBase = baseFor(inst[4]);
+                    const std::uint32_t falseBase = baseFor(inst[5]);
+                    if (trueBase != 0 && trueBase == falseBase) {
+                        baseForId[inst[2]] = trueBase;
+                    }
+                }
+                break;
+            case spv::OpImageWrite:
+                if (length >= 4) {
+                    const std::uint32_t base = baseFor(inst[1]);
+                    if (storageIds.find(base) != storageIds.end()) {
+                        writes.insert(base);
+                    }
+                }
+                break;
+            default:
+                break;
+        }
+
+        cursor += length;
+    }
+    return writes;
+}
 
 bool isIdentifierChar(char ch) {
     return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
@@ -3071,6 +3208,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // with a #define-toggled input-image use, so the pre-fs
         // compile drops g_input_image but retains its declaration).
         auto activeStorageImages = compiler.get_active_interface_variables();
+        auto storageImageWrites =
+            storageImageWriteVariables(spirv, wordCount, resources.storage_images);
         {
             // Mirror the (glBinding, id) sort used by spirvToMSL so
             // reflection's `metalBinding` lines up with each image's
@@ -3089,6 +3228,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 std::uint32_t id;
                 bool multisample = false;
                 bool multisampleArray = false;
+                GLenum storageTarget = 0;
+                bool sparseWrite = false;
                 spirv_cross::Resource* res;
             };
             std::vector<StorageImgRef> sortedStorageImages;
@@ -3109,6 +3250,10 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     imageType.image.dim == spv::Dim2D &&
                     imageType.image.sampled == 2;
                 r.multisampleArray = r.multisample && imageType.image.arrayed;
+                r.storageTarget = storageImageTargetForType(imageType);
+                r.sparseWrite =
+                    storageImageWrites.find(img.id) != storageImageWrites.end() &&
+                    sparseStorageImageWriteTarget(r.storageTarget);
                 r.res = &img;
                 sortedStorageImages.push_back(r);
             }
@@ -3135,6 +3280,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 rb.name = entry.res->name;
                 rb.multisampleStorageImage = entry.multisample;
                 rb.multisampleStorageImageArray = entry.multisampleArray;
+                rb.storageImageTarget = entry.storageTarget;
+                rb.sparseStorageImageWrite = entry.sparseWrite;
                 result.storageImages.push_back(std::move(rb));
             }
         }

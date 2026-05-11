@@ -1,0 +1,25 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index ecf09538..e36a861c 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -10018,6 +10018,20 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+ 		string expr;
+ 		if (needs_frag_discard_checks())
+ 			expr = join("(", builtin_to_glsl(BuiltInHelperInvocation, StorageClassInput), " ? ((void)0) : ");
++		const bool appgl_sparse_storage_image_write =
++		    get_execution_model() == ExecutionModelGLCompute &&
++		    type.basetype == SPIRType::Image &&
++		    img_type.image.sampled == 2 &&
++		    !img_type.image.ms &&
++		    (img_type.image.dim == Dim2D ||
++		     img_type.image.dim == Dim3D ||
++		     img_type.image.dim == DimCube ||
++		     img_type.image.dim == DimRect);
++		if (appgl_sparse_storage_image_write)
++		{
++			uint32_t resource_index = p_var ? get_automatic_msl_resource_binding(p_var->self) : 0;
++			statement("// APPGL_SPARSE_STORAGE_IMAGE_WRITE_SLOT_", resource_index);
++		}
+ 		const bool appgl_ms_storage_image_sidecar =
+ 		    get_execution_model() == ExecutionModelGLCompute &&
+ 		    type.basetype == SPIRType::Image &&

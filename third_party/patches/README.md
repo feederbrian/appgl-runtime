@@ -1614,6 +1614,37 @@ the generic sparse-feedback lowering from
 the same explicit sparse-feedback error. Depth MS sparse fetch remains a
 documented follow-up blocker rather than silently mis-lowering.
 
+### `spirv-cross-msl-sparse-storage-image-write.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` —
+`CompilerMSL::emit_instruction(OpImageWrite)` for compute-stage,
+non-multisample storage images whose texture dimensions are eligible for
+AppGL sparse storage sidecars.
+
+**Summary:** Emits an AppGL marker comment
+`// APPGL_SPARSE_STORAGE_IMAGE_WRITE_SLOT_<N>` immediately before the
+native Metal storage-texture `.write(...)` for compute `imageStore` on
+2D, 2D array, 3D, cube, cube-array, and rectangle image types. The
+marker uses SPIRV-Cross's automatic MSL resource binding so the slot
+matches AppGL reflection and dispatch binding.
+
+**Why:** Apple sparse-heap-backed textures do not accept the regular
+storage-image write path (`MTLTextureUsageShaderWrite`) on the Sprint 19
+M1 Max probe matrix. AppGL therefore needs to route sparse-bound
+non-MS image stores to the regular writable sidecar allocated by
+`SparseStorageImageEmulation`. This patch is the SPIRV-Cross-side
+breadcrumb: the emitted MSL remains semantically identical until the
+runtime binding shim routes sparse image units to the sidecar, avoiding a
+new unbound texture argument during the Phase 7.6.2 preparation step.
+
+**Regression-safe:** The native `.write(...)` expression is unchanged,
+and the marker is gated to compute-stage, storage-image, non-MS,
+sparse-sidecar-eligible image dimensions. Non-sparse storage-image
+writes therefore emit and execute exactly as before. AppGL reflection
+tracks the same SPIR-V `OpImageWrite` reachability as structured
+metadata (`sparseStorageImageWrite`) so Phase 7.6.3 can combine the
+program flag with the actual runtime `textureSparse` state.
+
 ### `glslang-cull-distance-builtin-constants.patch`
 
 **Target:** `third_party/glslang/glslang/MachineIndependent/{Initialize.cpp, Versions.cpp, Versions.h}` (KhronosGroup/glslang) — three small adjustments that make `gl_MaxCullDistances` / `gl_MaxCombinedClipAndCullDistances` GLSL constants visible to shaders that declare `#extension GL_ARB_cull_distance : require` at desktop GL versions 130-440.
