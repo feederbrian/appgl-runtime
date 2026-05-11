@@ -211,6 +211,40 @@ inline bool lookupIndexedBufferPname(GLenum pname, IndexedBufferPname& out) {
     }
 }
 
+constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
+
+std::uint32_t multisampleStorageImageSampleCountSlotForMSL(
+    const std::string& msl) {
+    static constexpr const char* kSampleCountsName =
+        "appgl_ms_storage_image_samples";
+    static constexpr const char* kBufferAttr = "[[buffer(";
+    static constexpr std::size_t kNameLen = 30;
+    static constexpr std::size_t kBufferAttrLen = 9;
+
+    std::size_t pos = 0;
+    while ((pos = msl.find(kSampleCountsName, pos)) != std::string::npos) {
+        const std::size_t attrPos = msl.find(kBufferAttr, pos + kNameLen);
+        if (attrPos == std::string::npos || attrPos - pos > 96) {
+            pos += kNameLen;
+            continue;
+        }
+        std::size_t cursor = attrPos + kBufferAttrLen;
+        if (cursor >= msl.size() ||
+            !std::isdigit(static_cast<unsigned char>(msl[cursor]))) {
+            pos += kNameLen;
+            continue;
+        }
+        std::uint32_t slot = 0;
+        while (cursor < msl.size() &&
+               std::isdigit(static_cast<unsigned char>(msl[cursor]))) {
+            slot = slot * 10u + static_cast<std::uint32_t>(msl[cursor] - '0');
+            ++cursor;
+        }
+        return slot;
+    }
+    return makeComputeBindingMap().multisampleStorageImageSampleBuffer;
+}
+
 inline bool isImageUniformType(GLenum t) {
     switch (t) {
         case GL_IMAGE_1D:
@@ -34823,6 +34857,13 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         }
     };
 
+    thread_local std::vector<std::uint32_t> msImageSampleCounts;
+    msImageSampleCounts.assign(128, 1u);
+    bool hasMSImageSampleCounts = false;
+    ExtensionContext extensionContext(*this);
+    const bool usesMSSampledSidecars =
+        programObject->computeMSL.find("appgl_ms_sampled_sidecar_") != std::string::npos;
+
     const bool traceCompSamp = std::getenv("APPGL_TRACE_COMP_SAMP") != nullptr;
     for (const auto& samp : programObject->computeReflection.sampledTextures) {
         // Find the matching uniform to read its texture-unit value AND
@@ -34902,6 +34943,27 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             tb.metalSamplerState = texObj->metalSampler;
             tb.metalSlot = samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
             info.textures.push_back(tb);
+            if (usesMSSampledSidecars &&
+                extensions::sparse_texture::isMultisampleStorageImageTarget(preferredTarget)) {
+                extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                if (extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
+                        extensionContext, *texObj, &sidecarInfo)) {
+                    const std::uint32_t slot =
+                        samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                    ComputeDispatchInfo::TextureBinding sidecarBinding;
+                    sidecarBinding.metalTexture = sidecarInfo.metalTexture;
+                    sidecarBinding.metalSamplerState = nullptr;
+                    sidecarBinding.metalSlot =
+                        slot + kMultisampleSampledSidecarTextureSlotOffset;
+                    info.textures.push_back(sidecarBinding);
+                    if (slot >= msImageSampleCounts.size()) {
+                        msImageSampleCounts.resize(static_cast<std::size_t>(slot) + 1u, 1u);
+                    }
+                    msImageSampleCounts[slot] =
+                        static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
+                    hasMSImageSampleCounts = true;
+                }
+            }
             if (traceCompSamp) std::fprintf(stderr, " BOUND\n");
         }
     }
@@ -34914,10 +34976,6 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     // shading_language_420pack.binding_images_* relies on this — only
     // one of the three images has an explicit layout binding, and the
     // others rely on glUniform1i to set the unit.
-    thread_local std::vector<std::uint32_t> msImageSampleCounts;
-    msImageSampleCounts.assign(128, 1u);
-    bool hasMSImageSampleCounts = false;
-    ExtensionContext extensionContext(*this);
     for (const auto& img : programObject->computeReflection.storageImages) {
         // CKPT145 (Sprint 13 Day 9): storage image array iteration. SPIRV-
         // Cross emits an image array (`uniform image2D goku[7]`) as N
@@ -34983,7 +35041,7 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         info.multisampleStorageImageSampleCountBytes =
             msImageSampleCounts.size() * sizeof(std::uint32_t);
         info.multisampleStorageImageSampleCountSlot =
-            makeComputeBindingMap().multisampleStorageImageSampleBuffer;
+            multisampleStorageImageSampleCountSlotForMSL(programObject->computeMSL);
     }
 
     (void)impl_->frameGraph->encodeComputeDispatch(info);
@@ -35189,6 +35247,13 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             default: return 0;
         }
     };
+    thread_local std::vector<std::uint32_t> msImageSampleCountsIndirect;
+    msImageSampleCountsIndirect.assign(128, 1u);
+    bool hasMSImageSampleCountsIndirect = false;
+    ExtensionContext extensionContext(*this);
+    const bool usesMSSampledSidecarsIndirect =
+        programObject->computeMSL.find("appgl_ms_sampled_sidecar_") != std::string::npos;
+
     // CKPT145 (Sprint 13 Day 9): sampler array iteration — see direct
     // dispatch path for full rationale. Indirect mirror.
     for (const auto& samp : programObject->computeReflection.sampledTextures) {
@@ -35235,49 +35300,88 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             tb.metalSamplerState = texObj->metalSampler;
             tb.metalSlot = samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
             info.textures.push_back(tb);
+            if (usesMSSampledSidecarsIndirect &&
+                extensions::sparse_texture::isMultisampleStorageImageTarget(preferredTarget)) {
+                extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                if (extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
+                        extensionContext, *texObj, &sidecarInfo)) {
+                    const std::uint32_t slot =
+                        samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                    ComputeDispatchInfo::TextureBinding sidecarBinding;
+                    sidecarBinding.metalTexture = sidecarInfo.metalTexture;
+                    sidecarBinding.metalSamplerState = nullptr;
+                    sidecarBinding.metalSlot =
+                        slot + kMultisampleSampledSidecarTextureSlotOffset;
+                    info.textures.push_back(sidecarBinding);
+                    if (slot >= msImageSampleCountsIndirect.size()) {
+                        msImageSampleCountsIndirect.resize(
+                            static_cast<std::size_t>(slot) + 1u, 1u);
+                    }
+                    msImageSampleCountsIndirect[slot] =
+                        static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
+                    hasMSImageSampleCountsIndirect = true;
+                }
+            }
         }
     }
     // Storage images for the indirect path — mirror the direct path.
-    thread_local std::vector<std::uint32_t> msImageSampleCountsIndirect;
-    msImageSampleCountsIndirect.assign(128, 1u);
-    bool hasMSImageSampleCountsIndirect = false;
-    ExtensionContext extensionContext(*this);
     for (const auto& img : programObject->computeReflection.storageImages) {
-        if (img.glBinding >= Impl::kMaxImageUnits) continue;
-        auto& ib = impl_->imageBindings[img.glBinding];
-        if (ib.texture == 0) continue;
-        GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
-        if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
-        if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
-        ComputeDispatchInfo::TextureBinding tb;
-        if (img.multisampleStorageImage) {
-            extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
-            if (!extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
-                    extensionContext, *texObj, &sidecarInfo)) {
-                continue;
+        GLint imageArraySize = 1;
+        const GLProgramUniformValue* imageValue = nullptr;
+        for (const auto& u : programObject->uniforms) {
+            if (u.name == img.name) {
+                imageArraySize = std::max<GLint>(u.arraySize, 1);
+                auto uvIt = programObject->uniformValues.find(u.location);
+                if (uvIt != programObject->uniformValues.end()) {
+                    imageValue = &uvIt->second;
+                }
+                break;
             }
-            tb.metalTexture = sidecarInfo.metalTexture;
-            if (img.metalBinding >= msImageSampleCountsIndirect.size()) {
-                msImageSampleCountsIndirect.resize(
-                    static_cast<std::size_t>(img.metalBinding) + 1u, 1u);
-            }
-            msImageSampleCountsIndirect[img.metalBinding] =
-                static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
-            hasMSImageSampleCountsIndirect = true;
-        } else {
-            // CKPT119: level-restricted view when ib.level > 0.
-            tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
         }
-        tb.metalSamplerState = nullptr;
-        tb.metalSlot = img.metalBinding;
-        info.textures.push_back(tb);
+        for (GLint arrayElement = 0; arrayElement < imageArraySize; ++arrayElement) {
+            GLuint effectiveUnit = img.glBinding + static_cast<GLuint>(arrayElement);
+            if (imageValue != nullptr &&
+                static_cast<std::size_t>(arrayElement) < imageValue->ints.size()) {
+                effectiveUnit = static_cast<GLuint>(imageValue->ints[arrayElement]);
+            }
+            if (effectiveUnit >= Impl::kMaxImageUnits) continue;
+            auto& ib = impl_->imageBindings[effectiveUnit];
+            if (ib.texture == 0) continue;
+            GLTextureObject* texObj = impl_->objects->textures().get(ib.texture);
+            if (texObj == nullptr || texObj->metalTexture == nullptr) continue;
+            if (!impl_->imageBindingLevelAvailable(ib, texObj)) continue;
+            ComputeDispatchInfo::TextureBinding tb;
+            if (img.multisampleStorageImage) {
+                extensions::sparse_texture::MultisampleStorageImageSidecarInfo sidecarInfo;
+                if (!extensions::sparse_texture::ensureMultisampleStorageImageSidecar(
+                        extensionContext, *texObj, &sidecarInfo)) {
+                    continue;
+                }
+                tb.metalTexture = sidecarInfo.metalTexture;
+                const std::uint32_t slot =
+                    img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                if (slot >= msImageSampleCountsIndirect.size()) {
+                    msImageSampleCountsIndirect.resize(
+                        static_cast<std::size_t>(slot) + 1u, 1u);
+                }
+                msImageSampleCountsIndirect[slot] =
+                    static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
+                hasMSImageSampleCountsIndirect = true;
+            } else {
+                // CKPT119: level-restricted view when ib.level > 0.
+                tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
+            }
+            tb.metalSamplerState = nullptr;
+            tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
+            info.textures.push_back(tb);
+        }
     }
     if (hasMSImageSampleCountsIndirect) {
         info.multisampleStorageImageSampleCounts = msImageSampleCountsIndirect.data();
         info.multisampleStorageImageSampleCountBytes =
             msImageSampleCountsIndirect.size() * sizeof(std::uint32_t);
         info.multisampleStorageImageSampleCountSlot =
-            makeComputeBindingMap().multisampleStorageImageSampleBuffer;
+            multisampleStorageImageSampleCountSlotForMSL(programObject->computeMSL);
     }
 
     (void)impl_->frameGraph->encodeComputeDispatch(info);

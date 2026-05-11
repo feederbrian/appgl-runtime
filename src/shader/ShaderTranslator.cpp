@@ -24,6 +24,8 @@ std::once_flag g_glslangInitFlag;
 constexpr std::uint32_t kDefaultUniformSyntheticBinding = 1024u;
 constexpr std::uint32_t kFragCoordParamsBufferSlot = 15u;
 constexpr std::uint32_t kMultisampleStorageImageSampleCountsBufferSlot = 30u;
+constexpr std::uint32_t kMaxMetalBufferSlot = 30u;
+constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
 
 bool isIdentifierChar(char ch) {
     return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
@@ -167,21 +169,12 @@ bool injectFragmentCoordYFixup(std::string& msl,
     return true;
 }
 
-bool injectMultisampleStorageImageSampleCounts(std::string& msl) {
-    static constexpr const char* kSampleCountsName =
-        "appgl_ms_storage_image_samples";
-    static constexpr const char* kSampleCountsParam =
-        "constant uint* appgl_ms_storage_image_samples";
-    if (msl.find(kSampleCountsName) == std::string::npos ||
-        msl.find(kSampleCountsParam) != std::string::npos) {
-        return false;
-    }
-
+bool findMain0ParameterEnd(const std::string& msl, std::size_t& paramEnd) {
     const std::size_t mainPos = msl.find("main0(");
     if (mainPos == std::string::npos) return false;
     const std::size_t paramStart = mainPos + 6;
     std::size_t depth = 1;
-    std::size_t paramEnd = paramStart;
+    paramEnd = paramStart;
     while (paramEnd < msl.size() && depth > 0) {
         const char c = msl[paramEnd];
         if (c == '(') {
@@ -192,12 +185,159 @@ bool injectMultisampleStorageImageSampleCounts(std::string& msl) {
         }
         ++paramEnd;
     }
-    if (depth != 0 || paramEnd >= msl.size()) return false;
+    return depth == 0 && paramEnd < msl.size();
+}
+
+std::uint32_t chooseFreeBufferSlot(const std::string& msl,
+                                   std::uint32_t preferredSlot) {
+    bool used[kMaxMetalBufferSlot + 1u] = {};
+    static constexpr const char* kBufferAttr = "[[buffer(";
+    static constexpr std::size_t kBufferAttrLen = 9;
+    std::size_t pos = 0;
+    while ((pos = msl.find(kBufferAttr, pos)) != std::string::npos) {
+        std::size_t cursor = pos + kBufferAttrLen;
+        std::uint32_t slot = 0;
+        bool haveDigit = false;
+        while (cursor < msl.size() &&
+               std::isdigit(static_cast<unsigned char>(msl[cursor]))) {
+            haveDigit = true;
+            slot = slot * 10u + static_cast<std::uint32_t>(msl[cursor] - '0');
+            ++cursor;
+        }
+        if (haveDigit && slot <= kMaxMetalBufferSlot) {
+            used[slot] = true;
+        }
+        pos = cursor;
+    }
+
+    if (preferredSlot <= kMaxMetalBufferSlot && !used[preferredSlot]) {
+        return preferredSlot;
+    }
+    for (int slot = static_cast<int>(kMaxMetalBufferSlot); slot >= 0; --slot) {
+        if (!used[slot]) {
+            return static_cast<std::uint32_t>(slot);
+        }
+    }
+    return preferredSlot;
+}
+
+bool parseUnsignedAfter(const std::string& text,
+                        std::size_t cursor,
+                        std::uint32_t& value,
+                        std::size_t* end = nullptr) {
+    if (cursor >= text.size() ||
+        !std::isdigit(static_cast<unsigned char>(text[cursor]))) {
+        return false;
+    }
+    std::uint32_t parsed = 0;
+    while (cursor < text.size() &&
+           std::isdigit(static_cast<unsigned char>(text[cursor]))) {
+        parsed = parsed * 10u + static_cast<std::uint32_t>(text[cursor] - '0');
+        ++cursor;
+    }
+    value = parsed;
+    if (end != nullptr) {
+        *end = cursor;
+    }
+    return true;
+}
+
+bool appendUnique(std::vector<std::string>& values, std::string value) {
+    if (std::find(values.begin(), values.end(), value) != values.end()) {
+        return false;
+    }
+    values.push_back(std::move(value));
+    return true;
+}
+
+bool injectMultisampleSampledImageSidecars(std::string& msl) {
+    static constexpr const char* kSidecarPrefix = "appgl_ms_sampled_sidecar_";
+    static constexpr std::size_t kSidecarPrefixLen = 25;
+
+    std::vector<std::string> params;
+    std::size_t pos = 0;
+    while ((pos = msl.find(kSidecarPrefix, pos)) != std::string::npos) {
+        std::uint32_t sourceSlot = 0;
+        std::size_t afterSlot = 0;
+        if (!parseUnsignedAfter(msl, pos + kSidecarPrefixLen,
+                                sourceSlot, &afterSlot)) {
+            pos += kSidecarPrefixLen;
+            continue;
+        }
+
+        const std::string sidecarName =
+            std::string(kSidecarPrefix) + std::to_string(sourceSlot);
+        if (msl.find(" " + sidecarName + " [[texture(") != std::string::npos) {
+            pos = afterSlot;
+            continue;
+        }
+
+        const std::string textureAttr =
+            "[[texture(" + std::to_string(sourceSlot) + ")]]";
+        const std::size_t attrPos = msl.find(textureAttr);
+        if (attrPos == std::string::npos) {
+            pos = afterSlot;
+            continue;
+        }
+
+        std::size_t typeStart = msl.rfind("texture2d_ms", attrPos);
+        if (typeStart == std::string::npos) {
+            pos = afterSlot;
+            continue;
+        }
+        const std::size_t templateStart = msl.find('<', typeStart);
+        const std::size_t templateEnd = msl.find('>', templateStart);
+        if (templateStart == std::string::npos ||
+            templateEnd == std::string::npos ||
+            templateEnd > attrPos) {
+            pos = afterSlot;
+            continue;
+        }
+
+        const std::string templateArgs =
+            msl.substr(templateStart + 1, templateEnd - templateStart - 1);
+        const std::uint32_t sidecarSlot =
+            sourceSlot + kMultisampleSampledSidecarTextureSlotOffset;
+        appendUnique(params,
+            ", texture2d_array<" + templateArgs + "> " + sidecarName +
+            " [[texture(" + std::to_string(sidecarSlot) + ")]]");
+        pos = afterSlot;
+    }
+
+    if (params.empty()) {
+        return false;
+    }
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    std::string insertion;
+    for (const auto& param : params) {
+        insertion += param;
+    }
+    msl.insert(paramEnd, insertion);
+    return true;
+}
+
+bool injectMultisampleStorageImageSampleCounts(std::string& msl) {
+    static constexpr const char* kSampleCountsName =
+        "appgl_ms_storage_image_samples";
+    static constexpr const char* kSampleCountsParam =
+        "constant uint* appgl_ms_storage_image_samples";
+    if (msl.find(kSampleCountsName) == std::string::npos ||
+        msl.find(kSampleCountsParam) != std::string::npos) {
+        return false;
+    }
+
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) return false;
+    const std::uint32_t slot = chooseFreeBufferSlot(
+        msl, kMultisampleStorageImageSampleCountsBufferSlot);
 
     const std::string param =
         ", constant uint* " + std::string(kSampleCountsName) +
         " [[buffer(" +
-        std::to_string(kMultisampleStorageImageSampleCountsBufferSlot) + ")]]";
+        std::to_string(slot) + ")]]";
     msl.insert(paramEnd, param);
     return true;
 }
@@ -1849,6 +1989,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             }
         }
 
+        (void)injectMultisampleSampledImageSidecars(msl);
         (void)injectMultisampleStorageImageSampleCounts(msl);
 
         // SPIRV-Cross lowers GLSL image coordinates as signed integer
