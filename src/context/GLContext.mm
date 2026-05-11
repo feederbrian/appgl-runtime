@@ -35114,12 +35114,25 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                     static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
                 hasMSImageSampleCounts = true;
             } else {
-                if (ib.access != GL_READ_ONLY) {
-                    (void)extensions::sparse_texture::ensureSparseStorageImageSidecar(
-                        extensionContext, *texObj);
+                extensions::sparse_texture::SparseStorageImageSidecarInfo sidecarInfo;
+                const auto sparseWriteRoute = img.sparseStorageImageWrite
+                    ? extensions::sparse_texture::resolveSparseStorageImageWriteBinding(
+                          extensionContext, *texObj, img.storageImageTarget, &sidecarInfo)
+                    : extensions::sparse_texture::SparseStorageImageWriteBindingRoute::NativeTexture;
+                if (sparseWriteRoute ==
+                    extensions::sparse_texture::SparseStorageImageWriteBindingRoute::SidecarTexture) {
+                    tb.metalTexture = sidecarInfo.metalTexture;
+                } else if (sparseWriteRoute ==
+                           extensions::sparse_texture::SparseStorageImageWriteBindingRoute::SparseSidecarUnavailable) {
+                    continue;
+                } else {
+                    if (ib.access != GL_READ_ONLY) {
+                        (void)extensions::sparse_texture::ensureSparseStorageImageSidecar(
+                            extensionContext, *texObj);
+                    }
+                    // CKPT119: level-restricted view when ib.level > 0.
+                    tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
                 }
-                // CKPT119: level-restricted view when ib.level > 0.
-                tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
             }
             tb.metalSamplerState = nullptr;  // no sampler for storage images
             tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);
@@ -35458,12 +35471,25 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
                     static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
                 hasMSImageSampleCountsIndirect = true;
             } else {
-                if (ib.access != GL_READ_ONLY) {
-                    (void)extensions::sparse_texture::ensureSparseStorageImageSidecar(
-                        extensionContext, *texObj);
+                extensions::sparse_texture::SparseStorageImageSidecarInfo sidecarInfo;
+                const auto sparseWriteRoute = img.sparseStorageImageWrite
+                    ? extensions::sparse_texture::resolveSparseStorageImageWriteBinding(
+                          extensionContext, *texObj, img.storageImageTarget, &sidecarInfo)
+                    : extensions::sparse_texture::SparseStorageImageWriteBindingRoute::NativeTexture;
+                if (sparseWriteRoute ==
+                    extensions::sparse_texture::SparseStorageImageWriteBindingRoute::SidecarTexture) {
+                    tb.metalTexture = sidecarInfo.metalTexture;
+                } else if (sparseWriteRoute ==
+                           extensions::sparse_texture::SparseStorageImageWriteBindingRoute::SparseSidecarUnavailable) {
+                    continue;
+                } else {
+                    if (ib.access != GL_READ_ONLY) {
+                        (void)extensions::sparse_texture::ensureSparseStorageImageSidecar(
+                            extensionContext, *texObj);
+                    }
+                    // CKPT119: level-restricted view when ib.level > 0.
+                    tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
                 }
-                // CKPT119: level-restricted view when ib.level > 0.
-                tb.metalTexture = impl_->resolveImageMetalTexture(ib, texObj);
             }
             tb.metalSamplerState = nullptr;
             tb.metalSlot = img.metalBinding + static_cast<std::uint32_t>(arrayElement);

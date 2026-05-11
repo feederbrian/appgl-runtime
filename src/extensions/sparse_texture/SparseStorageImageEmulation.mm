@@ -104,7 +104,7 @@ const char* probeSourceForTarget(GLenum target) {
                 "#include <metal_stdlib>\n"
                 "using namespace metal;\n"
                 "kernel void appgl_sparse_storage_sidecar_probe(\n"
-                "    texture2d<float, access::read_write> sidecar [[texture(0)]],\n"
+                "    texture2d<float, access::write> sidecar [[texture(0)]],\n"
                 "    uint2 gid [[thread_position_in_grid]]) {\n"
                 "    sidecar.write(float4(1.0), gid);\n"
                 "}\n";
@@ -113,7 +113,7 @@ const char* probeSourceForTarget(GLenum target) {
                 "#include <metal_stdlib>\n"
                 "using namespace metal;\n"
                 "kernel void appgl_sparse_storage_sidecar_probe(\n"
-                "    texture2d_array<float, access::read_write> sidecar [[texture(0)]],\n"
+                "    texture2d_array<float, access::write> sidecar [[texture(0)]],\n"
                 "    uint2 gid [[thread_position_in_grid]]) {\n"
                 "    sidecar.write(float4(1.0), gid, 0);\n"
                 "}\n";
@@ -122,7 +122,7 @@ const char* probeSourceForTarget(GLenum target) {
                 "#include <metal_stdlib>\n"
                 "using namespace metal;\n"
                 "kernel void appgl_sparse_storage_sidecar_probe(\n"
-                "    texture3d<float, access::read_write> sidecar [[texture(0)]],\n"
+                "    texture3d<float, access::write> sidecar [[texture(0)]],\n"
                 "    uint3 gid [[thread_position_in_grid]]) {\n"
                 "    sidecar.write(float4(1.0), gid);\n"
                 "}\n";
@@ -131,7 +131,7 @@ const char* probeSourceForTarget(GLenum target) {
                 "#include <metal_stdlib>\n"
                 "using namespace metal;\n"
                 "kernel void appgl_sparse_storage_sidecar_probe(\n"
-                "    texturecube<float, access::read_write> sidecar [[texture(0)]],\n"
+                "    texturecube<float, access::write> sidecar [[texture(0)]],\n"
                 "    uint2 gid [[thread_position_in_grid]]) {\n"
                 "    sidecar.write(float4(1.0), gid, 0);\n"
                 "}\n";
@@ -140,7 +140,7 @@ const char* probeSourceForTarget(GLenum target) {
                 "#include <metal_stdlib>\n"
                 "using namespace metal;\n"
                 "kernel void appgl_sparse_storage_sidecar_probe(\n"
-                "    texturecube_array<float, access::read_write> sidecar [[texture(0)]],\n"
+                "    texturecube_array<float, access::write> sidecar [[texture(0)]],\n"
                 "    uint2 gid [[thread_position_in_grid]]) {\n"
                 "    sidecar.write(float4(1.0), gid, 0, 0);\n"
                 "}\n";
@@ -413,6 +413,34 @@ bool ensureSparseStorageImageSidecar(ExtensionContext& ctx,
         *outInfo = entry.info;
     }
     return true;
+}
+
+SparseStorageImageWriteBindingRoute resolveSparseStorageImageWriteBinding(
+    ExtensionContext& ctx,
+    GLTextureObject& texture,
+    GLenum shaderImageTarget,
+    SparseStorageImageSidecarInfo* outInfo) {
+    if (!isSparseStorageImageSidecarTarget(shaderImageTarget)) {
+        return SparseStorageImageWriteBindingRoute::NativeTexture;
+    }
+    if (textureSparse(ctx, &texture) != GL_TRUE) {
+        return SparseStorageImageWriteBindingRoute::NativeTexture;
+    }
+    if (!isSparseStorageImageSidecarTarget(texture.target) ||
+        isMultisampleStorageImageTarget(texture.target) ||
+        texture.target != shaderImageTarget) {
+        return SparseStorageImageWriteBindingRoute::SparseSidecarUnavailable;
+    }
+
+    SparseStorageImageSidecarInfo info;
+    if (!ensureSparseStorageImageSidecar(ctx, texture, &info) ||
+        info.metalTexture == nullptr) {
+        return SparseStorageImageWriteBindingRoute::SparseSidecarUnavailable;
+    }
+    if (outInfo != nullptr) {
+        *outInfo = info;
+    }
+    return SparseStorageImageWriteBindingRoute::SidecarTexture;
 }
 
 bool getSparseStorageImageSidecar(ExtensionContext& ctx,
