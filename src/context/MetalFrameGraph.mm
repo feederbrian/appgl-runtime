@@ -6999,6 +6999,49 @@ fragment float4 appgl_immediate_textured_fs(
                             length:info.fsUniformSize
                            atIndex:16];
         }
+        if (info.fragmentNeedsFragCoordParams) {
+            id<MTLTexture> colorTex =
+                (__bridge id<MTLTexture>)info.fboColorTexture;
+            const float renderTargetHeight = colorTex != nil
+                ? static_cast<float>(colorTex.height)
+                : static_cast<float>(std::max<std::int32_t>(
+                      info.viewportHeight, 1));
+            bool fragmentAliasesColorAttachment = false;
+            if (colorTex != nil) {
+                for (const auto& binding : info.fragmentTextures) {
+                    if (binding.metalTexture == nullptr) continue;
+                    id<MTLTexture> tex =
+                        (__bridge id<MTLTexture>)binding.metalTexture;
+                    if (tex == colorTex) {
+                        fragmentAliasesColorAttachment = true;
+                        break;
+                    }
+                }
+            }
+            const bool flipToLowerLeft =
+                (info.clipOrigin != GL_UPPER_LEFT) &&
+                !fragmentAliasesColorAttachment;
+            const float fragCoordParams[4] = {
+                flipToLowerLeft ? renderTargetHeight : 0.0f,
+                flipToLowerLeft ? -1.0f : 1.0f,
+                flipToLowerLeft ? 1.0f : 0.0f,
+                0.0f,
+            };
+            [renc setFragmentBytes:fragCoordParams
+                            length:sizeof(fragCoordParams)
+                           atIndex:kAppGLFragCoordParamsBufferSlot];
+            if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                std::fprintf(stderr,
+                    "[MESH_GS] fragCoordParams clipOrigin=0x%x rtH=%.1f "
+                    "aliasesColor=%d params=(%.1f,%.1f,%.1f,%.1f)\n",
+                    info.clipOrigin,
+                    renderTargetHeight,
+                    fragmentAliasesColorAttachment ? 1 : 0,
+                    fragCoordParams[0], fragCoordParams[1],
+                    fragCoordParams[2], fragCoordParams[3]);
+                std::fflush(stderr);
+            }
+        }
         for (const auto& binding : info.fragmentTextures) {
             id<MTLTexture> tex =
                 (__bridge id<MTLTexture>)binding.metalTexture;

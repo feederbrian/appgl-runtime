@@ -1119,6 +1119,9 @@ public:
         const void* fsUniformData = nullptr;
         std::size_t fsUniformSize = 0;
         std::vector<TranslatedDrawInfo::TextureBinding> fragmentTextures;
+        // Fragment shaders rewritten to synthesize OpenGL lower-left
+        // gl_FragCoord.y need the same slot-15 params as translated draws.
+        bool fragmentNeedsFragCoordParams = false;
         // FBO state (matches encodeTranslatedDraw's fboColorTexture /
         // fboDepthStencilTexture / etc.).
         void* fboColorTexture = nullptr;

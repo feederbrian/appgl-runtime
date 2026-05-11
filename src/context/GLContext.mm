@@ -29520,6 +29520,8 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     resolveSamplerBindings(program, textureInfo);
     resolveImageBindings(program, textureInfo);
     info.fragmentTextures = std::move(textureInfo.fragmentTextures);
+    info.fragmentNeedsFragCoordParams =
+        (program.fragmentMSL.find("_appgl_FragCoordParams") != std::string::npos);
 
     // GL render state — mirror encodeTranslatedDraw's tdi setup
     // (GLContext.mm:22172-22217) for the fields the mesh-render
