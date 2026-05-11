@@ -166,6 +166,48 @@ void markStateFunction(FunctionId id, std::string_view note) {
     Runtime::shared().refreshCurrentContextClaimedVersion();
 }
 
+constexpr GLenum kFragmentShadingRatesExtSupported[] = {
+    GL_SHADING_RATE_1X1_PIXELS_EXT,
+    GL_SHADING_RATE_1X2_PIXELS_EXT,
+    GL_SHADING_RATE_2X1_PIXELS_EXT,
+    GL_SHADING_RATE_2X2_PIXELS_EXT,
+};
+
+bool isFragmentShadingRateEnumEXT(GLenum rate) {
+    switch (rate) {
+        case GL_SHADING_RATE_1X1_PIXELS_EXT:
+        case GL_SHADING_RATE_1X2_PIXELS_EXT:
+        case GL_SHADING_RATE_1X4_PIXELS_EXT:
+        case GL_SHADING_RATE_2X1_PIXELS_EXT:
+        case GL_SHADING_RATE_2X2_PIXELS_EXT:
+        case GL_SHADING_RATE_2X4_PIXELS_EXT:
+        case GL_SHADING_RATE_4X1_PIXELS_EXT:
+        case GL_SHADING_RATE_4X2_PIXELS_EXT:
+        case GL_SHADING_RATE_4X4_PIXELS_EXT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isFragmentShadingRateCombinerOpEXT(GLenum op) {
+    switch (op) {
+        case GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT:
+        case GL_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_EXT:
+        case GL_FRAGMENT_SHADING_RATE_COMBINER_OP_MIN_EXT:
+        case GL_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_EXT:
+        case GL_FRAGMENT_SHADING_RATE_COMBINER_OP_MUL_EXT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isTrivialFragmentShadingRateCombinerOpEXT(GLenum op) {
+    return op == GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT
+        || op == GL_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_EXT;
+}
+
 // Phase A state mirror allowlist — every cap that glEnable/glDisable/glIsEnabled
 // accepts without raising GL_INVALID_ENUM. Keeping this list explicit means BAR's
 // audit can cross-reference which caps are supported against their InitGLState
@@ -2451,6 +2493,152 @@ void APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLen
     Runtime::shared().refreshCurrentContextClaimedVersion();
     Runtime::shared().recordBootstrapTrace(
         "glReadPixels(" + std::to_string(width) + "x" + std::to_string(height) + ")"
+    );
+}
+
+void APIENTRY glGetFragmentShadingRatesEXT(GLsizei samples, GLsizei maxCount, GLsizei* count, GLenum* shadingRates) {
+    auto* context = requireCurrentContext("glGetFragmentShadingRatesEXT");
+    if (context == nullptr) {
+        return;
+    }
+    if (maxCount < 0) {
+        recordValidationError(context, "glGetFragmentShadingRatesEXT", GL_INVALID_VALUE, "maxCount must be non-negative");
+        return;
+    }
+
+    const bool supportedSampleCount = samples == 1 || samples == 4;
+    const GLsizei availableCount = supportedSampleCount
+        ? static_cast<GLsizei>(sizeof(kFragmentShadingRatesExtSupported) / sizeof(kFragmentShadingRatesExtSupported[0]))
+        : 0;
+    const GLsizei writeCount = shadingRates != nullptr ? std::min(maxCount, availableCount) : 0;
+    for (GLsizei i = 0; i < writeCount; ++i) {
+        shadingRates[i] = kFragmentShadingRatesExtSupported[i];
+    }
+    if (count != nullptr) {
+        *count = writeCount;
+    }
+    markStateFunction(
+        FunctionId::glGetFragmentShadingRatesEXT,
+        "GL_EXT_fragment_shading_rate scaffold reports base Metal-supported rates; advertising remains gated."
+    );
+    Runtime::shared().recordBootstrapTrace("glGetFragmentShadingRatesEXT(" + std::to_string(samples) + ")");
+}
+
+void APIENTRY glShadingRateEXT(GLenum rate) {
+    auto* context = requireCurrentContext("glShadingRateEXT");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isFragmentShadingRateEnumEXT(rate)) {
+        recordValidationError(context, "glShadingRateEXT", GL_INVALID_ENUM, "rate is not a valid fragment shading rate");
+        return;
+    }
+    context->state().setFragmentShadingRate(rate);
+    markStateFunction(FunctionId::glShadingRateEXT, "GL_EXT_fragment_shading_rate draw-call rate is tracked.");
+    Runtime::shared().recordBootstrapTrace("glShadingRateEXT(" + std::to_string(rate) + ")");
+}
+
+void APIENTRY glShadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1) {
+    auto* context = requireCurrentContext("glShadingRateCombinerOpsEXT");
+    if (context == nullptr) {
+        return;
+    }
+    if (!isFragmentShadingRateCombinerOpEXT(combinerOp0)) {
+        recordValidationError(
+            context,
+            "glShadingRateCombinerOpsEXT",
+            GL_INVALID_ENUM,
+            "combinerOp0 is not a valid fragment shading rate combiner"
+        );
+        return;
+    }
+    if (!isFragmentShadingRateCombinerOpEXT(combinerOp1)) {
+        recordValidationError(
+            context,
+            "glShadingRateCombinerOpsEXT",
+            GL_INVALID_ENUM,
+            "combinerOp1 is not a valid fragment shading rate combiner"
+        );
+        return;
+    }
+    if (!isTrivialFragmentShadingRateCombinerOpEXT(combinerOp0)) {
+        recordValidationError(
+            context,
+            "glShadingRateCombinerOpsEXT",
+            GL_INVALID_OPERATION,
+            "non-trivial fragment shading rate combinerOp0 is not supported"
+        );
+        return;
+    }
+    if (!isTrivialFragmentShadingRateCombinerOpEXT(combinerOp1)) {
+        recordValidationError(
+            context,
+            "glShadingRateCombinerOpsEXT",
+            GL_INVALID_OPERATION,
+            "non-trivial fragment shading rate combinerOp1 is not supported"
+        );
+        return;
+    }
+    if (combinerOp0 != GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT) {
+        recordValidationError(
+            context,
+            "glShadingRateCombinerOpsEXT",
+            GL_INVALID_OPERATION,
+            "primitive fragment shading rate combinerOp0 is not supported"
+        );
+        return;
+    }
+    if (combinerOp1 != GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT) {
+        recordValidationError(
+            context,
+            "glShadingRateCombinerOpsEXT",
+            GL_INVALID_OPERATION,
+            "attachment fragment shading rate combinerOp1 is not supported"
+        );
+        return;
+    }
+    context->state().setFragmentShadingRateCombinerOps(combinerOp0, combinerOp1);
+    markStateFunction(
+        FunctionId::glShadingRateCombinerOpsEXT,
+        "GL_EXT_fragment_shading_rate combiner ops are tracked with primitive/attachment paths gated."
+    );
+    Runtime::shared().recordBootstrapTrace("glShadingRateCombinerOpsEXT()");
+}
+
+void APIENTRY glFramebufferShadingRateEXT(GLenum target,
+                                          GLenum attachment,
+                                          GLuint texture,
+                                          GLint baseLayer,
+                                          GLsizei numLayers,
+                                          GLsizei texelWidth,
+                                          GLsizei texelHeight) {
+    auto* context = requireCurrentContext("glFramebufferShadingRateEXT");
+    if (context == nullptr) {
+        return;
+    }
+    (void)texture;
+    (void)baseLayer;
+    (void)numLayers;
+    (void)texelWidth;
+    (void)texelHeight;
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) {
+        recordValidationError(context, "glFramebufferShadingRateEXT", GL_INVALID_ENUM, "target is not a framebuffer target");
+        return;
+    }
+    if (attachment != GL_SHADING_RATE_ATTACHMENT_EXT) {
+        recordValidationError(
+            context,
+            "glFramebufferShadingRateEXT",
+            GL_INVALID_ENUM,
+            "attachment is not GL_SHADING_RATE_ATTACHMENT_EXT"
+        );
+        return;
+    }
+    recordValidationError(
+        context,
+        "glFramebufferShadingRateEXT",
+        GL_INVALID_OPERATION,
+        "GL_EXT_fragment_shading_rate_attachment is not advertised or implemented"
     );
 }
 

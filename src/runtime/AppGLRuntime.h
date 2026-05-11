@@ -92,6 +92,10 @@ void APIENTRY glTexStorage3D(GLenum target, GLsizei levels, GLenum internalforma
 void APIENTRY glTexStorage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations);
 void APIENTRY glTexStorage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations);
 void APIENTRY glTexPageCommitmentARB(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit);
+void APIENTRY glGetFragmentShadingRatesEXT(GLsizei samples, GLsizei maxCount, GLsizei* count, GLenum* shadingRates);
+void APIENTRY glShadingRateEXT(GLenum rate);
+void APIENTRY glShadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1);
+void APIENTRY glFramebufferShadingRateEXT(GLenum target, GLenum attachment, GLuint texture, GLint baseLayer, GLsizei numLayers, GLsizei texelWidth, GLsizei texelHeight);
 void APIENTRY glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size);
 void APIENTRY glPixelStorei(GLenum pname, GLint param);
 void APIENTRY glPixelStoref(GLenum pname, GLfloat param);

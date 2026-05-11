@@ -665,6 +665,10 @@ struct GLDispatchTable {
     PFNGLPOLYGONOFFSETCLAMPPROC glPolygonOffsetClamp = nullptr;
     PFNGLTEXPAGECOMMITMENTARBPROC glTexPageCommitmentARB = nullptr;
     PFNGLTEXTUREPAGECOMMITMENTEXTPROC glTexturePageCommitmentEXT = nullptr;
+    PFNGLGETFRAGMENTSHADINGRATESEXTPROC glGetFragmentShadingRatesEXT = nullptr;
+    PFNGLSHADINGRATEEXTPROC glShadingRateEXT = nullptr;
+    PFNGLSHADINGRATECOMBINEROPSEXTPROC glShadingRateCombinerOpsEXT = nullptr;
+    PFNGLFRAMEBUFFERSHADINGRATEEXTPROC glFramebufferShadingRateEXT = nullptr;
 };
 
 }  // namespace appgl

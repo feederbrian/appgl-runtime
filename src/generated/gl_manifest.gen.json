@@ -5937,6 +5937,42 @@
       "firstPassingTestId": "",
       "firstPassingBenchmarkId": "",
       "notes": ""
+    },
+    {
+      "name": "glGetFragmentShadingRatesEXT",
+      "subsystem": "context and state",
+      "introducedVersion": "GL_EXT_fragment_shading_rate",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glShadingRateEXT",
+      "subsystem": "context and state",
+      "introducedVersion": "GL_EXT_fragment_shading_rate",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glShadingRateCombinerOpsEXT",
+      "subsystem": "context and state",
+      "introducedVersion": "GL_EXT_fragment_shading_rate",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glFramebufferShadingRateEXT",
+      "subsystem": "framebuffers and renderbuffers",
+      "introducedVersion": "GL_EXT_fragment_shading_rate",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
     }
   ]
 }

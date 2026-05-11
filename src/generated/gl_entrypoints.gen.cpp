@@ -5891,3 +5891,39 @@ extern "C" void APIENTRY glTexturePageCommitmentEXT(GLuint texture, GLint level,
     }
     appgl::unimplementedReturn<void>(appgl::FunctionId::glTexturePageCommitmentEXT, "glTexturePageCommitmentEXT");
 }
+
+extern "C" void APIENTRY glGetFragmentShadingRatesEXT(GLsizei samples, GLsizei maxCount, GLsizei *count, GLenum *shadingRates) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glGetFragmentShadingRatesEXT, "glGetFragmentShadingRatesEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glGetFragmentShadingRatesEXT) {
+        fn(samples, maxCount, count, shadingRates);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glGetFragmentShadingRatesEXT, "glGetFragmentShadingRatesEXT");
+}
+
+extern "C" void APIENTRY glShadingRateEXT(GLenum rate) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glShadingRateEXT, "glShadingRateEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glShadingRateEXT) {
+        fn(rate);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glShadingRateEXT, "glShadingRateEXT");
+}
+
+extern "C" void APIENTRY glShadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glShadingRateCombinerOpsEXT, "glShadingRateCombinerOpsEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glShadingRateCombinerOpsEXT) {
+        fn(combinerOp0, combinerOp1);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glShadingRateCombinerOpsEXT, "glShadingRateCombinerOpsEXT");
+}
+
+extern "C" void APIENTRY glFramebufferShadingRateEXT(GLenum target, GLenum attachment, GLuint texture, GLint baseLayer, GLsizei numLayers, GLsizei texelWidth, GLsizei texelHeight) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glFramebufferShadingRateEXT, "glFramebufferShadingRateEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glFramebufferShadingRateEXT) {
+        fn(target, attachment, texture, baseLayer, numLayers, texelWidth, texelHeight);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glFramebufferShadingRateEXT, "glFramebufferShadingRateEXT");
+}

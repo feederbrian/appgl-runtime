@@ -664,6 +664,10 @@ enum class FunctionId : std::size_t {
     glPolygonOffsetClamp,
     glTexPageCommitmentARB,
     glTexturePageCommitmentEXT,
+    glGetFragmentShadingRatesEXT,
+    glShadingRateEXT,
+    glShadingRateCombinerOpsEXT,
+    glFramebufferShadingRateEXT,
     Count,
 };
 
@@ -1334,6 +1338,10 @@ inline constexpr GLFunctionMetadata kGLFunctionMetadata[] = {
     {FunctionId::glPolygonOffsetClamp, "glPolygonOffsetClamp", "context and state", "4.6"},
     {FunctionId::glTexPageCommitmentARB, "glTexPageCommitmentARB", "textures and samplers", "ARB_sparse_texture"},
     {FunctionId::glTexturePageCommitmentEXT, "glTexturePageCommitmentEXT", "direct state access", "ARB_sparse_texture"},
+    {FunctionId::glGetFragmentShadingRatesEXT, "glGetFragmentShadingRatesEXT", "context and state", "GL_EXT_fragment_shading_rate"},
+    {FunctionId::glShadingRateEXT, "glShadingRateEXT", "context and state", "GL_EXT_fragment_shading_rate"},
+    {FunctionId::glShadingRateCombinerOpsEXT, "glShadingRateCombinerOpsEXT", "context and state", "GL_EXT_fragment_shading_rate"},
+    {FunctionId::glFramebufferShadingRateEXT, "glFramebufferShadingRateEXT", "framebuffers and renderbuffers", "GL_EXT_fragment_shading_rate"},
 };
 
 inline constexpr std::size_t kGLFunctionCount = static_cast<std::size_t>(FunctionId::Count);

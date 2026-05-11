@@ -689,6 +689,19 @@ const GLTessellationState& GLStateTracker::tessellationState() const {
     return tessellation_;
 }
 
+void GLStateTracker::setFragmentShadingRate(GLenum rate) {
+    fragmentShadingRate_.rate = rate;
+}
+
+void GLStateTracker::setFragmentShadingRateCombinerOps(GLenum combinerOp0, GLenum combinerOp1) {
+    fragmentShadingRate_.combinerOp0 = combinerOp0;
+    fragmentShadingRate_.combinerOp1 = combinerOp1;
+}
+
+const GLFragmentShadingRateState& GLStateTracker::fragmentShadingRateState() const {
+    return fragmentShadingRate_;
+}
+
 void GLStateTracker::setPrimitiveRestartIndex(GLuint index) {
     primitiveRestartIndex_ = index;
 }
@@ -1040,6 +1053,16 @@ bool GLStateTracker::isScissorTestIndexedEnabled(GLuint index) const {
 bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
     if (out) {
         switch (pname) {
+            case GL_SHADING_RATE_EXT:
+                *out = fragmentShadingRate_.rate != 0 ? GL_TRUE : GL_FALSE;
+                return true;
+            case GL_FRAGMENT_SHADING_RATE_WITH_SHADER_DEPTH_STENCIL_WRITES_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_WITH_SAMPLE_MASK_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_ATTACHMENT_WITH_DEFAULT_FRAMEBUFFER_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_NON_TRIVIAL_COMBINERS_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_PRIMITIVE_RATE_WITH_MULTI_VIEWPORT_SUPPORTED_EXT:
+                *out = GL_FALSE;
+                return true;
             case GL_CLIP_ORIGIN:
                 *out = static_cast<GLboolean>(clipOrigin_ != 0);
                 return true;
@@ -1094,6 +1117,16 @@ bool GLStateTracker::queryBoolean(GLenum pname, GLboolean* out) const {
 bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
     if (out) {
         switch (pname) {
+            case GL_SHADING_RATE_EXT:
+                *out = static_cast<GLint>(fragmentShadingRate_.rate);
+                return true;
+            case GL_FRAGMENT_SHADING_RATE_WITH_SHADER_DEPTH_STENCIL_WRITES_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_WITH_SAMPLE_MASK_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_ATTACHMENT_WITH_DEFAULT_FRAMEBUFFER_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_NON_TRIVIAL_COMBINERS_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_PRIMITIVE_RATE_WITH_MULTI_VIEWPORT_SUPPORTED_EXT:
+                *out = GL_FALSE;
+                return true;
             case GL_CLIP_ORIGIN:
                 *out = static_cast<GLint>(clipOrigin_);
                 return true;
@@ -1158,6 +1191,16 @@ bool GLStateTracker::queryInteger(GLenum pname, GLint* out) const {
 bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
     if (out) {
         switch (pname) {
+            case GL_SHADING_RATE_EXT:
+                *out = static_cast<GLint64>(fragmentShadingRate_.rate);
+                return true;
+            case GL_FRAGMENT_SHADING_RATE_WITH_SHADER_DEPTH_STENCIL_WRITES_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_WITH_SAMPLE_MASK_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_ATTACHMENT_WITH_DEFAULT_FRAMEBUFFER_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_NON_TRIVIAL_COMBINERS_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_PRIMITIVE_RATE_WITH_MULTI_VIEWPORT_SUPPORTED_EXT:
+                *out = GL_FALSE;
+                return true;
             case GL_CLIP_ORIGIN:
                 *out = static_cast<GLint64>(clipOrigin_);
                 return true;
@@ -1215,6 +1258,16 @@ bool GLStateTracker::queryInteger64(GLenum pname, GLint64* out) const {
 bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
     if (out) {
         switch (pname) {
+            case GL_SHADING_RATE_EXT:
+                *out = static_cast<GLfloat>(fragmentShadingRate_.rate);
+                return true;
+            case GL_FRAGMENT_SHADING_RATE_WITH_SHADER_DEPTH_STENCIL_WRITES_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_WITH_SAMPLE_MASK_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_ATTACHMENT_WITH_DEFAULT_FRAMEBUFFER_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_NON_TRIVIAL_COMBINERS_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_PRIMITIVE_RATE_WITH_MULTI_VIEWPORT_SUPPORTED_EXT:
+                *out = 0.0f;
+                return true;
             case GL_CLIP_ORIGIN:
                 *out = static_cast<GLfloat>(clipOrigin_);
                 return true;
@@ -1275,6 +1328,16 @@ bool GLStateTracker::queryFloat(GLenum pname, GLfloat* out) const {
 bool GLStateTracker::queryDouble(GLenum pname, GLdouble* out) const {
     if (out) {
         switch (pname) {
+            case GL_SHADING_RATE_EXT:
+                *out = static_cast<GLdouble>(fragmentShadingRate_.rate);
+                return true;
+            case GL_FRAGMENT_SHADING_RATE_WITH_SHADER_DEPTH_STENCIL_WRITES_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_WITH_SAMPLE_MASK_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_ATTACHMENT_WITH_DEFAULT_FRAMEBUFFER_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_NON_TRIVIAL_COMBINERS_SUPPORTED_EXT:
+            case GL_FRAGMENT_SHADING_RATE_PRIMITIVE_RATE_WITH_MULTI_VIEWPORT_SUPPORTED_EXT:
+                *out = 0.0;
+                return true;
             case GL_CLIP_ORIGIN:
                 *out = static_cast<GLdouble>(clipOrigin_);
                 return true;
