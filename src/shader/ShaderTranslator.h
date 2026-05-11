@@ -128,6 +128,7 @@ struct ShaderReflection {
         bool multisampleStorageImage = false;
         bool multisampleStorageImageArray = false;
         GLenum storageImageTarget = 0;
+        bool sparseStorageImageRead = false;
         bool sparseStorageImageWrite = false;
         std::vector<UniformMember> members;
     };

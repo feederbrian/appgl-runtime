@@ -25,11 +25,13 @@ struct SparseStorageImageSidecarInfo {
     GLsizei arrayLength = 0;
 };
 
-enum class SparseStorageImageWriteBindingRoute {
+enum class SparseStorageImageBindingRoute {
     NativeTexture,
     SidecarTexture,
     SparseSidecarUnavailable,
 };
+
+using SparseStorageImageWriteBindingRoute = SparseStorageImageBindingRoute;
 
 bool isSparseStorageImageSidecarTarget(GLenum target);
 bool supportsSparseStorageImageSidecar(ExtensionContext& ctx, GLenum target);
@@ -37,6 +39,11 @@ bool supportsSparseStorageImageSidecar(ExtensionContext& ctx, GLenum target);
 bool ensureSparseStorageImageSidecar(ExtensionContext& ctx,
                                      GLTextureObject& texture,
                                      SparseStorageImageSidecarInfo* outInfo = nullptr);
+SparseStorageImageBindingRoute resolveSparseStorageImageSidecarBinding(
+    ExtensionContext& ctx,
+    GLTextureObject& texture,
+    GLenum shaderImageTarget,
+    SparseStorageImageSidecarInfo* outInfo = nullptr);
 SparseStorageImageWriteBindingRoute resolveSparseStorageImageWriteBinding(
     ExtensionContext& ctx,
     GLTextureObject& texture,

@@ -60,7 +60,7 @@ GLenum storageImageTargetForType(const spirv_cross::SPIRType& imageType) {
     }
 }
 
-bool sparseStorageImageWriteTarget(GLenum target) {
+bool sparseStorageImageSidecarTarget(GLenum target) {
     switch (target) {
         case GL_TEXTURE_2D:
         case GL_TEXTURE_2D_ARRAY:
@@ -74,8 +74,13 @@ bool sparseStorageImageWriteTarget(GLenum target) {
     }
 }
 
+struct StorageImageAccessVariables {
+    std::unordered_set<std::uint32_t> reads;
+    std::unordered_set<std::uint32_t> writes;
+};
+
 template <typename ResourceList>
-std::unordered_set<std::uint32_t> storageImageWriteVariables(
+StorageImageAccessVariables storageImageAccessVariables(
     const std::uint32_t* spirv,
     std::size_t wordCount,
     const ResourceList& storageImages) {
@@ -86,7 +91,7 @@ std::unordered_set<std::uint32_t> storageImageWriteVariables(
         baseForId[image.id] = image.id;
     }
 
-    std::unordered_set<std::uint32_t> writes;
+    StorageImageAccessVariables access;
     std::size_t cursor = 5;  // SPIR-V header.
     while (spirv != nullptr && cursor < wordCount) {
         const std::uint32_t first = spirv[cursor];
@@ -151,7 +156,16 @@ std::unordered_set<std::uint32_t> storageImageWriteVariables(
                 if (length >= 4) {
                     const std::uint32_t base = baseFor(inst[1]);
                     if (storageIds.find(base) != storageIds.end()) {
-                        writes.insert(base);
+                        access.writes.insert(base);
+                    }
+                }
+                break;
+            case spv::OpImageRead:
+            case spv::OpImageSparseRead:
+                if (length >= 5) {
+                    const std::uint32_t base = baseFor(inst[3]);
+                    if (storageIds.find(base) != storageIds.end()) {
+                        access.reads.insert(base);
                     }
                 }
                 break;
@@ -161,7 +175,7 @@ std::unordered_set<std::uint32_t> storageImageWriteVariables(
 
         cursor += length;
     }
-    return writes;
+    return access;
 }
 
 bool isIdentifierChar(char ch) {
@@ -437,6 +451,81 @@ bool injectMultisampleSampledImageSidecars(std::string& msl) {
             sourceSlot + kMultisampleSampledSidecarTextureSlotOffset;
         appendUnique(params,
             ", texture2d_array<" + templateArgs + "> " + sidecarName +
+            " [[texture(" + std::to_string(sidecarSlot) + ")]]");
+        pos = afterSlot;
+    }
+
+    if (params.empty()) {
+        return false;
+    }
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    std::string insertion;
+    for (const auto& param : params) {
+        insertion += param;
+    }
+    msl.insert(paramEnd, insertion);
+    return true;
+}
+
+bool injectSparseSampledImageSidecars(std::string& msl) {
+    static constexpr const char* kSidecarPrefix =
+        "appgl_sparse_sampled_sidecar_";
+    static constexpr std::size_t kSidecarPrefixLen =
+        sizeof("appgl_sparse_sampled_sidecar_") - 1u;
+
+    std::vector<std::string> params;
+    std::size_t pos = 0;
+    while ((pos = msl.find(kSidecarPrefix, pos)) != std::string::npos) {
+        std::uint32_t sourceSlot = 0;
+        std::size_t afterSlot = 0;
+        if (!parseUnsignedAfter(msl, pos + kSidecarPrefixLen,
+                                sourceSlot, &afterSlot)) {
+            pos += kSidecarPrefixLen;
+            continue;
+        }
+
+        const std::string sidecarName =
+            std::string(kSidecarPrefix) + std::to_string(sourceSlot);
+        if (msl.find(" " + sidecarName + " [[texture(") != std::string::npos) {
+            pos = afterSlot;
+            continue;
+        }
+
+        const std::string textureAttr =
+            "[[texture(" + std::to_string(sourceSlot) + ")]]";
+        const std::size_t attrPos = msl.find(textureAttr);
+        if (attrPos == std::string::npos) {
+            pos = afterSlot;
+            continue;
+        }
+
+        const std::size_t lineStart = msl.rfind('\n', attrPos);
+        const std::size_t lineBegin =
+            (lineStart == std::string::npos) ? 0 : lineStart + 1u;
+        const std::size_t typeStart = msl.rfind("texture", attrPos);
+        if (typeStart == std::string::npos || typeStart < lineBegin) {
+            pos = afterSlot;
+            continue;
+        }
+
+        const std::size_t templateStart = msl.find('<', typeStart);
+        const std::size_t templateEnd = msl.find('>', templateStart);
+        if (templateStart == std::string::npos ||
+            templateEnd == std::string::npos ||
+            templateEnd > attrPos) {
+            pos = afterSlot;
+            continue;
+        }
+
+        const std::string textureType =
+            msl.substr(typeStart, templateEnd - typeStart + 1u);
+        const std::uint32_t sidecarSlot =
+            sourceSlot + kMultisampleSampledSidecarTextureSlotOffset;
+        appendUnique(params,
+            ", " + textureType + " " + sidecarName +
             " [[texture(" + std::to_string(sidecarSlot) + ")]]");
         pos = afterSlot;
     }
@@ -2127,6 +2216,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
 
         (void)injectMultisampleSampledImageSidecars(msl);
+        (void)injectSparseSampledImageSidecars(msl);
         (void)injectMultisampleStorageImageSampleCounts(msl);
 
         // SPIRV-Cross lowers GLSL image coordinates as signed integer
@@ -3208,8 +3298,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         // with a #define-toggled input-image use, so the pre-fs
         // compile drops g_input_image but retains its declaration).
         auto activeStorageImages = compiler.get_active_interface_variables();
-        auto storageImageWrites =
-            storageImageWriteVariables(spirv, wordCount, resources.storage_images);
+        auto storageImageAccesses =
+            storageImageAccessVariables(spirv, wordCount, resources.storage_images);
         {
             // Mirror the (glBinding, id) sort used by spirvToMSL so
             // reflection's `metalBinding` lines up with each image's
@@ -3229,6 +3319,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 bool multisample = false;
                 bool multisampleArray = false;
                 GLenum storageTarget = 0;
+                bool sparseRead = false;
                 bool sparseWrite = false;
                 spirv_cross::Resource* res;
             };
@@ -3251,9 +3342,14 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     imageType.image.sampled == 2;
                 r.multisampleArray = r.multisample && imageType.image.arrayed;
                 r.storageTarget = storageImageTargetForType(imageType);
+                r.sparseRead =
+                    storageImageAccesses.reads.find(img.id) !=
+                        storageImageAccesses.reads.end() &&
+                    sparseStorageImageSidecarTarget(r.storageTarget);
                 r.sparseWrite =
-                    storageImageWrites.find(img.id) != storageImageWrites.end() &&
-                    sparseStorageImageWriteTarget(r.storageTarget);
+                    storageImageAccesses.writes.find(img.id) !=
+                        storageImageAccesses.writes.end() &&
+                    sparseStorageImageSidecarTarget(r.storageTarget);
                 r.res = &img;
                 sortedStorageImages.push_back(r);
             }
@@ -3281,6 +3377,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 rb.multisampleStorageImage = entry.multisample;
                 rb.multisampleStorageImageArray = entry.multisampleArray;
                 rb.storageImageTarget = entry.storageTarget;
+                rb.sparseStorageImageRead = entry.sparseRead;
                 rb.sparseStorageImageWrite = entry.sparseWrite;
                 result.storageImages.push_back(std::move(rb));
             }

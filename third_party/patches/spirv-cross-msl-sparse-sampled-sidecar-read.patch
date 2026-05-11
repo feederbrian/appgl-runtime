@@ -1,0 +1,81 @@
+commit 2c62487fbae1fedbc5fb236dff3f03ad3e92a1e3
+Author: Brian Soria <brian.m.soria@gmail.com>
+Date:   Mon May 11 12:15:53 2026 -0700
+
+    [appgl-local] lower sparse sampled reads to sidecar
+
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index e36a861c..900a8b34 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -11237,6 +11237,70 @@ void CompilerMSL::emit_texture_op(const Instruction &i, bool sparse)
+ 				return;
+ 			}
+ 		}
++		if (get_execution_model() == ExecutionModelGLCompute &&
++		    (op == OpImageSparseFetch ||
++		     op == OpImageSparseSampleImplicitLod ||
++		     op == OpImageSparseSampleExplicitLod))
++		{
++			auto &sampled_type = expression_type(img);
++			auto &imgtype = get<SPIRType>(sampled_type.self);
++			if (is_sampled_image_type(imgtype) &&
++			    !imgtype.image.ms &&
++			    !is_depth_image(imgtype, img) &&
++			    (imgtype.image.dim == Dim2D ||
++			     imgtype.image.dim == Dim3D ||
++			     imgtype.image.dim == DimCube ||
++			     imgtype.image.dim == DimRect))
++			{
++				if (!msl_options.supports_msl_version(2, 3))
++					SPIRV_CROSS_THROW("Sparse texture feedback requires MSL 2.3 / macOS 11.0+.");
++
++				uint32_t sparse_code_id = 0;
++				uint32_t sparse_texel_id = 0;
++				emit_sparse_feedback_temporaries(result_type_id, id, sparse_code_id, sparse_texel_id);
++
++				bool sparse_forward = false;
++				SmallVector<uint32_t> sparse_inherited;
++				string sparse_call = to_texture_op(i, true, &sparse_forward, sparse_inherited);
++
++				bool value_forward = false;
++				SmallVector<uint32_t> value_inherited;
++				string value_call = to_texture_op(i, false, &value_forward, value_inherited);
++
++				uint32_t image_var_id = img;
++				if (auto *combined = maybe_get<SPIRCombinedImageSampler>(img))
++					image_var_id = combined->image;
++				auto *p_var = maybe_get_backing_variable(image_var_id);
++				uint32_t resource_index = p_var ? get_automatic_msl_resource_binding(p_var->self) : 0;
++				string sidecar_name = join("appgl_sparse_sampled_sidecar_", resource_index);
++				string image_prefix = to_expression(image_var_id) + ".";
++				auto image_pos = value_call.find(image_prefix);
++				if (image_pos == string::npos)
++					SPIRV_CROSS_THROW("AppGL sparse sampled sidecar could not locate source texture expression.");
++				value_call.replace(image_pos, image_prefix.size(), sidecar_name + ".");
++
++				auto &return_type = get<SPIRType>(result_type_id);
++				if (return_type.basetype != SPIRType::Struct || return_type.member_types.size() != 2)
++					SPIRV_CROSS_THROW("Invalid return type for sparse feedback.");
++
++				uint32_t sparse_obj_id = ir.increase_bound_by(1);
++				string sparse_obj = join("spvSparse", sparse_obj_id);
++				statement("// APPGL_SPARSE_SAMPLED_SIDECAR");
++				statement("auto ", sparse_obj, " = ", sparse_call, ";");
++				statement(to_expression(sparse_code_id), " = int(", sparse_obj, ".resident());");
++				statement(to_expression(sparse_texel_id), " = ", value_call, ";");
++
++				string expr = join(type_to_glsl(return_type), "{ ",
++				                   to_expression(sparse_code_id), ", ",
++				                   to_expression(sparse_texel_id), " }");
++				emit_op(result_type_id, id, expr, true);
++				for (auto &inherit : sparse_inherited)
++					inherit_expression_dependencies(id, inherit);
++				for (auto &inherit : value_inherited)
++					inherit_expression_dependencies(id, inherit);
++				return;
++			}
++		}
+ 
+ 		if (!msl_options.supports_msl_version(2, 3))
+ 			SPIRV_CROSS_THROW("Sparse texture feedback requires MSL 2.3 / macOS 11.0+.");

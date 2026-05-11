@@ -34949,6 +34949,8 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     ExtensionContext extensionContext(*this);
     const bool usesMSSampledSidecars =
         programObject->computeMSL.find("appgl_ms_sampled_sidecar_") != std::string::npos;
+    const bool usesSparseSampledSidecars =
+        programObject->computeMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
 
     const bool traceCompSamp = std::getenv("APPGL_TRACE_COMP_SAMP") != nullptr;
     for (const auto& samp : programObject->computeReflection.sampledTextures) {
@@ -35050,6 +35052,30 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                     hasMSImageSampleCounts = true;
                 }
             }
+            const GLenum sparseSidecarTarget =
+                preferredTarget != 0 ? preferredTarget : discoveredTarget;
+            if (usesSparseSampledSidecars &&
+                extensions::sparse_texture::isSparseStorageImageSidecarTarget(
+                    sparseSidecarTarget)) {
+                extensions::sparse_texture::SparseStorageImageSidecarInfo sidecarInfo;
+                const auto sparseRoute =
+                    extensions::sparse_texture::resolveSparseStorageImageSidecarBinding(
+                        extensionContext, *texObj, sparseSidecarTarget, &sidecarInfo);
+                const std::uint32_t slot =
+                    samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                ComputeDispatchInfo::TextureBinding sidecarBinding;
+                sidecarBinding.metalSamplerState = nullptr;
+                sidecarBinding.metalSlot =
+                    slot + kMultisampleSampledSidecarTextureSlotOffset;
+                sidecarBinding.metalTexture =
+                    sparseRoute ==
+                            extensions::sparse_texture::SparseStorageImageBindingRoute::SidecarTexture
+                        ? sidecarInfo.metalTexture
+                        : texObj->metalTexture;
+                if (sidecarBinding.metalTexture != nullptr) {
+                    info.textures.push_back(sidecarBinding);
+                }
+            }
             if (traceCompSamp) std::fprintf(stderr, " BOUND\n");
         }
     }
@@ -35115,15 +35141,17 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                 hasMSImageSampleCounts = true;
             } else {
                 extensions::sparse_texture::SparseStorageImageSidecarInfo sidecarInfo;
-                const auto sparseWriteRoute = img.sparseStorageImageWrite
-                    ? extensions::sparse_texture::resolveSparseStorageImageWriteBinding(
+                const bool sparseSidecarAccess =
+                    img.sparseStorageImageRead || img.sparseStorageImageWrite;
+                const auto sparseRoute = sparseSidecarAccess
+                    ? extensions::sparse_texture::resolveSparseStorageImageSidecarBinding(
                           extensionContext, *texObj, img.storageImageTarget, &sidecarInfo)
-                    : extensions::sparse_texture::SparseStorageImageWriteBindingRoute::NativeTexture;
-                if (sparseWriteRoute ==
-                    extensions::sparse_texture::SparseStorageImageWriteBindingRoute::SidecarTexture) {
+                    : extensions::sparse_texture::SparseStorageImageBindingRoute::NativeTexture;
+                if (sparseRoute ==
+                    extensions::sparse_texture::SparseStorageImageBindingRoute::SidecarTexture) {
                     tb.metalTexture = sidecarInfo.metalTexture;
-                } else if (sparseWriteRoute ==
-                           extensions::sparse_texture::SparseStorageImageWriteBindingRoute::SparseSidecarUnavailable) {
+                } else if (sparseRoute ==
+                           extensions::sparse_texture::SparseStorageImageBindingRoute::SparseSidecarUnavailable) {
                     continue;
                 } else {
                     if (ib.access != GL_READ_ONLY) {
@@ -35356,6 +35384,8 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
     ExtensionContext extensionContext(*this);
     const bool usesMSSampledSidecarsIndirect =
         programObject->computeMSL.find("appgl_ms_sampled_sidecar_") != std::string::npos;
+    const bool usesSparseSampledSidecarsIndirect =
+        programObject->computeMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
 
     // CKPT145 (Sprint 13 Day 9): sampler array iteration — see direct
     // dispatch path for full rationale. Indirect mirror.
@@ -35425,6 +35455,30 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
                     hasMSImageSampleCountsIndirect = true;
                 }
             }
+            const GLenum sparseSidecarTarget =
+                preferredTarget != 0 ? preferredTarget : discoveredTarget;
+            if (usesSparseSampledSidecarsIndirect &&
+                extensions::sparse_texture::isSparseStorageImageSidecarTarget(
+                    sparseSidecarTarget)) {
+                extensions::sparse_texture::SparseStorageImageSidecarInfo sidecarInfo;
+                const auto sparseRoute =
+                    extensions::sparse_texture::resolveSparseStorageImageSidecarBinding(
+                        extensionContext, *texObj, sparseSidecarTarget, &sidecarInfo);
+                const std::uint32_t slot =
+                    samp.metalBinding + static_cast<std::uint32_t>(arrayElement);
+                ComputeDispatchInfo::TextureBinding sidecarBinding;
+                sidecarBinding.metalSamplerState = nullptr;
+                sidecarBinding.metalSlot =
+                    slot + kMultisampleSampledSidecarTextureSlotOffset;
+                sidecarBinding.metalTexture =
+                    sparseRoute ==
+                            extensions::sparse_texture::SparseStorageImageBindingRoute::SidecarTexture
+                        ? sidecarInfo.metalTexture
+                        : texObj->metalTexture;
+                if (sidecarBinding.metalTexture != nullptr) {
+                    info.textures.push_back(sidecarBinding);
+                }
+            }
         }
     }
     // Storage images for the indirect path — mirror the direct path.
@@ -35472,15 +35526,17 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
                 hasMSImageSampleCountsIndirect = true;
             } else {
                 extensions::sparse_texture::SparseStorageImageSidecarInfo sidecarInfo;
-                const auto sparseWriteRoute = img.sparseStorageImageWrite
-                    ? extensions::sparse_texture::resolveSparseStorageImageWriteBinding(
+                const bool sparseSidecarAccess =
+                    img.sparseStorageImageRead || img.sparseStorageImageWrite;
+                const auto sparseRoute = sparseSidecarAccess
+                    ? extensions::sparse_texture::resolveSparseStorageImageSidecarBinding(
                           extensionContext, *texObj, img.storageImageTarget, &sidecarInfo)
-                    : extensions::sparse_texture::SparseStorageImageWriteBindingRoute::NativeTexture;
-                if (sparseWriteRoute ==
-                    extensions::sparse_texture::SparseStorageImageWriteBindingRoute::SidecarTexture) {
+                    : extensions::sparse_texture::SparseStorageImageBindingRoute::NativeTexture;
+                if (sparseRoute ==
+                    extensions::sparse_texture::SparseStorageImageBindingRoute::SidecarTexture) {
                     tb.metalTexture = sidecarInfo.metalTexture;
-                } else if (sparseWriteRoute ==
-                           extensions::sparse_texture::SparseStorageImageWriteBindingRoute::SparseSidecarUnavailable) {
+                } else if (sparseRoute ==
+                           extensions::sparse_texture::SparseStorageImageBindingRoute::SparseSidecarUnavailable) {
                     continue;
                 } else {
                     if (ib.access != GL_READ_ONLY) {

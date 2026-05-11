@@ -104,45 +104,50 @@ const char* probeSourceForTarget(GLenum target) {
                 "#include <metal_stdlib>\n"
                 "using namespace metal;\n"
                 "kernel void appgl_sparse_storage_sidecar_probe(\n"
-                "    texture2d<float, access::write> sidecar [[texture(0)]],\n"
+                "    texture2d<float, access::read_write> sidecar [[texture(0)]],\n"
                 "    uint2 gid [[thread_position_in_grid]]) {\n"
-                "    sidecar.write(float4(1.0), gid);\n"
+                "    float4 v = sidecar.read(gid);\n"
+                "    sidecar.write(v, gid);\n"
                 "}\n";
         case GL_TEXTURE_2D_ARRAY:
             return
                 "#include <metal_stdlib>\n"
                 "using namespace metal;\n"
                 "kernel void appgl_sparse_storage_sidecar_probe(\n"
-                "    texture2d_array<float, access::write> sidecar [[texture(0)]],\n"
+                "    texture2d_array<float, access::read_write> sidecar [[texture(0)]],\n"
                 "    uint2 gid [[thread_position_in_grid]]) {\n"
-                "    sidecar.write(float4(1.0), gid, 0);\n"
+                "    float4 v = sidecar.read(gid, 0);\n"
+                "    sidecar.write(v, gid, 0);\n"
                 "}\n";
         case GL_TEXTURE_3D:
             return
                 "#include <metal_stdlib>\n"
                 "using namespace metal;\n"
                 "kernel void appgl_sparse_storage_sidecar_probe(\n"
-                "    texture3d<float, access::write> sidecar [[texture(0)]],\n"
+                "    texture3d<float, access::read_write> sidecar [[texture(0)]],\n"
                 "    uint3 gid [[thread_position_in_grid]]) {\n"
-                "    sidecar.write(float4(1.0), gid);\n"
+                "    float4 v = sidecar.read(gid);\n"
+                "    sidecar.write(v, gid);\n"
                 "}\n";
         case GL_TEXTURE_CUBE_MAP:
             return
                 "#include <metal_stdlib>\n"
                 "using namespace metal;\n"
                 "kernel void appgl_sparse_storage_sidecar_probe(\n"
-                "    texturecube<float, access::write> sidecar [[texture(0)]],\n"
+                "    texturecube<float, access::read_write> sidecar [[texture(0)]],\n"
                 "    uint2 gid [[thread_position_in_grid]]) {\n"
-                "    sidecar.write(float4(1.0), gid, 0);\n"
+                "    float4 v = sidecar.read(gid, 0);\n"
+                "    sidecar.write(v, gid, 0);\n"
                 "}\n";
         case GL_TEXTURE_CUBE_MAP_ARRAY:
             return
                 "#include <metal_stdlib>\n"
                 "using namespace metal;\n"
                 "kernel void appgl_sparse_storage_sidecar_probe(\n"
-                "    texturecube_array<float, access::write> sidecar [[texture(0)]],\n"
+                "    texturecube_array<float, access::read_write> sidecar [[texture(0)]],\n"
                 "    uint2 gid [[thread_position_in_grid]]) {\n"
-                "    sidecar.write(float4(1.0), gid, 0, 0);\n"
+                "    float4 v = sidecar.read(gid, 0, 0);\n"
+                "    sidecar.write(v, gid, 0, 0);\n"
                 "}\n";
         default:
             return nullptr;
@@ -415,32 +420,41 @@ bool ensureSparseStorageImageSidecar(ExtensionContext& ctx,
     return true;
 }
 
-SparseStorageImageWriteBindingRoute resolveSparseStorageImageWriteBinding(
+SparseStorageImageBindingRoute resolveSparseStorageImageSidecarBinding(
     ExtensionContext& ctx,
     GLTextureObject& texture,
     GLenum shaderImageTarget,
     SparseStorageImageSidecarInfo* outInfo) {
     if (!isSparseStorageImageSidecarTarget(shaderImageTarget)) {
-        return SparseStorageImageWriteBindingRoute::NativeTexture;
+        return SparseStorageImageBindingRoute::NativeTexture;
     }
     if (textureSparse(ctx, &texture) != GL_TRUE) {
-        return SparseStorageImageWriteBindingRoute::NativeTexture;
+        return SparseStorageImageBindingRoute::NativeTexture;
     }
     if (!isSparseStorageImageSidecarTarget(texture.target) ||
         isMultisampleStorageImageTarget(texture.target) ||
         texture.target != shaderImageTarget) {
-        return SparseStorageImageWriteBindingRoute::SparseSidecarUnavailable;
+        return SparseStorageImageBindingRoute::SparseSidecarUnavailable;
     }
 
     SparseStorageImageSidecarInfo info;
     if (!ensureSparseStorageImageSidecar(ctx, texture, &info) ||
         info.metalTexture == nullptr) {
-        return SparseStorageImageWriteBindingRoute::SparseSidecarUnavailable;
+        return SparseStorageImageBindingRoute::SparseSidecarUnavailable;
     }
     if (outInfo != nullptr) {
         *outInfo = info;
     }
-    return SparseStorageImageWriteBindingRoute::SidecarTexture;
+    return SparseStorageImageBindingRoute::SidecarTexture;
+}
+
+SparseStorageImageWriteBindingRoute resolveSparseStorageImageWriteBinding(
+    ExtensionContext& ctx,
+    GLTextureObject& texture,
+    GLenum shaderImageTarget,
+    SparseStorageImageSidecarInfo* outInfo) {
+    return resolveSparseStorageImageSidecarBinding(
+        ctx, texture, shaderImageTarget, outInfo);
 }
 
 bool getSparseStorageImageSidecar(ExtensionContext& ctx,

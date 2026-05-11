@@ -1614,6 +1614,35 @@ the generic sparse-feedback lowering from
 the same explicit sparse-feedback error. Depth MS sparse fetch remains a
 documented follow-up blocker rather than silently mis-lowering.
 
+### `spirv-cross-msl-sparse-sampled-sidecar-read.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` —
+`CompilerMSL::emit_texture_op` sparse-feedback lowering for compute-stage
+non-multisample sampled image sparse fetch/sample operations.
+
+**Summary:** Adds a compute-only fast path for non-depth `Dim2D`,
+`Dim3D`, `DimCube`, and `DimRect` sparse sampled operations. The emitted
+MSL still calls the original texture's native sparse operation and uses
+`resident()` for feedback, but reads the texel payload through
+`appgl_sparse_sampled_sidecar_<slot>` using the regular non-sparse
+texture operation. The `// APPGL_SPARSE_SAMPLED_SIDECAR` marker lets
+AppGL inject the extra sidecar texture parameter after SPIRV-Cross
+emission.
+
+**Why:** Phase 7.6.3 routes compute `imageStore` on sparse non-MS images
+to `SparseStorageImageEmulation` sidecars because Apple sparse textures
+do not provide the required storage-write path. Sparse sampled
+`sparseTexelFetchARB` / `sparseTextureARB` must therefore keep residency
+from the native sparse texture but source color from the same sidecar that
+storage writes update. This preserves GL-visible imageStore→sample
+coherence without a sidecar-to-sparse-heap mirror.
+
+**Regression-safe:** The path is gated to compute, sampled-image,
+non-multisample, non-depth sparse fetch/sample operations on sidecar
+eligible dimensions. Other sparse operations continue through the generic
+MSL sparse-feedback lowering, and pre-MSL-2.3 targets retain the existing
+explicit sparse-feedback error.
+
 ### `spirv-cross-msl-sparse-storage-image-write.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` —
