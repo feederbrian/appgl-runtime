@@ -2427,10 +2427,12 @@ struct GLContext::Impl {
             case MTLPixelFormatRGBA32Float:   return {4, 4, 16, NativeFormatInfo::Float};
             case MTLPixelFormatRGBA32Uint:    return {4, 4, 16, NativeFormatInfo::UInt};
             case MTLPixelFormatRGBA32Sint:    return {4, 4, 16, NativeFormatInfo::SInt};
-            // ── Packed (not supported for native upload) ──
+            // ── Packed native layouts. channels==0 marks formats whose
+            // component extraction/packing is handled by dedicated paths.
             case MTLPixelFormatRGB10A2Unorm:  return {0, 0, 4, NativeFormatInfo::UNorm};
             case MTLPixelFormatRGB10A2Uint:   return {0, 0, 4, NativeFormatInfo::UInt};
             case MTLPixelFormatRG11B10Float:  return {0, 0, 4, NativeFormatInfo::Float};
+            case MTLPixelFormatRGB9E5Float:   return {0, 0, 4, NativeFormatInfo::Float};
             // ── Depth / stencil ──
             // Metal's depth formats expose a single float or UNorm
             // channel for sampling purposes. The `buildNativeUpload`
@@ -4809,8 +4811,9 @@ struct GLContext::Impl {
             // non-RGBA8 Metal pixel format. This unblocks copy_image
             // round-trips that need >8-bit precision (rgb10 / rgb32f /
             // RGBA32UI etc.) per CKPT109 carryover. nativeBpp = 0 for
-            // RGBA8-mapped formats (no native shadow needed; rgba8 IS
-            // the native shadow).
+            // RGBA8-mapped formats (no native shadow needed; rgba8 IS the
+            // native shadow). Sprint 19 sparse uses the same native shadow
+            // for packed 4-byte formats (RGB10A2 / RG11B10F / RGB9E5).
             const MTLPixelFormat nativePixelFmt = metalRenderbufferFormat(internalFormat);
             const auto nativeInfo = nativeFormatInfo(nativePixelFmt);
             if (nativeInfo.bytesPerPixel > 0
@@ -4820,22 +4823,11 @@ struct GLContext::Impl {
                 object.nativeBpp = static_cast<std::size_t>(nativeInfo.bytesPerPixel);
                 object.nativeData.assign(texelCount * object.nativeBpp, 0);
             } else {
-                // RGBA8-mapped (rgba8 shadow IS the native representation),
-                // OR packed Metal format with channels==0 (RGB10A2 /
-                // RG11B10F / RGB9E5 — bytesPerPixel=4 but channels=0). For
-                // packed, allocate nativeData as 4 bpp since pack/unpack
-                // happens in copy_image fast-path; for RGBA8 leave
-                // nativeBpp=0 to mark "rgba8 is canonical."
-                if (nativePixelFmt == MTLPixelFormatRGB10A2Unorm ||
-                    nativePixelFmt == MTLPixelFormatRGB10A2Uint ||
-                    nativePixelFmt == MTLPixelFormatRG11B10Float ||
-                    nativePixelFmt == MTLPixelFormatRGB9E5Float) {
-                    object.nativeBpp = 4;
-                    object.nativeData.assign(texelCount * 4u, 0);
-                } else {
-                    object.nativeBpp = 0;
-                    object.nativeData.clear();
-                }
+                // RGBA8-mapped formats use rgba8 as the canonical native
+                // shadow; unsupported native formats fall back to no native
+                // shadow.
+                object.nativeBpp = 0;
+                object.nativeData.clear();
             }
         }
         if (isDepthFormat(internalFormat)) {
@@ -15503,7 +15495,9 @@ bool GLContext::texStorage(
             * static_cast<std::size_t>(image.desc.height)
             * static_cast<std::size_t>(image.desc.depth);
         image.rgba8.resize(lvlPixels * 4u, 0);
-        if (nativeInfo.channels > 0 && nativeInfo.bytesPerPixel > 0) {
+        // Packed native formats report channels==0 but still need their
+        // 4-byte native shadow so sparse uploads can commit real Metal texels.
+        if (nativeInfo.bytesPerPixel > 0) {
             image.nativeBpp =
                 static_cast<std::size_t>(nativeInfo.bytesPerPixel);
             image.nativeData.resize(lvlPixels * image.nativeBpp, 0);

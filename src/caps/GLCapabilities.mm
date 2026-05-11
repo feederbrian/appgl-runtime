@@ -721,7 +721,10 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // CKPT157 (Sprint 14 Day 4): bumped 45 → 46 for GL_ARB_texture_view
     // (re-enabled after CKPT156 deferral; Metal-side per-target mipmap
     // clamp implemented in replaceMetalTexture).
-    integerLimits_[GL_NUM_EXTENSIONS] = 46;
+    // Sprint 19: bumped 46 → 47 for base GL_ARB_sparse_texture after CTS
+    // base sparse allocation/commitment passed; sparse_texture2/clamp stay
+    // deliberately unadvertised.
+    integerLimits_[GL_NUM_EXTENSIONS] = 47;
     // GL 4.6 SPIR-V extension queries.  The SPIR-V extensions CTS test
     // (KHR-GL46.spirv_extensions.spirv_extensions_queries) calls
     // glGetIntegerv(GL_NUM_SPIR_V_EXTENSIONS) and then iterates with
@@ -1170,6 +1173,9 @@ void GLCapabilities::initializeExtensions() {
         "GL_ARB_base_instance "
         "GL_ARB_sampler_objects "
         "GL_ARB_texture_storage "
+        // Sprint 19: base sparse texture allocation/commitment is live for
+        // CTS base targets/formats. sparse_texture2/clamp remain gated.
+        "GL_ARB_sparse_texture "
         "GL_ARB_texture_swizzle "
         "GL_ARB_separate_shader_objects "
         "GL_ARB_program_interface_query "

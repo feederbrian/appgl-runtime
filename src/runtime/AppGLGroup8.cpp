@@ -1551,6 +1551,10 @@ static const char* const kAppGLExtensionList[] = {
     "GL_ARB_base_instance",
     "GL_ARB_sampler_objects",
     "GL_ARB_texture_storage",
+    // Sprint 19: advertise base sparse textures after Metal heap/page
+    // mapping covered CTS base allocation and commitment across all base
+    // sparse targets and formats. sparse_texture2/clamp remain gated.
+    "GL_ARB_sparse_texture",
     "GL_ARB_texture_swizzle",
     "GL_ARB_separate_shader_objects",
     "GL_ARB_program_interface_query",
