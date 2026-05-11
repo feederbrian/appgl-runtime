@@ -26880,6 +26880,7 @@ bool GLContext::linkProgram(GLuint program) {
             (void)translateCachedStage("tess-eval", tessEvalShader,
                                        programObject->tessEvalMSL, teRefl,
                                        tessOpts);
+            programObject->tessEvalAsComputeReflection = teRefl;
             // Extract tessellation execution modes from SPIR-V.
             programObject->hasTessellation = true;
             if (!tessEvalShader->spirv.empty()) {
@@ -26899,6 +26900,7 @@ bool GLContext::linkProgram(GLuint program) {
                 programObject->tessEvalSpirv = tessEvalShader->spirv;
                 programObject->tessEvalParsedModule.reset();
             }
+            (void)appgl::detectTessellationEmulatable(*programObject);
             rasterTranslationOk = true;
             break;
         }
@@ -30120,6 +30122,37 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     synth->vertexSpirv = vsProg ? vsProg->vertexSpirv : std::vector<std::uint32_t>{};
     synth->tessControlSpirv = tcsProg->tessControlSpirv;
     synth->tessEvalSpirv = tesProg->tessEvalSpirv;
+    synth->tessellationEmulated = tesProg->tessellationEmulated;
+    synth->tessellationInterpreted = tesProg->tessellationInterpreted;
+    synth->tessControlInterpreted = tcsProg->tessControlInterpreted;
+    for (int i = 0; i < 4; ++i) {
+        synth->tessPositionMapping[i] = tesProg->tessPositionMapping[i];
+        synth->tessPositionScale[i] = tesProg->tessPositionScale[i];
+        synth->tessPositionOffset[i] = tesProg->tessPositionOffset[i];
+        synth->tessPositionConstant[i] = tesProg->tessPositionConstant[i];
+    }
+    synth->tessVaryings = tesProg->tessVaryings;
+    (void)appgl::detectTessellationEmulatable(*synth);
+
+    auto mergeStageUniforms = [&](const GLProgramObject* src) {
+        if (src == nullptr) return;
+        for (const auto& uniform : src->uniforms) {
+            const auto sameName = [&](const GLProgramUniformInfo& existing) {
+                return existing.name == uniform.name;
+            };
+            if (std::find_if(synth->uniforms.begin(), synth->uniforms.end(), sameName) ==
+                synth->uniforms.end()) {
+                synth->uniforms.push_back(uniform);
+            }
+        }
+        for (const auto& entry : src->uniformValues) {
+            synth->uniformValues.emplace(entry.first, entry.second);
+        }
+    };
+    mergeStageUniforms(vsProg);
+    mergeStageUniforms(tcsProg);
+    mergeStageUniforms(tesProg);
+    mergeStageUniforms(fsProg);
 
     // TF varying names live on the TES separable program (linked
     // there via glTransformFeedbackVaryings or in-shader xfb_buffer
@@ -31741,6 +31774,12 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                         impl_->ensurePipelineTessSynthesizedProgram(*ppo)) {
                     tessProgram = synth;
                     tessProgramName = 0;  // synthetic — no GL program name
+                } else if (ppo->tessEvalProgram != 0) {
+                    if (GLProgramObject* tes =
+                            impl_->objects->programs().get(ppo->tessEvalProgram)) {
+                        tessProgram = tes;
+                        tessProgramName = ppo->tessEvalProgram;
+                    }
                 }
             }
         }
@@ -31749,19 +31788,45 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         tessProgram->hasTessellation &&
         tessProgram->metalTessTier != GLProgramObject::MetalTessTier::None &&
         !tessProgram->geometryEmulated) {
-        const bool preferCpuTessSsboSideEffects =
-            tessProgram == program &&
-            (tessProgram->tessControlInterpreted ||
-             tessProgram->tessellationInterpreted) &&
+        auto hasStorageImageUniform = [&](const std::vector<std::uint32_t>& spirv,
+                                          const ShaderReflection& reflection) -> bool {
+            if (!reflection.storageImages.empty()) return true;
+            if (spirv.empty()) return false;
+            const auto vars = appgl::collectSamplerVarsFromSpirv(
+                spirv.data(), spirv.size());
+            constexpr const char* kAppglPrefix = "_appgl_";
+            constexpr std::size_t kAppglPrefixLen = 7;
+            for (const auto& v : vars) {
+                std::string lookupName = v.name;
+                if (lookupName.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                    lookupName = lookupName.substr(kAppglPrefixLen);
+                }
+                for (const auto& uniform : tessProgram->uniforms) {
+                    if (uniform.name == lookupName && isImageUniformType(uniform.type)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        const bool interpretedTess =
+            tessProgram->tessControlInterpreted ||
+            tessProgram->tessellationInterpreted;
+        const bool preferCpuTessSideEffects =
+            interpretedTess &&
             (!tessProgram->tessControlReflection.storageBuffers.empty() ||
-             !tessProgram->tessEvalAsComputeReflection.storageBuffers.empty());
-        // TCS-SSBO routing: the Metal tess encoder currently binds only
+             !tessProgram->tessEvalAsComputeReflection.storageBuffers.empty() ||
+             hasStorageImageUniform(tessProgram->tessControlSpirv,
+                                    tessProgram->tessControlReflection) ||
+             hasStorageImageUniform(tessProgram->tessEvalSpirv,
+                                    tessProgram->tessEvalAsComputeReflection));
+        // TCS/TES side-effect routing: the Metal tess encoder currently binds only
         // its internal tess buffers (factors, per-CP/per-patch, indirect
-        // params). Keep interpreted SSBO side effects on the CPU path,
+        // params). Keep interpreted storage-buffer/image side effects on the CPU path,
         // sister to the GS-emul SSBO resolver, until arbitrary tess-stage
-        // storage-buffer slots are plumbed through Metal.
-        if (preferCpuTessSsboSideEffects) {
-            APPGL_LOG(SHADER, @"drawArrays metal-tess skipped for interpreted tess SSBO side effects");
+        // storage slots are plumbed through Metal.
+        if (preferCpuTessSideEffects) {
+            APPGL_LOG(SHADER, @"drawArrays metal-tess skipped for interpreted tess side effects");
         } else {
             if (impl_->tryMetalTessellationDraw(
                     *tessProgram, tessProgramName, mode, count, first)) {
@@ -31773,9 +31838,11 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
         }
     }
 
-    if (program != nullptr &&
-        (program->tessellationEmulated || program->tessellationInterpreted) &&
-        !program->geometryEmulated) {
+    GLProgramObject* tessEmulProgram = tessProgram != nullptr ? tessProgram : program;
+    const GLuint tessEmulProgramName = tessEmulProgram == tessProgram ? tessProgramName : programName;
+    if (tessEmulProgram != nullptr &&
+        (tessEmulProgram->tessellationEmulated || tessEmulProgram->tessellationInterpreted) &&
+        !tessEmulProgram->geometryEmulated) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* tvao = (vaoName != 0)
             ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
@@ -31790,32 +31857,32 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             // reflection data lives in tessEvalAsComputeReflection
             // (legacy naming — also used by pure CPU emul path).
             appgl::SampledTextureMap vsSamMap, vsImgMap, tcsSamMap, tcsImgMap, tesSamMap, tesImgMap;
-            if (!program->vertexSpirv.empty()) {
+            if (!tessEmulProgram->vertexSpirv.empty()) {
                 vsSamMap = impl_->buildSampledTextureMap(
-                    program->vertexSpirv,
-                    &program->vertexReflection, *program);
+                    tessEmulProgram->vertexSpirv,
+                    &tessEmulProgram->vertexReflection, *tessEmulProgram);
                 vsImgMap = impl_->buildStorageImageMap(
-                    program->vertexSpirv,
-                    &program->vertexReflection, *program);
+                    tessEmulProgram->vertexSpirv,
+                    &tessEmulProgram->vertexReflection, *tessEmulProgram);
             }
-            if (!program->tessControlSpirv.empty()) {
+            if (!tessEmulProgram->tessControlSpirv.empty()) {
                 tcsSamMap = impl_->buildSampledTextureMap(
-                    program->tessControlSpirv,
-                    &program->tessControlReflection, *program);
+                    tessEmulProgram->tessControlSpirv,
+                    &tessEmulProgram->tessControlReflection, *tessEmulProgram);
                 tcsImgMap = impl_->buildStorageImageMap(
-                    program->tessControlSpirv,
-                    &program->tessControlReflection, *program);
+                    tessEmulProgram->tessControlSpirv,
+                    &tessEmulProgram->tessControlReflection, *tessEmulProgram);
             }
-            if (!program->tessEvalSpirv.empty()) {
+            if (!tessEmulProgram->tessEvalSpirv.empty()) {
                 tesSamMap = impl_->buildSampledTextureMap(
-                    program->tessEvalSpirv,
-                    &program->tessEvalAsComputeReflection, *program);
+                    tessEmulProgram->tessEvalSpirv,
+                    &tessEmulProgram->tessEvalAsComputeReflection, *tessEmulProgram);
                 tesImgMap = impl_->buildStorageImageMap(
-                    program->tessEvalSpirv,
-                    &program->tessEvalAsComputeReflection, *program);
+                    tessEmulProgram->tessEvalSpirv,
+                    &tessEmulProgram->tessEvalAsComputeReflection, *tessEmulProgram);
             }
             appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
-                *program, *tvao, *impl_->objects, *impl_->state,
+                *tessEmulProgram, *tvao, *impl_->objects, *impl_->state,
                 mode, count, first, /*elementIndices=*/nullptr,
                 /*instanceCount=*/1, /*baseInstance=*/0,
                 tcsSamMap.empty() ? nullptr : &tcsSamMap,
@@ -31836,14 +31903,14 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 // tess-emul's EmulatedDraw layout (position + varying
                 // floats per vertex) is byte-compatible with what the
                 // helper expects.
-                if (impl_->writeGsXfbAndCheckDiscard(*program, ted)) {
+                if (impl_->writeGsXfbAndCheckDiscard(*tessEmulProgram, ted)) {
                     return true;
                 }
                 if (ted.vertexCount == 0) {
                     APPGL_LOG(DRAW, @"drawArrays tess-emul: zero verts");
                     return true;
                 }
-                if (impl_->encodeEmulatedGsDraw(*program, programName, ted)) {
+                if (impl_->encodeEmulatedGsDraw(*tessEmulProgram, tessEmulProgramName, ted)) {
                     APPGL_LOG(DRAW, @"drawArrays tess-emul ok: verts=%zu topo=0x%X",
                               ted.vertexCount, ted.topology);
                     return true;
