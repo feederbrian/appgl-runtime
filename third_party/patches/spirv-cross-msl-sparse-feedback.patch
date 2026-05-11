@@ -1,0 +1,130 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -10968,6 +10968,32 @@
+ 		MSL_ImgQry(samples);
+ 		break;
+ 
++	// Sparse residency / feedback (SPV_KHR_sparse_residency, lowered from
++	// GL_ARB_sparse_texture2 builtins).
++	//
++	// CompilerMSL::emit_texture_op rebinds the SPIR-V feedback-code id to an
++	// `int` temp holding `int(spvSparseN.resident())` — so all we have to do
++	// here is re-express that int as a bool. The GLSL backend emits
++	// `sparseTexelsResidentARB(<code>)` which is logically `<code> != 0`;
++	// that's identical to the int(resident()) encoding.
++	case OpImageSparseTexelsResident:
++	{
++		uint32_t result_type = ops[0];
++		uint32_t id = ops[1];
++		uint32_t arg = ops[2];
++		string expr = join("(", to_enclosed_unpacked_expression(arg), " != 0)");
++		emit_op(result_type, id, expr, should_forward(arg));
++		inherit_expression_dependencies(id, arg);
++		break;
++	}
++
++	// Storage-image sparse load (OpImageSparseRead via image2D et al). The GLSL
++	// backend emits `sparseImageLoadARB`; Metal has no direct equivalent for
++	// shader-stage sparse reads on storage images. Treated as a separate
++	// patch surface — fail explicitly so callers can flag.
++	case OpImageSparseRead:
++		SPIRV_CROSS_THROW("OpImageSparseRead (sparse storage-image load) is not yet supported in MSL.");
++
+ 	case OpImage:
+ 	{
+ 		uint32_t result_type = ops[0];
+@@ -12038,9 +12064,68 @@
+ 
+ void CompilerMSL::emit_texture_op(const Instruction &i, bool sparse)
+ {
++	// Sparse residency / feedback path (SPV_KHR_sparse_residency, lowered from
++	// GL_ARB_sparse_texture2 builtins like sparseTextureARB/sparseTexelFetchARB).
++	//
++	// MSL maps the SPIR-V `{int feedback_code, vec4 texel}` result struct onto
++	// Apple's `metal::sparse_color<T>` return type from
++	// `texture::sparse_sample(...)`, `texture::sparse_read(...)`, and
++	// `texture::sparse_gather(...)`. `sparse_color<T>` exposes `.resident()`
++	// (bool) and `.value()` (T). The SPIR-V feedback id is bound to an int
++	// holding `int(spvSparse<N>.resident())`; `OpImageSparseTexelsResident`
++	// then re-emits that int as a bool.
++	//
++	// Sparse texture APIs are available in MSL 2.3+ (macOS 11+).
+ 	if (sparse)
+-		SPIRV_CROSS_THROW("Sparse feedback not yet supported in MSL.");
++	{
++		if (!msl_options.supports_msl_version(2, 3))
++			SPIRV_CROSS_THROW("Sparse texture feedback requires MSL 2.3 / macOS 11.0+.");
+ 
++		auto *ops = stream(i);
++		uint32_t result_type_id = ops[0];
++		uint32_t id = ops[1];
++
++		// Allocate feedback-code + texel temporaries (same scaffolding as the
++		// GLSL backend). emit_sparse_feedback_temporaries declares an int and a
++		// T temp; we then assign into them from the sparse_color result.
++		uint32_t sparse_code_id = 0;
++		uint32_t sparse_texel_id = 0;
++		emit_sparse_feedback_temporaries(result_type_id, id, sparse_code_id, sparse_texel_id);
++
++		// Build the sparse_sample / sparse_read / sparse_gather call expression
++		// via the normal MSL emit pipeline. CompilerMSL::to_function_name has
++		// been extended to emit the `sparse_` prefix on the base call when
++		// args.is_sparse_feedback is true.
++		bool forward = false;
++		SmallVector<uint32_t> inherited_expressions;
++		string call_expr = to_texture_op(i, true, &forward, inherited_expressions);
++
++		auto &return_type = get<SPIRType>(result_type_id);
++		if (return_type.basetype != SPIRType::Struct || return_type.member_types.size() != 2)
++			SPIRV_CROSS_THROW("Invalid return type for sparse feedback.");
++
++		// Allocate a scoped sparse_color<T> identifier and emit the binding
++		// statements. We use `auto` to avoid declaring the templated
++		// sparse_color<T> type explicitly.
++		uint32_t sparse_obj_id = ir.increase_bound_by(1);
++		string sparse_obj = join("spvSparse", sparse_obj_id);
++		statement("auto ", sparse_obj, " = ", call_expr, ";");
++		// MSL `resident()` returns bool; cast to the int feedback temp.
++		statement(to_expression(sparse_code_id), " = int(", sparse_obj, ".resident());");
++		statement(to_expression(sparse_texel_id), " = ", sparse_obj, ".value();");
++
++		// Rebind the original SPIR-V result-id to a ResultStruct aggregate
++		// composed of the int feedback code + texel temporaries. Brace-init is
++		// valid MSL aggregate construction for POD structs.
++		string expr = join(type_to_glsl(return_type), "{ ",
++		                   to_expression(sparse_code_id), ", ",
++		                   to_expression(sparse_texel_id), " }");
++		emit_op(result_type_id, id, expr, true);
++		for (auto &inherit : inherited_expressions)
++			inherit_expression_dependencies(id, inherit);
++		return;
++	}
++
+ 	if (msl_options.use_framebuffer_fetch_subpasses)
+ 	{
+ 		auto *ops = stream(i);
+@@ -13515,13 +13600,17 @@
+ 	{
+ 		fname = to_expression(combined ? combined->image : img) + ".";
+ 
+-		// Texture function and sampler
+-		if (args.base.is_fetch)
+-			fname += "read";
+-		else if (args.base.is_gather)
+-			fname += "gather";
++		// Texture function and sampler. When sparse-feedback emission is
++		// requested (OpImageSparseSample/Fetch/Gather), prefix `sparse_` so we
++		// call Metal's sparse_sample / sparse_read / sparse_gather overloads
++		// which return `metal::sparse_color<T>` carrying both the texel value
++		// and a residency bit.
++		if (args.base.is_fetch)
++			fname += args.is_sparse_feedback ? "sparse_read" : "read";
++		else if (args.base.is_gather)
++			fname += args.is_sparse_feedback ? "sparse_gather" : "gather";
+ 		else
+-			fname += "sample";
++			fname += args.is_sparse_feedback ? "sparse_sample" : "sample";
+ 
+ 		if (args.has_dref)
+ 			fname += "_compare";

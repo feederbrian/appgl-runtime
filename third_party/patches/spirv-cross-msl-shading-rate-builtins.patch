@@ -1,0 +1,75 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -14789,9 +14789,14 @@
+ 		BuiltIn builtin = BuiltInMax;
+ 		if (is_member_builtin(type, index, &builtin))
+ 		{
+-			if (builtin == BuiltInPrimitiveShadingRateKHR)
++			// PrimitiveShadingRateKHR was previously emitted as an empty member
++			// because pre-MSL-2.4 Metal had no [[primitive_shading_rate]] attribute.
++			// When MSL 2.4+ is targeted, fall through to the standard emit path so
++			// the member is generated with the [[primitive_shading_rate]] qualifier
++			// from CompilerMSL::builtin_qualifier.
++			if (builtin == BuiltInPrimitiveShadingRateKHR && !msl_options.supports_msl_version(2, 4))
+ 			{
+-				// not supported in metal 3.0
++				// not supported in metal pre-2.4
+ 				is_using_builtin_array = false;
+ 				return "";
+ 			}
+@@ -14799,7 +14804,8 @@
+ 			SPIRType metallic_type = *declared_type;
+ 			if (builtin == BuiltInCullPrimitiveEXT)
+ 				metallic_type.basetype = SPIRType::Boolean;
+-			else if (builtin == BuiltInPrimitiveId || builtin == BuiltInLayer || builtin == BuiltInViewportIndex)
++			else if (builtin == BuiltInPrimitiveId || builtin == BuiltInLayer || builtin == BuiltInViewportIndex ||
++			         builtin == BuiltInPrimitiveShadingRateKHR)
+ 				metallic_type.basetype = SPIRType::UInt;
+
+ 			is_using_builtin_array = true;
+@@ -15160,6 +15166,7 @@
+ 			case BuiltInLayer:
+ 			case BuiltInBaryCoordKHR:
+ 			case BuiltInBaryCoordNoPerspKHR:
++			case BuiltInShadingRateKHR:
+ 				quals = builtin_qualifier(builtin);
+ 				break;
+
+@@ -20197,6 +20204,22 @@
+
+ 	case BuiltInCullPrimitiveEXT:
+ 		return "primitive_culled";
++
++	// Fragment shading rate (GL_EXT_fragment_shading_rate / SPV_KHR_fragment_shading_rate).
++	// Per-fragment input: MSL exposes [[shading_rate]] from MSL 2.4 onward (macOS 12+).
++	// Per-primitive output: MSL exposes [[primitive_shading_rate]] in the mesh-shader
++	// output struct from MSL 2.4 onward; vertex/geometry-stage primitive output is
++	// not supported by Metal.
++	case BuiltInShadingRateKHR:
++		if (!msl_options.supports_msl_version(2, 4))
++			SPIRV_CROSS_THROW("ShadingRate input requires MSL 2.4.");
++		return "shading_rate";
++	case BuiltInPrimitiveShadingRateKHR:
++		if (!msl_options.supports_msl_version(2, 4))
++			SPIRV_CROSS_THROW("PrimitiveShadingRate output requires MSL 2.4.");
++		if (execution.model != ExecutionModelMeshEXT)
++			SPIRV_CROSS_THROW("PrimitiveShadingRate output requires a mesh-shader execution model in MSL.");
++		return "primitive_shading_rate";
+
+ 	default:
+ 		return "unsupported-built-in";
+@@ -20321,6 +20344,13 @@
+ 		return "uint2";
+ 	case BuiltInPrimitiveTriangleIndicesEXT:
+ 		return "uint3";
++
++	// Fragment shading rate (GL_EXT_fragment_shading_rate). Both builtins are
++	// scalar packed bit-masks; the SPIR-V FragmentShadingRateMask encoding
++	// (V2/V4/H2/H4) is the same as Metal's [[shading_rate]] value layout.
++	case BuiltInShadingRateKHR:
++	case BuiltInPrimitiveShadingRateKHR:
++		return "uint";
+
+ 	default:
+ 		return "unsupported-built-in-type";

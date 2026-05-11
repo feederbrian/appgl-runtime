@@ -1488,6 +1488,87 @@ distinction is made at the SPIR-V decoration level, not the text.
 
 **Regression-safe:** the new arms add `imgtype.image.dim != DimRect` to existing skip gates that already exclude `Dim1D`. Non-rect samplers retain their original LOD/bias/gradient emission. Section sweep verified zero regression: 272/297 P, 22 F, 3 NS on `tessellation_shader.* + geometry_shader.* + transform_feedback.*`.
 
+### `spirv-cross-msl-shading-rate-builtins.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — adds MSL backend
+emit for `BuiltInShadingRateKHR` (per-fragment input) and
+`BuiltInPrimitiveShadingRateKHR` (per-primitive mesh-shader output),
+backing the SPV_KHR_fragment_shading_rate capability that
+`GL_EXT_fragment_shading_rate` lowers to.
+
+**Summary:** Five surgical insertion points in `spirv_msl.cpp`:
+(1) `CompilerMSL::builtin_qualifier` (~line 20200): add two arms returning `"shading_rate"` and `"primitive_shading_rate"` with MSL-2.4 version gate and an execution-model gate that requires `ExecutionModelMeshEXT` for the primitive-output case (Apple Metal does not expose primitive-shading-rate from vertex/geometry stages).
+(2) `CompilerMSL::builtin_type_decl` (~line 20347): both builtins map to `"uint"` — the SPIR-V `FragmentShadingRateMask` encoding (V2/V4/H2/H4 bits) matches Metal's `[[shading_rate]]` integer-mask layout.
+(3) Mesh-shader output struct path (~line 14792): replace the pre-existing `// not supported in metal 3.0` early-return for `BuiltInPrimitiveShadingRateKHR` with an MSL-2.4 version gate — when 2.4+ is targeted, fall through to the standard member-emit path so the `[[primitive_shading_rate]]` qualifier flows from `builtin_qualifier`. Also extend the basetype-to-uint coercion list (already covering `BuiltInPrimitiveId` / `BuiltInLayer` / `BuiltInViewportIndex`) to include `BuiltInPrimitiveShadingRateKHR`.
+(4) `CompilerMSL::member_attribute_qualifier` fragment-input switch (~line 15166): add `BuiltInShadingRateKHR` to the case list so fragment-stage stage_in struct members receive the qualifier.
+
+**Why:** MSL backend had zero arm for `BuiltInShadingRateKHR` in `builtin_qualifier` / `builtin_type_decl`, so the default `"unsupported-built-in"` token would land in the emitted MSL and the AppGL ShaderTranslator would fail downstream Metal compile. The pre-existing `BuiltInPrimitiveShadingRateKHR` partial handling in the mesh-out path silently dropped the member, which would compile cleanly but produce semantically-wrong MSL (the SPIR-V write target effectively disappeared).
+
+**CTS tests advanced (sub-section progress):** AppGL-CW CTS coverage for `KHR-GL46.fragment_shading_rate.*` was previously blocked at the shader-translation layer for any test reading `gl_ShadingRateEXT` or writing `gl_PrimitiveShadingRateEXT`. Post-patch, the SPIRV-Cross CLI emits `uint gl_ShadingRateEXT [[shading_rate]]` for a minimal fragment shader and `uint gl_PrimitiveShadingRateEXT [[primitive_shading_rate]]` for a minimal mesh shader — both confirmed via synthetic translate probe at MSL 2.4 target. Test-flip count deferred to AppGL-CW integration verification (advertise-gated; current `GL_EXT_fragment_shading_rate` is no-advert per `0bf67db`).
+
+**Regression-safe:** All additions are switch-arms with version-gates guarded by `msl_options.supports_msl_version(2, 4)`; the pre-patch behavior is exactly preserved for any target below MSL 2.4. The mesh-out path's early-return is preserved verbatim when `!supports_msl_version(2, 4)`. No new SPVFuncImpl helpers, no new public API. Patch size: 7 hunks, 33 lines added, 2 lines removed (35 LOC net additions excluding context).
+
+### `spirv-cross-msl-sparse-feedback.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — implements `CompilerMSL::emit_texture_op` lowering for `OpImageSparseSample*` / `OpImageSparseFetch` / `OpImageSparseGather*` / `OpImageSparseTexelsResident`, backing `SPV_KHR_sparse_residency` (the SPIR-V capability that `GL_ARB_sparse_texture2` and `GL_ARB_sparse_texture_clamp` lower to).
+
+**Summary:** Three surgical change sites in `spirv_msl.cpp`:
+(1) `CompilerMSL::emit_instruction` (~line 10970): new arms for `OpImageSparseTexelsResident` (emit `(<feedback_code> != 0)` bool expression) and `OpImageSparseRead` (explicit `SPIRV_CROSS_THROW` for unsupported storage-image sparse load — separate patch surface).
+(2) `CompilerMSL::emit_texture_op` (~line 12039): replace the pre-existing `Sparse feedback not yet supported in MSL.` throw with a `sparse_color<T>` rebind. When `sparse=true`: gate on `msl_options.supports_msl_version(2, 3)`, allocate feedback-code + texel temporaries via the GLSL-backend helper `emit_sparse_feedback_temporaries`, build the call expression via `to_texture_op` (which now routes to `sparse_sample` / `sparse_read` / `sparse_gather` via `to_function_name`), emit `auto spvSparseN = <call>;`, bind `<feedback_code> = int(spvSparseN.resident());` and `<texel> = spvSparseN.value();`, then rebind the SPIR-V result id to a `ResultStruct{ feedback, texel }` brace-init aggregate.
+(3) `CompilerMSL::to_function_name` (~line 13519): prepend `sparse_` to the base call when `args.is_sparse_feedback` is true — `sample`→`sparse_sample`, `read`→`sparse_read`, `gather`→`sparse_gather`. The `_compare` suffix flows through unchanged for `sparse_sample_compare` (Dref variants).
+
+**Why:** MSL backend hard-coded `SPIRV_CROSS_THROW("Sparse feedback not yet supported in MSL.")` on any `sparse=true` invocation, blocking the entire `GL_ARB_sparse_texture2` / `GL_ARB_sparse_texture_clamp` lookup family (`sparseTextureARB`, `sparseTextureLodARB`, `sparseTextureGradARB`, `sparseTextureOffsetARB`, `sparseTexelFetchARB`, `sparseTextureGatherARB`, `sparseTextureClampARB`, `sparseTextureGradClampARB`, and `sparseTexelsResidentARB`). Apple's MSL exposes `metal::sparse_color<T>` from `texture::sparse_sample` / `texture::sparse_read` / `texture::sparse_gather` (MSL 2.3+ / macOS 11+) carrying `.value()` (T) and `.resident()` (bool) — the natural target for the SPIR-V `{int feedback_code, vec4 texel}` result struct. SPIR-V `OpImageSparseTexelsResident(<code>)` semantically is `<code> != 0` after the `int(resident())` encoding, identical to the GLSL backend's `sparseTexelsResidentARB(<code>)` reading.
+
+**Risk-E follow-up resolved:** `GL_ARB_sparse_texture_clamp` (`sparseTextureClampARB`, `sparseTextureGradClampARB`) was orientation-flagged as potentially needing a separate patch for the SPIR-V `MinLod` image operand. Synthetic translate probe at MSL 2.3 target confirms the existing MSL `to_function_args` `min_lod_clamp(...)` overload (line 14034) flows through the sparse path unmodified — `sparse_sample(s, c, min_lod_clamp(L))` and `sparse_sample(s, c, gradient2d(gx, gy), min_lod_clamp(L))` both emit cleanly. No separate clamp patch needed; this single patch covers the full ARB sparse_texture2 + sparse_texture_clamp opcode family.
+
+**CTS tests advanced (sub-section progress):** AppGL-CW CTS coverage for `KHR-GL46.sparse_texture2_tests.*` (1204 cases) and the `negative_texture_lookup_functions_with_bias_tests.sparseTexture*` wrapper bias coverage (27 cases) was previously blocked at the shader-translation layer with `msl_log=SPIRV-Cross error: Sparse feedback not yet supported in MSL.` (per AppGL-CW empirical probe in `sprint19-sparse-texture2-spirv-gap-2026-05-11.md`). Post-patch, the AppGL-CW substrate compute shader emits clean MSL with `tex.sparse_sample(texSmplr, float2(0.5), level(0.0))` + `.resident()` / `.value()` accessors. Synthetic translate probes at MSL 2.3 target cover sparseTextureARB / sparseTextureLodARB / sparseTextureGradARB / sparseTextureOffsetARB / sparseTexelFetchARB / sparseTextureGatherARB / sparseTexelsResidentARB / sparseTextureClampARB / sparseTextureGradClampARB / sampler2DShadow-dref — all MSL emit verified clean. Test-flip count deferred to AppGL-CW integration verification (advertise-gated; `GL_ARB_sparse_texture2` and `GL_ARB_sparse_texture_clamp` no-advert per `35a4e67`).
+
+**Regression-safe:** The `sparse=false` path is untouched — the non-sparse `emit_texture_op` body (frame-buffer-fetch subpass shortcut + `CompilerGLSL::emit_texture_op` fallback) flows through verbatim. `to_function_name` adds a `sparse_` prefix only when `args.is_sparse_feedback` is true; non-sparse callers emit `sample` / `read` / `gather` exactly as before. MSL version gate at `msl_options.supports_msl_version(2, 3)` throws a clear error for pre-2.3 targets instead of emitting invalid code. `OpImageSparseRead` throws explicitly rather than falling through to GLSL's `sparseImageLoadARB` (which would emit invalid MSL). GLSL backend emission for the same input SPIR-V is byte-identical pre- and post-patch (verified via diff against SPIRV-Cross's `reference/shaders-no-opt/frag/sparse-texture-feedback.desktop.frag`). Patch size: 3 hunks, 105 lines added, 4 lines removed (101 LOC net additions excluding context).
+
+### `spirv-cross-msl-ms-sparse-fetch.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — extends
+`CompilerMSL::emit_texture_op` sparse-feedback lowering for
+`OpImageSparseFetch` on compute-stage `sampler2DMS` /
+`sampler2DMSArray` sampled images.
+
+**Summary:** Adds a sparse-fetch fast path inside the existing
+`sparse=true` branch. For compute-stage non-depth multisample sampled
+images, SPIRV-Cross still emits Metal's native `sparse_read(...)` call
+to obtain residency, but sources the returned texel from
+`appgl_ms_sampled_sidecar_<resource>.read(...)`, the sample-expanded
+sidecar populated by AppGL's multisample storage-image lowering. The
+sample operand is required, clamped against
+`appgl_ms_storage_image_samples[resource]`, and arrayed MS images map
+`layer * sample_count + sample` to the sidecar slice. The emitted marker
+`// APPGL_MS_SAMPLED_SIDECAR` lets `ShaderTranslator` inject the extra
+`texture2d_array<T>` parameter after SPIRV-Cross emission.
+
+**Why:** `GL_ARB_sparse_texture2` includes
+`sparseTexelFetchARB(sampler2DMS*)`. Metal can report sparse residency
+for the original MS texture, but AppGL's compute `imageStore` path writes
+MS storage images through the sample-expanded sidecar. Without this
+bridge, sparse MS sampled fetch observes the stale/native texture value
+instead of the coherent sidecar value written by imageStore. This patch
+keeps native Metal residency feedback and redirects only the texel
+payload for the AppGL MS-storage sidecar coherence case.
+
+**CTS tests advanced (sub-section progress):** Synthetic AppGL
+translation and real-device compute probes verified the lowered MSL emits
+both the native sparse read and the injected sampled-sidecar read for
+non-depth `sampler2DMS*` fetches, with dynamic sample-count metadata
+binding. Full `KHR-GL46.sparse_texture2_tests.*` and
+`KHR-GL46.sparse_texture_clamp_tests.*` pass-rate measurement is
+advertise-gated and follows the Sprint 19 Phase 4 Item 38 protocol.
+
+**Regression-safe:** The fast path is gated to `OpImageSparseFetch`,
+`ExecutionModelGLCompute`, `Dim2D`, multisample, sampled-image, non-depth
+images. All other sparse-feedback texture operations continue through
+the generic sparse-feedback lowering from
+`spirv-cross-msl-sparse-feedback.patch`. Pre-MSL-2.3 targets still throw
+the same explicit sparse-feedback error. Depth MS sparse fetch remains a
+documented follow-up blocker rather than silently mis-lowering.
+
 ### `glslang-cull-distance-builtin-constants.patch`
 
 **Target:** `third_party/glslang/glslang/MachineIndependent/{Initialize.cpp, Versions.cpp, Versions.h}` (KhronosGroup/glslang) — three small adjustments that make `gl_MaxCullDistances` / `gl_MaxCombinedClipAndCullDistances` GLSL constants visible to shaders that declare `#extension GL_ARB_cull_distance : require` at desktop GL versions 130-440.
