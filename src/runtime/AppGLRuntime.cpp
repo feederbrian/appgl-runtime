@@ -2519,7 +2519,7 @@ void APIENTRY glGetFragmentShadingRatesEXT(GLsizei samples, GLsizei maxCount, GL
     }
     markStateFunction(
         FunctionId::glGetFragmentShadingRatesEXT,
-        "GL_EXT_fragment_shading_rate scaffold reports base Metal-supported rates; advertising remains gated."
+        "GL_EXT_fragment_shading_rate reports base Metal-supported rates."
     );
     Runtime::shared().recordBootstrapTrace("glGetFragmentShadingRatesEXT(" + std::to_string(samples) + ")");
 }
@@ -2600,7 +2600,7 @@ void APIENTRY glShadingRateCombinerOpsEXT(GLenum combinerOp0, GLenum combinerOp1
     context->state().setFragmentShadingRateCombinerOps(combinerOp0, combinerOp1);
     markStateFunction(
         FunctionId::glShadingRateCombinerOpsEXT,
-        "GL_EXT_fragment_shading_rate combiner ops are tracked with primitive/attachment paths gated."
+        "GL_EXT_fragment_shading_rate combiner ops track KEEP/KEEP; non-trivial and attachment paths remain gated."
     );
     Runtime::shared().recordBootstrapTrace("glShadingRateCombinerOpsEXT()");
 }

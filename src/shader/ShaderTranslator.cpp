@@ -769,7 +769,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // regressions via the CTS sweep if we ever go back to 10.14
         // testing.
         //
-        // CKPT122 (Sprint 11 Phase 2 Cluster A Day 7 γ-pivot):
+        // CKPT122 (Sprint 11 Phase 2 Cluster A Day 7 gamma-pivot):
         // bump to MSL 2.3 so SPIRV-Cross can emit pull-model
         // interpolation (`stage_in.X.interpolate_at_sample(N)` /
         // `interpolate_at_centroid()` / `interpolate_at_offset(o)`).
@@ -780,7 +780,13 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // (72F before this fix) all hit this wall. MSL 2.3 minimum
         // matches macOS 11 Big Sur (Nov 2020), well below our 12.0+
         // host minimum.
-        mslOpts.set_msl_version(2, 3);
+        //
+        // Sprint 19: bump to MSL 2.4 so the SPIRV-Cross fork can emit
+        // GL_EXT_fragment_shading_rate builtins as native Metal attributes:
+        // `[[shading_rate]]` and mesh-stage `[[primitive_shading_rate]]`.
+        // MSL 2.4 maps to macOS 11/iOS 14-era Metal and remains below the
+        // runtime host floor.
+        mslOpts.set_msl_version(2, 4);
         mslOpts.enable_decoration_binding = true;
         // Pad fragment outputs to vec4 so Metal doesn't reject pipelines
         // where the shader outputs fewer components than the render target

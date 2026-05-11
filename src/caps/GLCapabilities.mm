@@ -724,7 +724,11 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // Sprint 19: bumped 46 → 47 for base GL_ARB_sparse_texture after CTS
     // base sparse allocation/commitment passed; sparse_texture2/clamp stay
     // deliberately unadvertised.
-    integerLimits_[GL_NUM_EXTENSIONS] = 47;
+    // Sprint 19: bumped 47 → 48 for GL_EXT_fragment_shading_rate base
+    // after base API/runtime passed. The primitive subextension remains held
+    // pending a backed primitive combiner path; ShaderTranslator still targets
+    // MSL 2.4 so the fragment shading-rate builtin can emit natively.
+    integerLimits_[GL_NUM_EXTENSIONS] = 48;
     // GL 4.6 SPIR-V extension queries.  The SPIR-V extensions CTS test
     // (KHR-GL46.spirv_extensions.spirv_extensions_queries) calls
     // glGetIntegerv(GL_NUM_SPIR_V_EXTENSIONS) and then iterates with
@@ -1181,6 +1185,10 @@ void GLCapabilities::initializeExtensions() {
         "GL_ARB_program_interface_query "
         "GL_ARB_shading_language_420pack "
         "GL_ARB_shading_language_packing "
+        // Sprint 19: advertise base fragment shading rate. Primitive,
+        // attachment, non-trivial combiner, and multiview surfaces remain
+        // gated by their own extension/capability checks.
+        "GL_EXT_fragment_shading_rate "
         // GL_ARB_texture_view — CKPT157 (Sprint 14 Day 4): re-enabled
         // after CKPT156 deferral. The Metal-side per-target mipmap
         // clamp (MTLTextureType1D / 1DArray / TextureBuffer →

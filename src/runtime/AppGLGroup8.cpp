@@ -1560,6 +1560,10 @@ static const char* const kAppGLExtensionList[] = {
     "GL_ARB_program_interface_query",
     "GL_ARB_shading_language_420pack",
     "GL_ARB_shading_language_packing",
+    // Sprint 19: base GL_EXT_fragment_shading_rate is backed by the Metal
+    // rasterization-rate map path. Primitive, attachment, non-trivial
+    // combiner, and multiview surfaces remain separately gated.
+    "GL_EXT_fragment_shading_rate",
     // CKPT157 (Sprint 14 Day 4): GL_ARB_texture_view — re-enabled after
     // CKPT156 Day 3 deferral. The Metal-side per-target mipmap clamp
     // (MTLTextureType1D/1DArray/TextureBuffer → mipmapLevelCount=1) now

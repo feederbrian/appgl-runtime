@@ -211,8 +211,8 @@ public:
     void setPatchParameterfv(GLenum pname, const GLfloat* values);
     const GLTessellationState& tessellationState() const;
 
-    // GL_EXT_fragment_shading_rate scaffold. This is state/query only;
-    // draw-time Metal rate-map application remains gated.
+    // GL_EXT_fragment_shading_rate base state. Draw-time Metal rate-map
+    // application is live; attachment/non-trivial-combiner surfaces remain gated.
     void setFragmentShadingRate(GLenum rate);
     void setFragmentShadingRateCombinerOps(GLenum combinerOp0, GLenum combinerOp1);
     const GLFragmentShadingRateState& fragmentShadingRateState() const;

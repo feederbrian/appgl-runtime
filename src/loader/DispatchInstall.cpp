@@ -415,11 +415,11 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     coverage.markImplemented(FunctionId::glTexPageCommitmentARB,
                              "ARB_sparse_texture commitment entry point is wired to Metal sparse mapping.");
     coverage.markImplemented(FunctionId::glGetFragmentShadingRatesEXT,
-                             "GL_EXT_fragment_shading_rate scaffold reports base supported rates; advertising gated.");
+                             "GL_EXT_fragment_shading_rate reports base supported rates.");
     coverage.markImplemented(FunctionId::glShadingRateEXT,
-                             "GL_EXT_fragment_shading_rate scaffold tracks draw-call rate state; advertising gated.");
+                             "GL_EXT_fragment_shading_rate tracks draw-call rate state and applies Metal rate maps.");
     coverage.markImplemented(FunctionId::glShadingRateCombinerOpsEXT,
-                             "GL_EXT_fragment_shading_rate scaffold validates combiner ops with primitive/attachment paths gated.");
+                             "GL_EXT_fragment_shading_rate validates combiner ops with primitive/attachment paths gated.");
     coverage.markImplemented(FunctionId::glFramebufferShadingRateEXT,
                              "GL_EXT_fragment_shading_rate attachment entry point is present but functionally gated.");
 
