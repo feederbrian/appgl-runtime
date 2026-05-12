@@ -7123,6 +7123,7 @@ struct GLContext::Impl {
         TranslatedDrawInfo& info)
     {
         info.ssboBindings.clear();
+        pendingFp64GraphicsSsboSidecars.clear();
 
         auto resolveStage = [&](const ShaderReflection* reflection,
                                 bool isVertex, bool isFragment) {
@@ -7175,6 +7176,8 @@ struct GLContext::Impl {
                         if (sidecar != nullptr && sidecar->metalBuffer != nullptr) {
                             sb.metalBuffer = sidecar->metalBuffer;
                             sb.offset = 0;
+                            pendingFp64GraphicsSsboSidecars.push_back(
+                                {bufObj, &ssbo, sidecar});
                             ExtensionContext extensionContext(*owner);
                             extensions::fp64::recordDoubleSsboBacking(
                                 extensionContext, sb.size);
@@ -7777,6 +7780,207 @@ struct GLContext::Impl {
         syncMetalFromShadow(object, sidecar.sourceOffset, sidecar.sourceSize);
         ++object.indexExpansionGeneration;
         sidecar.sourceGeneration = object.indexExpansionGeneration;
+    }
+
+    struct Fp64VertexAttribRange {
+        std::size_t sourceOffset = 0;
+        std::size_t stride = 0;
+        GLint components = 1;
+    };
+
+    GLBufferObject::Fp64TransportSidecar* ensureFp64VertexAttribSidecar(
+        GLBufferObject& object,
+        const std::vector<Fp64VertexAttribRange>& ranges) {
+        if (device == nil || object.shadowBytes.empty() || ranges.empty()) {
+            return nullptr;
+        }
+        std::size_t layoutHash = 1469598103934665603ull;
+        auto mix = [&](std::size_t v) {
+            layoutHash ^= v + 0x9e3779b97f4a7c15ull + (layoutHash << 6u) +
+                          (layoutHash >> 2u);
+        };
+        mix(0x6476663476657274ull);
+        mix(object.indexExpansionGeneration);
+        mix(object.shadowBytes.size());
+        for (const auto& range : ranges) {
+            mix(range.sourceOffset);
+            mix(range.stride);
+            mix(static_cast<std::size_t>(range.components));
+        }
+
+        GLBufferObject::Fp64TransportSidecar* sidecar = nullptr;
+        for (auto& candidate : object.fp64TransportSidecars) {
+            if (candidate.layoutHash == layoutHash) {
+                sidecar = &candidate;
+                break;
+            }
+        }
+        if (sidecar == nullptr) {
+            object.fp64TransportSidecars.push_back({});
+            sidecar = &object.fp64TransportSidecars.back();
+            sidecar->layoutHash = layoutHash;
+        }
+
+        const auto sourceSize = static_cast<GLsizeiptr>(object.shadowBytes.size());
+        const bool needsRebuild =
+            sidecar->metalBuffer == nullptr ||
+            sidecar->sourceGeneration != object.indexExpansionGeneration ||
+            sidecar->sourceOffset != 0 ||
+            sidecar->sourceSize != sourceSize ||
+            sidecar->bytes.size() != object.shadowBytes.size();
+        if (!needsRebuild) {
+            return sidecar;
+        }
+
+        sidecar->sourceOffset = 0;
+        sidecar->sourceSize = sourceSize;
+        sidecar->sourceGeneration = object.indexExpansionGeneration;
+        sidecar->bytes = object.shadowBytes;
+        for (const auto& range : ranges) {
+            const std::size_t components =
+                static_cast<std::size_t>(std::max<GLint>(range.components, 1));
+            const std::size_t stride = range.stride > 0
+                ? range.stride : components * sizeof(GLdouble);
+            if (stride == 0 || range.sourceOffset >= sidecar->bytes.size()) {
+                continue;
+            }
+            for (std::size_t base = range.sourceOffset;
+                 base + components * sizeof(GLdouble) <= sidecar->bytes.size();
+                 base += stride) {
+                for (std::size_t c = 0; c < components; ++c) {
+                    const std::size_t byteOffset = base + c * sizeof(GLdouble);
+                    GLdouble value = 0.0;
+                    std::memcpy(&value, sidecar->bytes.data() + byteOffset,
+                                sizeof(value));
+                    const auto words =
+                        extensions::fp64::encodeDoubleToDf64Transport(value);
+                    std::memcpy(sidecar->bytes.data() + byteOffset,
+                                &words.hi, sizeof(words.hi));
+                    std::memcpy(sidecar->bytes.data() + byteOffset +
+                                    sizeof(words.hi),
+                                &words.lo, sizeof(words.lo));
+                }
+                if (base + stride <= base) {
+                    break;
+                }
+            }
+        }
+
+        id<MTLBuffer> metalBuffer = metalBufferFromRaw(sidecar->metalBuffer);
+        if (metalBuffer == nil ||
+            [metalBuffer length] < static_cast<NSUInteger>(sidecar->bytes.size())) {
+            releaseRetainedMetalObject(sidecar->metalBuffer);
+            sidecar->metalBuffer = nullptr;
+            metalBuffer = [device newBufferWithLength:static_cast<NSUInteger>(sidecar->bytes.size())
+                                              options:MTLResourceStorageModeShared];
+            if (metalBuffer == nil) {
+                sidecar->bytes.clear();
+                return nullptr;
+            }
+            sidecar->metalBuffer = transferRetainedMetalObject(metalBuffer);
+        }
+        std::memcpy([metalBuffer contents], sidecar->bytes.data(),
+                    sidecar->bytes.size());
+        return sidecar;
+    }
+
+    bool vertexInputLocationContainsFp64(const ShaderReflection& reflection,
+                                         GLuint location) const {
+        for (const auto& input : reflection.vertexInputs) {
+            if (input.location == location && input.containsFp64) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void prepareFp64VertexSidecars(TranslatedDrawInfo& info) {
+        if (info.vertexReflection == nullptr ||
+            !info.vertexReflection->fp64TranslationActive) {
+            return;
+        }
+
+        auto lowerLayout = [&](TranslatedDrawInfo::VertexAttributeLayout layout,
+                               std::vector<TranslatedDrawInfo::VertexAttributeLayout>& out,
+                               std::vector<Fp64VertexAttribRange>& ranges,
+                               std::size_t sourceOffset,
+                               std::size_t stride) {
+            if (layout.glType != GL_DOUBLE ||
+                !vertexInputLocationContainsFp64(*info.vertexReflection,
+                                                 layout.location)) {
+                out.push_back(layout);
+                return;
+            }
+            const GLint components = std::max<GLint>(layout.glComponentCount, 1);
+            ranges.push_back({sourceOffset, stride, components});
+            layout.glType = GL_UNSIGNED_INT;
+            layout.glComponentCount = std::min<GLint>(components * 2, 4);
+            layout.glNormalized = GL_FALSE;
+            layout.glIsInteger = true;
+            out.push_back(layout);
+            if (components > 2) {
+                TranslatedDrawInfo::VertexAttributeLayout tail = layout;
+                tail.location = layout.location + 1u;
+                tail.offset = layout.offset + 2u * sizeof(GLdouble);
+                tail.glComponentCount = (components == 3) ? 2 : 4;
+                out.push_back(tail);
+            }
+        };
+
+        if (info.glVertexBuffer != 0) {
+            std::vector<TranslatedDrawInfo::VertexAttributeLayout> lowered;
+            std::vector<Fp64VertexAttribRange> ranges;
+            lowered.reserve(info.vertexAttributeLayouts.size() + 2u);
+            for (const auto& layout : info.vertexAttributeLayouts) {
+                lowerLayout(layout, lowered, ranges,
+                            info.metalVertexBufferOffset + layout.offset,
+                            info.vertexStride);
+            }
+            if (!ranges.empty()) {
+                if (GLBufferObject* buffer =
+                        objects->buffers().get(info.glVertexBuffer)) {
+                    if (auto* sidecar =
+                            ensureFp64VertexAttribSidecar(*buffer, ranges)) {
+                        if (sidecar->metalBuffer != nullptr) {
+                            info.metalVertexBuffer = sidecar->metalBuffer;
+                            ExtensionContext extensionContext(*owner);
+                            extensions::fp64::recordDoubleVertexAttribBacking(
+                                extensionContext, buffer->shadowBytes.size());
+                        }
+                    }
+                }
+                info.vertexAttributeLayouts = std::move(lowered);
+            }
+        }
+
+        for (auto& evb : info.extraVertexBuffers) {
+            if (evb.glBuffer == 0) {
+                continue;
+            }
+            std::vector<TranslatedDrawInfo::VertexAttributeLayout> lowered;
+            std::vector<Fp64VertexAttribRange> ranges;
+            lowered.reserve(evb.attributes.size() + 2u);
+            for (const auto& layout : evb.attributes) {
+                lowerLayout(layout, lowered, ranges,
+                            evb.metalBufferOffset + layout.offset,
+                            evb.stride);
+            }
+            if (!ranges.empty()) {
+                if (GLBufferObject* buffer =
+                        objects->buffers().get(evb.glBuffer)) {
+                    if (auto* sidecar =
+                            ensureFp64VertexAttribSidecar(*buffer, ranges)) {
+                        if (sidecar->metalBuffer != nullptr) {
+                            evb.metalBuffer = sidecar->metalBuffer;
+                            ExtensionContext extensionContext(*owner);
+                            extensions::fp64::recordDoubleVertexAttribBacking(
+                                extensionContext, buffer->shadowBytes.size());
+                        }
+                    }
+                }
+                evb.attributes = std::move(lowered);
+            }
+        }
     }
 
     bool runSSBOStdLayoutDoubleCopyFallback() {
@@ -11708,6 +11912,12 @@ struct GLContext::Impl {
     // still issues fresh names starting at 1.
     GLVertexArrayObject defaultVertexArray;
     bool defaultVertexArrayReady = false;
+    struct Fp64GraphicsSidecarSync {
+        GLBufferObject* buffer = nullptr;
+        const ShaderReflection::ResourceBinding* binding = nullptr;
+        GLBufferObject::Fp64TransportSidecar* sidecar = nullptr;
+    };
+    std::vector<Fp64GraphicsSidecarSync> pendingFp64GraphicsSsboSidecars;
     // Per-context immediate double vertex attribute values (GL 4.1 glVertexAttribL*).
     // Indexed by attribute slot; each stores 4 doubles (default {0,0,0,1}).
     static constexpr std::size_t kMaxImmediateDoubleAttribs = 16;
@@ -15276,6 +15486,16 @@ bool GLContext::vertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsi
     attribute.buffer = buffer;
     attribute.integer = false;
     attribute.longData = true;
+    attribute.bindingIndex = index;
+    attribute.relativeOffset = 0;
+    if (index < vertexArray->bindingPoints.size()) {
+        auto& bp = vertexArray->bindingPoints[index];
+        bp.buffer = buffer;
+        bp.offset = static_cast<GLintptr>(attribute.pointer);
+        bp.stride = stride > 0
+            ? stride
+            : static_cast<GLsizei>(size * static_cast<GLint>(sizeof(GLdouble)));
+    }
     markVertexDescriptorDirty(*vertexArray);
     impl_->state->markDirty(DirtyBit::VertexInput);
     return true;
@@ -26732,6 +26952,34 @@ bool GLContext::linkProgram(GLuint program) {
             programObject->needsCullDistancePrepass = vsCullPrepassVgf;
             std::string unusedGsMSL;
             (void)translateCachedStage("geometry", geometryShader, unusedGsMSL, gsRefl);
+            auto reflectStageOnlyVgf = [&](GLShaderObject* shader,
+                                           const appgl::TranslatorOptions& options)
+                -> ShaderReflection {
+                ShaderReflection refl;
+                if (shader == nullptr || shader->spirv.empty()) {
+                    return refl;
+                }
+                appgl::TranslatorOptions stageOptions = options;
+                stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
+                try {
+                    appgl::BindingMap reflectBindings;
+                    refl = translator.reflect(shader->spirv.data(),
+                                              shader->spirv.size(),
+                                              reflectBindings, nullptr,
+                                              stageOptions);
+                } catch (...) {
+                    // Reflection is introspection-only here; leave empty on
+                    // failure and preserve the pre-existing link outcome.
+                }
+                return refl;
+            };
+            if (gsRefl.uniformBlocks.empty() &&
+                gsRefl.storageBuffers.empty() &&
+                gsRefl.sampledTextures.empty() &&
+                gsRefl.storageImages.empty()) {
+                gsRefl = reflectStageOnlyVgf(geometryShader,
+                                             appgl::TranslatorOptions{});
+            }
             // Keep the GS reflection so `GL_REFERENCED_BY_GEOMETRY_SHADER`
             // queries on block-scoped resources (uniform blocks, SSBOs,
             // buffer variables) can consult it for usage analysis.
@@ -26771,6 +27019,16 @@ bool GLContext::linkProgram(GLuint program) {
                 if (tessControlShader != nullptr && !tessControlShader->spirv.empty()) {
                     programObject->tessControlSpirv = tessControlShader->spirv;
                     programObject->tessControlParsedModule.reset();
+                    appgl::TranslatorOptions tessReflectOpts;
+                    tessReflectOpts.forceTessellation = true;
+                    if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
+                        tessReflectOpts.siblingTesInputSpirv =
+                            tessEvalShader->spirv.data();
+                        tessReflectOpts.siblingTesInputWordCount =
+                            tessEvalShader->spirv.size();
+                    }
+                    programObject->tessControlReflection =
+                        reflectStageOnlyVgf(tessControlShader, tessReflectOpts);
                     auto tcModes = appgl::extractTessellationModes(
                         tessControlShader->spirv.data(),
                         tessControlShader->spirv.size());
@@ -26782,6 +27040,22 @@ bool GLContext::linkProgram(GLuint program) {
                 if (tessEvalShader != nullptr && !tessEvalShader->spirv.empty()) {
                     programObject->tessEvalSpirv = tessEvalShader->spirv;
                     programObject->tessEvalParsedModule.reset();
+                    appgl::TranslatorOptions tesReflectOpts;
+                    tesReflectOpts.forceTessellation = true;
+                    tesReflectOpts.forceTessEvalAsCompute = true;
+                    if (tessControlShader != nullptr &&
+                        !tessControlShader->spirv.empty()) {
+                        tesReflectOpts.siblingTcsOutputSpirv =
+                            tessControlShader->spirv.data();
+                        tesReflectOpts.siblingTcsOutputWordCount =
+                            tessControlShader->spirv.size();
+                        auto tcModes = appgl::extractTessellationModes(
+                            tessControlShader->spirv.data(),
+                            tessControlShader->spirv.size());
+                        tesReflectOpts.tesePatchVertices = tcModes.outputVertices;
+                    }
+                    programObject->tessEvalAsComputeReflection =
+                        reflectStageOnlyVgf(tessEvalShader, tesReflectOpts);
                     auto teModes = appgl::extractTessellationModes(
                         tessEvalShader->spirv.data(),
                         tessEvalShader->spirv.size());
@@ -27984,6 +28258,26 @@ bool GLContext::linkProgram(GLuint program) {
             if (topName.empty()) return false;
             const std::string uniformKw = "uniform";
             std::size_t pos = 0;
+            auto identifierAppears = [&](std::size_t scan, std::size_t end) {
+                while (scan < end) {
+                    while (scan < end &&
+                           !std::isalpha(static_cast<unsigned char>(src[scan])) &&
+                           src[scan] != '_') {
+                        ++scan;
+                    }
+                    if (scan >= end) break;
+                    std::size_t identStart = scan;
+                    while (scan < end &&
+                           (std::isalnum(static_cast<unsigned char>(src[scan])) ||
+                            src[scan] == '_')) {
+                        ++scan;
+                    }
+                    if (src.compare(identStart, scan - identStart, topName) == 0) {
+                        return true;
+                    }
+                }
+                return false;
+            };
             while ((pos = src.find(uniformKw, pos)) != std::string::npos) {
                 const bool leftBoundary = (pos == 0) ||
                     !(std::isalnum(static_cast<unsigned char>(src[pos - 1])) || src[pos - 1] == '_');
@@ -27993,8 +28287,35 @@ bool GLContext::linkProgram(GLuint program) {
                     pos += uniformKw.size();
                     continue;
                 }
-                // Scan identifiers from pos+7 up to first ; or {.
+                // Struct default uniforms use `uniform struct T { ... }
+                // name[N];`; the instance name lives after the matching
+                // closing brace, so scan there before the simpler scalar
+                // declaration path.
                 std::size_t scan = pos + uniformKw.size();
+                const std::size_t openBrace = src.find('{', scan);
+                if (openBrace != std::string::npos) {
+                    int depth = 1;
+                    std::size_t closeBrace = openBrace + 1;
+                    while (closeBrace < src.size() && depth > 0) {
+                        if (src[closeBrace] == '{') {
+                            ++depth;
+                        } else if (src[closeBrace] == '}') {
+                            --depth;
+                        }
+                        ++closeBrace;
+                    }
+                    const std::size_t semi = (depth == 0)
+                        ? src.find(';', closeBrace)
+                        : std::string::npos;
+                    if (depth == 0 && semi != std::string::npos) {
+                        if (identifierAppears(closeBrace, semi)) {
+                            return true;
+                        }
+                        pos = semi;
+                        continue;
+                    }
+                }
+                // Scan identifiers from pos+7 up to first ; or {.
                 while (scan < src.size() && src[scan] != ';' && src[scan] != '{') {
                     // Skip non-identifier chars.
                     while (scan < src.size() &&
@@ -28232,8 +28553,11 @@ bool GLContext::linkProgram(GLuint program) {
         static const std::string kEmptySrc;
         const std::string& vsSrc2 = vertexShader ? vertexShader->source : kEmptySrc;
         const std::string& fsSrc2 = fragmentShader ? fragmentShader->source : kEmptySrc;
+        const std::string& gsSrc2 = geometryShader ? geometryShader->source : kEmptySrc;
+        const std::string& csSrc2 = computeShader ? computeShader->source : kEmptySrc;
         supplementFromReflection(programObject->vertexReflection, 0x01, vsSrc2);
         supplementFromReflection(programObject->fragmentReflection, 0x02, fsSrc2);
+        supplementFromReflection(programObject->geometryReflection, 0x04, gsSrc2);
         // Tess stages: source the reflection from whichever TES form
         // got translated (compute form for combined VertexTessellation
         // Fragment programs, vertex form would be similar but isn't
@@ -28250,6 +28574,7 @@ bool GLContext::linkProgram(GLuint program) {
         const std::string& tesSrc2 = tessEvalShader ? tessEvalShader->source : kEmptySrc;
         supplementFromReflection(programObject->tessControlReflection, 0x08, tcsSrc2);
         supplementFromReflection(programObject->tessEvalAsComputeReflection, 0x10, tesSrc2);
+        supplementFromReflection(programObject->computeReflection, 0x20, csSrc2);
 
         // ── Sprint 17 Day 7+ Bank-Group-C: synthetic dispatch uniforms ──
         //
@@ -29424,6 +29749,19 @@ std::size_t uniformTypeComponentCount(GLenum type) {
     }
 }
 
+GLint roundFp64UniformToGLint(GLdouble value) {
+    const GLfloat narrowed = static_cast<GLfloat>(value);
+    return static_cast<GLint>(std::floor(narrowed + 0.5f));
+}
+
+GLuint roundFp64UniformToGLuint(GLdouble value) {
+    if (!(value > 0.0)) {
+        return 0u;
+    }
+    const GLfloat narrowed = static_cast<GLfloat>(value);
+    return static_cast<GLuint>(std::floor(narrowed + 0.5f));
+}
+
 }  // namespace
 
 bool GLContext::getUniformfv(GLuint program, GLint location, GLfloat* params) {
@@ -29449,7 +29787,13 @@ bool GLContext::getUniformfv(GLuint program, GLint location, GLfloat* params) {
     GLProgramUniformValue* value = ref.slot;
     const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
     const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
-    if (!value->floats.empty()) {
+    if (!value->doubles.empty()) {
+        const std::size_t avail = value->doubles.size() > offset
+            ? std::min(components, value->doubles.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLfloat>(value->doubles[offset + i]);
+        }
+    } else if (!value->floats.empty()) {
         const std::size_t avail = value->floats.size() > offset
             ? std::min(components, value->floats.size() - offset) : 0;
         if (avail > 0) {
@@ -29493,7 +29837,13 @@ bool GLContext::getUniformiv(GLuint program, GLint location, GLint* params) {
     GLProgramUniformValue* value = ref.slot;
     const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
     const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
-    if (!value->ints.empty()) {
+    if (!value->doubles.empty()) {
+        const std::size_t avail = value->doubles.size() > offset
+            ? std::min(components, value->doubles.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = roundFp64UniformToGLint(value->doubles[offset + i]);
+        }
+    } else if (!value->ints.empty()) {
         const std::size_t avail = value->ints.size() > offset
             ? std::min(components, value->ints.size() - offset) : 0;
         if (avail > 0) {
@@ -29537,7 +29887,13 @@ bool GLContext::getUniformuiv(GLuint program, GLint location, GLuint* params) {
     GLProgramUniformValue* value = ref.slot;
     const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
     const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
-    if (!value->uints.empty()) {
+    if (!value->doubles.empty()) {
+        const std::size_t avail = value->doubles.size() > offset
+            ? std::min(components, value->doubles.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = roundFp64UniformToGLuint(value->doubles[offset + i]);
+        }
+    } else if (!value->uints.empty()) {
         const std::size_t avail = value->uints.size() > offset
             ? std::min(components, value->uints.size() - offset) : 0;
         if (avail > 0) {
@@ -29825,6 +30181,34 @@ static void assignDf64TransportWords(GLProgramUniformValue& slot,
     }
 }
 
+static void writeDoubleUniformSlot(GLProgramUniformValue& slot,
+                                   GLint arraySize,
+                                   GLint elementIndex,
+                                   GLint vectorSize,
+                                   GLsizei count,
+                                   const GLdouble* values) {
+    const GLint remaining = std::max<GLint>(arraySize - elementIndex, 1);
+    const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
+    const std::size_t components = static_cast<std::size_t>(vectorSize);
+    const std::size_t writeCount = components * static_cast<std::size_t>(effCount);
+    const std::size_t fullCount = components * static_cast<std::size_t>(std::max<GLint>(arraySize, 1));
+    const std::size_t writeOffset = components * static_cast<std::size_t>(elementIndex);
+
+    if (slot.doubles.size() < fullCount) {
+        slot.doubles.resize(fullCount, 0.0);
+    }
+    std::memcpy(slot.doubles.data() + writeOffset, values, writeCount * sizeof(GLdouble));
+
+    slot.floats.resize(fullCount);
+    for (std::size_t i = 0; i < fullCount; ++i) {
+        slot.floats[i] = static_cast<GLfloat>(slot.doubles[i]);
+    }
+
+    assignDf64TransportWords(slot, slot.doubles.data(), slot.doubles.size());
+    slot.ints.clear();
+    slot.uints.clear();
+}
+
 bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count, const GLdouble* values) {
     if (location < 0) {
         return true;
@@ -29847,23 +30231,17 @@ bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    GLProgramUniformValue* slot = lookupUniformValue(object, location);
-    if (slot == nullptr) {
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    const std::size_t expected = static_cast<std::size_t>(vectorSize) *
-                                 static_cast<std::size_t>(std::max<GLsizei>(count, 1));
-    // Shadow original doubles for lossless glGetUniformdv readback.
-    slot->doubles.assign(values, values + expected);
-    assignDf64TransportWords(*slot, values, expected);
-    // Narrow to float for the Metal pipeline.
-    slot->floats.resize(expected);
-    for (std::size_t i = 0; i < expected; ++i) {
-        slot->floats[i] = static_cast<GLfloat>(values[i]);
-    }
-    slot->ints.clear();
-    slot->uints.clear();
+    writeDoubleUniformSlot(*ref.slot,
+                           ref.arraySize,
+                           ref.elementIndex,
+                           vectorSize,
+                           count,
+                           values);
     return true;
 }
 
@@ -29889,39 +30267,45 @@ bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, G
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    GLProgramUniformValue* slot = lookupUniformValue(object, location);
-    if (slot == nullptr) {
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) *
-                                 static_cast<std::size_t>(std::max<GLsizei>(count, 1));
-    // Shadow original doubles.
-    slot->doubles.resize(elements);
-    slot->floats.resize(elements);
+    GLProgramUniformValue* slot = ref.slot;
+    const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
+    const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
+    const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+    const std::size_t elements = matrixElements * static_cast<std::size_t>(effCount);
+    const std::size_t fullCount = matrixElements * static_cast<std::size_t>(std::max<GLint>(ref.arraySize, 1));
+    const std::size_t writeOffset = matrixElements * static_cast<std::size_t>(ref.elementIndex);
+    if (slot->doubles.size() < fullCount) {
+        slot->doubles.resize(fullCount, 0.0);
+    }
     if (transpose == GL_FALSE) {
         for (std::size_t i = 0; i < elements; ++i) {
-            slot->doubles[i] = values[i];
-            slot->floats[i] = static_cast<GLfloat>(values[i]);
+            slot->doubles[writeOffset + i] = values[i];
         }
     } else {
-        const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
-        for (GLsizei m = 0; m < std::max<GLsizei>(count, 1); ++m) {
+        for (GLsizei m = 0; m < effCount; ++m) {
             for (GLint r = 0; r < rows; ++r) {
                 for (GLint c = 0; c < cols; ++c) {
                     const std::size_t srcIndex = static_cast<std::size_t>(m) * matrixElements +
                                                  static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) +
                                                  static_cast<std::size_t>(c);
-                    const std::size_t dstIndex = static_cast<std::size_t>(m) * matrixElements +
+                    const std::size_t dstIndex = writeOffset + static_cast<std::size_t>(m) * matrixElements +
                                                  static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) +
                                                  static_cast<std::size_t>(r);
                     slot->doubles[dstIndex] = values[srcIndex];
-                    slot->floats[dstIndex] = static_cast<GLfloat>(values[srcIndex]);
                 }
             }
         }
     }
-    assignDf64TransportWords(*slot, slot->doubles.data(), elements);
+    slot->floats.resize(fullCount);
+    for (std::size_t i = 0; i < fullCount; ++i) {
+        slot->floats[i] = static_cast<GLfloat>(slot->doubles[i]);
+    }
+    assignDf64TransportWords(*slot, slot->doubles.data(), slot->doubles.size());
     slot->ints.clear();
     slot->uints.clear();
     return true;
@@ -30008,14 +30392,14 @@ bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint
     if (count < 0 || vectorSize < 1 || vectorSize > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
     GLProgramObject* object = impl_->objects->programs().get(program);
     if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
-    GLProgramUniformValue* slot = lookupUniformValue(object, location);
-    if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
-    const std::size_t expected = static_cast<std::size_t>(vectorSize) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
-    slot->doubles.assign(values, values + expected);
-    assignDf64TransportWords(*slot, values, expected);
-    slot->floats.resize(expected);
-    for (std::size_t i = 0; i < expected; ++i) { slot->floats[i] = static_cast<GLfloat>(values[i]); }
-    slot->ints.clear(); slot->uints.clear();
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    writeDoubleUniformSlot(*ref.slot,
+                           ref.arraySize,
+                           ref.elementIndex,
+                           vectorSize,
+                           count,
+                           values);
     return true;
 }
 
@@ -30024,27 +30408,34 @@ bool GLContext::setUniformDoubleMatrixForProgram(GLuint program, GLint location,
     if (count < 0 || rows < 2 || rows > 4 || cols < 2 || cols > 4 || values == nullptr) { pushError(GL_INVALID_VALUE); return false; }
     GLProgramObject* object = impl_->objects->programs().get(program);
     if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
-    GLProgramUniformValue* slot = lookupUniformValue(object, location);
-    if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
-    const std::size_t elements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
-    slot->doubles.resize(elements);
-    slot->floats.resize(elements);
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    GLProgramUniformValue* slot = ref.slot;
+    const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
+    const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);
+    const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+    const std::size_t elements = matrixElements * static_cast<std::size_t>(effCount);
+    const std::size_t fullCount = matrixElements * static_cast<std::size_t>(std::max<GLint>(ref.arraySize, 1));
+    const std::size_t writeOffset = matrixElements * static_cast<std::size_t>(ref.elementIndex);
+    if (slot->doubles.size() < fullCount) {
+        slot->doubles.resize(fullCount, 0.0);
+    }
     if (transpose == GL_FALSE) {
-        for (std::size_t i = 0; i < elements; ++i) { slot->doubles[i] = values[i]; slot->floats[i] = static_cast<GLfloat>(values[i]); }
+        for (std::size_t i = 0; i < elements; ++i) { slot->doubles[writeOffset + i] = values[i]; }
     } else {
-        const std::size_t matrixElements = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
-        for (GLsizei m = 0; m < std::max<GLsizei>(count, 1); ++m) {
+        for (GLsizei m = 0; m < effCount; ++m) {
             for (GLint r = 0; r < rows; ++r) {
                 for (GLint c = 0; c < cols; ++c) {
                     const std::size_t srcIndex = static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) + static_cast<std::size_t>(c);
-                    const std::size_t dstIndex = static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) + static_cast<std::size_t>(r);
+                    const std::size_t dstIndex = writeOffset + static_cast<std::size_t>(m) * matrixElements + static_cast<std::size_t>(c) * static_cast<std::size_t>(rows) + static_cast<std::size_t>(r);
                     slot->doubles[dstIndex] = values[srcIndex];
-                    slot->floats[dstIndex] = static_cast<GLfloat>(values[srcIndex]);
                 }
             }
         }
     }
-    assignDf64TransportWords(*slot, slot->doubles.data(), elements);
+    slot->floats.resize(fullCount);
+    for (std::size_t i = 0; i < fullCount; ++i) { slot->floats[i] = static_cast<GLfloat>(slot->doubles[i]); }
+    assignDf64TransportWords(*slot, slot->doubles.data(), slot->doubles.size());
     slot->ints.clear(); slot->uints.clear();
     return true;
 }
@@ -30055,25 +30446,38 @@ bool GLContext::getUniformdv(GLuint program, GLint location, GLdouble* params) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    GLProgramUniformValue* value = lookupUniformValue(object, location);
-    if (value == nullptr) {
+    UniformSlotRef ref = resolveUniformSlot(object, location);
+    if (ref.slot == nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    GLProgramUniformValue* value = ref.slot;
+    const std::size_t components = uniformTypeComponentCount(ref.type ? ref.type : value->type);
+    const std::size_t offset = static_cast<std::size_t>(ref.elementIndex) * components;
     // Prefer the lossless double shadow if available.
     if (!value->doubles.empty()) {
-        std::memcpy(params, value->doubles.data(), value->doubles.size() * sizeof(GLdouble));
+        const std::size_t avail = value->doubles.size() > offset
+            ? std::min(components, value->doubles.size() - offset) : 0;
+        if (avail > 0) {
+            std::memcpy(params, value->doubles.data() + offset, avail * sizeof(GLdouble));
+        }
     } else if (!value->floats.empty()) {
-        for (std::size_t i = 0; i < value->floats.size(); ++i) {
-            params[i] = static_cast<GLdouble>(value->floats[i]);
+        const std::size_t avail = value->floats.size() > offset
+            ? std::min(components, value->floats.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLdouble>(value->floats[offset + i]);
         }
     } else if (!value->ints.empty()) {
-        for (std::size_t i = 0; i < value->ints.size(); ++i) {
-            params[i] = static_cast<GLdouble>(value->ints[i]);
+        const std::size_t avail = value->ints.size() > offset
+            ? std::min(components, value->ints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLdouble>(value->ints[offset + i]);
         }
     } else if (!value->uints.empty()) {
-        for (std::size_t i = 0; i < value->uints.size(); ++i) {
-            params[i] = static_cast<GLdouble>(value->uints[i]);
+        const std::size_t avail = value->uints.size() > offset
+            ? std::min(components, value->uints.size() - offset) : 0;
+        for (std::size_t i = 0; i < avail; ++i) {
+            params[i] = static_cast<GLdouble>(value->uints[offset + i]);
         }
     }
     return true;
@@ -30561,6 +30965,21 @@ static ResolvedVertexAttrib resolveVertexAttrib(
     const GLVertexAttributeState& attr,
     const GLVertexArrayObject& vao)
 {
+    auto attributeScalarBytes = [](GLenum type) -> std::size_t {
+        switch (type) {
+            case GL_BYTE:
+            case GL_UNSIGNED_BYTE:
+                return 1;
+            case GL_SHORT:
+            case GL_UNSIGNED_SHORT:
+            case GL_HALF_FLOAT:
+                return 2;
+            case GL_DOUBLE:
+                return 8;
+            default:
+                return 4;
+        }
+    };
     ResolvedVertexAttrib r;
     // GL 4.3 separated vertex format: attribute[i].bindingIndex = i by
     // default (see `GLObjectStore::initializeVertexArray`), and
@@ -30586,7 +31005,8 @@ static ResolvedVertexAttrib resolveVertexAttrib(
             r.bufferName = bp.buffer;
             r.stride = bp.stride > 0
                 ? static_cast<std::size_t>(bp.stride)
-                : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
+                : attributeScalarBytes(attr.type) *
+                    static_cast<std::size_t>(attr.size);
             r.offset = static_cast<std::size_t>(bp.offset)
                      + static_cast<std::size_t>(attr.relativeOffset);
             return r;
@@ -30595,7 +31015,8 @@ static ResolvedVertexAttrib resolveVertexAttrib(
     r.bufferName = attr.buffer;
     r.stride = attr.stride > 0
         ? static_cast<std::size_t>(attr.stride)
-        : sizeof(GLfloat) * static_cast<std::size_t>(attr.size);
+        : attributeScalarBytes(attr.type) *
+            static_cast<std::size_t>(attr.size);
     r.offset = static_cast<std::size_t>(attr.pointer);
     return r;
 }
@@ -32536,6 +32957,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     tdi.vertexStride = posStride;
     tdi.metalVertexBuffer = vbo->metalBuffer;
     tdi.metalVertexBufferOffset = startOff;
+    tdi.glVertexBuffer = resolved.bufferName;
     // Filtered indices fed as UINT32 client-side index array;
     // encodeTranslatedDraw stages them into a Metal ring buffer.
     tdi.indices = filteredIndices.data();
@@ -32603,6 +33025,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
                     evb.divisor = 0;
                     evb.metalBuffer = extraVbo->metalBuffer;
                     evb.metalBufferOffset = 0;
+                    evb.glBuffer = attrRes.bufferName;
                     tdi.extraVertexBuffers.push_back(std::move(evb));
                 } else {
                     idx = it->second;
@@ -32667,6 +33090,7 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
 // comment at the Impl method declaration. Item 26 LIVE 19th-instance
 // candidate: sister-pattern leverage at the call-site-wrapper level.
 bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
+    prepareFp64VertexSidecars(tdi);
     const GLuint drawFboName = state->boundDrawFramebuffer();
     if (drawFboName != 0) {
         if (const GLFramebufferObject* drawFbo =
@@ -32695,6 +33119,16 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
 
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
     if (ok) {
+        if (!pendingFp64GraphicsSsboSidecars.empty()) {
+            frameGraph->flushForReadback();
+            for (const auto& sync : pendingFp64GraphicsSsboSidecars) {
+                if (sync.buffer != nullptr && sync.binding != nullptr &&
+                    sync.sidecar != nullptr) {
+                    syncFp64TransportSidecarBack(
+                        *sync.buffer, *sync.binding, *sync.sidecar);
+                }
+            }
+        }
         if (drawFboName == 0) {
             invalidateDefaultFramebufferShadow();
         } else {
@@ -32772,6 +33206,7 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
             }
         }
     }
+    pendingFp64GraphicsSsboSidecars.clear();
     return ok;
 }
 
@@ -33657,6 +34092,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
+                    tdi.glVertexBuffer = resolved.bufferName;
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot (depth/cull/front-face/
                     // wireframe/blend). Replaces the prior inline reads
@@ -33746,6 +34182,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                                     evb.byteCount = extraVbo->shadowBytes.size();
                                     evb.metalBuffer = extraVbo->metalBuffer;
                                     evb.metalBufferOffset = extraFirstOff;
+                                    evb.glBuffer = attrRes.bufferName;
                                 }
                                 tdi.extraVertexBuffers.push_back(std::move(evb));
                             } else {
@@ -34145,6 +34582,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
+                    tdi.glVertexBuffer = resolved.bufferName;
                     // Phase 8X Group 4d follow-up¹⁴ — centralised fixed-
                     // function state snapshot. See drawArrays.
                     populateTranslatedDrawFixedFunctionState(
@@ -34237,6 +34675,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                                 evb.metalBuffer = extraVbo->metalBuffer;
                                 evb.metalBufferOffset =
                                     static_cast<std::size_t>(first) * attrRes.stride;
+                                evb.glBuffer = attrRes.bufferName;
                                 tdi.extraVertexBuffers.push_back(std::move(evb));
                             } else {
                                 idx = it->second;
@@ -34921,6 +35360,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                     // OPT-5: pass pre-uploaded Metal buffer for direct bind.
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
+                    tdi.glVertexBuffer = resolved.bufferName;
                     tdi.indices = effectivePtr;
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
@@ -35006,6 +35446,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                                     evb.divisor = 0;
                                     evb.metalBuffer = extraVbo->metalBuffer;
                                     evb.metalBufferOffset = 0;
+                                    evb.glBuffer = attrRes.bufferName;
                                     tdi.extraVertexBuffers.push_back(std::move(evb));
                                 } else {
                                     idx = it->second;
@@ -35295,6 +35736,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.vertexStride = posStride;
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
+                    tdi.glVertexBuffer = resolved.bufferName;
                     tdi.indices = effectivePtr;
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
@@ -35663,6 +36105,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.vertexStride = posStride;
                     tdi.metalVertexBuffer = vbo->metalBuffer;
                     tdi.metalVertexBufferOffset = startOff;
+                    tdi.glVertexBuffer = resolved.bufferName;
                     tdi.indices = effectivePtr;
                     tdi.indexCount = count;
                     tdi.indexType = effectiveType;
@@ -35745,6 +36188,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                                 evb.divisor = attrDivisor;
                                 evb.metalBuffer = extraVbo->metalBuffer;
                                 evb.metalBufferOffset = 0;
+                                evb.glBuffer = attrRes.bufferName;
                                 tdi.extraVertexBuffers.push_back(std::move(evb));
                             } else {
                                 idx = it->second;

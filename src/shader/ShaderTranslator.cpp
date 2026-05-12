@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <mutex>
 #include <set>
@@ -182,6 +183,184 @@ StorageImageAccessVariables storageImageAccessVariables(
 
 bool isIdentifierChar(char ch) {
     return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
+}
+
+bool findMain0ParameterEnd(const std::string& msl, std::size_t& paramEnd);
+
+bool replaceWholeToken(std::string& text,
+                       std::size_t begin,
+                       const std::string& needle,
+                       const std::string& replacement,
+                       std::size_t end = std::string::npos) {
+    bool changed = false;
+    if (end == std::string::npos || end > text.size()) {
+        end = text.size();
+    }
+    std::size_t pos = begin;
+    while ((pos = text.find(needle, pos)) != std::string::npos && pos < end) {
+        const std::size_t after = pos + needle.size();
+        if (after < text.size() && isIdentifierChar(text[after])) {
+            pos = after;
+            continue;
+        }
+        text.replace(pos, needle.size(), replacement);
+        const auto delta = static_cast<std::ptrdiff_t>(replacement.size()) -
+            static_cast<std::ptrdiff_t>(needle.size());
+        if (delta != 0 && end != std::string::npos) {
+            end = static_cast<std::size_t>(
+                static_cast<std::ptrdiff_t>(end) + delta);
+        }
+        pos += replacement.size();
+        changed = true;
+    }
+    return changed;
+}
+
+bool lowerFp64VertexStageInputs(std::string& msl) {
+    struct Fp64Input {
+        std::string name;
+        std::string suffix;
+        std::uint32_t location = 0;
+    };
+    std::vector<Fp64Input> inputs;
+
+    const std::string structNeedle = "struct main0_in";
+    const std::size_t structPos = msl.find(structNeedle);
+    if (structPos == std::string::npos) {
+        return false;
+    }
+    const std::size_t structOpen = msl.find('{', structPos);
+    if (structOpen == std::string::npos) {
+        return false;
+    }
+    std::size_t structClose = msl.find("};", structOpen);
+    if (structClose == std::string::npos) {
+        return false;
+    }
+
+    std::size_t lineStart = structOpen + 1;
+    while (lineStart < structClose) {
+        std::size_t lineEnd = msl.find('\n', lineStart);
+        if (lineEnd == std::string::npos || lineEnd > structClose) {
+            lineEnd = structClose;
+        }
+        const std::string line = msl.substr(lineStart, lineEnd - lineStart);
+        const std::size_t typePos = line.find("appgl_df64");
+        const std::size_t attrPos = line.find("[[attribute(");
+        if (typePos != std::string::npos && attrPos != std::string::npos) {
+            std::size_t typeEnd = typePos;
+            while (typeEnd < line.size() && isIdentifierChar(line[typeEnd])) {
+                ++typeEnd;
+            }
+            const std::string typeName =
+                line.substr(typePos, typeEnd - typePos);
+            std::size_t nameStart = typeEnd;
+            while (nameStart < line.size() &&
+                   std::isspace(static_cast<unsigned char>(line[nameStart]))) {
+                ++nameStart;
+            }
+            std::size_t nameEnd = nameStart;
+            while (nameEnd < line.size() && isIdentifierChar(line[nameEnd])) {
+                ++nameEnd;
+            }
+            const std::string name = line.substr(nameStart, nameEnd - nameStart);
+            const std::size_t locStart = attrPos + std::strlen("[[attribute(");
+            std::size_t locEnd = locStart;
+            std::uint32_t location = 0;
+            while (locEnd < line.size() &&
+                   std::isdigit(static_cast<unsigned char>(line[locEnd]))) {
+                location = location * 10u +
+                    static_cast<std::uint32_t>(line[locEnd] - '0');
+                ++locEnd;
+            }
+            if (!name.empty()) {
+                std::string replacement;
+                if (typeName == "appgl_df64") {
+                    replacement = "    uint2 " + name + " [[attribute(" +
+                        std::to_string(location) + ")]];";
+                } else if (typeName == "appgl_df64x2") {
+                    replacement = "    uint4 " + name + " [[attribute(" +
+                        std::to_string(location) + ")]];";
+                } else if (typeName == "appgl_df64x3") {
+                    replacement = "    uint4 " + name + "_0 [[attribute(" +
+                        std::to_string(location) + ")]];\n    uint2 " +
+                        name + "_1 [[attribute(" +
+                        std::to_string(location + 1u) + ")]];";
+                } else if (typeName == "appgl_df64x4") {
+                    replacement = "    uint4 " + name + "_0 [[attribute(" +
+                        std::to_string(location) + ")]];\n    uint4 " +
+                        name + "_1 [[attribute(" +
+                        std::to_string(location + 1u) + ")]];";
+                }
+                if (!replacement.empty()) {
+                    msl.replace(lineStart, lineEnd - lineStart, replacement);
+                    const auto delta =
+                        static_cast<std::ptrdiff_t>(replacement.size()) -
+                        static_cast<std::ptrdiff_t>(lineEnd - lineStart);
+                    structClose = static_cast<std::size_t>(
+                        static_cast<std::ptrdiff_t>(structClose) + delta);
+                    lineEnd = lineStart + replacement.size();
+                    Fp64Input input;
+                    input.name = name;
+                    input.suffix = typeName.substr(std::strlen("appgl_df64"));
+                    input.location = location;
+                    inputs.push_back(std::move(input));
+                }
+            }
+        }
+        lineStart = lineEnd + 1;
+    }
+
+    if (inputs.empty()) {
+        return false;
+    }
+
+    const std::size_t mainPos = msl.find("main0(");
+    if (mainPos == std::string::npos) {
+        return true;
+    }
+    std::size_t paramEnd = mainPos;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return true;
+    }
+    const std::size_t bodyOpen = msl.find('{', paramEnd);
+    if (bodyOpen == std::string::npos) {
+        return true;
+    }
+
+    for (const auto& input : inputs) {
+        replaceWholeToken(msl, bodyOpen + 1, "in." + input.name, input.name);
+    }
+
+    std::string injection;
+    for (const auto& input : inputs) {
+        if (input.suffix.empty()) {
+            injection += "\n    appgl_df64 " + input.name +
+                " = appgl_df64_from_words2(in." + input.name + ");";
+        } else if (input.suffix == "x2") {
+            injection += "\n    appgl_df64x2 " + input.name +
+                " = appgl_df64x2(appgl_df64_from_words2(in." +
+                input.name + ".xy), appgl_df64_from_words2(in." +
+                input.name + ".zw));";
+        } else if (input.suffix == "x3") {
+            injection += "\n    appgl_df64x3 " + input.name +
+                " = appgl_df64x3(appgl_df64_from_words2(in." +
+                input.name + "_0.xy), appgl_df64_from_words2(in." +
+                input.name + "_0.zw), appgl_df64_from_words2(in." +
+                input.name + "_1));";
+        } else if (input.suffix == "x4") {
+            injection += "\n    appgl_df64x4 " + input.name +
+                " = appgl_df64x4(appgl_df64_from_words2(in." +
+                input.name + "_0.xy), appgl_df64_from_words2(in." +
+                input.name + "_0.zw), appgl_df64_from_words2(in." +
+                input.name + "_1.xy), appgl_df64_from_words2(in." +
+                input.name + "_1.zw));";
+        }
+    }
+    if (!injection.empty()) {
+        msl.insert(bodyOpen + 1, injection);
+    }
+    return true;
 }
 
 void fixStorageImageSignedCoordinateCasts(std::string& msl) {
@@ -2288,6 +2467,10 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         std::string msl = compiler.compile();
 
+        if (isVertex && mslOpts.appgl_fp64_emulation) {
+            (void)lowerFp64VertexStageInputs(msl);
+        }
+
         if (isFragment) {
             // Sprint 18 Bank D-3 (`textures_bind_unit`): SPIRV-Cross
             // maps GLSL gl_FragCoord to Metal's top-left
@@ -3014,12 +3197,16 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             e.spirvLocation = compiler.get_decoration(input.id, spv::DecorationLocation);
             const auto& type = compiler.get_type(input.type_id);
             // Array inputs: each outer-dimension element consumes one
-            // location slot. Non-array inputs consume 1. Matrices and
-            // dvec3/dvec4 technically consume multiple slots but are
-            // unlikely in vertex-attribute declarations (GL 4.6 spec
-            // restricts vertex attributes to scalar/vector/dvec).
-            e.slotCount = (!type.array.empty() && type.array[0] > 0)
-                ? static_cast<std::uint32_t>(type.array[0]) : 1u;
+            // location slot. FP64 dvec3/dvec4 lower to two uint-backed
+            // Metal attributes because Metal's largest integer vertex
+            // format carries four 32-bit lanes.
+            const std::uint32_t scalarSlots =
+                (type.basetype == spirv_cross::SPIRType::Double &&
+                 type.vecsize > 2) ? 2u : 1u;
+            const std::uint32_t arraySlots =
+                (!type.array.empty() && type.array[0] > 0)
+                    ? static_cast<std::uint32_t>(type.array[0]) : 1u;
+            e.slotCount = arraySlots * scalarSlots;
             sortedInputs.push_back(e);
         }
         std::sort(sortedInputs.begin(), sortedInputs.end(),
@@ -3357,52 +3544,163 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             rb.byteSize = compiler.get_declared_struct_size(type);
             rb.containsFp64 = spirvTypeUsesFp64(compiler, type);
 
-            // Enumerate struct members so the draw path can build a
-            // correctly-laid-out buffer for each shader stage.
-            for (std::uint32_t mi = 0; mi < type.member_types.size(); ++mi) {
-                ShaderReflection::UniformMember member;
-                member.name = compiler.get_member_name(type.self, mi);
-                member.offset = compiler.type_struct_member_offset(type, mi);
-                member.size = compiler.get_declared_struct_member_size(type, mi);
-                const auto& memberType = compiler.get_type(type.member_types[mi]);
-                member.type = spirvBaseTypeToGL(memberType);
-                member.containsFp64 = spirvTypeUsesFp64(compiler, memberType);
-                rb.containsFp64 = rb.containsFp64 || member.containsFp64;
-                // Detect array members. Default-uniform arrays need this
-                // so computeStageUniformLayout's arrayCount/arrayStride/
-                // glElementBytes path expands GL-packed values into
-                // std140-padded slots (e.g. `uniform uint g_uint_value[8]`
-                // writes 32 bytes from the GL side but the MSL struct
-                // lays it out as `uint4[8]` = 128 bytes). Mirrors the
-                // named-UBO block above; missing from the push-constant
-                // path caused the entire SSBO basic-atomic-* cluster to
-                // read stale zeros via uniform[i] accesses after the
-                // first element.
-                if (!memberType.array.empty() && memberType.array[0] > 0) {
-                    member.isArray = true;
-                    member.arraySize = memberType.array[0];
-                }
-                if (compiler.has_member_decoration(type.self, mi,
-                        spv::DecorationArrayStride)) {
-                    member.arrayStride = static_cast<GLint>(
-                        compiler.get_member_decoration(type.self, mi,
-                            spv::DecorationArrayStride));
-                    if (member.arraySize > 0 && member.arrayStride > 0) {
-                        member.size = std::max<std::size_t>(
-                            member.size,
-                            static_cast<std::size_t>(member.arrayStride) *
-                                static_cast<std::size_t>(member.arraySize));
+            // Enumerate default-block members recursively. GLSL default
+            // uniforms can include structs and arrays-of-structs; GL exposes
+            // the flattened leaves via glGetUniformLocation, e.g.
+            // `s[0].field`, not the top-level struct object.
+            std::function<void(const spirv_cross::SPIRType&,
+                               const std::string&,
+                               std::size_t)> flattenDefaultMembers;
+            flattenDefaultMembers =
+                [&](const spirv_cross::SPIRType& parentType,
+                    const std::string& prefix,
+                    std::size_t baseOffset) {
+                for (std::uint32_t mi = 0;
+                     mi < parentType.member_types.size(); ++mi) {
+                    const auto& memberType =
+                        compiler.get_type(parentType.member_types[mi]);
+                    const std::string memberName =
+                        compiler.get_member_name(parentType.self, mi);
+                    const std::size_t memberOffset = baseOffset +
+                        compiler.type_struct_member_offset(parentType, mi);
+                    const std::string qualifiedName = prefix.empty()
+                        ? memberName : (prefix + "." + memberName);
+
+                    if (memberType.basetype == spirv_cross::SPIRType::Struct &&
+                        memberType.columns == 1 && memberType.array.empty()) {
+                        flattenDefaultMembers(memberType, qualifiedName,
+                                              memberOffset);
+                        continue;
                     }
+                    if (memberType.basetype == spirv_cross::SPIRType::Struct &&
+                        !memberType.array.empty() && memberType.array[0] > 0) {
+                        const std::size_t elemStride =
+                            compiler.get_declared_struct_member_size(
+                                parentType, mi) / memberType.array[0];
+                        for (std::uint32_t ai = 0; ai < memberType.array[0];
+                             ++ai) {
+                            flattenDefaultMembers(
+                                memberType,
+                                qualifiedName + "[" + std::to_string(ai) + "]",
+                                memberOffset + ai * elemStride);
+                        }
+                        continue;
+                    }
+
+                    if (!memberType.array.empty() &&
+                        memberType.array.size() > 1 &&
+                        memberType.basetype != spirv_cross::SPIRType::Struct) {
+                        const std::uint32_t innermostDim =
+                            memberType.array[0];
+                        GLint baseArrayStride = 0;
+                        if (compiler.has_member_decoration(
+                                parentType.self, mi,
+                                spv::DecorationArrayStride)) {
+                            baseArrayStride = static_cast<GLint>(
+                                compiler.get_member_decoration(
+                                    parentType.self, mi,
+                                    spv::DecorationArrayStride));
+                        }
+                        std::uint32_t totalCombos = 1;
+                        for (std::size_t d = 1; d < memberType.array.size();
+                             ++d) {
+                            totalCombos *=
+                                memberType.array[d] > 0 ? memberType.array[d] : 1;
+                        }
+                        for (std::uint32_t combo = 0; combo < totalCombos;
+                             ++combo) {
+                            std::string subscript;
+                            std::uint32_t remain = combo;
+                            std::vector<std::uint32_t> indices;
+                            for (std::size_t d = 1;
+                                 d < memberType.array.size(); ++d) {
+                                const std::uint32_t dimSize =
+                                    memberType.array[d] > 0
+                                        ? memberType.array[d] : 1;
+                                indices.push_back(remain % dimSize);
+                                remain /= dimSize;
+                            }
+                            for (auto it = indices.rbegin();
+                                 it != indices.rend(); ++it) {
+                                subscript += "[" + std::to_string(*it) + "]";
+                            }
+
+                            ShaderReflection::UniformMember member;
+                            member.name = qualifiedName + subscript;
+                            member.offset = memberOffset +
+                                combo * static_cast<std::size_t>(baseArrayStride);
+                            member.size = static_cast<std::size_t>(
+                                baseArrayStride * innermostDim);
+                            member.type = spirvBaseTypeToGL(memberType);
+                            member.containsFp64 =
+                                spirvTypeUsesFp64(compiler, memberType);
+                            rb.containsFp64 =
+                                rb.containsFp64 || member.containsFp64;
+                            member.isArray = true;
+                            member.arraySize = innermostDim;
+                            member.arrayStride = baseArrayStride;
+                            if (memberType.columns > 1) {
+                                member.isRowMajor =
+                                    compiler.has_member_decoration(
+                                        parentType.self, mi,
+                                        spv::DecorationRowMajor);
+                            }
+                            if (compiler.has_member_decoration(
+                                    parentType.self, mi,
+                                    spv::DecorationMatrixStride)) {
+                                member.matrixStride = static_cast<GLint>(
+                                    compiler.get_member_decoration(
+                                        parentType.self, mi,
+                                        spv::DecorationMatrixStride));
+                            }
+                            rb.members.push_back(std::move(member));
+                        }
+                        continue;
+                    }
+
+                    ShaderReflection::UniformMember member;
+                    member.name = qualifiedName;
+                    member.offset = memberOffset;
+                    member.size =
+                        compiler.get_declared_struct_member_size(parentType, mi);
+                    member.type = spirvBaseTypeToGL(memberType);
+                    member.containsFp64 =
+                        spirvTypeUsesFp64(compiler, memberType);
+                    rb.containsFp64 = rb.containsFp64 || member.containsFp64;
+                    if (!memberType.array.empty() && memberType.array[0] > 0) {
+                        member.isArray = true;
+                        member.arraySize = memberType.array[0];
+                    }
+                    if (compiler.has_member_decoration(
+                            parentType.self, mi,
+                            spv::DecorationArrayStride)) {
+                        member.arrayStride = static_cast<GLint>(
+                            compiler.get_member_decoration(
+                                parentType.self, mi,
+                                spv::DecorationArrayStride));
+                        if (member.arraySize > 0 && member.arrayStride > 0) {
+                            member.size = std::max<std::size_t>(
+                                member.size,
+                                static_cast<std::size_t>(member.arrayStride) *
+                                    static_cast<std::size_t>(member.arraySize));
+                        }
+                    }
+                    if (memberType.columns > 1) {
+                        member.isRowMajor = compiler.has_member_decoration(
+                            parentType.self, mi, spv::DecorationRowMajor);
+                    }
+                    if (compiler.has_member_decoration(
+                            parentType.self, mi,
+                            spv::DecorationMatrixStride)) {
+                        member.matrixStride = static_cast<GLint>(
+                            compiler.get_member_decoration(
+                                parentType.self, mi,
+                                spv::DecorationMatrixStride));
+                    }
+                    rb.members.push_back(std::move(member));
                 }
-                // Detect row_major decoration on matrix members (same
-                // as the named-UBO path) so matrix-row iteration in
-                // the packing loop uses the correct stride.
-                if (memberType.columns > 1) {
-                    member.isRowMajor = compiler.has_member_decoration(
-                        type.self, mi, spv::DecorationRowMajor);
-                }
-                rb.members.push_back(std::move(member));
-            }
+            };
+            flattenDefaultMembers(type, "", 0);
             for (const auto& member : rb.members) {
                 rb.byteSize = std::max<std::size_t>(
                     rb.byteSize, member.offset + member.size);

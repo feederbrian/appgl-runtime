@@ -98,6 +98,7 @@ struct TranslatedDrawInfo {
     // VBO Metal buffer is bound directly, bypassing the ring-buffer memcpy.
     void* metalVertexBuffer = nullptr;
     std::size_t metalVertexBufferOffset = 0;
+    GLuint glVertexBuffer = 0;
 
     // Per-attribute layout within the interleaved vertex buffer.  Each entry
     // describes one enabled vertex attribute's location and its byte offset
@@ -145,6 +146,7 @@ struct TranslatedDrawInfo {
         // Direct Metal buffer binding (OPT-5).
         void* metalBuffer = nullptr;
         std::size_t metalBufferOffset = 0;
+        GLuint glBuffer = 0;
     };
     std::vector<ExtraVertexBuffer> extraVertexBuffers;
 
