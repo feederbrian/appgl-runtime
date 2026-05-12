@@ -159,7 +159,9 @@ struct TessEvalVarying {
     std::uint32_t typeId = 0;     // pointer-to-T; `scalarWidth` resolves T
     std::uint32_t scalarCount = 0; // runtime flat-scalar width of the element type
     std::uint8_t baseType = 0;    // 0=float, 1=int, 2=uint
+    std::uint8_t scalarByteSize = 4;
     std::uint8_t interp = 0;      // 0=smooth, 1=flat, 2=noperspective, 3=centroid
+    std::vector<std::uint32_t> stageSlotWidths;
     std::string name;
     bool isArray = false;
     // Per-vertex inputs arrive through gl_in[N].<member>. isPerVertex

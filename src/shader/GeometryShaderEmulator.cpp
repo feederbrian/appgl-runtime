@@ -41,13 +41,15 @@ namespace spv {
         OpArrayLength = 68,
         OpCompositeExtract = 81, OpCompositeConstruct = 80,
         OpVectorShuffle = 79,
-        OpVectorTimesScalar = 142, OpMatrixTimesVector = 145, OpDot = 148,
+        OpVectorTimesScalar = 142, OpMatrixTimesScalar = 143,
+        OpVectorTimesMatrix = 144, OpMatrixTimesVector = 145,
+        OpMatrixTimesMatrix = 146, OpDot = 148,
         OpFNegate = 127,
         OpFAdd = 129, OpFSub = 131, OpFMul = 133, OpFDiv = 136, OpFMod = 141,
         OpIAdd = 128, OpISub = 130, OpIMul = 132,
         OpSDiv = 135, OpSRem = 138, OpSMod = 139, OpUMod = 137, OpSNegate = 126,
         OpConvertFToS = 110, OpConvertFToU = 109,
-        OpConvertSToF = 111, OpConvertUToF = 112,
+        OpConvertSToF = 111, OpConvertUToF = 112, OpFConvert = 115,
         OpBitcast = 124,
         OpBitwiseAnd = 199, OpShiftLeftLogical = 196,
         OpIEqual = 170, OpINotEqual = 171,
@@ -96,7 +98,9 @@ namespace spv {
     enum Decoration : std::uint32_t {
         DecorationBlock = 2, DecorationBufferBlock = 3,
         DecorationLocation = 30, DecorationBuiltIn = 11,
+        DecorationRowMajor = 4, DecorationColMajor = 5,
         DecorationArrayStride = 6,
+        DecorationMatrixStride = 7,
         DecorationNoPerspective = 13, DecorationFlat = 14, DecorationCentroid = 16,
         DecorationOffset = 35,
         DecorationDescriptorSet = 34, DecorationBinding = 33,
@@ -139,6 +143,7 @@ enum GLSLstd450 : std::uint32_t {
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -823,6 +828,10 @@ private:
     // std430 in Phase 4 if surfaced). Sister to loadFromSSBO.
     Value loadFromUBO(std::uint32_t binding, std::uint32_t byteOffset,
                       std::uint32_t leafTypeId);
+    std::vector<Value> loadMatrixColumnsFromUBO(std::uint32_t binding,
+                                                std::uint32_t byteOffset,
+                                                std::uint32_t matrixTypeId,
+                                                std::uint32_t matrixStride);
 
     // Apply GLSL.std.450 extended instruction.
     Value evalExtInst(std::uint32_t glslOp, const std::uint32_t* operands,
@@ -897,6 +906,8 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     std::uint32_t curType = tIt->second.pointeeType;   // deref pointer
     std::uint32_t offset = 0;         // scalar offset (non-SSBO path)
     std::uint32_t byteOffset = 0;     // byte offset (SSBO / UBO path)
+    std::uint32_t activeMatrixStride = 0;
+    std::uint32_t resolvedMatrixStride = 0;
     auto scalarByteWidth = [&](std::uint32_t typeId) -> std::uint32_t {
         std::uint32_t cur = typeId;
         for (int depth = 0; depth < 8; ++depth) {
@@ -925,6 +936,32 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             }
         }
         return 4u;
+    };
+    auto matrixColumnStrideBytes = [&](std::uint32_t matrixTypeId,
+                                       std::uint32_t decoratedStride,
+                                       bool std140Like) -> std::uint32_t {
+        if (decoratedStride != 0) return decoratedStride;
+        auto mIt = module_.types.find(matrixTypeId);
+        if (mIt == module_.types.end() ||
+            mIt->second.kind != TypeInfo::Kind::Matrix) {
+            return 0;
+        }
+        const std::uint32_t scalarBytes =
+            scalarByteWidth(mIt->second.componentType);
+        const std::uint32_t columnScalars =
+            module_.scalarWidth(mIt->second.componentType);
+        std::uint32_t stride = columnScalars * scalarBytes;
+        if (std140Like) {
+            stride = ((stride + 15u) / 16u) * 16u;
+        }
+        return stride == 0 ? 4u : stride;
+    };
+    auto decoratedMatrixStrideForType = [&](std::uint32_t typeId) -> std::uint32_t {
+        auto dIt = module_.decorations.find(typeId);
+        if (dIt != module_.decorations.end() && dIt->second.hasMatrixStride) {
+            return dIt->second.matrixStride;
+        }
+        return 0;
     };
 
     for (std::uint32_t k = 0; k < nIndices; ++k) {
@@ -998,12 +1035,17 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             // member layouts to be unambiguous).
             if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
                 auto mdIt = module_.memberDecorations.find(curType);
+                activeMatrixStride = 0;
                 if (mdIt != module_.memberDecorations.end()) {
                     auto pIt2 = mdIt->second.perMember.find(
                         static_cast<std::uint32_t>(idx));
-                    if (pIt2 != mdIt->second.perMember.end() &&
-                        pIt2->second.hasOffset) {
-                        byteOffset += pIt2->second.offset;
+                    if (pIt2 != mdIt->second.perMember.end()) {
+                        if (pIt2->second.hasOffset) {
+                            byteOffset += pIt2->second.offset;
+                        }
+                        if (pIt2->second.hasMatrixStride) {
+                            activeMatrixStride = pIt2->second.matrixStride;
+                        }
                     }
                 }
             }
@@ -1021,13 +1063,15 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
             const std::uint32_t colW = module_.scalarWidth(t.componentType);
             offset += static_cast<std::uint32_t>(idx) * colW;
             if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
-                // Matrix column stride: fall back to colW * 4 bytes
-                // (std430 vec-column-packed) when no MatrixStride
-                // decoration is parsed. Matrices in SSBO are rare in
-                // the CE tess_eval target set.
+                const std::uint32_t decoratedStride =
+                    activeMatrixStride != 0
+                        ? activeMatrixStride
+                        : decoratedMatrixStrideForType(curType);
+                const std::uint32_t stride = matrixColumnStrideBytes(
+                    curType, decoratedStride, (rootIsUboArray || rootIsUBO));
+                resolvedMatrixStride = stride;
                 byteOffset +=
-                    static_cast<std::uint32_t>(idx) * colW *
-                    scalarByteWidth(t.componentType);
+                    static_cast<std::uint32_t>(idx) * stride;
             }
             curType = t.componentType;
         } else {
@@ -1042,6 +1086,22 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     r.isStorageBuffer = rootIsSSBO;
     r.byteOffset = byteOffset;
     r.binding = rootBinding;
+    if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
+        auto leafTIt = module_.types.find(curType);
+        if (leafTIt != module_.types.end() &&
+            leafTIt->second.kind == TypeInfo::Kind::Matrix) {
+            const std::uint32_t decoratedStride =
+                activeMatrixStride != 0
+                    ? activeMatrixStride
+                    : decoratedMatrixStrideForType(curType);
+            resolvedMatrixStride = matrixColumnStrideBytes(
+                curType, decoratedStride, (rootIsUboArray || rootIsUBO));
+        }
+        if (resolvedMatrixStride != 0) {
+            r.hasMatrixStride = true;
+            r.matrixStride = resolvedMatrixStride;
+        }
+    }
     // Sprint 17 Day 4+ BONUS-2: when the root is a UBO array, the
     // resolved binding came from the first array index dispatch
     // (uboArrayElemBinding). Override `binding` and flip
@@ -1502,6 +1562,91 @@ Value Interpreter::loadFromUBO(std::uint32_t binding,
         }
     }
     return v;
+}
+
+std::vector<Value> Interpreter::loadMatrixColumnsFromUBO(
+    std::uint32_t binding,
+    std::uint32_t byteOffset,
+    std::uint32_t matrixTypeId,
+    std::uint32_t matrixStride)
+{
+    std::vector<Value> columns;
+    auto mIt = module_.types.find(matrixTypeId);
+    if (mIt == module_.types.end() ||
+        mIt->second.kind != TypeInfo::Kind::Matrix) {
+        bail("loadMatrixColumnsFromUBO: unknown matrix type");
+        return columns;
+    }
+    const TypeInfo& matrix = mIt->second;
+    auto cIt = module_.types.find(matrix.componentType);
+    if (cIt == module_.types.end()) {
+        bail("loadMatrixColumnsFromUBO: unknown column type");
+        return columns;
+    }
+    const TypeInfo& columnType = cIt->second;
+
+    int rows = 1;
+    switch (columnType.kind) {
+        case TypeInfo::Kind::Vec2: rows = 2; break;
+        case TypeInfo::Kind::Vec3: rows = 3; break;
+        case TypeInfo::Kind::Vec4: rows = 4; break;
+        default: rows = 1; break;
+    }
+
+    std::uint32_t scalarBytes = 4;
+    auto scalarIt = module_.types.find(columnType.componentType);
+    if (scalarIt != module_.types.end()) {
+        scalarBytes = std::max<std::uint32_t>(
+            scalarIt->second.elementScalarWidth, 4u);
+    }
+    if (matrixStride == 0) {
+        const std::uint32_t packedBytes =
+            static_cast<std::uint32_t>(rows) * scalarBytes;
+        matrixStride = ((packedBytes + 15u) / 16u) * 16u;
+    }
+
+    const std::uint8_t* base = nullptr;
+    std::size_t size = 0;
+    if (uniformBuffers_ == nullptr) {
+        bail("loadMatrixColumnsFromUBO: no UBO map set");
+    } else {
+        auto bIt = uniformBuffers_->find(binding);
+        if (bIt != uniformBuffers_->end()) {
+            base = bIt->second.ptr;
+            size = bIt->second.size;
+        }
+    }
+
+    auto readFloatScalar = [&](std::uint32_t off) -> float {
+        if (base == nullptr) return 0.0f;
+        if (scalarBytes == 8u) {
+            if (off + sizeof(double) > size) return 0.0f;
+            double d = 0.0;
+            std::memcpy(&d, base + off, sizeof(d));
+            return static_cast<float>(d);
+        }
+        if (off + sizeof(float) > size) return 0.0f;
+        float f = 0.0f;
+        std::memcpy(&f, base + off, sizeof(f));
+        return f;
+    };
+
+    columns.reserve(matrix.count);
+    for (std::uint32_t col = 0; col < matrix.count; ++col) {
+        Value v;
+        v.kind = rows == 2 ? Value::Kind::Float2
+               : rows == 3 ? Value::Kind::Float3
+               : rows == 4 ? Value::Kind::Float4
+                            : Value::Kind::Float;
+        for (int row = 0; row < rows; ++row) {
+            const std::uint32_t off =
+                byteOffset + col * matrixStride +
+                static_cast<std::uint32_t>(row) * scalarBytes;
+            v.f[row] = readFloatScalar(off);
+        }
+        columns.push_back(v);
+    }
+    return columns;
 }
 
 void Interpreter::storeToSSBO(std::uint32_t binding,
@@ -2171,18 +2316,60 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                             handledAsArray = true;
                         }
                     }
-                    if (pIt != module_.types.end() &&
-                        pIt->second.kind == TypeInfo::Kind::Array) {
-                        const std::uint32_t elementType = pIt->second.componentType;
-                        const std::uint32_t elementWidth = module_.scalarWidth(elementType);
-                        // Each element occupies one location (per spec)
-                        // when element width <= 4. Wider elements (mat3,
-                        // mat4 inputs) consume multiple locations per
-                        // element — out of scope here; fall through.
-                        if (elementWidth >= 1 && elementWidth <= 4) {
-                            const std::uint32_t baseLoc = locIt->second;
-                            const std::uint32_t arrayLen =
-                                width / std::max<std::uint32_t>(1, elementWidth);
+	                    if (pIt != module_.types.end() &&
+	                        pIt->second.kind == TypeInfo::Kind::Array) {
+	                        const std::uint32_t elementType = pIt->second.componentType;
+	                        const std::uint32_t elementWidth = module_.scalarWidth(elementType);
+	                        auto elementIt = module_.types.find(elementType);
+	                        if (elementIt != module_.types.end() &&
+	                            elementIt->second.kind == TypeInfo::Kind::Matrix) {
+	                            const std::uint32_t columnWidth =
+	                                module_.scalarWidth(elementIt->second.componentType);
+	                            const std::uint32_t columnCount = elementIt->second.count;
+	                            if (columnWidth >= 1 && columnWidth <= 4 &&
+	                                columnCount >= 1 && elementWidth != 0) {
+	                                const std::uint32_t baseLoc = locIt->second;
+	                                const std::uint32_t arrayLen =
+	                                    width / std::max<std::uint32_t>(1, elementWidth);
+	                                for (std::uint32_t e = 0; e < arrayLen; ++e) {
+	                                    for (std::uint32_t col = 0; col < columnCount; ++col) {
+	                                        auto eIt = vsAttribs_->find(baseLoc + e * columnCount + col);
+	                                        if (eIt == vsAttribs_->end()) continue;
+	                                        const Value& v = eIt->second;
+	                                        const int n = v.componentCount();
+	                                        const std::uint32_t dstBase =
+	                                            e * elementWidth + col * columnWidth;
+	                                        if (v.isFloatKind()) {
+	                                            for (int k = 0;
+	                                                 k < n &&
+	                                                 k < static_cast<int>(columnWidth) &&
+	                                                 dstBase + static_cast<std::uint32_t>(k) < width;
+	                                                 ++k) {
+	                                                storage[dstBase + k] = v.f[k];
+	                                            }
+	                                        } else {
+	                                            for (int k = 0;
+	                                                 k < n &&
+	                                                 k < static_cast<int>(columnWidth) &&
+	                                                 dstBase + static_cast<std::uint32_t>(k) < width;
+	                                                 ++k) {
+	                                                std::memcpy(&storage[dstBase + k],
+	                                                            &v.i[k], 4);
+	                                            }
+	                                        }
+	                                    }
+	                                }
+	                                handledAsArray = true;
+	                            }
+	                        }
+	                        // Each element occupies one location (per spec)
+	                        // when element width <= 4. Wider elements (mat3,
+	                        // mat4 inputs) consume multiple locations per
+	                        // element — out of scope here; fall through.
+	                        if (!handledAsArray && elementWidth >= 1 && elementWidth <= 4) {
+	                            const std::uint32_t baseLoc = locIt->second;
+	                            const std::uint32_t arrayLen =
+	                                width / std::max<std::uint32_t>(1, elementWidth);
                             for (std::uint32_t e = 0; e < arrayLen; ++e) {
                                 auto eIt = vsAttribs_->find(baseLoc + e);
                                 if (eIt == vsAttribs_->end()) continue;
@@ -3037,18 +3224,45 @@ void Interpreter::emitVertex(std::vector<EmulatedVertex>& out, std::uint32_t str
     for (std::size_t k = 0; k < outputVaryingNames_.size(); ++k) {
         std::vector<float> v;
         v.assign(outputVaryingWidths_[k], 0.0f);
+        const std::string& wantName = outputVaryingNames_[k];
+        bool matched = false;
         // Find the Output variable by name.
         for (const auto& [varId, info] : module_.variables) {
-            if (info.storageClass == spv::StorageClassOutput &&
-                info.name == outputVaryingNames_[k]) {
+            if (info.storageClass != spv::StorageClassOutput) continue;
+            if (info.name == wantName) {
                 auto sIt = varStorage_.find(varId);
                 if (sIt != varStorage_.end()) {
                     for (std::size_t j = 0; j < v.size() && j < sIt->second.size(); ++j) {
                         v[j] = sIt->second[j];
                     }
                 }
+                matched = true;
                 break;
             }
+            auto tIt = module_.types.find(info.typeId);
+            if (tIt == module_.types.end()) continue;
+            const std::uint32_t pointeeId = tIt->second.pointeeType;
+            auto pIt = module_.types.find(pointeeId);
+            if (pIt == module_.types.end() || pIt->second.kind != TypeInfo::Kind::Struct) continue;
+            auto mnIt = module_.memberNames.find(pointeeId);
+            if (mnIt == module_.memberNames.end()) continue;
+            std::uint32_t runningOff = 0;
+            for (std::size_t m = 0; m < pIt->second.memberTypes.size(); ++m) {
+                const std::uint32_t memW = module_.scalarWidth(pIt->second.memberTypes[m]);
+                auto nameIt = mnIt->second.find(static_cast<std::uint32_t>(m));
+                if (nameIt != mnIt->second.end() && nameIt->second == wantName) {
+                    auto sIt = varStorage_.find(varId);
+                    if (sIt != varStorage_.end()) {
+                        for (std::size_t j = 0; j < v.size() && runningOff + j < sIt->second.size(); ++j) {
+                            v[j] = sIt->second[runningOff + j];
+                        }
+                    }
+                    matched = true;
+                    break;
+                }
+                runningOff += memW;
+            }
+            if (matched) break;
         }
         ev.varyings.insert(ev.varyings.end(), v.begin(), v.end());
     }
@@ -3539,6 +3753,139 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
         }
         return r;
     };
+    auto floatVectorWidthForType = [&](std::uint32_t typeId,
+                                       int fallbackWidth) -> int {
+        auto tIt = module_.types.find(typeId);
+        if (tIt == module_.types.end()) {
+            return std::clamp(fallbackWidth, 1, 4);
+        }
+        const TypeInfo& t = tIt->second;
+        switch (t.kind) {
+            case TypeInfo::Kind::Vec2: return 2;
+            case TypeInfo::Kind::Vec3: return 3;
+            case TypeInfo::Kind::Vec4: return 4;
+            default: return std::clamp(fallbackWidth, 1, 4);
+        }
+    };
+    auto floatKindForWidth = [](int width) -> Value::Kind {
+        return width == 2 ? Value::Kind::Float2 :
+               width == 3 ? Value::Kind::Float3 :
+               width == 4 ? Value::Kind::Float4 :
+                            Value::Kind::Float;
+    };
+    auto makeFloatValueForType = [&](std::uint32_t typeId,
+                                     int fallbackWidth) -> Value {
+        Value r;
+        r.kind = floatKindForWidth(floatVectorWidthForType(typeId, fallbackWidth));
+        return r;
+    };
+    auto matrixColumnsForId =
+        [&](std::uint32_t id) -> const std::vector<Value>* {
+            auto mIt = matrixColumns_.find(id);
+            if (mIt != matrixColumns_.end()) return &mIt->second;
+            auto cIt = module_.matrixConstants.find(id);
+            if (cIt != module_.matrixConstants.end()) return &cIt->second;
+            return nullptr;
+        };
+    auto matrixRowsForType = [&](std::uint32_t matrixTypeId,
+                                 int fallbackRows) -> int {
+        auto mIt = module_.types.find(matrixTypeId);
+        if (mIt == module_.types.end() ||
+            mIt->second.kind != TypeInfo::Kind::Matrix) {
+            return std::clamp(fallbackRows, 1, 4);
+        }
+        auto cIt = module_.types.find(mIt->second.componentType);
+        if (cIt == module_.types.end()) {
+            return std::clamp(fallbackRows, 1, 4);
+        }
+        switch (cIt->second.kind) {
+            case TypeInfo::Kind::Vec2: return 2;
+            case TypeInfo::Kind::Vec3: return 3;
+            case TypeInfo::Kind::Vec4: return 4;
+            default: return 1;
+        }
+    };
+    auto applyMatrixElementwise =
+        [&](std::uint32_t resultId, std::uint32_t leftId,
+            std::uint32_t rightId, std::uint16_t op) -> bool {
+            const auto* aCols = matrixColumnsForId(leftId);
+            const auto* bCols = matrixColumnsForId(rightId);
+            if (aCols == nullptr || bCols == nullptr) return false;
+            std::vector<Value> outCols;
+            const std::size_t cols = std::min(aCols->size(), bCols->size());
+            outCols.reserve(cols);
+            for (std::size_t c = 0; c < cols; ++c) {
+                Value r = (*aCols)[c];
+                const Value& a = (*aCols)[c];
+                const Value& b = (*bCols)[c];
+                const int n = std::min(a.componentCount(), b.componentCount());
+                for (int k = 0; k < n; ++k) {
+                    switch (op) {
+                        case spv::OpFAdd: r.f[k] = a.f[k] + b.f[k]; break;
+                        case spv::OpFSub: r.f[k] = a.f[k] - b.f[k]; break;
+                        case spv::OpFMul: r.f[k] = a.f[k] * b.f[k]; break;
+                        case spv::OpFDiv: r.f[k] = b.f[k] != 0.0f ? a.f[k] / b.f[k] : 0.0f; break;
+                        default: break;
+                    }
+                }
+                outCols.push_back(r);
+            }
+            matrixColumns_[resultId] = std::move(outCols);
+            valueStore_.erase(resultId);
+            return true;
+        };
+    auto applyMatrixScalar =
+        [&](std::uint32_t resultId, std::uint32_t matrixId,
+            const Value& scalar, std::uint16_t op,
+            bool scalarOnLeft = false) -> bool {
+            const auto* cols = matrixColumnsForId(matrixId);
+            if (cols == nullptr) return false;
+            std::vector<Value> outCols = *cols;
+            const float s = scalar.f[0];
+            for (Value& col : outCols) {
+                for (int k = 0; k < col.componentCount(); ++k) {
+                    const float v = col.f[k];
+                    switch (op) {
+                        case spv::OpFAdd: col.f[k] = scalarOnLeft ? s + v : v + s; break;
+                        case spv::OpFSub: col.f[k] = scalarOnLeft ? s - v : v - s; break;
+                        case spv::OpFMul:
+                        case spv::OpVectorTimesScalar:
+                        case spv::OpMatrixTimesScalar:
+                            col.f[k] = v * s;
+                            break;
+                        case spv::OpFDiv:
+                            col.f[k] = scalarOnLeft
+                                ? (v != 0.0f ? s / v : 0.0f)
+                                : (s != 0.0f ? v / s : 0.0f);
+                            break;
+                        default: break;
+                    }
+                }
+            }
+            matrixColumns_[resultId] = std::move(outCols);
+            valueStore_.erase(resultId);
+            return true;
+        };
+    auto multiplyMatrixVector =
+        [&](const std::vector<Value>& cols, const Value& v,
+            std::uint32_t resultTypeId, int fallbackRows) -> Value {
+            const int n = matrixRowsForType(resultTypeId, fallbackRows);
+            Value r;
+            r.kind = floatKindForWidth(n);
+            const int colCount = std::min<int>(
+                static_cast<int>(cols.size()), v.componentCount());
+            for (int row = 0; row < n; ++row) {
+                float sum = 0.0f;
+                for (int col = 0; col < colCount; ++col) {
+                    const Value& c = cols[static_cast<std::size_t>(col)];
+                    if (row < c.componentCount()) {
+                        sum += c.f[row] * v.f[col];
+                    }
+                }
+                r.f[row] = sum;
+            }
+            return r;
+        };
 
     while (pc < currentFuncEnd && !errored_) {
         const std::uint32_t inst = module_.words[pc];
@@ -3648,10 +3995,21 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             // — read from the per-binding UBO map at
                             // the byteOffset accumulated during access-
                             // chain resolution.
-                            valueStore_[w[1]] = loadFromUBO(
-                                acIt->second.binding,
-                                acIt->second.byteOffset,
-                                acIt->second.leafTypeId);
+                            auto resultTypeIt = module_.types.find(w[0]);
+                            if (resultTypeIt != module_.types.end() &&
+                                resultTypeIt->second.kind == TypeInfo::Kind::Matrix) {
+                                matrixColumns_[w[1]] = loadMatrixColumnsFromUBO(
+                                    acIt->second.binding,
+                                    acIt->second.byteOffset,
+                                    w[0],
+                                    acIt->second.matrixStride);
+                                valueStore_.erase(w[1]);
+                            } else {
+                                valueStore_[w[1]] = loadFromUBO(
+                                    acIt->second.binding,
+                                    acIt->second.byteOffset,
+                                    acIt->second.leafTypeId);
+                            }
                         } else {
                             auto resultTypeIt = module_.types.find(w[0]);
                             if (resultTypeIt != module_.types.end() &&
@@ -3684,11 +4042,11 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         ? aliasIt->second
                         : w[0];
                 }();
-                auto matrixIt = matrixColumns_.find(w[1]);
-                if (matrixIt != matrixColumns_.end()) {
+                const auto* storeMatrixColumns = matrixColumnsForId(w[1]);
+                if (storeMatrixColumns != nullptr) {
                     auto vIt = module_.variables.find(ptrId);
                     if (vIt != module_.variables.end()) {
-                        storeMatrixColumnsToVar(ptrId, 0, matrixIt->second);
+                        storeMatrixColumnsToVar(ptrId, 0, *storeMatrixColumns);
                     } else {
                         auto acIt = accessChains_.find(ptrId);
                         if (acIt != accessChains_.end()) {
@@ -3698,7 +4056,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                             } else {
                                 storeMatrixColumnsToVar(acIt->second.rootVarId,
                                                         acIt->second.scalarOffset,
-                                                        matrixIt->second);
+                                                        *storeMatrixColumns);
                             }
                         } else {
                             bail("OpStore: unresolved matrix pointer");
@@ -4672,22 +5030,22 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpCompositeExtract: {
                 // w[0]=type, w[1]=resultId, w[2]=composite, w[3..]=indices
-                auto matrixIt = matrixColumns_.find(w[2]);
-                if (matrixIt != matrixColumns_.end()) {
+                const auto* matrixIt = matrixColumnsForId(w[2]);
+                if (matrixIt != nullptr) {
                     if (wc >= 4) {
                         const std::uint32_t col = w[3];
-                        if (col < matrixIt->second.size()) {
-                            if (wc >= 5) {
+                        if (col < matrixIt->size()) {
+                            if (wc >= 6) {
                                 const std::uint32_t row = w[4];
                                 Value r;
                                 r.kind = Value::Kind::Float;
                                 if (row < static_cast<std::uint32_t>(
-                                        matrixIt->second[col].componentCount())) {
-                                    r.f[0] = matrixIt->second[col].f[row];
+                                        (*matrixIt)[col].componentCount())) {
+                                    r.f[0] = (*matrixIt)[col].f[row];
                                 }
                                 valueStore_[w[1]] = r;
                             } else {
-                                valueStore_[w[1]] = matrixIt->second[col];
+                                valueStore_[w[1]] = (*matrixIt)[col];
                             }
                         }
                     }
@@ -4805,6 +5163,26 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpFAdd: case spv::OpFSub:
             case spv::OpFMul: case spv::OpFDiv: {
+                if (applyMatrixElementwise(w[1], w[2], w[3], opcode)) {
+                    pc += wc;
+                    break;
+                }
+                if (matrixColumnsForId(w[2]) != nullptr) {
+                    Value b;
+                    if (!tryGetValue(w[3], b)) { bail("arith: unknown matrix scalar"); break; }
+                    if (applyMatrixScalar(w[1], w[2], b, opcode)) {
+                        pc += wc;
+                        break;
+                    }
+                }
+                if (matrixColumnsForId(w[3]) != nullptr) {
+                    Value a;
+                    if (!tryGetValue(w[2], a)) { bail("arith: unknown scalar matrix"); break; }
+                    if (applyMatrixScalar(w[1], w[3], a, opcode, true)) {
+                        pc += wc;
+                        break;
+                    }
+                }
                 Value a, b;
                 if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("arith: unknown operand"); break; }
                 Value r = a;
@@ -4821,6 +5199,19 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 break;
             }
             case spv::OpFNegate: {
+                const auto* cols = matrixColumnsForId(w[2]);
+                if (cols != nullptr) {
+                    std::vector<Value> outCols = *cols;
+                    for (Value& col : outCols) {
+                        for (int k = 0; k < col.componentCount(); ++k) {
+                            col.f[k] = -col.f[k];
+                        }
+                    }
+                    matrixColumns_[w[1]] = std::move(outCols);
+                    valueStore_.erase(w[1]);
+                    pc += wc;
+                    break;
+                }
                 Value a;
                 if (!tryGetValue(w[2], a)) { bail("OpFNegate: unknown operand"); break; }
                 Value r = a;
@@ -4853,47 +5244,73 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            case spv::OpMatrixTimesScalar: {
+                Value s;
+                if (!tryGetValue(w[3], s) ||
+                    !applyMatrixScalar(w[1], w[2], s, opcode)) {
+                    bail("OpMatrixTimesScalar: unknown operand");
+                    break;
+                }
+                pc += wc;
+                break;
+            }
+            case spv::OpVectorTimesMatrix: {
+                Value v;
+                const auto* cols = matrixColumnsForId(w[3]);
+                if (!tryGetValue(w[2], v) || cols == nullptr) {
+                    bail("OpVectorTimesMatrix: unknown operand");
+                    break;
+                }
+                Value r = makeFloatValueForType(
+                    w[0], static_cast<int>(cols->size()));
+                for (std::size_t col = 0; col < cols->size() && col < 4; ++col) {
+                    const Value& c = (*cols)[col];
+                    float sum = 0.0f;
+                    const int n = std::min(v.componentCount(), c.componentCount());
+                    for (int row = 0; row < n; ++row) {
+                        sum += v.f[row] * c.f[row];
+                    }
+                    r.f[col] = sum;
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
             case spv::OpMatrixTimesVector: {
                 // Matrix values are column vectors; M * v is
                 // sum(column[i] * v[i]). This covers CTS
                 // cull_distance item6's TES mat3(position columns)
                 // * gl_TessCoord position formula.
-                auto mIt = matrixColumns_.find(w[2]);
+                const auto* mIt = matrixColumnsForId(w[2]);
                 Value v;
-                if (mIt == matrixColumns_.end() || !tryGetValue(w[3], v)) {
+                if (mIt == nullptr || !tryGetValue(w[3], v)) {
                     bail("OpMatrixTimesVector: unknown operand");
                     break;
                 }
-                int n = 1;
-                auto typeIt = module_.types.find(w[0]);
-                if (typeIt != module_.types.end()) {
-                    switch (typeIt->second.kind) {
-                        case TypeInfo::Kind::Vec2: n = 2; break;
-                        case TypeInfo::Kind::Vec3: n = 3; break;
-                        case TypeInfo::Kind::Vec4: n = 4; break;
-                        default: n = 1; break;
-                    }
-                } else if (!mIt->second.empty()) {
-                    n = mIt->second.front().componentCount();
-                }
-                Value r;
-                r.kind = (n == 2) ? Value::Kind::Float2 :
-                         (n == 3) ? Value::Kind::Float3 :
-                         (n == 4) ? Value::Kind::Float4 :
-                                    Value::Kind::Float;
-                const int cols = std::min<int>(
-                    static_cast<int>(mIt->second.size()), v.componentCount());
-                for (int row = 0; row < n; ++row) {
-                    float sum = 0.0f;
-                    for (int col = 0; col < cols; ++col) {
-                        const Value& c = mIt->second[static_cast<std::size_t>(col)];
-                        if (row < c.componentCount()) {
-                            sum += c.f[row] * v.f[col];
-                        }
-                    }
-                    r.f[row] = sum;
-                }
+                const int fallbackRows = !mIt->empty()
+                    ? mIt->front().componentCount() : 1;
+                Value r = multiplyMatrixVector(*mIt, v, w[0], fallbackRows);
                 valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpMatrixTimesMatrix: {
+                const auto* aCols = matrixColumnsForId(w[2]);
+                const auto* bCols = matrixColumnsForId(w[3]);
+                if (aCols == nullptr || bCols == nullptr) {
+                    bail("OpMatrixTimesMatrix: unknown operand");
+                    break;
+                }
+                const int fallbackRows = !aCols->empty()
+                    ? aCols->front().componentCount() : 1;
+                std::vector<Value> outCols;
+                outCols.reserve(bCols->size());
+                for (const Value& bCol : *bCols) {
+                    outCols.push_back(
+                        multiplyMatrixVector(*aCols, bCol, w[0], fallbackRows));
+                }
+                matrixColumns_[w[1]] = std::move(outCols);
+                valueStore_.erase(w[1]);
                 pc += wc;
                 break;
             }
@@ -4903,20 +5320,67 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 if (!tryGetValue(w[2], v1) || !tryGetValue(w[3], v2)) { bail("OpVectorShuffle: unknown operand"); break; }
                 const std::uint32_t n = wc - 5;   // result component count
                 Value r;
-                r.kind = (n == 2) ? Value::Kind::Float2 :
-                         (n == 3) ? Value::Kind::Float3 :
-                         (n == 4) ? Value::Kind::Float4 : Value::Kind::Float;
+                bool isInt = false;
+                bool isUInt = false;
+                auto typeIt = module_.types.find(w[0]);
+                if (typeIt != module_.types.end()) {
+                    const auto& t = typeIt->second;
+                    std::uint32_t scalarType = 0;
+                    if (t.kind == TypeInfo::Kind::Vec2 ||
+                        t.kind == TypeInfo::Kind::Vec3 ||
+                        t.kind == TypeInfo::Kind::Vec4) {
+                        scalarType = t.componentType;
+                    } else {
+                        scalarType = w[0];
+                    }
+                    auto sIt = module_.types.find(scalarType);
+                    if (sIt != module_.types.end()) {
+                        isInt = sIt->second.kind == TypeInfo::Kind::Int;
+                        isUInt = sIt->second.kind == TypeInfo::Kind::UInt;
+                    }
+                }
+                if (isInt) {
+                    r.kind = (n == 2) ? Value::Kind::Int2 :
+                             (n == 3) ? Value::Kind::Int3 :
+                             (n == 4) ? Value::Kind::Int4 : Value::Kind::Int;
+                } else if (isUInt) {
+                    r.kind = (n == 2) ? Value::Kind::UInt2 :
+                             (n == 3) ? Value::Kind::UInt3 :
+                             (n == 4) ? Value::Kind::UInt4 : Value::Kind::UInt;
+                } else {
+                    r.kind = (n == 2) ? Value::Kind::Float2 :
+                             (n == 3) ? Value::Kind::Float3 :
+                             (n == 4) ? Value::Kind::Float4 : Value::Kind::Float;
+                }
                 const int v1n = v1.componentCount();
+                auto copyLane = [&](const Value& src, std::uint32_t srcLane,
+                                    std::uint32_t dstLane) {
+                    if (dstLane >= 4 || srcLane >= 4) return;
+                    if (isInt || isUInt) {
+                        if (src.isFloatKind()) {
+                            r.i[dstLane] = static_cast<std::int32_t>(src.f[srcLane]);
+                        } else {
+                            r.i[dstLane] = src.i[srcLane];
+                        }
+                    } else {
+                        if (src.isFloatKind()) {
+                            r.f[dstLane] = src.f[srcLane];
+                        } else {
+                            r.f[dstLane] = static_cast<float>(src.i[srcLane]);
+                        }
+                    }
+                };
                 for (std::uint32_t k = 0; k < n && k < 4; ++k) {
                     const std::uint32_t sel = w[4 + k];
                     // sel < v1n → pick from v1; else sel - v1n → pick from v2.
                     // 0xFFFFFFFF means "undefined" — we treat as 0.
                     if (sel == 0xFFFFFFFFu) {
-                        r.f[k] = 0.0f;
+                        if (isInt || isUInt) r.i[k] = 0;
+                        else r.f[k] = 0.0f;
                     } else if (sel < static_cast<std::uint32_t>(v1n)) {
-                        r.f[k] = v1.f[sel];
+                        copyLane(v1, sel, k);
                     } else {
-                        r.f[k] = v2.f[sel - v1n];
+                        copyLane(v2, sel - v1n, k);
                     }
                 }
                 valueStore_[w[1]] = r;
@@ -5091,16 +5555,36 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             case spv::OpConvertSToF: case spv::OpConvertUToF: {
                 Value a;
                 if (!tryGetValue(w[2], a)) { bail("OpConvertSToF/UToF: unknown operand"); break; }
-                Value r;
                 const int n = a.componentCount();
-                r.kind = (n == 2) ? Value::Kind::Float2 :
-                         (n == 3) ? Value::Kind::Float3 :
-                         (n == 4) ? Value::Kind::Float4 : Value::Kind::Float;
+                Value r = makeFloatValueForType(w[0], n);
                 if (opcode == spv::OpConvertSToF) {
                     for (int k = 0; k < n; ++k) r.f[k] = static_cast<float>(a.i[k]);
                 } else {
                     for (int k = 0; k < n; ++k)
                         r.f[k] = static_cast<float>(static_cast<std::uint32_t>(a.i[k]));
+                }
+                valueStore_[w[1]] = r;
+                pc += wc;
+                break;
+            }
+            case spv::OpFConvert: {
+                const auto* cols = matrixColumnsForId(w[2]);
+                if (cols != nullptr) {
+                    matrixColumns_[w[1]] = *cols;
+                    valueStore_.erase(w[1]);
+                    pc += wc;
+                    break;
+                }
+                Value a;
+                if (!tryGetValue(w[2], a)) { bail("OpFConvert: unknown operand"); break; }
+                const int n = a.componentCount();
+                Value r = makeFloatValueForType(w[0], n);
+                if (a.isFloatKind()) {
+                    for (int k = 0; k < n; ++k) r.f[k] = a.f[k];
+                } else if (a.isIntKind()) {
+                    for (int k = 0; k < n; ++k) r.f[k] = static_cast<float>(a.i[k]);
+                } else if (a.kind == Value::Kind::Bool) {
+                    r.f[0] = a.bval ? 1.0f : 0.0f;
                 }
                 valueStore_[w[1]] = r;
                 pc += wc;
@@ -5561,7 +6045,10 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpFMod:
         case spv::OpFNegate:
         case spv::OpVectorTimesScalar:
+        case spv::OpMatrixTimesScalar:
+        case spv::OpVectorTimesMatrix:
         case spv::OpMatrixTimesVector:
+        case spv::OpMatrixTimesMatrix:
         case spv::OpDot:
         // ─ Int arith ─
         case spv::OpIAdd:
@@ -5597,6 +6084,7 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpConvertFToU:
         case spv::OpConvertSToF:
         case spv::OpConvertUToF:
+        case spv::OpFConvert:
         // ─ Int comparisons ─
         case spv::OpIEqual:
         case spv::OpINotEqual:
@@ -5941,6 +6429,71 @@ std::uint8_t scalarByteSizeForType(const SpirvModule& mod, std::uint32_t typeId)
     }
 }
 
+std::uint32_t arrayLengthForType(const SpirvModule& mod, const TypeInfo& t) {
+    if (t.kind != TypeInfo::Kind::Array) return 1;
+    auto cIt = mod.constants.find(t.arrayLengthConstId);
+    if (cIt == mod.constants.end()) return 1;
+    return std::max<std::uint32_t>(1, static_cast<std::uint32_t>(cIt->second.i[0]));
+}
+
+void appendStageSlotWidthsForType(const SpirvModule& mod,
+                                  std::uint32_t typeId,
+                                  std::vector<std::uint32_t>& widths) {
+    auto it = mod.types.find(typeId);
+    if (it == mod.types.end()) return;
+    const TypeInfo& t = it->second;
+    switch (t.kind) {
+        case TypeInfo::Kind::Pointer:
+            appendStageSlotWidthsForType(mod, t.pointeeType, widths);
+            break;
+        case TypeInfo::Kind::Array: {
+            const std::uint32_t len = arrayLengthForType(mod, t);
+            for (std::uint32_t i = 0; i < len; ++i) {
+                appendStageSlotWidthsForType(mod, t.componentType, widths);
+            }
+            break;
+        }
+        case TypeInfo::Kind::Matrix: {
+            const std::uint32_t colWidth = mod.scalarWidth(t.componentType);
+            for (std::uint32_t i = 0; i < t.count; ++i) {
+                widths.push_back(std::max<std::uint32_t>(1, colWidth));
+            }
+            break;
+        }
+        default: {
+            const std::uint32_t w = mod.scalarWidth(typeId);
+            if (w != 0) widths.push_back(w);
+            break;
+        }
+    }
+}
+
+std::uint8_t baseTypeForType(const SpirvModule& mod, std::uint32_t typeId) {
+    auto it = mod.types.find(typeId);
+    while (it != mod.types.end()) {
+        const TypeInfo& t = it->second;
+        switch (t.kind) {
+            case TypeInfo::Kind::Pointer:
+            case TypeInfo::Kind::Array:
+            case TypeInfo::Kind::RuntimeArray:
+            case TypeInfo::Kind::Matrix:
+            case TypeInfo::Kind::Vec2:
+            case TypeInfo::Kind::Vec3:
+            case TypeInfo::Kind::Vec4:
+                it = mod.types.find(t.componentType ? t.componentType : t.pointeeType);
+                continue;
+            case TypeInfo::Kind::Int:
+                return 1;
+            case TypeInfo::Kind::UInt:
+                return 2;
+            case TypeInfo::Kind::Float:
+            default:
+                return 0;
+        }
+    }
+    return 0;
+}
+
 struct OutputVaryingDesc {
     std::string name;
     std::uint32_t width = 0;     // flat scalar count (always in scalar units)
@@ -5948,6 +6501,7 @@ struct OutputVaryingDesc {
     std::uint8_t interp = 0;     // 0=smooth, 1=flat, 2=noperspective, 3=centroid
     std::uint8_t baseType = 0;   // 0=float, 1=int, 2=uint
     std::uint8_t scalarByteSize = 4;
+    std::vector<std::uint32_t> stageSlotWidths;
     // Sprint 8 #9-C (CKPT96) — GLSL `layout(stream=N) out` →
     // SPIR-V DecorationStream. Default 0 (single-stream behaviour).
     // writeGsXfbAndCheckDiscard uses this to route per-buffer per-
@@ -5985,6 +6539,8 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
         if (tIt != mod.types.end()) {
             d.width = mod.scalarWidth(tIt->second.pointeeType);
             d.scalarByteSize = scalarByteSizeForType(mod, tIt->second.pointeeType);
+            d.baseType = baseTypeForType(mod, tIt->second.pointeeType);
+            appendStageSlotWidthsForType(mod, tIt->second.pointeeType, d.stageSlotWidths);
         }
         if (d.width == 0) continue;   // empty or unresolved — skip
         // If the type pointee is the gl_PerVertex output block
@@ -6027,6 +6583,9 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
                     if (!mname.empty()) d.name = mname;
                     d.width = mod.scalarWidth(st.memberTypes[0]);
                     d.scalarByteSize = scalarByteSizeForType(mod, st.memberTypes[0]);
+                    d.baseType = baseTypeForType(mod, st.memberTypes[0]);
+                    d.stageSlotWidths.clear();
+                    appendStageSlotWidthsForType(mod, st.memberTypes[0], d.stageSlotWidths);
                 } else {
                     // Multi-member: emit one descriptor per member.
                     // Locations come from OpMemberDecorate Location
@@ -6054,31 +6613,9 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
                             ? (info.name + "." + std::to_string(m)) : mname;
                         md.width = mod.scalarWidth(st.memberTypes[m]);
                         md.scalarByteSize = scalarByteSizeForType(mod, st.memberTypes[m]);
+                        md.baseType = baseTypeForType(mod, st.memberTypes[m]);
+                        appendStageSlotWidthsForType(mod, st.memberTypes[m], md.stageSlotWidths);
                         if (md.width == 0) continue;
-                        // Base type from the member's leaf scalar.
-                        {
-                            const auto mtIt = mod.types.find(st.memberTypes[m]);
-                            if (mtIt != mod.types.end()) {
-                                std::uint32_t scalarTypeId = 0;
-                                const auto& mt = mtIt->second;
-                                if (mt.kind == TypeInfo::Kind::Vec2 ||
-                                    mt.kind == TypeInfo::Kind::Vec3 ||
-                                    mt.kind == TypeInfo::Kind::Vec4) {
-                                    scalarTypeId = mt.componentType;
-                                } else {
-                                    scalarTypeId = st.memberTypes[m];
-                                }
-                                const auto sIt = mod.types.find(scalarTypeId);
-                                if (sIt != mod.types.end()) {
-                                    switch (sIt->second.kind) {
-                                        case TypeInfo::Kind::Int:   md.baseType = 1; break;
-                                        case TypeInfo::Kind::UInt:  md.baseType = 2; break;
-                                        case TypeInfo::Kind::Float: md.baseType = 0; break;
-                                        default: md.baseType = 0; break;
-                                    }
-                                }
-                            }
-                        }
                         // Location: per-member Location decoration
                         // wins; otherwise take the block-level base
                         // and increment by width per member (vec4 =
@@ -6101,30 +6638,12 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
                         if (!haveLoc) {
                             md.location = nextMemberLoc;
                         }
-                        nextMemberLoc = md.location + 1;
+                        nextMemberLoc = md.location +
+                            std::max<std::uint32_t>(
+                                1, static_cast<std::uint32_t>(md.stageSlotWidths.size()));
                         out.push_back(std::move(md));
                     }
                     continue;   // processed — skip the single-desc path below
-                }
-            }
-            // Determine scalar base type by walking vec → scalar.
-            if (pIt != mod.types.end()) {
-                std::uint32_t scalarTypeId = 0;
-                if (pIt->second.kind == TypeInfo::Kind::Vec2 ||
-                    pIt->second.kind == TypeInfo::Kind::Vec3 ||
-                    pIt->second.kind == TypeInfo::Kind::Vec4) {
-                    scalarTypeId = pIt->second.componentType;
-                } else {
-                    scalarTypeId = tIt->second.pointeeType;
-                }
-                const auto sIt = mod.types.find(scalarTypeId);
-                if (sIt != mod.types.end()) {
-                    switch (sIt->second.kind) {
-                        case TypeInfo::Kind::Int:   d.baseType = 1; break;
-                        case TypeInfo::Kind::UInt:  d.baseType = 2; break;
-                        case TypeInfo::Kind::Float: d.baseType = 0; break;
-                        default: d.baseType = 0; break;
-                    }
                 }
             }
         }
@@ -7494,6 +8013,11 @@ EmulatedDraw emulateGeometryDraw(
     std::vector<std::uint8_t>  outInterp;
     std::vector<std::uint8_t>  outBaseType;
     std::vector<std::uint8_t>  outScalarByteSize;
+    std::vector<std::uint32_t> outStageSlotWidths;
+    std::vector<std::uint32_t> outStageSlotLocations;
+    std::vector<std::uint8_t>  outStageSlotInterp;
+    std::vector<std::uint8_t>  outStageSlotBaseType;
+    std::vector<std::uint8_t>  outStageSlotScalarByteSize;
     // Sprint 8 #9-C (CKPT96) — per-varying stream tag from
     // DecorationStream. Default 0 (no decoration). Mirrors the layout
     // of the other outX vectors so the per-varying index lines up.
@@ -7513,6 +8037,16 @@ EmulatedDraw emulateGeometryDraw(
         outBaseType.push_back(v.baseType);
         outScalarByteSize.push_back(v.scalarByteSize);
         outStreams.push_back(v.stream);
+        const auto& slots = v.stageSlotWidths.empty()
+            ? std::vector<std::uint32_t>{std::max<std::uint32_t>(1, v.width)}
+            : v.stageSlotWidths;
+        for (std::size_t slot = 0; slot < slots.size(); ++slot) {
+            outStageSlotWidths.push_back(slots[slot]);
+            outStageSlotLocations.push_back(v.location + static_cast<std::uint32_t>(slot));
+            outStageSlotInterp.push_back(v.interp);
+            outStageSlotBaseType.push_back(v.baseType);
+            outStageSlotScalarByteSize.push_back(v.scalarByteSize);
+        }
     }
 
     // ─── VS pre-pass ────────────────────────────────────────────
@@ -8043,6 +8577,11 @@ EmulatedDraw emulateGeometryDraw(
     d.varyingStreams    = std::move(outStreams);   // Sprint 8 #9-C (CKPT96)
     d.varyingBaseType   = std::move(outBaseType);
     d.varyingScalarByteSize = std::move(outScalarByteSize);
+    d.varyingStageSlotWidths = std::move(outStageSlotWidths);
+    d.varyingStageSlotLocations = std::move(outStageSlotLocations);
+    d.varyingStageSlotInterp = std::move(outStageSlotInterp);
+    d.varyingStageSlotBaseType = std::move(outStageSlotBaseType);
+    d.varyingStageSlotScalarByteSize = std::move(outStageSlotScalarByteSize);
     d.clipDistanceLen   = clipLen;
     d.cullDistanceLen   = cullLen;
     // Pre-compute the primitive-id varying location for the
@@ -8051,10 +8590,12 @@ EmulatedDraw emulateGeometryDraw(
     // there are no user varyings, location 0 is fine.
     if (d.hasPrimitiveID) {
         std::uint32_t maxLoc = 0;
-        for (std::uint32_t loc : d.varyingLocations) {
+        const auto& locs = d.varyingStageSlotLocations.empty()
+            ? d.varyingLocations : d.varyingStageSlotLocations;
+        for (std::uint32_t loc : locs) {
             if (loc > maxLoc) maxLoc = loc;
         }
-        d.primitiveIDLocation = d.varyingLocations.empty() ? 0u : (maxLoc + 1u);
+        d.primitiveIDLocation = locs.empty() ? 0u : (maxLoc + 1u);
     }
 
     // Per-primitive gl_Layer propagation. GL 4.6 §14.5.1 with
@@ -8335,6 +8876,14 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
             default: return floatNames[idx];
         }
     };
+    const auto& slotWidths = draw.varyingStageSlotWidths.empty()
+        ? draw.varyingWidths : draw.varyingStageSlotWidths;
+    const auto& slotLocations = draw.varyingStageSlotLocations.empty()
+        ? draw.varyingLocations : draw.varyingStageSlotLocations;
+    const auto& slotInterp = draw.varyingStageSlotInterp.empty()
+        ? draw.varyingInterp : draw.varyingStageSlotInterp;
+    const auto& slotBaseType = draw.varyingStageSlotBaseType.empty()
+        ? draw.varyingBaseType : draw.varyingStageSlotBaseType;
 
     std::string src;
     src.reserve(512);
@@ -8344,10 +8893,10 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     // ─ Vertex input struct (stage_in).
     src += "struct VsIn {\n";
     src += "    float4 vsin_position [[attribute(0)]];\n";
-    for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
-        const std::uint8_t bt = (i < draw.varyingBaseType.size()) ? draw.varyingBaseType[i] : 0;
+    for (std::size_t i = 0; i < slotWidths.size(); ++i) {
+        const std::uint8_t bt = (i < slotBaseType.size()) ? slotBaseType[i] : 0;
         src += "    ";
-        src += mslTypeFor(draw.varyingWidths[i], bt);
+        src += mslTypeFor(slotWidths[i], bt);
         src += " vsin_v";
         src += std::to_string(i);
         src += " [[attribute(";
@@ -8360,7 +8909,7 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     // builder emits matching per-scalar attributes so Metal's vertex
     // fetcher pulls one float from the packed expanded buffer.
     const std::uint32_t clipBaseAttrib =
-        static_cast<std::uint32_t>(draw.varyingWidths.size() + 1);
+        static_cast<std::uint32_t>(slotWidths.size() + 1);
     for (std::uint32_t i = 0; i < draw.clipDistanceLen; ++i) {
         src += "    float vsin_clip";
         src += std::to_string(i);
@@ -8469,19 +9018,19 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
     if (emitViewportArrayIndex) {
         src += "    uint gl_ViewportIndex [[viewport_array_index]];\n";
     }
-    for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
-        const std::uint32_t loc = (i < draw.varyingLocations.size())
-            ? draw.varyingLocations[i] : static_cast<std::uint32_t>(i);
-        const std::uint8_t interp = (i < draw.varyingInterp.size())
-            ? draw.varyingInterp[i] : 0;
-        const std::uint8_t bt = (i < draw.varyingBaseType.size())
-            ? draw.varyingBaseType[i] : 0;
+    for (std::size_t i = 0; i < slotWidths.size(); ++i) {
+        const std::uint32_t loc = (i < slotLocations.size())
+            ? slotLocations[i] : static_cast<std::uint32_t>(i);
+        const std::uint8_t interp = (i < slotInterp.size())
+            ? slotInterp[i] : 0;
+        const std::uint8_t bt = (i < slotBaseType.size())
+            ? slotBaseType[i] : 0;
         // Integer varyings MUST be flat — Metal spec and MSL compiler
         // both enforce this. If we got here with smooth on an int
         // varying, force flat.
         const std::uint8_t effInterp = (bt != 0 && interp == 0) ? 1 : interp;
         src += "    ";
-        src += mslTypeFor(draw.varyingWidths[i], bt);
+        src += mslTypeFor(slotWidths[i], bt);
         src += " vsout_v";
         src += std::to_string(i);
         src += " [[user(locn";
@@ -8540,7 +9089,7 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
             src += "    out.gl_PointSize = 1.0;\n";
         }
     }
-    for (std::size_t i = 0; i < draw.varyingWidths.size(); ++i) {
+    for (std::size_t i = 0; i < slotWidths.size(); ++i) {
         src += "    out.vsout_v";
         src += std::to_string(i);
         src += " = in.vsin_v";
@@ -8717,6 +9266,113 @@ std::string rewriteFragmentMSLForPrimitiveID(const std::string& fsMsl,
     out.append("{\n");
     out.append("    uint gl_PrimitiveID = uint(_gs_in._gs_prim_id);\n");
     out.append(fsMsl, braceStart + 1, std::string::npos);
+    return out;
+}
+
+std::string rewriteFragmentMSLForFp64StageIn(const std::string& fsMsl)
+{
+    const std::string structNeedle = "struct main0_in";
+    const std::size_t structPos = fsMsl.find(structNeedle);
+    if (structPos == std::string::npos ||
+        fsMsl.find("appgl_df64", structPos) == std::string::npos) {
+        return fsMsl;
+    }
+
+    const std::size_t braceOpen = fsMsl.find('{', structPos);
+    if (braceOpen == std::string::npos) return fsMsl;
+    const std::size_t braceClose = fsMsl.find("};", braceOpen);
+    if (braceClose == std::string::npos) return fsMsl;
+
+    struct FieldRewrite {
+        std::string name;
+        std::string fp64Type;
+        std::string transportType;
+    };
+    std::vector<FieldRewrite> fields;
+
+    auto transportTypeFor = [](const std::string& type) -> std::string {
+        if (type == "appgl_df64") return "float";
+        if (type == "appgl_df64x2") return "float2";
+        if (type == "appgl_df64x3") return "float3";
+        if (type == "appgl_df64x4") return "float4";
+        return {};
+    };
+    auto isIdent = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+    };
+
+    std::string rewrittenStruct;
+    rewrittenStruct.reserve(braceClose - braceOpen + 64);
+    std::size_t lineStart = braceOpen + 1;
+    while (lineStart < braceClose) {
+        std::size_t lineEnd = fsMsl.find('\n', lineStart);
+        if (lineEnd == std::string::npos || lineEnd > braceClose) {
+            lineEnd = braceClose;
+        }
+        std::string line = fsMsl.substr(lineStart, lineEnd - lineStart);
+        const std::size_t typePos = line.find("appgl_df64");
+        const std::size_t userPos = line.find("[[user(locn");
+        bool rewrote = false;
+        if (typePos != std::string::npos && userPos != std::string::npos) {
+            std::size_t typeEnd = typePos;
+            while (typeEnd < line.size() && isIdent(line[typeEnd])) ++typeEnd;
+            const std::string fp64Type = line.substr(typePos, typeEnd - typePos);
+            const std::string transportType = transportTypeFor(fp64Type);
+            if (!transportType.empty()) {
+                std::size_t nameStart = typeEnd;
+                while (nameStart < line.size() &&
+                       std::isspace(static_cast<unsigned char>(line[nameStart]))) {
+                    ++nameStart;
+                }
+                std::size_t nameEnd = nameStart;
+                while (nameEnd < line.size() && isIdent(line[nameEnd])) ++nameEnd;
+                if (nameEnd > nameStart) {
+                    fields.push_back({
+                        line.substr(nameStart, nameEnd - nameStart),
+                        fp64Type,
+                        transportType
+                    });
+                    line.replace(typePos, fp64Type.size(), transportType);
+                    rewrote = true;
+                }
+            }
+        }
+        (void)rewrote;
+        rewrittenStruct += line;
+        if (lineEnd < braceClose) rewrittenStruct += '\n';
+        lineStart = lineEnd + 1;
+    }
+
+    if (fields.empty()) return fsMsl;
+
+    std::string out;
+    out.reserve(fsMsl.size() + fields.size() * 32);
+    out.append(fsMsl, 0, braceOpen + 1);
+    out.append(rewrittenStruct);
+    out.append(fsMsl, braceClose, std::string::npos);
+
+    const std::size_t bodyStart = out.find("main0(", structPos);
+    if (bodyStart == std::string::npos) return out;
+
+    for (const auto& field : fields) {
+        const std::string needle = "in." + field.name;
+        const std::string replacement = "appgl_df64_from_float(" + needle + ")";
+        std::size_t pos = bodyStart;
+        while ((pos = out.find(needle, pos)) != std::string::npos) {
+            const bool leftOk =
+                (pos == 0) || !isIdent(out[pos - 1]);
+            const std::size_t right = pos + needle.size();
+            const bool rightOk =
+                (right >= out.size()) || !isIdent(out[right]);
+            if (leftOk && rightOk) {
+                out.replace(pos, needle.size(), replacement);
+                pos += replacement.size();
+            } else {
+                pos += needle.size();
+            }
+        }
+    }
+
     return out;
 }
 

@@ -157,6 +157,16 @@ struct EmulatedDraw {
     // lanes; double-precision TF captures need 8-byte writes even though
     // the CPU interpreter stores their arithmetic value in float lanes.
     std::vector<std::uint8_t> varyingScalarByteSize;
+    // Expanded raster-stage slots for the synthetic pass-through VS.
+    // `varyingWidths` remains the flat logical payload used by the CPU
+    // interpreter and transform feedback; arrays and matrices can occupy
+    // multiple GL user locations, so rasterization needs this per-location
+    // view to match SPIRV-Cross's fragment `main0_in` layout.
+    std::vector<std::uint32_t> varyingStageSlotWidths;
+    std::vector<std::uint32_t> varyingStageSlotLocations;
+    std::vector<std::uint8_t> varyingStageSlotInterp;
+    std::vector<std::uint8_t> varyingStageSlotBaseType;
+    std::vector<std::uint8_t> varyingStageSlotScalarByteSize;
     // gl_ClipDistance / gl_CullDistance array sizes captured on the
     // last EmitVertex. Per GL 4.6 §7.1 these are per-vertex float
     // arrays with implementation-defined max length (we advertise 8).
@@ -753,6 +763,13 @@ std::string synthesisePassThroughVertexMSL(const EmulatedDraw& draw,
 // `[[primitive_id]]` reference.
 std::string rewriteFragmentMSLForPrimitiveID(const std::string& fsMsl,
                                               const EmulatedDraw& draw);
+
+// Metal rejects fragment `[[stage_in]]` structs that contain nested
+// appgl_df64/appgl_df64xN helper structs because every nested scalar has
+// the same leaf field name. The GS-emulation pass-through VS transports
+// these values as float/floatN user varyings, then this rewrite rebuilds
+// appgl_df64 values at each `in.<field>` use site.
+std::string rewriteFragmentMSLForFp64StageIn(const std::string& fsMsl);
 
 // Walk a SPIR-V module's entry-point function body for
 // OpAccessChain instructions that reach any Uniform-storage

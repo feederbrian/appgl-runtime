@@ -97,7 +97,7 @@ struct DecorationSet {
     // Applies to TCS Output and TES Input interface variables. Marks
     // the value as per-patch (one value shared across all domain
     // vertices in the patch) rather than per-vertex. SPIR-V emits
-    // DecorationPatch (=5) on the variable; interpreter reads this
+    // DecorationPatch (=15) on the variable; interpreter reads this
     // to route data through a per-patch scratch map instead of the
     // gl_in[] / gl_out[] array path.
     bool isPatch = false;
@@ -121,6 +121,10 @@ struct DecorationSet {
     // SSBO runtime-array it generates).
     bool hasArrayStride = false;
     std::uint32_t arrayStride = 0;
+    bool hasMatrixStride = false;
+    std::uint32_t matrixStride = 0;
+    bool isRowMajor = false;
+    bool isColMajor = false;
     // Sprint 8 #9-C (CKPT96) — GLSL `layout(stream=N) out` →
     // SPIR-V DecorationStream (=29). Carries the target vertex
     // stream index for transform-feedback per-stream BO routing.
@@ -141,6 +145,7 @@ struct SpirvModule {
 
     std::unordered_map<std::uint32_t, TypeInfo> types;
     std::unordered_map<std::uint32_t, Value> constants;
+    std::unordered_map<std::uint32_t, std::vector<Value>> matrixConstants;
     std::unordered_map<std::uint32_t, VariableInfo> variables;
     std::unordered_map<std::uint32_t, DecorationSet> decorations;
     std::unordered_map<std::uint32_t, MemberDecorations> memberDecorations;
@@ -200,6 +205,8 @@ struct AccessChainResult {
     // read-only per GL spec). Mutually exclusive with
     // isStorageBuffer (which is read+write).
     bool isUniformBuffer = false;
+    bool hasMatrixStride = false;
+    std::uint32_t matrixStride = 0;
 };
 
 // ─── UBO array dispatch (Sprint 17 Day 4+ BONUS-2) ──────────────────

@@ -35,9 +35,11 @@ namespace spv {
     enum Decoration : std::uint32_t {
         DecorationBlock = 2, DecorationBufferBlock = 3,
         DecorationLocation = 30, DecorationBuiltIn = 11,
+        DecorationRowMajor = 4, DecorationColMajor = 5,
         DecorationArrayStride = 6,
+        DecorationMatrixStride = 7,
         DecorationNoPerspective = 13, DecorationFlat = 14,
-        DecorationPatch = 5,
+        DecorationPatch = 15,
         DecorationCentroid = 16, DecorationOffset = 35,
         DecorationDescriptorSet = 34, DecorationBinding = 33,
         // Sprint 8 #9-C (CKPT96) — GLSL `layout(stream=N) out` decoration.
@@ -202,6 +204,13 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 } else if (deco == spv::DecorationArrayStride && wc >= 4) {
                     decorations[target].hasArrayStride = true;
                     decorations[target].arrayStride = w[2];
+                } else if (deco == spv::DecorationMatrixStride && wc >= 4) {
+                    decorations[target].hasMatrixStride = true;
+                    decorations[target].matrixStride = w[2];
+                } else if (deco == spv::DecorationRowMajor) {
+                    decorations[target].isRowMajor = true;
+                } else if (deco == spv::DecorationColMajor) {
+                    decorations[target].isColMajor = true;
                 } else if (deco == spv::DecorationBinding && wc >= 4) {
                     decorations[target].hasBinding = true;
                     decorations[target].binding = w[2];
@@ -237,6 +246,13 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 } else if (deco == spv::DecorationArrayStride && wc >= 5) {
                     memberDecorations[target].perMember[member].hasArrayStride = true;
                     memberDecorations[target].perMember[member].arrayStride = w[3];
+                } else if (deco == spv::DecorationMatrixStride && wc >= 5) {
+                    memberDecorations[target].perMember[member].hasMatrixStride = true;
+                    memberDecorations[target].perMember[member].matrixStride = w[3];
+                } else if (deco == spv::DecorationRowMajor) {
+                    memberDecorations[target].perMember[member].isRowMajor = true;
+                } else if (deco == spv::DecorationColMajor) {
+                    memberDecorations[target].perMember[member].isColMajor = true;
                 }
                 break;
             }
@@ -373,6 +389,18 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                                 auto cIt = constants.find(w[2 + k]);
                                 if (cIt != constants.end()) v.i[k] = cIt->second.i[0];
                             }
+                        }
+                    } else if (t.kind == TypeInfo::Kind::Matrix) {
+                        std::vector<Value> columns;
+                        columns.reserve(wc > 2 ? wc - 2 : 0);
+                        for (std::uint32_t k = 2; k < wc; ++k) {
+                            auto cIt = constants.find(w[k]);
+                            if (cIt != constants.end()) {
+                                columns.push_back(cIt->second);
+                            }
+                        }
+                        if (!columns.empty()) {
+                            matrixConstants[w[1]] = std::move(columns);
                         }
                     }
                 }

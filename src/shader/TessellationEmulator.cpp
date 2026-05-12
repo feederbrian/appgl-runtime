@@ -81,6 +81,70 @@ std::uint8_t baseTypeForTessType(
     }
 }
 
+std::uint8_t scalarByteSizeForTessType(
+    const SpirvModule& module,
+    std::uint32_t typeId)
+{
+    const std::uint32_t scalarTypeId =
+        scalarTypeIdForTessType(module, typeId);
+    auto it = module.types.find(scalarTypeId);
+    if (it == module.types.end()) return 4;
+    switch (it->second.kind) {
+        case TypeInfo::Kind::Float:
+        case TypeInfo::Kind::Int:
+        case TypeInfo::Kind::UInt:
+            return static_cast<std::uint8_t>(
+                std::clamp<std::uint32_t>(it->second.elementScalarWidth, 4, 8));
+        default:
+            return 4;
+    }
+}
+
+std::uint32_t arrayLengthForTessType(
+    const SpirvModule& module,
+    const TypeInfo& type)
+{
+    if (type.kind != TypeInfo::Kind::Array) return 1;
+    auto cIt = module.constants.find(type.arrayLengthConstId);
+    if (cIt == module.constants.end()) return 1;
+    return std::max<std::uint32_t>(
+        1, static_cast<std::uint32_t>(cIt->second.i[0]));
+}
+
+void appendTessStageSlotWidthsForType(
+    const SpirvModule& module,
+    std::uint32_t typeId,
+    std::vector<std::uint32_t>& widths)
+{
+    auto it = module.types.find(typeId);
+    if (it == module.types.end()) return;
+    const TypeInfo& type = it->second;
+    switch (type.kind) {
+        case TypeInfo::Kind::Pointer:
+            appendTessStageSlotWidthsForType(module, type.pointeeType, widths);
+            break;
+        case TypeInfo::Kind::Array: {
+            const std::uint32_t len = arrayLengthForTessType(module, type);
+            for (std::uint32_t i = 0; i < len; ++i) {
+                appendTessStageSlotWidthsForType(module, type.componentType, widths);
+            }
+            break;
+        }
+        case TypeInfo::Kind::Matrix: {
+            const std::uint32_t colWidth = module.scalarWidth(type.componentType);
+            for (std::uint32_t col = 0; col < type.count; ++col) {
+                widths.push_back(std::max<std::uint32_t>(1, colWidth));
+            }
+            break;
+        }
+        default: {
+            const std::uint32_t w = module.scalarWidth(typeId);
+            if (w != 0) widths.push_back(w);
+            break;
+        }
+    }
+}
+
 bool appglEnvEnabledDefaultOn(const char* name) {
     const char* v = std::getenv(name);
     return v == nullptr || (v[0] != '0' && v[0] != '\0');
@@ -417,6 +481,9 @@ void walkTessInterface(
                 sub.scalarCount = module.scalarWidth(memberType);
                 sub.name = vi.name;
                 sub.baseType = baseTypeForTessType(module, memberType);
+                sub.scalarByteSize = scalarByteSizeForTessType(module, memberType);
+                appendTessStageSlotWidthsForType(module, memberType,
+                                                 sub.stageSlotWidths);
                 sub.interp = ev.interp;
                 auto namesIt = module.memberNames.find(pointee);
                 if (namesIt != module.memberNames.end()) {
@@ -453,6 +520,8 @@ void walkTessInterface(
 
         ev.scalarCount = module.scalarWidth(pointee);
         ev.baseType = baseTypeForTessType(module, pointee);
+        ev.scalarByteSize = scalarByteSizeForTessType(module, pointee);
+        appendTessStageSlotWidthsForType(module, pointee, ev.stageSlotWidths);
         if (asOutput) {
             onOutput(ev);
             if (outputs) outputs->push_back(std::move(ev));
@@ -875,9 +944,17 @@ TessBodyInterpretabilityCheck classifyTessControlInterpretable(
             return out;
         }
         auto eIt = module.types.find(pIt->second.componentType);
-        if (eIt == module.types.end() ||
-            eIt->second.kind != appgl::interp::TypeInfo::Kind::Struct) {
-            out.diagnostic = "TCS Input array of non-struct (id=" +
+        if (eIt == module.types.end()) {
+            out.diagnostic = "TCS Input array with missing element type (id=" +
+                             std::to_string(varId) + "): " + info.name;
+            return out;
+        }
+        if (eIt->second.kind != appgl::interp::TypeInfo::Kind::Struct) {
+            const std::uint32_t elemWidth = module.scalarWidth(pIt->second.componentType);
+            if (elemWidth >= 1 && elemWidth <= 4) {
+                continue;
+            }
+            out.diagnostic = "TCS Input array of unsupported non-struct element (id=" +
                              std::to_string(varId) + "): " + info.name;
             return out;
         }
@@ -1882,6 +1959,9 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
                 slot.name = v.name;
                 slot.location = v.location;
                 slot.numComponents = v.numComponents;
+                if (v.numComponents != 0) {
+                    slot.stageSlotWidths.push_back(v.numComponents);
+                }
                 for (int c = 0; c < 4; ++c) {
                     slot.mapping[c] = v.mapping[c];
                     slot.scale[c] = v.scale[c];
@@ -1939,21 +2019,26 @@ bool detectTessellationEmulatable(GLProgramObject& program) {
                 for (const auto& ov : teIface.outputs) {
                     if (ov.isBuiltIn) continue;
                     if (ov.isPerVertex) continue;
-                    if (ov.scalarCount == 0 || ov.scalarCount > 4) continue;
+                    if (ov.scalarCount == 0) continue;
                     if (ov.name.empty()) continue;
                     GLProgramObject::TessVaryingSlot slot;
                     slot.name = ov.name;
-                    if (ov.hasLocation) {
-                        slot.location = ov.location;
-                        if (ov.location >= nextSyntheticLocation) {
-                            nextSyntheticLocation = ov.location + 1;
-                        }
-                    } else {
-                        slot.location = nextSyntheticLocation++;
-                    }
                     slot.numComponents = ov.scalarCount;
                     slot.baseType = ov.baseType;
+                    slot.scalarByteSize = ov.scalarByteSize;
                     slot.interp = ov.interp;
+                    slot.stageSlotWidths = ov.stageSlotWidths;
+                    const GLuint slotLocationCount = static_cast<GLuint>(
+                        std::max<std::size_t>(1, slot.stageSlotWidths.size()));
+                    if (ov.hasLocation) {
+                        slot.location = ov.location;
+                        if (ov.location + slotLocationCount > nextSyntheticLocation) {
+                            nextSyntheticLocation = ov.location + slotLocationCount;
+                        }
+                    } else {
+                        slot.location = nextSyntheticLocation;
+                        nextSyntheticLocation += slotLocationCount;
+                    }
                     // Interpreter path produces these values at runtime;
                     // the mapping/scale/offset/constant fields are unused
                     // (only the matcher's affine path consults them).
@@ -2183,6 +2268,24 @@ EmulatedDraw emulateTessellationDraw(
         d.varyingLocations.push_back(v.location);
         d.varyingInterp.push_back(v.interp);
         d.varyingBaseType.push_back(v.baseType);
+        d.varyingScalarByteSize.push_back(v.scalarByteSize);
+        std::vector<std::uint32_t> stageWidths = v.stageSlotWidths;
+        if (stageWidths.empty()) {
+            std::uint32_t remaining = static_cast<std::uint32_t>(v.numComponents);
+            while (remaining > 0) {
+                const std::uint32_t w = std::min<std::uint32_t>(remaining, 4);
+                stageWidths.push_back(std::max<std::uint32_t>(1, w));
+                remaining -= w;
+            }
+        }
+        for (std::size_t slot = 0; slot < stageWidths.size(); ++slot) {
+            d.varyingStageSlotWidths.push_back(stageWidths[slot]);
+            d.varyingStageSlotLocations.push_back(
+                v.location + static_cast<GLuint>(slot));
+            d.varyingStageSlotInterp.push_back(v.interp);
+            d.varyingStageSlotBaseType.push_back(v.baseType);
+            d.varyingStageSlotScalarByteSize.push_back(v.scalarByteSize);
+        }
         varyingFloats += v.numComponents;
     }
     const bool useInterpreter =

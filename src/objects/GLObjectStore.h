@@ -815,7 +815,9 @@ struct GLProgramObject {
         GLuint location = 0;
         GLuint numComponents = 1;
         std::uint8_t baseType = 0;   // 0=float, 1=int, 2=uint
+        std::uint8_t scalarByteSize = 4;
         std::uint8_t interp = 0;     // 0=smooth, 1=flat, 2=noperspective, 3=centroid
+        std::vector<std::uint32_t> stageSlotWidths;
         std::int8_t mapping[4] = {-1, -1, -1, -1};
         float scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         float offset[4] = {0.0f, 0.0f, 0.0f, 0.0f};

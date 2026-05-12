@@ -20658,27 +20658,113 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
             std::size_t count = 0;
             std::size_t scalarBytes = sizeof(float);
         };
-        std::vector<TfSource> sources(tfNames.size());
-        for (std::size_t i = 0; i < tfNames.size(); ++i) {
-            const std::string& name = tfNames[i];
-            if (name == "gl_Position") {
-                sources[i] = {0, 4, sizeof(float)};
-                continue;
+        auto glTypeScalarCount = [](GLenum t) -> std::size_t {
+            switch (t) {
+                case GL_FLOAT: case GL_INT: case GL_UNSIGNED_INT: case GL_BOOL:
+                case GL_DOUBLE:
+                    return 1;
+                case GL_FLOAT_VEC2: case GL_INT_VEC2: case GL_UNSIGNED_INT_VEC2:
+                case GL_BOOL_VEC2: case GL_DOUBLE_VEC2:
+                    return 2;
+                case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_UNSIGNED_INT_VEC3:
+                case GL_BOOL_VEC3: case GL_DOUBLE_VEC3:
+                    return 3;
+                case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_UNSIGNED_INT_VEC4:
+                case GL_BOOL_VEC4: case GL_DOUBLE_VEC4:
+                    return 4;
+                case GL_FLOAT_MAT2: case GL_DOUBLE_MAT2:     return 4;
+                case GL_FLOAT_MAT3: case GL_DOUBLE_MAT3:     return 9;
+                case GL_FLOAT_MAT4: case GL_DOUBLE_MAT4:     return 16;
+                case GL_FLOAT_MAT2x3: case GL_DOUBLE_MAT2x3: return 6;
+                case GL_FLOAT_MAT2x4: case GL_DOUBLE_MAT2x4: return 8;
+                case GL_FLOAT_MAT3x2: case GL_DOUBLE_MAT3x2: return 6;
+                case GL_FLOAT_MAT3x4: case GL_DOUBLE_MAT3x4: return 12;
+                case GL_FLOAT_MAT4x2: case GL_DOUBLE_MAT4x2: return 8;
+                case GL_FLOAT_MAT4x3: case GL_DOUBLE_MAT4x3: return 12;
+                default: return 0;
             }
+        };
+        auto parseArrayElementName = [](const std::string& name,
+                                        std::string& base,
+                                        std::size_t& element) -> bool {
+            const auto bracket = name.rfind('[');
+            if (bracket == std::string::npos || name.empty() || name.back() != ']') {
+                return false;
+            }
+            const std::string idx =
+                name.substr(bracket + 1, name.size() - bracket - 2);
+            if (idx.empty() ||
+                !std::all_of(idx.begin(), idx.end(), [](char c) {
+                    return std::isdigit(static_cast<unsigned char>(c));
+                })) {
+                return false;
+            }
+            std::size_t parsed = 0;
+            for (char c : idx) {
+                parsed = parsed * 10u + static_cast<std::size_t>(c - '0');
+            }
+            base = name.substr(0, bracket);
+            element = parsed;
+            return !base.empty();
+        };
+        auto tfResourceElementCount = [&](std::size_t tfIndex) -> std::size_t {
+            if (tfIndex >= program.resourceTransformFeedbackVaryings.size()) {
+                return 0;
+            }
+            return glTypeScalarCount(
+                program.resourceTransformFeedbackVaryings[tfIndex].type);
+        };
+        auto resolveTfSource = [&](const std::string& name,
+                                   std::size_t tfIndex,
+                                   TfSource& src,
+                                   std::uint32_t* streamOut = nullptr) -> bool {
+            if (name == "gl_Position") {
+                src = {0, 4, sizeof(float)};
+                if (streamOut != nullptr) *streamOut = 0;
+                return true;
+            }
+
+            std::string lookupName = name;
+            std::size_t arrayElement = 0;
+            const bool arrayElementCapture =
+                parseArrayElementName(name, lookupName, arrayElement);
+
             std::size_t off = 4;   // skip position
             for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
-                if (ed.varyingNames[k] == name) {
+                if (ed.varyingNames[k] == lookupName) {
                     const std::size_t scalarBytes =
                         (k < ed.varyingScalarByteSize.size() &&
                          k < ed.varyingBaseType.size() &&
                          ed.varyingBaseType[k] == 0 &&
                          ed.varyingScalarByteSize[k] == sizeof(double))
                             ? sizeof(double) : sizeof(float);
-                    sources[i] = {off, ed.varyingWidths[k], scalarBytes};
-                    break;
+                    std::size_t count = ed.varyingWidths[k];
+                    if (arrayElementCapture) {
+                        std::size_t elementCount = tfResourceElementCount(tfIndex);
+                        if (elementCount == 0) {
+                            elementCount = count;
+                        }
+                        const std::size_t elementOffset = arrayElement * elementCount;
+                        if (elementOffset + elementCount > count) {
+                            return false;
+                        }
+                        off += elementOffset;
+                        count = elementCount;
+                    }
+                    src = {off, count, scalarBytes};
+                    if (streamOut != nullptr &&
+                        k < ed.varyingStreams.size()) {
+                        *streamOut = ed.varyingStreams[k];
+                    }
+                    return true;
                 }
                 off += ed.varyingWidths[k];
             }
+            return false;
+        };
+        std::vector<TfSource> sources(tfNames.size());
+        for (std::size_t i = 0; i < tfNames.size(); ++i) {
+            (void)resolveTfSource(tfNames[i], i, sources[i]);
         }
 
         auto writeToBuffer = [this](GLuint bufferName, std::size_t bufOffset,
@@ -20798,59 +20884,31 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                     continue;
                 }
                 TfSource src;
-                if (name == "gl_Position") {
-                    src = {0, 4, sizeof(float)};   // stream 0 (built-in)
-                } else {
-                    std::size_t off = 4;
-                    bool found = false;
-                    for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
-                        if (ed.varyingNames[k] == name) {
-                            const std::size_t scalarBytes =
-                                (k < ed.varyingScalarByteSize.size() &&
-                                 k < ed.varyingBaseType.size() &&
-                                 ed.varyingBaseType[k] == 0 &&
-                                 ed.varyingScalarByteSize[k] == sizeof(double))
-                                    ? sizeof(double) : sizeof(float);
-                            src = {off, ed.varyingWidths[k], scalarBytes};
-                            // First non-builtin varying claims the
-                            // slot's stream (the spec requires all
-                            // varyings in the same buffer share a
-                            // stream; we honour that by taking the
-                            // first observed and ignoring later ones).
-                            if (slots.back().stream == 0 &&
-                                k < ed.varyingStreams.size() &&
-                                ed.varyingStreams[k] != 0) {
-                                slots.back().stream = ed.varyingStreams[k];
-                            }
-                            found = true;
-                            break;
-                        }
-                        off += ed.varyingWidths[k];
-                    }
-                    if (!found) {
-                        // CKPT111 (Sprint 10 Phase 2 Day 2): handle
-                        // gl_SkipComponents{1,2,3,4} per GL 4.6 §7.3.1.1
-                        // — advance the slot cursor by N floats without
-                        // writing any data, leaving N components of
-                        // existing buffer contents untouched. The CTS
-                        // capture_special_interleaved_test layout is
-                        //   variable_1 + skip4 + variable_2 + nextBuffer +
-                        //   variable_3 + skip4 + variable_4
-                        // so variable_2 lands at offset 8 floats (not 4)
-                        // in BO0. Encoded as a TfSource with
-                        // offset = SIZE_MAX (skip sentinel) and count = N.
-                        if (name.size() == 18 &&
-                            name.compare(0, 17, "gl_SkipComponents") == 0 &&
-                            name[17] >= '1' && name[17] <= '4') {
-                            src = {static_cast<std::size_t>(-1),
-                                   static_cast<std::size_t>(name[17] - '0'),
-                                   sizeof(float)};
-                        } else {
-                            // Unknown varying name — treat as zero-byte
-                            // skip (mirrors prior behaviour for unmatched
-                            // sources).
-                            src = {0, 0, sizeof(float)};
-                        }
+                std::uint32_t stream = 0;
+                bool found = resolveTfSource(name, i, src, &stream);
+                if (found && slots.back().stream == 0 && stream != 0) {
+                    // First non-builtin varying claims the slot's stream
+                    // (the spec requires all varyings in the same buffer
+                    // share a stream; we honour that by taking the first
+                    // observed and ignoring later ones).
+                    slots.back().stream = stream;
+                }
+                if (!found) {
+                    // CKPT111 (Sprint 10 Phase 2 Day 2): handle
+                    // gl_SkipComponents{1,2,3,4} per GL 4.6 §7.3.1.1
+                    // — advance the slot cursor by N floats without
+                    // writing any data, leaving N components of existing
+                    // buffer contents untouched.
+                    if (name.size() == 18 &&
+                        name.compare(0, 17, "gl_SkipComponents") == 0 &&
+                        name[17] >= '1' && name[17] <= '4') {
+                        src = {static_cast<std::size_t>(-1),
+                               static_cast<std::size_t>(name[17] - '0'),
+                               sizeof(float)};
+                    } else {
+                        // Unknown varying name — treat as zero-byte skip
+                        // (mirrors prior behaviour for unmatched sources).
+                        src = {0, 0, sizeof(float)};
                     }
                 }
                 slots.back().srcList.push_back(src);
@@ -24092,11 +24150,11 @@ bool GLContext::linkProgram(GLuint program) {
                     // link-time check falls back to the spec-correct
                     // "not found" path. Keep in sync with the larger
                     // typeTable() in GLSLReflection.cpp.
-                    auto typeFromKeyword = [](const std::string& k) -> GLenum {
-                        if (k == "float") return GL_FLOAT;
-                        if (k == "vec2")  return GL_FLOAT_VEC2;
-                        if (k == "vec3")  return GL_FLOAT_VEC3;
-                        if (k == "vec4")  return GL_FLOAT_VEC4;
+	                    auto typeFromKeyword = [](const std::string& k) -> GLenum {
+	                        if (k == "float") return GL_FLOAT;
+	                        if (k == "vec2")  return GL_FLOAT_VEC2;
+	                        if (k == "vec3")  return GL_FLOAT_VEC3;
+	                        if (k == "vec4")  return GL_FLOAT_VEC4;
                         if (k == "int")   return GL_INT;
                         if (k == "ivec2") return GL_INT_VEC2;
                         if (k == "ivec3") return GL_INT_VEC3;
@@ -24105,19 +24163,54 @@ bool GLContext::linkProgram(GLuint program) {
                         if (k == "uvec2") return GL_UNSIGNED_INT_VEC2;
                         if (k == "uvec3") return GL_UNSIGNED_INT_VEC3;
                         if (k == "uvec4") return GL_UNSIGNED_INT_VEC4;
-                        if (k == "double") return GL_DOUBLE;
-                        if (k == "dvec2") return GL_DOUBLE_VEC2;
-                        if (k == "dvec3") return GL_DOUBLE_VEC3;
-                        if (k == "dvec4") return GL_DOUBLE_VEC4;
-                        if (k == "mat2")  return GL_FLOAT_MAT2;
-                        if (k == "mat3")  return GL_FLOAT_MAT3;
-                        if (k == "mat4")  return GL_FLOAT_MAT4;
-                        return 0;
-                    };
-                    std::size_t ti = 0;
-                    GLenum memberType = 0;
-                    while (ti < toks.size()) {
-                        GLenum t = typeFromKeyword(toks[ti]);
+	                        if (k == "double") return GL_DOUBLE;
+	                        if (k == "dvec2") return GL_DOUBLE_VEC2;
+	                        if (k == "dvec3") return GL_DOUBLE_VEC3;
+	                        if (k == "dvec4") return GL_DOUBLE_VEC4;
+	                        if (k == "mat2")  return GL_FLOAT_MAT2;
+	                        if (k == "mat3")  return GL_FLOAT_MAT3;
+	                        if (k == "mat4")  return GL_FLOAT_MAT4;
+	                        if (k == "mat2x2") return GL_FLOAT_MAT2;
+	                        if (k == "mat3x3") return GL_FLOAT_MAT3;
+	                        if (k == "mat4x4") return GL_FLOAT_MAT4;
+	                        if (k == "mat2x3") return GL_FLOAT_MAT2x3;
+	                        if (k == "mat2x4") return GL_FLOAT_MAT2x4;
+	                        if (k == "mat3x2") return GL_FLOAT_MAT3x2;
+	                        if (k == "mat3x4") return GL_FLOAT_MAT3x4;
+	                        if (k == "mat4x2") return GL_FLOAT_MAT4x2;
+	                        if (k == "mat4x3") return GL_FLOAT_MAT4x3;
+	                        if (k == "dmat2") return GL_DOUBLE_MAT2;
+	                        if (k == "dmat3") return GL_DOUBLE_MAT3;
+	                        if (k == "dmat4") return GL_DOUBLE_MAT4;
+	                        if (k == "dmat2x2") return GL_DOUBLE_MAT2;
+	                        if (k == "dmat3x3") return GL_DOUBLE_MAT3;
+	                        if (k == "dmat4x4") return GL_DOUBLE_MAT4;
+	                        if (k == "dmat2x3") return GL_DOUBLE_MAT2x3;
+	                        if (k == "dmat2x4") return GL_DOUBLE_MAT2x4;
+	                        if (k == "dmat3x2") return GL_DOUBLE_MAT3x2;
+	                        if (k == "dmat3x4") return GL_DOUBLE_MAT3x4;
+	                        if (k == "dmat4x2") return GL_DOUBLE_MAT4x2;
+	                        if (k == "dmat4x3") return GL_DOUBLE_MAT4x3;
+	                        return 0;
+	                    };
+	                    std::string instanceName;
+	                    {
+	                        std::size_t q = p;
+	                        while (q < src.size() &&
+	                               (src[q] == ' ' || src[q] == '\t' ||
+	                                src[q] == '\n' || src[q] == '\r')) { ++q; }
+	                        const std::size_t instStart = q;
+	                        while (q < src.size() &&
+	                               (std::isalnum(static_cast<unsigned char>(src[q])) ||
+	                                src[q] == '_')) { ++q; }
+	                        if (q > instStart) {
+	                            instanceName.assign(src, instStart, q - instStart);
+	                        }
+	                    }
+	                    std::size_t ti = 0;
+	                    GLenum memberType = 0;
+	                    while (ti < toks.size()) {
+	                        GLenum t = typeFromKeyword(toks[ti]);
                         if (t != 0) { memberType = t; ++ti; break; }
                         ++ti;
                     }
@@ -24139,13 +24232,18 @@ bool GLContext::linkProgram(GLuint program) {
                             isArray = true;
                         }
                         OutputInfo info;
-                        info.type = memberType;
-                        info.arraySize = arraySize > 0 ? arraySize : 1;
-                        info.isArray = isArray;
-                        outputTypeMap[blockName + "." + name] = info;
-                        // Skip past `,`
-                        if (ti < toks.size() && toks[ti] == ",") ++ti;
-                    }
+	                        info.type = memberType;
+	                        info.arraySize = arraySize > 0 ? arraySize : 1;
+	                        info.isArray = isArray;
+	                        outputTypeMap[blockName + "." + name] = info;
+	                        if (!instanceName.empty()) {
+	                            outputTypeMap[instanceName + "." + name] = info;
+	                        } else {
+	                            outputTypeMap[name] = info;
+	                        }
+	                        // Skip past `,`
+	                        if (ti < toks.size() && toks[ti] == ",") ++ti;
+	                    }
                 }
                 scanPos = p;
             }
@@ -26244,6 +26342,9 @@ bool GLContext::linkProgram(GLuint program) {
     releaseRetainedMetalObject(programObject->gsPassThroughFragmentFunction);
     programObject->gsPassThroughFragmentFunction = nullptr;
     programObject->gsPassThroughVertexMSL.clear();
+    programObject->gsPassThroughFragmentMSL.clear();
+    programObject->gsPassThroughFragmentMSLActive = false;
+    programObject->gsPassThroughFragmentMSLPrimIdLoc = 0;
     programObject->gsPassThroughReflection = ShaderReflection{};
     programObject->geometryEmulated = false;
     programObject->geometrySpirv.clear();
@@ -32748,12 +32849,16 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             pos.name = "vsin_position";
             program.gsPassThroughReflection.vertexInputs.push_back(pos);
         }
-        for (std::size_t i = 0; i < ed.varyingWidths.size(); ++i) {
+        const auto& stageSlotWidths = ed.varyingStageSlotWidths.empty()
+            ? ed.varyingWidths : ed.varyingStageSlotWidths;
+        const auto& stageSlotBaseType = ed.varyingStageSlotBaseType.empty()
+            ? ed.varyingBaseType : ed.varyingStageSlotBaseType;
+        for (std::size_t i = 0; i < stageSlotWidths.size(); ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = static_cast<GLuint>(i + 1);
-            const std::uint8_t bt = (i < ed.varyingBaseType.size())
-                ? ed.varyingBaseType[i] : 0;
-            const std::uint32_t w = ed.varyingWidths[i];
+            const std::uint8_t bt = (i < stageSlotBaseType.size())
+                ? stageSlotBaseType[i] : 0;
+            const std::uint32_t w = stageSlotWidths[i];
             if (bt == 1) {
                 switch (w) {
                     case 1: vi.type = GL_INT;      break;
@@ -32788,7 +32893,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // follow the varying block; Metal attribute indices are
         // allocated the same way in the synth VS MSL so these match.
         const GLuint clipBaseLoc =
-            static_cast<GLuint>(ed.varyingWidths.size() + 1);
+            static_cast<GLuint>(stageSlotWidths.size() + 1);
         for (std::uint32_t i = 0; i < ed.clipDistanceLen; ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = clipBaseLoc + i;
@@ -32837,12 +32942,16 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             tdi.vertexAttributeLayouts.push_back(la);
             offset += 4 * sizeof(float);
         }
-        for (std::size_t i = 0; i < ed.varyingWidths.size(); ++i) {
+        const auto& stageSlotWidths = ed.varyingStageSlotWidths.empty()
+            ? ed.varyingWidths : ed.varyingStageSlotWidths;
+        const auto& stageSlotBaseType = ed.varyingStageSlotBaseType.empty()
+            ? ed.varyingBaseType : ed.varyingStageSlotBaseType;
+        for (std::size_t i = 0; i < stageSlotWidths.size(); ++i) {
             TranslatedDrawInfo::VertexAttributeLayout la;
             la.location = static_cast<GLuint>(i + 1);
             la.offset = offset;
-            const std::uint8_t bt = (i < ed.varyingBaseType.size())
-                ? ed.varyingBaseType[i] : 0;
+            const std::uint8_t bt = (i < stageSlotBaseType.size())
+                ? stageSlotBaseType[i] : 0;
             if (bt == 1) {
                 la.glType = GL_INT;
                 la.glIsInteger = true;
@@ -32852,9 +32961,9 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             } else {
                 la.glType = GL_FLOAT;
             }
-            la.glComponentCount = static_cast<GLint>(ed.varyingWidths[i]);
+            la.glComponentCount = static_cast<GLint>(stageSlotWidths[i]);
             tdi.vertexAttributeLayouts.push_back(la);
-            offset += ed.varyingWidths[i] * sizeof(float);
+            offset += stageSlotWidths[i] * sizeof(float);
         }
         // Clip / cull distance attribute layouts, in order, one float
         // per slot. They share the same packed buffer with the other
@@ -32862,7 +32971,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // TranslatedDrawInfo::vertexAttributeLayouts to set up
         // MTLVertexDescriptor's per-attribute format + offset.
         const GLuint clipBaseLoc =
-            static_cast<GLuint>(ed.varyingWidths.size() + 1);
+            static_cast<GLuint>(stageSlotWidths.size() + 1);
         for (std::uint32_t i = 0; i < ed.clipDistanceLen; ++i) {
             TranslatedDrawInfo::VertexAttributeLayout la;
             la.location = clipBaseLoc + i;
@@ -32903,16 +33012,31 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     tdi.markColorAttachmentReadbackFlip =
         routeViewportIndex && tdi.clipOrigin == GL_LOWER_LEFT;
     tdi.vertexMSL = &program.gsPassThroughVertexMSL;
-    // Post-process the FS MSL to redirect `gl_PrimitiveID` reads
-    // to a user varying when the GS wrote BuiltInPrimitiveId.
-    // Rebuild when the primitive-id location changed (e.g. if
-    // the user varying layout shifted between draws — currently
-    // impossible for a linked program but guard for safety).
-    if (ed.hasPrimitiveID) {
+    // Post-process the FS MSL for GS-emulation replay. PrimitiveID needs
+    // a user-varying redirect; fp64 stage inputs need float transport
+    // because Metal rejects nested appgl_df64 structs in [[stage_in]].
+    const auto& stageSlotScalarBytes = ed.varyingStageSlotScalarByteSize.empty()
+        ? ed.varyingScalarByteSize : ed.varyingStageSlotScalarByteSize;
+    bool needsFp64StageInRewrite = false;
+    for (std::uint8_t bytes : stageSlotScalarBytes) {
+        if (bytes == sizeof(double)) {
+            needsFp64StageInRewrite = true;
+            break;
+        }
+    }
+    if (ed.hasPrimitiveID || needsFp64StageInRewrite) {
         if (program.gsPassThroughFragmentMSL.empty()
             || program.gsPassThroughFragmentMSLPrimIdLoc != ed.primitiveIDLocation) {
-            program.gsPassThroughFragmentMSL =
-                appgl::rewriteFragmentMSLForPrimitiveID(program.fragmentMSL, ed);
+            std::string rewrittenFragment = program.fragmentMSL;
+            if (needsFp64StageInRewrite) {
+                rewrittenFragment =
+                    appgl::rewriteFragmentMSLForFp64StageIn(rewrittenFragment);
+            }
+            if (ed.hasPrimitiveID) {
+                rewrittenFragment =
+                    appgl::rewriteFragmentMSLForPrimitiveID(rewrittenFragment, ed);
+            }
+            program.gsPassThroughFragmentMSL = std::move(rewrittenFragment);
             program.gsPassThroughFragmentMSLPrimIdLoc = ed.primitiveIDLocation;
             program.gsPassThroughFragmentMSLActive = true;
             // Rebuilding FS invalidates any cached pipeline state.
@@ -32922,8 +33046,9 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             releaseRetainedMetalObject(program.gsPassThroughFragmentFunction);
             program.gsPassThroughFragmentFunction = nullptr;
             if (std::getenv("APPGL_GS_DUMP_MSL") != nullptr) {
-                std::fprintf(stderr, "\n[GS] rewritten FS MSL (primIdLoc=%u, %zu bytes)\n",
-                    ed.primitiveIDLocation, program.gsPassThroughFragmentMSL.size());
+                std::fprintf(stderr, "\n[GS] rewritten FS MSL (primIdLoc=%u fp64StageIn=%d, %zu bytes)\n",
+                    ed.primitiveIDLocation, needsFp64StageInRewrite ? 1 : 0,
+                    program.gsPassThroughFragmentMSL.size());
             }
         }
         tdi.fragmentMSL = &program.gsPassThroughFragmentMSL;
