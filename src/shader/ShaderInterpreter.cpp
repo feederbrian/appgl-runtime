@@ -327,9 +327,18 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
                 if (typeIt != types.end()) {
                     const TypeInfo& t = typeIt->second;
                     if (t.kind == TypeInfo::Kind::Float) {
-                        float f = 0;
-                        std::memcpy(&f, &w[2], sizeof(float));
-                        v = Value::makeFloat(f);
+                        if (t.elementScalarWidth == 8 && wc >= 4) {
+                            std::uint64_t bits =
+                                static_cast<std::uint64_t>(w[2]) |
+                                (static_cast<std::uint64_t>(w[3]) << 32u);
+                            double d = 0.0;
+                            std::memcpy(&d, &bits, sizeof(d));
+                            v = Value::makeFloat(static_cast<float>(d));
+                        } else {
+                            float f = 0;
+                            std::memcpy(&f, &w[2], sizeof(float));
+                            v = Value::makeFloat(f);
+                        }
                     } else if (t.kind == TypeInfo::Kind::Int) {
                         v = Value::makeInt(static_cast<std::int32_t>(w[2]));
                     } else if (t.kind == TypeInfo::Kind::UInt) {

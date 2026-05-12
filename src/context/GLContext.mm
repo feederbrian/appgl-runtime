@@ -30181,6 +30181,36 @@ static void assignDf64TransportWords(GLProgramUniformValue& slot,
     }
 }
 
+static GLint doubleUniformVectorWidth(GLenum type) {
+    switch (type) {
+        case GL_DOUBLE:      return 1;
+        case GL_DOUBLE_VEC2: return 2;
+        case GL_DOUBLE_VEC3: return 3;
+        case GL_DOUBLE_VEC4: return 4;
+        default:             return 0;
+    }
+}
+
+static bool doubleUniformMatrixShape(GLenum type, GLint& cols, GLint& rows) {
+    switch (type) {
+        case GL_DOUBLE_MAT2:   cols = 2; rows = 2; return true;
+        case GL_DOUBLE_MAT3:   cols = 3; rows = 3; return true;
+        case GL_DOUBLE_MAT4:   cols = 4; rows = 4; return true;
+        case GL_DOUBLE_MAT2x3: cols = 2; rows = 3; return true;
+        case GL_DOUBLE_MAT3x2: cols = 3; rows = 2; return true;
+        case GL_DOUBLE_MAT2x4: cols = 2; rows = 4; return true;
+        case GL_DOUBLE_MAT4x2: cols = 4; rows = 2; return true;
+        case GL_DOUBLE_MAT3x4: cols = 3; rows = 4; return true;
+        case GL_DOUBLE_MAT4x3: cols = 4; rows = 3; return true;
+        default: return false;
+    }
+}
+
+static bool uniformWriteCountFits(const UniformSlotRef& ref, GLsizei count) {
+    const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
+    return count <= remaining;
+}
+
 static void writeDoubleUniformSlot(GLProgramUniformValue& slot,
                                    GLint arraySize,
                                    GLint elementIndex,
@@ -30236,6 +30266,11 @@ bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    if (doubleUniformVectorWidth(ref.type) != vectorSize ||
+        !uniformWriteCountFits(ref, count)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     writeDoubleUniformSlot(*ref.slot,
                            ref.arraySize,
                            ref.elementIndex,
@@ -30269,6 +30304,14 @@ bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, G
     }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLint expectedCols = 0;
+    GLint expectedRows = 0;
+    if (!doubleUniformMatrixShape(ref.type, expectedCols, expectedRows) ||
+        rows != expectedCols || cols != expectedRows ||
+        !uniformWriteCountFits(ref, count)) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -30394,6 +30437,11 @@ bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint
     if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    if (doubleUniformVectorWidth(ref.type) != vectorSize ||
+        !uniformWriteCountFits(ref, count)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     writeDoubleUniformSlot(*ref.slot,
                            ref.arraySize,
                            ref.elementIndex,
@@ -30410,6 +30458,14 @@ bool GLContext::setUniformDoubleMatrixForProgram(GLuint program, GLint location,
     if (object == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     UniformSlotRef ref = resolveUniformSlot(object, location);
     if (ref.slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
+    GLint expectedCols = 0;
+    GLint expectedRows = 0;
+    if (!doubleUniformMatrixShape(ref.type, expectedCols, expectedRows) ||
+        rows != expectedCols || cols != expectedRows ||
+        !uniformWriteCountFits(ref, count)) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
     GLProgramUniformValue* slot = ref.slot;
     const GLint remaining = std::max<GLint>(ref.arraySize - ref.elementIndex, 1);
     const GLsizei effCount = std::min<GLsizei>(std::max<GLsizei>(count, 1), remaining);

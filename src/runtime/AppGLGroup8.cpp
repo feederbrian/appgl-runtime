@@ -1583,6 +1583,18 @@ extern "C" void APIENTRY glMaxShaderCompilerThreadsKHR(GLuint count) {
 
 namespace {
 
+static bool uniformResourceNameMatches(const std::string& stored,
+                                       const std::string& query) {
+    if (stored == query) {
+        return true;
+    }
+    static constexpr const char kArrayZeroSuffix[] = "[0]";
+    const std::size_t suffixLen = sizeof(kArrayZeroSuffix) - 1u;
+    return stored.size() == query.size() + suffixLen &&
+           stored.compare(0, query.size(), query) == 0 &&
+           stored.compare(query.size(), suffixLen, kArrayZeroSuffix) == 0;
+}
+
 static void APIENTRY glGetUniformIndices(GLuint program, GLsizei uniformCount, const GLchar *const*uniformNames, GLuint *uniformIndices) {
     auto* context = currentContextOrNull();
     if (context == nullptr || uniformNames == nullptr || uniformIndices == nullptr) return;
@@ -1596,7 +1608,7 @@ static void APIENTRY glGetUniformIndices(GLuint program, GLsizei uniformCount, c
         if (uniformNames[i] == nullptr) continue;
         const std::string name(uniformNames[i]);
         for (GLuint j = 0; j < static_cast<GLuint>(obj->resourceUniforms.size()); ++j) {
-            if (obj->resourceUniforms[j].name == name) {
+            if (uniformResourceNameMatches(obj->resourceUniforms[j].name, name)) {
                 uniformIndices[i] = j;
                 break;
             }
@@ -1642,6 +1654,10 @@ static void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount,
                     params[i] = 0;
                     break;
                 }
+                if (u.arrayStride > 0) {
+                    params[i] = u.arrayStride;
+                    break;
+                }
                 // std140: compute stride from type. Each array element
                 // is rounded up to vec4 (16 bytes).
                 // For matrices, stride = vectors × 16.
@@ -1679,7 +1695,9 @@ static void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount,
                                  t == GL_DOUBLE_MAT2x3 || t == GL_DOUBLE_MAT2x4 ||
                                  t == GL_DOUBLE_MAT3x2 || t == GL_DOUBLE_MAT3x4 ||
                                  t == GL_DOUBLE_MAT4x2 || t == GL_DOUBLE_MAT4x3);
-                params[i] = (isMatrix && u.blockIndex >= 0) ? 16 : 0;
+                params[i] = (isMatrix && u.blockIndex >= 0)
+                    ? (u.matrixStride > 0 ? u.matrixStride : 16)
+                    : 0;
                 break;
             }
             case GL_UNIFORM_IS_ROW_MAJOR:

@@ -892,6 +892,35 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
     std::uint32_t curType = tIt->second.pointeeType;   // deref pointer
     std::uint32_t offset = 0;         // scalar offset (non-SSBO path)
     std::uint32_t byteOffset = 0;     // byte offset (SSBO / UBO path)
+    auto scalarByteWidth = [&](std::uint32_t typeId) -> std::uint32_t {
+        std::uint32_t cur = typeId;
+        for (int depth = 0; depth < 8; ++depth) {
+            auto it = module_.types.find(cur);
+            if (it == module_.types.end()) return 4u;
+            const TypeInfo& ti = it->second;
+            switch (ti.kind) {
+                case TypeInfo::Kind::Float:
+                case TypeInfo::Kind::Int:
+                case TypeInfo::Kind::UInt:
+                case TypeInfo::Kind::Bool:
+                    return std::max<std::uint32_t>(ti.elementScalarWidth, 4u);
+                case TypeInfo::Kind::Vec2:
+                case TypeInfo::Kind::Vec3:
+                case TypeInfo::Kind::Vec4:
+                case TypeInfo::Kind::Matrix:
+                case TypeInfo::Kind::Array:
+                case TypeInfo::Kind::RuntimeArray:
+                    cur = ti.componentType;
+                    break;
+                case TypeInfo::Kind::Pointer:
+                    cur = ti.pointeeType;
+                    break;
+                default:
+                    return 4u;
+            }
+        }
+        return 4u;
+    };
 
     for (std::uint32_t k = 0; k < nIndices; ++k) {
         auto curTIt = module_.types.find(curType);
@@ -978,10 +1007,9 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
                    t.kind == TypeInfo::Kind::Vec4) {
             offset += static_cast<std::uint32_t>(idx);
             if (rootIsSSBO || rootIsUboArray || rootIsUBO) {
-                // std140/std430: vec component = 4 bytes for
-                // float/int/uint. Both layouts pack vec components
-                // identically; no layout-distinction needed here.
-                byteOffset += static_cast<std::uint32_t>(idx) * 4u;
+                byteOffset +=
+                    static_cast<std::uint32_t>(idx) *
+                    scalarByteWidth(t.componentType);
             }
             curType = t.componentType;
         } else if (t.kind == TypeInfo::Kind::Matrix) {
@@ -992,7 +1020,9 @@ AccessChainResult Interpreter::resolveAccessChain(std::uint32_t base,
                 // (std430 vec-column-packed) when no MatrixStride
                 // decoration is parsed. Matrices in SSBO are rare in
                 // the CE tess_eval target set.
-                byteOffset += static_cast<std::uint32_t>(idx) * colW * 4u;
+                byteOffset +=
+                    static_cast<std::uint32_t>(idx) * colW *
+                    scalarByteWidth(t.componentType);
             }
             curType = t.componentType;
         } else {
@@ -1324,6 +1354,19 @@ Value Interpreter::loadFromUBO(std::uint32_t binding,
         std::memcpy(&raw, base + off, 4);
         return raw;
     };
+    auto readFloatScalar = [&](std::uint32_t off,
+                               std::uint32_t scalarBytes) -> float {
+        if (scalarBytes == 8u) {
+            if (off + sizeof(double) > size) return 0.0f;
+            double d = 0.0;
+            std::memcpy(&d, base + off, sizeof(d));
+            return static_cast<float>(d);
+        }
+        std::uint32_t raw = readScalar(off);
+        float f = 0.0f;
+        std::memcpy(&f, &raw, 4);
+        return f;
+    };
 
     auto tIt = module_.types.find(leafTypeId);
     if (tIt == module_.types.end()) {
@@ -1357,6 +1400,17 @@ Value Interpreter::loadFromUBO(std::uint32_t binding,
         return false;
     };
 
+    const std::uint32_t scalarBytes = [&]() -> std::uint32_t {
+        if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
+            t.kind == TypeInfo::Kind::Vec4) {
+            auto cIt = module_.types.find(t.componentType);
+            if (cIt != module_.types.end()) {
+                return std::max<std::uint32_t>(cIt->second.elementScalarWidth, 4u);
+            }
+        }
+        return std::max<std::uint32_t>(t.elementScalarWidth, 4u);
+    }();
+
     const int n = (t.kind == TypeInfo::Kind::Vec4) ? 4 :
                   (t.kind == TypeInfo::Kind::Vec3) ? 3 :
                   (t.kind == TypeInfo::Kind::Vec2) ? 2 : 1;
@@ -1374,10 +1428,9 @@ Value Interpreter::loadFromUBO(std::uint32_t binding,
                   n == 2 ? Value::Kind::Float2 :
                   n == 3 ? Value::Kind::Float3 : Value::Kind::Float4);
         for (int k = 0; k < n; ++k) {
-            std::uint32_t raw = readScalar(byteOffset + k * 4);
-            float f = 0.0f;
-            std::memcpy(&f, &raw, 4);
-            v.f[k] = f;
+            v.f[k] = readFloatScalar(
+                byteOffset + static_cast<std::uint32_t>(k) * scalarBytes,
+                scalarBytes);
         }
     }
     return v;
