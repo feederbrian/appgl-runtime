@@ -8,14 +8,15 @@ diff --git a/spirv_msl.cpp b/spirv_msl.cpp
 index e36a861c..900a8b34 100644
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
-@@ -11237,6 +11237,70 @@ void CompilerMSL::emit_texture_op(const Instruction &i, bool sparse)
+@@ -11237,6 +11237,282 @@ void CompilerMSL::emit_texture_op(const Instruction &i, bool sparse)
  				return;
  			}
  		}
 +		if (get_execution_model() == ExecutionModelGLCompute &&
 +		    (op == OpImageSparseFetch ||
 +		     op == OpImageSparseSampleImplicitLod ||
-+		     op == OpImageSparseSampleExplicitLod))
++		     op == OpImageSparseSampleExplicitLod ||
++		     op == OpImageSparseGather))
 +		{
 +			auto &sampled_type = expression_type(img);
 +			auto &imgtype = get<SPIRType>(sampled_type.self);
@@ -37,6 +38,132 @@ index e36a861c..900a8b34 100644
 +				bool sparse_forward = false;
 +				SmallVector<uint32_t> sparse_inherited;
 +				string sparse_call = to_texture_op(i, true, &sparse_forward, sparse_inherited);
++				auto trim_sparse_arg = [](string value) {
++					auto first = value.find_first_not_of(" \t\n\r");
++					auto last = value.find_last_not_of(" \t\n\r");
++					if (first == string::npos || last == string::npos)
++						return string();
++					return value.substr(first, last - first + 1);
++				};
++				const string helper_prefix = "spvGatherConstOffsets(";
++				if (sparse_call.find(helper_prefix) == 0)
++				{
++					vector<string> args;
++					string current;
++					unsigned depth = 0;
++					for (size_t pos = helper_prefix.size(); pos + 1 < sparse_call.size(); ++pos)
++					{
++						char ch = sparse_call[pos];
++						if (ch == '(' || ch == '[' || ch == '{')
++							depth++;
++						else if (ch == ')' || ch == ']' || ch == '}')
++						{
++							if (depth == 0)
++								break;
++							depth--;
++						}
++						if (ch == ',' && depth == 0)
++						{
++							args.push_back(trim_sparse_arg(current));
++							current.clear();
++							continue;
++						}
++						current.push_back(ch);
++					}
++					if (!current.empty())
++						args.push_back(trim_sparse_arg(current));
++					if (args.size() >= 5)
++					{
++						string params = args[4];
++						for (size_t arg = 5; arg < args.size(); ++arg)
++							params += ", " + args[arg];
++						sparse_call = args[0] + ".sparse_gather(" + args[1] + ", " +
++						              params + ", " + args[2] + "[0], " + args[3] + ")";
++					}
++				}
++				const string sparse_read_call = ".sparse_read(";
++				auto sparse_read_pos = sparse_call.find(sparse_read_call);
++				if (sparse_read_pos != string::npos)
++				{
++					size_t args_start = sparse_read_pos + sparse_read_call.size();
++					vector<string> args;
++					string current;
++					unsigned depth = 0;
++					size_t args_end = string::npos;
++					for (size_t pos = args_start; pos < sparse_call.size(); ++pos)
++					{
++						char ch = sparse_call[pos];
++						if (ch == '(' || ch == '[' || ch == '{')
++							depth++;
++						else if (ch == ')' || ch == ']' || ch == '}')
++						{
++							if (depth == 0)
++							{
++								args_end = pos;
++								break;
++							}
++							depth--;
++						}
++						if (ch == ',' && depth == 0)
++						{
++							args.push_back(trim_sparse_arg(current));
++							current.clear();
++							continue;
++						}
++						current.push_back(ch);
++					}
++					if (!current.empty())
++						args.push_back(trim_sparse_arg(current));
++					if (args_end != string::npos && !args.empty() &&
++					    args[0].find("uint") != 0 && args[0].find("ushort") != 0)
++					{
++						const bool coord_is_3d =
++						    imgtype.image.dim == Dim3D ||
++						    (imgtype.image.dim == Dim2D && imgtype.image.arrayed);
++						const string coord_cast = coord_is_3d ? "uint3" : "uint2";
++						auto is_unsigned_coord = [](const string &expr) {
++							return expr.find("uint") == 0 || expr.find("ushort") == 0;
++						};
++						auto cast_coord_arg = [&](const string &coord_arg) {
++							unsigned coord_depth = 0;
++							for (size_t pos = 0; pos < coord_arg.size(); ++pos)
++							{
++								char ch = coord_arg[pos];
++								if (ch == '(' || ch == '[' || ch == '{')
++									coord_depth++;
++								else if (ch == ')' || ch == ']' || ch == '}')
++								{
++									if (coord_depth > 0)
++										coord_depth--;
++								}
++								else if ((ch == '+' || ch == '-') && coord_depth == 0 && pos > 0)
++								{
++									string lhs = trim_sparse_arg(coord_arg.substr(0, pos));
++									string rhs = trim_sparse_arg(coord_arg.substr(pos + 1));
++									if (!lhs.empty() && !rhs.empty())
++									{
++										if (!is_unsigned_coord(lhs))
++											lhs = coord_cast + "(" + lhs + ")";
++										if (!is_unsigned_coord(rhs))
++											rhs = coord_cast + "(" + rhs + ")";
++										return lhs + " " + ch + " " + rhs;
++									}
++								}
++							}
++							return coord_cast + "(" + coord_arg + ")";
++						};
++						args[0] = cast_coord_arg(args[0]);
++						string rewritten = sparse_call.substr(0, args_start);
++						for (size_t arg = 0; arg < args.size(); ++arg)
++						{
++							if (arg != 0)
++								rewritten += ", ";
++							rewritten += args[arg];
++						}
++						rewritten += sparse_call.substr(args_end);
++						sparse_call = rewritten;
++					}
++				}
 +
 +				bool value_forward = false;
 +				SmallVector<uint32_t> value_inherited;
@@ -48,11 +175,96 @@ index e36a861c..900a8b34 100644
 +				auto *p_var = maybe_get_backing_variable(image_var_id);
 +				uint32_t resource_index = p_var ? get_automatic_msl_resource_binding(p_var->self) : 0;
 +				string sidecar_name = join("appgl_sparse_sampled_sidecar_", resource_index);
-+				string image_prefix = to_expression(image_var_id) + ".";
++				string image_expr = to_expression(image_var_id);
++				string image_prefix = image_expr + ".";
 +				auto image_pos = value_call.find(image_prefix);
-+				if (image_pos == string::npos)
-+					SPIRV_CROSS_THROW("AppGL sparse sampled sidecar could not locate source texture expression.");
-+				value_call.replace(image_pos, image_prefix.size(), sidecar_name + ".");
++				if (image_pos != string::npos)
++				{
++					value_call.replace(image_pos, image_prefix.size(), sidecar_name + ".");
++				}
++				else
++				{
++					string helper_first_arg = "(" + image_expr + ",";
++					auto helper_arg_pos = value_call.find(helper_first_arg);
++					if (helper_arg_pos != string::npos)
++					{
++						value_call.replace(helper_arg_pos + 1, image_expr.size(), sidecar_name);
++					}
++					else
++					{
++						auto replace_receiver = [&](const string &method) {
++							auto method_pos = value_call.find(method);
++							if (method_pos == string::npos || method_pos == 0)
++								return false;
++							size_t start = method_pos;
++							while (start > 0)
++							{
++								char ch = value_call[start - 1];
++								if (!(ch == '_' || isalnum(static_cast<unsigned char>(ch))))
++									break;
++								--start;
++							}
++							if (start == method_pos)
++								return false;
++							value_call.replace(start, method_pos - start, sidecar_name);
++							return true;
++						};
++						if (!replace_receiver(".sample(") &&
++						    !replace_receiver(".read(") &&
++						    !replace_receiver(".gather("))
++						{
++							SPIRV_CROSS_THROW("AppGL sparse sampled sidecar could not locate source texture expression.");
++						}
++					}
++				}
++
++				auto insert_zero_gather_offset = [&](string &call, const string &method) {
++					auto method_pos = call.find(method);
++					if (method_pos == string::npos)
++						return;
++					size_t args_start = method_pos + method.size();
++					vector<string> args;
++					string current;
++					unsigned depth = 0;
++					size_t args_end = string::npos;
++					for (size_t pos = args_start; pos < call.size(); ++pos)
++					{
++						char ch = call[pos];
++						if (ch == '(' || ch == '[' || ch == '{')
++							depth++;
++						else if (ch == ')' || ch == ']' || ch == '}')
++						{
++							if (depth == 0)
++							{
++								args_end = pos;
++								break;
++							}
++							depth--;
++						}
++						if (ch == ',' && depth == 0)
++						{
++							args.push_back(trim_sparse_arg(current));
++							current.clear();
++							continue;
++						}
++						current.push_back(ch);
++					}
++					if (!current.empty())
++						args.push_back(trim_sparse_arg(current));
++					if (args_end == string::npos || args.size() != 3 ||
++					    args[2].find("component::") != 0)
++						return;
++
++					string rewritten = call.substr(0, args_start);
++					rewritten += args[0] + ", " + args[1] + ", int2(0), " + args[2];
++					rewritten += call.substr(args_end);
++					call = rewritten;
++				};
++				if (imgtype.image.dim == Dim2D || imgtype.image.dim == DimRect)
++				{
++					insert_zero_gather_offset(sparse_call, ".sparse_gather(");
++					insert_zero_gather_offset(value_call, ".gather(");
++				}
 +
 +				auto &return_type = get<SPIRType>(result_type_id);
 +				if (return_type.basetype != SPIRType::Struct || return_type.member_types.size() != 2)
