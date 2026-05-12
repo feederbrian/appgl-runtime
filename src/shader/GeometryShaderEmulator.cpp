@@ -785,10 +785,15 @@ private:
     // of the leaf type.
     Value loadFromVar(std::uint32_t varId, std::uint32_t off,
                       std::uint32_t count, std::uint32_t leafTypeId);
+    std::vector<Value> loadMatrixColumnsFromVar(std::uint32_t varId,
+                                                std::uint32_t off,
+                                                std::uint32_t matrixTypeId);
 
     // Store `v` into var storage at [off..off+count).
     void storeToVar(std::uint32_t varId, std::uint32_t off,
                     const Value& v);
+    void storeMatrixColumnsToVar(std::uint32_t varId, std::uint32_t off,
+                                 const std::vector<Value>& columns);
 
     // Phase 3f-3: byte-level SSBO read/write via caller-supplied
     // binding → (host ptr, size) map. leafTypeId determines how many
@@ -1163,6 +1168,48 @@ Value Interpreter::loadFromVar(std::uint32_t varId, std::uint32_t off,
     return v;
 }
 
+std::vector<Value> Interpreter::loadMatrixColumnsFromVar(
+    std::uint32_t varId,
+    std::uint32_t off,
+    std::uint32_t matrixTypeId)
+{
+    std::vector<Value> columns;
+    auto sIt = varStorage_.find(varId);
+    if (sIt == varStorage_.end()) return columns;
+    const auto& storage = sIt->second;
+    auto tIt = module_.types.find(matrixTypeId);
+    if (tIt == module_.types.end() ||
+        tIt->second.kind != TypeInfo::Kind::Matrix) {
+        return columns;
+    }
+    const TypeInfo& matrix = tIt->second;
+    auto cIt = module_.types.find(matrix.componentType);
+    if (cIt == module_.types.end()) return columns;
+    const TypeInfo& columnType = cIt->second;
+    int rows = 1;
+    switch (columnType.kind) {
+        case TypeInfo::Kind::Vec2: rows = 2; break;
+        case TypeInfo::Kind::Vec3: rows = 3; break;
+        case TypeInfo::Kind::Vec4: rows = 4; break;
+        default: rows = 1; break;
+    }
+    columns.reserve(matrix.count);
+    for (std::uint32_t col = 0; col < matrix.count; ++col) {
+        Value v;
+        v.kind = rows == 2 ? Value::Kind::Float2
+               : rows == 3 ? Value::Kind::Float3
+               : rows == 4 ? Value::Kind::Float4
+                            : Value::Kind::Float;
+        for (int row = 0; row < rows; ++row) {
+            const std::uint32_t idx = off + col * static_cast<std::uint32_t>(rows)
+                                    + static_cast<std::uint32_t>(row);
+            v.f[row] = idx < storage.size() ? storage[idx] : 0.0f;
+        }
+        columns.push_back(v);
+    }
+    return columns;
+}
+
 void Interpreter::storeToVar(std::uint32_t varId, std::uint32_t off,
                              const Value& v) {
     auto& storage = varStorage_[varId];
@@ -1192,6 +1239,27 @@ void Interpreter::storeToVar(std::uint32_t varId, std::uint32_t off,
     // had its non-zero invocation-0 write clobbered by invocation-1's
     // unwritten zero storage when both invocations' captures merged
     // into the same per-patch map.
+    writtenOutputVars_.insert(varId);
+}
+
+void Interpreter::storeMatrixColumnsToVar(std::uint32_t varId,
+                                          std::uint32_t off,
+                                          const std::vector<Value>& columns)
+{
+    auto& storage = varStorage_[varId];
+    std::uint32_t width = 0;
+    for (const auto& column : columns) {
+        width += static_cast<std::uint32_t>(column.componentCount());
+    }
+    if (off + width > storage.size()) {
+        storage.resize(off + width, 0.0f);
+    }
+    std::uint32_t cursor = off;
+    for (const auto& column : columns) {
+        for (int k = 0; k < column.componentCount(); ++k) {
+            storage[cursor++] = column.f[k];
+        }
+    }
     writtenOutputVars_.insert(varId);
 }
 
@@ -2065,6 +2133,44 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                     // scalar inputs which fit in one Value).
                     bool handledAsArray = false;
                     auto pIt = module_.types.find(tIt->second.pointeeType);
+                    if (pIt != module_.types.end() &&
+                        pIt->second.kind == TypeInfo::Kind::Matrix) {
+                        auto columnIt = module_.types.find(pIt->second.componentType);
+                        const std::uint32_t columnWidth =
+                            module_.scalarWidth(pIt->second.componentType);
+                        if (columnIt != module_.types.end() &&
+                            columnWidth >= 1 && columnWidth <= 4) {
+                            const std::uint32_t baseLoc = locIt->second;
+                            for (std::uint32_t col = 0;
+                                 col < pIt->second.count;
+                                 ++col) {
+                                auto eIt = vsAttribs_->find(baseLoc + col);
+                                if (eIt == vsAttribs_->end()) continue;
+                                const Value& v = eIt->second;
+                                const int n = v.componentCount();
+                                const std::uint32_t dstBase = col * columnWidth;
+                                if (v.isFloatKind()) {
+                                    for (int k = 0;
+                                         k < n &&
+                                         k < static_cast<int>(columnWidth) &&
+                                         dstBase + static_cast<std::uint32_t>(k) < width;
+                                         ++k) {
+                                        storage[dstBase + k] = v.f[k];
+                                    }
+                                } else {
+                                    for (int k = 0;
+                                         k < n &&
+                                         k < static_cast<int>(columnWidth) &&
+                                         dstBase + static_cast<std::uint32_t>(k) < width;
+                                         ++k) {
+                                        std::memcpy(&storage[dstBase + k],
+                                                    &v.i[k], 4);
+                                    }
+                                }
+                            }
+                            handledAsArray = true;
+                        }
+                    }
                     if (pIt != module_.types.end() &&
                         pIt->second.kind == TypeInfo::Kind::Array) {
                         const std::uint32_t elementType = pIt->second.componentType;
@@ -3517,7 +3623,17 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 if (vIt != module_.variables.end()) {
                     // Direct load from a variable (common for scalars).
                     const auto& tIt = module_.types.at(vIt->second.typeId);
-                    valueStore_[w[1]] = loadFromVar(ptrId, 0, module_.scalarWidth(tIt.pointeeType), tIt.pointeeType);
+                    auto resultTypeIt = module_.types.find(w[0]);
+                    if (resultTypeIt != module_.types.end() &&
+                        resultTypeIt->second.kind == TypeInfo::Kind::Matrix) {
+                        matrixColumns_[w[1]] =
+                            loadMatrixColumnsFromVar(ptrId, 0, w[0]);
+                        valueStore_.erase(w[1]);
+                    } else {
+                        valueStore_[w[1]] = loadFromVar(
+                            ptrId, 0, module_.scalarWidth(tIt.pointeeType),
+                            tIt.pointeeType);
+                    }
                 } else {
                     // Pointer came from OpAccessChain.
                     auto acIt = accessChains_.find(ptrId);
@@ -3537,11 +3653,21 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                 acIt->second.byteOffset,
                                 acIt->second.leafTypeId);
                         } else {
-                            valueStore_[w[1]] = loadFromVar(
-                                acIt->second.rootVarId,
-                                acIt->second.scalarOffset,
-                                acIt->second.scalarCount,
-                                acIt->second.leafTypeId);
+                            auto resultTypeIt = module_.types.find(w[0]);
+                            if (resultTypeIt != module_.types.end() &&
+                                resultTypeIt->second.kind == TypeInfo::Kind::Matrix) {
+                                matrixColumns_[w[1]] = loadMatrixColumnsFromVar(
+                                    acIt->second.rootVarId,
+                                    acIt->second.scalarOffset,
+                                    w[0]);
+                                valueStore_.erase(w[1]);
+                            } else {
+                                valueStore_[w[1]] = loadFromVar(
+                                    acIt->second.rootVarId,
+                                    acIt->second.scalarOffset,
+                                    acIt->second.scalarCount,
+                                    acIt->second.leafTypeId);
+                            }
                         }
                     } else {
                         bail("OpLoad: unresolved pointer");
@@ -3552,14 +3678,37 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpStore: {
                 // w[0]=ptrId, w[1]=valId
-                Value v;
-                if (!tryGetValue(w[1], v)) { bail("OpStore: unresolved value"); break; }
                 const std::uint32_t ptrId = [&]() {
                     auto aliasIt = functionPointerAliases.find(w[0]);
                     return aliasIt != functionPointerAliases.end()
                         ? aliasIt->second
                         : w[0];
                 }();
+                auto matrixIt = matrixColumns_.find(w[1]);
+                if (matrixIt != matrixColumns_.end()) {
+                    auto vIt = module_.variables.find(ptrId);
+                    if (vIt != module_.variables.end()) {
+                        storeMatrixColumnsToVar(ptrId, 0, matrixIt->second);
+                    } else {
+                        auto acIt = accessChains_.find(ptrId);
+                        if (acIt != accessChains_.end()) {
+                            if (acIt->second.isStorageBuffer ||
+                                acIt->second.isUniformBuffer) {
+                                bail("OpStore: matrix buffer store deferred");
+                            } else {
+                                storeMatrixColumnsToVar(acIt->second.rootVarId,
+                                                        acIt->second.scalarOffset,
+                                                        matrixIt->second);
+                            }
+                        } else {
+                            bail("OpStore: unresolved matrix pointer");
+                        }
+                    }
+                    pc += wc;
+                    break;
+                }
+                Value v;
+                if (!tryGetValue(w[1], v)) { bail("OpStore: unresolved value"); break; }
                 auto vIt = module_.variables.find(ptrId);
                 if (vIt != module_.variables.end()) {
                     storeToVar(ptrId, 0, v);
@@ -4523,6 +4672,28 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpCompositeExtract: {
                 // w[0]=type, w[1]=resultId, w[2]=composite, w[3..]=indices
+                auto matrixIt = matrixColumns_.find(w[2]);
+                if (matrixIt != matrixColumns_.end()) {
+                    if (wc >= 4) {
+                        const std::uint32_t col = w[3];
+                        if (col < matrixIt->second.size()) {
+                            if (wc >= 5) {
+                                const std::uint32_t row = w[4];
+                                Value r;
+                                r.kind = Value::Kind::Float;
+                                if (row < static_cast<std::uint32_t>(
+                                        matrixIt->second[col].componentCount())) {
+                                    r.f[0] = matrixIt->second[col].f[row];
+                                }
+                                valueStore_[w[1]] = r;
+                            } else {
+                                valueStore_[w[1]] = matrixIt->second[col];
+                            }
+                        }
+                    }
+                    pc += wc;
+                    break;
+                }
                 Value composite;
                 if (!tryGetValue(w[2], composite)) { bail("OpCompositeExtract: unknown src"); break; }
                 Value r;
@@ -6521,7 +6692,13 @@ Value readVertexAttribFromVAO(
     Value v;
     if (attrIdx >= vao.attributes.size()) return v;
     const auto& attr = vao.attributes[attrIdx];
-    if (!attr.enabled) return v;
+    if (!attr.enabled) {
+        v.kind = Value::Kind::Float4;
+        for (int k = 0; k < 4; ++k) {
+            v.f[k] = static_cast<float>(attr.immediateDouble[k]);
+        }
+        return v;
+    }
     // Sprint 8 SCOUT-W (f) regression-fix (CKPT72): honour
     // glVertexArrayAttribBinding (GL 4.3 §10.3 separated-format
     // routing). The attribute's bindingIndex selects which binding
@@ -8708,7 +8885,7 @@ bool runVsForVertex(
 
     Interpreter::VertexAttribs vsAttribs;
     for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
-        if (!vao.attributes[ai].enabled) continue;
+        // Disabled attributes still feed the VS from current generic state.
         Value v = readVertexAttribFromVAO(
             vao, mutableObjects, ai, vboSlot, instanceID);
         if (v.kind != Value::Kind::Invalid) {

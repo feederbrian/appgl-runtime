@@ -11920,7 +11920,10 @@ struct GLContext::Impl {
     std::vector<Fp64GraphicsSidecarSync> pendingFp64GraphicsSsboSidecars;
     // Per-context immediate double vertex attribute values (GL 4.1 glVertexAttribL*).
     // Indexed by attribute slot; each stores 4 doubles (default {0,0,0,1}).
-    static constexpr std::size_t kMaxImmediateDoubleAttribs = 16;
+    // Mirrors GL_MAX_VERTEX_ATTRIBS / GLObjectStore construction above.
+    // CTS vertex_attrib_64bit exercises constant L-attributes across every
+    // reported slot, so this shadow must cover all advertised attributes.
+    static constexpr std::size_t kMaxImmediateDoubleAttribs = 32;
     std::array<std::array<GLdouble, 4>, kMaxImmediateDoubleAttribs> immediateDoubleAttribs{};
 
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
@@ -14885,7 +14888,7 @@ bool GLContext::vertexAttribPointer(
         return false;
     }
     const GLuint buffer = impl_->state->boundBuffer(GL_ARRAY_BUFFER);
-    if (buffer == 0) {
+    if (buffer == 0 && pointer != nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -14956,7 +14959,7 @@ bool GLContext::vertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsi
         return false;
     }
     const GLuint buffer = impl_->state->boundBuffer(GL_ARRAY_BUFFER);
-    if (buffer == 0) {
+    if (buffer == 0 && pointer != nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -15472,7 +15475,7 @@ bool GLContext::vertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsi
         return false;
     }
     const GLuint buffer = impl_->state->boundBuffer(GL_ARRAY_BUFFER);
-    if (buffer == 0) {
+    if (buffer == 0 && pointer != nullptr) {
         pushError(GL_INVALID_OPERATION);
         return false;
     }
@@ -15512,6 +15515,14 @@ bool GLContext::setVertexAttribLImmediate(GLuint index, GLint count, const GLdou
     slot[1] = count >= 2 ? values[1] : 0.0;
     slot[2] = count >= 3 ? values[2] : 0.0;
     slot[3] = count >= 4 ? values[3] : 1.0;
+    if (GLVertexArrayObject* vertexArray = impl_->currentVertexArrayOrDefault();
+        vertexArray != nullptr && index < vertexArray->attributes.size()) {
+        auto& attr = vertexArray->attributes[index];
+        attr.immediateDouble[0] = slot[0];
+        attr.immediateDouble[1] = slot[1];
+        attr.immediateDouble[2] = slot[2];
+        attr.immediateDouble[3] = slot[3];
+    }
     return true;
 }
 
@@ -23420,6 +23431,29 @@ bool GLContext::linkProgram(GLuint program) {
     // SPIRV-Cross reflection cannot see, so we keep it as the authoritative
     // source for attribute locations.
     GLuint nextAttribLocation = 0;
+    auto vertexInputLocationSlotCount = [](GLenum type, GLint arraySize) -> GLuint {
+        GLuint columns = 1;
+        switch (type) {
+            case GL_FLOAT_MAT2:    case GL_DOUBLE_MAT2:
+            case GL_FLOAT_MAT2x3:  case GL_DOUBLE_MAT2x3:
+            case GL_FLOAT_MAT2x4:  case GL_DOUBLE_MAT2x4:
+                columns = 2;
+                break;
+            case GL_FLOAT_MAT3:    case GL_DOUBLE_MAT3:
+            case GL_FLOAT_MAT3x2:  case GL_DOUBLE_MAT3x2:
+            case GL_FLOAT_MAT3x4:  case GL_DOUBLE_MAT3x4:
+                columns = 3;
+                break;
+            case GL_FLOAT_MAT4:    case GL_DOUBLE_MAT4:
+            case GL_FLOAT_MAT4x2:  case GL_DOUBLE_MAT4x2:
+            case GL_FLOAT_MAT4x3:  case GL_DOUBLE_MAT4x3:
+                columns = 4;
+                break;
+            default:
+                break;
+        }
+        return columns * static_cast<GLuint>(std::max<GLint>(1, arraySize));
+    };
     if (vertexShader != nullptr) {
         for (const auto& input : vertexShader->declaredInputs) {
             GLProgramAttributeInfo attrib;
@@ -23438,19 +23472,21 @@ bool GLContext::linkProgram(GLuint program) {
                 }
             }
             // GL 4.6 §11.1.1: array vertex inputs consume arraySize
-            // consecutive attribute locations (one per element). SPIRV-
-            // Cross's MSL backend expands the array into individual
-            // `[[attribute(N)]]` slots so each element needs its own
-            // location. Advance `nextAttribLocation` by the full size so
-            // the NEXT input lands AFTER the array, not on top of its
-            // second element. CTS cull_distance tests have
+            // consecutive attribute locations (one per element), and
+            // matrix inputs consume one location per column. SPIRV-
+            // Cross's MSL backend expands those into individual
+            // `[[attribute(N)]]` slots so each element/column needs its
+            // own location. Advance `nextAttribLocation` by the full size
+            // so the NEXT input lands AFTER the aggregate, not on top of
+            // its second element/column. CTS cull_distance tests have
             //   in float clipdistance_data[1];
             //   in float culldistance_data[8];
             //   in vec2 position;
             // and expect position at MSL attribute(9), not (2). Before
             // this fix, getAttribLocation("position")=2 collided with
             // culldistance_data[1]'s MSL slot.
-            const GLuint slotCount = std::max<GLint>(1, input.arraySize);
+            const GLuint slotCount =
+                vertexInputLocationSlotCount(input.type, input.arraySize);
             if (static_cast<GLuint>(attrib.location) + slotCount > nextAttribLocation) {
                 nextAttribLocation = static_cast<GLuint>(attrib.location) + slotCount;
             }
@@ -36116,6 +36152,110 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
                 if (ed.vertexCount == 0) return true;
                 if (impl_->encodeEmulatedGsDraw(*program, programName, ed)) return true;
+            }
+        }
+    }
+
+    if (program != nullptr &&
+        isTransformFeedbackActive() &&
+        !program->transformFeedbackVaryingNames.empty() &&
+        !program->geometryEmulated &&
+        !program->tessellationEmulated &&
+        !program->tessellationInterpreted &&
+        count > 0 && instancecount > 0 &&
+        effectivePtr != nullptr) {
+        std::vector<std::uint32_t> idx32(static_cast<std::size_t>(count));
+        if (effectiveType == GL_UNSIGNED_INT) {
+            std::memcpy(idx32.data(), effectivePtr, count * sizeof(std::uint32_t));
+        } else if (effectiveType == GL_UNSIGNED_SHORT) {
+            const std::uint16_t* src16 =
+                static_cast<const std::uint16_t*>(effectivePtr);
+            for (GLsizei i = 0; i < count; ++i) idx32[i] = src16[i];
+        } else {
+            idx32.clear();
+        }
+        if (!idx32.empty() && basevertex != 0) {
+            for (auto& v : idx32) {
+                v = static_cast<std::uint32_t>(
+                    static_cast<std::int32_t>(v) + basevertex);
+            }
+        }
+
+        std::vector<std::uint32_t> capIdx;
+        if (!idx32.empty()) {
+            const std::size_t n = idx32.size();
+            switch (mode) {
+                case GL_POINTS:
+                case GL_LINES:
+                case GL_TRIANGLES:
+                    capIdx = idx32;
+                    break;
+                case GL_LINE_STRIP:
+                    if (n >= 2) {
+                        capIdx.reserve(2 * (n - 1));
+                        for (std::size_t i = 0; i + 1 < n; ++i) {
+                            capIdx.push_back(idx32[i]);
+                            capIdx.push_back(idx32[i + 1]);
+                        }
+                    }
+                    break;
+                case GL_LINE_LOOP:
+                    if (n >= 2) {
+                        capIdx.reserve(2 * n);
+                        for (std::size_t i = 0; i < n; ++i) {
+                            capIdx.push_back(idx32[i]);
+                            capIdx.push_back(idx32[(i + 1) % n]);
+                        }
+                    }
+                    break;
+                case GL_TRIANGLE_STRIP:
+                    if (n >= 3) {
+                        capIdx.reserve(3 * (n - 2));
+                        for (std::size_t i = 0; i + 2 < n; ++i) {
+                            if ((i & 1u) == 0u) {
+                                capIdx.push_back(idx32[i]);
+                                capIdx.push_back(idx32[i + 1]);
+                                capIdx.push_back(idx32[i + 2]);
+                            } else {
+                                capIdx.push_back(idx32[i + 1]);
+                                capIdx.push_back(idx32[i]);
+                                capIdx.push_back(idx32[i + 2]);
+                            }
+                        }
+                    }
+                    break;
+                case GL_TRIANGLE_FAN:
+                    if (n >= 3) {
+                        capIdx.reserve(3 * (n - 2));
+                        for (std::size_t i = 1; i + 1 < n; ++i) {
+                            capIdx.push_back(idx32[0]);
+                            capIdx.push_back(idx32[i]);
+                            capIdx.push_back(idx32[i + 1]);
+                        }
+                    }
+                    break;
+                default:
+                    capIdx.clear();
+                    break;
+            }
+        }
+        if (!capIdx.empty() && !program->vertexSpirv.empty()) {
+            const GLenum capTopology =
+                (mode == GL_POINTS) ? GL_POINTS :
+                (mode == GL_LINES || mode == GL_LINE_STRIP || mode == GL_LINE_LOOP) ? GL_LINES :
+                GL_TRIANGLES;
+            appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
+                *program, *vao, *impl_->objects, *impl_->state,
+                capTopology, static_cast<GLsizei>(capIdx.size()), /*first=*/0,
+                instancecount, /*baseInstance=*/0,
+                capIdx.data());
+            if (ed.ok) {
+                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                    return true;
+                }
+            } else if (!ed.diagnostic.empty()) {
+                APPGL_LOG(SHADER, @"drawElementsInstancedBaseVertex VS-only-TF: %s",
+                          ed.diagnostic.c_str());
             }
         }
     }
