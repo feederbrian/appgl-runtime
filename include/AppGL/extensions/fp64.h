@@ -1,0 +1,4 @@
+#pragma once
+
+#define APPGL_EXTENSION_ARB_GPU_SHADER_FP64 "GL_ARB_gpu_shader_fp64"
+#define APPGL_EXTENSION_ARB_VERTEX_ATTRIB_64BIT "GL_ARB_vertex_attrib_64bit"

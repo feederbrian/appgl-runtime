@@ -23,6 +23,9 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 option(APPGL_REGENERATE "Regenerate AppGL generated files at configure time." OFF)
 option(APPGL_VENDOR_THIRD_PARTY "Add vendored shader translator dependencies to the CMake graph." OFF)
+option(APPGL_FP64_EMULATION
+  "Enable the Decision F df64 emulation module substrate. Extension advertising remains gated by runtime validation."
+  OFF)
 option(APPGL_ENABLE_ASAN
   "Build with AddressSanitizer for development/debugging. DO NOT ship."
   OFF)
@@ -72,6 +75,10 @@ set(APPGL_SOURCES
   src/context/MetalFrameGraph.mm
   src/extensions/ExtensionContext.mm
   src/extensions/ExtensionRegistry.mm
+  src/extensions/fp64/Fp64Extension.mm
+  src/extensions/fp64/Fp64Module.mm
+  src/extensions/fp64/Fp64StateBinding.mm
+  src/extensions/fp64/Fp64Translation.mm
   src/extensions/fragment_shading_rate/FragmentShadingRateExtension.mm
   src/extensions/fragment_shading_rate/FragmentShadingRateModule.mm
   src/extensions/fragment_shading_rate/RasterizationRateMap.mm
@@ -110,6 +117,7 @@ set(APPGL_TEST_SUPPORT_SOURCES
 set(APPGL_PUBLIC_HEADERS
   include/AppGL/AppGL.h
   include/AppGL/extensions/ExtensionRegistry.h
+  include/AppGL/extensions/fp64.h
   include/AppGL/extensions/fragment_shading_rate.h
   include/AppGL/extensions/sparse_texture.h
   include/AppGL/glcorearb.h
@@ -162,7 +170,10 @@ target_sources(AppGL PRIVATE $<TARGET_OBJECTS:AppGLTestsSupport>)
 target_sources(AppGL_static PRIVATE $<TARGET_OBJECTS:AppGLTestsSupport>)
 
 foreach(target AppGL AppGL_static AppGLTestsSupport)
-  target_compile_definitions(${target} PRIVATE GL_SILENCE_DEPRECATION=1)
+  target_compile_definitions(${target} PRIVATE
+    GL_SILENCE_DEPRECATION=1
+    APPGL_FP64_EMULATION=$<IF:$<BOOL:${APPGL_FP64_EMULATION}>,1,0>
+  )
 endforeach()
 
 foreach(target AppGL AppGL_static)
