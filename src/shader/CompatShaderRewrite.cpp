@@ -801,7 +801,11 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     // preprocessor contract (`GL_KHR_blend_equation_advanced == 1`) and strip
     // the extension-only declarations before translation.
     bool didAdvancedBlendFixup = false;
-    {
+    const bool hasAdvancedBlendSyntax =
+        result.source.find("GL_KHR_blend_equation_advanced") !=
+            std::string::npos ||
+        result.source.find("blend_support_") != std::string::npos;
+    if (hasAdvancedBlendSyntax) {
         const std::string defineLine =
             "#ifndef GL_KHR_blend_equation_advanced\n"
             "#define GL_KHR_blend_equation_advanced 1\n"

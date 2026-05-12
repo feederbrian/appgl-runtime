@@ -19012,6 +19012,9 @@ void GLContext::endImmediate() {
     info.fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
 
     const bool ok = impl_->frameGraph->encodeImmediateModeDraw(info);
+    if (ok && impl_->state->boundDrawFramebuffer() == 0) {
+        impl_->invalidateDefaultFramebufferShadow();
+    }
     if (!ok) {
         emitDebugMessage(
             GL_DEBUG_SOURCE_API,
@@ -31450,6 +31453,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     }
 
     const bool encodeOk = frameGraph->encodeMetalTessellationDraw(info);
+    if (encodeOk && state->boundDrawFramebuffer() == 0) {
+        invalidateDefaultFramebufferShadow();
+    }
 
     if (detectorEnabled()) {
         std::fprintf(stderr,
@@ -31658,6 +31664,9 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     info.clipOrigin = static_cast<std::uint32_t>(state->clipOrigin());
 
     const bool ok = frameGraph->encodeMetalMeshGSDraw(info);
+    if (ok && state->boundDrawFramebuffer() == 0) {
+        invalidateDefaultFramebufferShadow();
+    }
     if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
         std::fprintf(stderr,
             "[MESH_GS] encodeMetalMeshGSDraw rc=%d diag=\"%s\"\n",
@@ -32299,7 +32308,9 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
 
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
     if (ok) {
-        if (drawFboName != 0) {
+        if (drawFboName == 0) {
+            invalidateDefaultFramebufferShadow();
+        } else {
             if (GLFramebufferObject* fbo =
                     objects->framebuffers().get(drawFboName)) {
                 // Split the two color-texture readback contracts:
@@ -35020,6 +35031,9 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     setup.info.indexType = effectiveType;
 
     const bool solidOk = impl_->frameGraph->encodeSolidColorDraw(setup.info);
+    if (solidOk && impl_->state->boundDrawFramebuffer() == 0) {
+        impl_->invalidateDefaultFramebufferShadow();
+    }
     if (!solidOk) {
         emitDebugMessage(
             GL_DEBUG_SOURCE_API,
@@ -35443,6 +35457,9 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     setup.info.indexType = effectiveType;
 
     const bool solidOk = impl_->frameGraph->encodeSolidColorDraw(setup.info);
+    if (solidOk && impl_->state->boundDrawFramebuffer() == 0) {
+        impl_->invalidateDefaultFramebufferShadow();
+    }
     if (!solidOk) {
         emitDebugMessage(
             GL_DEBUG_SOURCE_API,
