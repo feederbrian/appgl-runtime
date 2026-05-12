@@ -70,6 +70,16 @@ struct GLBufferObject {
     void* mapPointer = nullptr;
     std::vector<std::uint8_t> shadowBytes;
 
+    struct Fp64TransportSidecar {
+        std::size_t layoutHash = 0;
+        std::uint32_t sourceGeneration = 0;
+        GLintptr sourceOffset = 0;
+        GLsizeiptr sourceSize = 0;
+        void* metalBuffer = nullptr;
+        std::vector<std::uint8_t> bytes;
+    };
+    std::vector<Fp64TransportSidecar> fp64TransportSidecars;
+
     // ADV-10: cached uint8→uint16 index expansion.  Populated on the first
     // drawElements call with GL_UNSIGNED_BYTE; invalidated when buffer data
     // changes (glBufferData / glBufferSubData).  Avoids per-draw heap
@@ -520,6 +530,7 @@ struct GLProgramUniformValue {
     std::vector<GLint> ints;
     std::vector<GLuint> uints;
     std::vector<GLdouble> doubles;  // CPU-side shadow for f64→f32 narrowing (lossless glGetUniformdv readback)
+    std::vector<std::uint32_t> df64TransportWords;  // hi/lo float-bit pairs for AppGL df64 uint2 transport
 };
 
 // GL 4.3 program resource introspection — per-resource entry used by
@@ -1263,6 +1274,8 @@ struct GLProgramObject {
         std::size_t memberOffset = 0;   // byte offset in push-constant struct
         std::size_t copyBytes = 0;      // total bytes to memcpy (0 = skip)
         GLint location = -1;            // GL uniform location for value lookup
+        GLenum memberType = 0;
+        bool containsFp64 = false;
         // Matrix column-padding fields. When `matPaddedCols` > 0 the
         // member is a matrix type whose GL column width (matPaddedRows
         // floats) is less than the 4-float (16-byte) MSL/std140 column
@@ -1274,6 +1287,8 @@ struct GLProgramObject {
         // `matPaddedCols` stays 0.
         int matPaddedCols = 0;
         int matPaddedRows = 0;
+        std::size_t matPaddedStrideBytes = 16;
+        std::size_t matPaddedScalarBytes = sizeof(float);
         // Array-member unpadding fields. Non-zero arrayCount means the
         // member is an array with `arrayCount` elements where each GPU-
         // side element occupies `arrayStride` bytes (std140 rounds up to

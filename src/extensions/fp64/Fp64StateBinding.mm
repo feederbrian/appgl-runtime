@@ -36,6 +36,27 @@ BindingState bindingStateSnapshot(ExtensionContext& ctx) {
     return it->second;
 }
 
+void recordDoubleUniformBacking(ExtensionContext& ctx, std::size_t bytes) {
+    std::lock_guard<std::mutex> lock(bindingStateMutex());
+    BindingState& state = bindingStates()[&ctx.context()];
+    state.doubleUniformBackingEnabled = true;
+    state.doubleUniformBytes += bytes;
+}
+
+void recordDoubleSsboBacking(ExtensionContext& ctx, std::size_t bytes) {
+    std::lock_guard<std::mutex> lock(bindingStateMutex());
+    BindingState& state = bindingStates()[&ctx.context()];
+    state.doubleSsboBackingEnabled = true;
+    state.doubleSsboBytes += bytes;
+}
+
+void recordDoubleVertexAttribBacking(ExtensionContext& ctx, std::size_t bytes) {
+    std::lock_guard<std::mutex> lock(bindingStateMutex());
+    BindingState& state = bindingStates()[&ctx.context()];
+    state.doubleVertexAttribBackingEnabled = true;
+    state.doubleVertexAttribBytes += bytes;
+}
+
 void destroyContextBindingState(ExtensionContext& ctx) {
     std::lock_guard<std::mutex> lock(bindingStateMutex());
     bindingStates().erase(&ctx.context());

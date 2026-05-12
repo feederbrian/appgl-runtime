@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -722,6 +723,29 @@ GLenum spirvBaseTypeToGL(const spirv_cross::SPIRType& type) {
             default: return GL_FLOAT;
         }
     }
+    if (type.basetype == BT::Double) {
+        if (type.columns > 1) {
+            // Matrix types — columns × vecsize (rows).
+            // GL uses "dmatCxR" naming where C = columns, R = rows.
+            if (type.columns == 2 && type.vecsize == 2) return GL_DOUBLE_MAT2;
+            if (type.columns == 2 && type.vecsize == 3) return GL_DOUBLE_MAT2x3;
+            if (type.columns == 2 && type.vecsize == 4) return GL_DOUBLE_MAT2x4;
+            if (type.columns == 3 && type.vecsize == 2) return GL_DOUBLE_MAT3x2;
+            if (type.columns == 3 && type.vecsize == 3) return GL_DOUBLE_MAT3;
+            if (type.columns == 3 && type.vecsize == 4) return GL_DOUBLE_MAT3x4;
+            if (type.columns == 4 && type.vecsize == 2) return GL_DOUBLE_MAT4x2;
+            if (type.columns == 4 && type.vecsize == 3) return GL_DOUBLE_MAT4x3;
+            if (type.columns == 4 && type.vecsize == 4) return GL_DOUBLE_MAT4;
+            return GL_DOUBLE_MAT4;
+        }
+        switch (type.vecsize) {
+            case 1: return GL_DOUBLE;
+            case 2: return GL_DOUBLE_VEC2;
+            case 3: return GL_DOUBLE_VEC3;
+            case 4: return GL_DOUBLE_VEC4;
+            default: return GL_DOUBLE;
+        }
+    }
     if (type.basetype == BT::Int) {
         switch (type.vecsize) {
             case 1: return GL_INT;
@@ -753,6 +777,61 @@ GLenum spirvBaseTypeToGL(const spirv_cross::SPIRType& type) {
         return GL_SAMPLER_2D;
     }
     return GL_FLOAT;
+}
+
+bool spirvModuleDeclaresFp64(const std::uint32_t* spirv,
+                             std::size_t wordCount) {
+    if (spirv == nullptr || wordCount <= 5) {
+        return false;
+    }
+    std::size_t cursor = 5;  // SPIR-V header.
+    while (cursor < wordCount) {
+        const std::uint32_t first = spirv[cursor];
+        const std::uint16_t op = static_cast<std::uint16_t>(first & 0xffffu);
+        const std::uint16_t length = static_cast<std::uint16_t>(first >> 16u);
+        if (length == 0 || cursor + length > wordCount) {
+            break;
+        }
+        const std::uint32_t* inst = spirv + cursor;
+        if (static_cast<spv::Op>(op) == spv::OpTypeFloat &&
+            length >= 3 && inst[2] == 64u) {
+            return true;
+        }
+        cursor += length;
+    }
+    return false;
+}
+
+bool spirvTypeUsesFp64(spirv_cross::Compiler& compiler,
+                       const spirv_cross::SPIRType& type,
+                       std::unordered_set<std::uint32_t>& visiting) {
+    if (type.basetype == spirv_cross::SPIRType::Double) {
+        return true;
+    }
+    if (type.self != 0 && !visiting.insert(type.self).second) {
+        return false;
+    }
+    if ((type.basetype == spirv_cross::SPIRType::Image ||
+         type.basetype == spirv_cross::SPIRType::SampledImage) &&
+        type.image.type != 0) {
+        if (spirvTypeUsesFp64(compiler, compiler.get_type(type.image.type),
+                              visiting)) {
+            return true;
+        }
+    }
+    for (std::uint32_t memberTypeId : type.member_types) {
+        if (spirvTypeUsesFp64(compiler, compiler.get_type(memberTypeId),
+                              visiting)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool spirvTypeUsesFp64(spirv_cross::Compiler& compiler,
+                       const spirv_cross::SPIRType& type) {
+    std::unordered_set<std::uint32_t> visiting;
+    return spirvTypeUsesFp64(compiler, type, visiting);
 }
 
 bool resourcesUseFragmentShadingRateBuiltins(
@@ -1320,6 +1399,10 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         if (resourcesUseMultiviewBuiltins(versionResources)) {
             mslOpts.multiview = true;
             mslOpts.multiview_layered_rendering = true;
+        }
+        if (options.fp64EmulationAvailable &&
+            spirvModuleDeclaresFp64(spirv, wordCount)) {
+            mslOpts.appgl_fp64_emulation = true;
         }
         if (resourcesUseFragmentShadingRateBuiltins(versionResources)) {
             mslOpts.set_msl_version(2, 4);
@@ -2896,6 +2979,9 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         auto resources = compiler.get_shader_resources();
         result.usesFragmentShadingRateBuiltins =
             resourcesUseFragmentShadingRateBuiltins(resources);
+        result.usesFp64 = spirvModuleDeclaresFp64(spirv, wordCount);
+        result.fp64TranslationActive =
+            result.usesFp64 && options.fp64EmulationAvailable;
 
         // Vertex inputs (stage_inputs). SPIR-V assigns one OpDecorate
         // Location per input, but SPIRV-Cross MSL EXPANDS arrays into
@@ -2957,6 +3043,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             }
             const auto& type = compiler.get_type(entry.res->type_id);
             const GLenum glType = spirvBaseTypeToGL(type);
+            const bool containsFp64 = spirvTypeUsesFp64(compiler, type);
             for (std::uint32_t slot = 0; slot < entry.slotCount; ++slot) {
                 ShaderReflection::VertexInput vi;
                 vi.location = nextMslLocation + slot;
@@ -2964,6 +3051,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     ? (entry.res->name + "[" + std::to_string(slot) + "]")
                     : entry.res->name;
                 vi.type = glType;
+                vi.containsFp64 = containsFp64;
                 result.vertexInputs.push_back(std::move(vi));
             }
             nextMslLocation += entry.slotCount;
@@ -3043,6 +3131,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             rb.hasInstanceName = (!typeName.empty() && ubo.name != typeName);
             const auto& type = compiler.get_type(ubo.base_type_id);
             rb.byteSize = compiler.get_declared_struct_size(type);
+            rb.containsFp64 = spirvTypeUsesFp64(compiler, type);
             // entry.arraySize is 1 for non-arrays AND for 1-element arrays.
             // Distinguish them by checking the SPIR-V variable type directly.
             {
@@ -3131,6 +3220,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                             member.offset = memberOffset + combo * perEntryStride;
                             member.size = static_cast<std::size_t>(perEntryStride * innermostDim);
                             member.type = spirvBaseTypeToGL(memberType);
+                            member.containsFp64 = spirvTypeUsesFp64(compiler, memberType);
+                            rb.containsFp64 = rb.containsFp64 || member.containsFp64;
                             member.isArray = true;
                             member.arraySize = innermostDim;
                             member.arrayStride = baseArrayStride;
@@ -3155,6 +3246,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     member.offset = memberOffset;
                     member.size = compiler.get_declared_struct_member_size(parentType, mi);
                     member.type = spirvBaseTypeToGL(memberType);
+                    member.containsFp64 = spirvTypeUsesFp64(compiler, memberType);
+                    rb.containsFp64 = rb.containsFp64 || member.containsFp64;
                     // Detect row_major decoration on matrix members.
                     // A block-level `layout(row_major)` causes SPIRV-Cross
                     // to decorate each matrix member via
@@ -3262,6 +3355,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             rb.name = pc.name;
             const auto& type = compiler.get_type(pc.base_type_id);
             rb.byteSize = compiler.get_declared_struct_size(type);
+            rb.containsFp64 = spirvTypeUsesFp64(compiler, type);
 
             // Enumerate struct members so the draw path can build a
             // correctly-laid-out buffer for each shader stage.
@@ -3272,6 +3366,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 member.size = compiler.get_declared_struct_member_size(type, mi);
                 const auto& memberType = compiler.get_type(type.member_types[mi]);
                 member.type = spirvBaseTypeToGL(memberType);
+                member.containsFp64 = spirvTypeUsesFp64(compiler, memberType);
+                rb.containsFp64 = rb.containsFp64 || member.containsFp64;
                 // Detect array members. Default-uniform arrays need this
                 // so computeStageUniformLayout's arrayCount/arrayStride/
                 // glElementBytes path expands GL-packed values into
@@ -3439,6 +3535,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 GLenum storageTarget = 0;
                 bool sparseRead = false;
                 bool sparseWrite = false;
+                bool containsFp64 = false;
                 spirv_cross::Resource* res;
             };
             std::vector<StorageImgRef> sortedStorageImages;
@@ -3460,6 +3557,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                     imageType.image.sampled == 2;
                 r.multisampleArray = r.multisample && imageType.image.arrayed;
                 r.storageTarget = storageImageTargetForType(imageType);
+                r.containsFp64 = spirvTypeUsesFp64(compiler, imageType);
                 r.sparseRead =
                     storageImageAccesses.reads.find(img.id) !=
                         storageImageAccesses.reads.end() &&
@@ -3497,6 +3595,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                 rb.storageImageTarget = entry.storageTarget;
                 rb.sparseStorageImageRead = entry.sparseRead;
                 rb.sparseStorageImageWrite = entry.sparseWrite;
+                rb.containsFp64 = entry.containsFp64;
                 result.storageImages.push_back(std::move(rb));
             }
         }
@@ -3546,6 +3645,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             }
             rb.active = (ssboActive.find(ssbo.id) != ssboActive.end());
             const auto& ssboType = compiler.get_type(ssbo.base_type_id);
+            rb.containsFp64 = spirvTypeUsesFp64(compiler, ssboType);
             const std::string typeName = compiler.get_name(ssboType.self);
             rb.name = typeName.empty() ? ssbo.name : typeName;
             rb.hasInstanceName = (!typeName.empty() && ssbo.name != typeName);
@@ -3721,6 +3821,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                             member.offset = memberOffset + combo * perEntryStride;
                             member.size = perEntryStride * innermostDim;
                             member.type = spirvBaseTypeToGL(memberType);
+                            member.containsFp64 = spirvTypeUsesFp64(compiler, memberType);
+                            rb.containsFp64 = rb.containsFp64 || member.containsFp64;
                             member.topLevelArraySize = effTopLevel;
                             member.topLevelArrayStride = tlStride;
                             member.isArray = true;
@@ -3752,6 +3854,8 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
                         member.size = 0;  // unbounded tail
                     }
                     member.type = spirvBaseTypeToGL(memberType);
+                    member.containsFp64 = spirvTypeUsesFp64(compiler, memberType);
+                    rb.containsFp64 = rb.containsFp64 || member.containsFp64;
                     member.topLevelArraySize = effTopLevel;
                     // Row-major decoration (matrix members only).
                     if (memberType.columns > 1) {

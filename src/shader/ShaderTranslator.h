@@ -58,6 +58,7 @@ struct ShaderReflection {
         GLuint location = 0;
         GLenum type = 0;
         std::string name;
+        bool containsFp64 = false;
     };
 
     // Describes one member inside a UBO / push-constant block.  The offset
@@ -98,6 +99,7 @@ struct ShaderReflection {
         // only when the member is inside a top-level array. CTS
         // `top-level-array` asserts > 0 for a multi-dim SSBO leaf.
         GLint topLevelArrayStride = 0;
+        bool containsFp64 = false;
     };
 
     struct ResourceBinding {
@@ -130,6 +132,7 @@ struct ShaderReflection {
         GLenum storageImageTarget = 0;
         bool sparseStorageImageRead = false;
         bool sparseStorageImageWrite = false;
+        bool containsFp64 = false;
         std::vector<UniformMember> members;
     };
 
@@ -148,6 +151,8 @@ struct ShaderReflection {
     std::vector<ResourceBinding> storageImages;
     bool usesPointSize = false;
     bool usesFragmentShadingRateBuiltins = false;
+    bool usesFp64 = false;
+    bool fp64TranslationActive = false;
 };
 
 // Compute shader execution modes extracted from SPIR-V.
@@ -255,6 +260,12 @@ struct TranslatorOptions {
     // the emission is unchanged. Probing / pipeline-state build stays
     // optional and errors out cleanly downstream.
     bool forceTessEvalAsCompute = false;
+
+    // Sprint 20 Decision F: link-time runtime gate for AppGL df64
+    // lowering. GLContext sets this from Fp64Module::isAvailable() for
+    // the current Metal device; ShaderTranslator independently detects
+    // whether the SPIR-V module declares any 64-bit float types.
+    bool fp64EmulationAvailable = false;
 
     // Sprint 17 Day 7+ Bank-Group-H Phase 6-2-r Path B Component A2.
     // When true, the gl_CullDistance → [[clip_distance]] HW-slot

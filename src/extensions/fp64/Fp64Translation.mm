@@ -1,9 +1,68 @@
 #include "Fp64Translation.h"
 
+#include <cmath>
+#include <cstring>
+
 namespace appgl::extensions::fp64 {
+namespace {
+
+std::uint32_t bitsFromFloat(float value) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+float floatFromBits(std::uint32_t bits) {
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+std::uint64_t bitsFromDouble(double value) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+}  // namespace
 
 TranslationHelperInfo translationHelperInfo() {
     return {};
+}
+
+Df64TransportWords encodeDoubleToDf64Transport(double value) {
+    const float hi = static_cast<float>(value);
+    float lo = 0.0f;
+    if (std::isfinite(value) && std::isfinite(hi)) {
+        lo = static_cast<float>(value - static_cast<double>(hi));
+    }
+    return {bitsFromFloat(hi), bitsFromFloat(lo)};
+}
+
+double decodeDf64TransportToDouble(Df64TransportWords words) {
+    const float hi = floatFromBits(words.hi);
+    const float lo = floatFromBits(words.lo);
+    return static_cast<double>(hi) + static_cast<double>(lo);
+}
+
+bool df64TransportRoundTripMatches(double value) {
+    const Df64TransportWords words = encodeDoubleToDf64Transport(value);
+    const double decoded = decodeDf64TransportToDouble(words);
+    if (std::isnan(value) && std::isnan(decoded)) {
+        return true;
+    }
+    return bitsFromDouble(decoded) == bitsFromDouble(value);
+}
+
+void encodeDoublesToDf64Transport(const double* values,
+                                  std::size_t count,
+                                  Df64TransportWords* outWords) {
+    if (values == nullptr || outWords == nullptr) {
+        return;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        outWords[i] = encodeDoubleToDf64Transport(values[i]);
+    }
 }
 
 const char* mslHelperSource() {

@@ -55,6 +55,15 @@ targets. This patch is the Phase 2 SPIRV-Cross emit substrate for the
 Decision F df64 path while extension advertising remains held by the
 AppGL runtime.
 
+### `spirv-cross-msl-fp64-rectangular-dmat.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — follow-up to
+`spirv-cross-msl-fp64-emulation.patch`.
+
+**Summary:** Extends the AppGL df64 helper prologue with rectangular
+`dmatCxR` structs plus matrix/vector and matrix/matrix multiply helpers
+for 2/3/4 column-row combinations.
+
 ### `spirv-cross-msl-atomic-3d-dispatch.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — MSL image

@@ -7,6 +7,9 @@
 #include "../runtime/AppGLRuntime.h"
 #include "../extensions/ExtensionContext.h"
 #include "../extensions/ExtensionRegistry.h"
+#include "../extensions/fp64/Fp64Module.h"
+#include "../extensions/fp64/Fp64StateBinding.h"
+#include "../extensions/fp64/Fp64Translation.h"
 #include "../extensions/fragment_shading_rate/FragmentShadingRateModule.h"
 #include "../extensions/sparse_texture/MultisampleStorageImageEmulation.h"
 #include "../extensions/sparse_texture/SparseStorageImageEmulation.h"
@@ -34,6 +37,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <set>
 #include <unordered_map>
@@ -2506,6 +2510,23 @@ bool getTextureParameterFloat(const GLTextureParameters& params, GLenum pname, G
     return true;
 }
 
+enum class Fp64TransportDirection {
+    HostDoubleToDf64Words,
+    Df64WordsToHostDouble,
+};
+
+bool reflectionNeedsFp64BindingShim(const ShaderReflection& reflection);
+bool resourceNeedsFp64BindingShim(const ShaderReflection& reflection,
+                                  const ShaderReflection::ResourceBinding& binding);
+std::size_t hashFp64ResourceLayout(const ShaderReflection::ResourceBinding& binding,
+                                   GLintptr sourceOffset,
+                                   GLsizeiptr sourceSize);
+bool canonicalizeFp64ResourceBytes(std::uint8_t* bytes,
+                                   std::size_t byteCount,
+                                   const ShaderReflection::ResourceBinding& binding,
+                                   Fp64TransportDirection direction);
+bool defaultUniformBlockContainsFp64(const ShaderReflection& reflection);
+
 }  // namespace
 
 struct GLContext::Impl {
@@ -2592,6 +2613,11 @@ struct GLContext::Impl {
     void releaseBufferStorage(GLBufferObject& object) {
         releaseRetainedMetalObject(object.metalBuffer);
         object.metalBuffer = nullptr;
+        for (auto& sidecar : object.fp64TransportSidecars) {
+            releaseRetainedMetalObject(sidecar.metalBuffer);
+            sidecar.metalBuffer = nullptr;
+        }
+        object.fp64TransportSidecars.clear();
         object.size = 0;
         object.shadowBytes.clear();
         resetBufferMapping(object);
@@ -7034,7 +7060,7 @@ struct GLContext::Impl {
                         GL_UNIFORM_BUFFER, glBindingPoint);
                     if (binding.buffer == 0) continue;
 
-                    const GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
+                    GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
                     if (bufObj == nullptr || bufObj->shadowBytes.empty()) continue;
 
                     const std::uint8_t* dataPtr = bufObj->shadowBytes.data();
@@ -7053,9 +7079,24 @@ struct GLContext::Impl {
                     ubo.metalSlot = block.metalBinding + static_cast<std::uint32_t>(inst);
                     ubo.data = dataPtr;
                     ubo.size = dataSize;
+                    if (resourceNeedsFp64BindingShim(*reflection, block)) {
+                        auto* sidecar = ensureFp64TransportSidecar(
+                            *bufObj, *reflection, block,
+                            static_cast<GLintptr>(binding.offset),
+                            static_cast<GLsizeiptr>(dataSize));
+                        if (sidecar != nullptr && sidecar->metalBuffer != nullptr) {
+                            ubo.data = sidecar->bytes.data();
+                            ubo.metalBuffer = sidecar->metalBuffer;
+                            ubo.metalBufferOffset = 0;
+                            ExtensionContext extensionContext(*owner);
+                            extensions::fp64::recordDoubleUniformBacking(
+                                extensionContext, dataSize);
+                        }
+                    }
                     // For UBOs > 4KB, use the Metal buffer directly (setVertexBytes
                     // has a 4096-byte limit on Apple GPUs).
-                    if (dataSize > 4096 && bufObj->metalBuffer != nullptr) {
+                    if (ubo.metalBuffer == nullptr &&
+                        dataSize > 4096 && bufObj->metalBuffer != nullptr) {
                         ubo.metalBuffer = bufObj->metalBuffer;
                         ubo.metalBufferOffset = static_cast<std::size_t>(binding.offset);
                     }
@@ -7115,7 +7156,7 @@ struct GLContext::Impl {
                     const GLIndexedBufferBinding binding =
                         state->indexedBufferBinding(GL_SHADER_STORAGE_BUFFER, glBindingPoint);
                     if (binding.buffer == 0) continue;
-                    const GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
+                    GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
                     if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
                     TranslatedDrawInfo::SSBOBinding sb;
                     sb.metalSlot = ssbo.metalBinding + static_cast<std::uint32_t>(inst);
@@ -7125,6 +7166,19 @@ struct GLContext::Impl {
                         sb.size = static_cast<std::size_t>(binding.size);
                     } else if (binding.offset >= 0 && bufObj->size > binding.offset) {
                         sb.size = static_cast<std::size_t>(bufObj->size - binding.offset);
+                    }
+                    if (resourceNeedsFp64BindingShim(*reflection, ssbo)) {
+                        auto* sidecar = ensureFp64TransportSidecar(
+                            *bufObj, *reflection, ssbo,
+                            static_cast<GLintptr>(binding.offset),
+                            static_cast<GLsizeiptr>(sb.size));
+                        if (sidecar != nullptr && sidecar->metalBuffer != nullptr) {
+                            sb.metalBuffer = sidecar->metalBuffer;
+                            sb.offset = 0;
+                            ExtensionContext extensionContext(*owner);
+                            extensions::fp64::recordDoubleSsboBacking(
+                                extensionContext, sb.size);
+                        }
                     }
                     sb.isVertex = isVertex;
                     sb.isFragment = isFragment;
@@ -7614,6 +7668,115 @@ struct GLContext::Impl {
             object.shadowBytes.data() + static_cast<std::size_t>(offset),
             static_cast<std::size_t>(length)
         );
+    }
+
+    GLBufferObject::Fp64TransportSidecar* ensureFp64TransportSidecar(
+        GLBufferObject& object,
+        const ShaderReflection& reflection,
+        const ShaderReflection::ResourceBinding& binding,
+        GLintptr sourceOffset,
+        GLsizeiptr sourceSize) {
+        if (!resourceNeedsFp64BindingShim(reflection, binding) ||
+            sourceOffset < 0 || sourceSize <= 0 || device == nil) {
+            return nullptr;
+        }
+        const std::uint8_t* sourceBytes = readableBufferContents(object);
+        if (sourceBytes == nullptr ||
+            sourceOffset > object.size ||
+            sourceSize > object.size - sourceOffset) {
+            return nullptr;
+        }
+
+        const std::size_t layoutHash =
+            hashFp64ResourceLayout(binding, sourceOffset, sourceSize);
+        GLBufferObject::Fp64TransportSidecar* sidecar = nullptr;
+        for (auto& candidate : object.fp64TransportSidecars) {
+            if (candidate.layoutHash == layoutHash) {
+                sidecar = &candidate;
+                break;
+            }
+        }
+        if (sidecar == nullptr) {
+            object.fp64TransportSidecars.push_back({});
+            sidecar = &object.fp64TransportSidecars.back();
+            sidecar->layoutHash = layoutHash;
+        }
+
+        const bool needsRebuild =
+            sidecar->metalBuffer == nullptr ||
+            sidecar->sourceGeneration != object.indexExpansionGeneration ||
+            sidecar->sourceOffset != sourceOffset ||
+            sidecar->sourceSize != sourceSize ||
+            sidecar->bytes.size() != static_cast<std::size_t>(sourceSize);
+        if (!needsRebuild) {
+            return sidecar;
+        }
+
+        sidecar->sourceOffset = sourceOffset;
+        sidecar->sourceSize = sourceSize;
+        sidecar->sourceGeneration = object.indexExpansionGeneration;
+        sidecar->bytes.assign(
+            sourceBytes + static_cast<std::size_t>(sourceOffset),
+            sourceBytes + static_cast<std::size_t>(sourceOffset + sourceSize));
+        if (!canonicalizeFp64ResourceBytes(sidecar->bytes.data(),
+                                           sidecar->bytes.size(),
+                                           binding,
+                                           Fp64TransportDirection::HostDoubleToDf64Words)) {
+            return nullptr;
+        }
+
+        id<MTLBuffer> metalBuffer = metalBufferFromRaw(sidecar->metalBuffer);
+        if (metalBuffer == nil ||
+            [metalBuffer length] < static_cast<NSUInteger>(sidecar->bytes.size())) {
+            releaseRetainedMetalObject(sidecar->metalBuffer);
+            sidecar->metalBuffer = nullptr;
+            metalBuffer = [device newBufferWithLength:static_cast<NSUInteger>(sidecar->bytes.size())
+                                              options:MTLResourceStorageModeShared];
+            if (metalBuffer == nil) {
+                sidecar->bytes.clear();
+                return nullptr;
+            }
+            sidecar->metalBuffer = transferRetainedMetalObject(metalBuffer);
+        }
+        std::memcpy([metalBuffer contents], sidecar->bytes.data(), sidecar->bytes.size());
+        return sidecar;
+    }
+
+    void syncFp64TransportSidecarBack(
+        GLBufferObject& object,
+        const ShaderReflection::ResourceBinding& binding,
+        GLBufferObject::Fp64TransportSidecar& sidecar) {
+        if (sidecar.metalBuffer == nullptr ||
+            sidecar.sourceOffset < 0 ||
+            sidecar.sourceSize <= 0 ||
+            sidecar.sourceOffset > object.size ||
+            sidecar.sourceSize > object.size - sidecar.sourceOffset) {
+            return;
+        }
+        id<MTLBuffer> metalBuffer = metalBufferFromRaw(sidecar.metalBuffer);
+        if (metalBuffer == nil ||
+            [metalBuffer length] < static_cast<NSUInteger>(sidecar.sourceSize)) {
+            return;
+        }
+        const auto* contents = static_cast<const std::uint8_t*>([metalBuffer contents]);
+        sidecar.bytes.assign(
+            contents,
+            contents + static_cast<std::size_t>(sidecar.sourceSize));
+        if (!canonicalizeFp64ResourceBytes(sidecar.bytes.data(),
+                                           sidecar.bytes.size(),
+                                           binding,
+                                           Fp64TransportDirection::Df64WordsToHostDouble)) {
+            return;
+        }
+        if (object.shadowBytes.size() < static_cast<std::size_t>(object.size)) {
+            object.shadowBytes.resize(static_cast<std::size_t>(object.size), 0);
+        }
+        std::memcpy(object.shadowBytes.data() + static_cast<std::size_t>(sidecar.sourceOffset),
+                    sidecar.bytes.data(),
+                    sidecar.bytes.size());
+        syncMetalFromShadow(object, sidecar.sourceOffset, sidecar.sourceSize);
+        ++object.indexExpansionGeneration;
+        sidecar.sourceGeneration = object.indexExpansionGeneration;
     }
 
     bool runSSBOStdLayoutDoubleCopyFallback() {
@@ -11690,6 +11853,7 @@ GLContext::~GLContext() {
     Runtime::shared().unregisterContext(this);
     impl_.reset();
     ExtensionContext extensionContext(*this);
+    extensions::fp64::destroyContextBindingState(extensionContext);
     extensions::fragment_shading_rate::destroyContext(extensionContext);
     extensions::sparse_texture::destroyContext(extensionContext);
 }
@@ -14083,6 +14247,7 @@ bool GLContext::copyBufferSubData(
             static_cast<std::size_t>(size)
         );
         impl_->syncMetalFromShadow(*writeObject, writeOffset, size);
+        ++writeObject->indexExpansionGeneration;
     }
     return true;
 }
@@ -14299,6 +14464,7 @@ GLboolean GLContext::unmapBuffer(GLenum target) {
     }
     if (mapAccessWrites(object->mapAccessFlags)) {
         impl_->syncShadowFromMetal(*object, object->mapOffset, object->mapLength);
+        ++object->indexExpansionGeneration;
     }
     resetBufferMapping(*object);
     return GL_TRUE;
@@ -14322,6 +14488,7 @@ bool GLContext::flushMappedBufferRange(GLenum target, GLintptr offset, GLsizeipt
     }
     if (mapAccessWrites(object->mapAccessFlags)) {
         impl_->syncShadowFromMetal(*object, object->mapOffset + offset, length);
+        ++object->indexExpansionGeneration;
     }
     return true;
 }
@@ -23374,6 +23541,23 @@ bool GLContext::linkProgram(GLuint program) {
                     value.uints.assign(componentCount, 0u);
                 }
                 break;
+            case GL_DOUBLE:
+            case GL_DOUBLE_VEC2:
+            case GL_DOUBLE_VEC3:
+            case GL_DOUBLE_VEC4:
+            case GL_DOUBLE_MAT2:
+            case GL_DOUBLE_MAT3:
+            case GL_DOUBLE_MAT4:
+            case GL_DOUBLE_MAT2x3:
+            case GL_DOUBLE_MAT2x4:
+            case GL_DOUBLE_MAT3x2:
+            case GL_DOUBLE_MAT3x4:
+            case GL_DOUBLE_MAT4x2:
+            case GL_DOUBLE_MAT4x3:
+                value.doubles.assign(componentCount, 0.0);
+                value.floats.assign(componentCount, 0.0f);
+                value.df64TransportWords.assign(componentCount * 2u, 0u);
+                break;
             default:
                 if (uniform.defaultFloats.size() == componentCount) {
                     value.floats = uniform.defaultFloats;
@@ -25820,6 +26004,9 @@ bool GLContext::linkProgram(GLuint program) {
 
     ShaderTranslator translator;
     BindingMap bindings;
+    ExtensionContext fp64ExtensionContext(*this);
+    const bool fp64EmulationAvailable =
+        extensions::fp64::isAvailable(fp64ExtensionContext);
 
     auto spirvUsesStorageBuffers = [](const std::uint32_t* spirvData,
                                       std::size_t spirvWords) -> bool {
@@ -25863,6 +26050,7 @@ bool GLContext::linkProgram(GLuint program) {
         // tracks GL state at link time. Caller-provided overrides
         // (e.g. tess opts, mesh-GS opts) preserved by copy-then-amend.
         appgl::TranslatorOptions options = optionsIn;
+        options.fp64EmulationAvailable = fp64EmulationAvailable;
         options.clipDepthMode = impl_->state->clipDepthMode();
         if (std::strcmp(stageName, "fragment") == 0) {
             options.fragmentCoordOriginUpperLeft =
@@ -26902,11 +27090,13 @@ bool GLContext::linkProgram(GLuint program) {
                 if (shader == nullptr || shader->spirv.empty()) {
                     return refl;
                 }
+                appgl::TranslatorOptions stageOptions = options;
+                stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
                 try {
                     refl = translator.reflect(shader->spirv.data(),
                                               shader->spirv.size(),
                                               bindings, nullptr,
-                                              options);
+                                              stageOptions);
                 } catch (...) {
                     // CPU emulation can still run with empty reflection;
                     // buildStorageImageMap has a uniform-scanner fallback.
@@ -27719,6 +27909,7 @@ bool GLContext::linkProgram(GLuint program) {
                 if (sh == nullptr || sh->spirv.empty()) return;
                 BindingMap stageBindings;
                 appgl::TranslatorOptions stageOptions;
+                stageOptions.fp64EmulationAvailable = fp64EmulationAvailable;
                 stageOptions.forceArgumentBuffers = spirvUsesStorageBuffers(
                     sh->spirv.data(), sh->spirv.size());
                 if (stageEnum == GL_FRAGMENT_SHADER) {
@@ -27997,6 +28188,17 @@ bool GLContext::linkProgram(GLuint program) {
                     case GL_UNSIGNED_INT: case GL_UNSIGNED_INT_VEC2:
                     case GL_UNSIGNED_INT_VEC3: case GL_UNSIGNED_INT_VEC4:
                         value.uints.assign(cnt, 0u);
+                        break;
+                    case GL_DOUBLE: case GL_DOUBLE_VEC2:
+                    case GL_DOUBLE_VEC3: case GL_DOUBLE_VEC4:
+                    case GL_DOUBLE_MAT2: case GL_DOUBLE_MAT3:
+                    case GL_DOUBLE_MAT4: case GL_DOUBLE_MAT2x3:
+                    case GL_DOUBLE_MAT2x4: case GL_DOUBLE_MAT3x2:
+                    case GL_DOUBLE_MAT3x4: case GL_DOUBLE_MAT4x2:
+                    case GL_DOUBLE_MAT4x3:
+                        value.doubles.assign(cnt, 0.0);
+                        value.floats.assign(cnt, 0.0f);
+                        value.df64TransportWords.assign(cnt * 2u, 0u);
                         break;
                     default:
                         value.floats.assign(cnt, 0.0f);
@@ -29551,6 +29753,8 @@ bool GLContext::setUniformScalarVector(GLint location, UniformElementType elemen
             writeInto(slot->uints, slot->floats, slot->ints, static_cast<const GLuint*>(values));
             break;
     }
+    slot->doubles.clear();
+    slot->df64TransportWords.clear();
     return true;
 }
 
@@ -29604,7 +29808,21 @@ bool GLContext::setUniformMatrix(GLint location, GLint rows, GLint cols, GLsizei
     }
     slot->ints.clear();
     slot->uints.clear();
+    slot->doubles.clear();
+    slot->df64TransportWords.clear();
     return true;
+}
+
+static void assignDf64TransportWords(GLProgramUniformValue& slot,
+                                     const GLdouble* values,
+                                     std::size_t count) {
+    slot.df64TransportWords.resize(count * 2u);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto words =
+            extensions::fp64::encodeDoubleToDf64Transport(values[i]);
+        slot.df64TransportWords[i * 2u] = words.hi;
+        slot.df64TransportWords[i * 2u + 1u] = words.lo;
+    }
 }
 
 bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count, const GLdouble* values) {
@@ -29638,6 +29856,7 @@ bool GLContext::setUniformDouble(GLint location, GLint vectorSize, GLsizei count
                                  static_cast<std::size_t>(std::max<GLsizei>(count, 1));
     // Shadow original doubles for lossless glGetUniformdv readback.
     slot->doubles.assign(values, values + expected);
+    assignDf64TransportWords(*slot, values, expected);
     // Narrow to float for the Metal pipeline.
     slot->floats.resize(expected);
     for (std::size_t i = 0; i < expected; ++i) {
@@ -29702,6 +29921,7 @@ bool GLContext::setUniformDoubleMatrix(GLint location, GLint rows, GLint cols, G
             }
         }
     }
+    assignDf64TransportWords(*slot, slot->doubles.data(), elements);
     slot->ints.clear();
     slot->uints.clear();
     return true;
@@ -29750,6 +29970,8 @@ bool GLContext::setUniformScalarVectorForProgram(GLuint program, GLint location,
         case UniformElementType::UnsignedInt:
             writeInto(slot->uints, slot->floats, slot->ints, static_cast<const GLuint*>(values)); break;
     }
+    slot->doubles.clear();
+    slot->df64TransportWords.clear();
     return true;
 }
 
@@ -29777,6 +29999,7 @@ bool GLContext::setUniformMatrixForProgram(GLuint program, GLint location, GLint
         }
     }
     slot->ints.clear(); slot->uints.clear();
+    slot->doubles.clear(); slot->df64TransportWords.clear();
     return true;
 }
 
@@ -29789,6 +30012,7 @@ bool GLContext::setUniformDoubleForProgram(GLuint program, GLint location, GLint
     if (slot == nullptr) { pushError(GL_INVALID_OPERATION); return false; }
     const std::size_t expected = static_cast<std::size_t>(vectorSize) * static_cast<std::size_t>(std::max<GLsizei>(count, 1));
     slot->doubles.assign(values, values + expected);
+    assignDf64TransportWords(*slot, values, expected);
     slot->floats.resize(expected);
     for (std::size_t i = 0; i < expected; ++i) { slot->floats[i] = static_cast<GLfloat>(values[i]); }
     slot->ints.clear(); slot->uints.clear();
@@ -29820,6 +30044,7 @@ bool GLContext::setUniformDoubleMatrixForProgram(GLuint program, GLint location,
             }
         }
     }
+    assignDf64TransportWords(*slot, slot->doubles.data(), elements);
     slot->ints.clear(); slot->uints.clear();
     return true;
 }
@@ -29872,6 +30097,190 @@ static const ShaderReflection::ResourceBinding* defaultUniformBlock(
     return nullptr;
 }
 
+bool defaultUniformBlockContainsFp64(const ShaderReflection& reflection) {
+    const auto* block = defaultUniformBlock(reflection);
+    return block != nullptr && block->containsFp64;
+}
+
+bool reflectionNeedsFp64BindingShim(const ShaderReflection& reflection) {
+    return reflection.fp64TranslationActive && reflection.usesFp64;
+}
+
+bool resourceNeedsFp64BindingShim(const ShaderReflection& reflection,
+                                  const ShaderReflection::ResourceBinding& binding) {
+    return reflectionNeedsFp64BindingShim(reflection) && binding.containsFp64;
+}
+
+static bool uniformMatrixShape(GLenum type, int& cols, int& rows, bool& isFp64) {
+    isFp64 = false;
+    switch (type) {
+        case GL_FLOAT_MAT2: cols = 2; rows = 2; return true;
+        case GL_FLOAT_MAT3: cols = 3; rows = 3; return true;
+        case GL_FLOAT_MAT4: cols = 4; rows = 4; return true;
+        case GL_FLOAT_MAT2x3: cols = 2; rows = 3; return true;
+        case GL_FLOAT_MAT3x2: cols = 3; rows = 2; return true;
+        case GL_FLOAT_MAT2x4: cols = 2; rows = 4; return true;
+        case GL_FLOAT_MAT4x2: cols = 4; rows = 2; return true;
+        case GL_FLOAT_MAT3x4: cols = 3; rows = 4; return true;
+        case GL_FLOAT_MAT4x3: cols = 4; rows = 3; return true;
+        case GL_DOUBLE_MAT2: cols = 2; rows = 2; isFp64 = true; return true;
+        case GL_DOUBLE_MAT3: cols = 3; rows = 3; isFp64 = true; return true;
+        case GL_DOUBLE_MAT4: cols = 4; rows = 4; isFp64 = true; return true;
+        case GL_DOUBLE_MAT2x3: cols = 2; rows = 3; isFp64 = true; return true;
+        case GL_DOUBLE_MAT3x2: cols = 3; rows = 2; isFp64 = true; return true;
+        case GL_DOUBLE_MAT2x4: cols = 2; rows = 4; isFp64 = true; return true;
+        case GL_DOUBLE_MAT4x2: cols = 4; rows = 2; isFp64 = true; return true;
+        case GL_DOUBLE_MAT3x4: cols = 3; rows = 4; isFp64 = true; return true;
+        case GL_DOUBLE_MAT4x3: cols = 4; rows = 3; isFp64 = true; return true;
+        default: return false;
+    }
+}
+
+static std::size_t uniformScalarBytes(GLenum type) {
+    switch (type) {
+        case GL_DOUBLE:
+        case GL_DOUBLE_VEC2:
+        case GL_DOUBLE_VEC3:
+        case GL_DOUBLE_VEC4:
+        case GL_DOUBLE_MAT2:
+        case GL_DOUBLE_MAT3:
+        case GL_DOUBLE_MAT4:
+        case GL_DOUBLE_MAT2x3:
+        case GL_DOUBLE_MAT3x2:
+        case GL_DOUBLE_MAT2x4:
+        case GL_DOUBLE_MAT4x2:
+        case GL_DOUBLE_MAT3x4:
+        case GL_DOUBLE_MAT4x3:
+            return sizeof(GLdouble);
+        default:
+            return sizeof(GLfloat);
+    }
+}
+
+static std::size_t uniformComponentCountForPacking(GLenum type) {
+    return uniformTypeComponentCount(type);
+}
+
+static void hashCombine(std::size_t& seed, std::size_t value) {
+    seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
+}
+
+std::size_t hashFp64ResourceLayout(const ShaderReflection::ResourceBinding& binding,
+                                   GLintptr sourceOffset,
+                                   GLsizeiptr sourceSize) {
+    std::size_t seed = 1469598103934665603ull;
+    hashCombine(seed, std::hash<std::string>{}(binding.name));
+    hashCombine(seed, static_cast<std::size_t>(sourceOffset));
+    hashCombine(seed, static_cast<std::size_t>(sourceSize));
+    hashCombine(seed, binding.members.size());
+    for (const auto& member : binding.members) {
+        if (!member.containsFp64) continue;
+        hashCombine(seed, std::hash<std::string>{}(member.name));
+        hashCombine(seed, member.offset);
+        hashCombine(seed, member.size);
+        hashCombine(seed, static_cast<std::size_t>(member.type));
+        hashCombine(seed, static_cast<std::size_t>(member.arraySize));
+        hashCombine(seed, static_cast<std::size_t>(member.arrayStride));
+        hashCombine(seed, static_cast<std::size_t>(member.matrixStride));
+        hashCombine(seed, member.isRowMajor ? 1u : 0u);
+    }
+    return seed;
+}
+
+static bool canonicalizeDf64Component(std::uint8_t* ptr,
+                                      Fp64TransportDirection direction) {
+    if (direction == Fp64TransportDirection::HostDoubleToDf64Words) {
+        GLdouble value = 0.0;
+        std::memcpy(&value, ptr, sizeof(value));
+        const auto words = extensions::fp64::encodeDoubleToDf64Transport(value);
+        std::memcpy(ptr, &words.hi, sizeof(words.hi));
+        std::memcpy(ptr + sizeof(words.hi), &words.lo, sizeof(words.lo));
+        return true;
+    }
+
+    extensions::fp64::Df64TransportWords words;
+    std::memcpy(&words.hi, ptr, sizeof(words.hi));
+    std::memcpy(&words.lo, ptr + sizeof(words.hi), sizeof(words.lo));
+    const GLdouble value = extensions::fp64::decodeDf64TransportToDouble(words);
+    std::memcpy(ptr, &value, sizeof(value));
+    return true;
+}
+
+bool canonicalizeFp64ResourceBytes(std::uint8_t* bytes,
+                                   std::size_t byteCount,
+                                   const ShaderReflection::ResourceBinding& binding,
+                                   Fp64TransportDirection direction) {
+    if (bytes == nullptr || byteCount == 0 || !binding.containsFp64) {
+        return false;
+    }
+
+    bool changed = false;
+    for (const auto& member : binding.members) {
+        if (!member.containsFp64 || member.offset >= byteCount) continue;
+
+        int cols = 0;
+        int rows = 0;
+        bool isFp64Matrix = false;
+        const bool isMatrix = uniformMatrixShape(member.type, cols, rows, isFp64Matrix);
+        const std::size_t scalarBytes = uniformScalarBytes(member.type);
+        if (scalarBytes != sizeof(GLdouble) || (isMatrix && !isFp64Matrix)) {
+            continue;
+        }
+
+        const std::size_t arrayStride =
+            member.arrayStride > 0 ? static_cast<std::size_t>(member.arrayStride) : 0u;
+        std::size_t arrayCount = member.isArray && member.arraySize > 0
+            ? static_cast<std::size_t>(member.arraySize) : 1u;
+        if (member.isArray && member.arraySize == 0 && arrayStride > 0) {
+            arrayCount = (byteCount - member.offset) / arrayStride;
+        }
+
+        if (isMatrix) {
+            const int majorCount = member.isRowMajor ? rows : cols;
+            const int minorCount = member.isRowMajor ? cols : rows;
+            const std::size_t matrixStride = member.matrixStride > 0
+                ? static_cast<std::size_t>(member.matrixStride)
+                : static_cast<std::size_t>(minorCount) * scalarBytes;
+            const std::size_t matrixBytes =
+                static_cast<std::size_t>(majorCount - 1) * matrixStride +
+                static_cast<std::size_t>(minorCount) * scalarBytes;
+            const std::size_t elementStride =
+                member.isArray && arrayStride > 0 ? arrayStride : matrixBytes;
+            for (std::size_t arrayIndex = 0; arrayIndex < arrayCount; ++arrayIndex) {
+                const std::size_t base = member.offset + arrayIndex * elementStride;
+                for (int major = 0; major < majorCount; ++major) {
+                    for (int minor = 0; minor < minorCount; ++minor) {
+                        const std::size_t componentOffset =
+                            base + static_cast<std::size_t>(major) * matrixStride +
+                            static_cast<std::size_t>(minor) * scalarBytes;
+                        if (componentOffset + sizeof(GLdouble) > byteCount) {
+                            continue;
+                        }
+                        changed |= canonicalizeDf64Component(bytes + componentOffset, direction);
+                    }
+                }
+            }
+            continue;
+        }
+
+        const std::size_t components = uniformComponentCountForPacking(member.type);
+        const std::size_t elementBytes = components * scalarBytes;
+        const std::size_t elementStride =
+            member.isArray && arrayStride > 0 ? arrayStride : elementBytes;
+        for (std::size_t arrayIndex = 0; arrayIndex < arrayCount; ++arrayIndex) {
+            const std::size_t base = member.offset + arrayIndex * elementStride;
+            for (std::size_t component = 0; component < components; ++component) {
+                const std::size_t componentOffset = base + component * scalarBytes;
+                if (componentOffset + sizeof(GLdouble) > byteCount) {
+                    continue;
+                }
+                changed |= canonicalizeDf64Component(bytes + componentOffset, direction);
+            }
+        }
+    }
+    return changed;
+}
+
 // ── OPT-7: precomputed uniform layout ──
 // computeStageUniformLayout() runs once per program per stage, mapping each
 // push-constant struct member to its GL uniform location.  This eliminates
@@ -29893,38 +30302,31 @@ static void computeStageUniformLayout(
         entry.memberOffset = member.offset;
         entry.copyBytes = member.size;
         entry.location = -1;
-        // Matrix column-padding: GL 4.6 allows tight-packed mat*x* data
-        // via glUniformMatrix*fv, but MSL/std140 always aligns each
-        // matrix column to 16 bytes. When the column width
-        // (rows * 4 bytes) is < 16 we need to copy column-by-column,
-        // leaving trailing-column bytes zero. Covers mat2/mat3 (square)
-        // + mat2x3/mat3x2/mat4x3/mat4x2 (non-square). mat4/mat2x4/mat3x4
-        // have 16-byte columns and can use the plain memcpy path.
-        switch (member.type) {
-            case GL_FLOAT_MAT2:
-                entry.matPaddedCols = 2; entry.matPaddedRows = 2; break;
-            case GL_FLOAT_MAT3:
-                entry.matPaddedCols = 3; entry.matPaddedRows = 3; break;
-            case GL_FLOAT_MAT2x3:
-                entry.matPaddedCols = 2; entry.matPaddedRows = 3; break;
-            case GL_FLOAT_MAT3x2:
-                entry.matPaddedCols = 3; entry.matPaddedRows = 2; break;
-            case GL_FLOAT_MAT4x2:
-                entry.matPaddedCols = 4; entry.matPaddedRows = 2; break;
-            case GL_FLOAT_MAT4x3:
-                entry.matPaddedCols = 4; entry.matPaddedRows = 3; break;
-            default: break;
-        }
-        // Only activate padding when the MSL buffer layout actually
-        // allocates > cols*rows*4 bytes for the matrix (std140 with
-        // col-stride=16). If an MSL backend packs mat2 tightly at 16
-        // bytes (cols=2, col-stride=8) we'd double-copy; keep the
-        // plain memcpy path in that case.
-        if (entry.matPaddedCols > 0) {
-            const std::size_t tightBytes = static_cast<std::size_t>(
-                entry.matPaddedCols) * static_cast<std::size_t>(
-                entry.matPaddedRows) * sizeof(float);
-            if (member.size <= tightBytes) {
+        entry.memberType = member.type;
+        entry.containsFp64 = member.containsFp64;
+        // Matrix column-padding: GL stores glUniformMatrix payloads in a
+        // tight column-major sequence. SPIR-V/MSL block layout may align
+        // each column to a larger stride. Use the reflected matrix stride
+        // when present so FP64 df64 words follow the same route as floats.
+        int matrixCols = 0;
+        int matrixRows = 0;
+        bool matrixIsFp64 = false;
+        if (uniformMatrixShape(member.type, matrixCols, matrixRows, matrixIsFp64)) {
+            entry.matPaddedCols = member.isRowMajor ? matrixRows : matrixCols;
+            entry.matPaddedRows = member.isRowMajor ? matrixCols : matrixRows;
+            entry.matPaddedScalarBytes = matrixIsFp64 ? sizeof(GLdouble) : sizeof(GLfloat);
+            const std::size_t tightBytes =
+                static_cast<std::size_t>(entry.matPaddedCols) *
+                static_cast<std::size_t>(entry.matPaddedRows) *
+                entry.matPaddedScalarBytes;
+            entry.matPaddedStrideBytes = member.matrixStride > 0
+                ? static_cast<std::size_t>(member.matrixStride)
+                : static_cast<std::size_t>(entry.matPaddedRows) *
+                      entry.matPaddedScalarBytes;
+            if (member.size <= tightBytes ||
+                entry.matPaddedStrideBytes <=
+                    static_cast<std::size_t>(entry.matPaddedRows) *
+                        entry.matPaddedScalarBytes) {
                 entry.matPaddedCols = 0;
                 entry.matPaddedRows = 0;
             }
@@ -29943,38 +30345,9 @@ static void computeStageUniformLayout(
             entry.arrayStride = member.arrayStride > 0
                 ? static_cast<std::size_t>(member.arrayStride)
                 : member.size / member.arraySize;
-            // Compute the GL-packed element byte count from the element
-            // type (array's declared type is the element type — for
-            // arrays glslang reports the element type + arraySize > 0).
-            auto scalarBytes = [](GLenum t) -> std::size_t {
-                switch (t) {
-                    case GL_FLOAT: case GL_FLOAT_VEC2: case GL_FLOAT_VEC3: case GL_FLOAT_VEC4:
-                    case GL_INT: case GL_INT_VEC2: case GL_INT_VEC3: case GL_INT_VEC4:
-                    case GL_UNSIGNED_INT: case GL_UNSIGNED_INT_VEC2: case GL_UNSIGNED_INT_VEC3: case GL_UNSIGNED_INT_VEC4:
-                    case GL_BOOL:  case GL_BOOL_VEC2:  case GL_BOOL_VEC3:  case GL_BOOL_VEC4:
-                        return 4;
-                    case GL_DOUBLE: case GL_DOUBLE_VEC2: case GL_DOUBLE_VEC3: case GL_DOUBLE_VEC4:
-                        return 8;
-                    default:
-                        return 4;
-                }
-            };
-            auto componentCount = [](GLenum t) -> std::size_t {
-                switch (t) {
-                    case GL_FLOAT: case GL_INT: case GL_UNSIGNED_INT: case GL_DOUBLE: case GL_BOOL: return 1;
-                    case GL_FLOAT_VEC2: case GL_INT_VEC2: case GL_UNSIGNED_INT_VEC2: case GL_DOUBLE_VEC2: case GL_BOOL_VEC2: return 2;
-                    case GL_FLOAT_VEC3: case GL_INT_VEC3: case GL_UNSIGNED_INT_VEC3: case GL_DOUBLE_VEC3: case GL_BOOL_VEC3: return 3;
-                    case GL_FLOAT_VEC4: case GL_INT_VEC4: case GL_UNSIGNED_INT_VEC4: case GL_DOUBLE_VEC4: case GL_BOOL_VEC4: return 4;
-                    case GL_FLOAT_MAT2: return 4;
-                    case GL_FLOAT_MAT3: return 9;
-                    case GL_FLOAT_MAT4: return 16;
-                    case GL_FLOAT_MAT2x3: case GL_FLOAT_MAT3x2: return 6;
-                    case GL_FLOAT_MAT2x4: case GL_FLOAT_MAT4x2: return 8;
-                    case GL_FLOAT_MAT3x4: case GL_FLOAT_MAT4x3: return 12;
-                    default: return 1;
-                }
-            };
-            entry.glElementBytes = componentCount(member.type) * scalarBytes(member.type);
+            entry.glElementBytes =
+                uniformComponentCountForPacking(member.type) *
+                uniformScalarBytes(member.type);
         }
 
         // One-time name lookup: find the GL uniform location for this member.
@@ -30105,7 +30478,10 @@ static void buildStageUniformBuffer(
         // Determine which data vector to use based on what's populated.
         const void* srcData = nullptr;
         std::size_t srcBytes = 0;
-        if (!val.floats.empty()) {
+        if (entry.containsFp64 && !val.df64TransportWords.empty()) {
+            srcData = val.df64TransportWords.data();
+            srcBytes = val.df64TransportWords.size() * sizeof(std::uint32_t);
+        } else if (!val.floats.empty()) {
             srcData = val.floats.data();
             srcBytes = val.floats.size() * sizeof(GLfloat);
         } else if (!val.ints.empty()) {
@@ -30121,23 +30497,24 @@ static void buildStageUniformBuffer(
         std::uint8_t* dst = outBuffer.data() + entry.memberOffset;
 
         // Matrix column-padding: GL packs matrix data as `cols*rows`
-        // tight floats (column-major); MSL/std140 aligns each column
-        // to 16 bytes. Copy per-column and leave trailing bytes zero.
-        // Covers mat2 / mat3 / mat2x3 / mat3x2 / mat4x2 / mat4x3.
-        // (mat4 / mat2x4 / mat3x4 have 16-byte columns so matPaddedCols
-        // stays 0 and they fall through to the plain memcpy.)
+        // tight components; MSL/std140 may align each column to a larger
+        // stride. This path also handles df64 transport words because each
+        // lowered double component still occupies 8 bytes.
         if (entry.matPaddedCols > 0 && entry.matPaddedRows > 0) {
+            const std::size_t columnBytes =
+                static_cast<std::size_t>(entry.matPaddedRows) *
+                entry.matPaddedScalarBytes;
             const std::size_t needed = static_cast<std::size_t>(
-                entry.matPaddedCols) * static_cast<std::size_t>(
-                entry.matPaddedRows);
-            if (val.floats.size() >= needed) {
+                entry.matPaddedCols) * columnBytes;
+            if (srcBytes >= needed) {
                 const int cols = entry.matPaddedCols;
-                const int rows = entry.matPaddedRows;
+                const auto* srcBytesPtr = static_cast<const std::uint8_t*>(srcData);
                 for (int col = 0; col < cols; ++col) {
                     std::memcpy(
-                        dst + col * 16,
-                        val.floats.data() + col * rows,
-                        static_cast<std::size_t>(rows) * sizeof(float));
+                        dst + static_cast<std::size_t>(col) *
+                            entry.matPaddedStrideBytes,
+                        srcBytesPtr + static_cast<std::size_t>(col) * columnBytes,
+                        columnBytes);
                 }
                 continue;
             }
@@ -30780,6 +31157,12 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
 
     ShaderTranslator translator;
     BindingMap bindings;  // graphics-stage default; tess stages live in this layout
+    bool fp64EmulationAvailable = false;
+    if (owner != nullptr) {
+        ExtensionContext fp64ExtensionContext(*owner);
+        fp64EmulationAvailable =
+            extensions::fp64::isAvailable(fp64ExtensionContext);
+    }
 
     auto synth = std::make_unique<GLProgramObject>();
     synth->hasTessellation = true;
@@ -30795,6 +31178,7 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     //    Closes the per-CP buffer stride mismatch (Phase 7 / cluster A).
     {
         TranslatorOptions opts;
+        opts.fp64EmulationAvailable = fp64EmulationAvailable;
         opts.forceTessellation = true;
         opts.siblingTesInputSpirv = tesProg->tessEvalSpirv.data();
         opts.siblingTesInputWordCount = tesProg->tessEvalSpirv.size();
@@ -30807,7 +31191,7 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
             synth->tessControlReflection = translator.reflect(
                 tcsProg->tessControlSpirv.data(),
                 tcsProg->tessControlSpirv.size(),
-                bindings, nullptr);
+                bindings, nullptr, opts);
         } catch (...) {
             synth->tessControlMSL.clear();
         }
@@ -30818,6 +31202,7 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     //    reads tessEvalAsComputeMSL.
     {
         TranslatorOptions opts;
+        opts.fp64EmulationAvailable = fp64EmulationAvailable;
         opts.forceTessellation = true;
         // tc_barriers cluster: pad TES main0_in to mirror TCS main0_out
         // when TCS uses internal-output reads after barrier(). Without
@@ -30841,6 +31226,7 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     //    was linked before β added the preservation in step 1a).
     if (vsProg != nullptr && !vsProg->vertexSpirv.empty()) {
         TranslatorOptions opts;
+        opts.fp64EmulationAvailable = fp64EmulationAvailable;
         opts.forceVertexForTessellation = true;
         try {
             std::string log;
@@ -30851,7 +31237,7 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
             synth->tessVertexAsComputeReflection = translator.reflect(
                 vsProg->vertexSpirv.data(),
                 vsProg->vertexSpirv.size(),
-                bindings, nullptr);
+                bindings, nullptr, opts);
             // Strip the grid_size early-return — `dispatchThreads`
             // produces (0,0,0) for spvStageInputSize on macOS Apple
             // Silicon and the kernel would no-op every thread. Same
@@ -30877,6 +31263,7 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     //    and writes its output into a TF-capture buffer.
     {
         TranslatorOptions opts;
+        opts.fp64EmulationAvailable = fp64EmulationAvailable;
         opts.forceTessellation = true;
         opts.forceTessEvalAsCompute = true;
         opts.tesePatchVertices = static_cast<std::uint32_t>(tcsModes.outputVertices);
@@ -30892,7 +31279,7 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
             synth->tessEvalAsComputeReflection = translator.reflect(
                 tesProg->tessEvalSpirv.data(),
                 tesProg->tessEvalSpirv.size(),
-                bindings, nullptr);
+                bindings, nullptr, opts);
             // Reflect the TES output struct layout for the TF writer.
             synth->tessEvalOutputLayout =
                 translator.reflectStageOutputLayout(
@@ -35662,6 +36049,13 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     info.localY = programObject->computeLocalSizeY;
     info.localZ = programObject->computeLocalSizeZ;
 
+    struct Fp64ComputeSidecarSync {
+        GLBufferObject* buffer = nullptr;
+        const ShaderReflection::ResourceBinding* binding = nullptr;
+        GLBufferObject::Fp64TransportSidecar* sidecar = nullptr;
+    };
+    std::vector<Fp64ComputeSidecarSync> fp64SsboSidecars;
+
     // Pack default uniforms (bare GL uniforms in the _DefaultUniforms
     // block) for the compute stage. Mirrors the graphics-stage path:
     // lazy layout compute + per-dispatch rebuild of the byte buffer
@@ -35686,6 +36080,12 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
     if (!computeUniformScratch.empty()) {
         info.computeUniformData = computeUniformScratch.data();
         info.computeUniformSize = computeUniformScratch.size();
+        if (reflectionNeedsFp64BindingShim(programObject->computeReflection) &&
+            defaultUniformBlockContainsFp64(programObject->computeReflection)) {
+            ExtensionContext extensionContext(*this);
+            extensions::fp64::recordDoubleUniformBacking(
+                extensionContext, info.computeUniformSize);
+        }
     }
 
     // Resolve shader-storage buffer bindings. For each SSBO the shader
@@ -35737,7 +36137,7 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
                 GL_SHADER_STORAGE_BUFFER, glBindingPoint);
             if (binding.buffer == 0) continue;
-            const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+            GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
             if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
 
             ComputeDispatchInfo::BufferBinding bb;
@@ -35749,6 +36149,20 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                 bb.size = static_cast<std::size_t>(bufObj->size - binding.offset);
             }
             bb.metalSlot = ssbo.metalBinding + static_cast<std::uint32_t>(inst);
+            if (resourceNeedsFp64BindingShim(programObject->computeReflection, ssbo)) {
+                auto* sidecar = impl_->ensureFp64TransportSidecar(
+                    *bufObj, programObject->computeReflection, ssbo,
+                    static_cast<GLintptr>(binding.offset),
+                    static_cast<GLsizeiptr>(bb.size));
+                if (sidecar != nullptr && sidecar->metalBuffer != nullptr) {
+                    bb.metalBuffer = sidecar->metalBuffer;
+                    bb.offset = 0;
+                    fp64SsboSidecars.push_back({bufObj, &ssbo, sidecar});
+                    ExtensionContext extensionContext(*this);
+                    extensions::fp64::recordDoubleSsboBacking(
+                        extensionContext, bb.size);
+                }
+            }
             info.buffers.push_back(bb);
         }
     }
@@ -35797,13 +36211,29 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
                 GL_UNIFORM_BUFFER, glBindingPoint);
             if (binding.buffer == 0) continue;
-            const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+            GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
             if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
 
             ComputeDispatchInfo::BufferBinding bb;
             bb.metalBuffer = bufObj->metalBuffer;
             bb.offset = static_cast<std::size_t>(binding.offset);
             bb.metalSlot = ubo.metalBinding + static_cast<std::uint32_t>(inst);
+            if (resourceNeedsFp64BindingShim(programObject->computeReflection, ubo)) {
+                GLsizeiptr rangeSize = binding.size;
+                if (rangeSize <= 0 && binding.offset >= 0 && bufObj->size > binding.offset) {
+                    rangeSize = bufObj->size - binding.offset;
+                }
+                auto* sidecar = impl_->ensureFp64TransportSidecar(
+                    *bufObj, programObject->computeReflection, ubo,
+                    static_cast<GLintptr>(binding.offset), rangeSize);
+                if (sidecar != nullptr && sidecar->metalBuffer != nullptr) {
+                    bb.metalBuffer = sidecar->metalBuffer;
+                    bb.offset = 0;
+                    ExtensionContext extensionContext(*this);
+                    extensions::fp64::recordDoubleUniformBacking(
+                        extensionContext, static_cast<std::size_t>(rangeSize));
+                }
+            }
             info.buffers.push_back(bb);
         }
     }
@@ -36165,7 +36595,16 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
             multisampleStorageImageSampleCountSlotForMSL(programObject->computeMSL);
     }
 
-    (void)impl_->frameGraph->encodeComputeDispatch(info);
+    const bool encoded = impl_->frameGraph->encodeComputeDispatch(info);
+    if (encoded) {
+        for (const auto& sync : fp64SsboSidecars) {
+            if (sync.buffer != nullptr && sync.binding != nullptr &&
+                sync.sidecar != nullptr) {
+                impl_->syncFp64TransportSidecarBack(
+                    *sync.buffer, *sync.binding, *sync.sidecar);
+            }
+        }
+    }
     return true;
 }
 
@@ -36264,26 +36703,67 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
     info.localZ = programObject->computeLocalSizeZ;
     info.indirectBuffer = dispatchBuf->metalBuffer;
     info.indirectOffset = static_cast<std::size_t>(indirect);
+    struct Fp64IndirectSidecarSync {
+        GLBufferObject* buffer = nullptr;
+        const ShaderReflection::ResourceBinding* binding = nullptr;
+        GLBufferObject::Fp64TransportSidecar* sidecar = nullptr;
+    };
+    std::vector<Fp64IndirectSidecarSync> fp64SsboSidecars;
 
     // Same resource plumbing as the direct dispatch path: SSBOs, UBOs,
     // default-uniform push constants, sampled textures. Keep in sync
     // with GLContext::dispatchCompute.
     for (const auto& ssbo : programObject->computeReflection.storageBuffers) {
-        const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
-            GL_SHADER_STORAGE_BUFFER, ssbo.glBinding);
-        if (binding.buffer == 0) continue;
-        const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
-        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
-        ComputeDispatchInfo::BufferBinding bb;
-        bb.metalBuffer = bufObj->metalBuffer;
-        bb.offset = static_cast<std::size_t>(binding.offset);
-        if (binding.size > 0) {
-            bb.size = static_cast<std::size_t>(binding.size);
-        } else if (binding.offset >= 0 && bufObj->size > binding.offset) {
-            bb.size = static_cast<std::size_t>(bufObj->size - binding.offset);
+        GLuint effectiveBinding = ssbo.glBinding;
+        for (const auto& rb : programObject->resourceStorageBlocks) {
+            if (rb.name == ssbo.name && rb.location >= 0) {
+                effectiveBinding = static_cast<GLuint>(rb.location);
+                break;
+            }
         }
-        bb.metalSlot = ssbo.metalBinding;
-        info.buffers.push_back(bb);
+        const int numInstances = (ssbo.blockArraySize > 0)
+            ? static_cast<int>(ssbo.blockArraySize) : 1;
+        const bool isArray = (ssbo.blockArraySize > 0);
+        for (int inst = 0; inst < numInstances; ++inst) {
+            std::string lookupName = ssbo.name;
+            if (isArray) lookupName += "[" + std::to_string(inst) + "]";
+            GLuint glBindingPoint = effectiveBinding + static_cast<GLuint>(inst);
+            for (const auto& rb : programObject->resourceStorageBlocks) {
+                if (rb.name == lookupName && rb.location >= 0) {
+                    glBindingPoint = static_cast<GLuint>(rb.location);
+                    break;
+                }
+            }
+            const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
+                GL_SHADER_STORAGE_BUFFER, glBindingPoint);
+            if (binding.buffer == 0) continue;
+            GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+            if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+            ComputeDispatchInfo::BufferBinding bb;
+            bb.metalBuffer = bufObj->metalBuffer;
+            bb.offset = static_cast<std::size_t>(binding.offset);
+            if (binding.size > 0) {
+                bb.size = static_cast<std::size_t>(binding.size);
+            } else if (binding.offset >= 0 && bufObj->size > binding.offset) {
+                bb.size = static_cast<std::size_t>(bufObj->size - binding.offset);
+            }
+            bb.metalSlot = ssbo.metalBinding + static_cast<std::uint32_t>(inst);
+            if (resourceNeedsFp64BindingShim(programObject->computeReflection, ssbo)) {
+                auto* sidecar = impl_->ensureFp64TransportSidecar(
+                    *bufObj, programObject->computeReflection, ssbo,
+                    static_cast<GLintptr>(binding.offset),
+                    static_cast<GLsizeiptr>(bb.size));
+                if (sidecar != nullptr && sidecar->metalBuffer != nullptr) {
+                    bb.metalBuffer = sidecar->metalBuffer;
+                    bb.offset = 0;
+                    fp64SsboSidecars.push_back({bufObj, &ssbo, sidecar});
+                    ExtensionContext extensionContext(*this);
+                    extensions::fp64::recordDoubleSsboBacking(
+                        extensionContext, bb.size);
+                }
+            }
+            info.buffers.push_back(bb);
+        }
     }
     // CKPT143 (Sprint 13 Day 7): UBO array support — see direct-dispatch
     // path above for full rationale. Mirror here for dispatchComputeIndirect.
@@ -36310,12 +36790,28 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
                 GL_UNIFORM_BUFFER, glBindingPoint);
             if (binding.buffer == 0) continue;
-            const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+            GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
             if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
             ComputeDispatchInfo::BufferBinding bb;
             bb.metalBuffer = bufObj->metalBuffer;
             bb.offset = static_cast<std::size_t>(binding.offset);
             bb.metalSlot = ubo.metalBinding + static_cast<std::uint32_t>(inst);
+            if (resourceNeedsFp64BindingShim(programObject->computeReflection, ubo)) {
+                GLsizeiptr rangeSize = binding.size;
+                if (rangeSize <= 0 && binding.offset >= 0 && bufObj->size > binding.offset) {
+                    rangeSize = bufObj->size - binding.offset;
+                }
+                auto* sidecar = impl_->ensureFp64TransportSidecar(
+                    *bufObj, programObject->computeReflection, ubo,
+                    static_cast<GLintptr>(binding.offset), rangeSize);
+                if (sidecar != nullptr && sidecar->metalBuffer != nullptr) {
+                    bb.metalBuffer = sidecar->metalBuffer;
+                    bb.offset = 0;
+                    ExtensionContext extensionContext(*this);
+                    extensions::fp64::recordDoubleUniformBacking(
+                        extensionContext, static_cast<std::size_t>(rangeSize));
+                }
+            }
             info.buffers.push_back(bb);
         }
     }
@@ -36333,6 +36829,12 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
     if (!computeUniformScratchIndirect.empty()) {
         info.computeUniformData = computeUniformScratchIndirect.data();
         info.computeUniformSize = computeUniformScratchIndirect.size();
+        if (reflectionNeedsFp64BindingShim(programObject->computeReflection) &&
+            defaultUniformBlockContainsFp64(programObject->computeReflection)) {
+            ExtensionContext extensionContext(*this);
+            extensions::fp64::recordDoubleUniformBacking(
+                extensionContext, info.computeUniformSize);
+        }
     }
     // CKPT144 (Sprint 13 Day 8): sampler-type-aware target lookup —
     // see direct-dispatch path above for full rationale. Indirect mirror.
@@ -36565,7 +37067,16 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             multisampleStorageImageSampleCountSlotForMSL(programObject->computeMSL);
     }
 
-    (void)impl_->frameGraph->encodeComputeDispatch(info);
+    const bool encoded = impl_->frameGraph->encodeComputeDispatch(info);
+    if (encoded) {
+        for (const auto& sync : fp64SsboSidecars) {
+            if (sync.buffer != nullptr && sync.binding != nullptr &&
+                sync.sidecar != nullptr) {
+                impl_->syncFp64TransportSidecarBack(
+                    *sync.buffer, *sync.binding, *sync.sidecar);
+            }
+        }
+    }
     return true;
 }
 
@@ -37943,6 +38454,7 @@ bool GLContext::clearBufferData(GLenum target, GLenum internalformat, GLenum for
                                     data, patternBytes);
         }
     }
+    ++buffer->indexExpansionGeneration;
     return true;
 }
 
@@ -38010,6 +38522,7 @@ bool GLContext::clearBufferSubData(GLenum target, GLenum internalformat, GLintpt
                                     static_cast<std::size_t>(size), data, patternBytes);
         }
     }
+    ++buffer->indexExpansionGeneration;
     return true;
 }
 
