@@ -28,6 +28,7 @@ constexpr std::uint32_t kFragCoordParamsBufferSlot = 15u;
 constexpr std::uint32_t kMultisampleStorageImageSampleCountsBufferSlot = 30u;
 constexpr std::uint32_t kMaxMetalBufferSlot = 30u;
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
+constexpr std::uint32_t kMultisampleStorageSparseResidencyTextureSlotOffset = 96u;
 
 GLenum storageImageTargetForType(const spirv_cross::SPIRType& imageType) {
     if (imageType.basetype != spirv_cross::SPIRType::Image ||
@@ -565,6 +566,104 @@ bool injectMultisampleStorageImageSampleCounts(std::string& msl) {
         " [[buffer(" +
         std::to_string(slot) + ")]]";
     msl.insert(paramEnd, param);
+    return true;
+}
+
+bool injectMultisampleStorageSparseResidencyTextures(std::string& msl) {
+    static constexpr const char* kResidencyPrefix =
+        "appgl_ms_storage_sparse_";
+    static constexpr const char* kMarkerPrefix =
+        "APPGL_MS_STORAGE_SPARSE_RESIDENCY_SLOT_";
+    static constexpr std::size_t kMarkerPrefixLen =
+        sizeof("APPGL_MS_STORAGE_SPARSE_RESIDENCY_SLOT_") - 1u;
+
+    std::vector<std::string> params;
+    std::size_t pos = 0;
+    while ((pos = msl.find(kMarkerPrefix, pos)) != std::string::npos) {
+        std::uint32_t sourceSlot = 0;
+        std::size_t afterSlot = 0;
+        if (!parseUnsignedAfter(msl, pos + kMarkerPrefixLen,
+                                sourceSlot, &afterSlot)) {
+            pos += kMarkerPrefixLen;
+            continue;
+        }
+
+        bool arrayed = false;
+        const std::string arrayToken = "_ARRAY_";
+        const std::size_t arrayTokenPos = msl.find(arrayToken, afterSlot);
+        if (arrayTokenPos != std::string::npos && arrayTokenPos - afterSlot < 16u) {
+            const std::size_t valuePos = arrayTokenPos + arrayToken.size();
+            arrayed = valuePos < msl.size() && msl[valuePos] == '1';
+        }
+
+        const std::string residencyName =
+            std::string(kResidencyPrefix) + std::to_string(sourceSlot);
+        if (msl.find(" " + residencyName + " [[texture(") != std::string::npos) {
+            pos = afterSlot;
+            continue;
+        }
+
+        const std::string textureAttr =
+            "[[texture(" + std::to_string(sourceSlot) + ")]]";
+        const std::size_t attrPos = msl.find(textureAttr);
+        if (attrPos == std::string::npos) {
+            pos = afterSlot;
+            continue;
+        }
+
+        const std::size_t lineStart = msl.rfind('\n', attrPos);
+        const std::size_t lineBegin =
+            (lineStart == std::string::npos) ? 0 : lineStart + 1u;
+        const std::size_t typeStart = msl.rfind("texture2d_array", attrPos);
+        if (typeStart == std::string::npos || typeStart < lineBegin) {
+            pos = afterSlot;
+            continue;
+        }
+
+        const std::size_t templateStart = msl.find('<', typeStart);
+        const std::size_t templateEnd = msl.find('>', templateStart);
+        if (templateStart == std::string::npos ||
+            templateEnd == std::string::npos ||
+            templateEnd > attrPos) {
+            pos = afterSlot;
+            continue;
+        }
+
+        std::string templateArgs =
+            msl.substr(templateStart + 1, templateEnd - templateStart - 1);
+        const std::size_t accessPos = templateArgs.find("access::");
+        if (accessPos != std::string::npos) {
+            const std::size_t accessEnd = templateArgs.find(',', accessPos);
+            templateArgs.replace(accessPos,
+                                 accessEnd == std::string::npos
+                                     ? std::string::npos
+                                     : accessEnd - accessPos,
+                                 "access::read");
+        }
+
+        const std::uint32_t residencySlot =
+            sourceSlot + kMultisampleStorageSparseResidencyTextureSlotOffset;
+        const std::string nativeType =
+            arrayed ? "texture2d_ms_array" : "texture2d_ms";
+        appendUnique(params,
+            ", " + nativeType + "<" + templateArgs + "> " +
+            residencyName + " [[texture(" +
+            std::to_string(residencySlot) + ")]]");
+        pos = afterSlot;
+    }
+
+    if (params.empty()) {
+        return false;
+    }
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    std::string insertion;
+    for (const auto& param : params) {
+        insertion += param;
+    }
+    msl.insert(paramEnd, insertion);
     return true;
 }
 
@@ -2236,6 +2335,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         (void)injectMultisampleSampledImageSidecars(msl);
         (void)injectSparseSampledImageSidecars(msl);
         (void)injectMultisampleStorageImageSampleCounts(msl);
+        (void)injectMultisampleStorageSparseResidencyTextures(msl);
 
         // SPIRV-Cross lowers GLSL image coordinates as signed integer
         // temporaries (`int2`, `int3`), but Metal storage texture

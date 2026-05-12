@@ -9,6 +9,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 
@@ -76,6 +77,10 @@ void* transferRetainedMetalObject(id object) {
 
 id<MTLDevice> metalDevice(ExtensionContext& ctx) {
     return (__bridge id<MTLDevice>)ctx.metalDevice();
+}
+
+id<MTLCommandQueue> metalCommandQueue(ExtensionContext& ctx) {
+    return (__bridge id<MTLCommandQueue>)ctx.metalCommandQueue();
 }
 
 MTLTextureType metalTextureTypeForTarget(GLenum target) {
@@ -340,6 +345,250 @@ id<MTLTexture> createSidecarTexture(id<MTLDevice> device,
     return texture;
 }
 
+bool copyBytesToSidecar(id<MTLBlitCommandEncoder> blit,
+                        id<MTLTexture> sidecar,
+                        const std::uint8_t* bytes,
+                        NSUInteger bytesPerRow,
+                        NSUInteger bytesPerImage,
+                        const MTLRegion& region,
+                        NSUInteger level,
+                        NSUInteger slice) {
+    if (blit == nil || sidecar == nil || bytes == nullptr ||
+        region.size.width == 0 || region.size.height == 0 ||
+        region.size.depth == 0 || bytesPerRow == 0 || bytesPerImage == 0) {
+        return false;
+    }
+    id<MTLDevice> device = sidecar.device;
+    if (device == nil) {
+        return false;
+    }
+    id<MTLBuffer> staging = [device newBufferWithBytes:bytes
+                                                length:bytesPerImage * region.size.depth
+                                               options:MTLResourceStorageModeShared];
+    if (staging == nil) {
+        return false;
+    }
+    [blit copyFromBuffer:staging
+            sourceOffset:0
+       sourceBytesPerRow:bytesPerRow
+     sourceBytesPerImage:bytesPerImage
+              sourceSize:region.size
+               toTexture:sidecar
+        destinationSlice:slice
+        destinationLevel:level
+       destinationOrigin:region.origin];
+    return true;
+}
+
+bool zeroSidecarTexture(id<MTLBlitCommandEncoder> blit,
+                        id<MTLTexture> sidecar,
+                        const GLTextureObject& texture) {
+    if (blit == nil || sidecar == nil) {
+        return false;
+    }
+    for (const auto& [levelIndex, image] : texture.levels) {
+        if (!image.defined || image.desc.width <= 0 || image.desc.height <= 0 ||
+            image.desc.depth <= 0) {
+            continue;
+        }
+        const std::size_t bpp = image.nativeBpp > 0 ? image.nativeBpp : 4u;
+        const NSUInteger width = static_cast<NSUInteger>(image.desc.width);
+        const NSUInteger height = static_cast<NSUInteger>(image.desc.height);
+        const NSUInteger rowBytes = width * static_cast<NSUInteger>(bpp);
+        const NSUInteger imageBytes = rowBytes * height;
+        std::vector<std::uint8_t> zeros(static_cast<std::size_t>(imageBytes), 0);
+        if (texture.target == GL_TEXTURE_3D) {
+            const NSUInteger depth = static_cast<NSUInteger>(image.desc.depth);
+            std::vector<std::uint8_t> volumeZeros(
+                static_cast<std::size_t>(imageBytes * depth), 0);
+            const MTLRegion region =
+                MTLRegionMake3D(0, 0, 0, width, height, depth);
+            if (!copyBytesToSidecar(blit,
+                                    sidecar,
+                                    volumeZeros.data(),
+                                    rowBytes,
+                                    imageBytes,
+                                    region,
+                                    static_cast<NSUInteger>(levelIndex),
+                                    0)) {
+                return false;
+            }
+        } else if (targetUsesSlices(texture.target)) {
+            const NSUInteger slices = static_cast<NSUInteger>(image.desc.depth);
+            const MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+            for (NSUInteger slice = 0; slice < slices; ++slice) {
+                if (!copyBytesToSidecar(blit,
+                                        sidecar,
+                                        zeros.data(),
+                                        rowBytes,
+                                        imageBytes,
+                                        region,
+                                        static_cast<NSUInteger>(levelIndex),
+                                        slice)) {
+                    return false;
+                }
+            }
+        } else {
+            const MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+            if (!copyBytesToSidecar(blit,
+                                    sidecar,
+                                    zeros.data(),
+                                    rowBytes,
+                                    imageBytes,
+                                    region,
+                                    static_cast<NSUInteger>(levelIndex),
+                                    0)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool uploadCommittedRegionToSidecar(id<MTLBlitCommandEncoder> blit,
+                                    id<MTLTexture> sidecar,
+                                    const GLTextureObject& texture,
+                                    const CommittedRegion& committed) {
+    auto levelIt = texture.levels.find(committed.level);
+    if (levelIt == texture.levels.end() || !levelIt->second.defined) {
+        return true;
+    }
+    const GLTextureImageLevel& image = levelIt->second;
+    const std::uint8_t* source = nullptr;
+    std::size_t bpp = 0;
+    if (image.nativeBpp > 0 && !image.nativeData.empty()) {
+        source = image.nativeData.data();
+        bpp = image.nativeBpp;
+    } else if (!image.rgba8.empty()) {
+        source = image.rgba8.data();
+        bpp = 4u;
+    }
+    if (source == nullptr || bpp == 0 ||
+        image.desc.width <= 0 || image.desc.height <= 0 ||
+        image.desc.depth <= 0) {
+        return true;
+    }
+    if (committed.xoffset >= image.desc.width ||
+        committed.yoffset >= image.desc.height ||
+        committed.zoffset >= image.desc.depth) {
+        return true;
+    }
+    const GLsizei copyW =
+        std::min<GLsizei>(committed.width, image.desc.width - committed.xoffset);
+    const GLsizei copyH =
+        std::min<GLsizei>(committed.height, image.desc.height - committed.yoffset);
+    const GLsizei copyD =
+        std::min<GLsizei>(committed.depth, image.desc.depth - committed.zoffset);
+    if (copyW <= 0 || copyH <= 0 || copyD <= 0) {
+        return true;
+    }
+
+    const std::size_t rowBytes = static_cast<std::size_t>(copyW) * bpp;
+    std::vector<std::uint8_t> tight(
+        rowBytes * static_cast<std::size_t>(copyH) *
+        static_cast<std::size_t>(copyD),
+        0);
+    for (GLsizei z = 0; z < copyD; ++z) {
+        for (GLsizei y = 0; y < copyH; ++y) {
+            const std::size_t srcOffset =
+                ((static_cast<std::size_t>(committed.zoffset + z) *
+                  static_cast<std::size_t>(image.desc.height) +
+                  static_cast<std::size_t>(committed.yoffset + y)) *
+                 static_cast<std::size_t>(image.desc.width) +
+                 static_cast<std::size_t>(committed.xoffset)) *
+                bpp;
+            const std::size_t dstOffset =
+                (static_cast<std::size_t>(z) * static_cast<std::size_t>(copyH) +
+                 static_cast<std::size_t>(y)) *
+                rowBytes;
+            std::memcpy(tight.data() + dstOffset, source + srcOffset, rowBytes);
+        }
+    }
+
+    if (texture.target == GL_TEXTURE_3D) {
+        const MTLRegion region =
+            MTLRegionMake3D(static_cast<NSUInteger>(committed.xoffset),
+                            static_cast<NSUInteger>(committed.yoffset),
+                            static_cast<NSUInteger>(committed.zoffset),
+                            static_cast<NSUInteger>(copyW),
+                            static_cast<NSUInteger>(copyH),
+                            static_cast<NSUInteger>(copyD));
+        return copyBytesToSidecar(blit,
+                                  sidecar,
+                                  tight.data(),
+                                  static_cast<NSUInteger>(rowBytes),
+                                  static_cast<NSUInteger>(rowBytes * copyH),
+                                  region,
+                                  static_cast<NSUInteger>(committed.level),
+                                  0);
+    }
+
+    const MTLRegion region =
+        MTLRegionMake2D(static_cast<NSUInteger>(committed.xoffset),
+                        static_cast<NSUInteger>(committed.yoffset),
+                        static_cast<NSUInteger>(copyW),
+                        static_cast<NSUInteger>(copyH));
+    if (targetUsesSlices(texture.target)) {
+        for (GLsizei z = 0; z < copyD; ++z) {
+            const std::uint8_t* sliceBytes =
+                tight.data() +
+                static_cast<std::size_t>(z) *
+                    static_cast<std::size_t>(copyH) * rowBytes;
+            if (!copyBytesToSidecar(blit,
+                                    sidecar,
+                                    sliceBytes,
+                                    static_cast<NSUInteger>(rowBytes),
+                                    static_cast<NSUInteger>(rowBytes * copyH),
+                                    region,
+                                    static_cast<NSUInteger>(committed.level),
+                                    static_cast<NSUInteger>(committed.zoffset + z))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    return copyBytesToSidecar(blit,
+                              sidecar,
+                              tight.data(),
+                              static_cast<NSUInteger>(rowBytes),
+                              static_cast<NSUInteger>(rowBytes * copyH),
+                              region,
+                              static_cast<NSUInteger>(committed.level),
+                              0);
+}
+
+bool initializeSidecarFromCommittedRegions(ExtensionContext& ctx,
+                                           const GLTextureObject& texture,
+                                           id<MTLTexture> sidecar) {
+    id<MTLCommandQueue> commandQueue = metalCommandQueue(ctx);
+    if (commandQueue == nil || sidecar == nil) {
+        return false;
+    }
+    id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+    if (cmd == nil) {
+        return false;
+    }
+    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+    if (blit == nil) {
+        return false;
+    }
+    bool ok = zeroSidecarTexture(blit, sidecar, texture);
+    if (ok) {
+        const auto& regions = committedRegions(ctx, texture);
+        for (const CommittedRegion& committed : regions) {
+            if (!uploadCommittedRegionToSidecar(blit, sidecar, texture, committed)) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    [blit endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return ok && cmd.status == MTLCommandBufferStatusCompleted;
+}
+
 }  // namespace
 
 bool isSparseStorageImageSidecarTarget(GLenum target) {
@@ -403,6 +652,9 @@ bool ensureSparseStorageImageSidecar(ExtensionContext& ctx,
 
     id<MTLTexture> sidecar = createSidecarTexture(metalDevice(ctx), request);
     if (sidecar == nil) {
+        return false;
+    }
+    if (!initializeSidecarFromCommittedRegions(ctx, texture, sidecar)) {
         return false;
     }
     void* retainedSidecar = transferRetainedMetalObject(sidecar);

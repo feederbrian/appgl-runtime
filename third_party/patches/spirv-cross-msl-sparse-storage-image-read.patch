@@ -1,0 +1,77 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index e36a861c..3f6b7760 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -9908,6 +9908,72 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+ 			inherit_expression_dependencies(id, sample);
+ 			break;
+ 		}
++
++		const bool appgl_sparse_storage_image_read =
++		    get_execution_model() == ExecutionModelGLCompute &&
++		    type.basetype == SPIRType::Image &&
++		    img_type.image.sampled == 2 &&
++		    !img_type.image.ms &&
++		    (img_type.image.dim == Dim2D ||
++		     img_type.image.dim == Dim3D ||
++		     img_type.image.dim == DimCube ||
++		     img_type.image.dim == DimRect);
++		if (appgl_sparse_storage_image_read)
++		{
++			auto appgl_sparse_storage_zero = [&]() {
++				auto &return_type = get<SPIRType>(result_type);
++				string type_name = type_to_glsl(return_type);
++				bool alpha_one = false;
++				switch (img_type.image.format)
++				{
++				case ImageFormatR32f:
++				case ImageFormatR16f:
++				case ImageFormatR8:
++				case ImageFormatR16:
++				case ImageFormatR8Snorm:
++				case ImageFormatR16Snorm:
++				case ImageFormatR32i:
++				case ImageFormatR16i:
++				case ImageFormatR8i:
++				case ImageFormatR32ui:
++				case ImageFormatR16ui:
++				case ImageFormatR8ui:
++				case ImageFormatRg32f:
++				case ImageFormatRg16f:
++				case ImageFormatRg16:
++				case ImageFormatRg8:
++				case ImageFormatRg16Snorm:
++				case ImageFormatRg8Snorm:
++				case ImageFormatRg32i:
++				case ImageFormatRg16i:
++				case ImageFormatRg8i:
++				case ImageFormatRg32ui:
++				case ImageFormatRg16ui:
++				case ImageFormatRg8ui:
++				case ImageFormatR11fG11fB10f:
++					alpha_one = true;
++					break;
++				default:
++					break;
++				}
++				return alpha_one ? join(type_name, "(0, 0, 0, 1)") : join(type_name, "(0)");
++			};
++
++			bool forward = false;
++			SmallVector<uint32_t> inherited_expressions;
++			string sparse_call = to_texture_op(instruction, false, &forward, inherited_expressions);
++			const string read_call = ".read(";
++			size_t read_pos = sparse_call.find(read_call);
++			if (read_pos == string::npos)
++				SPIRV_CROSS_THROW("AppGL sparse storage-image read could not locate Metal read call.");
++			sparse_call.replace(read_pos, read_call.size(), ".sparse_read(");
++			string expr = join("(", sparse_call, ".resident() ? ", sparse_call, ".value() : ",
++			                   appgl_sparse_storage_zero(), ")");
++			emit_op(result_type, id, expr, forward);
++			for (auto &inherit : inherited_expressions)
++				inherit_expression_dependencies(id, inherit);
++			break;
++		}
+ 
+ 		emit_texture_op(instruction, false);
+ 		break;

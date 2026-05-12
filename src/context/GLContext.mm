@@ -214,6 +214,7 @@ inline bool lookupIndexedBufferPname(GLenum pname, IndexedBufferPname& out) {
 }
 
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
+constexpr std::uint32_t kMultisampleStorageSparseResidencyTextureSlotOffset = 96u;
 
 std::uint32_t multisampleStorageImageSampleCountSlotForMSL(
     const std::string& msl) {
@@ -35908,6 +35909,8 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         programObject->computeMSL.find("appgl_ms_sampled_sidecar_") != std::string::npos;
     const bool usesSparseSampledSidecars =
         programObject->computeMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
+    const bool usesMSStorageSparseResidency =
+        programObject->computeMSL.find("appgl_ms_storage_sparse_") != std::string::npos;
 
     const bool traceCompSamp = std::getenv("APPGL_TRACE_COMP_SAMP") != nullptr;
     for (const auto& samp : programObject->computeReflection.sampledTextures) {
@@ -36096,10 +36099,23 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                 msImageSampleCounts[slot] =
                     static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
                 hasMSImageSampleCounts = true;
+                if (usesMSStorageSparseResidency && texObj->metalTexture != nullptr) {
+                    ComputeDispatchInfo::TextureBinding sparseResidencyBinding;
+                    sparseResidencyBinding.metalTexture = texObj->metalTexture;
+                    sparseResidencyBinding.metalSamplerState = nullptr;
+                    sparseResidencyBinding.metalSlot =
+                        slot + kMultisampleStorageSparseResidencyTextureSlotOffset;
+                    info.textures.push_back(sparseResidencyBinding);
+                }
             } else {
                 extensions::sparse_texture::SparseStorageImageSidecarInfo sidecarInfo;
+                const bool sparseWritableBound =
+                    extensions::sparse_texture::textureSparse(extensionContext, texObj) == GL_TRUE &&
+                    extensions::sparse_texture::isSparseStorageImageSidecarTarget(img.storageImageTarget) &&
+                    texObj->target == img.storageImageTarget &&
+                    ib.access != GL_READ_ONLY;
                 const bool sparseSidecarAccess =
-                    img.sparseStorageImageRead || img.sparseStorageImageWrite;
+                    img.sparseStorageImageWrite || sparseWritableBound;
                 const auto sparseRoute = sparseSidecarAccess
                     ? extensions::sparse_texture::resolveSparseStorageImageSidecarBinding(
                           extensionContext, *texObj, img.storageImageTarget, &sidecarInfo)
@@ -36343,6 +36359,8 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         programObject->computeMSL.find("appgl_ms_sampled_sidecar_") != std::string::npos;
     const bool usesSparseSampledSidecarsIndirect =
         programObject->computeMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
+    const bool usesMSStorageSparseResidencyIndirect =
+        programObject->computeMSL.find("appgl_ms_storage_sparse_") != std::string::npos;
 
     // CKPT145 (Sprint 13 Day 9): sampler array iteration — see direct
     // dispatch path for full rationale. Indirect mirror.
@@ -36481,10 +36499,23 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
                 msImageSampleCountsIndirect[slot] =
                     static_cast<std::uint32_t>(std::max<GLsizei>(sidecarInfo.samples, 1));
                 hasMSImageSampleCountsIndirect = true;
+                if (usesMSStorageSparseResidencyIndirect && texObj->metalTexture != nullptr) {
+                    ComputeDispatchInfo::TextureBinding sparseResidencyBinding;
+                    sparseResidencyBinding.metalTexture = texObj->metalTexture;
+                    sparseResidencyBinding.metalSamplerState = nullptr;
+                    sparseResidencyBinding.metalSlot =
+                        slot + kMultisampleStorageSparseResidencyTextureSlotOffset;
+                    info.textures.push_back(sparseResidencyBinding);
+                }
             } else {
                 extensions::sparse_texture::SparseStorageImageSidecarInfo sidecarInfo;
+                const bool sparseWritableBound =
+                    extensions::sparse_texture::textureSparse(extensionContext, texObj) == GL_TRUE &&
+                    extensions::sparse_texture::isSparseStorageImageSidecarTarget(img.storageImageTarget) &&
+                    texObj->target == img.storageImageTarget &&
+                    ib.access != GL_READ_ONLY;
                 const bool sparseSidecarAccess =
-                    img.sparseStorageImageRead || img.sparseStorageImageWrite;
+                    img.sparseStorageImageWrite || sparseWritableBound;
                 const auto sparseRoute = sparseSidecarAccess
                     ? extensions::sparse_texture::resolveSparseStorageImageSidecarBinding(
                           extensionContext, *texObj, img.storageImageTarget, &sidecarInfo)

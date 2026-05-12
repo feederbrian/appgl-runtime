@@ -1570,6 +1570,28 @@ backing the SPV_KHR_fragment_shading_rate capability that
 
 **Regression-safe:** The `sparse=false` path is untouched — the non-sparse `emit_texture_op` body (frame-buffer-fetch subpass shortcut + `CompilerGLSL::emit_texture_op` fallback) flows through verbatim. `to_function_name` adds a `sparse_` prefix only when `args.is_sparse_feedback` is true; non-sparse callers emit `sample` / `read` / `gather` exactly as before. MSL version gate at `msl_options.supports_msl_version(2, 3)` throws a clear error for pre-2.3 targets instead of emitting invalid code. `OpImageSparseRead` throws explicitly rather than falling through to GLSL's `sparseImageLoadARB` (which would emit invalid MSL). GLSL backend emission for the same input SPIR-V is byte-identical pre- and post-patch (verified via diff against SPIRV-Cross's `reference/shaders-no-opt/frag/sparse-texture-feedback.desktop.frag`). Patch size: 3 hunks, 105 lines added, 4 lines removed (101 LOC net additions excluding context).
 
+### `spirv-cross-msl-multisample-storage-image.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` -
+`CompilerMSL::emit_instruction(OpImageRead/OpImageWrite)` and
+`CompilerMSL::image_type_glsl()` for compute-stage multisample storage
+images.
+
+**Summary:** Lowers `image2DMS*` storage images to sample-expanded
+`texture2d_array<T, access::read_write>` sidecars because Metal does not
+support read/write `texture2d_ms*` storage images. `imageLoad` and
+`imageStore` map `(layer, sample)` into sidecar slices through
+`appgl_ms_storage_image_samples`. For sparse MS storage images, the
+emitter also writes an `APPGL_MS_STORAGE_SPARSE_RESIDENCY_SLOT` marker
+and guards sidecar reads/writes with native `texture2d_ms*::sparse_read`
+residency, returning the GL default uncommitted-region color when the
+native page is not resident.
+
+**Regression-safe:** The lowering is gated to compute-stage storage
+images with `sampled == 2`, `Dim2D`, and `ms == true`. Non-MS storage
+images keep the normal MSL texture type, and sparse residency companion
+textures are injected only when the marker is present.
+
 ### `spirv-cross-msl-ms-sparse-fetch.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — extends
@@ -1642,6 +1664,34 @@ non-multisample, non-depth sparse fetch/sample operations on sidecar
 eligible dimensions. Other sparse operations continue through the generic
 MSL sparse-feedback lowering, and pre-MSL-2.3 targets retain the existing
 explicit sparse-feedback error.
+
+### `spirv-cross-msl-sparse-storage-image-read.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` -
+`CompilerMSL::emit_instruction(OpImageRead)` for compute-stage,
+non-multisample storage images whose dimensions can be Metal sparse
+textures.
+
+**Summary:** Routes compute `imageLoad` on 2D, 2D-array, 3D,
+cube/cube-array, and rectangle storage images through Metal
+`sparse_read(...)`. The emitted expression uses `.resident()` to select
+between the sparse texel value and the GL default uncommitted-region
+color, including alpha=1 defaults for R/RG/R11 formats.
+
+**Why:** CTS `GL_ARB_sparse_texture2` uncommitted-region verification
+fills the whole image, commits only the first sparse page, then expects
+`imageLoad` from the uncommitted half to return the format default. A
+regular Metal storage-texture `.read(...)` does not enforce sparse
+non-residency for rectangle storage-image reads on the observed Apple
+path, so the first texel of the second page still returned the uploaded
+255 payload. Native `sparse_read(...)` gives the residency bit needed to
+restore the GL uncommitted-region contract.
+
+**Regression-safe:** The path is gated to compute-stage storage-image
+reads, non-MS images, and sparse-capable dimensions. Non-sparse storage
+image reads still use the same runtime texture binding and observe
+`.resident() == true` on ordinary textures, while writable sparse image
+stores remain routed to the AppGL sidecar by the separate write patch.
 
 ### `spirv-cross-msl-sparse-storage-image-write.patch`
 
