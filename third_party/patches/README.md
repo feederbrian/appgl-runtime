@@ -38,6 +38,23 @@ git apply ../../third_party/patches/<patch-name>.patch
 
 ## Patches
 
+### `spirv-cross-msl-fp64-emulation.patch`
+
+**Target:** `third_party/SPIRV-Cross/{main.cpp,spirv_msl.hpp,spirv_msl.cpp}` —
+AppGL-only MSL FP64 lowering behind `--msl-appgl-fp64-emulation`.
+
+**Summary:** Adds an opt-in SPIRV-Cross MSL path that lowers SPIR-V
+`double` / `dvec` / square `dmat` types to AppGL `appgl_df64` helper
+structs backed by `uint2` words, injects the df64 helper prologue only
+when FP64 types are present, and routes arithmetic, comparisons,
+selected conversions, pack/unpack, sqrt, and common GLSL.std.450 FP
+built-ins through helper calls instead of native MSL `double`.
+
+**Why:** Apple Metal rejects native MSL `double`/`doubleN` on Apple GPU
+targets. This patch is the Phase 2 SPIRV-Cross emit substrate for the
+Decision F df64 path while extension advertising remains held by the
+AppGL runtime.
+
 ### `spirv-cross-msl-atomic-3d-dispatch.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — MSL image

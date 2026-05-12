@@ -1,0 +1,972 @@
+diff --git a/main.cpp b/main.cpp
+--- a/main.cpp
++++ b/main.cpp
+@@ -665,6 +665,7 @@
+ 	bool msl_raw_buffer_tese_input = false;
+ 	bool msl_multi_patch_workgroup = false;
+ 	bool msl_vertex_for_tessellation = false;
++	bool msl_appgl_fp64_emulation = false;
+ 	bool msl_tess_evaluation_as_compute = false;
+ 	uint32_t msl_tese_input_patch_vertices = 0;
+ 	bool msl_geometry_shader_as_mesh = false;
+@@ -954,6 +955,7 @@
+ 	                "\t\tIn a future version of SPIRV-Cross, this will become the default.\n"
+ 	                "\t[--msl-vertex-for-tessellation]:\n\t\tWhen handling a vertex shader, marks it as one that will be used with a new-style tessellation control shader.\n"
+ 	                "\t\tThe vertex shader is output to MSL as a compute kernel which outputs vertices to the buffer in the order they are received, rather than in index order as with --msl-capture-output normally.\n"
++	                "\t[--msl-appgl-fp64-emulation]:\n\t\t[AppGL fork] Lower SPIR-V FP64 values to AppGL df64 uint2 transport helpers instead of emitting native MSL double types.\n"
+ 	                "\t[--msl-tess-evaluation-as-compute]:\n\t\t[AppGL fork] Emit the tessellation evaluation shader as a compute kernel that writes its output to a host-supplied capture buffer instead of as a `[[patch(...)]] vertex` function.\n"
+ 	                "\t\tEnables transform-feedback capture of TES output. Pair with --msl-tese-input-patch-vertices to set the per-patch input stride.\n"
+ 	                "\t[--msl-tese-input-patch-vertices <count>]:\n\t\t[AppGL fork] Override the per-patch input vertex count used when computing `gl_in = &spvIn[gl_PrimitiveID * count]` in TES-as-compute mode.\n"
+@@ -1317,6 +1319,7 @@
+ 		msl_opts.raw_buffer_tese_input = args.msl_raw_buffer_tese_input;
+ 		msl_opts.multi_patch_workgroup = args.msl_multi_patch_workgroup;
+ 		msl_opts.vertex_for_tessellation = args.msl_vertex_for_tessellation;
++		msl_opts.appgl_fp64_emulation = args.msl_appgl_fp64_emulation;
+ 		msl_opts.tess_evaluation_as_compute = args.msl_tess_evaluation_as_compute;
+ 		msl_opts.tese_input_patch_vertices = args.msl_tese_input_patch_vertices;
+ 		msl_opts.geometry_shader_as_mesh = args.msl_geometry_shader_as_mesh;
+@@ -1925,6 +1928,7 @@
+ 	cbs.add("--msl-raw-buffer-tese-input", [&args](CLIParser &) { args.msl_raw_buffer_tese_input = true; });
+ 	cbs.add("--msl-multi-patch-workgroup", [&args](CLIParser &) { args.msl_multi_patch_workgroup = true; });
+ 	cbs.add("--msl-vertex-for-tessellation", [&args](CLIParser &) { args.msl_vertex_for_tessellation = true; });
++	cbs.add("--msl-appgl-fp64-emulation", [&args](CLIParser &) { args.msl_appgl_fp64_emulation = true; });
+ 	cbs.add("--msl-tess-evaluation-as-compute",
+ 	        [&args](CLIParser &) { args.msl_tess_evaluation_as_compute = true; });
+ 	cbs.add("--msl-tese-input-patch-vertices",
+diff --git a/spirv_msl.hpp b/spirv_msl.hpp
+--- a/spirv_msl.hpp
++++ b/spirv_msl.hpp
+@@ -469,6 +469,13 @@
+ 		// It will be translated as a compute kernel, so it can use the global invocation ID
+ 		// to index the output buffer.
+ 		bool vertex_for_tessellation = false;
++
++		// AppGL fork: lower SPIR-V FP64 values to a legal Metal df64 transport
++		// representation. Metal does not expose native fp64 arithmetic on Apple
++		// GPUs, so this option maps double/dvec/dmat types to AppGL helper
++		// structs backed by uint2 words and emits helper calls for arithmetic.
++		// Runtime extension advertising remains owned by AppGL's FP64 module.
++		bool appgl_fp64_emulation = false;
+ 
+ 		// AppGL fork addition (phase-3B-metal-tess-TF): when set, a
+ 		// tessellation evaluation shader is translated as a compute
+@@ -1244,6 +1251,7 @@
+ 	void emit_spv_amd_shader_trinary_minmax_op(uint32_t result_type, uint32_t result_id, uint32_t op,
+ 	                                           const uint32_t *args, uint32_t count) override;
+ 	void emit_header() override;
++	void emit_appgl_fp64_emulation_helpers();
+ 	void emit_function_prototype(SPIRFunction &func, const Bitset &return_flags) override;
+ 	void emit_sampled_image_op(uint32_t result_type, uint32_t result_id, uint32_t image_id, uint32_t samp_id) override;
+ 	void emit_subgroup_op(const Instruction &i) override;
+@@ -1270,6 +1278,7 @@
+ 	// Allow Metal to use the array<T> template to make arrays a value type
+ 	std::string type_to_array_glsl(const SPIRType &type, uint32_t variable_id) override;
+ 	std::string constant_op_expression(const SPIRConstantOp &cop) override;
++	std::string constant_expression_vector(const SPIRConstant &c, uint32_t vector) override;
+ 
+ 	bool variable_decl_is_remapped_storage(const SPIRVariable &variable, StorageClass storage) const override;
+ 
+@@ -1288,6 +1297,13 @@
+ 
+ 	std::string unpack_expression_type(std::string expr_str, const SPIRType &type, uint32_t physical_type_id,
+ 	                                   bool is_packed, bool row_major) override;
++
++	bool appgl_fp64_emulation_enabled_for_type(const SPIRType &type) const;
++	bool appgl_fp64_emulation_enabled_for_type_id(uint32_t type_id) const;
++	bool appgl_fp64_module_uses_emulation() const;
++	std::string appgl_fp64_msl_type_name(const SPIRType &type) const;
++	std::string appgl_fp64_constant_component(const SPIRConstant &c, uint32_t col, uint32_t row);
++	std::string appgl_fp64_float_literal(float value) const;
+ 
+ 	// Returns true for BuiltInSampleMask because gl_SampleMask[] is an array in SPIR-V, but [[sample_mask]] is a scalar in Metal.
+ 	bool builtin_translates_to_nonarray(BuiltIn builtin) const override;
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -26,6 +26,8 @@
+ 
+ #include <algorithm>
+ #include <assert.h>
++#include <cmath>
++#include <limits>
+ #include <numeric>
+ 
+ using namespace SPIRV_CROSS_SPV_HEADER_NAMESPACE;
+@@ -6611,6 +6613,419 @@
+ 	}
+ }
+ 
++bool CompilerMSL::appgl_fp64_emulation_enabled_for_type(const SPIRType &type) const
++{
++	return msl_options.appgl_fp64_emulation && type.basetype == SPIRType::Double;
++}
++
++bool CompilerMSL::appgl_fp64_emulation_enabled_for_type_id(uint32_t type_id) const
++{
++	return type_id && appgl_fp64_emulation_enabled_for_type(get<SPIRType>(type_id));
++}
++
++bool CompilerMSL::appgl_fp64_module_uses_emulation() const
++{
++	if (!msl_options.appgl_fp64_emulation)
++		return false;
++
++	bool uses_fp64 = false;
++	ir.for_each_typed_id<SPIRType>([&](uint32_t, const SPIRType &type) {
++		if (type.basetype == SPIRType::Double)
++			uses_fp64 = true;
++	});
++	return uses_fp64;
++}
++
++string CompilerMSL::appgl_fp64_msl_type_name(const SPIRType &type) const
++{
++	if (type.columns > 1)
++		return join("appgl_df64mat", type.columns, "x", type.vecsize);
++	else if (type.vecsize > 1)
++		return join("appgl_df64x", type.vecsize);
++	else
++		return "appgl_df64";
++}
++
++string CompilerMSL::appgl_fp64_float_literal(float value) const
++{
++	auto literal = format_float(value);
++	literal += "f";
++	return literal;
++}
++
++string CompilerMSL::appgl_fp64_constant_component(const SPIRConstant &c, uint32_t col, uint32_t row)
++{
++	double value = c.scalar_f64(col, row);
++	if (std::isnan(value))
++		return "appgl_df64_from_dd(float2(0.0f / 0.0f, 0.0f))";
++	else if (value == std::numeric_limits<double>::infinity())
++		return "appgl_df64_from_dd(float2(1.0f / 0.0f, 0.0f))";
++	else if (value == -std::numeric_limits<double>::infinity())
++		return "appgl_df64_from_dd(float2(-1.0f / 0.0f, 0.0f))";
++
++	float hi = static_cast<float>(value);
++	float lo = static_cast<float>(value - static_cast<double>(hi));
++	return join("appgl_df64_from_dd(float2(", appgl_fp64_float_literal(hi), ", ",
++	            appgl_fp64_float_literal(lo), "))");
++}
++
++void CompilerMSL::emit_appgl_fp64_emulation_helpers()
++{
++	static const char *lines[] = {
++		"struct appgl_df64 {",
++		"    uint2 words;",
++		"    appgl_df64() = default;",
++		"    explicit appgl_df64(uint2 w) : words(w) {}",
++		"};",
++		"",
++		"struct appgl_df64x2 {",
++		"    appgl_df64 x;",
++		"    appgl_df64 y;",
++		"    appgl_df64x2() = default;",
++		"    appgl_df64x2(appgl_df64 a, appgl_df64 b) : x(a), y(b) {}",
++		"};",
++		"",
++		"struct appgl_df64x3 {",
++		"    appgl_df64 x;",
++		"    appgl_df64 y;",
++		"    appgl_df64 z;",
++		"    appgl_df64x3() = default;",
++		"    appgl_df64x3(appgl_df64 a, appgl_df64 b, appgl_df64 c) : x(a), y(b), z(c) {}",
++		"};",
++		"",
++		"struct appgl_df64x4 {",
++		"    appgl_df64 x;",
++		"    appgl_df64 y;",
++		"    appgl_df64 z;",
++		"    appgl_df64 w;",
++		"    appgl_df64x4() = default;",
++		"    appgl_df64x4(appgl_df64 a, appgl_df64 b, appgl_df64 c, appgl_df64 d) : x(a), y(b), z(c), w(d) {}",
++		"};",
++		"",
++		"struct appgl_df64mat2x2 {",
++		"    appgl_df64x2 c0;",
++		"    appgl_df64x2 c1;",
++		"    appgl_df64mat2x2() = default;",
++		"    appgl_df64mat2x2(appgl_df64x2 a, appgl_df64x2 b) : c0(a), c1(b) {}",
++		"};",
++		"",
++		"struct appgl_df64mat3x3 {",
++		"    appgl_df64x3 c0;",
++		"    appgl_df64x3 c1;",
++		"    appgl_df64x3 c2;",
++		"    appgl_df64mat3x3() = default;",
++		"    appgl_df64mat3x3(appgl_df64x3 a, appgl_df64x3 b, appgl_df64x3 c) : c0(a), c1(b), c2(c) {}",
++		"};",
++		"",
++		"struct appgl_df64mat4x4 {",
++		"    appgl_df64x4 c0;",
++		"    appgl_df64x4 c1;",
++		"    appgl_df64x4 c2;",
++		"    appgl_df64x4 c3;",
++		"    appgl_df64mat4x4() = default;",
++		"    appgl_df64mat4x4(appgl_df64x4 a, appgl_df64x4 b, appgl_df64x4 c, appgl_df64x4 d) : c0(a), c1(b), c2(c), c3(d) {}",
++		"};",
++		"",
++		"inline appgl_df64 appgl_df64_from_words(uint lo, uint hi)",
++		"{",
++		"    return appgl_df64(uint2(lo, hi));",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_from_words2(uint2 words)",
++		"{",
++		"    return appgl_df64(words);",
++		"}",
++		"",
++		"inline uint2 appgl_df64_words(appgl_df64 value)",
++		"{",
++		"    return value.words;",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_from_dd(float2 value)",
++		"{",
++		"    return appgl_df64(as_type<uint2>(value));",
++		"}",
++		"",
++		"inline float2 appgl_df64_to_dd(appgl_df64 value)",
++		"{",
++		"    return as_type<float2>(value.words);",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_from_float(float value)",
++		"{",
++		"    return appgl_df64_from_dd(float2(value, 0.0f));",
++		"}",
++		"",
++		"inline appgl_df64x2 appgl_df64_from_float(float2 value)",
++		"{",
++		"    return appgl_df64x2(appgl_df64_from_float(value.x), appgl_df64_from_float(value.y));",
++		"}",
++		"",
++		"inline appgl_df64x3 appgl_df64_from_float(float3 value)",
++		"{",
++		"    return appgl_df64x3(appgl_df64_from_float(value.x), appgl_df64_from_float(value.y), appgl_df64_from_float(value.z));",
++		"}",
++		"",
++		"inline appgl_df64x4 appgl_df64_from_float(float4 value)",
++		"{",
++		"    return appgl_df64x4(appgl_df64_from_float(value.x), appgl_df64_from_float(value.y), appgl_df64_from_float(value.z), appgl_df64_from_float(value.w));",
++		"}",
++		"",
++		"inline float appgl_df64_to_float(appgl_df64 value)",
++		"{",
++		"    const float2 v = appgl_df64_to_dd(value);",
++		"    return v.x + v.y;",
++		"}",
++		"",
++		"inline float2 appgl_df64_to_float(appgl_df64x2 value)",
++		"{",
++		"    return float2(appgl_df64_to_float(value.x), appgl_df64_to_float(value.y));",
++		"}",
++		"",
++		"inline float3 appgl_df64_to_float(appgl_df64x3 value)",
++		"{",
++		"    return float3(appgl_df64_to_float(value.x), appgl_df64_to_float(value.y), appgl_df64_to_float(value.z));",
++		"}",
++		"",
++		"inline float4 appgl_df64_to_float(appgl_df64x4 value)",
++		"{",
++		"    return float4(appgl_df64_to_float(value.x), appgl_df64_to_float(value.y), appgl_df64_to_float(value.z), appgl_df64_to_float(value.w));",
++		"}",
++		"",
++		"inline float2 appgl_dd_quick_two_sum(float a, float b)",
++		"{",
++		"    const float s = a + b;",
++		"    const float e = b - (s - a);",
++		"    return float2(s, e);",
++		"}",
++		"",
++		"inline float2 appgl_dd_two_sum(float a, float b)",
++		"{",
++		"    const float s = a + b;",
++		"    const float bb = s - a;",
++		"    const float e = (a - (s - bb)) + (b - bb);",
++		"    return float2(s, e);",
++		"}",
++		"",
++		"inline float2 appgl_dd_two_prod(float a, float b)",
++		"{",
++		"    const float p = a * b;",
++		"    const float e = fma(a, b, -p);",
++		"    return float2(p, e);",
++		"}",
++		"",
++		"inline float2 appgl_dd_add(float2 a, float2 b)",
++		"{",
++		"    const float2 s = appgl_dd_two_sum(a.x, b.x);",
++		"    const float e = s.y + a.y + b.y;",
++		"    return appgl_dd_quick_two_sum(s.x, e);",
++		"}",
++		"",
++		"inline float2 appgl_dd_sub(float2 a, float2 b)",
++		"{",
++		"    return appgl_dd_add(a, float2(-b.x, -b.y));",
++		"}",
++		"",
++		"inline float2 appgl_dd_mul(float2 a, float2 b)",
++		"{",
++		"    const float2 p = appgl_dd_two_prod(a.x, b.x);",
++		"    const float e = p.y + (a.x * b.y) + (a.y * b.x);",
++		"    return appgl_dd_quick_two_sum(p.x, e);",
++		"}",
++		"",
++		"inline float2 appgl_dd_div(float2 a, float2 b)",
++		"{",
++		"    const float q1 = a.x / b.x;",
++		"    const float2 r = appgl_dd_sub(a, appgl_dd_mul(float2(q1, 0.0f), b));",
++		"    const float q2 = r.x / b.x;",
++		"    return appgl_dd_add(float2(q1, 0.0f), float2(q2, 0.0f));",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_neg(appgl_df64 value)",
++		"{",
++		"    const float2 v = appgl_df64_to_dd(value);",
++		"    return appgl_df64_from_dd(float2(-v.x, -v.y));",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_add(appgl_df64 a, appgl_df64 b)",
++		"{",
++		"    return appgl_df64_from_dd(appgl_dd_add(appgl_df64_to_dd(a), appgl_df64_to_dd(b)));",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_sub(appgl_df64 a, appgl_df64 b)",
++		"{",
++		"    return appgl_df64_from_dd(appgl_dd_sub(appgl_df64_to_dd(a), appgl_df64_to_dd(b)));",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_mul(appgl_df64 a, appgl_df64 b)",
++		"{",
++		"    return appgl_df64_from_dd(appgl_dd_mul(appgl_df64_to_dd(a), appgl_df64_to_dd(b)));",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_div(appgl_df64 a, appgl_df64 b)",
++		"{",
++		"    return appgl_df64_from_dd(appgl_dd_div(appgl_df64_to_dd(a), appgl_df64_to_dd(b)));",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_sqrt(appgl_df64 value)",
++		"{",
++		"    return appgl_df64_from_float(sqrt(max(appgl_df64_to_float(value), 0.0f)));",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_abs(appgl_df64 value)",
++		"{",
++		"    return appgl_df64_to_float(value) < 0.0f ? appgl_df64_neg(value) : value;",
++		"}",
++		"",
++		"inline appgl_df64 appgl_df64_floor(appgl_df64 value) { return appgl_df64_from_float(floor(appgl_df64_to_float(value))); }",
++		"inline appgl_df64 appgl_df64_ceil(appgl_df64 value) { return appgl_df64_from_float(ceil(appgl_df64_to_float(value))); }",
++		"inline appgl_df64 appgl_df64_round(appgl_df64 value) { return appgl_df64_from_float(round(appgl_df64_to_float(value))); }",
++		"inline appgl_df64 appgl_df64_trunc(appgl_df64 value) { return appgl_df64_from_float(trunc(appgl_df64_to_float(value))); }",
++		"inline appgl_df64 appgl_df64_sign(appgl_df64 value)",
++		"{",
++		"    const float v = appgl_df64_to_float(value);",
++		"    return appgl_df64_from_float((v > 0.0f ? 1.0f : 0.0f) - (v < 0.0f ? 1.0f : 0.0f));",
++		"}",
++		"",
++		"inline bool appgl_df64_eq(appgl_df64 a, appgl_df64 b)",
++		"{",
++		"    const float2 av = appgl_df64_to_dd(a);",
++		"    const float2 bv = appgl_df64_to_dd(b);",
++		"    return av.x == bv.x && av.y == bv.y;",
++		"}",
++		"",
++		"inline bool appgl_df64_lt(appgl_df64 a, appgl_df64 b)",
++		"{",
++		"    const float2 av = appgl_df64_to_dd(a);",
++		"    const float2 bv = appgl_df64_to_dd(b);",
++		"    return av.x < bv.x || (av.x == bv.x && av.y < bv.y);",
++		"}",
++		"",
++		"inline bool appgl_df64_gt(appgl_df64 a, appgl_df64 b) { return appgl_df64_lt(b, a); }",
++		"inline bool appgl_df64_ne(appgl_df64 a, appgl_df64 b) { return !appgl_df64_eq(a, b); }",
++		"inline bool appgl_df64_le(appgl_df64 a, appgl_df64 b) { return !appgl_df64_gt(a, b); }",
++		"inline bool appgl_df64_ge(appgl_df64 a, appgl_df64 b) { return !appgl_df64_lt(a, b); }",
++		"inline bool appgl_df64_unord(appgl_df64 a, appgl_df64 b)",
++		"{",
++		"    const float2 av = appgl_df64_to_dd(a);",
++		"    const float2 bv = appgl_df64_to_dd(b);",
++		"    return isnan(av.x) || isnan(av.y) || isnan(bv.x) || isnan(bv.y);",
++		"}",
++		"inline bool appgl_df64_ueq(appgl_df64 a, appgl_df64 b) { return appgl_df64_unord(a, b) || appgl_df64_eq(a, b); }",
++		"inline bool appgl_df64_une(appgl_df64 a, appgl_df64 b) { return appgl_df64_unord(a, b) || appgl_df64_ne(a, b); }",
++		"inline bool appgl_df64_ult(appgl_df64 a, appgl_df64 b) { return appgl_df64_unord(a, b) || appgl_df64_lt(a, b); }",
++		"inline bool appgl_df64_ugt(appgl_df64 a, appgl_df64 b) { return appgl_df64_unord(a, b) || appgl_df64_gt(a, b); }",
++		"inline bool appgl_df64_ule(appgl_df64 a, appgl_df64 b) { return appgl_df64_unord(a, b) || appgl_df64_le(a, b); }",
++		"inline bool appgl_df64_uge(appgl_df64 a, appgl_df64 b) { return appgl_df64_unord(a, b) || appgl_df64_ge(a, b); }",
++		"",
++		"inline appgl_df64 appgl_df64_min(appgl_df64 a, appgl_df64 b) { return appgl_df64_lt(b, a) ? b : a; }",
++		"inline appgl_df64 appgl_df64_max(appgl_df64 a, appgl_df64 b) { return appgl_df64_lt(a, b) ? b : a; }",
++		"inline appgl_df64 appgl_df64_clamp(appgl_df64 v, appgl_df64 lo, appgl_df64 hi) { return appgl_df64_min(appgl_df64_max(v, lo), hi); }",
++		"inline appgl_df64 appgl_df64_mix(appgl_df64 a, appgl_df64 b, appgl_df64 t) { return appgl_df64_add(a, appgl_df64_mul(appgl_df64_sub(b, a), t)); }",
++		"inline appgl_df64 appgl_df64_madd(appgl_df64 a, appgl_df64 b, appgl_df64 c) { return appgl_df64_add(appgl_df64_mul(a, b), c); }",
++		"",
++		"inline appgl_df64x2 appgl_df64_neg(appgl_df64x2 v) { return appgl_df64x2(appgl_df64_neg(v.x), appgl_df64_neg(v.y)); }",
++		"inline appgl_df64x3 appgl_df64_neg(appgl_df64x3 v) { return appgl_df64x3(appgl_df64_neg(v.x), appgl_df64_neg(v.y), appgl_df64_neg(v.z)); }",
++		"inline appgl_df64x4 appgl_df64_neg(appgl_df64x4 v) { return appgl_df64x4(appgl_df64_neg(v.x), appgl_df64_neg(v.y), appgl_df64_neg(v.z), appgl_df64_neg(v.w)); }",
++		"inline appgl_df64x2 appgl_df64_add(appgl_df64x2 a, appgl_df64x2 b) { return appgl_df64x2(appgl_df64_add(a.x, b.x), appgl_df64_add(a.y, b.y)); }",
++		"inline appgl_df64x3 appgl_df64_add(appgl_df64x3 a, appgl_df64x3 b) { return appgl_df64x3(appgl_df64_add(a.x, b.x), appgl_df64_add(a.y, b.y), appgl_df64_add(a.z, b.z)); }",
++		"inline appgl_df64x4 appgl_df64_add(appgl_df64x4 a, appgl_df64x4 b) { return appgl_df64x4(appgl_df64_add(a.x, b.x), appgl_df64_add(a.y, b.y), appgl_df64_add(a.z, b.z), appgl_df64_add(a.w, b.w)); }",
++		"inline appgl_df64x2 appgl_df64_sub(appgl_df64x2 a, appgl_df64x2 b) { return appgl_df64x2(appgl_df64_sub(a.x, b.x), appgl_df64_sub(a.y, b.y)); }",
++		"inline appgl_df64x3 appgl_df64_sub(appgl_df64x3 a, appgl_df64x3 b) { return appgl_df64x3(appgl_df64_sub(a.x, b.x), appgl_df64_sub(a.y, b.y), appgl_df64_sub(a.z, b.z)); }",
++		"inline appgl_df64x4 appgl_df64_sub(appgl_df64x4 a, appgl_df64x4 b) { return appgl_df64x4(appgl_df64_sub(a.x, b.x), appgl_df64_sub(a.y, b.y), appgl_df64_sub(a.z, b.z), appgl_df64_sub(a.w, b.w)); }",
++		"inline appgl_df64x2 appgl_df64_mul(appgl_df64x2 a, appgl_df64x2 b) { return appgl_df64x2(appgl_df64_mul(a.x, b.x), appgl_df64_mul(a.y, b.y)); }",
++		"inline appgl_df64x3 appgl_df64_mul(appgl_df64x3 a, appgl_df64x3 b) { return appgl_df64x3(appgl_df64_mul(a.x, b.x), appgl_df64_mul(a.y, b.y), appgl_df64_mul(a.z, b.z)); }",
++		"inline appgl_df64x4 appgl_df64_mul(appgl_df64x4 a, appgl_df64x4 b) { return appgl_df64x4(appgl_df64_mul(a.x, b.x), appgl_df64_mul(a.y, b.y), appgl_df64_mul(a.z, b.z), appgl_df64_mul(a.w, b.w)); }",
++		"inline appgl_df64x2 appgl_df64_div(appgl_df64x2 a, appgl_df64x2 b) { return appgl_df64x2(appgl_df64_div(a.x, b.x), appgl_df64_div(a.y, b.y)); }",
++		"inline appgl_df64x3 appgl_df64_div(appgl_df64x3 a, appgl_df64x3 b) { return appgl_df64x3(appgl_df64_div(a.x, b.x), appgl_df64_div(a.y, b.y), appgl_df64_div(a.z, b.z)); }",
++		"inline appgl_df64x4 appgl_df64_div(appgl_df64x4 a, appgl_df64x4 b) { return appgl_df64x4(appgl_df64_div(a.x, b.x), appgl_df64_div(a.y, b.y), appgl_df64_div(a.z, b.z), appgl_df64_div(a.w, b.w)); }",
++		"inline appgl_df64x2 appgl_df64_mul(appgl_df64x2 a, appgl_df64 b) { return appgl_df64x2(appgl_df64_mul(a.x, b), appgl_df64_mul(a.y, b)); }",
++		"inline appgl_df64x3 appgl_df64_mul(appgl_df64x3 a, appgl_df64 b) { return appgl_df64x3(appgl_df64_mul(a.x, b), appgl_df64_mul(a.y, b), appgl_df64_mul(a.z, b)); }",
++		"inline appgl_df64x4 appgl_df64_mul(appgl_df64x4 a, appgl_df64 b) { return appgl_df64x4(appgl_df64_mul(a.x, b), appgl_df64_mul(a.y, b), appgl_df64_mul(a.z, b), appgl_df64_mul(a.w, b)); }",
++		"inline appgl_df64x2 appgl_df64_mul(appgl_df64 a, appgl_df64x2 b) { return appgl_df64_mul(b, a); }",
++		"inline appgl_df64x3 appgl_df64_mul(appgl_df64 a, appgl_df64x3 b) { return appgl_df64_mul(b, a); }",
++		"inline appgl_df64x4 appgl_df64_mul(appgl_df64 a, appgl_df64x4 b) { return appgl_df64_mul(b, a); }",
++		"inline appgl_df64x2 appgl_df64_sqrt(appgl_df64x2 v) { return appgl_df64x2(appgl_df64_sqrt(v.x), appgl_df64_sqrt(v.y)); }",
++		"inline appgl_df64x3 appgl_df64_sqrt(appgl_df64x3 v) { return appgl_df64x3(appgl_df64_sqrt(v.x), appgl_df64_sqrt(v.y), appgl_df64_sqrt(v.z)); }",
++		"inline appgl_df64x4 appgl_df64_sqrt(appgl_df64x4 v) { return appgl_df64x4(appgl_df64_sqrt(v.x), appgl_df64_sqrt(v.y), appgl_df64_sqrt(v.z), appgl_df64_sqrt(v.w)); }",
++		"inline appgl_df64x2 appgl_df64_abs(appgl_df64x2 v) { return appgl_df64x2(appgl_df64_abs(v.x), appgl_df64_abs(v.y)); }",
++		"inline appgl_df64x3 appgl_df64_abs(appgl_df64x3 v) { return appgl_df64x3(appgl_df64_abs(v.x), appgl_df64_abs(v.y), appgl_df64_abs(v.z)); }",
++		"inline appgl_df64x4 appgl_df64_abs(appgl_df64x4 v) { return appgl_df64x4(appgl_df64_abs(v.x), appgl_df64_abs(v.y), appgl_df64_abs(v.z), appgl_df64_abs(v.w)); }",
++		"inline bool2 appgl_df64_eq(appgl_df64x2 a, appgl_df64x2 b) { return bool2(appgl_df64_eq(a.x, b.x), appgl_df64_eq(a.y, b.y)); }",
++		"inline bool3 appgl_df64_eq(appgl_df64x3 a, appgl_df64x3 b) { return bool3(appgl_df64_eq(a.x, b.x), appgl_df64_eq(a.y, b.y), appgl_df64_eq(a.z, b.z)); }",
++		"inline bool4 appgl_df64_eq(appgl_df64x4 a, appgl_df64x4 b) { return bool4(appgl_df64_eq(a.x, b.x), appgl_df64_eq(a.y, b.y), appgl_df64_eq(a.z, b.z), appgl_df64_eq(a.w, b.w)); }",
++		"inline bool2 appgl_df64_lt(appgl_df64x2 a, appgl_df64x2 b) { return bool2(appgl_df64_lt(a.x, b.x), appgl_df64_lt(a.y, b.y)); }",
++		"inline bool3 appgl_df64_lt(appgl_df64x3 a, appgl_df64x3 b) { return bool3(appgl_df64_lt(a.x, b.x), appgl_df64_lt(a.y, b.y), appgl_df64_lt(a.z, b.z)); }",
++		"inline bool4 appgl_df64_lt(appgl_df64x4 a, appgl_df64x4 b) { return bool4(appgl_df64_lt(a.x, b.x), appgl_df64_lt(a.y, b.y), appgl_df64_lt(a.z, b.z), appgl_df64_lt(a.w, b.w)); }",
++		"inline bool2 appgl_df64_gt(appgl_df64x2 a, appgl_df64x2 b) { return appgl_df64_lt(b, a); }",
++		"inline bool3 appgl_df64_gt(appgl_df64x3 a, appgl_df64x3 b) { return appgl_df64_lt(b, a); }",
++		"inline bool4 appgl_df64_gt(appgl_df64x4 a, appgl_df64x4 b) { return appgl_df64_lt(b, a); }",
++		"inline bool2 appgl_df64_ne(appgl_df64x2 a, appgl_df64x2 b) { return !appgl_df64_eq(a, b); }",
++		"inline bool3 appgl_df64_ne(appgl_df64x3 a, appgl_df64x3 b) { return !appgl_df64_eq(a, b); }",
++		"inline bool4 appgl_df64_ne(appgl_df64x4 a, appgl_df64x4 b) { return !appgl_df64_eq(a, b); }",
++		"inline bool2 appgl_df64_le(appgl_df64x2 a, appgl_df64x2 b) { return !appgl_df64_gt(a, b); }",
++		"inline bool3 appgl_df64_le(appgl_df64x3 a, appgl_df64x3 b) { return !appgl_df64_gt(a, b); }",
++		"inline bool4 appgl_df64_le(appgl_df64x4 a, appgl_df64x4 b) { return !appgl_df64_gt(a, b); }",
++		"inline bool2 appgl_df64_ge(appgl_df64x2 a, appgl_df64x2 b) { return !appgl_df64_lt(a, b); }",
++		"inline bool3 appgl_df64_ge(appgl_df64x3 a, appgl_df64x3 b) { return !appgl_df64_lt(a, b); }",
++		"inline bool4 appgl_df64_ge(appgl_df64x4 a, appgl_df64x4 b) { return !appgl_df64_lt(a, b); }",
++		"inline appgl_df64x2 appgl_df64_mul(appgl_df64mat2x2 m, appgl_df64x2 v)",
++		"{",
++		"    return appgl_df64x2(appgl_df64_madd(m.c0.x, v.x, appgl_df64_mul(m.c1.x, v.y)),",
++		"                        appgl_df64_madd(m.c0.y, v.x, appgl_df64_mul(m.c1.y, v.y)));",
++		"}",
++		"inline appgl_df64x3 appgl_df64_mul(appgl_df64mat3x3 m, appgl_df64x3 v)",
++		"{",
++		"    return appgl_df64x3(appgl_df64_add(appgl_df64_madd(m.c0.x, v.x, appgl_df64_mul(m.c1.x, v.y)), appgl_df64_mul(m.c2.x, v.z)),",
++		"                        appgl_df64_add(appgl_df64_madd(m.c0.y, v.x, appgl_df64_mul(m.c1.y, v.y)), appgl_df64_mul(m.c2.y, v.z)),",
++		"                        appgl_df64_add(appgl_df64_madd(m.c0.z, v.x, appgl_df64_mul(m.c1.z, v.y)), appgl_df64_mul(m.c2.z, v.z)));",
++		"}",
++		"inline appgl_df64x4 appgl_df64_mul(appgl_df64mat4x4 m, appgl_df64x4 v)",
++		"{",
++		"    return appgl_df64x4(appgl_df64_add(appgl_df64_add(appgl_df64_madd(m.c0.x, v.x, appgl_df64_mul(m.c1.x, v.y)), appgl_df64_mul(m.c2.x, v.z)), appgl_df64_mul(m.c3.x, v.w)),",
++		"                        appgl_df64_add(appgl_df64_add(appgl_df64_madd(m.c0.y, v.x, appgl_df64_mul(m.c1.y, v.y)), appgl_df64_mul(m.c2.y, v.z)), appgl_df64_mul(m.c3.y, v.w)),",
++		"                        appgl_df64_add(appgl_df64_add(appgl_df64_madd(m.c0.z, v.x, appgl_df64_mul(m.c1.z, v.y)), appgl_df64_mul(m.c2.z, v.z)), appgl_df64_mul(m.c3.z, v.w)),",
++		"                        appgl_df64_add(appgl_df64_add(appgl_df64_madd(m.c0.w, v.x, appgl_df64_mul(m.c1.w, v.y)), appgl_df64_mul(m.c2.w, v.z)), appgl_df64_mul(m.c3.w, v.w)));",
++		"}",
++		"inline appgl_df64x2 appgl_df64_mul(appgl_df64x2 v, appgl_df64mat2x2 m)",
++		"{",
++		"    return appgl_df64x2(appgl_df64_madd(v.x, m.c0.x, appgl_df64_mul(v.y, m.c0.y)),",
++		"                        appgl_df64_madd(v.x, m.c1.x, appgl_df64_mul(v.y, m.c1.y)));",
++		"}",
++		"inline appgl_df64x3 appgl_df64_mul(appgl_df64x3 v, appgl_df64mat3x3 m)",
++		"{",
++		"    return appgl_df64x3(appgl_df64_add(appgl_df64_madd(v.x, m.c0.x, appgl_df64_mul(v.y, m.c0.y)), appgl_df64_mul(v.z, m.c0.z)),",
++		"                        appgl_df64_add(appgl_df64_madd(v.x, m.c1.x, appgl_df64_mul(v.y, m.c1.y)), appgl_df64_mul(v.z, m.c1.z)),",
++		"                        appgl_df64_add(appgl_df64_madd(v.x, m.c2.x, appgl_df64_mul(v.y, m.c2.y)), appgl_df64_mul(v.z, m.c2.z)));",
++		"}",
++		"inline appgl_df64x4 appgl_df64_mul(appgl_df64x4 v, appgl_df64mat4x4 m)",
++		"{",
++		"    return appgl_df64x4(appgl_df64_add(appgl_df64_add(appgl_df64_madd(v.x, m.c0.x, appgl_df64_mul(v.y, m.c0.y)), appgl_df64_mul(v.z, m.c0.z)), appgl_df64_mul(v.w, m.c0.w)),",
++		"                        appgl_df64_add(appgl_df64_add(appgl_df64_madd(v.x, m.c1.x, appgl_df64_mul(v.y, m.c1.y)), appgl_df64_mul(v.z, m.c1.z)), appgl_df64_mul(v.w, m.c1.w)),",
++		"                        appgl_df64_add(appgl_df64_add(appgl_df64_madd(v.x, m.c2.x, appgl_df64_mul(v.y, m.c2.y)), appgl_df64_mul(v.z, m.c2.z)), appgl_df64_mul(v.w, m.c2.w)),",
++		"                        appgl_df64_add(appgl_df64_add(appgl_df64_madd(v.x, m.c3.x, appgl_df64_mul(v.y, m.c3.y)), appgl_df64_mul(v.z, m.c3.z)), appgl_df64_mul(v.w, m.c3.w)));",
++		"}",
++		"inline appgl_df64mat2x2 appgl_df64_mul(appgl_df64mat2x2 a, appgl_df64mat2x2 b) { return appgl_df64mat2x2(appgl_df64_mul(a, b.c0), appgl_df64_mul(a, b.c1)); }",
++		"inline appgl_df64mat3x3 appgl_df64_mul(appgl_df64mat3x3 a, appgl_df64mat3x3 b) { return appgl_df64mat3x3(appgl_df64_mul(a, b.c0), appgl_df64_mul(a, b.c1), appgl_df64_mul(a, b.c2)); }",
++		"inline appgl_df64mat4x4 appgl_df64_mul(appgl_df64mat4x4 a, appgl_df64mat4x4 b) { return appgl_df64mat4x4(appgl_df64_mul(a, b.c0), appgl_df64_mul(a, b.c1), appgl_df64_mul(a, b.c2), appgl_df64_mul(a, b.c3)); }",
++		"inline appgl_df64 operator+(appgl_df64 a, appgl_df64 b) { return appgl_df64_add(a, b); }",
++		"inline appgl_df64 operator-(appgl_df64 a, appgl_df64 b) { return appgl_df64_sub(a, b); }",
++		"inline appgl_df64 operator-(appgl_df64 a) { return appgl_df64_neg(a); }",
++		"inline appgl_df64 operator*(appgl_df64 a, appgl_df64 b) { return appgl_df64_mul(a, b); }",
++		"inline appgl_df64 operator/(appgl_df64 a, appgl_df64 b) { return appgl_df64_div(a, b); }",
++		"inline bool operator==(appgl_df64 a, appgl_df64 b) { return appgl_df64_eq(a, b); }",
++		"inline bool operator!=(appgl_df64 a, appgl_df64 b) { return appgl_df64_ne(a, b); }",
++		"inline bool operator<(appgl_df64 a, appgl_df64 b) { return appgl_df64_lt(a, b); }",
++		"inline bool operator>(appgl_df64 a, appgl_df64 b) { return appgl_df64_gt(a, b); }",
++		"inline bool operator<=(appgl_df64 a, appgl_df64 b) { return appgl_df64_le(a, b); }",
++		"inline bool operator>=(appgl_df64 a, appgl_df64 b) { return appgl_df64_ge(a, b); }",
++	};
++
++	for (auto *line : lines)
++		statement(line);
++	statement("");
++}
++
+ // Emits the file header info
+ void CompilerMSL::emit_header()
+ {
+@@ -6665,6 +7080,9 @@
+ 	statement("");
+ 	statement("using namespace metal;");
+ 	statement("");
++
++	if (appgl_fp64_module_uses_emulation())
++		emit_appgl_fp64_emulation_helpers();
+ 
+ 	for (auto &td : typedef_lines)
+ 		statement(td);
+@@ -10408,7 +10826,10 @@
+ 
+ 	case OpLogicalEqual:
+ 	case OpFOrdEqual:
+-		MSL_BOP(==);
++		if (opcode == OpFOrdEqual && appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_eq);
++		else
++			MSL_BOP(==);
+ 		break;
+ 
+ 	case OpINotEqual:
+@@ -10421,7 +10842,10 @@
+ 		// Typically OrdNotEqual comes from GLSL which itself does not really specify what
+ 		// happens with NaN.
+ 		// Consider fixing this if we run into real issues.
+-		MSL_BOP(!=);
++		if (opcode == OpFOrdNotEqual && appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_ne);
++		else
++			MSL_BOP(!=);
+ 		break;
+ 
+ 	case OpUGreaterThan:
+@@ -10433,7 +10857,10 @@
+ 		break;
+ 
+ 	case OpFOrdGreaterThan:
+-		MSL_BOP(>);
++		if (appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_gt);
++		else
++			MSL_BOP(>);
+ 		break;
+ 
+ 	case OpUGreaterThanEqual:
+@@ -10445,7 +10872,10 @@
+ 		break;
+ 
+ 	case OpFOrdGreaterThanEqual:
+-		MSL_BOP(>=);
++		if (appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_ge);
++		else
++			MSL_BOP(>=);
+ 		break;
+ 
+ 	case OpULessThan:
+@@ -10457,7 +10887,10 @@
+ 		break;
+ 
+ 	case OpFOrdLessThan:
+-		MSL_BOP(<);
++		if (appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_lt);
++		else
++			MSL_BOP(<);
+ 		break;
+ 
+ 	case OpULessThanEqual:
+@@ -10469,33 +10902,54 @@
+ 		break;
+ 
+ 	case OpFOrdLessThanEqual:
+-		MSL_BOP(<=);
++		if (appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_le);
++		else
++			MSL_BOP(<=);
+ 		break;
+ 
+ 	case OpFUnordEqual:
+-		MSL_UNORD_BOP(==);
++		if (appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_ueq);
++		else
++			MSL_UNORD_BOP(==);
+ 		break;
+ 
+ 	case OpFUnordNotEqual:
+ 		// not equal in MSL generates une opcodes to begin with.
+ 		// Since unordered not equal is how it works in C, just inherit that behavior.
+-		MSL_BOP(!=);
++		if (appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_une);
++		else
++			MSL_BOP(!=);
+ 		break;
+ 
+ 	case OpFUnordGreaterThan:
+-		MSL_UNORD_BOP(>);
++		if (appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_ugt);
++		else
++			MSL_UNORD_BOP(>);
+ 		break;
+ 
+ 	case OpFUnordGreaterThanEqual:
+-		MSL_UNORD_BOP(>=);
++		if (appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_uge);
++		else
++			MSL_UNORD_BOP(>=);
+ 		break;
+ 
+ 	case OpFUnordLessThan:
+-		MSL_UNORD_BOP(<);
++		if (appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_ult);
++		else
++			MSL_UNORD_BOP(<);
+ 		break;
+ 
+ 	case OpFUnordLessThanEqual:
+-		MSL_UNORD_BOP(<=);
++		if (appgl_fp64_emulation_enabled_for_type(expression_type(ops[2])))
++			MSL_BFOP(appgl_df64_ule);
++		else
++			MSL_UNORD_BOP(<=);
+ 		break;
+ 
+ 	// Pointer math
+@@ -10510,6 +10964,74 @@
+ 	case OpPtrDiff:
+ 		MSL_PTR_BOP(-);
+ 		break;
++
++	// AppGL df64 conversions.
++	case OpFConvert:
++	{
++		uint32_t result_type = ops[0];
++		uint32_t id = ops[1];
++		uint32_t arg = ops[2];
++		auto &dst_type = get<SPIRType>(result_type);
++		auto &src_type = expression_type(arg);
++
++		if (appgl_fp64_emulation_enabled_for_type(dst_type) && src_type.basetype == SPIRType::Float)
++		{
++			MSL_UFOP(appgl_df64_from_float);
++		}
++		else if (dst_type.basetype == SPIRType::Float && appgl_fp64_emulation_enabled_for_type(src_type))
++		{
++			auto expr = join(type_to_glsl_constructor(dst_type), "(appgl_df64_to_float(", to_unpacked_expression(arg), "))");
++			emit_op(result_type, id, expr, should_forward(arg));
++			inherit_expression_dependencies(id, arg);
++		}
++		else
++			CompilerGLSL::emit_instruction(instruction);
++		break;
++	}
++
++	case OpConvertSToF:
++	case OpConvertUToF:
++	{
++		uint32_t result_type = ops[0];
++		uint32_t id = ops[1];
++		uint32_t arg = ops[2];
++		auto &dst_type = get<SPIRType>(result_type);
++
++		if (appgl_fp64_emulation_enabled_for_type(dst_type))
++		{
++			SPIRType float_type = dst_type;
++			float_type.basetype = SPIRType::Float;
++			float_type.width = 32;
++			auto expr = join("appgl_df64_from_float(", type_to_glsl_constructor(float_type), "(",
++			                 to_unpacked_expression(arg), "))");
++			emit_op(result_type, id, expr, should_forward(arg));
++			inherit_expression_dependencies(id, arg);
++		}
++		else
++			CompilerGLSL::emit_instruction(instruction);
++		break;
++	}
++
++	case OpConvertFToS:
++	case OpConvertFToU:
++	{
++		uint32_t result_type = ops[0];
++		uint32_t id = ops[1];
++		uint32_t arg = ops[2];
++		auto &src_type = expression_type(arg);
++
++		if (appgl_fp64_emulation_enabled_for_type(src_type))
++		{
++			auto &dst_type = get<SPIRType>(result_type);
++			auto expr = join(type_to_glsl_constructor(dst_type), "(appgl_df64_to_float(",
++			                 to_unpacked_expression(arg), "))");
++			emit_op(result_type, id, expr, should_forward(arg));
++			inherit_expression_dependencies(id, arg);
++		}
++		else
++			CompilerGLSL::emit_instruction(instruction);
++		break;
++	}
+ 
+ 	// Derivatives
+ 	case OpDPdx:
+@@ -10575,28 +11097,59 @@
+ 		break;
+ 
+ 	case OpFMul:
+-		if (msl_options.invariant_float_math || has_legacy_nocontract(ops[0], ops[1]))
++		if (appgl_fp64_emulation_enabled_for_type_id(ops[0]))
++			MSL_BFOP(appgl_df64_mul);
++		else if (msl_options.invariant_float_math || has_legacy_nocontract(ops[0], ops[1]))
+ 			MSL_BFOP(spvFMul);
+ 		else
+ 			MSL_BOP(*);
+ 		break;
+ 
+ 	case OpFAdd:
+-		if (msl_options.invariant_float_math || has_legacy_nocontract(ops[0], ops[1]))
++		if (appgl_fp64_emulation_enabled_for_type_id(ops[0]))
++			MSL_BFOP(appgl_df64_add);
++		else if (msl_options.invariant_float_math || has_legacy_nocontract(ops[0], ops[1]))
+ 			MSL_BFOP(spvFAdd);
+ 		else
+ 			MSL_BOP(+);
+ 		break;
+ 
+ 	case OpFSub:
+-		if (msl_options.invariant_float_math || has_legacy_nocontract(ops[0], ops[1]))
++		if (appgl_fp64_emulation_enabled_for_type_id(ops[0]))
++			MSL_BFOP(appgl_df64_sub);
++		else if (msl_options.invariant_float_math || has_legacy_nocontract(ops[0], ops[1]))
+ 			MSL_BFOP(spvFSub);
+ 		else
+ 			MSL_BOP(-);
+ 		break;
+ 
++	case OpFDiv:
++		if (appgl_fp64_emulation_enabled_for_type_id(ops[0]))
++			MSL_BFOP(appgl_df64_div);
++		else
++			CompilerGLSL::emit_instruction(instruction);
++		break;
++
++	case OpFNegate:
++		if (appgl_fp64_emulation_enabled_for_type_id(ops[0]))
++			MSL_UFOP(appgl_df64_neg);
++		else
++			CompilerGLSL::emit_instruction(instruction);
++		break;
++
++	case OpVectorTimesScalar:
++	case OpMatrixTimesScalar:
++		if (appgl_fp64_emulation_enabled_for_type_id(ops[0]))
++			MSL_BFOP(appgl_df64_mul);
++		else
++			CompilerGLSL::emit_instruction(instruction);
++		break;
++
+ 	case OpFmaKHR:
+-		MSL_TFOP(fma);
++		if (appgl_fp64_emulation_enabled_for_type_id(ops[0]))
++			MSL_TFOP(appgl_df64_madd);
++		else
++			MSL_TFOP(fma);
+ 		break;
+ 
+ 	// Atomics
+@@ -11516,6 +12069,12 @@
+ 	case OpVectorTimesMatrix:
+ 	case OpMatrixTimesVector:
+ 	{
++		if (appgl_fp64_emulation_enabled_for_type_id(ops[0]))
++		{
++			MSL_BFOP(appgl_df64_mul);
++			break;
++		}
++
+ 		if (!msl_options.invariant_float_math && !has_legacy_nocontract(ops[0], ops[1]))
+ 		{
+ 			CompilerGLSL::emit_instruction(instruction);
+@@ -11558,6 +12117,12 @@
+ 
+ 	case OpMatrixTimesMatrix:
+ 	{
++		if (appgl_fp64_emulation_enabled_for_type_id(ops[0]))
++		{
++			MSL_BFOP(appgl_df64_mul);
++			break;
++		}
++
+ 		if (!msl_options.invariant_float_math && !has_legacy_nocontract(ops[0], ops[1]))
+ 		{
+ 			CompilerGLSL::emit_instruction(instruction);
+@@ -13459,6 +14024,67 @@
+ 	op = get_remapped_glsl_op(op);
+ 
+ 	auto &restype = get<SPIRType>(result_type);
++
++	if (msl_options.appgl_fp64_emulation)
++	{
++		if (op == GLSLstd450PackDouble2x32 && appgl_fp64_emulation_enabled_for_type(restype))
++		{
++			emit_unary_func_op(result_type, id, args[0], "appgl_df64_from_words2");
++			return;
++		}
++
++		if (op == GLSLstd450UnpackDouble2x32 && appgl_fp64_emulation_enabled_for_type(expression_type(args[0])))
++		{
++			emit_unary_func_op(result_type, id, args[0], "appgl_df64_words");
++			return;
++		}
++
++		if (appgl_fp64_emulation_enabled_for_type(restype))
++		{
++			switch (op)
++			{
++			case GLSLstd450Sqrt:
++				emit_unary_func_op(result_type, id, args[0], "appgl_df64_sqrt");
++				return;
++			case GLSLstd450FAbs:
++				emit_unary_func_op(result_type, id, args[0], "appgl_df64_abs");
++				return;
++			case GLSLstd450Floor:
++				emit_unary_func_op(result_type, id, args[0], "appgl_df64_floor");
++				return;
++			case GLSLstd450Ceil:
++				emit_unary_func_op(result_type, id, args[0], "appgl_df64_ceil");
++				return;
++			case GLSLstd450Round:
++			case GLSLstd450RoundEven:
++				emit_unary_func_op(result_type, id, args[0], "appgl_df64_round");
++				return;
++			case GLSLstd450Trunc:
++				emit_unary_func_op(result_type, id, args[0], "appgl_df64_trunc");
++				return;
++			case GLSLstd450FSign:
++				emit_unary_func_op(result_type, id, args[0], "appgl_df64_sign");
++				return;
++			case GLSLstd450FMin:
++			case GLSLstd450NMin:
++				emit_binary_func_op(result_type, id, args[0], args[1], "appgl_df64_min");
++				return;
++			case GLSLstd450FMax:
++			case GLSLstd450NMax:
++				emit_binary_func_op(result_type, id, args[0], args[1], "appgl_df64_max");
++				return;
++			case GLSLstd450FClamp:
++			case GLSLstd450NClamp:
++				emit_trinary_func_op(result_type, id, args[0], args[1], args[2], "appgl_df64_clamp");
++				return;
++			case GLSLstd450FMix:
++				emit_trinary_func_op(result_type, id, args[0], args[1], args[2], "appgl_df64_mix");
++				return;
++			default:
++				break;
++			}
++		}
++	}
+ 
+ 	// Only precise:: preserves NaN in trancendentals (supposedly, cannot find documentation for this).
+ 	const auto drop_nan_inf = FPFastMathModeNotInfMask | FPFastMathModeNotNaNMask;
+@@ -19389,6 +20015,7 @@
+ string CompilerMSL::type_to_glsl(const SPIRType &type, uint32_t id, bool member)
+ {
+ 	string type_name;
++	bool appgl_fp64_lowered_type = false;
+ 
+ 	// Pointer?
+ 	if (is_pointer(type) || type_is_array_of_pointers(type))
+@@ -19594,7 +20221,13 @@
+ 		type_name = "float";
+ 		break;
+ 	case SPIRType::Double:
+-		type_name = "double"; // Currently unsupported
++		if (msl_options.appgl_fp64_emulation)
++		{
++			type_name = appgl_fp64_msl_type_name(type);
++			appgl_fp64_lowered_type = true;
++		}
++		else
++			type_name = "double"; // Currently unsupported
+ 		break;
+ 	case SPIRType::BFloat16:
+ 		if (!msl_options.supports_msl_version(3, 1))
+@@ -19619,7 +20252,7 @@
+ 	}
+ 
+ 	// Matrix?
+-	if (type.columns > 1)
++	if (!appgl_fp64_lowered_type && type.columns > 1)
+ 	{
+ 		auto *var = maybe_get_backing_variable(id);
+ 		if (var && var->basevariable)
+@@ -19640,7 +20273,7 @@
+ 	}
+ 
+ 	// Vector or Matrix?
+-	if (type.vecsize > 1)
++	if (!appgl_fp64_lowered_type && type.vecsize > 1)
+ 		type_name += to_string(type.vecsize);
+ 
+ 	if (type.array.empty() || using_builtin_array())
+@@ -19712,6 +20345,33 @@
+ 	default:
+ 		return CompilerGLSL::constant_op_expression(cop);
+ 	}
++}
++
++string CompilerMSL::constant_expression_vector(const SPIRConstant &c, uint32_t vector)
++{
++	auto type = get<SPIRType>(c.constant_type);
++	type.columns = 1;
++
++	if (!appgl_fp64_emulation_enabled_for_type(type))
++		return CompilerGLSL::constant_expression_vector(c, vector);
++
++	if (type.vecsize == 1)
++		return appgl_fp64_constant_component(c, vector, 0);
++
++	string res = appgl_fp64_msl_type_name(type);
++	res += "(";
++	for (uint32_t i = 0; i < c.vector_size(); i++)
++	{
++		if (i)
++			res += ", ";
++
++		if (c.specialization_constant_id(vector, i) != 0)
++			res += to_expression(c.specialization_constant_id(vector, i));
++		else
++			res += appgl_fp64_constant_component(c, vector, i);
++	}
++	res += ")";
++	return res;
+ }
+ 
+ bool CompilerMSL::variable_decl_is_remapped_storage(const SPIRVariable &variable, StorageClass storage) const
+@@ -21405,7 +22065,16 @@
+ 		SPIRV_CROSS_THROW("Querying alignment of opaque object.");
+ 
+ 	case SPIRType::Double:
+-		SPIRV_CROSS_THROW("double types are not supported in buffers in MSL.");
++		if (msl_options.appgl_fp64_emulation)
++		{
++			if (is_packed)
++				return 8;
++
++			uint32_t vecsize = (row_major && type.columns > 1) ? type.columns : type.vecsize;
++			return 8 * (vecsize == 3 ? 4 : vecsize);
++		}
++		else
++			SPIRV_CROSS_THROW("double types are not supported in buffers in MSL.");
+ 
+ 	case SPIRType::Struct:
+ 	{
