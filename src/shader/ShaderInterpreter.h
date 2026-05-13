@@ -33,10 +33,12 @@ struct Value {
     };
     Kind kind = Kind::Invalid;
     std::array<float, 4> f{0, 0, 0, 0};
+    std::array<double, 4> d{0, 0, 0, 0};
     std::array<std::int32_t, 4> i{0, 0, 0, 0};
     bool bval = false;
+    bool hasDouble = false;
 
-    static Value makeFloat(float v) { Value r; r.kind = Kind::Float; r.f[0] = v; return r; }
+    static Value makeFloat(float v) { Value r; r.kind = Kind::Float; r.f[0] = v; r.d[0] = static_cast<double>(v); return r; }
     static Value makeInt(std::int32_t v) { Value r; r.kind = Kind::Int; r.i[0] = v; return r; }
     static Value makeUInt(std::uint32_t v) { Value r; r.kind = Kind::UInt; r.i[0] = static_cast<std::int32_t>(v); return r; }
     static Value makeBool(bool v) { Value r; r.kind = Kind::Bool; r.bval = v; return r; }

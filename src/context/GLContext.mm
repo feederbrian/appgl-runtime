@@ -20768,7 +20768,8 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         }
 
         auto writeToBuffer = [this](GLuint bufferName, std::size_t bufOffset,
-                                    const float* src, std::size_t count,
+                                    const float* src, const double* doubleSrc,
+                                    std::size_t count,
                                     std::size_t scalarBytes) {
             if (bufferName == 0 || count == 0) return;
             GLBufferObject* buf = objects->buffers().get(bufferName);
@@ -20780,7 +20781,8 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
             if (scalarBytes == sizeof(double)) {
                 converted.resize(bytes);
                 for (std::size_t i = 0; i < count; ++i) {
-                    const double d = static_cast<double>(src[i]);
+                    const double d = doubleSrc != nullptr
+                        ? doubleSrc[i] : static_cast<double>(src[i]);
                     std::memcpy(converted.data() + i * sizeof(double),
                                 &d, sizeof(d));
                 }
@@ -20956,6 +20958,10 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                     const std::size_t v = p * vpp + vi;
                     const float* vertexBase =
                         ed.expandedVertexData.data() + v * fpv;
+                    const double* doubleVertexBase =
+                        ed.expandedVertexDoubleData.empty()
+                            ? nullptr
+                            : ed.expandedVertexDoubleData.data() + v * fpv;
                     for (auto& sl : slots) {
                         if (!slotMatchesPrim(sl, pstream)) continue;
                         for (const auto& src : sl.srcList) {
@@ -20967,7 +20973,11 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                                 continue;
                             }
                             writeToBuffer(sl.buffer, sl.cursor,
-                                          vertexBase + src.offset, src.count,
+                                          vertexBase + src.offset,
+                                          doubleVertexBase != nullptr
+                                              ? doubleVertexBase + src.offset
+                                              : nullptr,
+                                          src.count,
                                           src.scalarBytes);
                             sl.cursor += src.count * src.scalarBytes;
                         }
@@ -21030,8 +21040,15 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                     for (std::size_t vi = 0; vi < vpp; ++vi) {
                         const std::size_t v = p * vpp + vi;
                         const float* vertexBase = ed.expandedVertexData.data() + v * fpv;
+                        const double* doubleVertexBase =
+                            ed.expandedVertexDoubleData.empty()
+                                ? nullptr
+                                : ed.expandedVertexDoubleData.data() + v * fpv;
                         writeToBuffer(binds[i].buffer, binds[i].cursor,
                                       vertexBase + sources[i].offset,
+                                      doubleVertexBase != nullptr
+                                          ? doubleVertexBase + sources[i].offset
+                                          : nullptr,
                                       sources[i].count,
                                       sources[i].scalarBytes);
                         binds[i].cursor += binds[i].perVertexBytes;

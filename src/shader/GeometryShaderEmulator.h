@@ -60,6 +60,7 @@ class GLStateTracker;
 struct EmulatedVertex {
     float position[4] = {0, 0, 0, 1};
     std::vector<float> varyings;       // concatenated user varying values
+    std::vector<double> doubleVaryings; // precise values for double TF writes
     std::vector<float> clipDistance;   // gl_ClipDistance[] at EmitVertex
     std::vector<float> cullDistance;   // gl_CullDistance[] at EmitVertex
     // gl_Layer value at EmitVertex (GL 4.6 §11.2.1 /
@@ -126,6 +127,9 @@ struct EmulatedDraw {
     GLenum topology = 0;              // one of GL_POINTS / GL_LINE_STRIP / GL_TRIANGLE_STRIP
     // Interleaved per-vertex payload: [pos0..pos3, varying0..N-1] per vertex.
     std::vector<float> expandedVertexData;
+    // Same logical layout as expandedVertexData, used only when TF writes
+    // 8-byte floating scalars and the interpreter has a precise double.
+    std::vector<double> expandedVertexDoubleData;
     std::size_t vertexCount = 0;
     std::size_t floatsPerVertex = 0;   // 4 (position) + sum of varying widths
     // Per-output-varying widths (float count), in the order they appear

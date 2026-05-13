@@ -139,9 +139,10 @@ enum GLSLstd450 : std::uint32_t {
     GLSLstd450InverseSqrt = 32,
     GLSLstd450FMin = 37, GLSLstd450FMax = 40, GLSLstd450FClamp = 43,
     GLSLstd450FMix = 46, GLSLstd450Step = 48, GLSLstd450SmoothStep = 49,
-    GLSLstd450Fma = 50,
+    GLSLstd450Fma = 50, GLSLstd450Ldexp = 53,
     GLSLstd450Length = 66, GLSLstd450Distance = 67, GLSLstd450Cross = 68,
-    GLSLstd450Normalize = 69, GLSLstd450Reflect = 71,
+    GLSLstd450Normalize = 69, GLSLstd450FaceForward = 70,
+    GLSLstd450Reflect = 71, GLSLstd450Refract = 72,
 };
 #endif
 
@@ -627,6 +628,9 @@ private:
     // scalar offset). Float storage is universal — int/uint/bool
     // bitcast into/out of float by the load/store paths.
     std::unordered_map<std::uint32_t, std::vector<float>> varStorage_;
+    // Optional precise double sidecar for float-kind values that feed
+    // double-precision transform-feedback writes.
+    std::unordered_map<std::uint32_t, std::vector<double>> varDoubleStorage_;
 
     // Resolved access-chain results, keyed by the OpAccessChain's
     // result id. Subsequent OpLoad / OpStore use these to drive
@@ -1233,6 +1237,25 @@ Value Interpreter::loadFromVar(std::uint32_t varId, std::uint32_t off,
         default:
             bail("load: unsupported leaf kind");
     }
+    if (v.isFloatKind()) {
+        const auto dIt = varDoubleStorage_.find(varId);
+        if (dIt != varDoubleStorage_.end()) {
+            const auto& dStorage = dIt->second;
+            if (off < dStorage.size()) {
+                v.hasDouble = true;
+                for (int k = 0; k < v.componentCount(); ++k) {
+                    const std::uint32_t idx = off + static_cast<std::uint32_t>(k);
+                    v.d[k] = idx < dStorage.size()
+                        ? dStorage[idx] : static_cast<double>(v.f[k]);
+                }
+            }
+        }
+        if (!v.hasDouble) {
+            for (int k = 0; k < v.componentCount(); ++k) {
+                v.d[k] = static_cast<double>(v.f[k]);
+            }
+        }
+    }
     return v;
 }
 
@@ -1286,6 +1309,18 @@ void Interpreter::storeToVar(std::uint32_t varId, std::uint32_t off,
     }
     if (v.isFloatKind()) {
         for (int k = 0; k < v.componentCount(); ++k) storage[off + k] = v.f[k];
+        auto dIt = varDoubleStorage_.find(varId);
+        if (v.hasDouble || dIt != varDoubleStorage_.end()) {
+            auto& dStorage = (dIt != varDoubleStorage_.end())
+                ? dIt->second
+                : varDoubleStorage_[varId];
+            if (off + static_cast<std::uint32_t>(v.componentCount()) > dStorage.size()) {
+                dStorage.resize(off + v.componentCount(), 0.0);
+            }
+            for (int k = 0; k < v.componentCount(); ++k) {
+                dStorage[off + k] = v.hasDouble ? v.d[k] : static_cast<double>(v.f[k]);
+            }
+        }
     } else if (v.isIntKind()) {
         for (int k = 0; k < v.componentCount(); ++k) {
             std::int32_t iv = v.i[k];
@@ -3324,20 +3359,43 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
         bail("OpExtInst: unknown operand 2");
         return a;
     }
+    auto clearDoubleSidecar = [](Value& v) {
+        v.hasDouble = false;
+        if (v.isFloatKind()) {
+            for (int k = 0; k < v.componentCount(); ++k) {
+                v.d[k] = static_cast<double>(v.f[k]);
+            }
+        }
+    };
     auto scalarMap = [&](float (*fn)(float)) {
         Value r = a;
         for (int k = 0; k < a.componentCount(); ++k) r.f[k] = fn(a.f[k]);
+        clearDoubleSidecar(r);
         return r;
     };
     auto binaryMap = [&](float (*fn)(float, float)) {
         Value r = a;
         for (int k = 0; k < a.componentCount(); ++k) r.f[k] = fn(a.f[k], b.f[k]);
+        clearDoubleSidecar(r);
         return r;
     };
     auto ternaryMap = [&](float (*fn)(float, float, float)) {
         Value r = a;
         for (int k = 0; k < a.componentCount(); ++k) r.f[k] = fn(a.f[k], b.f[k], c.f[k]);
+        clearDoubleSidecar(r);
         return r;
+    };
+    auto floatLane = [](const Value& v, int lane) {
+        const int idx = std::min(lane, v.componentCount() - 1);
+        return v.f[idx];
+    };
+    auto realLane = [](const Value& v, int lane) {
+        const int idx = std::min(lane, v.componentCount() - 1);
+        return v.hasDouble ? v.d[idx] : static_cast<double>(v.f[idx]);
+    };
+    auto intLane = [](const Value& v, int lane) {
+        const int idx = std::min(lane, v.componentCount() - 1);
+        return v.isIntKind() ? v.i[idx] : static_cast<std::int32_t>(v.f[idx]);
     };
     switch (glslOp) {
         // ─ Unary transcendentals / sign / rounding ─
@@ -3382,10 +3440,20 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
         case ::GLSLstd450Atan2:   return binaryMap([](float y, float x) { return std::atan2(y, x); });
         case ::GLSLstd450FMin:    return binaryMap([](float x, float y) { return std::fmin(x, y); });
         case ::GLSLstd450FMax:    return binaryMap([](float x, float y) { return std::fmax(x, y); });
+        case ::GLSLstd450Ldexp: {
+            Value r = a;
+            r.hasDouble = true;
+            for (int k = 0; k < a.componentCount(); ++k) {
+                r.d[k] = std::ldexp(realLane(a, k), intLane(b, k));
+                r.f[k] = static_cast<float>(r.d[k]);
+            }
+            return r;
+        }
         case ::GLSLstd450Step: {
             // step(edge, x) — edge is operand0 in GLSL, x is operand1.
             Value r = b;   // result matches x shape
             for (int k = 0; k < b.componentCount(); ++k) r.f[k] = (b.f[k] < a.f[k]) ? 0.0f : 1.0f;
+            clearDoubleSidecar(r);
             return r;
         }
 
@@ -3405,6 +3473,7 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
                 t = std::fmin(std::fmax(t, 0.0f), 1.0f);
                 r.f[k] = t * t * (3.0f - 2.0f * t);
             }
+            clearDoubleSidecar(r);
             return r;
         }
 
@@ -3415,6 +3484,7 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
             float s = 0.0f;
             for (int k = 0; k < a.componentCount(); ++k) s += a.f[k] * a.f[k];
             r.f[0] = std::sqrt(s);
+            r.d[0] = static_cast<double>(r.f[0]);
             return r;
         }
         case ::GLSLstd450Distance: {
@@ -3426,6 +3496,7 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
                 s += d * d;
             }
             r.f[0] = std::sqrt(s);
+            r.d[0] = static_cast<double>(r.f[0]);
             return r;
         }
         // GLSL `dot()` maps to SPIR-V OpDot (not an ext-inst), which is
@@ -3442,6 +3513,7 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
             } else {
                 for (int k = 0; k < a.componentCount(); ++k) r.f[k] = 0.0f;
             }
+            clearDoubleSidecar(r);
             return r;
         }
         case ::GLSLstd450Cross: {
@@ -3450,6 +3522,7 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
             r.f[0] = a.f[1] * b.f[2] - a.f[2] * b.f[1];
             r.f[1] = a.f[2] * b.f[0] - a.f[0] * b.f[2];
             r.f[2] = a.f[0] * b.f[1] - a.f[1] * b.f[0];
+            clearDoubleSidecar(r);
             return r;
         }
         case ::GLSLstd450Reflect: {
@@ -3459,6 +3532,46 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
             for (int k = 0; k < a.componentCount(); ++k) dotNI += b.f[k] * a.f[k];
             for (int k = 0; k < a.componentCount(); ++k) {
                 r.f[k] = a.f[k] - 2.0f * dotNI * b.f[k];
+            }
+            clearDoubleSidecar(r);
+            return r;
+        }
+        case ::GLSLstd450FaceForward: {
+            // faceforward(N, I, Nref) = dot(Nref, I) < 0 ? N : -N
+            Value r = a;
+            double dotNrefI = 0.0;
+            for (int k = 0; k < a.componentCount(); ++k) {
+                dotNrefI += realLane(c, k) * realLane(b, k);
+            }
+            const double sign = dotNrefI < 0.0 ? 1.0 : -1.0;
+            r.hasDouble = true;
+            for (int k = 0; k < a.componentCount(); ++k) {
+                r.d[k] = realLane(a, k) * sign;
+                r.f[k] = static_cast<float>(r.d[k]);
+            }
+            return r;
+        }
+        case ::GLSLstd450Refract: {
+            // refract(I, N, eta) per GLSL 8.5.
+            Value r = a;
+            double dotNI = 0.0;
+            for (int k = 0; k < a.componentCount(); ++k) {
+                dotNI += realLane(b, k) * realLane(a, k);
+            }
+            const double eta = realLane(c, 0);
+            const double kTerm = 1.0 - eta * eta * (1.0 - dotNI * dotNI);
+            r.hasDouble = true;
+            if (kTerm < 0.0) {
+                for (int k = 0; k < a.componentCount(); ++k) {
+                    r.d[k] = 0.0;
+                    r.f[k] = 0.0f;
+                }
+            } else {
+                const double scale = eta * dotNI + std::sqrt(kTerm);
+                for (int k = 0; k < a.componentCount(); ++k) {
+                    r.d[k] = eta * realLane(a, k) - scale * realLane(b, k);
+                    r.f[k] = static_cast<float>(r.d[k]);
+                }
             }
             return r;
         }
@@ -3478,6 +3591,7 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
             for (int k = 0; k < a.componentCount(); ++k) {
                 r.f[k] = a.f[k] * b.f[k] + c.f[k];
             }
+            clearDoubleSidecar(r);
             return r;
         }
 
@@ -3564,6 +3678,7 @@ void Interpreter::resetExecutionState() {
     valueStore_.clear();
     matrixColumns_.clear();
     varStorage_.clear();
+    varDoubleStorage_.clear();
     accessChains_.clear();
     writtenOutputVars_.clear();
     uboArrayVarMeta_.clear();
@@ -3598,9 +3713,11 @@ bool Interpreter::executeVs(EmulatedVertex& out) {
     out.position[2] = currentPosition_[2];
     out.position[3] = currentPosition_[3];
     out.varyings.clear();
+    out.doubleVaryings.clear();
     for (std::size_t k = 0; k < outputVaryingNames_.size(); ++k) {
         std::vector<float> v;
         v.assign(outputVaryingWidths_[k], 0.0f);
+        std::vector<double> dv(outputVaryingWidths_[k], 0.0);
         const std::string& wantName = outputVaryingNames_[k];
         bool matched = false;
         for (const auto& [varId, info] : module_.variables) {
@@ -3611,6 +3728,11 @@ bool Interpreter::executeVs(EmulatedVertex& out) {
                 if (sIt != varStorage_.end()) {
                     for (std::size_t j = 0; j < v.size() && j < sIt->second.size(); ++j) {
                         v[j] = sIt->second[j];
+                    }
+                    auto dIt = varDoubleStorage_.find(varId);
+                    for (std::size_t j = 0; j < dv.size(); ++j) {
+                        dv[j] = (dIt != varDoubleStorage_.end() && j < dIt->second.size())
+                            ? dIt->second[j] : static_cast<double>(v[j]);
                     }
                 }
                 matched = true;
@@ -3640,6 +3762,13 @@ bool Interpreter::executeVs(EmulatedVertex& out) {
                         for (std::size_t j = 0; j < v.size() && runningOff + j < sIt->second.size(); ++j) {
                             v[j] = sIt->second[runningOff + j];
                         }
+                        auto dIt = varDoubleStorage_.find(varId);
+                        for (std::size_t j = 0; j < dv.size(); ++j) {
+                            dv[j] = (dIt != varDoubleStorage_.end() &&
+                                     runningOff + j < dIt->second.size())
+                                ? dIt->second[runningOff + j]
+                                : static_cast<double>(v[j]);
+                        }
                     }
                     matched = true;
                     break;
@@ -3649,6 +3778,7 @@ bool Interpreter::executeVs(EmulatedVertex& out) {
             if (matched) break;
         }
         out.varyings.insert(out.varyings.end(), v.begin(), v.end());
+        out.doubleVaryings.insert(out.doubleVaryings.end(), dv.begin(), dv.end());
     }
     // Propagate the VS's gl_ClipDistance[] / gl_CullDistance[] so the
     // emulator's caller can feed them into the GS's gl_in[] and use
@@ -3804,6 +3934,10 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
         Value r;
         r.kind = floatKindForWidth(floatVectorWidthForType(typeId, fallbackWidth));
         return r;
+    };
+    auto realLane = [](const Value& v, int lane) -> double {
+        const int idx = std::min(lane, v.componentCount() - 1);
+        return v.hasDouble ? v.d[idx] : static_cast<double>(v.f[idx]);
     };
     auto matrixColumnsForId =
         [&](std::uint32_t id) -> const std::vector<Value>* {
@@ -5221,12 +5355,29 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 Value a, b;
                 if (!tryGetValue(w[2], a) || !tryGetValue(w[3], b)) { bail("arith: unknown operand"); break; }
                 Value r = a;
+                const bool useDouble = a.hasDouble || b.hasDouble;
+                r.hasDouble = useDouble;
                 for (int k = 0; k < a.componentCount(); ++k) {
-                    switch (opcode) {
-                        case spv::OpFAdd: r.f[k] = a.f[k] + b.f[k]; break;
-                        case spv::OpFSub: r.f[k] = a.f[k] - b.f[k]; break;
-                        case spv::OpFMul: r.f[k] = a.f[k] * b.f[k]; break;
-                        case spv::OpFDiv: r.f[k] = a.f[k] / b.f[k]; break;
+                    if (useDouble) {
+                        double rd = 0.0;
+                        switch (opcode) {
+                            case spv::OpFAdd: rd = realLane(a, k) + realLane(b, k); break;
+                            case spv::OpFSub: rd = realLane(a, k) - realLane(b, k); break;
+                            case spv::OpFMul: rd = realLane(a, k) * realLane(b, k); break;
+                            case spv::OpFDiv: rd = realLane(a, k) / realLane(b, k); break;
+                            default: break;
+                        }
+                        r.d[k] = rd;
+                        r.f[k] = static_cast<float>(rd);
+                    } else {
+                        switch (opcode) {
+                            case spv::OpFAdd: r.f[k] = a.f[k] + b.f[k]; break;
+                            case spv::OpFSub: r.f[k] = a.f[k] - b.f[k]; break;
+                            case spv::OpFMul: r.f[k] = a.f[k] * b.f[k]; break;
+                            case spv::OpFDiv: r.f[k] = a.f[k] / b.f[k]; break;
+                            default: break;
+                        }
+                        r.d[k] = static_cast<double>(r.f[k]);
                     }
                 }
                 valueStore_[w[1]] = r;
@@ -5250,7 +5401,16 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 Value a;
                 if (!tryGetValue(w[2], a)) { bail("OpFNegate: unknown operand"); break; }
                 Value r = a;
-                for (int k = 0; k < a.componentCount(); ++k) r.f[k] = -a.f[k];
+                for (int k = 0; k < a.componentCount(); ++k) {
+                    if (a.hasDouble) {
+                        const double rd = -realLane(a, k);
+                        r.d[k] = rd;
+                        r.f[k] = static_cast<float>(rd);
+                    } else {
+                        r.f[k] = -a.f[k];
+                        r.d[k] = static_cast<double>(r.f[k]);
+                    }
+                }
                 valueStore_[w[1]] = r;
                 pc += wc;
                 break;
@@ -7851,6 +8011,7 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     d.vertexCount = static_cast<std::size_t>(count) *
                     static_cast<std::size_t>(effectiveInstances);
     d.expandedVertexData.assign(d.vertexCount * fpv, 0.0f);
+    d.expandedVertexDoubleData.assign(d.vertexCount * fpv, 0.0);
     if (timing) {
         timingCounters.vertices.fetch_add(
             static_cast<std::uint64_t>(d.vertexCount),
@@ -7954,10 +8115,21 @@ EmulatedDraw emulateVsOnlyDrawForTf(
             const std::uint64_t packStart =
                 timing ? vsOnlyTfTimingNowNs() : 0;
             float* dst = d.expandedVertexData.data() + ordinal * fpv;
-            for (int k = 0; k < 4; ++k) dst[k] = outVertex.position[k];
+            double* ddst = d.expandedVertexDoubleData.data() + ordinal * fpv;
+            for (int k = 0; k < 4; ++k) {
+                dst[k] = outVertex.position[k];
+                ddst[k] = static_cast<double>(outVertex.position[k]);
+            }
             std::size_t cursor = 4;
             for (std::size_t k = 0; k < outVertex.varyings.size() && cursor < fpv; ++k) {
                 dst[cursor++] = outVertex.varyings[k];
+            }
+            cursor = 4;
+            for (std::size_t k = 0; k < outVertex.varyings.size() && cursor < fpv; ++k) {
+                ddst[cursor] = (k < outVertex.doubleVaryings.size())
+                    ? outVertex.doubleVaryings[k]
+                    : static_cast<double>(outVertex.varyings[k]);
+                ++cursor;
             }
             if (timing) {
                 addTimingNs(timingCounters.packOutputNs,
