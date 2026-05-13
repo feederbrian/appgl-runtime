@@ -47,7 +47,7 @@ namespace spv {
         OpVectorShuffle = 79,
         OpVectorTimesScalar = 142, OpMatrixTimesScalar = 143,
         OpVectorTimesMatrix = 144, OpMatrixTimesVector = 145,
-        OpMatrixTimesMatrix = 146, OpDot = 148,
+        OpMatrixTimesMatrix = 146, OpOuterProduct = 147, OpDot = 148,
         OpFNegate = 127,
         OpFAdd = 129, OpFSub = 131, OpFMul = 133, OpFDiv = 136, OpFMod = 141,
         OpIAdd = 128, OpISub = 130, OpIMul = 132,
@@ -3831,6 +3831,15 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             default: return 1;
         }
     };
+    auto matrixColsForType = [&](std::uint32_t matrixTypeId,
+                                 int fallbackCols) -> int {
+        auto mIt = module_.types.find(matrixTypeId);
+        if (mIt == module_.types.end() ||
+            mIt->second.kind != TypeInfo::Kind::Matrix) {
+            return std::clamp(fallbackCols, 1, 4);
+        }
+        return std::clamp(static_cast<int>(mIt->second.count), 1, 4);
+    };
     auto applyMatrixElementwise =
         [&](std::uint32_t resultId, std::uint32_t leftId,
             std::uint32_t rightId, std::uint16_t op) -> bool {
@@ -5340,6 +5349,31 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 pc += wc;
                 break;
             }
+            case spv::OpOuterProduct: {
+                Value left, right;
+                if (!tryGetValue(w[2], left) || !tryGetValue(w[3], right)) {
+                    bail("OpOuterProduct: unknown operand");
+                    break;
+                }
+                const int rows = matrixRowsForType(w[0], left.componentCount());
+                const int cols = matrixColsForType(w[0], right.componentCount());
+                std::vector<Value> outCols;
+                outCols.reserve(static_cast<std::size_t>(cols));
+                for (int col = 0; col < cols; ++col) {
+                    Value outCol;
+                    outCol.kind = floatKindForWidth(rows);
+                    const int rightLane = std::min(col, right.componentCount() - 1);
+                    for (int row = 0; row < rows; ++row) {
+                        const int leftLane = std::min(row, left.componentCount() - 1);
+                        outCol.f[row] = left.f[leftLane] * right.f[rightLane];
+                    }
+                    outCols.push_back(outCol);
+                }
+                matrixColumns_[w[1]] = std::move(outCols);
+                valueStore_.erase(w[1]);
+                pc += wc;
+                break;
+            }
             case spv::OpVectorShuffle: {
                 // w[0]=type, w[1]=resultId, w[2]=v1, w[3]=v2, w[4..]=indices
                 Value v1, v2;
@@ -6094,6 +6128,7 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpVectorTimesMatrix:
         case spv::OpMatrixTimesVector:
         case spv::OpMatrixTimesMatrix:
+        case spv::OpOuterProduct:
         case spv::OpDot:
         // ─ Int arith ─
         case spv::OpIAdd:
