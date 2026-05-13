@@ -34112,7 +34112,16 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     *program, *vao, *impl_->objects, *impl_->state,
                     mode, count, first);
                 if (ed.ok) {
-                    if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                    bool discard = false;
+                    if (appgl::vsOnlyTfTimingEnabled()) {
+                        const std::uint64_t t0 = appgl::vsOnlyTfTimingNowNs();
+                        discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
+                        appgl::recordVsOnlyTfWriteDurationNs(
+                            appgl::vsOnlyTfTimingNowNs() - t0);
+                    } else {
+                        discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
+                    }
+                    if (discard) {
                         return true;
                     }
                     // VS-only-TF without rasterizer-discard: fall
@@ -34682,7 +34691,16 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                 mode, count, first, instancecount, /*baseInstance=*/0,
                 /*elementIndices=*/nullptr);
             if (ed.ok) {
-                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                bool discard = false;
+                if (appgl::vsOnlyTfTimingEnabled()) {
+                    const std::uint64_t t0 = appgl::vsOnlyTfTimingNowNs();
+                    discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
+                    appgl::recordVsOnlyTfWriteDurationNs(
+                        appgl::vsOnlyTfTimingNowNs() - t0);
+                } else {
+                    discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
+                }
+                if (discard) {
                     return true;
                 }
             } else if (!ed.diagnostic.empty()) {
@@ -35362,7 +35380,16 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 /*instanceCount=*/1, /*baseInstance=*/0,
                 capIdx.data());
             if (ed.ok) {
-                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                bool discard = false;
+                if (appgl::vsOnlyTfTimingEnabled()) {
+                    const std::uint64_t t0 = appgl::vsOnlyTfTimingNowNs();
+                    discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
+                    appgl::recordVsOnlyTfWriteDurationNs(
+                        appgl::vsOnlyTfTimingNowNs() - t0);
+                } else {
+                    discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
+                }
+                if (discard) {
                     return true;
                 }
                 // VS-only-TF without rasterizer-discard: fall through
@@ -36394,7 +36421,16 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                 instancecount, /*baseInstance=*/0,
                 capIdx.data());
             if (ed.ok) {
-                if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
+                bool discard = false;
+                if (appgl::vsOnlyTfTimingEnabled()) {
+                    const std::uint64_t t0 = appgl::vsOnlyTfTimingNowNs();
+                    discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
+                    appgl::recordVsOnlyTfWriteDurationNs(
+                        appgl::vsOnlyTfTimingNowNs() - t0);
+                } else {
+                    discard = impl_->writeGsXfbAndCheckDiscard(*program, ed);
+                }
+                if (discard) {
                     return true;
                 }
             } else if (!ed.diagnostic.empty()) {

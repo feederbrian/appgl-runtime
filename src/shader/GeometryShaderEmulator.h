@@ -377,6 +377,13 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     // pass nullptr (default).
     const std::uint32_t* elementIndices = nullptr);
 
+// Sprint 20 Decision F Option A Step 0: env-gated aggregate timing
+// counters for the VS-only transform-feedback CPU path. These are no-ops
+// unless APPGL_DF64_VSTF_TIMING is present in the process environment.
+bool vsOnlyTfTimingEnabled();
+std::uint64_t vsOnlyTfTimingNowNs();
+void recordVsOnlyTfWriteDurationNs(std::uint64_t ns);
+
 // Sprint 17 Day 7+ Bank-Group-H Path B Component A1 helper. Walks the
 // VS SPIR-V's Output variable / struct-member decorations and returns
 // true iff any output is decorated `BuiltInCullDistance`. Used at link

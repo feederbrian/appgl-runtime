@@ -15,6 +15,10 @@
 #include "../objects/GLObjectStore.h"
 #include "../state/GLStateTracker.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 #ifdef APPGL_HAS_SHADER_COMPILER
@@ -7464,6 +7468,78 @@ std::unordered_map<std::string, std::uint32_t> buildVsInputLocationOverrides(
 }
 }  // namespace
 
+namespace {
+
+struct VsOnlyTfTimingCounters {
+    std::atomic<std::uint64_t> draws{0};
+    std::atomic<std::uint64_t> vertices{0};
+    std::atomic<std::uint64_t> failures{0};
+    std::atomic<std::uint64_t> parseNs{0};
+    std::atomic<std::uint64_t> reflectionNs{0};
+    std::atomic<std::uint64_t> setupNs{0};
+    std::atomic<std::uint64_t> attribFetchNs{0};
+    std::atomic<std::uint64_t> executeVsNs{0};
+    std::atomic<std::uint64_t> packOutputNs{0};
+    std::atomic<std::uint64_t> tfWriteNs{0};
+};
+
+VsOnlyTfTimingCounters& vsOnlyTfTimingCounters() {
+    static VsOnlyTfTimingCounters counters;
+    return counters;
+}
+
+std::uint64_t loadTimingCounter(const std::atomic<std::uint64_t>& value) {
+    return value.load(std::memory_order_relaxed);
+}
+
+void addTimingNs(std::atomic<std::uint64_t>& dst, std::uint64_t ns) {
+    dst.fetch_add(ns, std::memory_order_relaxed);
+}
+
+void printVsOnlyTfTimingSummary() {
+    auto& c = vsOnlyTfTimingCounters();
+    const std::uint64_t draws = loadTimingCounter(c.draws);
+    if (draws == 0) return;
+    std::fprintf(stderr,
+        "[APPGL_DF64_VSTF_TIMING] summary "
+        "draws=%llu vertices=%llu failures=%llu "
+        "parse_ns=%llu reflection_ns=%llu setup_ns=%llu "
+        "attrib_fetch_ns=%llu execute_vs_ns=%llu pack_output_ns=%llu "
+        "tf_write_ns=%llu\n",
+        static_cast<unsigned long long>(draws),
+        static_cast<unsigned long long>(loadTimingCounter(c.vertices)),
+        static_cast<unsigned long long>(loadTimingCounter(c.failures)),
+        static_cast<unsigned long long>(loadTimingCounter(c.parseNs)),
+        static_cast<unsigned long long>(loadTimingCounter(c.reflectionNs)),
+        static_cast<unsigned long long>(loadTimingCounter(c.setupNs)),
+        static_cast<unsigned long long>(loadTimingCounter(c.attribFetchNs)),
+        static_cast<unsigned long long>(loadTimingCounter(c.executeVsNs)),
+        static_cast<unsigned long long>(loadTimingCounter(c.packOutputNs)),
+        static_cast<unsigned long long>(loadTimingCounter(c.tfWriteNs)));
+}
+
+}  // namespace
+
+bool vsOnlyTfTimingEnabled() {
+    static const bool enabled = [] {
+        const bool on = std::getenv("APPGL_DF64_VSTF_TIMING") != nullptr;
+        if (on) std::atexit(printVsOnlyTfTimingSummary);
+        return on;
+    }();
+    return enabled;
+}
+
+std::uint64_t vsOnlyTfTimingNowNs() {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+void recordVsOnlyTfWriteDurationNs(std::uint64_t ns) {
+    if (!vsOnlyTfTimingEnabled()) return;
+    addTimingNs(vsOnlyTfTimingCounters().tfWriteNs, ns);
+}
+
 // Sprint 17 Day 7+ Bank-Group-H Path B Component A1 — public helper
 // for link-time VS gl_CullDistance detection. Wraps `scanClipCullWrites`
 // (in the anon namespace above) behind a stable signature so callers
@@ -7579,19 +7655,40 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     EmulatedDraw d;
     d.topology = drawMode;
     d.ok = false;
+    const bool timing = vsOnlyTfTimingEnabled();
+    auto& timingCounters = vsOnlyTfTimingCounters();
+    auto markFailure = [&]() {
+        if (timing) {
+            timingCounters.failures.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    if (timing) {
+        timingCounters.draws.fetch_add(1, std::memory_order_relaxed);
+    }
     if (program.vertexSpirv.empty()) {
+        markFailure();
         d.diagnostic = "emulateVsOnlyDrawForTf: empty VS SPIR-V";
         return d;
     }
     if (program.transformFeedbackVaryingNames.empty()) {
+        markFailure();
         d.diagnostic = "emulateVsOnlyDrawForTf: no TF varyings recorded";
         return d;
     }
+    const std::uint64_t parseStart = timing ? vsOnlyTfTimingNowNs() : 0;
     SpirvModule vsMod;
     if (!vsMod.parse(program.vertexSpirv.data(), program.vertexSpirv.size())) {
+        if (timing) {
+            addTimingNs(timingCounters.parseNs, vsOnlyTfTimingNowNs() - parseStart);
+        }
+        markFailure();
         d.diagnostic = "emulateVsOnlyDrawForTf: SpirvModule parse: " + vsMod.parseError;
         return d;
     }
+    if (timing) {
+        addTimingNs(timingCounters.parseNs, vsOnlyTfTimingNowNs() - parseStart);
+    }
+    const std::uint64_t reflectionStart = timing ? vsOnlyTfTimingNowNs() : 0;
     // Walk VS SPIR-V outputs once, then filter to TF-captured ones.
     // Order matches `program.transformFeedbackVaryingNames` so the
     // TF capture helper's offset arithmetic lands on the right bytes.
@@ -7641,11 +7738,21 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         d.varyingScalarByteSize.push_back(v.scalarByteSize);
     }
     d.floatsPerVertex = fpv;
+    if (timing) {
+        addTimingNs(timingCounters.reflectionNs,
+                    vsOnlyTfTimingNowNs() - reflectionStart);
+    }
 
+    const std::uint64_t setupStart = timing ? vsOnlyTfTimingNowNs() : 0;
     const GLsizei effectiveInstances = std::max<GLsizei>(1, instanceCount);
     d.vertexCount = static_cast<std::size_t>(count) *
                     static_cast<std::size_t>(effectiveInstances);
     d.expandedVertexData.assign(d.vertexCount * fpv, 0.0f);
+    if (timing) {
+        timingCounters.vertices.fetch_add(
+            static_cast<std::uint64_t>(d.vertexCount),
+            std::memory_order_relaxed);
+    }
 
     // Sprint 18 420pack qualifier_order_uniform: include ordinary
     // UBO roots as well as UBO arrays now that broader bool-op
@@ -7677,6 +7784,10 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     if (vsUboMapPtr != nullptr) {
         vsInterp.setUniformBuffers(vsUboMapPtr);
     }
+    if (timing) {
+        addTimingNs(timingCounters.setupNs,
+                    vsOnlyTfTimingNowNs() - setupStart);
+    }
 
     // Per-vertex VS interpretation. The immutable SPIR-V parse,
     // reflection-derived location overrides, uniform maps, VAO fetch
@@ -7698,6 +7809,8 @@ EmulatedDraw emulateVsOnlyDrawForTf(
                 static_cast<std::size_t>(instanceIdx) *
                     static_cast<std::size_t>(count) +
                 static_cast<std::size_t>(vi);
+            const std::uint64_t attribStart =
+                timing ? vsOnlyTfTimingNowNs() : 0;
             outVertex = EmulatedVertex{};
             outVertex.position[0] = outVertex.position[1] = outVertex.position[2] = 0.0f;
             outVertex.position[3] = 1.0f;
@@ -7711,18 +7824,35 @@ EmulatedDraw emulateVsOnlyDrawForTf(
             vsInterp.setVsInputs(&vsAttribs,
                                  static_cast<std::int32_t>(vboSlot),
                                  glInstanceID);
+            if (timing) {
+                addTimingNs(timingCounters.attribFetchNs,
+                            vsOnlyTfTimingNowNs() - attribStart);
+            }
+            const std::uint64_t executeStart =
+                timing ? vsOnlyTfTimingNowNs() : 0;
             const bool ok = vsInterp.executeVs(outVertex);
+            if (timing) {
+                addTimingNs(timingCounters.executeVsNs,
+                            vsOnlyTfTimingNowNs() - executeStart);
+            }
             if (!ok) {
+                markFailure();
                 vsDiag = vsInterp.diagnostic();
                 d.ok = false;
                 d.diagnostic = "VS-only-TF: " + vsDiag;
                 return d;
             }
+            const std::uint64_t packStart =
+                timing ? vsOnlyTfTimingNowNs() : 0;
             float* dst = d.expandedVertexData.data() + vIdx * fpv;
             for (int k = 0; k < 4; ++k) dst[k] = outVertex.position[k];
             std::size_t cursor = 4;
             for (std::size_t k = 0; k < outVertex.varyings.size() && cursor < fpv; ++k) {
                 dst[cursor++] = outVertex.varyings[k];
+            }
+            if (timing) {
+                addTimingNs(timingCounters.packOutputNs,
+                            vsOnlyTfTimingNowNs() - packStart);
             }
         }
     }
