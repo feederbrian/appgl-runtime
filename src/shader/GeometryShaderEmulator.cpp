@@ -154,7 +154,9 @@ enum GLSLstd450 : std::uint32_t {
 #include <cstring>
 #include <unordered_set>
 #include <iterator>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -7180,9 +7182,10 @@ bool vertexAttribUnsignedIntegerType(GLenum type) {
 }
 
 float readFloatVertexComponent(const std::uint8_t* src,
-                               const GLVertexAttributeState& attr,
+                               GLenum type,
+                               GLboolean normalized,
                                int component) {
-    switch (attr.type) {
+    switch (type) {
         case GL_FLOAT: {
             float v = 0.0f;
             std::memcpy(&v, src + component * 4, sizeof(v));
@@ -7206,19 +7209,25 @@ float readFloatVertexComponent(const std::uint8_t* src,
         default:
             break;
     }
-    if (vertexAttribSignedIntegerType(attr.type)) {
-        const std::int32_t v = readSignedVertexComponent(src, attr.type, component);
-        return attr.normalized == GL_TRUE
-            ? normalizeSignedVertexComponent(v, attr.type)
+    if (vertexAttribSignedIntegerType(type)) {
+        const std::int32_t v = readSignedVertexComponent(src, type, component);
+        return normalized == GL_TRUE
+            ? normalizeSignedVertexComponent(v, type)
             : static_cast<float>(v);
     }
-    if (vertexAttribUnsignedIntegerType(attr.type)) {
-        const std::uint32_t v = readUnsignedVertexComponent(src, attr.type, component);
-        return attr.normalized == GL_TRUE
-            ? normalizeUnsignedVertexComponent(v, attr.type)
+    if (vertexAttribUnsignedIntegerType(type)) {
+        const std::uint32_t v = readUnsignedVertexComponent(src, type, component);
+        return normalized == GL_TRUE
+            ? normalizeUnsignedVertexComponent(v, type)
             : static_cast<float>(v);
     }
     return 0.0f;
+}
+
+float readFloatVertexComponent(const std::uint8_t* src,
+                               const GLVertexAttributeState& attr,
+                               int component) {
+    return readFloatVertexComponent(src, attr.type, attr.normalized, component);
 }
 
 // Extract a single vertex's attribute value from a VAO + VBO shadow.
@@ -7333,8 +7342,10 @@ Value readVertexAttribFromVAO(
 }
 
 struct VsAttribFetchSource {
+    // Draw-local immutable VAO/VBO fetch snapshot. The VS-only TF
+    // chunk workers read this concurrently, so keep scalar attribute
+    // state here instead of retaining pointers into GLVertexArrayObject.
     std::uint32_t location = 0;
-    const GLVertexAttributeState* attr = nullptr;
     bool enabled = false;
     Value immediate;
     const std::uint8_t* data = nullptr;
@@ -7344,6 +7355,8 @@ struct VsAttribFetchSource {
     std::size_t stride = 0;
     GLuint divisor = 0;
     int componentCount = 4;
+    GLenum type = GL_FLOAT;
+    GLboolean normalized = GL_FALSE;
     bool isInt = false;
     bool isUInt = false;
 };
@@ -7358,8 +7371,9 @@ std::vector<VsAttribFetchSource> buildVsAttribFetchSources(
         const auto& attr = vao.attributes[ai];
         VsAttribFetchSource src;
         src.location = static_cast<std::uint32_t>(ai);
-        src.attr = &attr;
         src.enabled = attr.enabled;
+        src.type = attr.type;
+        src.normalized = attr.normalized;
         if (!attr.enabled) {
             src.immediate.kind = Value::Kind::Float4;
             for (int k = 0; k < 4; ++k) {
@@ -7409,7 +7423,7 @@ Value readVertexAttribFromSource(const VsAttribFetchSource& src,
     if (!src.enabled) return src.immediate;
 
     Value v;
-    if (src.attr == nullptr || src.data == nullptr || src.attrBytes == 0) return v;
+    if (src.data == nullptr || src.attrBytes == 0) return v;
     const std::size_t fetchIdx = src.divisor > 0
         ? (static_cast<std::size_t>(std::max<std::int32_t>(instanceIdx, 0)) /
            static_cast<std::size_t>(src.divisor))
@@ -7428,17 +7442,17 @@ Value readVertexAttribFromSource(const VsAttribFetchSource& src,
         v.i[3] = 1;
         for (int k = 0; k < src.componentCount; ++k) {
             if (src.isUInt) {
-                const std::uint32_t u = readUnsignedVertexComponent(raw, src.attr->type, k);
+                const std::uint32_t u = readUnsignedVertexComponent(raw, src.type, k);
                 v.i[k] = static_cast<std::int32_t>(u);
-            } else if (vertexAttribSignedIntegerType(src.attr->type)) {
-                v.i[k] = readSignedVertexComponent(raw, src.attr->type, k);
+            } else if (vertexAttribSignedIntegerType(src.type)) {
+                v.i[k] = readSignedVertexComponent(raw, src.type, k);
             }
         }
     } else {
         v.f[0] = v.f[1] = v.f[2] = 0.0f;
         v.f[3] = 1.0f;
         for (int k = 0; k < src.componentCount; ++k) {
-            v.f[k] = readFloatVertexComponent(raw, *src.attr, k);
+            v.f[k] = readFloatVertexComponent(raw, src.type, src.normalized, k);
         }
     }
     return v;
@@ -7494,6 +7508,41 @@ std::uint64_t loadTimingCounter(const std::atomic<std::uint64_t>& value) {
 
 void addTimingNs(std::atomic<std::uint64_t>& dst, std::uint64_t ns) {
     dst.fetch_add(ns, std::memory_order_relaxed);
+}
+
+// Env-gated Sprint 20 Phase 3a tuning. The threshold keeps tiny VS-only
+// TF draws, especially count=1 builtin probes, on the serial path while
+// still chunking vertex_attrib_64bit.limits_test-sized draws.
+constexpr std::size_t kVsOnlyTfChunkVertexThreshold = 512;
+constexpr std::size_t kVsOnlyTfMaxWorkerThreads = 8;  // M1 Max P-core cap.
+
+std::size_t requestedVsOnlyTfChunks() {
+    static const std::size_t chunks = [] {
+        const char* raw = std::getenv("APPGL_DF64_VSTF_CHUNKS");
+        if (raw == nullptr || *raw == '\0') return std::size_t{1};
+
+        char* end = nullptr;
+        const long parsed = std::strtol(raw, &end, 10);
+        if (end == raw || parsed <= 1) return std::size_t{1};
+        return static_cast<std::size_t>(std::min<long>(parsed, 64));
+    }();
+    return chunks;
+}
+
+std::size_t effectiveVsOnlyTfChunks(std::size_t totalVertices) {
+    const std::size_t requested = requestedVsOnlyTfChunks();
+    if (requested <= 1 || totalVertices <= kVsOnlyTfChunkVertexThreshold) {
+        return 1;
+    }
+
+    const unsigned hw = std::thread::hardware_concurrency();
+    const std::size_t hardwareCap = hw == 0
+        ? kVsOnlyTfMaxWorkerThreads
+        : std::min<std::size_t>(static_cast<std::size_t>(hw),
+                                kVsOnlyTfMaxWorkerThreads);
+    std::size_t chunks = std::min(requested, hardwareCap);
+    chunks = std::min(chunks, totalVertices);
+    return std::max<std::size_t>(1, chunks);
 }
 
 void printVsOnlyTfTimingSummary() {
@@ -7775,40 +7824,48 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         capturedNames.push_back(v.name);
         capturedWidths.push_back(v.width);
     }
-    Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
-                         capturedNames, capturedWidths);
-    vsInterp.setUniforms(&uniforms);
-    if (!vsInputLocOverrides.empty()) {
-        vsInterp.setVsInputLocationOverrides(&vsInputLocOverrides);
-    }
-    if (vsUboMapPtr != nullptr) {
-        vsInterp.setUniformBuffers(vsUboMapPtr);
-    }
-    if (timing) {
-        addTimingNs(timingCounters.setupNs,
-                    vsOnlyTfTimingNowNs() - setupStart);
-    }
+    const std::size_t chunkCount = effectiveVsOnlyTfChunks(d.vertexCount);
+    auto configureVsInterpreter = [&](Interpreter& interp) {
+        interp.setUniforms(&uniforms);
+        if (!vsInputLocOverrides.empty()) {
+            interp.setVsInputLocationOverrides(&vsInputLocOverrides);
+        }
+        if (vsUboMapPtr != nullptr) {
+            interp.setUniformBuffers(vsUboMapPtr);
+        }
+    };
 
-    // Per-vertex VS interpretation. The immutable SPIR-V parse,
-    // reflection-derived location overrides, uniform maps, VAO fetch
-    // sources, and interpreter construction are draw-level setup; each
-    // loop only refreshes attribute values and built-in vertex inputs.
-    EmulatedVertex outVertex;
-    Interpreter::VertexAttribs vsAttribs;
-    std::string vsDiag;
-    for (GLsizei instanceIdx = 0; instanceIdx < effectiveInstances; ++instanceIdx) {
-        const std::int32_t glInstanceID = instanceIdx;
-        (void)baseInstance;   // VS sees gl_InstanceID = instanceIdx; baseInstance affects VBO fetch only.
-        for (GLsizei vi = 0; vi < count; ++vi) {
+    // Sprint20 residual: preserve the pre-existing baseInstance handling
+    // in this VS-only TF path. gl_InstanceID remains instanceIdx, and
+    // instanced VBO fetch is not adjusted here by Phase 3a.
+    (void)baseInstance;
+
+    auto runVertexRange = [&](std::size_t beginVertex,
+                              std::size_t endVertex,
+                              Interpreter& vsInterp,
+                              const std::atomic<bool>* stopFlag,
+                              std::string& outDiagnostic) -> bool {
+        // Per-vertex VS interpretation. The immutable SPIR-V parse,
+        // reflection-derived location overrides, uniform maps, and VAO
+        // fetch sources are draw-level setup; each worker owns its
+        // Interpreter, attribute scratch map, diagnostic, and output slice.
+        EmulatedVertex outVertex;
+        Interpreter::VertexAttribs vsAttribs;
+        const std::size_t countSize = static_cast<std::size_t>(count);
+        for (std::size_t ordinal = beginVertex; ordinal < endVertex; ++ordinal) {
+            if (stopFlag != nullptr &&
+                stopFlag->load(std::memory_order_relaxed)) {
+                return true;
+            }
+            const std::size_t instanceOrdinal = ordinal / countSize;
+            const std::size_t vertexOrdinal = ordinal - instanceOrdinal * countSize;
+            const std::int32_t glInstanceID =
+                static_cast<std::int32_t>(instanceOrdinal);
             // Sprint 7 #9 (CKPT65) — drawElements indexes via
             // elementIndices[vi]; drawArrays uses sequential first+vi.
             const std::size_t vboSlot = (elementIndices != nullptr)
-                ? static_cast<std::size_t>(elementIndices[vi])
-                : static_cast<std::size_t>(first + vi);
-            const std::size_t vIdx =
-                static_cast<std::size_t>(instanceIdx) *
-                    static_cast<std::size_t>(count) +
-                static_cast<std::size_t>(vi);
+                ? static_cast<std::size_t>(elementIndices[vertexOrdinal])
+                : static_cast<std::size_t>(first + static_cast<GLint>(vertexOrdinal));
             const std::uint64_t attribStart =
                 timing ? vsOnlyTfTimingNowNs() : 0;
             outVertex = EmulatedVertex{};
@@ -7837,14 +7894,12 @@ EmulatedDraw emulateVsOnlyDrawForTf(
             }
             if (!ok) {
                 markFailure();
-                vsDiag = vsInterp.diagnostic();
-                d.ok = false;
-                d.diagnostic = "VS-only-TF: " + vsDiag;
-                return d;
+                outDiagnostic = vsInterp.diagnostic();
+                return false;
             }
             const std::uint64_t packStart =
                 timing ? vsOnlyTfTimingNowNs() : 0;
-            float* dst = d.expandedVertexData.data() + vIdx * fpv;
+            float* dst = d.expandedVertexData.data() + ordinal * fpv;
             for (int k = 0; k < 4; ++k) dst[k] = outVertex.position[k];
             std::size_t cursor = 4;
             for (std::size_t k = 0; k < outVertex.varyings.size() && cursor < fpv; ++k) {
@@ -7854,6 +7909,70 @@ EmulatedDraw emulateVsOnlyDrawForTf(
                 addTimingNs(timingCounters.packOutputNs,
                             vsOnlyTfTimingNowNs() - packStart);
             }
+        }
+        return true;
+    };
+
+    std::optional<Interpreter> serialVsInterp;
+    if (chunkCount == 1) {
+        serialVsInterp.emplace(vsMod, Interpreter::Stage::Vertex,
+                               capturedNames, capturedWidths);
+        configureVsInterpreter(*serialVsInterp);
+    }
+    if (timing) {
+        addTimingNs(timingCounters.setupNs,
+                    vsOnlyTfTimingNowNs() - setupStart);
+    }
+
+    std::string vsDiag;
+    if (chunkCount == 1) {
+        if (!runVertexRange(0, d.vertexCount, *serialVsInterp, nullptr, vsDiag)) {
+            d.ok = false;
+            d.diagnostic = "VS-only-TF: " + vsDiag;
+            return d;
+        }
+    } else {
+        std::atomic<bool> failed{false};
+        std::mutex diagnosticMutex;
+        std::string firstDiagnostic;
+        auto recordFailure = [&](const std::string& diag) {
+            bool expected = false;
+            if (failed.compare_exchange_strong(expected, true,
+                                               std::memory_order_relaxed)) {
+                std::lock_guard<std::mutex> lock(diagnosticMutex);
+                firstDiagnostic = diag;
+            }
+        };
+
+        std::vector<std::thread> workers;
+        workers.reserve(chunkCount);
+        const std::size_t verticesPerChunk =
+            (d.vertexCount + chunkCount - 1) / chunkCount;
+        for (std::size_t chunk = 0; chunk < chunkCount; ++chunk) {
+            const std::size_t beginVertex = chunk * verticesPerChunk;
+            const std::size_t endVertex =
+                std::min(d.vertexCount, beginVertex + verticesPerChunk);
+            if (beginVertex >= endVertex) break;
+            workers.emplace_back([&, beginVertex, endVertex] {
+                Interpreter workerInterp(vsMod, Interpreter::Stage::Vertex,
+                                         capturedNames, capturedWidths);
+                configureVsInterpreter(workerInterp);
+                std::string workerDiagnostic;
+                if (!runVertexRange(beginVertex, endVertex, workerInterp,
+                                    &failed, workerDiagnostic)) {
+                    recordFailure(workerDiagnostic);
+                }
+            });
+        }
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+        if (failed.load(std::memory_order_relaxed)) {
+            d.ok = false;
+            d.diagnostic = "VS-only-TF: " +
+                (firstDiagnostic.empty() ? std::string("worker failure")
+                                         : firstDiagnostic);
+            return d;
         }
     }
 
