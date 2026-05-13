@@ -5752,7 +5752,26 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 if (!tryGetValue(w[2], c) || !tryGetValue(w[3], t) || !tryGetValue(w[4], f)) {
                     bail("OpSelect: unknown operand"); break;
                 }
-                valueStore_[w[1]] = c.bval ? t : f;
+                if (c.componentCount() <= 1) {
+                    valueStore_[w[1]] = truthy(c, 0) ? t : f;
+                    pc += wc;
+                    break;
+                }
+
+                Value r = t;
+                const int lanes = std::min(r.componentCount(), 4);
+                for (int k = 0; k < lanes; ++k) {
+                    const Value& src = truthy(c, k) ? t : f;
+                    const int srcLane = std::min(k, src.componentCount() - 1);
+                    if (r.isFloatKind()) {
+                        r.f[k] = src.f[srcLane];
+                    } else if (r.isIntKind()) {
+                        r.i[k] = src.i[srcLane];
+                    } else if (r.kind == Value::Kind::Bool) {
+                        r.bval = truthy(src, srcLane);
+                    }
+                }
+                valueStore_[w[1]] = r;
                 pc += wc;
                 break;
             }
