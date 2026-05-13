@@ -716,6 +716,8 @@ private:
         errored_ = true;
     }
 
+    void resetExecutionState();
+
     // Initialise variable storage for entryInterface. Called at
     // execute() start.
     void initVariables(const std::vector<PerVertexInput>& inputs);
@@ -3552,7 +3554,25 @@ bool Interpreter::executeTes(EmulatedVertex& out,
     return !errored_;
 }
 
+void Interpreter::resetExecutionState() {
+    valueStore_.clear();
+    matrixColumns_.clear();
+    varStorage_.clear();
+    accessChains_.clear();
+    writtenOutputVars_.clear();
+    uboArrayVarMeta_.clear();
+    uboVarMeta_.clear();
+    ssboVarMeta_.clear();
+    sampledImages_.clear();
+    pendingImageWrites_.clear();
+    currentPosition_ = {0.0f, 0.0f, 0.0f, 1.0f};
+    currentOutVaryings_.clear();
+    diagnostic_.clear();
+    errored_ = false;
+}
+
 bool Interpreter::executeVs(EmulatedVertex& out) {
+    resetExecutionState();
     if (!module_.haveFuncBody) {
         diagnostic_ = "SPIR-V module has no function body";
         return false;
@@ -7307,6 +7327,141 @@ Value readVertexAttribFromVAO(
     }
     return v;
 }
+
+struct VsAttribFetchSource {
+    std::uint32_t location = 0;
+    const GLVertexAttributeState* attr = nullptr;
+    bool enabled = false;
+    Value immediate;
+    const std::uint8_t* data = nullptr;
+    std::size_t dataSize = 0;
+    std::size_t attrBytes = 0;
+    std::size_t baseOffset = 0;
+    std::size_t stride = 0;
+    GLuint divisor = 0;
+    int componentCount = 4;
+    bool isInt = false;
+    bool isUInt = false;
+};
+
+std::vector<VsAttribFetchSource> buildVsAttribFetchSources(
+    const GLVertexArrayObject& vao,
+    GLObjectStore& objects)
+{
+    std::vector<VsAttribFetchSource> sources;
+    sources.reserve(vao.attributes.size());
+    for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
+        const auto& attr = vao.attributes[ai];
+        VsAttribFetchSource src;
+        src.location = static_cast<std::uint32_t>(ai);
+        src.attr = &attr;
+        src.enabled = attr.enabled;
+        if (!attr.enabled) {
+            src.immediate.kind = Value::Kind::Float4;
+            for (int k = 0; k < 4; ++k) {
+                src.immediate.f[k] = static_cast<float>(attr.immediateDouble[k]);
+            }
+            sources.push_back(src);
+            continue;
+        }
+
+        GLuint bufferName = attr.buffer;
+        src.attrBytes = vertexAttribByteSize(attr);
+        if (src.attrBytes == 0) continue;
+        src.componentCount = (attr.size == static_cast<GLint>(GL_BGRA))
+            ? 4 : std::clamp(attr.size, 1, 4);
+        src.baseOffset = attr.pointer;
+        src.stride = attr.stride > 0 ? static_cast<std::size_t>(attr.stride)
+                                     : src.attrBytes;
+        src.divisor = attr.divisor;
+        if (attr.bindingIndex < vao.bindingPoints.size()) {
+            const auto& bp = vao.bindingPoints[attr.bindingIndex];
+            src.divisor = bp.divisor;
+            if (bp.buffer != 0) {
+                bufferName = bp.buffer;
+                src.baseOffset = static_cast<std::size_t>(bp.offset) +
+                                 static_cast<std::size_t>(attr.relativeOffset);
+                if (bp.stride > 0) {
+                    src.stride = static_cast<std::size_t>(bp.stride);
+                }
+            }
+        }
+        if (bufferName == 0) continue;
+        GLBufferObject* buf = objects.buffers().get(bufferName);
+        if (buf == nullptr || buf->shadowBytes.empty()) continue;
+        src.data = buf->shadowBytes.data();
+        src.dataSize = buf->shadowBytes.size();
+        src.isUInt = attr.integer && vertexAttribUnsignedIntegerType(attr.type);
+        src.isInt = attr.integer && !src.isUInt;
+        sources.push_back(src);
+    }
+    return sources;
+}
+
+Value readVertexAttribFromSource(const VsAttribFetchSource& src,
+                                 std::size_t vertexIdx,
+                                 std::int32_t instanceIdx)
+{
+    if (!src.enabled) return src.immediate;
+
+    Value v;
+    if (src.attr == nullptr || src.data == nullptr || src.attrBytes == 0) return v;
+    const std::size_t fetchIdx = src.divisor > 0
+        ? (static_cast<std::size_t>(std::max<std::int32_t>(instanceIdx, 0)) /
+           static_cast<std::size_t>(src.divisor))
+        : vertexIdx;
+    const std::size_t byteOffset = src.baseOffset + src.stride * fetchIdx;
+    if (byteOffset > src.dataSize || src.attrBytes > src.dataSize - byteOffset) {
+        return v;
+    }
+
+    const std::uint8_t* raw = src.data + byteOffset;
+    v.kind = src.isInt ? Value::Kind::Int4
+           : src.isUInt ? Value::Kind::UInt4
+                        : Value::Kind::Float4;
+    if (src.isInt || src.isUInt) {
+        v.i[0] = v.i[1] = v.i[2] = 0;
+        v.i[3] = 1;
+        for (int k = 0; k < src.componentCount; ++k) {
+            if (src.isUInt) {
+                const std::uint32_t u = readUnsignedVertexComponent(raw, src.attr->type, k);
+                v.i[k] = static_cast<std::int32_t>(u);
+            } else if (vertexAttribSignedIntegerType(src.attr->type)) {
+                v.i[k] = readSignedVertexComponent(raw, src.attr->type, k);
+            }
+        }
+    } else {
+        v.f[0] = v.f[1] = v.f[2] = 0.0f;
+        v.f[3] = 1.0f;
+        for (int k = 0; k < src.componentCount; ++k) {
+            v.f[k] = readFloatVertexComponent(raw, *src.attr, k);
+        }
+    }
+    return v;
+}
+
+std::unordered_map<std::string, std::uint32_t> buildVsInputLocationOverrides(
+    const GLProgramObject& program)
+{
+    std::unordered_map<std::string, std::uint32_t> overrides;
+    for (const auto& vi : program.vertexReflection.vertexInputs) {
+        std::string base = vi.name;
+        const std::size_t bracket = base.find('[');
+        if (bracket != std::string::npos) base.resize(bracket);
+        auto it = overrides.find(base);
+        if (it == overrides.end() || it->second > vi.location) {
+            overrides[base] = vi.location;
+        }
+    }
+    for (const auto& attrib : program.attributes) {
+        if (attrib.location < 0 || attrib.name.empty()) continue;
+        std::string base = attrib.name;
+        const std::size_t bracket = base.find('[');
+        if (bracket != std::string::npos) base.resize(bracket);
+        overrides[base] = static_cast<std::uint32_t>(attrib.location);
+    }
+    return overrides;
+}
 }  // namespace
 
 // Sprint 17 Day 7+ Bank-Group-H Path B Component A1 — public helper
@@ -7432,12 +7587,26 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         d.diagnostic = "emulateVsOnlyDrawForTf: no TF varyings recorded";
         return d;
     }
+    SpirvModule vsMod;
+    if (!vsMod.parse(program.vertexSpirv.data(), program.vertexSpirv.size())) {
+        d.diagnostic = "emulateVsOnlyDrawForTf: SpirvModule parse: " + vsMod.parseError;
+        return d;
+    }
     // Walk VS SPIR-V outputs once, then filter to TF-captured ones.
     // Order matches `program.transformFeedbackVaryingNames` so the
     // TF capture helper's offset arithmetic lands on the right bytes.
-    const std::vector<VsOutputVaryingInfo> allOutputs =
-        discoverVsOutputVaryings(program.vertexSpirv.data(),
-                                 program.vertexSpirv.size());
+    std::vector<VsOutputVaryingInfo> allOutputs;
+    const std::vector<OutputVaryingDesc> rawOutputs = gatherOutputVaryings(vsMod);
+    allOutputs.reserve(rawOutputs.size());
+    for (const auto& v : rawOutputs) {
+        VsOutputVaryingInfo info;
+        info.name = v.name;
+        info.width = v.width;
+        info.location = v.location;
+        info.baseType = v.baseType;
+        info.scalarByteSize = v.scalarByteSize;
+        allOutputs.push_back(std::move(info));
+    }
     std::vector<VsOutputVaryingInfo> captured;
     for (const auto& tfName : program.transformFeedbackVaryingNames) {
         if (tfName == "gl_Position") continue;   // handled by position[4]
@@ -7486,10 +7655,35 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     const Interpreter::UniformBufferMap* vsUboMapPtr =
         vsUboMap.empty() ? nullptr : &vsUboMap;
 
-    // Per-vertex VS interpretation. runVsForVertex captures position +
-    // named output varyings into an EmulatedVertex; we pack into the
-    // flat per-vertex slot in `expandedVertexData`.
+    Interpreter::UniformValues uniforms = buildUniformMap(program);
+    std::unordered_map<std::string, std::uint32_t> vsInputLocOverrides =
+        buildVsInputLocationOverrides(program);
+    const std::vector<VsAttribFetchSource> vsAttribSources =
+        buildVsAttribFetchSources(vao, objects);
+    std::vector<std::string> capturedNames;
+    std::vector<std::uint32_t> capturedWidths;
+    capturedNames.reserve(captured.size());
+    capturedWidths.reserve(captured.size());
+    for (const auto& v : captured) {
+        capturedNames.push_back(v.name);
+        capturedWidths.push_back(v.width);
+    }
+    Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
+                         capturedNames, capturedWidths);
+    vsInterp.setUniforms(&uniforms);
+    if (!vsInputLocOverrides.empty()) {
+        vsInterp.setVsInputLocationOverrides(&vsInputLocOverrides);
+    }
+    if (vsUboMapPtr != nullptr) {
+        vsInterp.setUniformBuffers(vsUboMapPtr);
+    }
+
+    // Per-vertex VS interpretation. The immutable SPIR-V parse,
+    // reflection-derived location overrides, uniform maps, VAO fetch
+    // sources, and interpreter construction are draw-level setup; each
+    // loop only refreshes attribute values and built-in vertex inputs.
     EmulatedVertex outVertex;
+    Interpreter::VertexAttribs vsAttribs;
     std::string vsDiag;
     for (GLsizei instanceIdx = 0; instanceIdx < effectiveInstances; ++instanceIdx) {
         const std::int32_t glInstanceID = instanceIdx;
@@ -7507,28 +7701,19 @@ EmulatedDraw emulateVsOnlyDrawForTf(
             outVertex = EmulatedVertex{};
             outVertex.position[0] = outVertex.position[1] = outVertex.position[2] = 0.0f;
             outVertex.position[3] = 1.0f;
-            // Build the captured-varying name+width vectors that
-            // runVsForVertex needs; matches our layout so out.varyings
-            // packs in the same order.
-            std::vector<std::string> capturedNames;
-            std::vector<std::uint32_t> capturedWidths;
-            capturedNames.reserve(captured.size());
-            capturedWidths.reserve(captured.size());
-            for (const auto& v : captured) {
-                capturedNames.push_back(v.name);
-                capturedWidths.push_back(v.width);
+            vsAttribs.clear();
+            for (const auto& src : vsAttribSources) {
+                Value v = readVertexAttribFromSource(src, vboSlot, glInstanceID);
+                if (v.kind != Value::Kind::Invalid) {
+                    vsAttribs[src.location] = v;
+                }
             }
-            const bool ok = runVsForVertex(
-                program.vertexSpirv.data(),
-                program.vertexSpirv.size(),
-                program, vao, objects, vboSlot,
-                glInstanceID,
-                capturedNames, capturedWidths,
-                outVertex, &vsDiag,
-                /*sampledTextures=*/ nullptr,
-                /*storageImages=*/ nullptr,
-                /*uniformBuffers=*/ vsUboMapPtr);
+            vsInterp.setVsInputs(&vsAttribs,
+                                 static_cast<std::int32_t>(vboSlot),
+                                 glInstanceID);
+            const bool ok = vsInterp.executeVs(outVertex);
             if (!ok) {
+                vsDiag = vsInterp.diagnostic();
                 d.ok = false;
                 d.diagnostic = "VS-only-TF: " + vsDiag;
                 return d;
@@ -9527,12 +9712,12 @@ bool runVsForVertex(
     }
 
     // Build uniform map + vertex-attribute map the Interpreter expects.
-    // `buildUniformMap` + `readVertexAttribFromVAO` live in the anon
-    // namespace alongside the Interpreter — same TU, so we can call
-    // them here.
+    // `buildUniformMap` + the VAO fetch-source helpers live in the
+    // anon namespace alongside the Interpreter — same TU, so we can
+    // call them here.
     Interpreter::UniformValues uniforms = buildUniformMap(program);
 
-    // `readVertexAttribFromVAO` takes non-const GLObjectStore&
+    // VAO shadow reads take non-const GLObjectStore&
     // because the BufferObject shadow-pointer readback path is
     // non-const. We cast away the const on the caller's input since
     // we're only reading — future readVertexAttribFromVAO could be
@@ -9540,12 +9725,13 @@ bool runVsForVertex(
     GLObjectStore& mutableObjects = const_cast<GLObjectStore&>(objects);
 
     Interpreter::VertexAttribs vsAttribs;
-    for (std::size_t ai = 0; ai < vao.attributes.size(); ++ai) {
+    const std::vector<VsAttribFetchSource> vsAttribSources =
+        buildVsAttribFetchSources(vao, mutableObjects);
+    for (const auto& src : vsAttribSources) {
         // Disabled attributes still feed the VS from current generic state.
-        Value v = readVertexAttribFromVAO(
-            vao, mutableObjects, ai, vboSlot, instanceID);
+        Value v = readVertexAttribFromSource(src, vboSlot, instanceID);
         if (v.kind != Value::Kind::Invalid) {
-            vsAttribs[static_cast<std::uint32_t>(ai)] = v;
+            vsAttribs[src.location] = v;
         }
     }
 
@@ -9562,27 +9748,12 @@ bool runVsForVertex(
     // precedent: glslang's xfb path strips those decorations from
     // certain inputs while still emitting per-element Location info
     // SPIRV-Cross can recover at MSL-emit time).
-    std::unordered_map<std::string, std::uint32_t> vsInputLocOverrides;
-    for (const auto& vi : program.vertexReflection.vertexInputs) {
-        std::string base = vi.name;
-        const std::size_t bracket = base.find('[');
-        if (bracket != std::string::npos) base.resize(bracket);
-        auto it = vsInputLocOverrides.find(base);
-        if (it == vsInputLocOverrides.end() || it->second > vi.location) {
-            vsInputLocOverrides[base] = vi.location;
-        }
-    }
+    std::unordered_map<std::string, std::uint32_t> vsInputLocOverrides =
+        buildVsInputLocationOverrides(program);
     // Link-time GLProgramObject::attributes is the authoritative GL view:
     // it folds in glBindAttribLocation requests, which SPIRV-Cross
     // reflection cannot observe from raw SPIR-V. VS-only TF tests that bind
     // a_0, a_2, ... to sparse locations need those exact indices.
-    for (const auto& attrib : program.attributes) {
-        if (attrib.location < 0 || attrib.name.empty()) continue;
-        std::string base = attrib.name;
-        const std::size_t bracket = base.find('[');
-        if (bracket != std::string::npos) base.resize(bracket);
-        vsInputLocOverrides[base] = static_cast<std::uint32_t>(attrib.location);
-    }
 
     Interpreter vsInterp(vsMod, Interpreter::Stage::Vertex,
                          outVaryingNames, outVaryingWidths);
