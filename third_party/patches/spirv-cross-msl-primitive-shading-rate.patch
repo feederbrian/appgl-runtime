@@ -1,0 +1,33 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index 23682f28..ddf18979 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -21561,6 +21561,17 @@ string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
+ 			return stage_in_var_name + "." + CompilerGLSL::builtin_to_glsl(builtin, storage);
+ 		break;
+ 
++	case BuiltInShadingRateKHR:
++	case BuiltInPrimitiveShadingRateKHR:
++		if (builtin_declaration)
++			return "spv_ShadingRateEXT";
++		if (storage == StorageClassInput && current_function && (current_function->self == ir.default_entry_point))
++			return stage_in_var_name + ".spv_ShadingRateEXT";
++		if (storage != StorageClassInput && current_function && (current_function->self == ir.default_entry_point) &&
++		    !is_stage_output_builtin_masked(builtin))
++			return stage_out_var_name + ".spv_ShadingRateEXT";
++		return "spv_ShadingRateEXT";
++
+ 	case BuiltInTessLevelOuter:
+ 		if (is_tesc_shader() && storage != StorageClassInput && current_function &&
+ 		    (current_function->self == ir.default_entry_point))
+@@ -21832,8 +21843,8 @@ string CompilerMSL::builtin_qualifier(BuiltIn builtin)
+ 	case BuiltInPrimitiveShadingRateKHR:
+ 		if (!msl_options.supports_msl_version(2, 4))
+ 			SPIRV_CROSS_THROW("PrimitiveShadingRate output requires MSL 2.4.");
+-		if (execution.model != ExecutionModelMeshEXT)
+-			SPIRV_CROSS_THROW("PrimitiveShadingRate output requires a mesh-shader execution model in MSL.");
++		if (execution.model != ExecutionModelMeshEXT && execution.model != ExecutionModelVertex)
++			SPIRV_CROSS_THROW("PrimitiveShadingRate output requires a mesh-shader or vertex execution model in MSL.");
+ 		return "primitive_shading_rate";
+ 
+ 	default:

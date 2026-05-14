@@ -1579,6 +1579,40 @@ backing the SPV_KHR_fragment_shading_rate capability that
 
 **Regression-safe:** All additions are switch-arms with version-gates guarded by `msl_options.supports_msl_version(2, 4)`; the pre-patch behavior is exactly preserved for any target below MSL 2.4. The mesh-out path's early-return is preserved verbatim when `!supports_msl_version(2, 4)`. No new SPVFuncImpl helpers, no new public API. Patch size: 7 hunks, 33 lines added, 2 lines removed (35 LOC net additions excluding context).
 
+### `spirv-cross-msl-primitive-shading-rate.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — narrows the
+Sprint 20 Path A primitive fragment-shading-rate prototype unblock.
+
+**Summary:** Two surgical changes layer on top of
+`spirv-cross-msl-shading-rate-builtins.patch`:
+(1) `CompilerMSL::builtin_qualifier` now allows
+`BuiltInPrimitiveShadingRateKHR` from the vertex execution model in addition
+to mesh shaders, guarded by the same MSL 2.4 version gate.
+(2) `CompilerMSL::builtin_to_glsl` coalesces
+`BuiltInPrimitiveShadingRateKHR` and `BuiltInShadingRateKHR` to the shared MSL
+stage-interface member name `spv_ShadingRateEXT`.
+
+**Why:** Sprint 20 semantic probe
+`primitive_fsr_semantic_probe.mm` proved the current Apple runtime propagates a
+vertex `[[primitive_shading_rate]]` output to fragment `[[shading_rate]]`, but
+the exact GLSL built-in names (`gl_PrimitiveShadingRateEXT` →
+`gl_ShadingRateEXT`) fail Metal pipeline link as a stage-interface name
+mismatch. The shared `spv_ShadingRateEXT` member name matches the empirically
+working ABI while preserving the MSL attributes that carry the primitive/effective
+rate semantics.
+
+**CTS tests advanced (sub-section progress):** Translation is no longer blocked
+for vertex-stage `gl_PrimitiveShadingRateEXT` when the runtime opts into
+`GL_EXT_fragment_shading_rate_primitive`. Full CTS flip count is deferred to the
+AppGL env-gated Path A prototype because advertising, combiner validation, and
+render-pass rate-map interaction are runtime responsibilities.
+
+**Regression-safe:** MSL 2.4 remains required. The new execution-model
+allow-list adds only `ExecutionModelVertex`; other non-mesh stages still throw.
+The shared member name is limited to the two SPV_KHR_fragment_shading_rate
+builtins and only affects MSL interface naming for those builtins.
+
 ### `spirv-cross-msl-sparse-feedback.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — implements `CompilerMSL::emit_texture_op` lowering for `OpImageSparseSample*` / `OpImageSparseFetch` / `OpImageSparseGather*` / `OpImageSparseTexelsResident`, backing `SPV_KHR_sparse_residency` (the SPIR-V capability that `GL_ARB_sparse_texture2` and `GL_ARB_sparse_texture_clamp` lower to).
