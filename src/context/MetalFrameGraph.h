@@ -285,6 +285,13 @@ struct TranslatedDrawInfo {
     bool sampleShadingEnabled = false;
     float minSampleShading = 0.0f;
     GLenum fragmentShadingRate = GL_SHADING_RATE_1X1_PIXELS_EXT;
+    struct FragmentShadingRateShaderState {
+        std::uint32_t apiRate = 0;
+        std::uint32_t attachmentRate = 0;
+        std::uint32_t combinerOp0 = 0;
+        std::uint32_t combinerOp1 = 0;
+    };
+    FragmentShadingRateShaderState fragmentShadingRateShaderState;
 
     // RC-A02: viewport state.  Plumbed from glViewport so Metal's render
     // encoder receives the correct viewport rectangle.

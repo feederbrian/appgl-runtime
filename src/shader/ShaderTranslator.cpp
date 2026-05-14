@@ -27,6 +27,7 @@ namespace {
 std::once_flag g_glslangInitFlag;
 constexpr std::uint32_t kDefaultUniformSyntheticBinding = 1024u;
 constexpr std::uint32_t kFragCoordParamsBufferSlot = 15u;
+constexpr std::uint32_t kFragmentShadingRateParamsBufferSlot = 30u;
 constexpr std::uint32_t kMultisampleStorageImageSampleCountsBufferSlot = 30u;
 constexpr std::uint32_t kMaxMetalBufferSlot = 30u;
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
@@ -518,6 +519,119 @@ bool findMain0ParameterEnd(const std::string& msl, std::size_t& paramEnd) {
         ++paramEnd;
     }
     return depth == 0 && paramEnd < msl.size();
+}
+
+bool injectPrimitiveFragmentShadingRateCombiner(std::string& msl) {
+    static constexpr const char* kPrimitiveRateAttr = "[[primitive_shading_rate]]";
+    static constexpr const char* kStateName = "_appgl_FSRState";
+    static constexpr const char* kCombineFunction = "appgl_fsr_combine_vertex_rate";
+    if (msl.find(kPrimitiveRateAttr) == std::string::npos ||
+        msl.find(kStateName) != std::string::npos) {
+        return false;
+    }
+
+    const std::string bufferAttr =
+        "[[buffer(" + std::to_string(kFragmentShadingRateParamsBufferSlot) + ")]]";
+    if (msl.find(bufferAttr) != std::string::npos) {
+        return false;
+    }
+
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+
+    bool wrappedAssignment = false;
+    static constexpr const char* kAssignNeedle = ".spv_ShadingRateEXT =";
+    std::size_t pos = 0;
+    while ((pos = msl.find(kAssignNeedle, pos)) != std::string::npos) {
+        const std::size_t rhsStart = pos + std::strlen(kAssignNeedle);
+        const std::size_t semi = msl.find(';', rhsStart);
+        if (semi == std::string::npos) {
+            break;
+        }
+
+        std::string rhs = msl.substr(rhsStart, semi - rhsStart);
+        if (rhs.find(kCombineFunction) != std::string::npos) {
+            pos = semi + 1;
+            continue;
+        }
+        const std::size_t exprBegin = rhs.find_first_not_of(" \t\r\n");
+        const std::size_t exprEnd = rhs.find_last_not_of(" \t\r\n");
+        if (exprBegin == std::string::npos || exprEnd == std::string::npos) {
+            pos = semi + 1;
+            continue;
+        }
+
+        const std::string expr = rhs.substr(exprBegin, exprEnd - exprBegin + 1);
+        const std::string replacement =
+            " " + std::string(kCombineFunction) + "((" + expr + "), " + kStateName + ")";
+        msl.replace(rhsStart, semi - rhsStart, replacement);
+        pos = rhsStart + replacement.size();
+        wrappedAssignment = true;
+    }
+
+    if (!wrappedAssignment) {
+        return false;
+    }
+
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    const std::string param =
+        ", constant AppGLFragmentShadingRateState& " + std::string(kStateName) +
+        " [[buffer(" + std::to_string(kFragmentShadingRateParamsBufferSlot) + ")]]";
+    msl.insert(paramEnd, param);
+
+    const std::string support = R"MSL(
+struct AppGLFragmentShadingRateState {
+    uint apiRate;
+    uint attachmentRate;
+    uint combinerOp0;
+    uint combinerOp1;
+};
+
+inline uint appgl_fsr_width(uint rate) {
+    return 1u << ((rate >> 2u) & 3u);
+}
+
+inline uint appgl_fsr_height(uint rate) {
+    return 1u << (rate & 3u);
+}
+
+inline uint appgl_fsr_pack(uint width, uint height) {
+    const uint x = width >= 4u ? 2u : (width >= 2u ? 1u : 0u);
+    const uint y = height >= 4u ? 2u : (height >= 2u ? 1u : 0u);
+    return (x << 2u) | y;
+}
+
+inline uint appgl_fsr_combine(uint first, uint second, uint op) {
+    if (op == 0u) return first;
+    if (op == 1u) return second;
+    const uint fw = appgl_fsr_width(first);
+    const uint fh = appgl_fsr_height(first);
+    const uint sw = appgl_fsr_width(second);
+    const uint sh = appgl_fsr_height(second);
+    if (op == 2u) return appgl_fsr_pack(fw < sw ? fw : sw, fh < sh ? fh : sh);
+    if (op == 3u) return appgl_fsr_pack(fw > sw ? fw : sw, fh > sh ? fh : sh);
+    if (op == 4u) return appgl_fsr_pack(fw * sw, fh * sh);
+    return first;
+}
+
+inline uint appgl_fsr_combine_vertex_rate(uint primitiveRate,
+                                          constant AppGLFragmentShadingRateState& state) {
+    const uint primitiveCombined =
+        appgl_fsr_combine(state.apiRate, primitiveRate, state.combinerOp0);
+    return appgl_fsr_combine(primitiveCombined, state.attachmentRate, state.combinerOp1);
+}
+
+)MSL";
+    const std::string usingNeedle = "using namespace metal;\n";
+    const std::size_t usingPos = msl.find(usingNeedle);
+    const std::size_t insertPos =
+        usingPos == std::string::npos ? 0 : usingPos + usingNeedle.size();
+    msl.insert(insertPos, support);
+    return true;
 }
 
 std::uint32_t chooseFreeBufferSlot(const std::string& msl,
@@ -2469,6 +2583,9 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         if (isVertex && mslOpts.appgl_fp64_emulation) {
             (void)lowerFp64VertexStageInputs(msl);
+        }
+        if (isVertex) {
+            (void)injectPrimitiveFragmentShadingRateCombiner(msl);
         }
 
         if (isFragment) {

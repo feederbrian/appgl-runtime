@@ -66,7 +66,8 @@ bool shadingRateCombinerOps(ExtensionContext& ctx, GLenum combinerOp0, GLenum co
                       "combinerOp1 is not a valid fragment shading rate combiner");
         return false;
     }
-    if (combinerOp0 != GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT) {
+    if (combinerOp0 != GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT &&
+        !isPrimitiveAvailable(ctx)) {
         ctx.pushError(GL_INVALID_OPERATION,
                       "glShadingRateCombinerOpsEXT",
                       "primitive fragment shading rate combinerOp0 is not supported");

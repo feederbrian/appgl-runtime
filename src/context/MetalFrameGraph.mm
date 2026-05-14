@@ -32,6 +32,7 @@
 namespace appgl {
 
 static constexpr NSUInteger kAppGLFragCoordParamsBufferSlot = 15;
+static constexpr NSUInteger kAppGLFragmentShadingRateParamsBufferSlot = 30;
 
 // Phase 4A [metal-tess-TF] — MSL source for the CPU-exact domain-gen
 // port. Shared between the production path (`ensureTessDomainPortLibrary`
@@ -1229,6 +1230,9 @@ struct MetalFrameGraph::Impl {
         const bool fragmentNeedsFragCoordParams =
             hasFragmentStage && info.fragmentMSL != nullptr &&
             info.fragmentMSL->find("_appgl_FragCoordParams") != std::string::npos;
+        const bool vertexNeedsFragmentShadingRateState =
+            info.vertexMSL != nullptr &&
+            info.vertexMSL->find("_appgl_FSRState") != std::string::npos;
         auto mslUsesMultiviewViewMask = [](const std::string* msl) -> bool {
             return msl != nullptr &&
                 msl->find("spvViewMask") != std::string::npos;
@@ -2677,6 +2681,11 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder setFragmentBytes:&glNumSamples
                                                 length:sizeof(glNumSamples)
                                                atIndex:0];
+            }
+            if (vertexNeedsFragmentShadingRateState) {
+                [currentRenderEncoder setVertexBytes:&info.fragmentShadingRateShaderState
+                                              length:sizeof(info.fragmentShadingRateShaderState)
+                                             atIndex:kAppGLFragmentShadingRateParamsBufferSlot];
             }
             if (fragmentNeedsFragCoordParams) {
                 const float renderTargetHeight = colorTexture != nil
