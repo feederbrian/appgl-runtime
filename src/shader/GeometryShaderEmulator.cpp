@@ -143,6 +143,7 @@ enum GLSLstd450 : std::uint32_t {
     GLSLstd450FMix = 46, GLSLstd450Step = 48, GLSLstd450SmoothStep = 49,
     GLSLstd450Fma = 50, GLSLstd450Frexp = 51,
     GLSLstd450FrexpStruct = 52, GLSLstd450Ldexp = 53,
+    GLSLstd450PackDouble2x32 = 64, GLSLstd450UnpackDouble2x32 = 65,
     GLSLstd450Length = 66, GLSLstd450Distance = 67, GLSLstd450Cross = 68,
     GLSLstd450Normalize = 69, GLSLstd450FaceForward = 70,
     GLSLstd450Reflect = 71, GLSLstd450Refract = 72,
@@ -3461,6 +3462,18 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
             Value r = b;   // result matches x shape
             for (int k = 0; k < b.componentCount(); ++k) r.f[k] = (b.f[k] < a.f[k]) ? 0.0f : 1.0f;
             clearDoubleSidecar(r);
+            return r;
+        }
+        case ::GLSLstd450UnpackDouble2x32: {
+            Value r;
+            r.kind = Value::Kind::UInt2;
+            const double x = realLane(a, 0);
+            std::uint64_t bits = 0;
+            std::memcpy(&bits, &x, sizeof(bits));
+            r.i[0] = static_cast<std::int32_t>(
+                static_cast<std::uint32_t>(bits & 0xFFFFFFFFull));
+            r.i[1] = static_cast<std::int32_t>(
+                static_cast<std::uint32_t>(bits >> 32u));
             return r;
         }
 
