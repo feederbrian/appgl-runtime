@@ -853,7 +853,7 @@ private:
 
     // Apply GLSL.std.450 extended instruction.
     Value evalExtInst(std::uint32_t glslOp, const std::uint32_t* operands,
-                      std::uint32_t nOperands);
+                      std::uint32_t nOperands, bool resultIsDouble);
 
     // Quick lookup in constants or valueStore.
     bool tryGetValue(std::uint32_t id, Value& out) {
@@ -3351,7 +3351,8 @@ void Interpreter::emitVertex(std::vector<EmulatedVertex>& out, std::uint32_t str
 
 Value Interpreter::evalExtInst(std::uint32_t glslOp,
                                const std::uint32_t* operands,
-                               std::uint32_t nOperands) {
+                               std::uint32_t nOperands,
+                               bool resultIsDouble) {
     Value a, b, c;
     if (nOperands >= 1 && !tryGetValue(operands[0], a)) {
         bail("OpExtInst: unknown operand 0");
@@ -3487,10 +3488,14 @@ Value Interpreter::evalExtInst(std::uint32_t glslOp,
         case ::GLSLstd450Length: {
             Value r;
             r.kind = Value::Kind::Float;
-            float s = 0.0f;
-            for (int k = 0; k < a.componentCount(); ++k) s += a.f[k] * a.f[k];
-            r.f[0] = std::sqrt(s);
-            r.d[0] = static_cast<double>(r.f[0]);
+            double s = 0.0;
+            for (int k = 0; k < a.componentCount(); ++k) {
+                const double x = realLane(a, k);
+                s += x * x;
+            }
+            r.d[0] = std::sqrt(s);
+            r.f[0] = static_cast<float>(r.d[0]);
+            r.hasDouble = resultIsDouble;
             return r;
         }
         case ::GLSLstd450Distance: {
@@ -5916,7 +5921,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     pc += wc;
                     break;
                 }
-                valueStore_[w[1]] = evalExtInst(w[3], &w[4], wc - 5);
+                valueStore_[w[1]] = evalExtInst(
+                    w[3], &w[4], wc - 5, floatScalarByteSizeForType(w[0]) >= 8);
                 pc += wc;
                 break;
             }
