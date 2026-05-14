@@ -137,9 +137,11 @@ enum GLSLstd450 : std::uint32_t {
     GLSLstd450Pow = 26, GLSLstd450Exp = 27, GLSLstd450Log = 28,
     GLSLstd450Exp2 = 29, GLSLstd450Log2 = 30, GLSLstd450Sqrt = 31,
     GLSLstd450InverseSqrt = 32,
+    GLSLstd450Modf = 35, GLSLstd450ModfStruct = 36,
     GLSLstd450FMin = 37, GLSLstd450FMax = 40, GLSLstd450FClamp = 43,
     GLSLstd450FMix = 46, GLSLstd450Step = 48, GLSLstd450SmoothStep = 49,
-    GLSLstd450Fma = 50, GLSLstd450Ldexp = 53,
+    GLSLstd450Fma = 50, GLSLstd450Frexp = 51,
+    GLSLstd450FrexpStruct = 52, GLSLstd450Ldexp = 53,
     GLSLstd450Length = 66, GLSLstd450Distance = 67, GLSLstd450Cross = 68,
     GLSLstd450Normalize = 69, GLSLstd450FaceForward = 70,
     GLSLstd450Reflect = 71, GLSLstd450Refract = 72,
@@ -619,6 +621,9 @@ private:
 
     // Per-id SSA values for loads/arithmetic results.
     std::unordered_map<std::uint32_t, Value> valueStore_;
+    // Struct-like SSA composites whose members can have different
+    // scalar kinds, e.g. GLSL.std.450 FrexpStruct returns {float, int}.
+    std::unordered_map<std::uint32_t, std::vector<Value>> compositeValues_;
     // Matrix SSA values are stored as column vectors. The narrow
     // interpreter Value model is four scalars wide, so mat3/mat4
     // composites need side storage for OpMatrixTimesVector.
@@ -3676,6 +3681,7 @@ bool Interpreter::executeTes(EmulatedVertex& out,
 
 void Interpreter::resetExecutionState() {
     valueStore_.clear();
+    compositeValues_.clear();
     matrixColumns_.clear();
     varStorage_.clear();
     varDoubleStorage_.clear();
@@ -3938,6 +3944,61 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
     auto realLane = [](const Value& v, int lane) -> double {
         const int idx = std::min(lane, v.componentCount() - 1);
         return v.hasDouble ? v.d[idx] : static_cast<double>(v.f[idx]);
+    };
+    auto floatScalarByteSizeForType = [&](std::uint32_t typeId) -> std::uint32_t {
+        auto tIt = module_.types.find(typeId);
+        if (tIt == module_.types.end()) {
+            return 4;
+        }
+        const TypeInfo& t = tIt->second;
+        if (t.kind == TypeInfo::Kind::Float) {
+            return t.elementScalarWidth;
+        }
+        if (t.kind == TypeInfo::Kind::Vec2 ||
+            t.kind == TypeInfo::Kind::Vec3 ||
+            t.kind == TypeInfo::Kind::Vec4) {
+            auto cIt = module_.types.find(t.componentType);
+            if (cIt != module_.types.end() &&
+                cIt->second.kind == TypeInfo::Kind::Float) {
+                return cIt->second.elementScalarWidth;
+            }
+        }
+        return 4;
+    };
+    auto firstStructMemberType = [&](std::uint32_t typeId) -> std::uint32_t {
+        auto tIt = module_.types.find(typeId);
+        if (tIt == module_.types.end() ||
+            tIt->second.kind != TypeInfo::Kind::Struct ||
+            tIt->second.memberTypes.empty()) {
+            return typeId;
+        }
+        return tIt->second.memberTypes[0];
+    };
+    auto storeExtInstOutParam = [&](std::uint32_t pointerId,
+                                    const Value& v) -> bool {
+        auto aliasIt = functionPointerAliases.find(pointerId);
+        const std::uint32_t ptrId = aliasIt != functionPointerAliases.end()
+            ? aliasIt->second
+            : pointerId;
+
+        if (module_.variables.find(ptrId) != module_.variables.end()) {
+            storeToVar(ptrId, 0, v);
+            return true;
+        }
+
+        auto acIt = accessChains_.find(ptrId);
+        if (acIt != accessChains_.end()) {
+            const AccessChainResult& ac = acIt->second;
+            if (ac.isStorageBuffer) {
+                storeToSSBO(ac.binding, ac.byteOffset, v, ac.leafTypeId);
+            } else {
+                storeToVar(ac.rootVarId, ac.scalarOffset, v);
+            }
+            return true;
+        }
+
+        bail("OpExtInst out-param: unsupported pointer target");
+        return false;
     };
     auto matrixColumnsForId =
         [&](std::uint32_t id) -> const std::vector<Value>* {
@@ -5199,6 +5260,43 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpCompositeExtract: {
                 // w[0]=type, w[1]=resultId, w[2]=composite, w[3..]=indices
+                auto compositeIt = compositeValues_.find(w[2]);
+                if (compositeIt != compositeValues_.end()) {
+                    if (wc < 5) {
+                        bail("OpCompositeExtract: missing composite index");
+                        break;
+                    }
+                    const std::uint32_t member = w[3];
+                    if (member >= compositeIt->second.size()) {
+                        bail("OpCompositeExtract: composite member OOB");
+                        break;
+                    }
+                    Value r = compositeIt->second[member];
+                    if (wc >= 6) {
+                        const std::uint32_t lane = w[4];
+                        Value scalar;
+                        if (r.isFloatKind()) {
+                            scalar.kind = Value::Kind::Float;
+                            const int idx = std::min<int>(
+                                static_cast<int>(lane), r.componentCount() - 1);
+                            scalar.f[0] = r.f[idx];
+                            scalar.d[0] = r.d[idx];
+                            scalar.hasDouble = r.hasDouble;
+                        } else if (r.isIntKind()) {
+                            scalar.kind = Value::Kind::Int;
+                            const int idx = std::min<int>(
+                                static_cast<int>(lane), r.componentCount() - 1);
+                            scalar.i[0] = r.i[idx];
+                        } else {
+                            bail("OpCompositeExtract: unsupported composite member kind");
+                            break;
+                        }
+                        r = scalar;
+                    }
+                    valueStore_[w[1]] = r;
+                    pc += wc;
+                    break;
+                }
                 const auto* matrixIt = matrixColumnsForId(w[2]);
                 if (matrixIt != nullptr) {
                     if (wc >= 4) {
@@ -5623,6 +5721,68 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 // `min(a.x, b.x)` to compute an AABB).
                 if (module_.extInstImports.count(w[2]) == 0) {
                     bail("OpExtInst: unsupported instruction set");
+                    break;
+                }
+                const bool frexpOutParam = w[3] == ::GLSLstd450Frexp;
+                const bool modfOutParam = w[3] == ::GLSLstd450Modf;
+                const bool frexpStruct = w[3] == ::GLSLstd450FrexpStruct;
+                const bool modfStruct = w[3] == ::GLSLstd450ModfStruct;
+                if (frexpOutParam || modfOutParam || frexpStruct || modfStruct) {
+                    const bool writesOutParam = frexpOutParam || modfOutParam;
+                    if ((writesOutParam && wc < 7) || (!writesOutParam && wc < 6)) {
+                        bail("OpExtInst: missing frexp/modf operand");
+                        break;
+                    }
+                    Value x;
+                    if (!tryGetValue(w[4], x) || !x.isFloatKind()) {
+                        bail("OpExtInst: invalid frexp/modf operand");
+                        break;
+                    }
+
+                    Value result = x;
+                    Value outParam;
+                    const int n = std::clamp(x.componentCount(), 1, 4);
+                    const std::uint32_t floatResultType =
+                        writesOutParam ? w[0] : firstStructMemberType(w[0]);
+                    const bool doubleResult =
+                        floatScalarByteSizeForType(floatResultType) >= 8;
+                    result.hasDouble = doubleResult;
+
+                    if (frexpOutParam || frexpStruct) {
+                        outParam.kind = n == 1 ? Value::Kind::Int :
+                                        n == 2 ? Value::Kind::Int2 :
+                                        n == 3 ? Value::Kind::Int3 :
+                                                 Value::Kind::Int4;
+                        for (int k = 0; k < n; ++k) {
+                            int exponent = 0;
+                            const double mantissa = std::frexp(realLane(x, k), &exponent);
+                            result.f[k] = static_cast<float>(mantissa);
+                            result.d[k] = mantissa;
+                            outParam.i[k] = exponent;
+                        }
+                    } else {
+                        outParam = x;
+                        outParam.hasDouble = doubleResult;
+                        for (int k = 0; k < n; ++k) {
+                            double integral = 0.0;
+                            const double fraction = std::modf(realLane(x, k), &integral);
+                            result.f[k] = static_cast<float>(fraction);
+                            result.d[k] = fraction;
+                            outParam.f[k] = static_cast<float>(integral);
+                            outParam.d[k] = integral;
+                        }
+                    }
+
+                    if (writesOutParam) {
+                        if (!storeExtInstOutParam(w[5], outParam)) {
+                            break;
+                        }
+                        valueStore_[w[1]] = result;
+                    } else {
+                        compositeValues_[w[1]] = {result, outParam};
+                        valueStore_.erase(w[1]);
+                    }
+                    pc += wc;
                     break;
                 }
                 valueStore_[w[1]] = evalExtInst(w[3], &w[4], wc - 5);
