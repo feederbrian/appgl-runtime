@@ -137,6 +137,7 @@ enum GLSLstd450 : std::uint32_t {
     GLSLstd450Pow = 26, GLSLstd450Exp = 27, GLSLstd450Log = 28,
     GLSLstd450Exp2 = 29, GLSLstd450Log2 = 30, GLSLstd450Sqrt = 31,
     GLSLstd450InverseSqrt = 32,
+    GLSLstd450Determinant = 33, GLSLstd450MatrixInverse = 34,
     GLSLstd450Modf = 35, GLSLstd450ModfStruct = 36,
     GLSLstd450FMin = 37, GLSLstd450FMax = 40, GLSLstd450FClamp = 43,
     GLSLstd450FMix = 46, GLSLstd450Step = 48, GLSLstd450SmoothStep = 49,
@@ -3954,6 +3955,19 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
         if (t.kind == TypeInfo::Kind::Float) {
             return t.elementScalarWidth;
         }
+        if (t.kind == TypeInfo::Kind::Matrix) {
+            auto colIt = module_.types.find(t.componentType);
+            if (colIt != module_.types.end() &&
+                (colIt->second.kind == TypeInfo::Kind::Vec2 ||
+                 colIt->second.kind == TypeInfo::Kind::Vec3 ||
+                 colIt->second.kind == TypeInfo::Kind::Vec4)) {
+                auto scalarIt = module_.types.find(colIt->second.componentType);
+                if (scalarIt != module_.types.end() &&
+                    scalarIt->second.kind == TypeInfo::Kind::Float) {
+                    return scalarIt->second.elementScalarWidth;
+                }
+            }
+        }
         if (t.kind == TypeInfo::Kind::Vec2 ||
             t.kind == TypeInfo::Kind::Vec3 ||
             t.kind == TypeInfo::Kind::Vec4) {
@@ -4035,6 +4049,84 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
         }
         return std::clamp(static_cast<int>(mIt->second.count), 1, 4);
     };
+    auto squareMatrixSizeForColumns =
+        [&](const std::vector<Value>& cols) -> int {
+            if (cols.empty()) return 0;
+            const int colCount = std::clamp<int>(
+                static_cast<int>(cols.size()), 1, 4);
+            const int rowCount = std::clamp(cols[0].componentCount(), 1, 4);
+            return colCount == rowCount ? colCount : 0;
+        };
+    auto matrixElement =
+        [&](const std::vector<Value>& cols, int row, int col) -> double {
+            if (col < 0 || col >= static_cast<int>(cols.size())) return 0.0;
+            return realLane(cols[col], row);
+        };
+    auto determinantFromColumns =
+        [&](const std::vector<Value>& cols, int n) -> double {
+            if (n == 2) {
+                return matrixElement(cols, 0, 0) * matrixElement(cols, 1, 1) -
+                       matrixElement(cols, 0, 1) * matrixElement(cols, 1, 0);
+            }
+            if (n == 3) {
+                const double a00 = matrixElement(cols, 0, 0);
+                const double a01 = matrixElement(cols, 0, 1);
+                const double a02 = matrixElement(cols, 0, 2);
+                const double a10 = matrixElement(cols, 1, 0);
+                const double a11 = matrixElement(cols, 1, 1);
+                const double a12 = matrixElement(cols, 1, 2);
+                const double a20 = matrixElement(cols, 2, 0);
+                const double a21 = matrixElement(cols, 2, 1);
+                const double a22 = matrixElement(cols, 2, 2);
+                return a00 * (a11 * a22 - a12 * a21) -
+                       a01 * (a10 * a22 - a12 * a20) +
+                       a02 * (a10 * a21 - a11 * a20);
+            }
+            return 0.0;
+        };
+    auto matrixCofactor =
+        [&](const std::vector<Value>& cols, int n,
+            int skipRow, int skipCol) -> double {
+            if (n == 2) {
+                const double minor = matrixElement(cols, 1 - skipRow, 1 - skipCol);
+                return ((skipRow + skipCol) & 1) ? -minor : minor;
+            }
+            std::array<int, 2> rows{};
+            std::array<int, 2> outCols{};
+            int rCount = 0;
+            int cCount = 0;
+            for (int r = 0; r < 3; ++r) {
+                if (r != skipRow) rows[rCount++] = r;
+            }
+            for (int c = 0; c < 3; ++c) {
+                if (c != skipCol) outCols[cCount++] = c;
+            }
+            const double minor =
+                matrixElement(cols, rows[0], outCols[0]) *
+                matrixElement(cols, rows[1], outCols[1]) -
+                matrixElement(cols, rows[0], outCols[1]) *
+                matrixElement(cols, rows[1], outCols[0]);
+            return ((skipRow + skipCol) & 1) ? -minor : minor;
+        };
+    auto inverseMatrixColumns =
+        [&](const std::vector<Value>& cols, int n,
+            bool hasDouble) -> std::vector<Value> {
+            const double det = determinantFromColumns(cols, n);
+            std::vector<Value> out;
+            out.reserve(static_cast<std::size_t>(n));
+            for (int col = 0; col < n; ++col) {
+                Value outCol;
+                outCol.kind = floatKindForWidth(n);
+                outCol.hasDouble = hasDouble;
+                for (int row = 0; row < n; ++row) {
+                    const double v = matrixCofactor(cols, n, col, row) / det;
+                    outCol.d[row] = v;
+                    outCol.f[row] = static_cast<float>(v);
+                }
+                out.push_back(outCol);
+            }
+            return out;
+        };
     auto applyMatrixElementwise =
         [&](std::uint32_t resultId, std::uint32_t leftId,
             std::uint32_t rightId, std::uint16_t op) -> bool {
@@ -5721,6 +5813,45 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 // `min(a.x, b.x)` to compute an AABB).
                 if (module_.extInstImports.count(w[2]) == 0) {
                     bail("OpExtInst: unsupported instruction set");
+                    break;
+                }
+                if (w[3] == ::GLSLstd450Determinant ||
+                    w[3] == ::GLSLstd450MatrixInverse) {
+                    if (wc < 6) {
+                        bail("OpExtInst: missing matrix operand");
+                        break;
+                    }
+                    const auto* cols = matrixColumnsForId(w[4]);
+                    if (cols == nullptr) {
+                        bail("OpExtInst: unknown matrix operand");
+                        break;
+                    }
+                    const int n = squareMatrixSizeForColumns(*cols);
+                    if (n < 2 || n > 3) {
+                        bail("OpExtInst: unsupported matrix size");
+                        break;
+                    }
+
+                    if (w[3] == ::GLSLstd450Determinant) {
+                        Value r;
+                        r.kind = Value::Kind::Float;
+                        r.hasDouble = floatScalarByteSizeForType(w[0]) >= 8;
+                        r.d[0] = determinantFromColumns(*cols, n);
+                        r.f[0] = static_cast<float>(r.d[0]);
+                        valueStore_[w[1]] = r;
+                        matrixColumns_.erase(w[1]);
+                    } else {
+                        const int resultRows = matrixRowsForType(w[0], n);
+                        const int resultCols = matrixColsForType(w[0], n);
+                        if (resultRows != n || resultCols != n) {
+                            bail("OpExtInst: matrix inverse result shape mismatch");
+                            break;
+                        }
+                        matrixColumns_[w[1]] = inverseMatrixColumns(
+                            *cols, n, floatScalarByteSizeForType(w[0]) >= 8);
+                        valueStore_.erase(w[1]);
+                    }
+                    pc += wc;
                     break;
                 }
                 const bool frexpOutParam = w[3] == ::GLSLstd450Frexp;
