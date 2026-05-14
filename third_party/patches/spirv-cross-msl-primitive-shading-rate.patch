@@ -1,8 +1,55 @@
 diff --git a/spirv_msl.cpp b/spirv_msl.cpp
-index 23682f28..ddf18979 100644
+index 23682f28..23ef3762 100644
 --- a/spirv_msl.cpp
 +++ b/spirv_msl.cpp
-@@ -21561,6 +21561,17 @@ string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
+@@ -4624,6 +4624,8 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
+ 		bool builtin_is_stage_in_out = builtin_is_gl_in_out ||
+ 		                               bi_type == BuiltInLayer || bi_type == BuiltInViewportIndex ||
+ 		                               bi_type == BuiltInBaryCoordKHR || bi_type == BuiltInBaryCoordNoPerspKHR ||
++		                               bi_type == BuiltInShadingRateKHR ||
++		                               bi_type == BuiltInPrimitiveShadingRateKHR ||
+ 		                               bi_type == BuiltInFragDepth ||
+ 		                               bi_type == BuiltInFragStencilRefEXT || bi_type == BuiltInSampleMask;
+ 
+@@ -4656,6 +4658,8 @@ uint32_t CompilerMSL::add_interface_block(StorageClass storage, bool patch)
+ 		// ClipDistance is never hidden, we need to emulate it when used as an input.
+ 		if (bi_type == BuiltInClipDistance || bi_type == BuiltInCullDistance)
+ 			hidden = false;
++		if (bi_type == BuiltInShadingRateKHR)
++			hidden = false;
+ 
+ 		// It's not enough to simply avoid marking fragment outputs if the pipeline won't
+ 		// accept them. We can't put them in the struct at all, or otherwise the compiler
+@@ -16259,6 +16263,11 @@ string CompilerMSL::to_struct_member(const SPIRType &type, uint32_t member_type_
+ 
+ 	SPIRType row_major_physical_type { OpTypeMatrix };
+ 	const SPIRType *declared_type = &physical_type;
++	BuiltIn appgl_member_builtin = BuiltInMax;
++	const bool appgl_fsr_builtin_member =
++		is_member_builtin(type, index, &appgl_member_builtin) &&
++		(appgl_member_builtin == BuiltInShadingRateKHR ||
++		 appgl_member_builtin == BuiltInPrimitiveShadingRateKHR);
+ 
+ 	// If a struct is being declared with physical layout,
+ 	// do not use array<T> wrappers.
+@@ -16426,6 +16435,8 @@ string CompilerMSL::to_struct_member(const SPIRType &type, uint32_t member_type_
+ 	}
+ 	else
+ 		decl_type = type_to_glsl(*declared_type, orig_id, true);
++	if (appgl_fsr_builtin_member)
++		decl_type = "uint";
+ 
+ 	if (physical_type.basetype == SPIRType::Struct &&
+ 	    has_decoration(physical_type.self, DecorationArrayStride) &&
+@@ -17448,6 +17459,7 @@ bool CompilerMSL::is_direct_input_builtin(BuiltIn bi_type)
+ 	case BuiltInHelperInvocation:
+ 	case BuiltInBaryCoordKHR:
+ 	case BuiltInBaryCoordNoPerspKHR:
++	case BuiltInShadingRateKHR:
+ 		return false;
+ 	case BuiltInViewIndex:
+ 		return get_execution_model() == ExecutionModelFragment && msl_options.multiview &&
+@@ -21561,6 +21573,17 @@ string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
  			return stage_in_var_name + "." + CompilerGLSL::builtin_to_glsl(builtin, storage);
  		break;
  
@@ -20,7 +67,7 @@ index 23682f28..ddf18979 100644
  	case BuiltInTessLevelOuter:
  		if (is_tesc_shader() && storage != StorageClassInput && current_function &&
  		    (current_function->self == ir.default_entry_point))
-@@ -21832,8 +21843,8 @@ string CompilerMSL::builtin_qualifier(BuiltIn builtin)
+@@ -21832,8 +21855,8 @@ string CompilerMSL::builtin_qualifier(BuiltIn builtin)
  	case BuiltInPrimitiveShadingRateKHR:
  		if (!msl_options.supports_msl_version(2, 4))
  			SPIRV_CROSS_THROW("PrimitiveShadingRate output requires MSL 2.4.");

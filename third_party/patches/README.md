@@ -1584,7 +1584,7 @@ backing the SPV_KHR_fragment_shading_rate capability that
 **Target:** `third_party/SPIRV-Cross/spirv_msl.cpp` — narrows the
 Sprint 20 Path A primitive fragment-shading-rate prototype unblock.
 
-**Summary:** Two surgical changes layer on top of
+**Summary:** Final Path A MSL ABI changes layer on top of
 `spirv-cross-msl-shading-rate-builtins.patch`:
 (1) `CompilerMSL::builtin_qualifier` now allows
 `BuiltInPrimitiveShadingRateKHR` from the vertex execution model in addition
@@ -1592,6 +1592,10 @@ to mesh shaders, guarded by the same MSL 2.4 version gate.
 (2) `CompilerMSL::builtin_to_glsl` coalesces
 `BuiltInPrimitiveShadingRateKHR` and `BuiltInShadingRateKHR` to the shared MSL
 stage-interface member name `spv_ShadingRateEXT`.
+(3) both built-ins are classified as stage input/output members and forced to
+`uint` struct members.
+(4) fragment `BuiltInShadingRateKHR` is kept visible as a `[[stage_in]]`
+member instead of a direct fragment parameter.
 
 **Why:** Sprint 20 semantic probe
 `primitive_fsr_semantic_probe.mm` proved the current Apple runtime propagates a
@@ -1604,14 +1608,15 @@ rate semantics.
 
 **CTS tests advanced (sub-section progress):** Translation is no longer blocked
 for vertex-stage `gl_PrimitiveShadingRateEXT` when the runtime opts into
-`GL_EXT_fragment_shading_rate_primitive`. Full CTS flip count is deferred to the
-AppGL env-gated Path A prototype because advertising, combiner validation, and
-render-pass rate-map interaction are runtime responsibilities.
+`GL_EXT_fragment_shading_rate_primitive`. The env-gated AppGL Path A prototype
+now reaches the expected full-suite shape:
+`KHR-GL46.fragment_shading_rate.*` = 1061/1067 pass, 0 fail, 6 existing
+multiview attachment-layer NotSupported.
 
 **Regression-safe:** MSL 2.4 remains required. The new execution-model
 allow-list adds only `ExecutionModelVertex`; other non-mesh stages still throw.
-The shared member name is limited to the two SPV_KHR_fragment_shading_rate
-builtins and only affects MSL interface naming for those builtins.
+The shared member name and stage-in/out handling are limited to the two
+SPV_KHR_fragment_shading_rate built-ins.
 
 ### `spirv-cross-msl-sparse-feedback.patch`
 
