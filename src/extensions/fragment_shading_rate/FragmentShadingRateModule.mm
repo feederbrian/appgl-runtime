@@ -7,8 +7,12 @@
 #include "../../../include/AppGL/extensions/fragment_shading_rate.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
+
+#import <Metal/Metal.h>
 
 namespace appgl::extensions::fragment_shading_rate {
 namespace {
@@ -27,6 +31,79 @@ std::unordered_map<const GLContext*, State>& contextStates() {
 
 State& stateForLocked(ExtensionContext& ctx) {
     return contextStates()[&ctx.context()];
+}
+
+bool envFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    return std::strcmp(value, "0") != 0 &&
+           std::strcmp(value, "false") != 0 &&
+           std::strcmp(value, "FALSE") != 0 &&
+           std::strcmp(value, "no") != 0 &&
+           std::strcmp(value, "NO") != 0;
+}
+
+bool primitiveShadingRatePipelineProbe(ExtensionContext& ctx) {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)ctx.metalDevice();
+    if (device == nil) {
+        return false;
+    }
+
+    static std::mutex probeMutex;
+    static std::unordered_map<const void*, bool> probeResults;
+    const void* key = (__bridge const void*)device;
+    {
+        std::lock_guard<std::mutex> lock(probeMutex);
+        auto it = probeResults.find(key);
+        if (it != probeResults.end()) {
+            return it->second;
+        }
+    }
+
+    static NSString* kProbeSource =
+        @"#include <metal_stdlib>\n"
+         "using namespace metal;\n"
+         "struct VSOut {\n"
+         "    float4 position [[position]];\n"
+         "    uint spv_ShadingRateEXT [[primitive_shading_rate]];\n"
+         "};\n"
+         "struct FSIn {\n"
+         "    uint spv_ShadingRateEXT [[shading_rate]];\n"
+         "};\n"
+         "vertex VSOut vs(uint vertexID [[vertex_id]]) {\n"
+         "    float2 pos[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };\n"
+         "    VSOut out;\n"
+         "    out.position = float4(pos[vertexID], 0.0, 1.0);\n"
+         "    out.spv_ShadingRateEXT = 5u;\n"
+         "    return out;\n"
+         "}\n"
+         "fragment float4 fs(FSIn in [[stage_in]]) {\n"
+         "    return float4(float(in.spv_ShadingRateEXT) / 255.0, 0.0, 0.0, 1.0);\n"
+         "}\n";
+
+    bool supported = false;
+    @autoreleasepool {
+        MTLCompileOptions* options = [MTLCompileOptions new];
+        options.languageVersion = MTLLanguageVersion2_4;
+        NSError* libraryError = nil;
+        id<MTLLibrary> library = [device newLibraryWithSource:kProbeSource options:options error:&libraryError];
+        if (library != nil) {
+            MTLRenderPipelineDescriptor* desc = [MTLRenderPipelineDescriptor new];
+            desc.vertexFunction = [library newFunctionWithName:@"vs"];
+            desc.fragmentFunction = [library newFunctionWithName:@"fs"];
+            desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            NSError* pipelineError = nil;
+            id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:desc
+                                                                                         error:&pipelineError];
+            supported = pipeline != nil;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(probeMutex);
+    probeResults[key] = supported;
+    return supported;
 }
 
 const ExtensionModuleDescriptor kDescriptor = {
@@ -58,6 +135,15 @@ struct Registrar {
             "fragment_shading_rate_attachment",
             attachmentExtensionString,
             isAvailable,
+            nullptr,
+            nullptr,
+            {},
+            {}
+        });
+        ExtensionRegistry::registerModule({
+            "fragment_shading_rate_primitive",
+            primitiveExtensionString,
+            isPrimitiveAvailable,
             nullptr,
             nullptr,
             {},
@@ -176,12 +262,22 @@ const char* attachmentExtensionString() {
     return APPGL_EXTENSION_EXT_FRAGMENT_SHADING_RATE_ATTACHMENT;
 }
 
+const char* primitiveExtensionString() {
+    return APPGL_EXTENSION_EXT_FRAGMENT_SHADING_RATE_PRIMITIVE;
+}
+
 const char* multiviewExtensionString() {
     return APPGL_EXTENSION_OVR_MULTIVIEW;
 }
 
 bool isAvailable(ExtensionContext& ctx) {
     return isRasterizationRateMapAvailable(ctx);
+}
+
+bool isPrimitiveAvailable(ExtensionContext& ctx) {
+    return envFlagEnabled("APPGL_FSR_PRIMITIVE_FORCE_ADVERTISE") &&
+           isAvailable(ctx) &&
+           primitiveShadingRatePipelineProbe(ctx);
 }
 
 void initialize(ExtensionContext& ctx) {

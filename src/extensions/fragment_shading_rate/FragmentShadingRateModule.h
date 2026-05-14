@@ -16,8 +16,10 @@ struct State {
 
 const char* extensionString();
 const char* attachmentExtensionString();
+const char* primitiveExtensionString();
 const char* multiviewExtensionString();
 bool isAvailable(ExtensionContext& ctx);
+bool isPrimitiveAvailable(ExtensionContext& ctx);
 void initialize(ExtensionContext& ctx);
 void shutdown();
 bool isActive();

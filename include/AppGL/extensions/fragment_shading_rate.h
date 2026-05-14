@@ -2,4 +2,5 @@
 
 #define APPGL_EXTENSION_EXT_FRAGMENT_SHADING_RATE "GL_EXT_fragment_shading_rate"
 #define APPGL_EXTENSION_EXT_FRAGMENT_SHADING_RATE_ATTACHMENT "GL_EXT_fragment_shading_rate_attachment"
+#define APPGL_EXTENSION_EXT_FRAGMENT_SHADING_RATE_PRIMITIVE "GL_EXT_fragment_shading_rate_primitive"
 #define APPGL_EXTENSION_OVR_MULTIVIEW "GL_OVR_multiview"
