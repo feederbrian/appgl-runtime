@@ -7,9 +7,11 @@
 #include "../../../include/AppGL/extensions/fragment_shading_rate.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 #import <Metal/Metal.h>
@@ -45,6 +47,10 @@ bool envFlagEnabled(const char* name) {
            std::strcmp(value, "NO") != 0;
 }
 
+bool primitiveForceAdvertiseForMeasurement() {
+    return envFlagEnabled("APPGL_FSR_PRIMITIVE_FORCE_ADVERTISE");
+}
+
 bool primitiveShadingRatePipelineProbe(ExtensionContext& ctx) {
     id<MTLDevice> device = (__bridge id<MTLDevice>)ctx.metalDevice();
     if (device == nil) {
@@ -52,13 +58,29 @@ bool primitiveShadingRatePipelineProbe(ExtensionContext& ctx) {
     }
 
     static std::mutex probeMutex;
-    static std::unordered_map<const void*, bool> probeResults;
-    const void* key = (__bridge const void*)device;
+    static std::unordered_map<std::uint64_t, bool> probeResults;
+    static std::unordered_map<std::string, bool> probeResultsByName;
+    std::uint64_t key = [device registryID];
+    std::string nameKey;
+    if (device.name != nil) {
+        nameKey = [device.name UTF8String];
+    }
+    if (key == 0) {
+        key = static_cast<std::uint64_t>(
+            reinterpret_cast<std::uintptr_t>((__bridge const void*)device));
+    }
     {
         std::lock_guard<std::mutex> lock(probeMutex);
         auto it = probeResults.find(key);
         if (it != probeResults.end()) {
             return it->second;
+        }
+        if (!nameKey.empty()) {
+            auto byName = probeResultsByName.find(nameKey);
+            if (byName != probeResultsByName.end()) {
+                probeResults[key] = byName->second;
+                return byName->second;
+            }
         }
     }
 
@@ -103,6 +125,9 @@ bool primitiveShadingRatePipelineProbe(ExtensionContext& ctx) {
 
     std::lock_guard<std::mutex> lock(probeMutex);
     probeResults[key] = supported;
+    if (!nameKey.empty()) {
+        probeResultsByName[nameKey] = supported;
+    }
     return supported;
 }
 
@@ -275,9 +300,9 @@ bool isAvailable(ExtensionContext& ctx) {
 }
 
 bool isPrimitiveAvailable(ExtensionContext& ctx) {
-    return envFlagEnabled("APPGL_FSR_PRIMITIVE_FORCE_ADVERTISE") &&
-           isAvailable(ctx) &&
-           primitiveShadingRatePipelineProbe(ctx);
+    return isAvailable(ctx) &&
+           (primitiveShadingRatePipelineProbe(ctx) ||
+            primitiveForceAdvertiseForMeasurement());
 }
 
 void initialize(ExtensionContext& ctx) {
