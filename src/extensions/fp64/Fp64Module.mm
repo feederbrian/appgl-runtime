@@ -21,15 +21,11 @@ bool forceAdvertiseForMeasurement() {
 }
 
 const char* advertisedGpuShaderFp64ExtensionString() {
-    return forceAdvertiseForMeasurement()
-        ? APPGL_EXTENSION_ARB_GPU_SHADER_FP64
-        : nullptr;
+    return APPGL_EXTENSION_ARB_GPU_SHADER_FP64;
 }
 
 const char* advertisedVertexAttrib64BitExtensionString() {
-    return forceAdvertiseForMeasurement()
-        ? APPGL_EXTENSION_ARB_VERTEX_ATTRIB_64BIT
-        : nullptr;
+    return APPGL_EXTENSION_ARB_VERTEX_ATTRIB_64BIT;
 }
 
 bool supportsAppleGpuFamily(ExtensionContext& ctx) {
@@ -85,7 +81,7 @@ bool buildFlagEnabled() {
 }
 
 bool isAdvertisingHeld() {
-    return !forceAdvertiseForMeasurement();
+    return false;
 }
 
 bool isAvailable(ExtensionContext& ctx) {
