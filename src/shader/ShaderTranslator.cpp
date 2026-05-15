@@ -634,16 +634,15 @@ inline uint appgl_fsr_combine_vertex_rate(uint primitiveRate,
     return true;
 }
 
-bool fixScalarFloatUnsafeArrayDoubleIndex(std::string& msl) {
-    // SPIRV-Cross can emit scalar helper arrays as `floatArray[i][0]`.
-    // The helper element is already a scalar float, so the second index
-    // makes Metal reject cull/clip-distance shaders at pipeline build.
-    static constexpr const char* kDeclPrefix = "spvUnsafeArray<float,";
+std::vector<std::string> findUnsafeArrayNamesForElementType(const std::string& msl,
+                                                            const char* elementType) {
+    const std::string kDeclPrefix =
+        std::string("spvUnsafeArray<") + elementType + ",";
     std::vector<std::string> names;
 
     std::size_t scan = 0;
     while ((scan = msl.find(kDeclPrefix, scan)) != std::string::npos) {
-        const std::size_t close = msl.find('>', scan + std::strlen(kDeclPrefix));
+        const std::size_t close = msl.find('>', scan + kDeclPrefix.size());
         if (close == std::string::npos) {
             break;
         }
@@ -665,9 +664,100 @@ bool fixScalarFloatUnsafeArrayDoubleIndex(std::string& msl) {
         names.emplace_back(msl.substr(nameStart, nameEnd - nameStart));
         scan = nameEnd;
     }
+    return names;
+}
+
+bool eraseLiteralZeroComponentIndex(std::string& msl, std::size_t pos) {
+    const std::size_t prefixEnd = msl.find('[', pos);
+    if (prefixEnd == std::string::npos) {
+        return false;
+    }
+    std::size_t indexEnd = prefixEnd + 1;
+    while (indexEnd < msl.size() &&
+           std::isdigit(static_cast<unsigned char>(msl[indexEnd]))) {
+        ++indexEnd;
+    }
+    if (indexEnd == prefixEnd + 1 ||
+        indexEnd + 3 >= msl.size() ||
+        msl[indexEnd] != ']' ||
+        msl[indexEnd + 1] != '[' ||
+        msl[indexEnd + 2] != '0' ||
+        msl[indexEnd + 3] != ']') {
+        return false;
+    }
+    msl.erase(indexEnd + 1, 3);
+    return true;
+}
+
+std::unordered_map<std::string, std::string> collectUserFieldTypes(const std::string& msl) {
+    std::unordered_map<std::string, std::string> fields;
+    std::size_t attr = 0;
+    while ((attr = msl.find("[[user(", attr)) != std::string::npos) {
+        const std::size_t lineStart = msl.rfind('\n', attr);
+        std::size_t cursor = (lineStart == std::string::npos) ? 0 : lineStart + 1;
+        while (cursor < attr && std::isspace(static_cast<unsigned char>(msl[cursor]))) {
+            ++cursor;
+        }
+        const std::size_t typeStart = cursor;
+        while (cursor < attr && isIdentifierChar(msl[cursor])) {
+            ++cursor;
+        }
+        const std::string type = msl.substr(typeStart, cursor - typeStart);
+        while (cursor < attr && std::isspace(static_cast<unsigned char>(msl[cursor]))) {
+            ++cursor;
+        }
+        const std::size_t nameStart = cursor;
+        while (cursor < attr && isIdentifierChar(msl[cursor])) {
+            ++cursor;
+        }
+        if (nameStart != cursor &&
+            (type == "float2" || type == "float3" || type == "float4")) {
+            fields.emplace(msl.substr(nameStart, cursor - nameStart), type);
+        }
+        attr += 8;
+    }
+    return fields;
+}
+
+bool lhsAssignsUserFieldOfType(const std::string& msl,
+                               std::size_t lineStart,
+                               std::size_t rhsStart,
+                               const std::string& elementType,
+                               const std::unordered_map<std::string, std::string>& userFields) {
+    const std::size_t eq = msl.rfind('=', rhsStart);
+    if (eq == std::string::npos || eq < lineStart) {
+        return false;
+    }
+    for (std::size_t cursor = eq + 1; cursor < rhsStart; ++cursor) {
+        if (!std::isspace(static_cast<unsigned char>(msl[cursor]))) {
+            return false;
+        }
+    }
+    std::size_t end = eq;
+    while (end > lineStart && std::isspace(static_cast<unsigned char>(msl[end - 1]))) {
+        --end;
+    }
+    std::size_t fieldStart = end;
+    while (fieldStart > lineStart && isIdentifierChar(msl[fieldStart - 1])) {
+        --fieldStart;
+    }
+    if (fieldStart == end || fieldStart == lineStart || msl[fieldStart - 1] != '.') {
+        return false;
+    }
+    const auto found = userFields.find(msl.substr(fieldStart, end - fieldStart));
+    return found != userFields.end() && found->second == elementType;
+}
+
+bool fixUnsafeArrayDoubleIndex(std::string& msl) {
+    // SPIRV-Cross can emit helper arrays as `array[i][0]` even when the
+    // helper element is already the value being assigned. For scalar
+    // floats this is always invalid; for vector varyings, keep the repair
+    // scoped to assignments into same-typed user stage fields so legitimate
+    // vector component reads are left intact.
+    std::vector<std::string> scalarNames = findUnsafeArrayNamesForElementType(msl, "float");
 
     bool changed = false;
-    for (const std::string& name : names) {
+    for (const std::string& name : scalarNames) {
         const std::string prefix = name + "[";
         std::size_t pos = 0;
         while ((pos = msl.find(prefix, pos)) != std::string::npos) {
@@ -675,23 +765,35 @@ bool fixScalarFloatUnsafeArrayDoubleIndex(std::string& msl) {
                 pos += prefix.size();
                 continue;
             }
-            std::size_t indexEnd = pos + prefix.size();
-            while (indexEnd < msl.size() &&
-                   std::isdigit(static_cast<unsigned char>(msl[indexEnd]))) {
-                ++indexEnd;
-            }
-            if (indexEnd == pos + prefix.size() ||
-                indexEnd + 3 >= msl.size() ||
-                msl[indexEnd] != ']' ||
-                msl[indexEnd + 1] != '[' ||
-                msl[indexEnd + 2] != '0' ||
-                msl[indexEnd + 3] != ']') {
+            if (!eraseLiteralZeroComponentIndex(msl, pos)) {
                 pos += prefix.size();
                 continue;
             }
-            msl.erase(indexEnd + 1, 3);
-            pos = indexEnd + 1;
+            pos += prefix.size();
             changed = true;
+        }
+    }
+
+    const auto userFields = collectUserFieldTypes(msl);
+    for (const char* elementType : {"float2", "float3", "float4"}) {
+        for (const std::string& name : findUnsafeArrayNamesForElementType(msl, elementType)) {
+            const std::string prefix = name + "[";
+            std::size_t pos = 0;
+            while ((pos = msl.find(prefix, pos)) != std::string::npos) {
+                if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+                    pos += prefix.size();
+                    continue;
+                }
+                const std::size_t lineStart = msl.rfind('\n', pos);
+                const std::size_t lineBegin = (lineStart == std::string::npos) ? 0 : lineStart + 1;
+                if (!lhsAssignsUserFieldOfType(msl, lineBegin, pos, elementType, userFields) ||
+                    !eraseLiteralZeroComponentIndex(msl, pos)) {
+                    pos += prefix.size();
+                    continue;
+                }
+                pos += prefix.size();
+                changed = true;
+            }
         }
     }
     return changed;
@@ -2644,7 +2746,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         std::string msl = compiler.compile();
 
-        (void)fixScalarFloatUnsafeArrayDoubleIndex(msl);
+        (void)fixUnsafeArrayDoubleIndex(msl);
 
         if (isVertex && mslOpts.appgl_fp64_emulation) {
             (void)lowerFp64VertexStageInputs(msl);
