@@ -9550,8 +9550,12 @@ struct GLContext::Impl {
                 if (layers > 1) arrayLen = static_cast<std::uint32_t>(layers);
             }
             if (frameGraph != nullptr && texture->metalTexture != nullptr) {
-                return frameGraph->clearTextureDepth(
+                const bool cleared = frameGraph->clearTextureDepth(
                     texture->metalTexture, mipLevel, slice, arrayLen, depth);
+                if (cleared && arrayLen > 0) {
+                    frameGraph->flushForReadback();
+                }
+                return cleared;
             }
             return true;
         }
@@ -32837,8 +32841,27 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     GLsizei preFboW = 0, preFboH = 0;
     void* preFboDSTex = nullptr;
     std::uint32_t preFboArrayLen = 0;
-    void* preFboColTex = resolveFBOColorTarget(preFboW, preFboH, preFboDSTex, &preFboArrayLen);
-    const bool fboIsLayered = (preFboColTex != nullptr && preFboArrayLen > 0);
+    std::array<void*, 7> preExtraColTex = {};
+    std::array<std::uint32_t, 8> preColorSlices = {};
+    void* preFboColTex = resolveFBOColorTarget(
+        preFboW, preFboH, preFboDSTex, &preFboArrayLen,
+        &preExtraColTex, &preColorSlices);
+    const GLuint preDrawFboName = state->boundDrawFramebuffer();
+    const GLFramebufferObject* preDrawFbo =
+        preDrawFboName != 0 ? objects->framebuffers().get(preDrawFboName) : nullptr;
+    const bool preAttachmentlessFbo =
+        preDrawFbo != nullptr &&
+        preDrawFbo->attachments.empty() &&
+        preDrawFbo->defaultWidth > 0 &&
+        preDrawFbo->defaultHeight > 0;
+    const std::uint32_t preAttachmentlessLayers =
+        preAttachmentlessFbo
+            ? static_cast<std::uint32_t>(
+                  std::max<GLint>(preDrawFbo->defaultLayers, 0))
+            : 0u;
+    const bool fboIsLayered =
+        (preFboColTex != nullptr && preFboArrayLen > 0) ||
+        (preAttachmentlessFbo && preAttachmentlessLayers > 0);
     const bool routeLayer = ed.hasLayer && fboIsLayered;
     // Sprint 15 Day 10 [metal-viewport-array]: detect multi-viewport
     // binding (state divergence from slot 0). Originally env-gated on
@@ -32949,6 +32972,112 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         }
     }
 
+    appgl::EmulatedDraw replayDraw = ed;
+    auto remapGsVaryingLocationsFromFragmentMSL =
+        [](appgl::EmulatedDraw& draw, const std::string& fragmentMSL) {
+            if (draw.varyingNames.empty() || fragmentMSL.empty()) return;
+            const std::size_t structPos = fragmentMSL.find("struct main0_in");
+            if (structPos == std::string::npos) return;
+            const std::size_t bodyBegin = fragmentMSL.find('{', structPos);
+            const std::size_t bodyEnd = fragmentMSL.find("};", bodyBegin);
+            if (bodyBegin == std::string::npos || bodyEnd == std::string::npos) return;
+
+            std::unordered_map<std::string, std::uint32_t> fsInputLocations;
+            std::size_t cursor = bodyBegin + 1;
+            while (cursor < bodyEnd) {
+                const std::size_t semi = fragmentMSL.find(';', cursor);
+                if (semi == std::string::npos || semi > bodyEnd) break;
+                const std::string line = fragmentMSL.substr(cursor, semi - cursor);
+                cursor = semi + 1;
+
+                const std::size_t userPos = line.find("[[user(locn");
+                if (userPos == std::string::npos) continue;
+                const std::size_t locBegin = userPos + std::strlen("[[user(locn");
+                std::size_t locEnd = locBegin;
+                while (locEnd < line.size() &&
+                       line[locEnd] >= '0' && line[locEnd] <= '9') {
+                    ++locEnd;
+                }
+                if (locEnd == locBegin) continue;
+
+                std::size_t nameEnd = userPos;
+                while (nameEnd > 0 &&
+                       std::isspace(static_cast<unsigned char>(line[nameEnd - 1]))) {
+                    --nameEnd;
+                }
+                std::size_t nameBegin = nameEnd;
+                while (nameBegin > 0) {
+                    const unsigned char ch =
+                        static_cast<unsigned char>(line[nameBegin - 1]);
+                    if (!(std::isalnum(ch) || ch == '_')) break;
+                    --nameBegin;
+                }
+                if (nameBegin == nameEnd) continue;
+
+                const std::string name = line.substr(nameBegin, nameEnd - nameBegin);
+                const std::uint32_t loc = static_cast<std::uint32_t>(
+                    std::strtoul(line.c_str() + locBegin, nullptr, 10));
+                fsInputLocations[name] = loc;
+            }
+            if (fsInputLocations.empty()) return;
+
+            const std::vector<std::uint32_t> originalVaryingLocations =
+                draw.varyingLocations;
+            const std::vector<std::uint32_t> originalStageSlotLocations =
+                draw.varyingStageSlotLocations;
+            bool changed = false;
+            std::uint32_t stageSlotIndex = 0;
+            for (std::size_t i = 0; i < draw.varyingNames.size(); ++i) {
+                const auto locIt = fsInputLocations.find(draw.varyingNames[i]);
+                const std::uint32_t oldLoc =
+                    i < originalVaryingLocations.size() ? originalVaryingLocations[i] : 0u;
+                const std::uint32_t newLoc =
+                    locIt != fsInputLocations.end() ? locIt->second : oldLoc;
+                if (i < draw.varyingLocations.size() &&
+                    draw.varyingLocations[i] != newLoc) {
+                    draw.varyingLocations[i] = newLoc;
+                    changed = true;
+                }
+                std::uint32_t slotCount = 1;
+                if (!originalStageSlotLocations.empty() &&
+                    stageSlotIndex < originalStageSlotLocations.size()) {
+                    const std::uint32_t nextOldLoc =
+                        (i + 1 < originalVaryingLocations.size())
+                            ? originalVaryingLocations[i + 1]
+                            : ~0u;
+                    slotCount = 0;
+                    while (stageSlotIndex + slotCount <
+                           originalStageSlotLocations.size()) {
+                        const std::uint32_t slotOldLoc =
+                            originalStageSlotLocations[stageSlotIndex + slotCount];
+                        if (slotCount > 0 && slotOldLoc >= nextOldLoc) break;
+                        if (nextOldLoc != ~0u && slotOldLoc >= nextOldLoc) break;
+                        ++slotCount;
+                    }
+                    slotCount = std::max<std::uint32_t>(slotCount, 1u);
+                }
+                for (std::uint32_t slot = 0;
+                     slot < slotCount &&
+                     stageSlotIndex + slot < draw.varyingStageSlotLocations.size();
+                     ++slot) {
+                    const std::uint32_t slotLoc = newLoc + slot;
+                    if (draw.varyingStageSlotLocations[stageSlotIndex + slot] != slotLoc) {
+                        draw.varyingStageSlotLocations[stageSlotIndex + slot] = slotLoc;
+                        changed = true;
+                    }
+                }
+                stageSlotIndex += slotCount;
+            }
+            if (changed && draw.hasPrimitiveID) {
+                std::uint32_t maxLoc = 0;
+                const auto& locs = draw.varyingStageSlotLocations.empty()
+                    ? draw.varyingLocations : draw.varyingStageSlotLocations;
+                for (std::uint32_t loc : locs) maxLoc = std::max(maxLoc, loc);
+                draw.primitiveIDLocation = locs.empty() ? 0u : (maxLoc + 1u);
+            }
+        };
+    remapGsVaryingLocationsFromFragmentMSL(replayDraw, program.fragmentMSL);
+
     // Invalidate the cached synth VS when its layered-ness doesn't
     // match the current draw. Metal won't accept swapping the
     // `[[render_target_array_index]]` declaration on an existing
@@ -32980,12 +33109,12 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     // same `ed` so Metal's vertex descriptor picks the right formats.
     if (program.gsPassThroughVertexMSL.empty()) {
         program.gsPassThroughVertexMSL = appgl::synthesisePassThroughVertexMSL(
-            ed, routeLayer, routeViewportIndex);
+            replayDraw, routeLayer, routeViewportIndex);
         program.gsPassThroughVertexMSLLayered = routeLayer;
         program.gsPassThroughVertexMSLViewportArray = routeViewportIndex;
         if (std::getenv("APPGL_GS_DUMP_MSL") != nullptr) {
             std::fprintf(stderr, "\n[GS] synth VS MSL (routeLayer=%d hasLayer=%d clipLen=%u cullLen=%u):\n%s\n",
-                (int)routeLayer, (int)ed.hasLayer, ed.clipDistanceLen, ed.cullDistanceLen,
+                (int)routeLayer, (int)replayDraw.hasLayer, replayDraw.clipDistanceLen, replayDraw.cullDistanceLen,
                 program.gsPassThroughVertexMSL.c_str());
         }
         program.gsPassThroughReflection = ShaderReflection{};
@@ -32996,10 +33125,10 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             pos.name = "vsin_position";
             program.gsPassThroughReflection.vertexInputs.push_back(pos);
         }
-        const auto& stageSlotWidths = ed.varyingStageSlotWidths.empty()
-            ? ed.varyingWidths : ed.varyingStageSlotWidths;
-        const auto& stageSlotBaseType = ed.varyingStageSlotBaseType.empty()
-            ? ed.varyingBaseType : ed.varyingStageSlotBaseType;
+        const auto& stageSlotWidths = replayDraw.varyingStageSlotWidths.empty()
+            ? replayDraw.varyingWidths : replayDraw.varyingStageSlotWidths;
+        const auto& stageSlotBaseType = replayDraw.varyingStageSlotBaseType.empty()
+            ? replayDraw.varyingBaseType : replayDraw.varyingStageSlotBaseType;
         for (std::size_t i = 0; i < stageSlotWidths.size(); ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = static_cast<GLuint>(i + 1);
@@ -33041,15 +33170,15 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // allocated the same way in the synth VS MSL so these match.
         const GLuint clipBaseLoc =
             static_cast<GLuint>(stageSlotWidths.size() + 1);
-        for (std::uint32_t i = 0; i < ed.clipDistanceLen; ++i) {
+        for (std::uint32_t i = 0; i < replayDraw.clipDistanceLen; ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = clipBaseLoc + i;
             vi.type = GL_FLOAT;
             vi.name = "vsin_clip" + std::to_string(i);
             program.gsPassThroughReflection.vertexInputs.push_back(vi);
         }
-        const GLuint cullBaseLoc = clipBaseLoc + ed.clipDistanceLen;
-        for (std::uint32_t i = 0; i < ed.cullDistanceLen; ++i) {
+        const GLuint cullBaseLoc = clipBaseLoc + replayDraw.clipDistanceLen;
+        for (std::uint32_t i = 0; i < replayDraw.cullDistanceLen; ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = cullBaseLoc + i;
             vi.type = GL_FLOAT;
@@ -33072,11 +33201,11 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     }
 
     TranslatedDrawInfo tdi;
-    tdi.mode = ed.topology;
-    tdi.vertexCount = static_cast<GLsizei>(ed.vertexCount);
-    tdi.vertexData = ed.expandedVertexData.data();
-    tdi.vertexDataByteCount = ed.expandedVertexData.size() * sizeof(float);
-    tdi.vertexStride = ed.floatsPerVertex * sizeof(float);
+    tdi.mode = replayDraw.topology;
+    tdi.vertexCount = static_cast<GLsizei>(replayDraw.vertexCount);
+    tdi.vertexData = replayDraw.expandedVertexData.data();
+    tdi.vertexDataByteCount = replayDraw.expandedVertexData.size() * sizeof(float);
+    tdi.vertexStride = replayDraw.floatsPerVertex * sizeof(float);
 
     {
         std::size_t offset = 0;
@@ -33089,10 +33218,10 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             tdi.vertexAttributeLayouts.push_back(la);
             offset += 4 * sizeof(float);
         }
-        const auto& stageSlotWidths = ed.varyingStageSlotWidths.empty()
-            ? ed.varyingWidths : ed.varyingStageSlotWidths;
-        const auto& stageSlotBaseType = ed.varyingStageSlotBaseType.empty()
-            ? ed.varyingBaseType : ed.varyingStageSlotBaseType;
+        const auto& stageSlotWidths = replayDraw.varyingStageSlotWidths.empty()
+            ? replayDraw.varyingWidths : replayDraw.varyingStageSlotWidths;
+        const auto& stageSlotBaseType = replayDraw.varyingStageSlotBaseType.empty()
+            ? replayDraw.varyingBaseType : replayDraw.varyingStageSlotBaseType;
         for (std::size_t i = 0; i < stageSlotWidths.size(); ++i) {
             TranslatedDrawInfo::VertexAttributeLayout la;
             la.location = static_cast<GLuint>(i + 1);
@@ -33119,7 +33248,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // MTLVertexDescriptor's per-attribute format + offset.
         const GLuint clipBaseLoc =
             static_cast<GLuint>(stageSlotWidths.size() + 1);
-        for (std::uint32_t i = 0; i < ed.clipDistanceLen; ++i) {
+        for (std::uint32_t i = 0; i < replayDraw.clipDistanceLen; ++i) {
             TranslatedDrawInfo::VertexAttributeLayout la;
             la.location = clipBaseLoc + i;
             la.offset = offset;
@@ -33128,8 +33257,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             tdi.vertexAttributeLayouts.push_back(la);
             offset += sizeof(float);
         }
-        const GLuint cullBaseLoc = clipBaseLoc + ed.clipDistanceLen;
-        for (std::uint32_t i = 0; i < ed.cullDistanceLen; ++i) {
+        const GLuint cullBaseLoc = clipBaseLoc + replayDraw.clipDistanceLen;
+        for (std::uint32_t i = 0; i < replayDraw.cullDistanceLen; ++i) {
             TranslatedDrawInfo::VertexAttributeLayout la;
             la.location = cullBaseLoc + i;
             la.offset = offset;
@@ -33147,9 +33276,9 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // keeps `tdi.vertexStride` matching the actual per-vertex
         // byte count and the manual buffer reads point at the right
         // position.
-        if (ed.hasLayer)        offset += sizeof(std::int32_t);
-        if (ed.hasPointSize)    offset += sizeof(float);
-        if (ed.hasPrimitiveID)  offset += sizeof(std::int32_t);
+        if (replayDraw.hasLayer)        offset += sizeof(std::int32_t);
+        if (replayDraw.hasPointSize)    offset += sizeof(float);
+        if (replayDraw.hasPrimitiveID)  offset += sizeof(std::int32_t);
     }
 
     populateTranslatedDrawFixedFunctionState(tdi, *state, GL_SHADING_RATE_1X1_PIXELS_EXT);
@@ -33162,8 +33291,8 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     // Post-process the FS MSL for GS-emulation replay. PrimitiveID needs
     // a user-varying redirect; fp64 stage inputs need float transport
     // because Metal rejects nested appgl_df64 structs in [[stage_in]].
-    const auto& stageSlotScalarBytes = ed.varyingStageSlotScalarByteSize.empty()
-        ? ed.varyingScalarByteSize : ed.varyingStageSlotScalarByteSize;
+    const auto& stageSlotScalarBytes = replayDraw.varyingStageSlotScalarByteSize.empty()
+        ? replayDraw.varyingScalarByteSize : replayDraw.varyingStageSlotScalarByteSize;
     bool needsFp64StageInRewrite = false;
     for (std::uint8_t bytes : stageSlotScalarBytes) {
         if (bytes == sizeof(double)) {
@@ -33171,20 +33300,20 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             break;
         }
     }
-    if (ed.hasPrimitiveID || needsFp64StageInRewrite) {
+    if (replayDraw.hasPrimitiveID || needsFp64StageInRewrite) {
         if (program.gsPassThroughFragmentMSL.empty()
-            || program.gsPassThroughFragmentMSLPrimIdLoc != ed.primitiveIDLocation) {
+            || program.gsPassThroughFragmentMSLPrimIdLoc != replayDraw.primitiveIDLocation) {
             std::string rewrittenFragment = program.fragmentMSL;
             if (needsFp64StageInRewrite) {
                 rewrittenFragment =
                     appgl::rewriteFragmentMSLForFp64StageIn(rewrittenFragment);
             }
-            if (ed.hasPrimitiveID) {
+            if (replayDraw.hasPrimitiveID) {
                 rewrittenFragment =
-                    appgl::rewriteFragmentMSLForPrimitiveID(rewrittenFragment, ed);
+                    appgl::rewriteFragmentMSLForPrimitiveID(rewrittenFragment, replayDraw);
             }
             program.gsPassThroughFragmentMSL = std::move(rewrittenFragment);
-            program.gsPassThroughFragmentMSLPrimIdLoc = ed.primitiveIDLocation;
+            program.gsPassThroughFragmentMSLPrimIdLoc = replayDraw.primitiveIDLocation;
             program.gsPassThroughFragmentMSLActive = true;
             // Rebuilding FS invalidates any cached pipeline state.
             program.gsPassThroughPipelineStateCache.clear();
@@ -33194,7 +33323,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
             program.gsPassThroughFragmentFunction = nullptr;
             if (std::getenv("APPGL_GS_DUMP_MSL") != nullptr) {
                 std::fprintf(stderr, "\n[GS] rewritten FS MSL (primIdLoc=%u fp64StageIn=%d, %zu bytes)\n",
-                    ed.primitiveIDLocation, needsFp64StageInRewrite ? 1 : 0,
+                    replayDraw.primitiveIDLocation, needsFp64StageInRewrite ? 1 : 0,
                     program.gsPassThroughFragmentMSL.size());
             }
         }
@@ -33234,11 +33363,17 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     resolveSSBOBindings(program, tdi);
     resolveImageBindings(program, tdi);
 
-    if (preFboColTex != nullptr || preFboDSTex != nullptr) {
+    if (preFboColTex != nullptr || preFboDSTex != nullptr || preAttachmentlessFbo) {
         tdi.fboColorTexture = preFboColTex;
+        tdi.fboAdditionalColorTextures = preExtraColTex;
+        tdi.fboColorSlices = preColorSlices;
         tdi.fboDepthStencilTexture = preFboDSTex;
-        tdi.fboWidth = preFboW;
-        tdi.fboHeight = preFboH;
+        tdi.fboWidth = preAttachmentlessFbo ? preDrawFbo->defaultWidth : preFboW;
+        tdi.fboHeight = preAttachmentlessFbo ? preDrawFbo->defaultHeight : preFboH;
+        tdi.fboAttachmentless = preAttachmentlessFbo &&
+            preFboColTex == nullptr &&
+            preFboDSTex == nullptr;
+        tdi.fboDefaultLayers = preAttachmentlessLayers;
         // Only honour layered-attachment routing when the emulated
         // GS actually wrote gl_Layer AND the FBO is layered. In
         // the GS-wrote but non-layered case the synth VS didn't
@@ -33246,12 +33381,13 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         // branch at function entry), so we must leave
         // renderTargetArrayLength at 0 to match.
         if (routeLayer) {
-            tdi.fboColorArrayLength = preFboArrayLen;
+            tdi.fboColorArrayLength =
+                preAttachmentlessFbo ? preAttachmentlessLayers : preFboArrayLen;
             // Sprint 17 Day 1 (CKPT236) [Probe A 2DMSArray clamp]:
             // forward GS-emul-tracked max emitted layer so
             // `encodeTranslatedDraw` can clamp `renderTargetArrayLength`
             // for MS-array attachments (h2DM-3 AGX assertion fix).
-            tdi.maxEmittedLayer = ed.maxEmittedLayer;
+            tdi.maxEmittedLayer = replayDraw.maxEmittedLayer;
         }
     }
 

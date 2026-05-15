@@ -1139,13 +1139,40 @@ struct MetalFrameGraph::Impl {
 
         // RC-A02: when an FBO render target is provided, use it instead of
         // the default framebuffer texture.
+        const bool isAttachmentlessFBODraw =
+            info.fboAttachmentless &&
+            info.fboColorTexture == nullptr &&
+            info.fboDepthStencilTexture == nullptr;
         const bool isFBODraw =
             info.fboColorTexture != nullptr ||
-            info.fboDepthStencilTexture != nullptr;
+            info.fboDepthStencilTexture != nullptr ||
+            isAttachmentlessFBODraw;
         id<MTLTexture> fboColorTex = (info.fboColorTexture != nullptr)
             ? (__bridge id<MTLTexture>)info.fboColorTexture : nil;
         id<MTLTexture> fboDepthStencilTex = (info.fboDepthStencilTexture != nullptr)
             ? (__bridge id<MTLTexture>)info.fboDepthStencilTexture : nil;
+        id<MTLTexture> attachmentlessColorTex = nil;
+        if (isAttachmentlessFBODraw) {
+            const NSUInteger fboWidth =
+                static_cast<NSUInteger>(std::max<GLsizei>(info.fboWidth, 1));
+            const NSUInteger fboHeight =
+                static_cast<NSUInteger>(std::max<GLsizei>(info.fboHeight, 1));
+            const NSUInteger fboLayers =
+                static_cast<NSUInteger>(std::max<std::uint32_t>(info.fboDefaultLayers, 1u));
+            MTLTextureDescriptor* dummyDesc =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                    width:fboWidth
+                                                                   height:fboHeight
+                                                                mipmapped:NO];
+            dummyDesc.storageMode = MTLStorageModePrivate;
+            dummyDesc.usage = MTLTextureUsageRenderTarget;
+            if (fboLayers > 1) {
+                dummyDesc.textureType = MTLTextureType2DArray;
+                dummyDesc.arrayLength = fboLayers;
+            }
+            attachmentlessColorTex = [device newTextureWithDescriptor:dummyDesc];
+            fboColorTex = attachmentlessColorTex;
+        }
         id<MTLTexture> dsOnlyColorTex = nil;
         if (isFBODraw && fboColorTex == nil && fboDepthStencilTex != nil) {
             MTLTextureDescriptor* dummyDesc =
@@ -1614,7 +1641,8 @@ struct MetalFrameGraph::Impl {
                         pf == MTLPixelFormatX24_Stencil8) {
                         stencilFmt = pf;
                     }
-                } else if (info.fboColorTexture == nullptr) {
+                } else if (info.fboColorTexture == nullptr &&
+                           !info.fboAttachmentless) {
                     // Default framebuffer: keep the legacy combined
                     // format so the swapchain path (renderpass-attached
                     // depth+stencil renderbuffer backed by
@@ -4572,6 +4600,48 @@ fragment float4 appgl_immediate_textured_fs(
             currentCommandBuffer = [commandQueue commandBuffer];
             attachErrorHandler(currentCommandBuffer, @"layeredClear");
             if (currentCommandBuffer == nil) return false;
+        }
+        auto encodeClearPass = [&](std::uint32_t targetSlice,
+                                   std::uint32_t targetArrayLength) -> bool {
+            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            if (isColor) {
+                pass.colorAttachments[0].texture = tex;
+                pass.colorAttachments[0].level = level;
+                pass.colorAttachments[0].slice = targetSlice;
+                pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+                pass.colorAttachments[0].clearColor = MTLClearColorMake(rgba[0], rgba[1], rgba[2], rgba[3]);
+            }
+            if (isDepth) {
+                pass.depthAttachment.texture = tex;
+                pass.depthAttachment.level = level;
+                pass.depthAttachment.slice = targetSlice;
+                pass.depthAttachment.loadAction = MTLLoadActionClear;
+                pass.depthAttachment.storeAction = MTLStoreActionStore;
+                pass.depthAttachment.clearDepth = depth;
+            }
+            if (isStencil) {
+                pass.stencilAttachment.texture = tex;
+                pass.stencilAttachment.level = level;
+                pass.stencilAttachment.slice = targetSlice;
+                pass.stencilAttachment.loadAction = MTLLoadActionClear;
+                pass.stencilAttachment.storeAction = MTLStoreActionStore;
+                pass.stencilAttachment.clearStencil = stencil & 0xFF;
+            }
+            if (targetArrayLength > 0) {
+                pass.renderTargetArrayLength = targetArrayLength;
+            }
+            id<MTLRenderCommandEncoder> enc =
+                [currentCommandBuffer renderCommandEncoderWithDescriptor:pass];
+            if (enc == nil) return false;
+            [enc endEncoding];
+            return true;
+        };
+        if (!isColor && (isDepth || isStencil) && arrayLength > 0) {
+            for (std::uint32_t i = 0; i < arrayLength; ++i) {
+                if (!encodeClearPass(slice + i, 0)) return false;
+            }
+            return true;
         }
         MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
         if (isColor) {

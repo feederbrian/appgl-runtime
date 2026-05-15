@@ -540,6 +540,11 @@ struct TranslatedDrawInfo {
     void* fboDepthStencilTexture = nullptr; // id<MTLTexture> or nil
     GLsizei fboWidth = 0;
     GLsizei fboHeight = 0;
+    // Attachment-less user FBO (ARB_framebuffer_no_attachments). GL
+    // still rasterizes against the framebuffer default dimensions, so
+    // Metal needs a private dummy color target to host the render pass.
+    bool fboAttachmentless = false;
+    std::uint32_t fboDefaultLayers = 0;
     // Layered rendering: when non-zero, the color attachment is a
     // layered texture (2D_ARRAY / 2D_MS_ARRAY / 3D / CUBE / CUBE_
     // ARRAY) and `renderTargetArrayLength` on the MTLRenderPass

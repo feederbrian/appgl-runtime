@@ -7057,16 +7057,27 @@ struct OutputVaryingDesc {
     // writeGsXfbAndCheckDiscard uses this to route per-buffer per-
     // stream TF writes when the GS uses multi-stream emit.
     std::uint32_t stream = 0;
+    // Order in OpEntryPoint's interface list. Used only while assigning
+    // implicit locations for GS outputs without DecorationLocation.
+    std::uint32_t implicitOrder = ~0u;
 };
 
 std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
     std::vector<OutputVaryingDesc> out;
+    std::unordered_map<std::uint32_t, std::uint32_t> interfaceOrder;
+    interfaceOrder.reserve(mod.entryInterface.size());
+    for (std::size_t i = 0; i < mod.entryInterface.size(); ++i) {
+        interfaceOrder.emplace(mod.entryInterface[i],
+                               static_cast<std::uint32_t>(i));
+    }
     // Implicit-location varyings (no explicit `layout(location=N)` in
     // the GLSL) carry no DecorationLocation from glslang. GL 4.6 §4.4.2
     // says the linker assigns them sequentially starting from 0; we
     // mirror that here by collecting them separately and auto-numbering
-    // after the explicitly-located ones settle, sorted by SPIR-V id so
-    // the order is stable across runs.
+    // after the explicitly-located ones settle. Use OpEntryPoint's
+    // interface order when present so the GS-emul synthetic VS matches
+    // SPIRV-Cross's fragment-stage `[[user(locnN)]]` assignment for
+    // bare varyings such as `out vec2 uv; flat out int layer_id;`.
     std::vector<OutputVaryingDesc> implicits;
     for (const auto& [varId, info] : mod.variables) {
         if (info.storageClass != spv::StorageClassOutput) continue;
@@ -7079,6 +7090,12 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
         if (dIt != mod.decorations.end() && dIt->second.hasBuiltIn) continue;
         OutputVaryingDesc d;
         d.name = info.name;
+        if (auto ordIt = interfaceOrder.find(varId);
+            ordIt != interfaceOrder.end()) {
+            d.implicitOrder = ordIt->second;
+        } else {
+            d.implicitOrder = varId;
+        }
         // Sprint 8 #9-C (CKPT96) — capture DecorationStream on the
         // OpVariable. glslang emits this for `layout(stream=N) out`
         // qualifiers; default 0 means stream 0.
@@ -7216,11 +7233,14 @@ std::vector<OutputVaryingDesc> gatherOutputVaryings(const SpirvModule& mod) {
             implicits.push_back(std::move(d));
         }
     }
-    // Resolve implicit locations: sort by SPIR-V id (stable) and
-    // assign the lowest non-occupied location ≥ 0.
+    // Resolve implicit locations in entry-interface order and assign
+    // the lowest non-occupied location ≥ 0.
     if (!implicits.empty()) {
         std::sort(implicits.begin(), implicits.end(), [](const auto& a, const auto& b) {
-            return a.location < b.location;   // id-sorted
+            if (a.implicitOrder != b.implicitOrder) {
+                return a.implicitOrder < b.implicitOrder;
+            }
+            return a.location < b.location;
         });
         std::uint32_t nextLoc = 0;
         auto locTaken = [&](std::uint32_t loc) {
