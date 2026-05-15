@@ -2399,6 +2399,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         //   [0..127]    sampled_images   (2*N for image, 2*N+1 for sampler)
         //   [128..191]  storage_images
         //   [192..255]  SSBOs
+        //   [256..263]  atomic counters
         //
         // Desc_set 1 contains only UBOs, so no internal collision risk.
         // Push constants stay as a direct [[buffer(16)]] binding per
@@ -2480,6 +2481,23 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 }
                 compiler.add_msl_resource_binding(binding);
             }
+        }
+
+        // Atomic counters occupy their own GL binding namespace and
+        // SPIRV-Cross lowers them as buffer resources. Under argument
+        // buffers, leave SSBOs in the 192+ range and put atomic counters
+        // above them so `layout(binding=N) uniform atomic_uint` cannot
+        // collide with `layout(binding=N) buffer`.
+        for (auto& atomicCounter : resources.atomic_counters) {
+            const std::uint32_t glBinding =
+                compiler.get_decoration(atomicCounter.id, spv::DecorationBinding);
+            spirv_cross::MSLResourceBinding binding;
+            binding.stage = compiler.get_execution_model();
+            binding.desc_set =
+                compiler.get_decoration(atomicCounter.id, spv::DecorationDescriptorSet);
+            binding.binding = glBinding;
+            binding.msl_buffer = useArgBuf ? (256 + glBinding) : glBinding;
+            compiler.add_msl_resource_binding(binding);
         }
 
         // Sprint 8 B Cluster F F1 Day 9 (CKPT81): unified sequential

@@ -447,6 +447,18 @@ struct TranslatedDrawInfo {
     };
     std::vector<SSBOBinding> ssboBindings;
 
+    // Atomic counter buffers for graphics stages. Direct MSL uses the
+    // GL atomic-counter binding index; argument-buffer MSL uses the
+    // translator-assigned argbuf id carried here.
+    struct AtomicCounterBinding {
+        std::uint32_t metalSlot = 0;
+        void* metalBuffer = nullptr;
+        std::size_t offset = 0;
+        bool isVertex = false;
+        bool isFragment = false;
+    };
+    std::vector<AtomicCounterBinding> atomicCounterBindings;
+
     // Translated MSL + reflection (borrowed from GLProgramObject).
     const std::string* vertexMSL = nullptr;
     const std::string* fragmentMSL = nullptr;

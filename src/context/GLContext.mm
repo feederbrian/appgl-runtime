@@ -7123,6 +7123,7 @@ struct GLContext::Impl {
         TranslatedDrawInfo& info)
     {
         info.ssboBindings.clear();
+        info.atomicCounterBindings.clear();
         pendingFp64GraphicsSsboSidecars.clear();
 
         auto resolveStage = [&](const ShaderReflection* reflection,
@@ -7191,6 +7192,51 @@ struct GLContext::Impl {
         };
         resolveStage(info.vertexReflection, true, false);
         resolveStage(info.fragmentReflection, false, true);
+
+        // Graphics-stage atomic counters are not SSBOs, but they use the
+        // same indexed-buffer binding machinery and must be carried on the
+        // draw info before Metal encodes the render pass. The compute path
+        // already binds these in buildComputeDispatchInfo(); fragment tests
+        // such as shader_storage_buffer_object.advanced-write-fragment need
+        // the graphics equivalent so atomicCounterIncrement has real backing.
+        auto stageUsesArgBuf = [](const std::string* msl) -> bool {
+            return msl != nullptr &&
+                msl->find("spvDescriptorSetBuffer") != std::string::npos;
+        };
+        const bool vertexAtomicArgBuf = stageUsesArgBuf(info.vertexMSL);
+        const bool fragmentAtomicArgBuf = stageUsesArgBuf(info.fragmentMSL);
+        auto addAtomicBinding = [&](const GLProgramResourceEntry& ac,
+                                    bool isVertex,
+                                    bool isFragment,
+                                    std::uint32_t metalSlot) {
+            if (ac.binding < 0) return;
+            const GLuint glBinding = static_cast<GLuint>(ac.binding);
+            const GLIndexedBufferBinding binding =
+                state->indexedBufferBinding(GL_ATOMIC_COUNTER_BUFFER, glBinding);
+            if (binding.buffer == 0) return;
+            GLBufferObject* bufObj = objects->buffers().get(binding.buffer);
+            if (bufObj == nullptr || bufObj->metalBuffer == nullptr) return;
+
+            TranslatedDrawInfo::AtomicCounterBinding ab;
+            ab.metalSlot = metalSlot;
+            ab.metalBuffer = bufObj->metalBuffer;
+            ab.offset = static_cast<std::size_t>(binding.offset);
+            ab.isVertex = isVertex;
+            ab.isFragment = isFragment;
+            info.atomicCounterBindings.push_back(ab);
+        };
+        for (const auto& ac : program.resourceAtomicCounterBuffers) {
+            if (ac.binding < 0) continue;
+            const GLuint glBinding = static_cast<GLuint>(ac.binding);
+            if ((ac.referencedBy & 0x01) != 0) {
+                addAtomicBinding(ac, true, false,
+                    vertexAtomicArgBuf ? (256u + glBinding) : glBinding);
+            }
+            if ((ac.referencedBy & 0x02) != 0) {
+                addAtomicBinding(ac, false, true,
+                    fragmentAtomicArgBuf ? (256u + glBinding) : glBinding);
+            }
+        }
     }
 
     // Sprint 7 Phase 1 #4 (CKPT54): mirror of buildSampledTextureMap

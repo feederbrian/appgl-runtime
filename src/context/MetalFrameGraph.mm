@@ -2792,6 +2792,18 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
             }
         }
+        for (const auto& atomic : info.atomicCounterBindings) {
+            if (atomic.metalBuffer == nullptr) continue;
+            id<MTLBuffer> buf = (__bridge id<MTLBuffer>)atomic.metalBuffer;
+            const NSUInteger slot = static_cast<NSUInteger>(atomic.metalSlot);
+            const NSUInteger off = static_cast<NSUInteger>(atomic.offset);
+            if (atomic.isVertex && !vertexUsesArgBuf) {
+                [currentRenderEncoder setVertexBuffer:buf offset:off atIndex:slot];
+            }
+            if (atomic.isFragment && !fragmentUsesArgBuf) {
+                [currentRenderEncoder setFragmentBuffer:buf offset:off atIndex:slot];
+            }
+        }
 
         if (vertexUsesMultiviewViewMask && !vertexUsesArgBuf) {
             [currentRenderEncoder setVertexBytes:ovrViewMask
@@ -3094,6 +3106,18 @@ struct MetalFrameGraph::Impl {
                     [encoder setBuffer:buf
                                 offset:static_cast<NSUInteger>(ssbo.offset)
                                atIndex:static_cast<NSUInteger>(ssbo.metalSlot)];
+                    [currentRenderEncoder useResource:buf
+                                                usage:MTLResourceUsageRead|MTLResourceUsageWrite
+                                               stages:stage];
+                }
+                for (const auto& atomic : info.atomicCounterBindings) {
+                    if (atomic.metalBuffer == nullptr) continue;
+                    if (isFragment && !atomic.isFragment) continue;
+                    if (!isFragment && !atomic.isVertex) continue;
+                    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)(atomic.metalBuffer);
+                    [encoder setBuffer:buf
+                                offset:static_cast<NSUInteger>(atomic.offset)
+                               atIndex:static_cast<NSUInteger>(atomic.metalSlot)];
                     [currentRenderEncoder useResource:buf
                                                 usage:MTLResourceUsageRead|MTLResourceUsageWrite
                                                stages:stage];
