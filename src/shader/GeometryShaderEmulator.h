@@ -266,6 +266,13 @@ struct EmulatedDraw {
     // path so vertices write only to the buffer whose owner stream
     // matches the vertex's stream tag.
     std::vector<std::uint32_t> varyingStreams;
+    // Tessellation-emulator metadata. Populated only by
+    // emulateTessellationDraw so shared TF writing can recover
+    // per-input-patch semantics after the tessellator has expanded
+    // each patch into its output-domain vertex stream.
+    std::size_t tessOutputVerticesPerPatch = 0;
+    std::size_t tessPatchesPerInstance = 0;
+    std::int32_t tessPatchVerticesIn = 0;
     // CKPT162 (Sprint 14 Day 9): captured imageStore() writes from the
     // GS interpreter. Appended by the OpImageWrite handler. The runtime
     // walks this list after GS execution and applies each write to the
@@ -601,6 +608,7 @@ TesUniformMap buildTesUniformMap(const GLProgramObject& program);
 // the spec lets implementations pick). TES seeds its Input
 // patch-in variables from this map at initVariables time.
 using TesPatchVaryingMap = std::unordered_map<std::string, std::vector<float>>;
+using TcsSharedOutputStorage = std::unordered_map<std::uint32_t, std::vector<float>>;
 
 bool runTesForVertex(
     const std::uint32_t* tesSpirv,
@@ -712,7 +720,8 @@ bool runTcsForVertex(
     const SampledTextureMap* sampledTextures = nullptr,
     const SampledTextureMap* storageImages = nullptr,
     const appgl::interp::UniformBufferMap* uniformBuffers = nullptr,
-    std::vector<PendingImageWrite>* pendingImageWrites = nullptr);
+    std::vector<PendingImageWrite>* pendingImageWrites = nullptr,
+    TcsSharedOutputStorage* sharedOutputStorage = nullptr);
 
 // Synthesise a pass-through vertex-shader MSL source that reads
 // the expanded per-vertex payload (one buffer slot with gl_Position

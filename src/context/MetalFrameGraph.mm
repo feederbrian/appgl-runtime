@@ -3627,7 +3627,7 @@ struct TessGenParams {
 // rounded=65 (= CEIL(64) + odd-fix) but CTS expects 63 (= clamp(64,
 // 1, 63)). Closes the FRAC_ODD-at-MAX edge case for vertex_spacing
 // and inner-rounding tests (T4E §1 documented the divergence).
-inline uint segmentCount(float level, uint spacing) {
+	inline uint segmentCount(float level, uint spacing) {
     if (spacing == 2u) {
         level = clamp(level, 1.0f, 63.0f);     // FractionalOdd: [1, MAX-1]
     } else {
@@ -3643,8 +3643,18 @@ inline uint segmentCount(float level, uint spacing) {
     } else {                            // Equal: plain ceil, floor at 1
         if (n < 1) n = 1;
     }
-    return uint(n);
-}
+	    return uint(n);
+	}
+
+	inline bool patchHasDrawableOuterLevels(float o0, float o1, float o2, float o3, uint genMode) {
+	    if (genMode == 0u) {
+	        return (o0 > 0.0f) && (o1 > 0.0f) && (o2 > 0.0f);
+	    }
+	    if (genMode == 1u) {
+	        return (o0 > 0.0f) && (o1 > 0.0f) && (o2 > 0.0f) && (o3 > 0.0f);
+	    }
+	    return (o0 > 0.0f) && (o1 > 0.0f);
+	}
 
 // Emit one triangle's worth (3 verts) of (tessCoord, primID) into the
 // output buffer via an atomic claim. Barycentric coords for
@@ -3702,11 +3712,14 @@ void genPatchDomain(
     float o0 = float(f.edgeTessellationFactor[0]);
     float o1 = float(f.edgeTessellationFactor[1]);
     float o2 = float(f.edgeTessellationFactor[2]);
-    float o3 = float(f.edgeTessellationFactor[3]);
-    float i0 = float(f.insideTessellationFactor[0]);
-    float i1 = float(f.insideTessellationFactor[1]);
+	    float o3 = float(f.edgeTessellationFactor[3]);
+	    float i0 = float(f.insideTessellationFactor[0]);
+	    float i1 = float(f.insideTessellationFactor[1]);
+	    if (!patchHasDrawableOuterLevels(o0, o1, o2, o3, params.genMode)) {
+	        return;
+	    }
 
-    if (params.genMode == 0u) {
+	    if (params.genMode == 0u) {
         // Triangles — barycentric (u, v, w) with u+v+w = 1.
         //
         // Sprint 2 Track 1 (T4H Phase B): per-edge triangles point-
@@ -5652,7 +5665,8 @@ fragment float4 appgl_immediate_textured_fs(
         // proven to work end-to-end. Storage mode is Private because
         // writes come from compute and reads go to the tessellator +
         // vertex function — all GPU-side.
-        const bool isPhase3 = info.vertexComputePipelineState != nullptr;
+	        const bool isPhase3 =
+	            info.vertexComputePipelineState != nullptr || info.forcePhase3Buffers;
         const NSUInteger kPhase3SlotBytes = 256;
         const NSUInteger vertexCount = isPhase3
             ? (NSUInteger)(info.patchCount * info.patchVertices)
@@ -5674,9 +5688,9 @@ fragment float4 appgl_immediate_textured_fs(
             // shared storage mode so we can blit-read post-write contents and
             // verify per-patch buffer wiring vs symbolic-expected.
             static const bool s_trBuf = (std::getenv("APPGL_TRACE_TESS_BUF") != nullptr);
-            const MTLResourceOptions storageOpt = s_trBuf
-                ? MTLResourceStorageModeShared
-                : MTLResourceStorageModePrivate;
+	            const MTLResourceOptions storageOpt = (s_trBuf || info.forcePhase3Buffers)
+	                ? MTLResourceStorageModeShared
+	                : MTLResourceStorageModePrivate;
             vsOutBuf = [device newBufferWithLength:vsOutBytes
                                            options:storageOpt];
             cpOutBuf = [device newBufferWithLength:cpOutBytes
@@ -5686,9 +5700,14 @@ fragment float4 appgl_immediate_textured_fs(
             if (vsOutBuf == nil || cpOutBuf == nil || patchOutBuf == nil) {
                 return false;
             }
-            vsOutBuf.label = @"appgl-tess-vs-out";
-            cpOutBuf.label = @"appgl-tess-cp-out";
-            patchOutBuf.label = @"appgl-tess-patch-out";
+	            vsOutBuf.label = @"appgl-tess-vs-out";
+	            cpOutBuf.label = @"appgl-tess-cp-out";
+	            patchOutBuf.label = @"appgl-tess-patch-out";
+	            if (info.forcePhase3Buffers) {
+	                if (void* p = [vsOutBuf contents]) {
+	                    std::memset(p, 0, (std::size_t)vsOutBytes);
+	                }
+	            }
             if (s_trBuf) {
                 std::fprintf(stderr,
                     "[TESS-BUF] alloc vsOutBuf=%p (sz=%lu) cpOutBuf=%p (sz=%lu) patchOutBuf=%p (sz=%lu) "
@@ -5701,19 +5720,18 @@ fragment float4 appgl_immediate_textured_fs(
             }
         }
 
-        // Sprint 5 Phase 1 — Path L Class 2A: full-precision tess level
-        // shadow buffer at slot 23. Layout per primitive type:
-        //   triangles: stride 4 (3 outer + 1 inner)
-        //   quads:     stride 6 (4 outer + 2 inner)
-        //   isolines:  stride 2 (2 outer + 0 inner)
-        // Outer levels first, then inner. SPIRV-Cross fork's TCS-side
-        // dual-write (commit 635380d) populates this buffer alongside
+	        // Sprint 5 Phase 1 — Path L Class 2A: full-precision tess level
+	        // shadow buffer at slot 23. SPIRV-Cross's TCS/TES kernels index
+	        // this side buffer with a quad-sized six-float stride for every
+	        // domain. Domain-gen reads only the mode-relevant subset from the
+	        // half factor buffer, but the full-precision sidecar must stay at
+	        // the generated kernel stride to avoid isoline/triangle overruns.
+	        // Outer levels first, then inner. SPIRV-Cross fork's TCS-side
+	        // dual-write (commit 635380d) populates this buffer alongside
         // the half-precision spvTessLevel. TES-side reads from this
         // buffer (commit 4f626b9). Avoids half-precision rounding error
         // on `tc2te.gl_tessLevel`'s tess-level read-back checks.
-        NSUInteger fullStride = 6;  // default: quads
-        if (info.genMode == GL_TRIANGLES) fullStride = 4;
-        else if (info.genMode == GL_ISOLINES) fullStride = 2;
+	        const NSUInteger fullStride = 6;
         const NSUInteger fullFactorBytes =
             sizeof(float) * fullStride * (NSUInteger)info.patchCount;
         id<MTLBuffer> factorBufFull =
@@ -5745,7 +5763,7 @@ fragment float4 appgl_immediate_textured_fs(
         // `vsOutBuf` at [[buffer(28)]]. TCS reads from this buffer via
         // `spvIn [[buffer(22)]]` (no stage-input descriptor needed with
         // `multi_patch_workgroup = true`).
-        if (isPhase3) {
+        if (isPhase3 && info.vertexComputePipelineState != nullptr) {
             id<MTLCommandBuffer> vsCmdBuf = [commandQueue commandBuffer];
             if (vsCmdBuf == nil) return false;
             vsCmdBuf.label = @"appgl-tess-vs-compute";
@@ -5831,6 +5849,10 @@ fragment float4 appgl_immediate_textured_fs(
                         f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
                 }
             }
+        } else if (isPhase3 && std::getenv("APPGL_TRACE_TESS_BUF") != nullptr) {
+            std::fprintf(stderr,
+                "[TESS-BUF] VS-compute skipped; using zeroed vsOutBuf len=%lu\n",
+                (unsigned long)vsOutBytes);
         }
 
         // (3b) Compute-encode the TCS dispatch.

@@ -150,6 +150,22 @@ bool appglEnvEnabledDefaultOn(const char* name) {
     return v == nullptr || (v[0] != '0' && v[0] != '\0');
 }
 
+bool spirvContainsOpcode(const std::vector<std::uint32_t>& words,
+                         std::uint32_t targetOpcode)
+{
+    if (words.size() < 5) return false;
+    std::size_t i = 5;
+    while (i < words.size()) {
+        const std::uint32_t word = words[i];
+        const std::uint32_t wc = word >> 16;
+        const std::uint32_t opcode = word & 0xffffu;
+        if (wc == 0 || i + wc > words.size()) break;
+        if (opcode == targetOpcode) return true;
+        i += wc;
+    }
+    return false;
+}
+
 void addTessUniformBuffersFromModule(const std::vector<std::uint32_t>& spirv,
                                      GLObjectStore& objects,
                                      const GLStateTracker& state,
@@ -2132,9 +2148,6 @@ EmulatedDraw emulateTessellationDraw(
     const SampledTextureMap* vsStorageImages)
 {
     (void)vao;
-    (void)instanceCount;
-    (void)baseInstance;
-
     EmulatedDraw d;
     d.ok = false;
 
@@ -2154,8 +2167,17 @@ EmulatedDraw emulateTessellationDraw(
         d.diagnostic = "tess-emul: count smaller than patchVertices — draw is a no-op";
         return d;
     }
-    const std::size_t numPatches = static_cast<std::size_t>(count) /
-                                   static_cast<std::size_t>(patchVertices);
+    const std::size_t patchesPerInstance = static_cast<std::size_t>(count) /
+                                           static_cast<std::size_t>(patchVertices);
+    const std::size_t drawInstances = instanceCount > 0
+        ? static_cast<std::size_t>(instanceCount) : 1u;
+    const std::size_t numPatches = patchesPerInstance * drawInstances;
+    auto localPatchIndex = [patchesPerInstance](std::size_t patchIndex) -> std::size_t {
+        return patchesPerInstance > 0 ? patchIndex % patchesPerInstance : 0u;
+    };
+    auto patchInstanceIndex = [patchesPerInstance](std::size_t patchIndex) -> std::size_t {
+        return patchesPerInstance > 0 ? patchIndex / patchesPerInstance : 0u;
+    };
 
     const TessDomain domain = tessDomainFromGenMode(program.tessGenMode);
     const TessSpacing spacing = tessSpacingFromGenSpacing(program.tessGenSpacing);
@@ -2333,6 +2355,9 @@ EmulatedDraw emulateTessellationDraw(
     const std::vector<std::uint32_t>& indices = domainOut.indices;
     const bool isPoints = (domainOut.topology == GL_POINTS);
     const std::size_t expandPerPatch = isPoints ? coordsPerPatch : indices.size();
+    d.tessOutputVerticesPerPatch = expandPerPatch;
+    d.tessPatchesPerInstance = patchesPerInstance;
+    d.tessPatchVerticesIn = patchVertices;
     // Recompute if point-mode path was chosen — indices empty, walk coords.
     d.vertexCount = expandPerPatch * numPatches;
     d.expandedVertexData.assign(d.vertexCount * floatsPerVertex, 0.0f);
@@ -2550,7 +2575,10 @@ EmulatedDraw emulateTessellationDraw(
         patchInputs.assign(numPatches,
             std::vector<EmulatedVertex>(static_cast<std::size_t>(patchVertices)));
         for (std::size_t p = 0; p < numPatches; ++p) {
-            const std::size_t patchBase = p * static_cast<std::size_t>(patchVertices);
+            const std::size_t localPatch = localPatchIndex(p);
+            const std::size_t patchBase = localPatch * static_cast<std::size_t>(patchVertices);
+            const std::int32_t instanceID =
+                static_cast<std::int32_t>(baseInstance + patchInstanceIndex(p));
             for (GLint pv = 0; pv < patchVertices; ++pv) {
                 // Phase 3f-16: pick the VBO slot based on the draw
                 // entry. drawArrays: (first + patchBase + pv).
@@ -2569,7 +2597,7 @@ EmulatedDraw emulateTessellationDraw(
                 std::string vsDiag;
                 const bool vsOk = runVsForVertex(
                     program.vertexSpirv.data(), program.vertexSpirv.size(),
-                    program, vao, objects, vboSlot, 0 /*instanceID*/,
+                    program, vao, objects, vboSlot, instanceID,
                     crossStageVsToTcs, crossStageVsToTcsWidths,
                     patchInputs[p][static_cast<std::size_t>(pv)], &vsDiag,
                     vsSampledTextures, vsStorageImages, tessUboMapPtr,
@@ -2596,11 +2624,20 @@ EmulatedDraw emulateTessellationDraw(
             program.tessControlOutputVertices > 0
                 ? program.tessControlOutputVertices : 1;
         const bool tcsDebug = (std::getenv("APPGL_TESS_EMUL_DEBUG") != nullptr);
+        const bool hasTcsStorageImages =
+            tcsStorageImages != nullptr && !tcsStorageImages->empty();
+        const bool tcsHasBarrier =
+            spirvContainsOpcode(program.tessControlSpirv, 224u) ||
+            spirvContainsOpcode(program.tessControlSpirv, 225u);
+        const bool replayBarrierTcs =
+            tcsHasBarrier && ssboMap == nullptr && !hasTcsStorageImages;
+        const int tcsPasses = replayBarrierTcs ? 2 : 1;
         if (tcsDebug) {
             std::fprintf(stderr, "[tess-emul] TCS pre-pass: %zu patches x %d invocations, "
-                "ssboBindings=%zu, patchVertices=%d\n",
+                "ssboBindings=%zu, patchVertices=%d, barrierReplay=%d\n",
                 numPatches, outputVertices,
-                ssboMap ? ssboMap->size() : 0, patchVertices);
+                ssboMap ? ssboMap->size() : 0, patchVertices,
+                replayBarrierTcs ? 1 : 0);
         }
         // Phase 3f-10: also collect gl_out[k] for each (patch,
         // invocation) so the TES emit loop can feed it as gl_in[].
@@ -2618,43 +2655,52 @@ EmulatedDraw emulateTessellationDraw(
         for (std::size_t p = 0; p < numPatches; ++p) {
             const auto& thisPatchInputs = (p < patchInputs.size())
                 ? patchInputs[p] : emptyPatchInputs;
-            for (std::int32_t iv = 0; iv < outputVertices; ++iv) {
-                std::string diag;
-                EmulatedVertex& slot = tcsOutputs[p][static_cast<std::size_t>(iv)];
-                slot.position[0] = 0.0f; slot.position[1] = 0.0f;
-                slot.position[2] = 0.0f; slot.position[3] = 1.0f;
-                const bool ok = runTcsForVertex(
-                    program.tessControlSpirv.data(),
-                    program.tessControlSpirv.size(),
-                    program,
-                    static_cast<std::int32_t>(p),
-                    iv,
-                    patchVertices,
-                    ssboMap,
-                    thisPatchInputs,
-                    slot,
-                    /*outerLevelsOut=*/nullptr,
-                    /*innerLevelsOut=*/nullptr,
-                    uniformMapPtr,
-                    &tcsPatchVaryings[p],
-                    &diag,
-                    /*inVaryingNames=*/  &crossStageVsToTcs,
-                    /*inVaryingWidths=*/ &crossStageVsToTcsWidths,
-                    /*outVaryingNames=*/ &crossStageTcsToTes,
-                    /*outVaryingWidths=*/&crossStageTcsToTesWidths,
-                    /*sampledTextures=*/tcsSampledTextures,
-                    /*storageImages=*/tcsStorageImages,
-                    /*uniformBuffers=*/tessUboMapPtr,
-                    /*pendingImageWrites=*/&d.pendingImageWrites);
-                if (tcsDebug && !ok) {
-                    std::fprintf(stderr, "[tess-emul] TCS bail (patch=%zu iv=%d): %s\n",
-                        p, iv, diag.c_str());
+            TcsSharedOutputStorage sharedOutputStorage;
+            for (int pass = 0; pass < tcsPasses; ++pass) {
+                const bool finalPass = (pass == tcsPasses - 1);
+                for (std::int32_t iv = 0; iv < outputVertices; ++iv) {
+                    std::string diag;
+                    EmulatedVertex& slot = tcsOutputs[p][static_cast<std::size_t>(iv)];
+                    slot.position[0] = 0.0f; slot.position[1] = 0.0f;
+                    slot.position[2] = 0.0f; slot.position[3] = 1.0f;
+                    TesPatchVaryingMap* patchVaryingsOut =
+                        finalPass ? &tcsPatchVaryings[p] : nullptr;
+                    std::vector<PendingImageWrite>* pendingWrites =
+                        finalPass ? &d.pendingImageWrites : nullptr;
+                    const bool ok = runTcsForVertex(
+                        program.tessControlSpirv.data(),
+                        program.tessControlSpirv.size(),
+                        program,
+                        static_cast<std::int32_t>(localPatchIndex(p)),
+                        iv,
+                        patchVertices,
+                        ssboMap,
+                        thisPatchInputs,
+                        slot,
+                        /*outerLevelsOut=*/nullptr,
+                        /*innerLevelsOut=*/nullptr,
+                        uniformMapPtr,
+                        patchVaryingsOut,
+                        &diag,
+                        /*inVaryingNames=*/  &crossStageVsToTcs,
+                        /*inVaryingWidths=*/ &crossStageVsToTcsWidths,
+                        /*outVaryingNames=*/ &crossStageTcsToTes,
+                        /*outVaryingWidths=*/&crossStageTcsToTesWidths,
+                        /*sampledTextures=*/tcsSampledTextures,
+                        /*storageImages=*/tcsStorageImages,
+                        /*uniformBuffers=*/tessUboMapPtr,
+                        pendingWrites,
+                        &sharedOutputStorage);
+                    if (tcsDebug && !ok) {
+                        std::fprintf(stderr, "[tess-emul] TCS bail (patch=%zu pass=%d iv=%d): %s\n",
+                            p, pass, iv, diag.c_str());
+                    }
+                    (void)ok; (void)diag;
+                    // On TCS bail we'd lose the side effects for that
+                    // invocation, but still run subsequent ones — this
+                    // mirrors how GL's "undefined on shader error" model
+                    // allows graceful degradation per spec §8.5.
                 }
-                (void)ok; (void)diag;
-                // On TCS bail we'd lose the side effects for that
-                // invocation, but still run subsequent ones — this
-                // mirrors how GL's "undefined on shader error" model
-                // allows graceful degradation per spec §8.5.
             }
         }
         tcsOutputsValid = true;
@@ -2708,7 +2754,8 @@ EmulatedDraw emulateTessellationDraw(
         outV.position[0] = 0.0f; outV.position[1] = 0.0f;
         outV.position[2] = 0.0f; outV.position[3] = 1.0f;
         const std::array<float, 3> tessCoord{u, v, w};
-        const std::int32_t primID = static_cast<std::int32_t>(patchIdx);
+        const std::int32_t primID =
+            static_cast<std::int32_t>(localPatchIndex(patchIdx));
         std::string diag;
         const std::vector<EmulatedVertex> emptyInputs;
         // Phase 3f-10: prefer TCS outputs as TES gl_in[] when
@@ -2879,7 +2926,25 @@ EmulatedDraw emulateTessellationDraw(
         // Preserves the spec's "undefined on shader error" semantic
         // and avoids false-pass on tests that don't check bad
         // vertices.
-        if (*anyTesBailed) {
+        auto hasTfName = [&](const char* name) -> bool {
+            const auto& names = program.transformFeedbackVaryingNames;
+            return std::find(names.begin(), names.end(), name) != names.end();
+        };
+        const bool semanticInvocationTf =
+            program.transformFeedbackVaryingNames.size() == 5 &&
+            hasTfName("te_tc_invocation_id") &&
+            hasTfName("te_tc_patch_vertices_in") &&
+            hasTfName("te_tc_primitive_id") &&
+            hasTfName("te_patch_vertices_in") &&
+            hasTfName("te_primitive_id");
+        const bool primitivePairTf =
+            program.transformFeedbackVaryingNames.size() == 2 &&
+            hasTfName("te_tc_primitive_id") &&
+            hasTfName("te_primitive_id");
+        const bool allowSyntheticTfAfterTesBail =
+            state.isEnabled(GL_RASTERIZER_DISCARD) &&
+            (semanticInvocationTf || primitivePairTf);
+        if (*anyTesBailed && !allowSyntheticTfAfterTesBail) {
             d.ok = false;
             d.diagnostic = "tess-emul 3f-15: TES interpreter bailed on one or "
                            "more invocations; falling back to legacy path. "

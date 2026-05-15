@@ -693,10 +693,15 @@ struct MetalTessDrawInfo {
     // Phase 3: VS-as-compute pipeline state. When non-null, the
     // encoder runs a VS compute dispatch before the TCS and binds
     // per-CP / per-patch / VS-output buffers for the TCS + render
-    // encoders. When null, the encoder takes the Phase 2 path
-    // (factor + indirect only).
-    void* vertexComputePipelineState = nullptr;  // id<MTLComputePipelineState>
-    // Phase 3B.4 [metal-tess-TF]: TES-as-compute pipeline state.
+	    // encoders. When null, the encoder takes the Phase 2 path
+	    // (factor + indirect only).
+	    void* vertexComputePipelineState = nullptr;  // id<MTLComputePipelineState>
+	    // Targeted fallback for TF-only tessellation draws whose VS-compute
+	    // PSO cannot be built because Metal rejected an empty stage_in
+	    // descriptor. The encoder allocates the Phase-3 handoff buffers,
+	    // skips the VS dispatch, and seeds a zeroed VS-output buffer.
+	    bool forcePhase3Buffers = false;
+	    // Phase 3B.4 [metal-tess-TF]: TES-as-compute pipeline state.
     // When non-null AND transform feedback is active on the draw,
     // the encoder extends the compute chain with a domain-point
     // generator dispatch + a TES-as-compute dispatch whose output

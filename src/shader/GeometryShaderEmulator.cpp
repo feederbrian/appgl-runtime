@@ -77,8 +77,9 @@ namespace spv {
         OpEmitVertex = 218, OpEndPrimitive = 219,
         // Sprint 8 #9-C (CKPT95) — multi-stream GS emit. Stream operand is
         // an <id> referencing a constant Int specifying the target stream.
-        OpEmitStreamVertex = 220, OpEndStreamPrimitive = 221,
-        OpAtomicLoad = 227, OpAtomicStore = 228,
+	        OpEmitStreamVertex = 220, OpEndStreamPrimitive = 221,
+	        OpControlBarrier = 224, OpMemoryBarrier = 225,
+	        OpAtomicLoad = 227, OpAtomicStore = 228,
         OpAtomicExchange = 229, OpAtomicCompareExchange = 230,
         OpAtomicCompareExchangeWeak = 231,
         OpAtomicIIncrement = 232, OpAtomicIDecrement = 233,
@@ -449,13 +450,16 @@ public:
     // §11.2.2). `patchVertices` is the input patch size from
     // glPatchParameteri(GL_PATCH_VERTICES, N), exposed to TCS as
     // gl_PatchVerticesIn.
-    void setTcsInputs(std::int32_t primitiveID,
-                      std::int32_t invocationID,
-                      std::int32_t patchVertices) {
-        tcsPrimitiveId_ = primitiveID;
-        tcsInvocationId_ = invocationID;
-        tcsPatchVertices_ = patchVertices;
-    }
+	    void setTcsInputs(std::int32_t primitiveID,
+	                      std::int32_t invocationID,
+	                      std::int32_t patchVertices) {
+	        tcsPrimitiveId_ = primitiveID;
+	        tcsInvocationId_ = invocationID;
+	        tcsPatchVertices_ = patchVertices;
+	    }
+	    void setTcsSharedOutputStorage(TcsSharedOutputStorage* storage) {
+	        tcsSharedOutputStorage_ = storage;
+	    }
 
     // Run the entry-point function once, given `inputs` as gl_in[].
     // Appends emitted vertices to `emitted`. Primitive boundaries are
@@ -588,7 +592,8 @@ private:
     // after the body walk; the runtime flushes each write to its
     // bound Metal texture via replaceRegion: so subsequent reads
     // (glGetTexImage / FS samples) see the GS-emitted data.
-    std::vector<PendingImageWrite> pendingImageWrites_;
+	    std::vector<PendingImageWrite> pendingImageWrites_;
+	    TcsSharedOutputStorage* tcsSharedOutputStorage_ = nullptr;
 
     // Synthetic "sampled image handle" tracked through the SPIR-V
     // body walk. OpAccessChain on a sampler-array variable, OpLoad
@@ -711,8 +716,9 @@ public:
     // caller uses the same map across all invocations of a patch,
     // yielding last-write-wins semantics (spec-permitted when two
     // TCS invocations write the same patch-out variable).
-    void captureTcsPatchOutputs(
-        std::unordered_map<std::string, std::vector<float>>& out) const;
+	    void captureTcsPatchOutputs(
+	        std::unordered_map<std::string, std::vector<float>>& out) const;
+	    void captureTcsSharedOutputs(TcsSharedOutputStorage& out) const;
 
     // Phase 3f-14: caller-supplied patch-in varying map for TES.
     // initVariables consults this pointer when seeding Input
@@ -2015,10 +2021,21 @@ void Interpreter::initVariables(const std::vector<PerVertexInput>& inputs) {
                 module_.scalarWidth(inputPointeeIt->second.componentType);
             width = static_cast<std::uint32_t>(inputs.size()) * elemW;
         }
-        auto& storage = varStorage_[varId];
-        storage.assign(width, 0.0f);
+	        auto& storage = varStorage_[varId];
+	        storage.assign(width, 0.0f);
+	        if (stage_ == Stage::TessControl &&
+	            info.storageClass == spv::StorageClassOutput &&
+	            tcsSharedOutputStorage_ != nullptr) {
+	            auto sharedIt = tcsSharedOutputStorage_->find(varId);
+	            if (sharedIt != tcsSharedOutputStorage_->end()) {
+	                const auto& src = sharedIt->second;
+	                for (std::size_t k = 0; k < src.size() && k < storage.size(); ++k) {
+	                    storage[k] = src[k];
+	                }
+	            }
+	        }
 
-        // Phase 3f-3: SSBO variables don't get flat-scalar storage —
+	        // Phase 3f-3: SSBO variables don't get flat-scalar storage —
         // OpLoad / OpStore route through the caller's binding map
         // into real buffer memory. Populate ssboVarMeta_ so the
         // access-chain walk can confirm the root binding later.
@@ -3220,9 +3237,9 @@ bool Interpreter::captureTcsOutputForInvocation(std::int32_t invocationID,
     return foundBuiltInGlOut || !outputVaryingNames_.empty();
 }
 
-void Interpreter::captureTcsPatchOutputs(
-    std::unordered_map<std::string, std::vector<float>>& out) const
-{
+	void Interpreter::captureTcsPatchOutputs(
+	    std::unordered_map<std::string, std::vector<float>>& out) const
+	{
     // Walk Output variables. Any with DecorationPatch is a
     // `patch out <type>` varying; copy its flat-float storage
     // into the caller's map, keyed by variable NAME (OpName).
@@ -3257,11 +3274,25 @@ void Interpreter::captureTcsPatchOutputs(
         // Overwrite any existing entry — last-write-wins across
         // invocations (GL 4.6 §11.2.2 permits this when multiple
         // TCS invocations write the same patch-out).
-        out[info.name] = sIt->second;
-    }
-}
+	        out[info.name] = sIt->second;
+	    }
+	}
 
-void Interpreter::emitVertex(std::vector<EmulatedVertex>& out, std::uint32_t stream) {
+	void Interpreter::captureTcsSharedOutputs(TcsSharedOutputStorage& out) const
+	{
+	    for (const auto& [varId, info] : module_.variables) {
+	        if (info.storageClass != spv::StorageClassOutput) {
+	            continue;
+	        }
+	        auto sIt = varStorage_.find(varId);
+	        if (sIt == varStorage_.end()) {
+	            continue;
+	        }
+	        out[varId] = sIt->second;
+	    }
+	}
+
+	void Interpreter::emitVertex(std::vector<EmulatedVertex>& out, std::uint32_t stream) {
     // Capture gl_Position and named output varyings from their
     // respective output variables' storage.
     EmulatedVertex ev;
@@ -6363,6 +6394,10 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             case spv::OpSelectionMerge:
                 pc += wc;   // structural annotations, no runtime action
                 break;
+            case spv::OpControlBarrier:
+            case spv::OpMemoryBarrier:
+                pc += wc;   // CPU TCS replay serializes invocations.
+                break;
             case spv::OpEmitVertex:
                 emitVertex(emitted);
                 pc += wc;
@@ -6677,6 +6712,8 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpPhi:
         case spv::OpLoopMerge:
         case spv::OpSelectionMerge:
+        case spv::OpControlBarrier:
+        case spv::OpMemoryBarrier:
         // ─ GS-specific ─
         case spv::OpEmitVertex:
         case spv::OpEndPrimitive:
@@ -10796,7 +10833,8 @@ bool runTcsForVertex(
     const SampledTextureMap* sampledTextures,
     const SampledTextureMap* storageImages,
     const Interpreter::UniformBufferMap* uniformBuffers,
-    std::vector<PendingImageWrite>* pendingImageWrites)
+    std::vector<PendingImageWrite>* pendingImageWrites,
+    TcsSharedOutputStorage* sharedOutputStorage)
 {
     if (tcsSpirv == nullptr || tcsWordCount < 5) {
         if (diagnostic) *diagnostic = "runTcsForVertex: empty SPIR-V";
@@ -10848,6 +10886,7 @@ bool runTcsForVertex(
         tcsInterp.setUniformBuffers(uniformBuffers);
     }
     tcsInterp.setTcsInputs(primitiveID, invocationID, patchVertices);
+    tcsInterp.setTcsSharedOutputStorage(sharedOutputStorage);
 
     // Sprint 8 #8 β.2 (CKPT69): cross-stage input varying interface for
     // TCS gl_in[].user_block.member name resolution.
@@ -10924,6 +10963,9 @@ bool runTcsForVertex(
         pendingImageWrites->insert(pendingImageWrites->end(),
                                    std::make_move_iterator(writes.begin()),
                                    std::make_move_iterator(writes.end()));
+    }
+    if (sharedOutputStorage != nullptr) {
+        tcsInterp.captureTcsSharedOutputs(*sharedOutputStorage);
     }
 
     // Phase 3f-10: capture gl_out[invocationID] — position + clip/cull

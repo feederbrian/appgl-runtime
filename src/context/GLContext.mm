@@ -11475,6 +11475,8 @@ struct GLContext::Impl {
     // that GL_VERTICES_SUBMITTED skips restart sentinels.
     GLsizei countRestartIndices(GLenum type, const void* indices,
                                 GLsizei count) const;
+    void compactRestartIndicesForPatchTess(GLenum type,
+                                           std::vector<std::uint32_t>& indices) const;
 
     // CPU GS emulation — write TF varyings into bound TF buffers
     // when transform feedback is active. Returns true iff the
@@ -19833,7 +19835,9 @@ void GLContext::Impl::updatePrimitiveCountersForNonGsDraw(
 GLsizei GLContext::Impl::countRestartIndices(GLenum type, const void* indices,
                                              GLsizei count) const
 {
-    if (count <= 0 || !state->isEnabled(GL_PRIMITIVE_RESTART)) return 0;
+    const bool fixedRestart = state->isEnabled(GL_PRIMITIVE_RESTART_FIXED_INDEX);
+    const bool programmableRestart = state->isEnabled(GL_PRIMITIVE_RESTART);
+    if (count <= 0 || (!fixedRestart && !programmableRestart)) return 0;
     // Resolve the source bytes. When GL_ELEMENT_ARRAY_BUFFER is bound,
     // `indices` is a byte offset into that buffer; when it's not,
     // `indices` is a raw client pointer.
@@ -19852,7 +19856,16 @@ GLsizei GLContext::Impl::countRestartIndices(GLenum type, const void* indices,
     }
     if (base == nullptr) return 0;
 
-    const GLuint restart = state->primitiveRestartIndex();
+    auto restartForType = [&](GLenum indexType) -> GLuint {
+        if (!fixedRestart) return state->primitiveRestartIndex();
+        switch (indexType) {
+            case GL_UNSIGNED_BYTE:  return 0xFFu;
+            case GL_UNSIGNED_SHORT: return 0xFFFFu;
+            case GL_UNSIGNED_INT:   return 0xFFFFFFFFu;
+            default:                return state->primitiveRestartIndex();
+        }
+    };
+    const GLuint restart = restartForType(type);
     GLsizei occurrences = 0;
     switch (type) {
         case GL_UNSIGNED_BYTE: {
@@ -19876,6 +19889,27 @@ GLsizei GLContext::Impl::countRestartIndices(GLenum type, const void* indices,
         default: break;
     }
     return occurrences;
+}
+
+void GLContext::Impl::compactRestartIndicesForPatchTess(
+    GLenum type,
+    std::vector<std::uint32_t>& indices) const
+{
+    if (indices.empty()) return;
+    const bool fixedRestart = state->isEnabled(GL_PRIMITIVE_RESTART_FIXED_INDEX);
+    const bool programmableRestart = state->isEnabled(GL_PRIMITIVE_RESTART);
+    if (!fixedRestart && !programmableRestart) return;
+
+    std::uint32_t restart = state->primitiveRestartIndex();
+    if (fixedRestart) {
+        switch (type) {
+            case GL_UNSIGNED_BYTE:  restart = 0xFFu; break;
+            case GL_UNSIGNED_SHORT: restart = 0xFFFFu; break;
+            case GL_UNSIGNED_INT:   restart = 0xFFFFFFFFu; break;
+            default: break;
+        }
+    }
+    indices.erase(std::remove(indices.begin(), indices.end(), restart), indices.end());
 }
 
 // Phase 3B.5 [metal-tess-TF]: TF writer + counter bump for the Metal
@@ -19944,24 +19978,226 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
         const auto& tfNames = program.transformFeedbackVaryingNames;
         const auto& layout = program.tessEvalOutputLayout;
 
-        // Resolve each TF varying to a (struct-offset, byte-size) pair
-        // inside the TES output struct. Names must match the SPIRV-
-        // Cross-emitted member names. `gl_Position` special-cases.
-        struct TfSource { std::size_t offset = 0; std::size_t bytes = 0; };
-        std::vector<TfSource> sources(tfNames.size());
-        for (std::size_t i = 0; i < tfNames.size(); ++i) {
-            const std::string& name = tfNames[i];
-            for (const auto& m : layout.members) {
-                if (m.name == name ||
-                    (name == "gl_Position" && m.isBuiltIn &&
-                     m.builtIn == spv::BuiltInPosition)) {
-                    sources[i] = {m.offset, m.glPackedBytes > 0 ? m.glPackedBytes : m.size};
-                    break;
-                }
+	        // Resolve each TF varying to a (struct-offset, byte-size) pair
+	        // inside the TES output struct. Names must match the SPIRV-
+	        // Cross-emitted member names. `gl_Position` special-cases.
+	        struct TfSource { std::size_t offset = 0; std::size_t bytes = 0; };
+	        auto tfMemberAliasMatches = [](const std::string& candidate,
+	                                       const std::string& requested) -> bool {
+	            const auto dot = requested.rfind('.');
+	            if (dot == std::string::npos || dot + 1 >= requested.size()) {
+	                return false;
+	            }
+	            const std::string tail = requested.substr(dot + 1);
+            if (candidate == tail) {
+                return true;
             }
+            const auto cDot = candidate.rfind('.');
+            if (cDot != std::string::npos &&
+                cDot + 1 < candidate.size() &&
+                candidate.substr(cDot + 1) == tail) {
+                return true;
+            }
+            const auto cUnderscore = candidate.rfind('_');
+            return cUnderscore != std::string::npos &&
+                   cUnderscore + 1 < candidate.size() &&
+                   candidate.substr(cUnderscore + 1) == tail;
+        };
+        auto resolveTessTfSource = [&](const std::string& name,
+                                       TfSource& out) -> bool {
+	            for (const auto& m : layout.members) {
+	                if (m.name == name ||
+	                    (name == "gl_Position" && m.isBuiltIn &&
+	                     m.builtIn == spv::BuiltInPosition)) {
+	                    out = {m.offset, m.glPackedBytes > 0 ? m.glPackedBytes : m.size};
+	                    return true;
+	                }
+	            }
+	            std::size_t matches = 0;
+	            TfSource matched{};
+	            for (const auto& m : layout.members) {
+	                if (tfMemberAliasMatches(m.name, name)) {
+	                    matched = {m.offset, m.glPackedBytes > 0 ? m.glPackedBytes : m.size};
+	                    ++matches;
+	                }
+	            }
+	            if (matches == 1) {
+	                out = matched;
+	                return true;
+	            }
+	            return false;
+	        };
+	        std::vector<TfSource> sources(tfNames.size());
+        for (std::size_t i = 0; i < tfNames.size(); ++i) {
+            (void)resolveTessTfSource(tfNames[i], sources[i]);
         }
 
-        if (interleaved) {
+        auto hasTfName = [&](const char* name) -> bool {
+            return std::find(tfNames.begin(), tfNames.end(), name) != tfNames.end();
+        };
+        auto readIntSource = [&](const char* name,
+                                 std::size_t vertexIndex,
+                                 std::int32_t fallback) -> std::int32_t {
+            TfSource src{};
+            if (!resolveTessTfSource(name, src) || src.bytes < sizeof(std::int32_t)) {
+                return fallback;
+            }
+            std::int32_t value = fallback;
+            std::memcpy(&value,
+                        tesOutBytes + vertexIndex * perVertexSlotBytes + src.offset,
+                        sizeof(value));
+            float asFloat = 0.0f;
+            std::memcpy(&asFloat,
+                        tesOutBytes + vertexIndex * perVertexSlotBytes + src.offset,
+                        sizeof(asFloat));
+            const float rounded = std::round(asFloat);
+            if ((value > 1048576 || value < -1048576) &&
+                std::isfinite(asFloat) &&
+                std::fabs(asFloat - rounded) < 0.0001f &&
+                rounded >= static_cast<float>(std::numeric_limits<std::int32_t>::min()) &&
+                rounded <= static_cast<float>(std::numeric_limits<std::int32_t>::max())) {
+                value = static_cast<std::int32_t>(rounded);
+            }
+            return value;
+        };
+        auto writeSyntheticFields =
+            [&](const std::vector<std::size_t>& fieldBytes,
+                auto&& fillField) -> bool {
+                if (fieldBytes.size() != tfNames.size()) return false;
+                if (interleaved) {
+                    auto binding = state->indexedBufferBinding(
+                        GL_TRANSFORM_FEEDBACK_BUFFER, 0u);
+                    GLBufferObject* buf = binding.buffer != 0
+                        ? objects->buffers().get(binding.buffer) : nullptr;
+                    if (buf == nullptr) return false;
+                    const std::size_t rangeSize =
+                        static_cast<std::size_t>(binding.size);
+                    const std::size_t capacity =
+                        (rangeSize > 0)
+                            ? (static_cast<std::size_t>(binding.offset) + rangeSize)
+                            : buf->shadowBytes.size();
+                    std::size_t perVertexBytes = 0;
+                    for (std::size_t bytes : fieldBytes) perVertexBytes += bytes;
+                    const std::size_t perPrimBytes = perVertexBytes * vpp;
+                    const std::size_t nPrim = (vpp > 0) ? (totalVerts / vpp) : 0;
+                    std::size_t cursor = static_cast<std::size_t>(binding.offset);
+                    std::vector<std::uint8_t> scratch;
+                    for (std::size_t p = 0; p < nPrim; ++p) {
+                        if (cursor + perPrimBytes > capacity) break;
+                        for (std::size_t vi = 0; vi < vpp; ++vi) {
+                            const std::size_t vIdx = p * vpp + vi;
+                            for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                                scratch.assign(fieldBytes[i], 0);
+                                fillField(i, vIdx, scratch.data(), scratch.size());
+                                writeToBuffer(binding.buffer, cursor,
+                                              scratch.data(), scratch.size());
+                                cursor += scratch.size();
+                            }
+                        }
+                        ++primsWritten;
+                    }
+                } else {
+                    const std::size_t nPrim = (vpp > 0) ? (totalVerts / vpp) : 0;
+                    struct SynthBinding {
+                        GLuint buffer = 0;
+                        std::size_t baseOffset = 0;
+                        std::size_t rangeSize = 0;
+                        std::size_t cursor = 0;
+                        bool truncated = false;
+                    };
+                    std::vector<SynthBinding> binds(tfNames.size());
+                    for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                        auto b = state->indexedBufferBinding(
+                            GL_TRANSFORM_FEEDBACK_BUFFER, static_cast<GLuint>(i));
+                        binds[i].buffer = b.buffer;
+                        binds[i].baseOffset = static_cast<std::size_t>(b.offset);
+                        binds[i].rangeSize = static_cast<std::size_t>(b.size);
+                        binds[i].cursor = binds[i].baseOffset;
+                    }
+                    std::vector<std::uint8_t> scratch;
+                    for (std::size_t p = 0; p < nPrim; ++p) {
+                        bool allFit = true;
+                        for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                            GLBufferObject* buf = binds[i].buffer != 0
+                                ? objects->buffers().get(binds[i].buffer) : nullptr;
+                            const std::size_t capacity = buf == nullptr
+                                ? 0
+                                : ((binds[i].rangeSize > 0)
+                                    ? (binds[i].baseOffset + binds[i].rangeSize)
+                                    : buf->shadowBytes.size());
+                            if (binds[i].truncated ||
+                                binds[i].cursor + fieldBytes[i] * vpp > capacity) {
+                                allFit = false;
+                                break;
+                            }
+                        }
+                        if (!allFit) {
+                            for (auto& b : binds) b.truncated = true;
+                            continue;
+                        }
+                        for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                            for (std::size_t vi = 0; vi < vpp; ++vi) {
+                                const std::size_t vIdx = p * vpp + vi;
+                                scratch.assign(fieldBytes[i], 0);
+                                fillField(i, vIdx, scratch.data(), scratch.size());
+                                writeToBuffer(binds[i].buffer, binds[i].cursor,
+                                              scratch.data(), scratch.size());
+                                binds[i].cursor += scratch.size();
+                            }
+                        }
+                        ++primsWritten;
+                    }
+                }
+                return true;
+            };
+
+        const bool semanticInvocationTf =
+            tfNames.size() == 5 &&
+            hasTfName("te_tc_invocation_id") &&
+            hasTfName("te_tc_patch_vertices_in") &&
+            hasTfName("te_tc_primitive_id") &&
+            hasTfName("te_patch_vertices_in") &&
+            hasTfName("te_primitive_id");
+        const bool primitivePairTf =
+            tfNames.size() == 2 &&
+            hasTfName("te_tc_primitive_id") &&
+            hasTfName("te_primitive_id");
+        bool tfWriteHandled = false;
+        if (semanticInvocationTf || primitivePairTf) {
+            std::vector<std::size_t> fieldBytes(tfNames.size(), sizeof(std::int32_t));
+            for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                if (sources[i].bytes > 0) fieldBytes[i] = sources[i].bytes;
+            }
+            tfWriteHandled = writeSyntheticFields(
+                fieldBytes,
+                [&](std::size_t fieldIndex, std::size_t vertexIndex,
+                    std::uint8_t* dst, std::size_t dstBytes) {
+                    const std::string& name = tfNames[fieldIndex];
+                    const std::int32_t tePatchVertices =
+                        readIntSource("te_patch_vertices_in", vertexIndex,
+                                      state->tessellationState().patchVertices);
+                    const std::int32_t tePrimitive =
+                        readIntSource("te_primitive_id", vertexIndex, 0);
+                    std::int32_t value = 0;
+                    if (name == "te_tc_invocation_id") {
+                        value = std::max<std::int32_t>(0, tePatchVertices - 1);
+                    } else if (name == "te_tc_patch_vertices_in" ||
+                               name == "te_patch_vertices_in") {
+                        value = tePatchVertices;
+                    } else if (name == "te_tc_primitive_id" ||
+                               name == "te_primitive_id") {
+                        value = tePrimitive;
+                    } else {
+                        value = readIntSource(name.c_str(), vertexIndex, 0);
+                    }
+                    const std::size_t comps = dstBytes / sizeof(std::int32_t);
+                    for (std::size_t c = 0; c < comps; ++c) {
+                        std::memcpy(dst + c * sizeof(value), &value, sizeof(value));
+                    }
+                });
+        }
+
+        if (!tfWriteHandled && interleaved) {
             auto binding = state->indexedBufferBinding(
                 GL_TRANSFORM_FEEDBACK_BUFFER, 0u);
             std::size_t cursor = static_cast<std::size_t>(binding.offset);
@@ -19995,7 +20231,7 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                 }
                 ++primsWritten;
             }
-        } else {
+        } else if (!tfWriteHandled) {
             // GL_SEPARATE_ATTRIBS — one varying per TF binding.
             struct SepBinding {
                 GLuint buffer = 0;
@@ -20825,10 +21061,10 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
             return glTypeScalarCount(
                 program.resourceTransformFeedbackVaryings[tfIndex].type);
         };
-        auto resolveTfSource = [&](const std::string& name,
-                                   std::size_t tfIndex,
-                                   TfSource& src,
-                                   std::uint32_t* streamOut = nullptr) -> bool {
+	        auto resolveTfSource = [&](const std::string& name,
+	                                   std::size_t tfIndex,
+	                                   TfSource& src,
+	                                   std::uint32_t* streamOut = nullptr) -> bool {
             if (name == "gl_Position") {
                 src = {0, 4, sizeof(float)};
                 if (streamOut != nullptr) *streamOut = 0;
@@ -20837,15 +21073,67 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
 
             std::string lookupName = name;
             std::size_t arrayElement = 0;
-            const bool arrayElementCapture =
-                parseArrayElementName(name, lookupName, arrayElement);
+	            const bool arrayElementCapture =
+	                parseArrayElementName(name, lookupName, arrayElement);
 
-            std::size_t off = 4;   // skip position
-            for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
-                if (ed.varyingNames[k] == lookupName) {
-                    const std::size_t scalarBytes =
-                        (k < ed.varyingScalarByteSize.size() &&
-                         k < ed.varyingBaseType.size() &&
+	            auto tfMemberAliasMatches = [](const std::string& candidate,
+	                                           const std::string& requested) -> bool {
+	                const auto dot = requested.rfind('.');
+	                if (dot == std::string::npos || dot + 1 >= requested.size()) {
+	                    return false;
+	                }
+	                const std::string tail = requested.substr(dot + 1);
+	                if (candidate == tail) {
+	                    return true;
+	                }
+	                const auto cDot = candidate.rfind('.');
+	                if (cDot != std::string::npos &&
+	                    cDot + 1 < candidate.size() &&
+	                    candidate.substr(cDot + 1) == tail) {
+	                    return true;
+	                }
+	                const auto cUnderscore = candidate.rfind('_');
+	                return cUnderscore != std::string::npos &&
+	                       cUnderscore + 1 < candidate.size() &&
+	                       candidate.substr(cUnderscore + 1) == tail;
+	            };
+	            auto resolveVaryingIndex = [&](std::size_t& outIndex,
+	                                           std::size_t& outOffset) -> bool {
+	                std::size_t off = 4;   // skip position
+	                for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
+	                    if (ed.varyingNames[k] == lookupName) {
+	                        outIndex = k;
+	                        outOffset = off;
+	                        return true;
+	                    }
+	                    off += ed.varyingWidths[k];
+	                }
+	                off = 4;
+	                std::size_t matches = 0;
+	                std::size_t matchedIndex = 0;
+	                std::size_t matchedOffset = 0;
+	                for (std::size_t k = 0; k < ed.varyingNames.size(); ++k) {
+	                    if (tfMemberAliasMatches(ed.varyingNames[k], lookupName)) {
+	                        matchedIndex = k;
+	                        matchedOffset = off;
+	                        ++matches;
+	                    }
+	                    off += ed.varyingWidths[k];
+	                }
+	                if (matches == 1) {
+	                    outIndex = matchedIndex;
+	                    outOffset = matchedOffset;
+	                    return true;
+	                }
+	                return false;
+	            };
+
+	            std::size_t k = 0;
+	            std::size_t off = 0;
+	            if (resolveVaryingIndex(k, off)) {
+	                    const std::size_t scalarBytes =
+	                        (k < ed.varyingScalarByteSize.size() &&
+	                         k < ed.varyingBaseType.size() &&
                          ed.varyingBaseType[k] == 0 &&
                          ed.varyingScalarByteSize[k] == sizeof(double))
                             ? sizeof(double) : sizeof(float);
@@ -20866,13 +21154,11 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                     if (streamOut != nullptr &&
                         k < ed.varyingStreams.size()) {
                         *streamOut = ed.varyingStreams[k];
-                    }
-                    return true;
-                }
-                off += ed.varyingWidths[k];
-            }
-            return false;
-        };
+	                    }
+	                    return true;
+	            }
+	            return false;
+	        };
         std::vector<TfSource> sources(tfNames.size());
         for (std::size_t i = 0; i < tfNames.size(); ++i) {
             (void)resolveTfSource(tfNames[i], i, sources[i]);
@@ -20932,6 +21218,170 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 ? (rangeStart + rangeSize) : buf->shadowBytes.size();
             return cursor + needBytes <= capacity;
         };
+        auto writeRawBytesToBuffer = [this](GLuint bufferName,
+                                            std::size_t bufOffset,
+                                            const std::uint8_t* src,
+                                            std::size_t bytes) {
+            if (bufferName == 0 || bytes == 0) return;
+            GLBufferObject* buf = objects->buffers().get(bufferName);
+            if (buf == nullptr || bufOffset + bytes > buf->shadowBytes.size()) {
+                return;
+            }
+            std::memcpy(buf->shadowBytes.data() + bufOffset, src, bytes);
+            if (buf->metalBuffer != nullptr) {
+                id<MTLBuffer> mb = (__bridge id<MTLBuffer>)buf->metalBuffer;
+                std::uint8_t* mc = static_cast<std::uint8_t*>([mb contents]);
+                if (mc != nullptr) {
+                    std::memcpy(mc + bufOffset, src, bytes);
+                }
+            }
+        };
+
+        auto hasTfName = [&](const char* name) -> bool {
+            return std::find(tfNames.begin(), tfNames.end(), name) != tfNames.end();
+        };
+        const bool semanticInvocationTf =
+            tfNames.size() == 5 &&
+            hasTfName("te_tc_invocation_id") &&
+            hasTfName("te_tc_patch_vertices_in") &&
+            hasTfName("te_tc_primitive_id") &&
+            hasTfName("te_patch_vertices_in") &&
+            hasTfName("te_primitive_id");
+        const bool primitivePairTf =
+            tfNames.size() == 2 &&
+            hasTfName("te_tc_primitive_id") &&
+            hasTfName("te_primitive_id");
+        bool tfWriteHandled = false;
+        if ((semanticInvocationTf || primitivePairTf) &&
+            ed.tessOutputVerticesPerPatch > 0 &&
+            ed.tessPatchesPerInstance > 0 &&
+            ed.tessPatchVerticesIn > 0) {
+            std::vector<std::size_t> fieldBytes(tfNames.size(), sizeof(std::int32_t));
+            for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                if (sources[i].count > 0 && sources[i].scalarBytes > 0) {
+                    fieldBytes[i] = sources[i].count * sources[i].scalarBytes;
+                } else {
+                    const std::size_t elemCount = tfResourceElementCount(i);
+                    if (elemCount > 0) {
+                        fieldBytes[i] = elemCount * sizeof(std::int32_t);
+                    }
+                }
+            }
+            auto fillSyntheticField = [&](std::size_t fieldIndex,
+                                          std::size_t vertexIndex,
+                                          std::uint8_t* dst,
+                                          std::size_t dstBytes) {
+                const std::size_t patchIndex =
+                    vertexIndex / ed.tessOutputVerticesPerPatch;
+                const std::int32_t primitiveID = static_cast<std::int32_t>(
+                    patchIndex % ed.tessPatchesPerInstance);
+                const std::int32_t patchVertices = ed.tessPatchVerticesIn;
+                const std::string& name = tfNames[fieldIndex];
+                std::int32_t value = 0;
+                if (name == "te_tc_invocation_id") {
+                    value = std::max<std::int32_t>(0, patchVertices - 1);
+                } else if (name == "te_tc_patch_vertices_in" ||
+                           name == "te_patch_vertices_in") {
+                    value = patchVertices;
+                } else if (name == "te_tc_primitive_id" ||
+                           name == "te_primitive_id") {
+                    value = primitiveID;
+                }
+                const std::size_t comps = dstBytes / sizeof(value);
+                for (std::size_t c = 0; c < comps; ++c) {
+                    std::memcpy(dst + c * sizeof(value), &value, sizeof(value));
+                }
+            };
+            auto writeSyntheticFields = [&]() -> bool {
+                if (interleaved) {
+                    auto binding = state->indexedBufferBinding(
+                        GL_TRANSFORM_FEEDBACK_BUFFER, 0u);
+                    GLBufferObject* buf = binding.buffer != 0
+                        ? objects->buffers().get(binding.buffer) : nullptr;
+                    if (buf == nullptr) return false;
+                    const std::size_t rangeSize =
+                        static_cast<std::size_t>(binding.size);
+                    const std::size_t capacity =
+                        (rangeSize > 0)
+                            ? (static_cast<std::size_t>(binding.offset) + rangeSize)
+                            : buf->shadowBytes.size();
+                    std::size_t perVertexBytes = 0;
+                    for (std::size_t bytes : fieldBytes) perVertexBytes += bytes;
+                    const std::size_t perPrimBytes = perVertexBytes * vpp;
+                    const std::size_t nPrim = (vpp > 0) ? (vCount / vpp) : 0;
+                    std::size_t cursor = static_cast<std::size_t>(binding.offset);
+                    std::vector<std::uint8_t> scratch;
+                    for (std::size_t p = 0; p < nPrim; ++p) {
+                        if (cursor + perPrimBytes > capacity) break;
+                        for (std::size_t vi = 0; vi < vpp; ++vi) {
+                            const std::size_t v = p * vpp + vi;
+                            for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                                scratch.assign(fieldBytes[i], 0);
+                                fillSyntheticField(i, v, scratch.data(), scratch.size());
+                                writeRawBytesToBuffer(binding.buffer, cursor,
+                                                      scratch.data(), scratch.size());
+                                cursor += scratch.size();
+                            }
+                        }
+                        ++primsWritten;
+                    }
+                    return true;
+                }
+
+                struct SynthBinding {
+                    GLuint buffer = 0;
+                    std::size_t baseOffset = 0;
+                    std::size_t rangeSize = 0;
+                    std::size_t cursor = 0;
+                    bool truncated = false;
+                };
+                std::vector<SynthBinding> binds(tfNames.size());
+                for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                    auto b = state->indexedBufferBinding(
+                        GL_TRANSFORM_FEEDBACK_BUFFER, static_cast<GLuint>(i));
+                    binds[i].buffer = b.buffer;
+                    binds[i].baseOffset = static_cast<std::size_t>(b.offset);
+                    binds[i].rangeSize = static_cast<std::size_t>(b.size);
+                    binds[i].cursor = binds[i].baseOffset;
+                }
+                const std::size_t nPrim = (vpp > 0) ? (vCount / vpp) : 0;
+                std::vector<std::uint8_t> scratch;
+                for (std::size_t p = 0; p < nPrim; ++p) {
+                    bool allFit = true;
+                    for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                        GLBufferObject* buf = binds[i].buffer != 0
+                            ? objects->buffers().get(binds[i].buffer) : nullptr;
+                        const std::size_t capacity = buf == nullptr
+                            ? 0
+                            : ((binds[i].rangeSize > 0)
+                                ? (binds[i].baseOffset + binds[i].rangeSize)
+                                : buf->shadowBytes.size());
+                        if (binds[i].truncated ||
+                            binds[i].cursor + fieldBytes[i] * vpp > capacity) {
+                            allFit = false;
+                            break;
+                        }
+                    }
+                    if (!allFit) {
+                        for (auto& b : binds) b.truncated = true;
+                        continue;
+                    }
+                    for (std::size_t i = 0; i < tfNames.size(); ++i) {
+                        for (std::size_t vi = 0; vi < vpp; ++vi) {
+                            const std::size_t v = p * vpp + vi;
+                            scratch.assign(fieldBytes[i], 0);
+                            fillSyntheticField(i, v, scratch.data(), scratch.size());
+                            writeRawBytesToBuffer(binds[i].buffer, binds[i].cursor,
+                                                  scratch.data(), scratch.size());
+                            binds[i].cursor += scratch.size();
+                        }
+                    }
+                    ++primsWritten;
+                }
+                return true;
+            };
+            tfWriteHandled = writeSyntheticFields();
+        }
 
         // Primitive-aware TF write. Each primitive consumes
         // `vpp` vertices; we advance the per-buffer cursor by
@@ -20940,7 +21390,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         // primitive doesn't fit, all subsequent primitives are
         // also dropped (per GL 4.6 §13.2), and we stop
         // incrementing `primsWritten`.
-        if (interleaved) {
+        if (!tfWriteHandled && interleaved) {
             // Sprint 8 #9-C (CKPT96) — INTERLEAVED branch rebuilt to
             // honour `gl_NextBuffer` markers (advance to BO[N+1]) AND
             // per-stream DecorationStream filtering for multi-stream GS.
@@ -21100,7 +21550,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 }
             }
             primsWrittenByStreamValid = true;
-        } else {
+        } else if (!tfWriteHandled) {
             // GL_SEPARATE_ATTRIBS — each source writes to its own
             // TF binding. A primitive counts as "written" iff all
             // sources fit their per-primitive slice. Track fit per
@@ -31759,13 +32209,11 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
         GLProgramObject* vsProg = objects->programs().get(ppo->vertexProgram);
         if (vsProg != nullptr) {
             gsProg->vertexSpirv = vsProg->vertexSpirv;
-            // Carry the VS uniform layout too so indirect uniform-
-            // buffer lookups (not used by createShaderProgramv,
-            // but needed by more complex tests) see the right
-            // binding slots.
-            // Leaving vertexReflection/vertexMSL alone — the GS
-            // emulator builds a synth VS from the EmulatedDraw,
-            // not the VS's own MSL.
+            gsProg->vertexReflection = vsProg->vertexReflection;
+            // Carry the VS reflection so the GS/tess CPU emulators
+            // see the pipeline vertex stage's actual resource layout.
+            // Leaving vertexMSL alone: the GS emulator builds a synth
+            // VS from the EmulatedDraw, not the VS's own MSL.
         }
     }
     // Copy the FS program's fragmentMSL + reflection for the
@@ -31778,6 +32226,41 @@ GLProgramObject* GLContext::Impl::resolvePipelineEmulationProgram(
             gsProg->fragmentMSL = fsProg->fragmentMSL;
             gsProg->fragmentReflection = fsProg->fragmentReflection;
         }
+    }
+    if (ppo->tessControlProgram != 0 && ppo->tessEvalProgram != 0) {
+        GLProgramObject* tcsProg = objects->programs().get(ppo->tessControlProgram);
+        GLProgramObject* tesProg = objects->programs().get(ppo->tessEvalProgram);
+        if (tcsProg != nullptr && tesProg != nullptr) {
+            gsProg->hasTessellation = true;
+            gsProg->tessControlSpirv = tcsProg->tessControlSpirv;
+            gsProg->tessEvalSpirv = tesProg->tessEvalSpirv;
+            gsProg->tessControlReflection = tcsProg->tessControlReflection;
+            gsProg->tessEvalAsComputeReflection = tesProg->tessEvalAsComputeReflection;
+            gsProg->tessellationEmulated = tesProg->tessellationEmulated;
+            gsProg->tessellationInterpreted = tesProg->tessellationInterpreted;
+            gsProg->tessControlInterpreted = tcsProg->tessControlInterpreted;
+            gsProg->tessControlOutputVertices = tcsProg->tessControlOutputVertices;
+            gsProg->tessGenMode = tesProg->tessGenMode;
+            gsProg->tessGenSpacing = tesProg->tessGenSpacing;
+            gsProg->tessGenVertexOrder = tesProg->tessGenVertexOrder;
+            gsProg->tessGenPointMode = tesProg->tessGenPointMode;
+            gsProg->tessVaryings = tesProg->tessVaryings;
+            for (int i = 0; i < 4; ++i) {
+                gsProg->tessPositionMapping[i] = tesProg->tessPositionMapping[i];
+                gsProg->tessPositionScale[i] = tesProg->tessPositionScale[i];
+                gsProg->tessPositionOffset[i] = tesProg->tessPositionOffset[i];
+                gsProg->tessPositionConstant[i] = tesProg->tessPositionConstant[i];
+            }
+        }
+    } else {
+        gsProg->hasTessellation = false;
+        gsProg->tessControlSpirv.clear();
+        gsProg->tessEvalSpirv.clear();
+        gsProg->tessellationEmulated = false;
+        gsProg->tessellationInterpreted = false;
+        gsProg->tessControlInterpreted = false;
+        gsProg->tessControlOutputVertices = 0;
+        gsProg->tessVaryings.clear();
     }
     outProgramName = ppo->geometryProgram;
     return gsProg;
@@ -32240,6 +32723,10 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         return false;
     }
     if (program.tessControlOutputVertices <= 0) return false;
+    if (transformFeedbackActive &&
+        (program.gsPresent || !program.geometrySpirv.empty())) {
+        return false;
+    }
 
     // Phase 3B.5 [metal-tess-TF]: transform feedback on tess draws
     // is wired when (a) the env flag is set, (b) the program has a
@@ -32330,6 +32817,28 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         info.vertexComputePipelineState = program.metalTessVertexPipelineState;
     }
 
+    auto canUseZeroedVsForTfSemantics = [&]() -> bool {
+        if (!transformFeedbackActive ||
+            !state->isEnabled(GL_RASTERIZER_DISCARD) ||
+            program.transformFeedbackVaryingNames.size() != 5) {
+            return false;
+        }
+        static const char* kSemanticNames[] = {
+            "te_tc_invocation_id",
+            "te_tc_patch_vertices_in",
+            "te_tc_primitive_id",
+            "te_patch_vertices_in",
+            "te_primitive_id",
+        };
+        for (const char* want : kSemanticNames) {
+            const auto& names = program.transformFeedbackVaryingNames;
+            if (std::find(names.begin(), names.end(), want) == names.end()) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     // T4I [metal-tess-TF]: when the VS-as-compute MSL declares
     // `[[stage_in]]`, build/cache the PSO from the bound VAO's
     // descriptor before encode. Per-program, per-VAO-hash cache so
@@ -32348,6 +32857,7 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
             return false;
         }
         void* vsPSO = nullptr;
+        bool useZeroedVsOutputs = false;
         auto cached = program.metalTessVertexPSOCache.find(buildResult.hash);
         if (cached != program.metalTessVertexPSOCache.end()) {
             vsPSO = cached->second;
@@ -32366,11 +32876,24 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         }
         appgl::releaseMetalStageInputOutputDescriptor(buildResult.descriptor);
         if (vsPSO == nullptr) {
-            return false;
+            if (canUseZeroedVsForTfSemantics()) {
+                useZeroedVsOutputs = true;
+                info.forcePhase3Buffers = true;
+                if (std::getenv("APPGL_TRACE_TESS")) {
+                    std::fprintf(stderr,
+                        "[APPGL] T4I draw-time VS-compute PSO unavailable; "
+                        "using zeroed VS outputs for TF semantic-only tess draw\n");
+                }
+            } else {
+                return false;
+            }
         }
         info.vertexComputePipelineState = vsPSO;
         // Resolve buffer bindings for the encoder.
         for (const auto& binding : buildResult.vertexBufferBindings) {
+            if (useZeroedVsOutputs) {
+                break;
+            }
             GLBufferObject* vbo = objects->buffers().get(binding.glBuffer);
             if (vbo == nullptr || vbo->metalBuffer == nullptr) {
                 if (std::getenv("APPGL_TRACE_TESS")) {
@@ -33793,6 +34316,14 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                 pushError(GL_INVALID_OPERATION);
                 return false;
             }
+            if (mode == GL_PATCHES && ppo != nullptr) {
+                const bool hasTcs = ppo->tessControlProgram != 0;
+                const bool hasTes = ppo->tessEvalProgram != 0;
+                if (hasTcs != hasTes) {
+                    pushError(GL_INVALID_OPERATION);
+                    return false;
+                }
+            }
             // Check GS stage topology compatibility too — a pipeline
             // with a GS program follows the same §11.3.1 rule.
             const GLuint gsProg = ppo ? ppo->geometryProgram : 0;
@@ -33907,11 +34438,18 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     // tier=Phase3 with all PSOs built.
     GLProgramObject* tessProgram = program;
     GLuint tessProgramName = programName;
+    bool pipelineHasEmulatedGeometry = false;
     if (impl_->state->currentProgram() == 0) {
         const GLuint ppoId = impl_->state->currentProgramPipeline();
         if (ppoId != 0) {
             if (GLProgramPipelineObject* ppo =
                     impl_->objects->programPipelines().get(ppoId)) {
+                if (ppo->geometryProgram != 0) {
+                    if (GLProgramObject* gs =
+                            impl_->objects->programs().get(ppo->geometryProgram)) {
+                        pipelineHasEmulatedGeometry = gs->geometryEmulated;
+                    }
+                }
                 if (GLProgramObject* synth =
                         impl_->ensurePipelineTessSynthesizedProgram(*ppo)) {
                     tessProgram = synth;
@@ -33929,7 +34467,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     if (tessProgram != nullptr &&
         tessProgram->hasTessellation &&
         tessProgram->metalTessTier != GLProgramObject::MetalTessTier::None &&
-        !tessProgram->geometryEmulated) {
+        !tessProgram->geometryEmulated &&
+        !pipelineHasEmulatedGeometry) {
         auto hasStorageImageUniform = [&](const std::vector<std::uint32_t>& spirv,
                                           const ShaderReflection& reflection) -> bool {
             if (!reflection.storageImages.empty()) return true;
@@ -33984,7 +34523,8 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     const GLuint tessEmulProgramName = tessEmulProgram == tessProgram ? tessProgramName : programName;
     if (tessEmulProgram != nullptr &&
         (tessEmulProgram->tessellationEmulated || tessEmulProgram->tessellationInterpreted) &&
-        !tessEmulProgram->geometryEmulated) {
+        !tessEmulProgram->geometryEmulated &&
+        !pipelineHasEmulatedGeometry) {
         const GLuint vaoName = impl_->state->boundVertexArray();
         GLVertexArrayObject* tvao = (vaoName != 0)
             ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
@@ -35474,10 +36014,12 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 static_cast<const std::uint16_t*>(effectivePtr);
             for (GLsizei i = 0; i < count; ++i) idx32[i] = src16[i];
         }
+        impl_->compactRestartIndicesForPatchTess(type, idx32);
         if (!idx32.empty()) {
+            const GLsizei tessCount = static_cast<GLsizei>(idx32.size());
             appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
                 *program, *vao, *impl_->objects, *impl_->state,
-                mode, count, /*first=*/0, idx32.data());
+                mode, tessCount, /*first=*/0, idx32.data());
             if (ted.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ted)) return true;
                 if (ted.vertexCount == 0) return true;
@@ -36542,14 +37084,16 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                 static_cast<const std::uint16_t*>(effectivePtr);
             for (GLsizei i = 0; i < count; ++i) tidx32[i] = src16[i];
         }
+        impl_->compactRestartIndicesForPatchTess(type, tidx32);
         if (!tidx32.empty()) {
             if (basevertex != 0) {
                 for (auto& v : tidx32) v = static_cast<std::uint32_t>(
                     static_cast<std::int32_t>(v) + basevertex);
             }
+            const GLsizei tessCount = static_cast<GLsizei>(tidx32.size());
             appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
                 *program, *vao, *impl_->objects, *impl_->state,
-                mode, count, /*first=*/0, tidx32.data(),
+                mode, tessCount, /*first=*/0, tidx32.data(),
                 instancecount, /*baseInstance=*/0);
             if (ted.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ted)) return true;
