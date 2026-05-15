@@ -634,6 +634,69 @@ inline uint appgl_fsr_combine_vertex_rate(uint primitiveRate,
     return true;
 }
 
+bool fixScalarFloatUnsafeArrayDoubleIndex(std::string& msl) {
+    // SPIRV-Cross can emit scalar helper arrays as `floatArray[i][0]`.
+    // The helper element is already a scalar float, so the second index
+    // makes Metal reject cull/clip-distance shaders at pipeline build.
+    static constexpr const char* kDeclPrefix = "spvUnsafeArray<float,";
+    std::vector<std::string> names;
+
+    std::size_t scan = 0;
+    while ((scan = msl.find(kDeclPrefix, scan)) != std::string::npos) {
+        const std::size_t close = msl.find('>', scan + std::strlen(kDeclPrefix));
+        if (close == std::string::npos) {
+            break;
+        }
+        std::size_t nameStart = close + 1;
+        while (nameStart < msl.size() &&
+               std::isspace(static_cast<unsigned char>(msl[nameStart]))) {
+            ++nameStart;
+        }
+        if (nameStart >= msl.size() ||
+            !isIdentifierChar(msl[nameStart]) ||
+            std::isdigit(static_cast<unsigned char>(msl[nameStart]))) {
+            scan = close + 1;
+            continue;
+        }
+        std::size_t nameEnd = nameStart + 1;
+        while (nameEnd < msl.size() && isIdentifierChar(msl[nameEnd])) {
+            ++nameEnd;
+        }
+        names.emplace_back(msl.substr(nameStart, nameEnd - nameStart));
+        scan = nameEnd;
+    }
+
+    bool changed = false;
+    for (const std::string& name : names) {
+        const std::string prefix = name + "[";
+        std::size_t pos = 0;
+        while ((pos = msl.find(prefix, pos)) != std::string::npos) {
+            if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+                pos += prefix.size();
+                continue;
+            }
+            std::size_t indexEnd = pos + prefix.size();
+            while (indexEnd < msl.size() &&
+                   std::isdigit(static_cast<unsigned char>(msl[indexEnd]))) {
+                ++indexEnd;
+            }
+            if (indexEnd == pos + prefix.size() ||
+                indexEnd + 3 >= msl.size() ||
+                msl[indexEnd] != ']' ||
+                msl[indexEnd + 1] != '[' ||
+                msl[indexEnd + 2] != '0' ||
+                msl[indexEnd + 3] != ']') {
+                pos += prefix.size();
+                continue;
+            }
+            msl.erase(indexEnd + 1, 3);
+            pos = indexEnd + 1;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 std::uint32_t chooseFreeBufferSlot(const std::string& msl,
                                    std::uint32_t preferredSlot) {
     bool used[kMaxMetalBufferSlot + 1u] = {};
@@ -2580,6 +2643,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
 
         std::string msl = compiler.compile();
+
+        (void)fixScalarFloatUnsafeArrayDoubleIndex(msl);
 
         if (isVertex && mslOpts.appgl_fp64_emulation) {
             (void)lowerFp64VertexStageInputs(msl);
