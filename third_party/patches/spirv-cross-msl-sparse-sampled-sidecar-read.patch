@@ -12,7 +12,9 @@ index e36a861c..900a8b34 100644
  				return;
  			}
  		}
-+		if (get_execution_model() == ExecutionModelGLCompute &&
++		const auto execution_model = get_execution_model();
++		if ((execution_model == ExecutionModelGLCompute ||
++		     execution_model == ExecutionModelFragment) &&
 +		    (op == OpImageSparseFetch ||
 +		     op == OpImageSparseSampleImplicitLod ||
 +		     op == OpImageSparseSampleExplicitLod ||

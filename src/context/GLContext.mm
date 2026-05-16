@@ -6369,10 +6369,15 @@ struct GLContext::Impl {
         // iteration; non-env-gated debug code follows cleanup
         // discipline).
         static const bool g_lbLog = (std::getenv("APPGL_LOG_LB") != nullptr);
+        const bool fragmentUsesSparseSampledSidecars =
+            program.fragmentMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
+        const bool vertexUsesSparseSampledSidecars =
+            program.vertexMSL.find("appgl_sparse_sampled_sidecar_") != std::string::npos;
 
         auto resolveStage = [&](const char* stageTag,
                                 const ShaderReflection* reflection,
-                                std::vector<TranslatedDrawInfo::TextureBinding>& outBindings) {
+                                std::vector<TranslatedDrawInfo::TextureBinding>& outBindings,
+                                bool usesSparseSampledSidecars) {
             if (reflection == nullptr || reflection->sampledTextures.empty()) {
                 if (g_lbLog) {
                     std::fprintf(stderr,
@@ -6587,9 +6592,13 @@ struct GLContext::Impl {
                 //       (e.g. samplerGLType wasn't populated by the
                 //       reflection walker yet).
                 GLuint texName = 0;
+                GLenum discoveredTarget = 0;
                 if (preferredTarget != 0 && preferredTarget != GL_TEXTURE_2D) {
                     texName = state->boundTextureOnUnit(
                         static_cast<GLuint>(glUnit), preferredTarget);
+                    if (texName != 0) {
+                        discoveredTarget = preferredTarget;
+                    }
                     if (g_lbLog) {
                         std::fprintf(stderr,
                             "[LB-PROBE-PREFERRED] glUnit=%d target=0x%X → texName=%u\n",
@@ -6599,6 +6608,9 @@ struct GLContext::Impl {
                 if (texName == 0) {
                     texName = state->boundTextureOnUnit(
                         static_cast<GLuint>(glUnit), GL_TEXTURE_2D);
+                    if (texName != 0) {
+                        discoveredTarget = GL_TEXTURE_2D;
+                    }
                     if (g_lbLog) {
                         std::fprintf(stderr,
                             "[LB-PROBE-2D] glUnit=%d target=GL_TEXTURE_2D → texName=%u\n",
@@ -6606,7 +6618,6 @@ struct GLContext::Impl {
                     }
                 }
                 if (texName == 0) {
-                    GLenum discoveredTarget = 0;
                     texName = state->boundTextureOnUnitAny(
                         static_cast<GLuint>(glUnit), &discoveredTarget);
                     if (g_lbLog) {
@@ -6614,7 +6625,6 @@ struct GLContext::Impl {
                             "[LB-PROBE-ANY] glUnit=%d → texName=%u (discovered target=0x%X)\n",
                             glUnit, texName, discoveredTarget);
                     }
-                    (void)discoveredTarget;
                 }
                 if (texName == 0) {
                     if (logThisCall) {
@@ -6684,6 +6694,30 @@ struct GLContext::Impl {
                 binding.metalTexture = resolveSwizzledTexture(*texObject);
                 binding.metalSamplerState = metalSamplerState;
                 outBindings.push_back(binding);
+                const GLenum sparseSidecarTarget =
+                    preferredTarget != 0 ? preferredTarget : discoveredTarget;
+                if (owner != nullptr &&
+                    usesSparseSampledSidecars &&
+                    extensions::sparse_texture::isSparseStorageImageSidecarTarget(
+                        sparseSidecarTarget)) {
+                    ExtensionContext extensionContext(*owner);
+                    extensions::sparse_texture::SparseStorageImageSidecarInfo sidecarInfo;
+                    const auto sparseRoute =
+                        extensions::sparse_texture::resolveSparseStorageImageSidecarBinding(
+                            extensionContext, *texObject, sparseSidecarTarget, &sidecarInfo);
+                    TranslatedDrawInfo::TextureBinding sidecarBinding;
+                    sidecarBinding.metalSamplerState = nullptr;
+                    sidecarBinding.metalSlot =
+                        binding.metalSlot + kMultisampleSampledSidecarTextureSlotOffset;
+                    sidecarBinding.metalTexture =
+                        sparseRoute ==
+                                extensions::sparse_texture::SparseStorageImageBindingRoute::SidecarTexture
+                            ? sidecarInfo.metalTexture
+                            : texObject->metalTexture;
+                    if (sidecarBinding.metalTexture != nullptr) {
+                        outBindings.push_back(sidecarBinding);
+                    }
+                }
                 if (g_lbLog) {
                     std::fprintf(stderr,
                         "[LB-BOUND] stage=%s sampler='%s' glUnit=%d metalSlot=%u "
@@ -6748,8 +6782,10 @@ struct GLContext::Impl {
             }
         };
 
-        resolveStage("frag", info.fragmentReflection, info.fragmentTextures);
-        resolveStage("vert", info.vertexReflection, info.vertexTextures);
+        resolveStage("frag", info.fragmentReflection, info.fragmentTextures,
+                     fragmentUsesSparseSampledSidecars);
+        resolveStage("vert", info.vertexReflection, info.vertexTextures,
+                     vertexUsesSparseSampledSidecars);
     }
 
     // Sprint 6 Phase 1 sub-task 3 day 3 (CKPT43): build the
@@ -7549,7 +7585,8 @@ struct GLContext::Impl {
                                        void*& cachedView,
                                        GLuint& cachedTex,
                                        GLint& cachedLev,
-                                       GLenum& cachedFmt);
+                                       GLenum& cachedFmt,
+                                       void* overrideMetalTexture = nullptr);
 
     // Graphics-stage storage-image binding (imageLoad/imageStore in VS/FS).
     // Mirrors the compute-dispatch storage-image path but appends to the
@@ -12045,15 +12082,28 @@ struct GLContext::Impl {
         GLuint cachedViewTexture = 0;  // texture name the view was created from
         GLint cachedViewLevel = -1;    // level the view was created for
         GLenum cachedViewFormat = 0;   // image binding format used for the view
+        void* sparseSidecarLevelView = nullptr;
+        GLuint sparseCachedViewTexture = 0;
+        GLint sparseCachedViewLevel = -1;
+        GLenum sparseCachedViewFormat = 0;
+        void* sparseCachedViewBase = nullptr;
 
         void invalidateMetalView() {
             if (metalLevelView != nullptr) {
                 releaseRetainedMetalObject(metalLevelView);
             }
+            if (sparseSidecarLevelView != nullptr) {
+                releaseRetainedMetalObject(sparseSidecarLevelView);
+            }
             metalLevelView = nullptr;
             cachedViewTexture = 0;
             cachedViewLevel = -1;
             cachedViewFormat = 0;
+            sparseSidecarLevelView = nullptr;
+            sparseCachedViewTexture = 0;
+            sparseCachedViewLevel = -1;
+            sparseCachedViewFormat = 0;
+            sparseCachedViewBase = nullptr;
         }
     };
 
@@ -12067,6 +12117,38 @@ struct GLContext::Impl {
                                             ib.cachedViewTexture,
                                             ib.cachedViewLevel,
                                             ib.cachedViewFormat);
+    }
+
+    void* resolveSparseSidecarImageMetalTexture(
+        ImageBinding& ib,
+        GLTextureObject* texObj,
+        const extensions::sparse_texture::SparseStorageImageSidecarInfo& sidecarInfo)
+    {
+        if (sidecarInfo.metalTexture == nullptr) {
+            return nullptr;
+        }
+        if (ib.sparseCachedViewBase != nullptr &&
+            ib.sparseCachedViewBase != sidecarInfo.metalTexture) {
+            if (ib.sparseSidecarLevelView != nullptr) {
+                releaseRetainedMetalObject(ib.sparseSidecarLevelView);
+            }
+            ib.sparseSidecarLevelView = nullptr;
+            ib.sparseCachedViewTexture = 0;
+            ib.sparseCachedViewLevel = -1;
+            ib.sparseCachedViewFormat = 0;
+            ib.sparseCachedViewBase = nullptr;
+        }
+        void* result = resolveImageMetalTextureImpl(
+            texObj, ib.texture, ib.level, ib.format,
+            ib.sparseSidecarLevelView,
+            ib.sparseCachedViewTexture,
+            ib.sparseCachedViewLevel,
+            ib.sparseCachedViewFormat,
+            sidecarInfo.metalTexture);
+        if (ib.sparseSidecarLevelView != nullptr) {
+            ib.sparseCachedViewBase = sidecarInfo.metalTexture;
+        }
+        return result;
     }
 
     bool imageBindingLevelAvailable(const ImageBinding& ib,
@@ -19624,8 +19706,12 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
                                                     void*& cachedView,
                                                     GLuint& cachedTex,
                                                     GLint& cachedLev,
-                                                    GLenum& cachedFmt) {
-    if (texObj == nullptr || texObj->metalTexture == nullptr) return nullptr;
+                                                    GLenum& cachedFmt,
+                                                    void* overrideMetalTexture) {
+    void* baseMetalTexture = overrideMetalTexture != nullptr
+        ? overrideMetalTexture
+        : (texObj != nullptr ? texObj->metalTexture : nullptr);
+    if (texObj == nullptr || baseMetalTexture == nullptr) return nullptr;
     if (level < 0) {
         return nullptr;
     }
@@ -19641,7 +19727,7 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
         }
         return cachedView;
     }
-    id<MTLTexture> baseTex = (__bridge id<MTLTexture>)texObj->metalTexture;
+    id<MTLTexture> baseTex = (__bridge id<MTLTexture>)baseMetalTexture;
     if (baseTex == nil) return nullptr;
     const NSUInteger maxLevels = baseTex.mipmapLevelCount;
     if (static_cast<NSUInteger>(level) >= maxLevels) {
@@ -19662,7 +19748,7 @@ void* GLContext::Impl::resolveImageMetalTextureImpl(GLTextureObject* texObj,
                 "[IMG-VIEW] tex=%u level=0 fmt=0x%X base-pf=%lu use=base\n",
                 texName, imageFormat, static_cast<unsigned long>(baseTex.pixelFormat));
         }
-        return texObj->metalTexture;
+        return baseMetalTexture;
     }
     if (extensions::sparse_texture::shouldSkipDepthImageViewCast(texObj->desc.internalFormat,
                                                                  imageFormat)) {
@@ -38310,7 +38396,9 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
                     : extensions::sparse_texture::SparseStorageImageBindingRoute::NativeTexture;
                 if (sparseRoute ==
                     extensions::sparse_texture::SparseStorageImageBindingRoute::SidecarTexture) {
-                    tb.metalTexture = sidecarInfo.metalTexture;
+                    tb.metalTexture =
+                        impl_->resolveSparseSidecarImageMetalTexture(
+                            ib, texObj, sidecarInfo);
                 } else if (sparseRoute ==
                            extensions::sparse_texture::SparseStorageImageBindingRoute::SparseSidecarUnavailable) {
                     continue;
@@ -38782,7 +38870,9 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
                     : extensions::sparse_texture::SparseStorageImageBindingRoute::NativeTexture;
                 if (sparseRoute ==
                     extensions::sparse_texture::SparseStorageImageBindingRoute::SidecarTexture) {
-                    tb.metalTexture = sidecarInfo.metalTexture;
+                    tb.metalTexture =
+                        impl_->resolveSparseSidecarImageMetalTexture(
+                            ib, texObj, sidecarInfo);
                 } else if (sparseRoute ==
                            extensions::sparse_texture::SparseStorageImageBindingRoute::SparseSidecarUnavailable) {
                     continue;
