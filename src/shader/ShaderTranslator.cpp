@@ -7,6 +7,8 @@
 #include <SPIRV/GlslangToSpv.h>
 #include <spirv_msl.hpp>
 
+#include "../extensions/ExtensionRegistry.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -1671,6 +1673,14 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         spirv_cross::CompilerMSL::Options mslOpts;
         mslOpts.platform = spirv_cross::CompilerMSL::Options::macOS;
+        // GL_ARB_sparse_texture_clamp CTS exercises 1D/1D-array
+        // textureClampARB with mipmapped min_lod_clamp sampling. Native
+        // Metal texture1d backings are single-mip in AppGL due AGX
+        // descriptor/assertion limits, so when the extension is active we
+        // lower 1D image/sampler declarations to 2D/2D-array and let the
+        // runtime provide matching 2D mip-chain backing.
+        mslOpts.texture_1D_as_2D =
+            extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp");
         // Step 8 (tessellation on Metal via SPIRV-Cross): when the shader is
         // a tess stage, we emit MSL compatible with Metal's native tess
         // pipeline (TCS-as-compute + TES-as-vertex-function + hardware

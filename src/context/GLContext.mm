@@ -751,17 +751,22 @@ MTLResourceOptions metalBufferOptionsForUsage(GLenum usage) {
     return options;
 }
 
+bool sparseClampUses2DBackingFor1DTextures() {
+    return extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp");
+}
+
 MTLTextureType metalTextureTypeForTarget(GLenum target) {
+    const bool use2DFor1D = sparseClampUses2DBackingFor1DTextures();
     switch (target) {
         case GL_TEXTURE_1D:
-            return MTLTextureType1D;
+            return use2DFor1D ? MTLTextureType2D : MTLTextureType1D;
         case GL_TEXTURE_2D:
         case GL_TEXTURE_RECTANGLE:
             return MTLTextureType2D;
         case GL_TEXTURE_3D:
             return MTLTextureType3D;
         case GL_TEXTURE_1D_ARRAY:
-            return MTLTextureType1DArray;
+            return use2DFor1D ? MTLTextureType2DArray : MTLTextureType1DArray;
         case GL_TEXTURE_2D_ARRAY:
             return MTLTextureType2DArray;
         case GL_TEXTURE_CUBE_MAP:
@@ -4499,7 +4504,8 @@ struct GLContext::Impl {
                     maxLevelExisting = std::max(maxLevelExisting, levelIndex);
                 }
             }
-            const NSUInteger wantMipCount = (object.target == GL_TEXTURE_1D)
+            const bool use2DFor1D = sparseClampUses2DBackingFor1DTextures();
+            const NSUInteger wantMipCount = (object.target == GL_TEXTURE_1D && !use2DFor1D)
                 ? 1u
                 : static_cast<NSUInteger>(maxLevelExisting + 1);
             const bool shapeMatches =
@@ -4599,6 +4605,7 @@ struct GLContext::Impl {
                         // bytesPerImage == 0 for MTLTextureType1DArray
                         // replaceRegion calls. Per-layer pointer math
                         // still uses the actual row stride (rowStride).
+                        const bool native1DArray = !use2DFor1D;
                         const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.height));
                         const MTLRegion r = MTLRegionMake2D(0, 0,
                             static_cast<NSUInteger>(safeDimension(image.desc.width)), 1);
@@ -4610,14 +4617,15 @@ struct GLContext::Impl {
                             } else {
                                 [existing replaceRegion:r mipmapLevel:mipLevel slice:layer
                                               withBytes:bytes + layer * rowStride
-                                            bytesPerRow:0u
-                                          bytesPerImage:0u];
+                                            bytesPerRow:(native1DArray ? 0u : rowStride)
+                                          bytesPerImage:(native1DArray ? 0u : rowStride)];
                             }
                         }
                     } else {
                         // CKPT82: Metal requires bytesPerRow == 0 for
                         // MTLTextureType1D replaceRegion calls.
                         const bool is1D = (object.target == GL_TEXTURE_1D);
+                        const bool native1D = is1D && !use2DFor1D;
                         const MTLRegion r = MTLRegionMake2D(0, 0,
                             static_cast<NSUInteger>(safeDimension(image.desc.width)),
                             static_cast<NSUInteger>(
@@ -4628,7 +4636,7 @@ struct GLContext::Impl {
                         } else {
                             [existing replaceRegion:r mipmapLevel:mipLevel
                                           withBytes:bytes
-                                        bytesPerRow:(is1D ? 0u : rowStride)];
+                                        bytesPerRow:(native1D ? 0u : rowStride)];
                         }
                     }
                 }
@@ -4748,10 +4756,11 @@ struct GLContext::Impl {
         // GL_ARB_texture_view trip a Metal hard assertion at descriptor
         // creation (CKPT156 Day 3 experiment).
         const NSUInteger requestedLevels = static_cast<NSUInteger>(highestDefinedLevel + 1);
+        const bool use2DFor1D = sparseClampUses2DBackingFor1DTextures();
         const bool metalRequiresSingleLevel =
-            (object.target == GL_TEXTURE_1D ||
-             object.target == GL_TEXTURE_1D_ARRAY ||
-             object.target == GL_TEXTURE_BUFFER);
+            ((object.target == GL_TEXTURE_1D ||
+              object.target == GL_TEXTURE_1D_ARRAY) && !use2DFor1D) ||
+             object.target == GL_TEXTURE_BUFFER;
         descriptor.mipmapLevelCount = metalRequiresSingleLevel ? 1u : requestedLevels;
         // Include MTLTextureUsageShaderWrite for non-MSAA textures so
         // imageStore in compute / graphics shaders actually lands.
@@ -4883,10 +4892,11 @@ struct GLContext::Impl {
             // layerBytes = uploadBytes + layer * sourceRowStride).
             const bool is1DLike =
                 (object.target == GL_TEXTURE_1D || object.target == GL_TEXTURE_1D_ARRAY);
+            const bool native1DLike = is1DLike && !use2DFor1D;
             const NSUInteger sourceRowStride =
                 static_cast<NSUInteger>(safeDimension(image.desc.width) * bpp);
-            const NSUInteger bytesPerRow = is1DLike ? 0u : sourceRowStride;
-            const NSUInteger bytesPerImage = is1DLike
+            const NSUInteger bytesPerRow = native1DLike ? 0u : sourceRowStride;
+            const NSUInteger bytesPerImage = native1DLike
                 ? 0u
                 : sourceRowStride * static_cast<NSUInteger>(safeDimension(image.desc.height));
             const MTLRegion region = MTLRegionMake3D(
@@ -4939,6 +4949,8 @@ struct GLContext::Impl {
                 // bytes are still laid out one row per layer.
                 const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.height));
                 const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, 1);
+                const NSUInteger layerBytesPerRow = native1DLike ? 0u : sourceRowStride;
+                const NSUInteger layerBytesPerImage = native1DLike ? 0u : sourceRowStride;
                 for (NSUInteger layer = 0; layer < layers; ++layer) {
                     const auto* layerBytes = uploadBytes + static_cast<std::size_t>(layer * sourceRowStride);
                     if (needsBlitUpload) {
@@ -4949,8 +4961,8 @@ struct GLContext::Impl {
                                    mipmapLevel:mipLevel
                                          slice:layer
                                      withBytes:layerBytes
-                                   bytesPerRow:0u
-                                 bytesPerImage:0u];
+                                   bytesPerRow:layerBytesPerRow
+                                 bytesPerImage:layerBytesPerImage];
                     }
                 }
             } else {
