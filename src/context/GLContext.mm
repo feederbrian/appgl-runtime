@@ -32786,6 +32786,17 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     if (transformFeedbackActive && !tessTFActive) {
         return false;
     }
+    if (!transformFeedbackActive &&
+        !state->isEnabled(GL_RASTERIZER_DISCARD) &&
+        program.tessEvalMSL.empty() &&
+        !program.tessEvalAsComputeMSL.empty() &&
+        program.tessGenMode == GL_ISOLINES &&
+        program.tessGenPointMode == GL_TRUE &&
+        !(program.metalTessEvalComputePipelineState != nullptr &&
+          program.tessEvalOutputLayout.structSize > 0 &&
+          std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr)) {
+        return false;
+    }
     // Rasterizer-discard is usually paired with TF. When the TF-
     // capture chain is wired, we still run it (the render pass
     // below is skipped naturally because the test is side-effect
@@ -33167,6 +33178,92 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         writeTessTFAndUpdateCounters(program, bytes,
                                       tfGeneratedVerts,
                                       kTesComputeSlotBytes, topo);
+        if (encodeOk &&
+            !transformFeedbackActive &&
+            !state->isEnabled(GL_RASTERIZER_DISCARD) &&
+            program.tessEvalMSL.empty() &&
+            program.tessGenMode == GL_ISOLINES &&
+            program.tessGenPointMode == GL_TRUE &&
+            topo == GL_POINTS) {
+            const auto& layout = program.tessEvalOutputLayout;
+            const StageOutputLayout::Member* positionMember = nullptr;
+            const StageOutputLayout::Member* pointSizeMember = nullptr;
+            struct ReplayVarying {
+                const StageOutputLayout::Member* member = nullptr;
+                std::uint32_t width = 0;
+            };
+            std::vector<ReplayVarying> replayVaryings;
+            for (const auto& m : layout.members) {
+                if (m.isBuiltIn && m.builtIn == spv::BuiltInPosition) {
+                    positionMember = &m;
+                } else if (m.isBuiltIn && m.builtIn == spv::BuiltInPointSize) {
+                    pointSizeMember = &m;
+                } else if (!m.isBuiltIn) {
+                    const std::size_t bytesForGL =
+                        m.glPackedBytes > 0 ? m.glPackedBytes : m.size;
+                    if (bytesForGL > 0 && (bytesForGL % sizeof(float)) == 0) {
+                        replayVaryings.push_back(
+                            {&m, static_cast<std::uint32_t>(bytesForGL / sizeof(float))});
+                    }
+                }
+            }
+            if (positionMember != nullptr) {
+                appgl::EmulatedDraw replay;
+                replay.ok = true;
+                replay.topology = GL_POINTS;
+                replay.vertexCount = tfGeneratedVerts;
+                replay.hasPointSize = (pointSizeMember != nullptr);
+                replay.streamVertexCounts[0] = tfGeneratedVerts;
+                std::size_t varyingFloats = 0;
+                std::uint32_t nextLocation = 0;
+                for (const ReplayVarying& rv : replayVaryings) {
+                    replay.varyingNames.push_back(rv.member->name);
+                    replay.varyingWidths.push_back(rv.width);
+                    replay.varyingLocations.push_back(nextLocation);
+                    replay.varyingInterp.push_back(0);
+                    replay.varyingBaseType.push_back(0);
+                    replay.varyingScalarByteSize.push_back(sizeof(float));
+                    replay.varyingStageSlotWidths.push_back(rv.width);
+                    replay.varyingStageSlotLocations.push_back(nextLocation);
+                    replay.varyingStageSlotInterp.push_back(0);
+                    replay.varyingStageSlotBaseType.push_back(0);
+                    replay.varyingStageSlotScalarByteSize.push_back(sizeof(float));
+                    varyingFloats += rv.width;
+                    nextLocation += 1u;
+                }
+                replay.floatsPerVertex = 4u + varyingFloats +
+                    (replay.hasPointSize ? 1u : 0u);
+                replay.expandedVertexData.assign(
+                    static_cast<std::size_t>(tfGeneratedVerts) *
+                        replay.floatsPerVertex,
+                    0.0f);
+                for (std::uint32_t v = 0; v < tfGeneratedVerts; ++v) {
+                    const std::uint8_t* src =
+                        bytes + static_cast<std::size_t>(v) * kTesComputeSlotBytes;
+                    float* dst = replay.expandedVertexData.data() +
+                        static_cast<std::size_t>(v) * replay.floatsPerVertex;
+                    std::memcpy(dst,
+                                src + positionMember->offset,
+                                sizeof(float) * 4);
+                    std::size_t dstOff = 4;
+                    for (const ReplayVarying& rv : replayVaryings) {
+                        std::memcpy(dst + dstOff,
+                                    src + rv.member->offset,
+                                    static_cast<std::size_t>(rv.width) * sizeof(float));
+                        dstOff += rv.width;
+                    }
+                    if (pointSizeMember != nullptr) {
+                        std::memcpy(dst + dstOff,
+                                    src + pointSizeMember->offset,
+                                    sizeof(float));
+                    }
+                }
+                if (encodeEmulatedGsDraw(program, programName, replay)) {
+                    return true;
+                }
+                return false;
+            }
+        }
         (void)tesOut;  // released by __bridge_transfer at scope exit
     }
 
