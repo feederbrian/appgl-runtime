@@ -15667,9 +15667,14 @@ bool GLContext::getVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params)
 }
 
 bool GLContext::activeTexture(GLenum texture) {
-    // Must match GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS (80) in GLCapabilities.
+    // Must match GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS in GLCapabilities.
     // CTS state reset iterates that cap — a stricter gate breaks state reset.
-    if (texture < GL_TEXTURE0 || texture >= GL_TEXTURE0 + 80) {
+    GLint maxUnits = 144;
+    if (impl_->capabilities != nullptr) {
+        impl_->capabilities->queryInteger(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxUnits);
+    }
+    if (texture < GL_TEXTURE0 ||
+        static_cast<GLint>(texture - GL_TEXTURE0) >= maxUnits) {
         pushError(GL_INVALID_ENUM);
         return false;
     }
@@ -18879,8 +18884,12 @@ bool GLContext::isSampler(GLuint sampler) const {
 }
 
 bool GLContext::bindSampler(GLuint unit, GLuint sampler) {
-    // Must match GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS (80) in GLCapabilities.
-    if (unit >= 80) {
+    // Must match GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS in GLCapabilities.
+    GLint maxUnits = 144;
+    if (impl_->capabilities != nullptr) {
+        impl_->capabilities->queryInteger(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxUnits);
+    }
+    if (static_cast<GLint>(unit) >= maxUnits) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -21913,18 +21922,13 @@ void appendDeclarationsAsUniforms(
             if (existing->explicitOffset < 0 && decl.explicitOffset >= 0) {
                 existing->explicitOffset = decl.explicitOffset;
             }
-            // GS-max-combined-texture-units fix: when the same uniform
-            // array is declared with different sizes across stages
-            // (CTS `max_combined_texture_units` declares
-            // `usampler2D sampler[VS_UNITS]` / `[GS_UNITS]` / `[FS_UNITS]`
-            // where VS=48, GS=1, FS=31 via a per-stage split of
-            // MAX_COMBINED_TEXTURE_IMAGE_UNITS between stages — the
-            // linked program must cover queries up to
-            // sampler[VS_UNITS-1]=47, so arraySize must be 48). Take
-            // the max and OR isArray across stages. GLSL 4.6 technically
-            // flags differing array sizes as a link error, but most
-            // drivers relax and use the maximum; CTS tests assume
-            // that behaviour.
+            // GS max-combined texture-unit path: the same sampler uniform
+            // array can be declared with independently computed sizes across
+            // stages. The linked program must cover queries through the
+            // largest stage slice, so take the max and OR isArray across
+            // stages. GLSL 4.6 technically flags differing array sizes as a
+            // link error, but desktop drivers commonly relax to the maximum;
+            // CTS tests assume that behaviour.
             if (decl.arraySize > existing->arraySize) {
                 existing->arraySize = decl.arraySize;
             }

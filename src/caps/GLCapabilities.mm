@@ -679,16 +679,14 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
     // GL 4.6 spec floor is 16; Apple Silicon argument-table limit is 128
     // per stage, so 48 is well within Metal's real budget.
     //
-    // **DO NOT bump COMBINED above the runtime's per-stage activeTexture
-    // limit (kPhaseAMaxTextureUnits = 80 in AppGLRuntime.cpp).**
-    // gluStateReset iterates `glActiveTexture(GL_TEXTURE0 + i)` for
-    // `i ∈ [0, COMBINED)`, so a COMBINED > 80 pushes GL_INVALID_ENUM for
-    // units 80..COMBINED-1 on every state-reset, cascading into the
-    // test-run abort observed in s8 (session 7's first attempt). 80
-    // keeps the iterator inside our activeTexture range, which is the
-    // binding we'd grow next if we ever need more CTS coverage.
+    // Keep COMBINED at the sum of the advertised VS/GS/FS per-stage
+    // sampler budgets. CTS `geometry_shader.limits.
+    // max_combined_texture_units` partitions this value across those
+    // three stages and then verifies all advertised per-stage points; a
+    // smaller combined cap collapses the GS slice and leaves later points
+    // undrawn. Runtime/state texture-unit arrays are sized to match.
     integerLimits_[GL_MAX_TEXTURE_IMAGE_UNITS] = 48;
-    integerLimits_[GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS] = 80;
+    integerLimits_[GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS] = 144;
     integerLimits_[GL_MAX_UNIFORM_BLOCK_SIZE] = maxUniformBlockSize;
     // Phase 8X Group 4d follow-up⁶ — UBO offset alignment. Metal's
     // MTLBuffer::setBufferOffset requires Mac-family GPUs to align constant

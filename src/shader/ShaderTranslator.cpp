@@ -1365,7 +1365,7 @@ static TBuiltInResource makeAppGLBuiltInResources() {
     r.maxFragmentImageUniforms = 8;
     // Combined / pipeline.
     r.maxTextureImageUnits = 48;            // per-stage fragment tex units
-    r.maxCombinedTextureImageUnits = 80;
+    r.maxCombinedTextureImageUnits = 144;
     r.maxDrawBuffers = 8;
     r.maxVaryingComponents = 128;
     r.maxVaryingVectors = 32;

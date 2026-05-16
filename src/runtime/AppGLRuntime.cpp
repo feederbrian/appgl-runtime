@@ -78,10 +78,10 @@ GLuint maxIndexedBindings(GLenum target) {
     }
 }
 // Must match the cap reported via GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS in
-// GLCapabilities (currently 80). CTS state reset iterates the reported cap
+// GLCapabilities (currently 144). CTS state reset iterates the reported cap
 // via glActiveTexture(GL_TEXTURE0 + ndx) — a lower validator cap makes the
 // loop blow up with GL_INVALID_ENUM and skips subsequent state reset steps.
-constexpr GLuint kPhaseAMaxTextureUnits = 80;
+constexpr GLuint kPhaseAMaxTextureUnits = 144;
 
 GLContext* requireCurrentContext(std::string_view functionName) {
     auto* context = Runtime::shared().currentContext();
