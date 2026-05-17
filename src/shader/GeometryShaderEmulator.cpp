@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <optional>
 
 #ifdef APPGL_HAS_SHADER_COMPILER
@@ -43,6 +44,10 @@ namespace spv {
         OpFunctionCall = 57,
         OpVariable = 59, OpLoad = 61, OpStore = 62, OpAccessChain = 65,
         OpArrayLength = 68,
+        OpSampledImage = 86, OpImageSampleImplicitLod = 87,
+        OpImageSampleExplicitLod = 88, OpImageFetch = 95,
+        OpImageRead = 98, OpImageWrite = 99, OpImage = 100,
+        OpImageQuerySizeLod = 103, OpImageQuerySize = 104,
         OpCompositeExtract = 81, OpCompositeConstruct = 80,
         OpVectorShuffle = 79,
         OpVectorTimesScalar = 142, OpMatrixTimesScalar = 143,
@@ -73,7 +78,7 @@ namespace spv {
         OpSelect = 169, OpAny = 154, OpAll = 155,
         OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247,
         OpLabel = 248, OpBranch = 249, OpBranchConditional = 250, OpSwitch = 251,
-        OpReturn = 253,
+        OpReturn = 253, OpReturnValue = 254,
         OpEmitVertex = 218, OpEndPrimitive = 219,
         // Sprint 8 #9-C (CKPT95) — multi-stream GS emit. Stream operand is
         // an <id> referencing a constant Int specifying the target stream.
@@ -635,6 +640,16 @@ private:
     // interpreter Value model is four scalars wide, so mat3/mat4
     // composites need side storage for OpMatrixTimesVector.
     std::unordered_map<std::uint32_t, std::vector<Value>> matrixColumns_;
+    // Array/struct composites use the same flat scalar layout as varStorage_.
+    // This lets OpCompositeConstruct + OpStore seed Function variables that are
+    // later read through OpAccessChain.
+    struct AggregateValue {
+        std::uint32_t typeId = 0;
+        std::vector<float> scalars;
+        std::vector<double> doubles;
+        bool hasDouble = false;
+    };
+    std::unordered_map<std::uint32_t, AggregateValue> aggregateValues_;
 
     // Per-variable flat float storage (indexed by access-chain
     // scalar offset). Float storage is universal — int/uint/bool
@@ -1343,7 +1358,8 @@ void Interpreter::storeToVar(std::uint32_t varId, std::uint32_t off,
         std::int32_t iv = v.bval ? 1 : 0;
         std::memcpy(&storage[off], &iv, 4);
     } else {
-        bail("store: unsupported value kind");
+        bail("store: unsupported value kind " +
+             std::to_string(static_cast<int>(v.kind)));
     }
     // Sprint 8 #8 β.2 Day 2 (CKPT70): track which variables had at
     // least one OpStore during this body's execution. Used by
@@ -3733,6 +3749,7 @@ void Interpreter::resetExecutionState() {
     valueStore_.clear();
     compositeValues_.clear();
     matrixColumns_.clear();
+    aggregateValues_.clear();
     varStorage_.clear();
     varDoubleStorage_.clear();
     accessChains_.clear();
@@ -3905,6 +3922,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
         std::uint32_t previousLabel = 0;
         std::uint32_t currentLabel = 0;
         std::uint32_t calleeFunctionId = 0;
+        std::uint32_t resultId = 0;
+        bool expectsReturnValue = false;
         std::unordered_map<std::uint32_t, std::uint32_t> pointerAliases;
     };
     std::vector<CallFrame> callStack;
@@ -4070,6 +4089,149 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             auto cIt = module_.matrixConstants.find(id);
             if (cIt != module_.matrixConstants.end()) return &cIt->second;
             return nullptr;
+        };
+    auto appendValueScalars =
+        [](AggregateValue& out, const Value& v) {
+            const int n = v.componentCount();
+            const std::size_t base = out.scalars.size();
+            out.scalars.resize(base + static_cast<std::size_t>(n), 0.0f);
+            out.doubles.resize(base + static_cast<std::size_t>(n), 0.0);
+            if (v.isFloatKind()) {
+                for (int k = 0; k < n; ++k) {
+                    out.scalars[base + static_cast<std::size_t>(k)] = v.f[k];
+                    out.doubles[base + static_cast<std::size_t>(k)] =
+                        v.hasDouble ? v.d[k] : static_cast<double>(v.f[k]);
+                }
+                out.hasDouble = out.hasDouble || v.hasDouble;
+            } else if (v.isIntKind()) {
+                for (int k = 0; k < n; ++k) {
+                    float bits = 0.0f;
+                    const std::int32_t iv = v.i[k];
+                    std::memcpy(&bits, &iv, 4);
+                    out.scalars[base + static_cast<std::size_t>(k)] = bits;
+                    out.doubles[base + static_cast<std::size_t>(k)] =
+                        static_cast<double>(iv);
+                }
+            } else if (v.kind == Value::Kind::Bool) {
+                float bits = 0.0f;
+                const std::int32_t iv = v.bval ? 1 : 0;
+                std::memcpy(&bits, &iv, 4);
+                out.scalars[base] = bits;
+                out.doubles[base] = static_cast<double>(iv);
+            }
+        };
+    std::function<bool(std::uint32_t, std::uint32_t, AggregateValue&)>
+        appendFlattenedId;
+    appendFlattenedId =
+        [&](std::uint32_t typeId, std::uint32_t valueId,
+            AggregateValue& out) -> bool {
+            auto aggIt = aggregateValues_.find(valueId);
+            if (aggIt != aggregateValues_.end()) {
+                const AggregateValue& agg = aggIt->second;
+                out.scalars.insert(out.scalars.end(),
+                                   agg.scalars.begin(), agg.scalars.end());
+                out.doubles.insert(out.doubles.end(),
+                                   agg.doubles.begin(), agg.doubles.end());
+                out.hasDouble = out.hasDouble || agg.hasDouble;
+                return true;
+            }
+            if (const auto* cols = matrixColumnsForId(valueId)) {
+                for (const Value& col : *cols) {
+                    appendValueScalars(out, col);
+                }
+                return true;
+            }
+            auto ccIt = module_.constantComposites.find(valueId);
+            if (ccIt != module_.constantComposites.end()) {
+                const ConstantCompositeInfo& cc = ccIt->second;
+                auto ccTypeIt = module_.types.find(cc.typeId);
+                if (ccTypeIt == module_.types.end()) {
+                    return false;
+                }
+                const TypeInfo& ccType = ccTypeIt->second;
+                if (ccType.kind == TypeInfo::Kind::Struct) {
+                    for (std::size_t k = 0; k < cc.constituents.size(); ++k) {
+                        const std::uint32_t memberType =
+                            k < ccType.memberTypes.size()
+                                ? ccType.memberTypes[k]
+                                : 0;
+                        if (!appendFlattenedId(memberType, cc.constituents[k], out)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                if (ccType.kind == TypeInfo::Kind::Array ||
+                    ccType.kind == TypeInfo::Kind::RuntimeArray) {
+                    for (std::uint32_t constituent : cc.constituents) {
+                        if (!appendFlattenedId(ccType.componentType,
+                                               constituent, out)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+            }
+            Value v;
+            if (tryGetValue(valueId, v) && v.kind != Value::Kind::Invalid) {
+                appendValueScalars(out, v);
+                return true;
+            }
+            auto typeIt = module_.types.find(typeId);
+            return typeIt != module_.types.end() &&
+                   module_.scalarWidth(typeId) == 0;
+        };
+    auto storeAggregateToVar =
+        [&](std::uint32_t varId, std::uint32_t off,
+            const AggregateValue& agg) {
+            auto& storage = varStorage_[varId];
+            if (off + agg.scalars.size() > storage.size()) {
+                storage.resize(off + agg.scalars.size(), 0.0f);
+            }
+            std::copy(agg.scalars.begin(), agg.scalars.end(),
+                      storage.begin() + static_cast<std::ptrdiff_t>(off));
+            if (agg.hasDouble || varDoubleStorage_.find(varId) != varDoubleStorage_.end()) {
+                auto& dStorage = varDoubleStorage_[varId];
+                if (off + agg.doubles.size() > dStorage.size()) {
+                    dStorage.resize(off + agg.doubles.size(), 0.0);
+                }
+                std::copy(agg.doubles.begin(), agg.doubles.end(),
+                          dStorage.begin() + static_cast<std::ptrdiff_t>(off));
+            }
+            writtenOutputVars_.insert(varId);
+        };
+    auto loadAggregateFromVar =
+        [&](std::uint32_t varId, std::uint32_t off,
+            std::uint32_t typeId, AggregateValue& agg) -> bool {
+            const std::uint32_t count = module_.scalarWidth(typeId);
+            if (count == 0) return false;
+            auto sIt = varStorage_.find(varId);
+            if (sIt == varStorage_.end()) return false;
+            const auto& storage = sIt->second;
+            if (off + count > storage.size()) {
+                bail("aggregate load: offset OOB");
+                return false;
+            }
+            agg.typeId = typeId;
+            agg.scalars.assign(storage.begin() + static_cast<std::ptrdiff_t>(off),
+                               storage.begin() + static_cast<std::ptrdiff_t>(off + count));
+            agg.doubles.assign(count, 0.0);
+            auto dIt = varDoubleStorage_.find(varId);
+            if (dIt != varDoubleStorage_.end() &&
+                off + count <= dIt->second.size()) {
+                agg.doubles.assign(
+                    dIt->second.begin() + static_cast<std::ptrdiff_t>(off),
+                    dIt->second.begin() + static_cast<std::ptrdiff_t>(off + count));
+                agg.hasDouble = true;
+            }
+            return true;
+        };
+    auto isFlatAggregateType =
+        [&](std::uint32_t typeId) -> bool {
+            auto tIt = module_.types.find(typeId);
+            if (tIt == module_.types.end()) return false;
+            return tIt->second.kind == TypeInfo::Kind::Struct ||
+                   tIt->second.kind == TypeInfo::Kind::Array;
         };
     auto matrixRowsForType = [&](std::uint32_t matrixTypeId,
                                  int fallbackRows) -> int {
@@ -4347,6 +4509,14 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         matrixColumns_[w[1]] =
                             loadMatrixColumnsFromVar(ptrId, 0, w[0]);
                         valueStore_.erase(w[1]);
+                    } else if (isFlatAggregateType(w[0])) {
+                        AggregateValue agg;
+                        if (!loadAggregateFromVar(ptrId, 0, w[0], agg)) {
+                            bail("OpLoad: unsupported aggregate load");
+                            break;
+                        }
+                        aggregateValues_[w[1]] = std::move(agg);
+                        valueStore_.erase(w[1]);
                     } else {
                         valueStore_[w[1]] = loadFromVar(
                             ptrId, 0, module_.scalarWidth(tIt.pointeeType),
@@ -4390,6 +4560,17 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                     acIt->second.scalarOffset,
                                     w[0]);
                                 valueStore_.erase(w[1]);
+                            } else if (isFlatAggregateType(w[0])) {
+                                AggregateValue agg;
+                                if (!loadAggregateFromVar(
+                                        acIt->second.rootVarId,
+                                        acIt->second.scalarOffset,
+                                        w[0], agg)) {
+                                    bail("OpLoad: unsupported aggregate load");
+                                    break;
+                                }
+                                aggregateValues_[w[1]] = std::move(agg);
+                                valueStore_.erase(w[1]);
                             } else {
                                 valueStore_[w[1]] = loadFromVar(
                                     acIt->second.rootVarId,
@@ -4413,6 +4594,63 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         ? aliasIt->second
                         : w[0];
                 }();
+                auto storeAggregateIt = aggregateValues_.find(w[1]);
+                if (storeAggregateIt != aggregateValues_.end()) {
+                    auto vIt = module_.variables.find(ptrId);
+                    if (vIt != module_.variables.end()) {
+                        storeAggregateToVar(ptrId, 0, storeAggregateIt->second);
+                    } else {
+                        auto acIt = accessChains_.find(ptrId);
+                        if (acIt != accessChains_.end() &&
+                            !acIt->second.isStorageBuffer &&
+                            !acIt->second.isUniformBuffer) {
+                            storeAggregateToVar(acIt->second.rootVarId,
+                                                acIt->second.scalarOffset,
+                                                storeAggregateIt->second);
+                        } else {
+                            bail("OpStore: unsupported aggregate pointer");
+                        }
+                    }
+                    pc += wc;
+                    break;
+                }
+                auto storeConstantCompositeIt =
+                    module_.constantComposites.find(w[1]);
+                bool storeConstantAggregate = false;
+                if (storeConstantCompositeIt != module_.constantComposites.end()) {
+                    auto typeIt = module_.types.find(
+                        storeConstantCompositeIt->second.typeId);
+                    storeConstantAggregate =
+                        typeIt != module_.types.end() &&
+                        (typeIt->second.kind == TypeInfo::Kind::Array ||
+                         typeIt->second.kind == TypeInfo::Kind::RuntimeArray ||
+                         typeIt->second.kind == TypeInfo::Kind::Struct);
+                }
+                if (storeConstantAggregate) {
+                    AggregateValue agg;
+                    agg.typeId = storeConstantCompositeIt->second.typeId;
+                    if (!appendFlattenedId(agg.typeId, w[1], agg)) {
+                        bail("OpStore: unsupported constant aggregate");
+                        break;
+                    }
+                    auto vIt = module_.variables.find(ptrId);
+                    if (vIt != module_.variables.end()) {
+                        storeAggregateToVar(ptrId, 0, agg);
+                    } else {
+                        auto acIt = accessChains_.find(ptrId);
+                        if (acIt != accessChains_.end() &&
+                            !acIt->second.isStorageBuffer &&
+                            !acIt->second.isUniformBuffer) {
+                            storeAggregateToVar(acIt->second.rootVarId,
+                                                acIt->second.scalarOffset,
+                                                agg);
+                        } else {
+                            bail("OpStore: unsupported constant aggregate pointer");
+                        }
+                    }
+                    pc += wc;
+                    break;
+                }
                 const auto* storeMatrixColumns = matrixColumnsForId(w[1]);
                 if (storeMatrixColumns != nullptr) {
                     auto vIt = module_.variables.find(ptrId);
@@ -4438,6 +4676,10 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 }
                 Value v;
                 if (!tryGetValue(w[1], v)) { bail("OpStore: unresolved value"); break; }
+                if (v.kind == Value::Kind::Invalid) {
+                    bail("OpStore: invalid value id=" + std::to_string(w[1]));
+                    break;
+                }
                 auto vIt = module_.variables.find(ptrId);
                 if (vIt != module_.variables.end()) {
                     storeToVar(ptrId, 0, v);
@@ -4556,6 +4798,12 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             }
             case spv::OpAccessChain: {
                 // w[0]=type, w[1]=resultId, w[2]=base, w[3..]=indices
+                const std::uint32_t baseId = [&]() {
+                    auto aliasIt = functionPointerAliases.find(w[2]);
+                    return aliasIt != functionPointerAliases.end()
+                        ? aliasIt->second
+                        : w[2];
+                }();
                 // Sprint 6 P1 sub-task 3 day 3: sampler-array element
                 // selection. If base is in sampledTextures_, the chain
                 // selects an array element by w[3] (constant or SSA
@@ -4564,13 +4812,13 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 // image arrays — mint a handle with isStorage=true.
                 const bool baseIsSampler =
                     (sampledTextures_ != nullptr &&
-                     sampledTextures_->count(w[2]) != 0);
+                     sampledTextures_->count(baseId) != 0);
                 const bool baseIsStorageImg =
                     (!baseIsSampler && storageImages_ != nullptr &&
-                     storageImages_->count(w[2]) != 0);
+                     storageImages_->count(baseId) != 0);
                 if ((baseIsSampler || baseIsStorageImg) && wc >= 5) {
                     SampledImageHandle h;
-                    h.arrayVarId = w[2];
+                    h.arrayVarId = baseId;
                     h.isStorage = baseIsStorageImg;
                     // Index operand: try constant first, fall back to
                     // SSA value (e.g. loop counter).
@@ -4594,7 +4842,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     break;
                 }
                 const std::uint32_t nIdx = wc - 4;
-                AccessChainResult r = resolveAccessChain(w[2], &w[3], nIdx);
+                AccessChainResult r = resolveAccessChain(baseId, &w[3], nIdx);
                 if (r.ok) {
                     // SPIR-V's OpAccessChain result type is already the
                     // pointer-to-leaf. Keep it as a fallback for tess-stage
@@ -4635,6 +4883,18 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
             //                       Common in VS/GS (`texture()` lowers
             //                       to ExplicitLod when no derivatives).
             //                       We support Lod=0 only.
+            case spv::OpImage: {
+                // w[0]=type, w[1]=resultId, w[2]=sampledImage.
+                // texelFetch(samplerBuffer, i) lowers through OpImage
+                // before OpImageFetch; the underlying texture handle is
+                // the same one we already track for sampled images.
+                auto sIt = sampledImages_.find(w[2]);
+                if (sIt != sampledImages_.end()) {
+                    sampledImages_[w[1]] = sIt->second;
+                }
+                pc += wc;
+                break;
+            }
             case spv::OpSampledImage: {
                 // w[0]=type, w[1]=resultId, w[2]=image, w[3]=sampler
                 auto sIt = sampledImages_.find(w[2]);
@@ -4777,6 +5037,115 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     }
                 } else {
                     // OOB — return zeros.
+                    out.kind = Value::Kind::UInt4;
+                }
+                valueStore_[w[1]] = out;
+                pc += wc;
+                break;
+            }
+            case spv::OpImageFetch: {
+                // w[0]=resultType, w[1]=resultId, w[2]=image, w[3]=coord.
+                auto sIt = sampledImages_.find(w[2]);
+                if (sIt == sampledImages_.end() ||
+                    sampledTextures_ == nullptr) {
+                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
+                                              {0, 0, 0, 0},
+                                              {0, 0, 0, 0},
+                                              false};
+                    pc += wc;
+                    break;
+                }
+                const SampledImageHandle& h = sIt->second;
+                auto arrIt = sampledTextures_->find(h.arrayVarId);
+                if (arrIt == sampledTextures_->end() ||
+                    h.elementIdx >= arrIt->second.size()) {
+                    valueStore_[w[1]] = Value{Value::Kind::UInt4,
+                                              {0, 0, 0, 0},
+                                              {0, 0, 0, 0},
+                                              false};
+                    pc += wc;
+                    break;
+                }
+                const SampledTextureSlot& slot = arrIt->second[h.elementIdx];
+                Value coord{};
+                std::int32_t ix = 0;
+                std::int32_t iy = 0;
+                if (tryGetValue(w[3], coord)) {
+                    auto pickI = [&](int idx) -> std::int32_t {
+                        if (idx >= coord.componentCount()) return 0;
+                        if (coord.isIntKind() ||
+                            coord.kind == Value::Kind::UInt ||
+                            coord.kind == Value::Kind::UInt2 ||
+                            coord.kind == Value::Kind::UInt3 ||
+                            coord.kind == Value::Kind::UInt4) {
+                            return coord.i[idx];
+                        }
+                        return static_cast<std::int32_t>(coord.f[idx]);
+                    };
+                    ix = pickI(0);
+                    iy = pickI(1);
+                }
+                std::uint32_t u = 0;
+                std::uint32_t v = 0;
+                const bool isBufferSampler =
+                    slot.samplerType == GL_SAMPLER_BUFFER ||
+                    slot.samplerType == GL_INT_SAMPLER_BUFFER ||
+                    slot.samplerType == GL_UNSIGNED_INT_SAMPLER_BUFFER;
+                if (isBufferSampler) {
+                    const std::uint32_t idx = ix < 0 ? 0u : static_cast<std::uint32_t>(ix);
+                    u = idx % 4096u;
+                    v = idx / 4096u;
+                } else {
+                    u = ix < 0 ? 0u : static_cast<std::uint32_t>(ix);
+                    v = iy < 0 ? 0u : static_cast<std::uint32_t>(iy);
+                }
+                Value out{};
+                const std::uint32_t bpr =
+                    slot.bytesPerRow != 0 ? slot.bytesPerRow : slot.width * 4u;
+                const std::size_t off =
+                    static_cast<std::size_t>(v) * bpr +
+                    static_cast<std::size_t>(u) * 4u;
+                if (off + 4 <= slot.data.size()) {
+                    std::uint32_t raw = 0;
+                    std::memcpy(&raw, slot.data.data() + off, 4);
+                    switch (slot.internalFormat) {
+                        case 0x8236: { // GL_R32UI
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(raw);
+                            out.i[1] = 0; out.i[2] = 0;
+                            out.i[3] = static_cast<std::int32_t>(1u);
+                            break;
+                        }
+                        case 0x8235: { // GL_R32I
+                            out.kind = Value::Kind::Int4;
+                            out.i[0] = static_cast<std::int32_t>(raw);
+                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+                            break;
+                        }
+                        case 0x822E: { // GL_R32F
+                            out.kind = Value::Kind::Float4;
+                            std::memcpy(&out.f[0], &raw, 4);
+                            out.f[1] = 0.0f; out.f[2] = 0.0f;
+                            out.f[3] = 1.0f;
+                            break;
+                        }
+                        case 0x8058: { // GL_RGBA8
+                            const std::uint8_t* p = slot.data.data() + off;
+                            out.kind = Value::Kind::Float4;
+                            out.f[0] = p[0] / 255.0f;
+                            out.f[1] = p[1] / 255.0f;
+                            out.f[2] = p[2] / 255.0f;
+                            out.f[3] = p[3] / 255.0f;
+                            break;
+                        }
+                        default: {
+                            out.kind = Value::Kind::UInt4;
+                            out.i[0] = static_cast<std::int32_t>(raw);
+                            out.i[1] = 0; out.i[2] = 0; out.i[3] = 1;
+                            break;
+                        }
+                    }
+                } else {
                     out.kind = Value::Kind::UInt4;
                 }
                 valueStore_[w[1]] = out;
@@ -5502,6 +5871,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 if (typeIt != module_.types.end()) {
                     const auto& t = typeIt->second;
                     matrixColumns_.erase(w[1]);
+                    aggregateValues_.erase(w[1]);
                     if (t.kind == TypeInfo::Kind::Vec2 || t.kind == TypeInfo::Kind::Vec3 ||
                         t.kind == TypeInfo::Kind::Vec4) {
                         // Pick result kind based on component scalar type.
@@ -5522,7 +5892,7 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                                      (t.count == 3) ? Value::Kind::Float3 : Value::Kind::Float4;
                         }
                         std::uint32_t dstIdx = 0;
-                        const std::uint32_t nOperands = (wc > 2) ? (wc - 2) : 0;
+                        const std::uint32_t nOperands = (wc > 3) ? (wc - 3) : 0;
                         for (std::uint32_t k = 0; k < nOperands && dstIdx < t.count; ++k) {
                             Value cv;
                             if (!tryGetValue(w[2 + k], cv)) continue;
@@ -5553,8 +5923,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         }
                     } else if (t.kind == TypeInfo::Kind::Matrix) {
                         std::vector<Value> columns;
-                        columns.reserve(wc > 2 ? wc - 2 : 0);
-                        for (std::uint32_t k = 2; k < wc; ++k) {
+                        columns.reserve(wc > 3 ? wc - 3 : 0);
+                        for (std::uint32_t k = 2; k + 1 < wc; ++k) {
                             Value cv;
                             if (tryGetValue(w[k], cv) && cv.isFloatKind()) {
                                 columns.push_back(cv);
@@ -5563,6 +5933,52 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         if (!columns.empty()) {
                             matrixColumns_[w[1]] = std::move(columns);
                         }
+                        valueStore_.erase(w[1]);
+                        pc += wc;
+                        break;
+                    } else if (t.kind == TypeInfo::Kind::Array ||
+                               t.kind == TypeInfo::Kind::RuntimeArray ||
+                               t.kind == TypeInfo::Kind::Struct) {
+                        AggregateValue agg;
+                        agg.typeId = w[0];
+                        const std::uint32_t nOperands = (wc > 3) ? (wc - 3) : 0;
+                        bool ok = true;
+                        std::uint32_t failedOperand = 0;
+                        std::uint32_t failedType = 0;
+                        if (t.kind == TypeInfo::Kind::Struct) {
+                            for (std::uint32_t k = 0; k < nOperands; ++k) {
+                                const std::uint32_t memberType =
+                                    k < t.memberTypes.size()
+                                        ? t.memberTypes[k]
+                                        : 0;
+                                ok = appendFlattenedId(memberType, w[2 + k], agg);
+                                if (!ok) {
+                                    failedOperand = w[2 + k];
+                                    failedType = memberType;
+                                }
+                                if (!ok) break;
+                            }
+                        } else {
+                            for (std::uint32_t k = 0; k < nOperands; ++k) {
+                                ok = appendFlattenedId(t.componentType, w[2 + k], agg);
+                                if (!ok) {
+                                    failedOperand = w[2 + k];
+                                    failedType = t.componentType;
+                                }
+                                if (!ok) break;
+                            }
+                        }
+                        if (!ok) {
+                            bail("OpCompositeConstruct: unsupported aggregate operand type=" +
+                                 std::to_string(failedType) + " id=" +
+                                 std::to_string(failedOperand) + " resultType=" +
+                                 std::to_string(w[0]));
+                            break;
+                        }
+                        aggregateValues_[w[1]] = std::move(agg);
+                        valueStore_.erase(w[1]);
+                        pc += wc;
+                        break;
                     }
                 }
                 valueStore_[w[1]] = r;
@@ -6461,6 +6877,9 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 // effects are stores to GS outputs plus EmitVertex /
                 // EndPrimitive. Support that narrow side-effect call shape
                 // without claiming general SPIR-V call-frame semantics.
+                // Sprint 20 FANTASTIC #4 extends the same frame machinery to
+                // by-value helpers with a scalar/vector return, matching
+                // 420pack qualifier_order function-input shaders.
                 if (wc < 4) {
                     bail("OpFunctionCall: malformed");
                     break;
@@ -6468,11 +6887,18 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 const std::uint32_t resultTypeId = w[0];
                 const std::uint32_t resultId = w[1];
                 const std::uint32_t functionId = w[2];
-                (void)resultId;
                 auto typeIt = module_.types.find(resultTypeId);
-                if (typeIt == module_.types.end() ||
-                    typeIt->second.kind != TypeInfo::Kind::Void) {
-                    bail("OpFunctionCall: non-void return deferred");
+                if (typeIt == module_.types.end()) {
+                    bail("OpFunctionCall: missing result type");
+                    break;
+                }
+                const bool expectsReturnValue =
+                    typeIt->second.kind != TypeInfo::Kind::Void;
+                const std::uint32_t resultScalarWidth =
+                    expectsReturnValue ? module_.scalarWidth(resultTypeId) : 0;
+                if (expectsReturnValue &&
+                    (resultScalarWidth == 0 || resultScalarWidth > 4)) {
+                    bail("OpFunctionCall: unsupported return type deferred");
                     break;
                 }
                 auto fnIt = module_.functions.find(functionId);
@@ -6484,10 +6910,6 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 const std::uint32_t argCount = wc - 4;
                 if (!callStack.empty()) {
                     bail("OpFunctionCall: nested calls deferred");
-                    break;
-                }
-                if (argCount != 1) {
-                    bail("OpFunctionCall: only single-parameter helpers supported");
                     break;
                 }
                 if (activeFunctions.count(functionId) != 0) {
@@ -6511,29 +6933,50 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                         bail("OpFunctionCall: missing parameter type");
                         break;
                     }
-                    if (paramTypeIt->second.kind != TypeInfo::Kind::Pointer ||
-                        paramTypeIt->second.storageClass != spv::StorageClassFunction ||
-                        module_.scalarWidth(paramTypeIt->second.pointeeType) != 1) {
-                        bail("OpFunctionCall: non-scalar Function pointer parameter deferred");
-                        break;
+                    if (paramTypeIt->second.kind == TypeInfo::Kind::Pointer) {
+                        const std::uint32_t paramScalarWidth =
+                            module_.scalarWidth(paramTypeIt->second.pointeeType);
+                        if (paramTypeIt->second.storageClass != spv::StorageClassFunction ||
+                            paramScalarWidth == 0) {
+                            bail("OpFunctionCall: unsupported Function pointer parameter deferred");
+                            break;
+                        }
+                        const std::uint32_t argVarId = w[3 + ai];
+                        auto argVarIt = module_.variables.find(argVarId);
+                        if (argVarIt == module_.variables.end() ||
+                            argVarIt->second.storageClass != spv::StorageClassFunction) {
+                            bail("OpFunctionCall: non-Function pointer argument deferred");
+                            break;
+                        }
+                        auto argTypeIt = module_.types.find(argVarIt->second.typeId);
+                        if (argTypeIt == module_.types.end() ||
+                            argTypeIt->second.kind != TypeInfo::Kind::Pointer ||
+                            argTypeIt->second.storageClass != spv::StorageClassFunction ||
+                            argTypeIt->second.pointeeType != paramTypeIt->second.pointeeType ||
+                            module_.scalarWidth(argTypeIt->second.pointeeType) != paramScalarWidth) {
+                            bail("OpFunctionCall: incompatible pointer argument deferred");
+                            break;
+                        }
+                        callPointerAliases[paramId] = argVarId;
+                    } else {
+                        const std::uint32_t paramScalarWidth =
+                            module_.scalarWidth(paramTypeId);
+                        if (paramScalarWidth == 0 || paramScalarWidth > 4) {
+                            bail("OpFunctionCall: unsupported value parameter deferred");
+                            break;
+                        }
+                        Value arg{};
+                        if (!tryGetValue(w[3 + ai], arg)) {
+                            bail("OpFunctionCall: missing value argument");
+                            break;
+                        }
+                        if (static_cast<std::uint32_t>(arg.componentCount()) !=
+                            paramScalarWidth) {
+                            bail("OpFunctionCall: value parameter width mismatch");
+                            break;
+                        }
+                        valueStore_[paramId] = arg;
                     }
-                    const std::uint32_t argVarId = w[3 + ai];
-                    auto argVarIt = module_.variables.find(argVarId);
-                    if (argVarIt == module_.variables.end() ||
-                        argVarIt->second.storageClass != spv::StorageClassFunction) {
-                        bail("OpFunctionCall: non-Function pointer argument deferred");
-                        break;
-                    }
-                    auto argTypeIt = module_.types.find(argVarIt->second.typeId);
-                    if (argTypeIt == module_.types.end() ||
-                        argTypeIt->second.kind != TypeInfo::Kind::Pointer ||
-                        argTypeIt->second.storageClass != spv::StorageClassFunction ||
-                        argTypeIt->second.pointeeType != paramTypeIt->second.pointeeType ||
-                        module_.scalarWidth(argTypeIt->second.pointeeType) != 1) {
-                        bail("OpFunctionCall: incompatible pointer argument deferred");
-                        break;
-                    }
-                    callPointerAliases[paramId] = argVarId;
                 }
                 if (errored_) break;
                 CallFrame frame;
@@ -6543,6 +6986,8 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 frame.previousLabel = previousLabel;
                 frame.currentLabel = currentLabel;
                 frame.calleeFunctionId = functionId;
+                frame.resultId = resultId;
+                frame.expectsReturnValue = expectsReturnValue;
                 frame.pointerAliases = std::move(functionPointerAliases);
                 callStack.push_back(std::move(frame));
                 functionPointerAliases = std::move(callPointerAliases);
@@ -6559,6 +7004,10 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                 if (!callStack.empty()) {
                     CallFrame frame = std::move(callStack.back());
                     callStack.pop_back();
+                    if (frame.expectsReturnValue) {
+                        bail("OpReturn: missing return value");
+                        break;
+                    }
                     activeFunctions.erase(frame.calleeFunctionId);
                     pc = frame.returnPc;
                     currentFuncEnd = frame.functionEnd;
@@ -6578,6 +7027,36 @@ bool Interpreter::execute(const std::vector<PerVertexInput>& inputs,
                     primEnds.push_back(sz);
                 }
                 return true;
+            }
+            case spv::OpReturnValue: {
+                if (wc < 2) {
+                    bail("OpReturnValue: malformed");
+                    break;
+                }
+                if (callStack.empty()) {
+                    bail("OpReturnValue: entry-point return deferred");
+                    break;
+                }
+                CallFrame frame = std::move(callStack.back());
+                callStack.pop_back();
+                if (!frame.expectsReturnValue) {
+                    bail("OpReturnValue: unexpected value");
+                    break;
+                }
+                Value ret{};
+                if (!tryGetValue(w[0], ret)) {
+                    bail("OpReturnValue: missing value");
+                    break;
+                }
+                valueStore_[frame.resultId] = ret;
+                activeFunctions.erase(frame.calleeFunctionId);
+                pc = frame.returnPc;
+                currentFuncEnd = frame.functionEnd;
+                labelMap = std::move(frame.labels);
+                previousLabel = frame.previousLabel;
+                currentLabel = frame.currentLabel;
+                functionPointerAliases = std::move(frame.pointerAliases);
+                break;
             }
             case spv::OpFunction:
             case spv::OpFunctionEnd:
@@ -6722,12 +7201,15 @@ bool isSupportedGsOpcode(std::uint32_t op) {
         case spv::OpEndStreamPrimitive:
         // ─ Function ─
         case spv::OpReturn:
+        case spv::OpReturnValue:
         case spv::OpFunction:
         case spv::OpFunctionParameter:
         case spv::OpFunctionCall:
         case spv::OpFunctionEnd:
         // ─ Sampler / texture (Sprint 6 P1 sub-task 3 day 3, CKPT43) ─
+        case spv::OpImage:                      // 100
         case spv::OpSampledImage:               // 86
+        case spv::OpImageFetch:                 // 95
         case spv::OpImageSampleImplicitLod:     // 87 (defensive)
         case spv::OpImageSampleExplicitLod:     // 88
         // ─ Storage image load (Sprint 7 P1 #4, CKPT54) ─

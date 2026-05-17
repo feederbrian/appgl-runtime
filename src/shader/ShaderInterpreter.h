@@ -139,6 +139,11 @@ struct MemberDecorations {
     std::unordered_map<std::uint32_t, DecorationSet> perMember;
 };
 
+struct ConstantCompositeInfo {
+    std::uint32_t typeId = 0;
+    std::vector<std::uint32_t> constituents;
+};
+
 // ─── SPIR-V module ──────────────────────────────────────────────────
 
 struct SpirvModule {
@@ -148,6 +153,7 @@ struct SpirvModule {
     std::unordered_map<std::uint32_t, TypeInfo> types;
     std::unordered_map<std::uint32_t, Value> constants;
     std::unordered_map<std::uint32_t, std::vector<Value>> matrixConstants;
+    std::unordered_map<std::uint32_t, ConstantCompositeInfo> constantComposites;
     std::unordered_map<std::uint32_t, VariableInfo> variables;
     std::unordered_map<std::uint32_t, DecorationSet> decorations;
     std::unordered_map<std::uint32_t, MemberDecorations> memberDecorations;

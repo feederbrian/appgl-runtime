@@ -162,6 +162,29 @@ const TypeEntry* lookupType(const std::string& keyword) {
     return &it->second;
 }
 
+// GLSL line continuations are processed before comments. The reflection scanner
+// must mirror that order or a source fragment like `// text \` + newline leaves
+// the post-newline comment text as apparent code and can hide the next
+// declaration from the statement parser.
+std::string spliceLineContinuations(std::string_view source) {
+    std::string out;
+    out.reserve(source.size());
+    for (std::size_t i = 0; i < source.size();) {
+        if (source[i] == '\\' && i + 1 < source.size()) {
+            if (source[i + 1] == '\n') {
+                i += 2;
+                continue;
+            }
+            if (source[i + 1] == '\r') {
+                i += (i + 2 < source.size() && source[i + 2] == '\n') ? 3 : 2;
+                continue;
+            }
+        }
+        out.push_back(source[i++]);
+    }
+    return out;
+}
+
 // Strip line and block comments. Returns a copy with comments replaced by spaces
 // to preserve token boundaries.
 std::string stripComments(std::string_view source) {
@@ -651,7 +674,8 @@ bool parseDeclTail(std::vector<std::string>& tokens, GLShaderDeclaration& out) {
 
 GLSLReflectionResult reflectGLSL(std::string_view source, GLenum stage) {
     GLSLReflectionResult result;
-    std::string cleaned = stripComments(source);
+    std::string spliced = spliceLineContinuations(source);
+    std::string cleaned = stripComments(spliced);
     // First pass: capture `#define NAME INTEGER_LITERAL[u]` so we can
     // substitute NAME into the rest of the source before dropping
     // preprocessor lines. CTS `limits.max_uniform_components` builds

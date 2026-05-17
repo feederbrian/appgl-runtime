@@ -2313,10 +2313,68 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 nextLoc++;
             }
         };
+        auto repairDuplicateLocations = [&compiler](
+            auto& vars) {
+            std::set<std::pair<std::uint32_t, std::uint32_t>> occupied;
+            auto outputIndex = [&compiler](const auto& v) -> std::uint32_t {
+                if (compiler.has_decoration(v.id, spv::DecorationIndex)) {
+                    return compiler.get_decoration(v.id, spv::DecorationIndex);
+                }
+                return 0u;
+            };
+            auto markOccupied = [&](std::uint32_t first, std::uint32_t count,
+                                    std::uint32_t index) {
+                count = std::max<std::uint32_t>(1, count);
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    occupied.emplace(first + i, index);
+                }
+            };
+            auto arraySlots = [&compiler](const auto& v) -> std::uint32_t {
+                const auto& type = compiler.get_type(v.type_id);
+                if (!type.array.empty() && type.array[0] > 0) {
+                    return type.array[0];
+                }
+                return 1u;
+            };
+            for (auto& v : vars) {
+                if (!compiler.has_decoration(v.id, spv::DecorationLocation)) {
+                    continue;
+                }
+                std::uint32_t loc =
+                    compiler.get_decoration(v.id, spv::DecorationLocation);
+                const std::uint32_t slots = arraySlots(v);
+                const std::uint32_t index = outputIndex(v);
+                bool collides = false;
+                for (std::uint32_t i = 0; i < slots; ++i) {
+                    if (occupied.count({loc + i, index}) != 0) {
+                        collides = true;
+                        break;
+                    }
+                }
+                if (collides) {
+                    loc = 0;
+                    while (true) {
+                        bool freeRange = true;
+                        for (std::uint32_t i = 0; i < slots; ++i) {
+                            if (occupied.count({loc + i, index}) != 0) {
+                                freeRange = false;
+                                break;
+                            }
+                        }
+                        if (freeRange) break;
+                        ++loc;
+                    }
+                    compiler.set_decoration(v.id, spv::DecorationLocation, loc);
+                }
+                markOccupied(loc, slots, index);
+            }
+        };
         if (execModel == spv::ExecutionModelVertex) {
             assignMissingLocations(resources.stage_outputs);
         } else if (execModel == spv::ExecutionModelFragment) {
             assignMissingLocations(resources.stage_inputs);
+            assignMissingLocations(resources.stage_outputs);
+            repairDuplicateLocations(resources.stage_outputs);
         }
 
         {

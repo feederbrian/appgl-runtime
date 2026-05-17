@@ -367,6 +367,12 @@ bool SpirvModule::parse(const std::uint32_t* data, std::size_t count) {
             case spv::OpConstantTrue:  constants[w[1]] = Value::makeBool(true);  break;
             case spv::OpConstantFalse: constants[w[1]] = Value::makeBool(false); break;
             case spv::OpConstantComposite: {
+                ConstantCompositeInfo compositeInfo;
+                compositeInfo.typeId = w[0];
+                if (wc > 3) {
+                    compositeInfo.constituents.assign(w + 2, w + wc - 1);
+                }
+                constantComposites[w[1]] = std::move(compositeInfo);
                 auto typeIt = types.find(w[0]);
                 Value v;
                 if (typeIt != types.end()) {
