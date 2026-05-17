@@ -3529,7 +3529,7 @@ struct MetalFrameGraph::Impl {
                              indexBufferOffset:idxOffset];
             }
         } else {
-            if (effectiveInstanceCount > 1) {
+            if (effectiveInstanceCount > 1 || info.baseInstance != 0) {
                 [currentRenderEncoder drawPrimitives:primitive
                             vertexStart:0
                             vertexCount:static_cast<NSUInteger>(info.vertexCount)

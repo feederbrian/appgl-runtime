@@ -634,18 +634,13 @@ static void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void *i
 }
 
 static void APIENTRY glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount) {
-    (void)mode;
-    (void)first;
-    (void)count;
-    (void)drawcount;
+    auto* ctx = currentContextOrNull();
+    if (ctx) ctx->multiDrawArrays(mode, first, count, drawcount);
 }
 
 static void APIENTRY glMultiDrawElements(GLenum mode, const GLsizei *count, GLenum type, const void *const*indices, GLsizei drawcount) {
-    (void)mode;
-    (void)count;
-    (void)type;
-    (void)indices;
-    (void)drawcount;
+    auto* ctx = currentContextOrNull();
+    if (ctx) ctx->multiDrawElements(mode, count, type, indices, drawcount);
 }
 
 static void APIENTRY glPointParameterf(GLenum pname, GLfloat param) {
@@ -2984,8 +2979,8 @@ void installGroup8Dispatch(GLDispatchTable& dispatch, CoverageStore& coverage) {
     coverage.markImplemented(FunctionId::glCompressedTexSubImage2D, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glCompressedTexSubImage1D, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glGetCompressedTexImage, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
-    coverage.markImplemented(FunctionId::glMultiDrawArrays, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
-    coverage.markImplemented(FunctionId::glMultiDrawElements, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
+    coverage.markImplemented(FunctionId::glMultiDrawArrays, "Multi-draw arrays decomposed through GLContext drawArrays.");
+    coverage.markImplemented(FunctionId::glMultiDrawElements, "Multi-draw elements decomposed through GLContext drawElements.");
     coverage.markImplemented(FunctionId::glPointParameterf, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glPointParameterfv, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");
     coverage.markImplemented(FunctionId::glPointParameteri, "Phase 8 surface stub: dispatch wired, smoke-tested via phase-a.api-surface-smoke.");

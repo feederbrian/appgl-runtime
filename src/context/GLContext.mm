@@ -16287,8 +16287,14 @@ bool GLContext::copyTexImage2D(
         !isDepthStencilCopy &&
         (internalformat == GL_STENCIL_INDEX ||
          internalformat == GL_STENCIL_INDEX8);
+    const bool isRGB10A2Copy =
+        internalformat == GL_RGB10_A2;
 
-    if (isDepthStencilCopy) {
+    if (isRGB10A2Copy) {
+        uploadFormat = GL_RGBA;
+        uploadType = GL_UNSIGNED_INT_2_10_10_10_REV;
+        uploadPixelBytes = sizeof(std::uint32_t);
+    } else if (isDepthStencilCopy) {
         uploadFormat = GL_DEPTH_STENCIL;
         if (internalformat == GL_DEPTH32F_STENCIL8) {
             uploadType = GL_FLOAT_32_UNSIGNED_INT_24_8_REV;
@@ -16451,7 +16457,17 @@ bool GLContext::copyTexImage2D(
     } else if (isStencilCopy) {
         readFormat = GL_STENCIL_INDEX;
     }
-    if (!impl_->readFramebufferPixels(readFormat, x, y,
+    bool didRead = false;
+    if (isRGB10A2Copy) {
+        didRead = impl_->readFBOColorNative(x, y, width, height,
+                                            uploadFormat, uploadType,
+                                            uploadBytes.data());
+        if (!didRead) {
+            uploadType = GL_UNSIGNED_BYTE;
+        }
+    }
+    if (!didRead &&
+        !impl_->readFramebufferPixels(readFormat, x, y,
                                       width, height,
                                       uploadBytes.data())) {
         pushError(GL_INVALID_OPERATION);
@@ -22282,6 +22298,137 @@ void appendDeclarationsAsUniforms(
     }
 }
 
+bool replaceShaderDrawIDToken(
+    std::string& source,
+    const char* from,
+    const char* to)
+{
+    const std::size_t fromLen = std::strlen(from);
+    std::string out;
+    out.reserve(source.size());
+    bool changed = false;
+    bool lineComment = false;
+    bool blockComment = false;
+    auto isIdent = [](unsigned char c) {
+        return std::isalnum(c) || c == '_';
+    };
+
+    for (std::size_t i = 0; i < source.size(); ) {
+        if (lineComment) {
+            out.push_back(source[i]);
+            if (source[i] == '\n') {
+                lineComment = false;
+            }
+            ++i;
+            continue;
+        }
+        if (blockComment) {
+            if (i + 1 < source.size() && source[i] == '*' && source[i + 1] == '/') {
+                out.append(source, i, 2);
+                i += 2;
+                blockComment = false;
+            } else {
+                out.push_back(source[i++]);
+            }
+            continue;
+        }
+        if (i + 1 < source.size() && source[i] == '/' && source[i + 1] == '/') {
+            out.append(source, i, 2);
+            i += 2;
+            lineComment = true;
+            continue;
+        }
+        if (i + 1 < source.size() && source[i] == '/' && source[i + 1] == '*') {
+            out.append(source, i, 2);
+            i += 2;
+            blockComment = true;
+            continue;
+        }
+
+        if (i + fromLen <= source.size() &&
+            source.compare(i, fromLen, from) == 0) {
+            const bool leftOk = (i == 0) ||
+                !isIdent(static_cast<unsigned char>(source[i - 1]));
+            const std::size_t end = i + fromLen;
+            const bool rightOk = (end >= source.size()) ||
+                !isIdent(static_cast<unsigned char>(source[end]));
+            if (leftOk && rightOk) {
+                out.append(to);
+                i = end;
+                changed = true;
+                continue;
+            }
+        }
+        out.push_back(source[i++]);
+    }
+
+    if (changed) {
+        source = std::move(out);
+    }
+    return changed;
+}
+
+std::size_t shaderPreambleInsertOffset(const std::string& source) {
+    std::size_t insertAt = 0;
+    auto directiveAt = [&](std::size_t p, const char* directive) {
+        const std::size_t len = std::strlen(directive);
+        return p + len <= source.size() && source.compare(p, len, directive) == 0;
+    };
+
+    std::size_t lineStart = 0;
+    bool blockComment = false;
+    while (lineStart < source.size()) {
+        const std::size_t eol = source.find('\n', lineStart);
+        const std::size_t lineEnd =
+            (eol == std::string::npos) ? source.size() : eol;
+        std::size_t p = lineStart;
+        while (p < lineEnd && (source[p] == ' ' || source[p] == '\t' || source[p] == '\r')) {
+            ++p;
+        }
+
+        const bool blank = p >= lineEnd;
+        const bool lineComment =
+            p + 1 < lineEnd && source[p] == '/' && source[p + 1] == '/';
+        const bool blockCommentStart =
+            p + 1 < lineEnd && source[p] == '/' && source[p + 1] == '*';
+        const bool header =
+            directiveAt(p, "#version") ||
+            directiveAt(p, "#extension") ||
+            directiveAt(p, "#pragma");
+        if (!blockComment && !blank && !lineComment && !blockCommentStart && !header) {
+            break;
+        }
+        if (blockComment || blockCommentStart) {
+            const std::size_t close = source.find("*/", p + (blockCommentStart ? 2 : 0));
+            blockComment = (close == std::string::npos || close > lineEnd);
+        }
+        insertAt = (eol == std::string::npos) ? source.size() : eol + 1;
+        if (eol == std::string::npos) {
+            return insertAt;
+        }
+        lineStart = insertAt;
+    }
+    return insertAt;
+}
+
+std::string rewriteShaderDrawIDForSpirv(const std::string& in, GLenum stage) {
+    if (stage != GL_VERTEX_SHADER) {
+        return in;
+    }
+    std::string out = in;
+    const bool changedArb =
+        replaceShaderDrawIDToken(out, "gl_DrawIDARB", "_appgl_DrawID");
+    const bool changedCore =
+        replaceShaderDrawIDToken(out, "gl_DrawID", "_appgl_DrawID");
+    if (!changedArb && !changedCore) {
+        return in;
+    }
+    if (out.find("uniform int _appgl_DrawID") == std::string::npos) {
+        out.insert(shaderPreambleInsertOffset(out), "uniform int _appgl_DrawID;\n");
+    }
+    return out;
+}
+
 }  // namespace
 
 GLuint GLContext::createShader(GLenum stage) {
@@ -22957,10 +23104,16 @@ bool GLContext::compileShader(GLuint shader) {
     std::string after420packQualifierRewrite =
         rewrite420packQualifierOrderInvariantInputsForSpirv(
             sourceAfterImplicitRewrite);
-    const std::string& compileSource =
+    const std::string& sourceAfterQualifierRewrite =
         (after420packQualifierRewrite != sourceAfterImplicitRewrite)
             ? after420packQualifierRewrite
             : sourceAfterImplicitRewrite;
+    std::string afterDrawIDRewrite =
+        rewriteShaderDrawIDForSpirv(sourceAfterQualifierRewrite, object->stage);
+    const std::string& compileSource =
+        (afterDrawIDRewrite != sourceAfterQualifierRewrite)
+            ? afterDrawIDRewrite
+            : sourceAfterQualifierRewrite;
 
     // 2. Lightweight scanner pass. Still needed for declared attribute inputs
     //    so the vertex-input binding path (glBindAttribLocation /
@@ -24924,6 +25077,8 @@ bool GLContext::linkProgram(GLuint program) {
             findLocByName(SUN::kNormalMatrix);
         programObject->synthesizedMatrixSlots.texture =
             findLocByName(SUN::kTextureMatrix);
+        programObject->shaderDrawIDUniformLocation =
+            findLocByName("_appgl_DrawID");
     }
 
     // ─── Transform feedback link-time validation ───────────────────────
@@ -27454,10 +27609,14 @@ bool GLContext::linkProgram(GLuint program) {
             vsRewrite.didRewrite ? vsRewrite.source : vsStage->source;
         const std::string& fsLinkSource =
             fsRewrite.didRewrite ? fsRewrite.source : fsStage->source;
+        std::string vsDrawIDLinkSource =
+            rewriteShaderDrawIDForSpirv(vsLinkSource, GL_VERTEX_SHADER);
+        std::string fsDrawIDLinkSource =
+            rewriteShaderDrawIDForSpirv(fsLinkSource, GL_FRAGMENT_SHADER);
         std::string vs420packLinkSource =
-            rewrite420packImplicitConversionsForSpirv(vsLinkSource);
+            rewrite420packImplicitConversionsForSpirv(vsDrawIDLinkSource);
         std::string fs420packLinkSource =
-            rewrite420packImplicitConversionsForSpirv(fsLinkSource);
+            rewrite420packImplicitConversionsForSpirv(fsDrawIDLinkSource);
         vs420packLinkSource =
             rewrite420packQualifierOrderInvariantInputsForSpirv(
                 vs420packLinkSource);
@@ -31905,8 +32064,16 @@ static void computeStageUniformLayout(
 // in O(1) and the per-draw cost is a single bool check.
 static void pushSynthesizedMatrixUniforms(
     GLProgramObject& program,
-    const MatrixStateMirror& matrixState)
+    const MatrixStateMirror& matrixState,
+    GLuint drawID = 0)
 {
+    if (program.shaderDrawIDUniformLocation >= 0) {
+        auto& value = program.uniformValues[program.shaderDrawIDUniformLocation];
+        value.type = GL_INT;
+        value.arraySize = 1;
+        value.ints.assign(1, static_cast<GLint>(drawID));
+    }
+
     const auto& slots = program.synthesizedMatrixSlots;
     if (!slots.hasAny()) {
         return;
@@ -34686,7 +34853,7 @@ static bool isValidDrawMode(GLenum mode) {
     }
 }
 
-bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
+bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawID) {
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -35477,7 +35644,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
             }
             thread_local std::vector<std::uint8_t> vtxUniformScratch;
             thread_local std::vector<std::uint8_t> fragUniformScratch;
-            pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+            pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
             buildStageUniformBuffer(vtxUniformScratch,
                 program->vertexReflection, program->uniformValues,
                 program->vertexUniformLayout);
@@ -35689,7 +35856,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
                     // Push synthesized fixed-function matrix uniforms into
                     // program->uniformValues for compat-rewritten shaders.
                     // Early-out for the common (core-profile) case.
-                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
                     buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniformValues,
                         program->vertexUniformLayout);
@@ -35806,7 +35973,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count) {
     return ok;
 }
 
-bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount) {
+bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance, GLuint drawID) {
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -35883,7 +36050,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
                 *program, *tvao, *impl_->objects, *impl_->state,
                 mode, count, first, /*elementIndices=*/nullptr,
-                instancecount, /*baseInstance=*/0);
+                instancecount, baseinstance);
             if (ted.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ted)) return true;
                 if (ted.vertexCount == 0) return true;
@@ -35900,7 +36067,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
                 *program, *vao, *impl_->objects, *impl_->state,
                 mode, count, first, /*elementIndices=*/nullptr,
-                instancecount, /*baseInstance=*/0);
+                instancecount, baseinstance);
             if (ed.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
                 if (ed.vertexCount == 0) return true;
@@ -35922,7 +36089,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         if (vao != nullptr && !program->vertexSpirv.empty()) {
             appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
                 *program, *vao, *impl_->objects, *impl_->state,
-                mode, count, first, instancecount, /*baseInstance=*/0,
+                mode, count, first, instancecount, baseinstance,
                 /*elementIndices=*/nullptr);
             if (ed.ok) {
                 bool discard = false;
@@ -35955,6 +36122,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             tdi.mode = mode;
             tdi.vertexCount = count;
             tdi.instanceCount = instancecount;
+            tdi.baseInstance = baseinstance;
             tdi.vertexData = nullptr;
             tdi.vertexDataByteCount = 0;
             tdi.vertexStride = 0;
@@ -35981,7 +36149,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             }
             thread_local std::vector<std::uint8_t> vtxUniformScratch;
             thread_local std::vector<std::uint8_t> fragUniformScratch;
-            pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+            pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
             buildStageUniformBuffer(vtxUniformScratch,
                 program->vertexReflection, program->uniformValues,
                 program->vertexUniformLayout);
@@ -36064,6 +36232,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     tdi.mode = mode;
                     tdi.vertexCount = count;
                     tdi.instanceCount = instancecount;
+                    tdi.baseInstance = baseinstance;
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
@@ -36187,7 +36356,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
                     // Push synthesized fixed-function matrix uniforms (compat
                     // shader path). Early-out for the common core-profile case.
-                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
                     buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniformValues,
                         program->vertexUniformLayout);
@@ -36257,7 +36426,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
     return false;
 }
 
-bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
+bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void* indices, GLuint drawID) {
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -36762,7 +36931,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         }
         thread_local std::vector<std::uint8_t> vtxUniformScratchDE;
         thread_local std::vector<std::uint8_t> fragUniformScratchDE;
-        pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+        pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
         buildStageUniformBuffer(vtxUniformScratchDE,
             program->vertexReflection, program->uniformValues,
             program->vertexUniformLayout);
@@ -36967,7 +37136,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
 
                     thread_local std::vector<std::uint8_t> vtxUniformScratch;
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
-                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
                     buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniformValues,
                         program->vertexUniformLayout);
@@ -37066,7 +37235,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
 // GL 3.2 — Base-vertex indexed drawing (ARB_draw_elements_base_vertex)
 // ---------------------------------------------------------------------------
 
-bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex) {
+bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex, GLuint drawID) {
     // GL 4.6 §10.5: mode must be a valid primitive-assembly enum.
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
@@ -37280,7 +37449,7 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
 
                     thread_local std::vector<std::uint8_t> vtxUniformScratch;
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
-                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
                     buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniformValues,
                         program->vertexUniformLayout);
@@ -37390,7 +37559,7 @@ bool GLContext::drawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint en
     return drawElementsBaseVertex(mode, count, type, indices, basevertex);
 }
 
-bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex) {
+bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID) {
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
         return false;
@@ -37524,7 +37693,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
             appgl::EmulatedDraw ted = appgl::emulateTessellationDraw(
                 *program, *vao, *impl_->objects, *impl_->state,
                 mode, tessCount, /*first=*/0, tidx32.data(),
-                instancecount, /*baseInstance=*/0);
+                instancecount, baseinstance);
             if (ted.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ted)) return true;
                 if (ted.vertexCount == 0) return true;
@@ -37556,7 +37725,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
             appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
                 *program, *vao, *impl_->objects, *impl_->state,
                 mode, count, /*first=*/0, idx32.data(),
-                instancecount, /*baseInstance=*/0);
+                instancecount, baseinstance);
             if (ed.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) return true;
                 if (ed.vertexCount == 0) return true;
@@ -37656,7 +37825,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
             appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
                 *program, *vao, *impl_->objects, *impl_->state,
                 capTopology, static_cast<GLsizei>(capIdx.size()), /*first=*/0,
-                instancecount, /*baseInstance=*/0,
+                instancecount, baseinstance,
                 capIdx.data());
             if (ed.ok) {
                 bool discard = false;
@@ -37714,6 +37883,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                     tdi.vertexCount = count;
                     tdi.baseVertex = basevertex;
                     tdi.instanceCount = instancecount;
+                    tdi.baseInstance = baseinstance;
                     tdi.vertexData = vbo->shadowBytes.data() + startOff;
                     tdi.vertexDataByteCount = vbo->shadowBytes.size() - startOff;
                     tdi.vertexStride = posStride;
@@ -37823,7 +37993,7 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
 
                     thread_local std::vector<std::uint8_t> vtxUniformScratch;
                     thread_local std::vector<std::uint8_t> fragUniformScratch;
-                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState);
+                    pushSynthesizedMatrixUniforms(*program, impl_->matrixState, drawID);
                     buildStageUniformBuffer(vtxUniformScratch,
                         program->vertexReflection, program->uniformValues,
                         program->vertexUniformLayout);
@@ -37917,6 +38087,64 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
     return solidOk;
 }
 
+bool GLContext::multiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GLsizei drawcount) {
+    if (!isValidDrawMode(mode)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (drawcount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (drawcount > 0 && (first == nullptr || count == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        if (count[i] < 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        if (count[i] > 0) {
+            drawArrays(mode, first[i], count[i], static_cast<GLuint>(i));
+        }
+    }
+    return true;
+}
+
+bool GLContext::multiDrawElements(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices, GLsizei drawcount) {
+    if (!isValidDrawMode(mode)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (drawcount < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!isSupportedElementIndexType(type)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    if (drawcount > 0 && (count == nullptr || indices == nullptr)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        if (count[i] < 0) {
+            pushError(GL_INVALID_VALUE);
+            return false;
+        }
+    }
+    for (GLsizei i = 0; i < drawcount; ++i) {
+        if (count[i] > 0) {
+            drawElements(mode, count[i], type, indices[i], static_cast<GLuint>(i));
+        }
+    }
+    return true;
+}
+
 bool GLContext::multiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum type, const void* const* indices, GLsizei drawcount, const GLint* basevertex) {
     if (!isValidDrawMode(mode)) {
         pushError(GL_INVALID_ENUM);
@@ -37946,7 +38174,8 @@ bool GLContext::multiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, G
     // Multi-draw decomposes into individual draws per the GL spec.
     for (GLsizei i = 0; i < drawcount; ++i) {
         if (count[i] > 0) {
-            drawElementsBaseVertex(mode, count[i], type, indices[i], basevertex[i]);
+            drawElementsBaseVertex(mode, count[i], type, indices[i],
+                                   basevertex[i], static_cast<GLuint>(i));
         }
     }
     return true;
@@ -40103,7 +40332,7 @@ bool GLContext::shaderStorageBlockBinding(GLuint program, GLuint storageBlockInd
 // GL 4.2 — Advanced Instanced Drawing with Base Instance
 // ---------------------------------------------------------------------------
 
-bool GLContext::drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance) {
+bool GLContext::drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count, GLsizei instancecount, GLuint baseinstance, GLuint drawID) {
     if (count < 0 || instancecount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -40111,14 +40340,10 @@ bool GLContext::drawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsize
     if (count == 0 || instancecount == 0) {
         return true; // valid no-op
     }
-    // Delegate to the instanced path; baseinstance is threaded through the
-    // TranslatedDrawInfo for Metal's baseInstance parameter.
-    // For now, we ignore baseinstance (it requires MTLGPUFamily Apple3+ to use
-    // non-zero base instance). The basic instanced draw still works.
-    return drawArraysInstanced(mode, first, count, instancecount);
+    return drawArraysInstanced(mode, first, count, instancecount, baseinstance, drawID);
 }
 
-bool GLContext::drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLuint baseinstance) {
+bool GLContext::drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLuint baseinstance, GLuint drawID) {
     if (count < 0 || instancecount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -40130,12 +40355,11 @@ bool GLContext::drawElementsInstancedBaseInstance(GLenum mode, GLsizei count, GL
     if (count == 0 || instancecount == 0) {
         return true;
     }
-    // Delegate to the instanced+baseVertex path; baseinstance is ignored for now
-    // (requires MTLGPUFamily Apple3+ for non-zero base instance).
-    return drawElementsInstancedBaseVertex(mode, count, type, indices, instancecount, 0);
+    return drawElementsInstancedBaseVertex(mode, count, type, indices,
+                                           instancecount, 0, baseinstance, drawID);
 }
 
-bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance) {
+bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance, GLuint drawID) {
     if (count < 0 || instancecount < 0) {
         pushError(GL_INVALID_VALUE);
         return false;
@@ -40147,9 +40371,9 @@ bool GLContext::drawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei
     if (count == 0 || instancecount == 0) {
         return true;
     }
-    // Delegate to the instanced+baseVertex path; baseinstance is ignored for now
-    // (requires MTLGPUFamily Apple3+ for non-zero base instance).
-    return drawElementsInstancedBaseVertex(mode, count, type, indices, instancecount, basevertex);
+    return drawElementsInstancedBaseVertex(mode, count, type, indices,
+                                           instancecount, basevertex,
+                                           baseinstance, drawID);
 }
 
 // ---------------------------------------------------------------------------
@@ -40255,7 +40479,8 @@ bool GLContext::multiDrawArraysIndirect(GLenum mode, const void* indirect, GLsiz
         drawArraysInstancedBaseInstance(mode, static_cast<GLint>(cmd.first),
                                         static_cast<GLsizei>(cmd.count),
                                         static_cast<GLsizei>(cmd.instanceCount),
-                                        cmd.baseInstance);
+                                        cmd.baseInstance,
+                                        static_cast<GLuint>(i));
     }
     return true;
 }
@@ -40331,7 +40556,8 @@ bool GLContext::multiDrawElementsIndirect(GLenum mode, GLenum type, const void* 
             static_cast<GLsizei>(cmd.count), type, indexOffset,
             static_cast<GLsizei>(cmd.instanceCount),
             static_cast<GLint>(cmd.baseVertex),
-            cmd.baseInstance);
+            cmd.baseInstance,
+            static_cast<GLuint>(i));
     }
     return true;
 }
