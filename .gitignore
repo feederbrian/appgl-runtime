@@ -44,6 +44,8 @@ install_manifest.txt
 # Test harness actuals
 tests/reports/actuals/
 tests/reports/gauntlet-*.json
+tests/reports/
+tests/cts-goldens/
 
 # Python caches (codegen tool)
 __pycache__/
@@ -60,3 +62,5 @@ third_party/SPIRV-Cross/
 /phase-d
 /gl33-instanced
 /--test
+/TestResults.qpa
+/phase-c.*
