@@ -4645,6 +4645,9 @@ struct GLContext::Impl {
                     [fpBlitCmdBuf commit];
                     [fpBlitCmdBuf waitUntilCompleted];
                 }
+                if (object.metalSwizzledView != nullptr) {
+                    object.swizzleDirty = true;
+                }
                 object.instantiated = true;
                 (void)texName;
                 return true;
@@ -5701,6 +5704,203 @@ struct GLContext::Impl {
                sw[2] == GL_BLUE && sw[3] == GL_ALPHA;
     }
 
+    static bool isPackedDepthStencilInternalFormat(GLenum internalFormat) {
+        return internalFormat == GL_DEPTH_STENCIL ||
+               internalFormat == GL_DEPTH24_STENCIL8 ||
+               internalFormat == GL_DEPTH32F_STENCIL8;
+    }
+
+    static bool depthStencilSwizzleProxyTarget(GLenum target) {
+        return target == GL_TEXTURE_1D ||
+               target == GL_TEXTURE_2D ||
+               target == GL_TEXTURE_1D_ARRAY ||
+               target == GL_TEXTURE_2D_ARRAY;
+    }
+
+    static MTLPixelFormat depthStencilSwizzleProxyFormat(const GLTextureObject& texObj) {
+        if (texObj.params.depthStencilTextureMode == GL_STENCIL_INDEX &&
+            isPackedDepthStencilInternalFormat(texObj.desc.internalFormat)) {
+            return MTLPixelFormatR8Uint;
+        }
+        if (isDepthFormat(texObj.desc.internalFormat)) {
+            return MTLPixelFormatR32Float;
+        }
+        return MTLPixelFormatInvalid;
+    }
+
+    static bool needsDepthStencilSwizzleProxy(const GLTextureObject& texObj,
+                                             id<MTLTexture> baseTex) {
+        if (baseTex == nil || baseTex.sampleCount > 1 ||
+            !depthStencilSwizzleProxyTarget(texObj.target)) {
+            return false;
+        }
+        const MTLPixelFormat proxyFormat = depthStencilSwizzleProxyFormat(texObj);
+        if (proxyFormat == MTLPixelFormatInvalid) {
+            return false;
+        }
+        return !isDefaultSwizzle(texObj.params.swizzle) ||
+               proxyFormat == MTLPixelFormatR8Uint;
+    }
+
+    static float depthSampleProxyValue(const GLTextureImageLevel& image,
+                                       std::size_t pixelIndex) {
+        if (image.nativeBpp >= 4 && !image.nativeData.empty()) {
+            const std::size_t offset = pixelIndex * image.nativeBpp;
+            if (offset + sizeof(float) <= image.nativeData.size()) {
+                float value = 0.0f;
+                std::memcpy(&value, image.nativeData.data() + offset, sizeof(value));
+                return value;
+            }
+        }
+        if (!image.rgba8.empty()) {
+            const std::size_t offset = pixelIndex * 4u;
+            if (offset < image.rgba8.size()) {
+                return static_cast<float>(image.rgba8[offset]) / 255.0f;
+            }
+        }
+        return 0.0f;
+    }
+
+    static std::uint8_t stencilSampleProxyValue(const GLTextureImageLevel& image,
+                                                std::size_t pixelIndex) {
+        if (image.nativeBpp >= 5 && !image.nativeData.empty()) {
+            const std::size_t offset = pixelIndex * image.nativeBpp + 4u;
+            if (offset < image.nativeData.size()) {
+                return image.nativeData[offset];
+            }
+        }
+        if (!image.rgba8.empty()) {
+            const std::size_t offset = pixelIndex * 4u;
+            if (offset < image.rgba8.size()) {
+                return image.rgba8[offset];
+            }
+        }
+        return 0;
+    }
+
+    static std::vector<std::uint8_t> buildDepthStencilSwizzleProxyLevelData(
+        const GLTextureImageLevel& image,
+        MTLPixelFormat proxyFormat
+    ) {
+        const std::size_t width = safeDimension(image.desc.width);
+        const std::size_t height = safeDimension(image.desc.height);
+        const std::size_t depth = safeDimension(image.desc.depth);
+        const std::size_t pixelCount = width * height * depth;
+        if (proxyFormat == MTLPixelFormatR8Uint) {
+            std::vector<std::uint8_t> data(pixelCount, 0);
+            for (std::size_t i = 0; i < pixelCount; ++i) {
+                data[i] = stencilSampleProxyValue(image, i);
+            }
+            return data;
+        }
+
+        std::vector<std::uint8_t> data(pixelCount * sizeof(float), 0);
+        for (std::size_t i = 0; i < pixelCount; ++i) {
+            const float value = depthSampleProxyValue(image, i);
+            std::memcpy(data.data() + i * sizeof(float), &value, sizeof(value));
+        }
+        return data;
+    }
+
+    id<MTLTexture> buildDepthStencilSwizzleSamplingTexture(GLTextureObject& texObj,
+                                                          id<MTLTexture> baseTex,
+                                                          MTLPixelFormat proxyFormat) {
+        if (device == nil || baseTex == nil ||
+            proxyFormat == MTLPixelFormatInvalid ||
+            baseTex.sampleCount > 1) {
+            return nil;
+        }
+
+        MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+        desc.textureType = baseTex.textureType;
+        desc.pixelFormat = proxyFormat;
+        desc.width = baseTex.width;
+        desc.height = baseTex.height;
+        desc.depth = baseTex.depth;
+        desc.arrayLength = baseTex.arrayLength;
+        desc.mipmapLevelCount = baseTex.mipmapLevelCount;
+        desc.sampleCount = 1;
+        desc.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        desc.storageMode = MTLStorageModeShared;
+
+        id<MTLTexture> proxy = [device newTextureWithDescriptor:desc];
+        if (proxy == nil) {
+            return nil;
+        }
+
+        const std::size_t proxyBpp = (proxyFormat == MTLPixelFormatR8Uint)
+            ? 1u
+            : sizeof(float);
+        const bool use2DFor1D = sparseClampUses2DBackingFor1DTextures();
+        for (const auto& [levelIndex, image] : texObj.levels) {
+            if (levelIndex < 0 || !image.defined ||
+                static_cast<NSUInteger>(levelIndex) >= proxy.mipmapLevelCount) {
+                continue;
+            }
+
+            std::vector<std::uint8_t> levelData =
+                buildDepthStencilSwizzleProxyLevelData(image, proxyFormat);
+            if (levelData.empty()) {
+                continue;
+            }
+
+            const NSUInteger mipLevel = static_cast<NSUInteger>(levelIndex);
+            const NSUInteger sourceRowStride =
+                static_cast<NSUInteger>(safeDimension(image.desc.width) * proxyBpp);
+            const bool is1DLike =
+                texObj.target == GL_TEXTURE_1D ||
+                texObj.target == GL_TEXTURE_1D_ARRAY;
+            const bool native1DLike = is1DLike && !use2DFor1D;
+            const NSUInteger bytesPerRow = native1DLike ? 0u : sourceRowStride;
+            const NSUInteger bytesPerImage = native1DLike
+                ? 0u
+                : sourceRowStride * static_cast<NSUInteger>(safeDimension(image.desc.height));
+            const MTLRegion region = MTLRegionMake3D(
+                0,
+                0,
+                0,
+                static_cast<NSUInteger>(safeDimension(image.desc.width)),
+                static_cast<NSUInteger>(texObj.target == GL_TEXTURE_1D ? 1 : safeDimension(image.desc.height)),
+                1
+            );
+
+            if (texObj.target == GL_TEXTURE_2D_ARRAY) {
+                const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.depth));
+                const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, region.size.height);
+                for (NSUInteger layer = 0; layer < layers && layer < proxy.arrayLength; ++layer) {
+                    const auto* layerBytes = levelData.data() + static_cast<std::size_t>(layer * bytesPerImage);
+                    [proxy replaceRegion:layerRegion
+                              mipmapLevel:mipLevel
+                                    slice:layer
+                                withBytes:layerBytes
+                              bytesPerRow:bytesPerRow
+                            bytesPerImage:bytesPerImage];
+                }
+            } else if (texObj.target == GL_TEXTURE_1D_ARRAY) {
+                const NSUInteger layers = static_cast<NSUInteger>(safeDimension(image.desc.height));
+                const MTLRegion layerRegion = MTLRegionMake2D(0, 0, region.size.width, 1);
+                const NSUInteger layerBytesPerRow = native1DLike ? 0u : sourceRowStride;
+                const NSUInteger layerBytesPerImage = native1DLike ? 0u : sourceRowStride;
+                for (NSUInteger layer = 0; layer < layers && layer < proxy.arrayLength; ++layer) {
+                    const auto* layerBytes = levelData.data() + static_cast<std::size_t>(layer * sourceRowStride);
+                    [proxy replaceRegion:layerRegion
+                              mipmapLevel:mipLevel
+                                    slice:layer
+                                withBytes:layerBytes
+                              bytesPerRow:layerBytesPerRow
+                            bytesPerImage:layerBytesPerImage];
+                }
+            } else {
+                [proxy replaceRegion:region
+                          mipmapLevel:mipLevel
+                            withBytes:levelData.data()
+                          bytesPerRow:bytesPerRow];
+            }
+        }
+
+        return proxy;
+    }
+
     id<MTLTexture> buildFlippedDepthStencilSamplingTexture(id<MTLTexture> baseTex) {
         if (baseTex == nil || device == nil || commandQueue == nil ||
             baseTex.textureType != MTLTextureType2D ||
@@ -5832,10 +6032,16 @@ struct GLContext::Impl {
              baseTex.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8) &&
             (texObj.wasFramebufferRenderedTo || texObj.wasViewportRenderedTo) &&
             state->clipOrigin() != GL_UPPER_LEFT;
+        const MTLPixelFormat depthStencilProxyFormat =
+            depthStencilSwizzleProxyFormat(texObj);
+        const bool depthStencilNeedsSwizzleProxy =
+            !depthStencilNeedsSamplingFlip &&
+            needsDepthStencilSwizzleProxy(texObj, baseTex);
         const bool needsView =
             !isDefaultSwizzle(sw) ||
             samplingPixelFormat != baseTex.pixelFormat ||
-            depthStencilNeedsSamplingFlip;
+            depthStencilNeedsSamplingFlip ||
+            depthStencilNeedsSwizzleProxy;
 
         // Fast path: default swizzle and no sampling-format override —
         // use the base texture, release any stale view.
@@ -5887,6 +6093,30 @@ struct GLContext::Impl {
         channels.green = metalTextureSwizzle(sw[1], alphaReadsOne);
         channels.blue  = metalTextureSwizzle(sw[2], alphaReadsOne);
         channels.alpha = metalTextureSwizzle(sw[3], alphaReadsOne);
+
+        if (depthStencilNeedsSwizzleProxy) {
+            if (id<MTLTexture> proxy =
+                    buildDepthStencilSwizzleSamplingTexture(texObj, baseTex, depthStencilProxyFormat)) {
+                id<MTLTexture> viewSource = proxy;
+                id<MTLTexture> swizzledProxy = nil;
+                if (!isDefaultSwizzle(sw)) {
+                    swizzledProxy = [proxy
+                        newTextureViewWithPixelFormat:proxy.pixelFormat
+                                         textureType:proxy.textureType
+                                              levels:NSMakeRange(0, proxy.mipmapLevelCount)
+                                              slices:NSMakeRange(0, proxy.arrayLength)
+                                             swizzle:channels];
+                }
+                if (swizzledProxy != nil) {
+                    viewSource = swizzledProxy;
+                }
+                texObj.metalSwizzledView = transferRetainedMetalObject(viewSource);
+            }
+            texObj.swizzleDirty = false;
+            return texObj.metalSwizzledView != nullptr
+                ? texObj.metalSwizzledView
+                : texObj.metalTexture;
+        }
 
         // Mode 2: MS sRGB textures are allocated with linear storage so
         // FBO writes do not get Metal's mandatory sRGB render-target
@@ -17399,7 +17629,8 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
     // Swizzle changes invalidate the cached texture view.
     if (pname == GL_TEXTURE_SWIZZLE_R || pname == GL_TEXTURE_SWIZZLE_G ||
         pname == GL_TEXTURE_SWIZZLE_B || pname == GL_TEXTURE_SWIZZLE_A ||
-        pname == GL_TEXTURE_SWIZZLE_RGBA) {
+        pname == GL_TEXTURE_SWIZZLE_RGBA ||
+        pname == GL_DEPTH_STENCIL_TEXTURE_MODE) {
         object->swizzleDirty = true;
     }
     return true;
