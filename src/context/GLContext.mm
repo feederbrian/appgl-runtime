@@ -948,6 +948,23 @@ bool isColorAttachment(GLenum attachment) {
     return attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + 8;
 }
 
+static bool framebufferUsesRenderbufferOnlyColorTargets(
+    const GLFramebufferObject& fbo)
+{
+    bool sawRenderbufferTarget = false;
+    for (const GLenum buffer : fbo.drawBuffers) {
+        if (buffer == GL_NONE) continue;
+        const auto it = fbo.attachments.find(buffer);
+        if (it == fbo.attachments.end()) continue;
+        if (!isColorAttachment(it->first)) continue;
+        if (it->second.kind != GLFramebufferAttachment::Kind::Renderbuffer) {
+            return false;
+        }
+        sawRenderbufferTarget = true;
+    }
+    return sawRenderbufferTarget;
+}
+
 // Any GL_COLOR_ATTACHMENT0..GL_COLOR_ATTACHMENT31 — i.e. the enum
 // range spec'd in GL 4.6 §9.2.8. Used to distinguish
 // "color-attachment-shaped enum that exceeds MAX_COLOR_ATTACHMENTS"
@@ -27724,6 +27741,17 @@ bool GLContext::linkProgram(GLuint program) {
         appgl::TranslatorOptions options = optionsIn;
         options.fp64EmulationAvailable = fp64EmulationAvailable;
         options.clipDepthMode = impl_->state->clipDepthMode();
+        if (std::strcmp(stageName, "vertex") == 0 &&
+            programObject->transformFeedbackVaryingNames.empty()) {
+            const GLuint drawFboName = impl_->state->boundDrawFramebuffer();
+            if (drawFboName != 0) {
+                if (const GLFramebufferObject* fbo =
+                        impl_->objects->framebuffers().get(drawFboName)) {
+                    options.enableClipControlYSignFixup =
+                        framebufferUsesRenderbufferOnlyColorTargets(*fbo);
+                }
+            }
+        }
         if (std::strcmp(stageName, "fragment") == 0) {
             options.fragmentCoordOriginUpperLeft =
                 sourceDeclaresFragCoordOriginUpperLeft(sourceText);
@@ -35125,6 +35153,13 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
 }
 
 static bool translatedDrawUsesClipControlYSign(const TranslatedDrawInfo& tdi) {
+    return tdi.clipControlYSignFixupEnabled &&
+        tdi.vertexMSL != nullptr &&
+        tdi.vertexMSL->find("_appgl_ClipControlYSign [[buffer(") !=
+            std::string::npos;
+}
+
+static bool translatedDrawHasClipControlYSignParameter(const TranslatedDrawInfo& tdi) {
     return tdi.vertexMSL != nullptr &&
         tdi.vertexMSL->find("_appgl_ClipControlYSign [[buffer(") !=
             std::string::npos;
@@ -35137,6 +35172,16 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
     prepareFp64VertexSidecars(tdi);
     appendCurrentGenericVertexAttributes(tdi, currentVertexArrayOrDefault());
     const GLuint drawFboName = state->boundDrawFramebuffer();
+    if (drawFboName != 0 &&
+        translatedDrawHasClipControlYSignParameter(tdi)) {
+        if (const GLFramebufferObject* fbo =
+                objects->framebuffers().get(drawFboName)) {
+            tdi.clipControlYSignFixupEnabled =
+                framebufferUsesRenderbufferOnlyColorTargets(*fbo);
+        }
+    } else {
+        tdi.clipControlYSignFixupEnabled = false;
+    }
     if (drawFboName != 0) {
         if (const GLFramebufferObject* drawFbo =
                 objects->framebuffers().get(drawFboName)) {

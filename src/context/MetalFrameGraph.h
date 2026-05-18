@@ -330,6 +330,11 @@ struct TranslatedDrawInfo {
     // so the viewport rectangle stays fixed while the clip origin flips
     // the mapping inside it.
     GLenum clipOrigin = GL_LOWER_LEFT;
+    // The injected Y-sign parameter is deliberately inert unless the
+    // draw target is on the renderbuffer-backed clip-control path. Texture
+    // FBOs and the default framebuffer keep the legacy viewport/readback
+    // orientation contract.
+    bool clipControlYSignFixupEnabled = false;
     // True only when the caller knows this draw used a GL Y-up producer path
     // under LOWER_LEFT clip origin, so texture readback must undo that
     // viewport Y-flip. Ordinary FBO draws leave this false.

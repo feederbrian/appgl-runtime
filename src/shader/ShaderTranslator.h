@@ -417,10 +417,13 @@ struct TranslatorOptions {
     // synth-MSL site) overrides with `state->clipDepthMode()` so each
     // program captures the depth mode in effect at link time.
     //
-    // Origin side (`GL_LOWER_LEFT` vs `GL_UPPER_LEFT`) is NOT here —
-    // it's handled at draw time via `TranslatedDrawInfo::clipOrigin`
-    // gating the existing viewport-Y-flip mechanism in
-    // MetalFrameGraph (single-source-of-truth for Y-axis flip).
+    // Origin side (`GL_LOWER_LEFT` vs `GL_UPPER_LEFT`) is not encoded
+    // as a link-time value, but some renderbuffer-backed clip-control
+    // draws need an optional draw-time Y-sign parameter so
+    // MetalFrameGraph can keep the viewport rectangle fixed and flip
+    // the mapping inside it. Off by default so ordinary texture/default
+    // framebuffer programs keep the legacy viewport/readback contract.
+    bool enableClipControlYSignFixup = false;
     GLenum clipDepthMode = GL_NEGATIVE_ONE_TO_ONE;
 };
 

@@ -3381,6 +3381,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
         if (isVertex) {
             (void)injectPrimitiveFragmentShadingRateCombiner(msl);
+        }
+        if (isVertex && options.enableClipControlYSignFixup) {
             (void)injectClipControlYSignFixup(msl);
         }
 

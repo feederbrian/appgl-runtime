@@ -1288,7 +1288,9 @@ struct MetalFrameGraph::Impl {
         const NSInteger vertexClipControlYSignSlot =
             clipControlYSignBufferSlot(info.vertexMSL);
         const bool clipControlShaderYFixup =
-            vertexClipControlYSignSlot >= 0 && !info.stencilTestEnabled;
+            vertexClipControlYSignSlot >= 0 &&
+            info.clipControlYSignFixupEnabled &&
+            !info.stencilTestEnabled;
         auto mslUsesMultiviewViewMask = [](const std::string* msl) -> bool {
             return msl != nullptr &&
                 msl->find("spvViewMask") != std::string::npos;
