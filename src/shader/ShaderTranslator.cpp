@@ -4884,6 +4884,24 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
             const std::size_t cols = m.columns > 0 ? m.columns : 1;
             const std::size_t arr = m.array_size > 0 ? m.array_size : 1;
             dst.glPackedBytes = scalarBytes * vec * cols * arr;
+            switch (m.base_type) {
+                case spirv_cross::SPIRType::Boolean:
+                case spirv_cross::SPIRType::SByte:
+                case spirv_cross::SPIRType::Short:
+                case spirv_cross::SPIRType::Int:
+                case spirv_cross::SPIRType::Int64:
+                    dst.baseType = 1;
+                    break;
+                case spirv_cross::SPIRType::UByte:
+                case spirv_cross::SPIRType::UShort:
+                case spirv_cross::SPIRType::UInt:
+                case spirv_cross::SPIRType::UInt64:
+                    dst.baseType = 2;
+                    break;
+                default:
+                    dst.baseType = 0;
+                    break;
+            }
             out.members.push_back(std::move(dst));
         }
         out.structSize = layout.struct_size;
@@ -4894,8 +4912,9 @@ StageOutputLayout ShaderTranslator::reflectStageOutputLayout(
                 out.structSize, out.members.size());
             for (const auto& m : out.members) {
                 std::fprintf(stderr,
-                    "[APPGL]   member '%s' offset=%zu size=%zu builtin=%d\n",
+                    "[APPGL]   member '%s' offset=%zu size=%zu baseType=%u builtin=%d\n",
                     m.name.c_str(), m.offset, m.size,
+                    static_cast<unsigned>(m.baseType),
                     m.isBuiltIn ? (int)m.builtIn : -1);
             }
         }

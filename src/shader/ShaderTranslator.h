@@ -448,6 +448,7 @@ struct StageOutputLayout {
                                    // float[4] → 16, etc.). What the TF
                                    // writer copies to the GL-side
                                    // GL_TRANSFORM_FEEDBACK_BUFFER.
+        std::uint8_t baseType = 0; // 0=float, 1=int, 2=uint
         bool isBuiltIn = false;
         std::uint32_t builtIn = 0; // spv::BuiltIn enum when isBuiltIn
     };

@@ -33686,7 +33686,6 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                                       tfGeneratedVerts,
                                       kTesComputeSlotBytes, topo);
         if (encodeOk &&
-            !transformFeedbackActive &&
             !state->isEnabled(GL_RASTERIZER_DISCARD) &&
             program.tessEvalMSL.empty() &&
             program.tessGenMode == GL_ISOLINES &&
@@ -33698,6 +33697,7 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
             struct ReplayVarying {
                 const StageOutputLayout::Member* member = nullptr;
                 std::uint32_t width = 0;
+                std::uint8_t baseType = 0;
             };
             std::vector<ReplayVarying> replayVaryings;
             for (const auto& m : layout.members) {
@@ -33710,16 +33710,32 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                         m.glPackedBytes > 0 ? m.glPackedBytes : m.size;
                     if (bytesForGL > 0 && (bytesForGL % sizeof(float)) == 0) {
                         replayVaryings.push_back(
-                            {&m, static_cast<std::uint32_t>(bytesForGL / sizeof(float))});
+                            {&m, static_cast<std::uint32_t>(bytesForGL / sizeof(float)),
+                             m.baseType});
                     }
                 }
             }
             if (positionMember != nullptr) {
+                bool replayHasPointSize = false;
+                if (pointSizeMember != nullptr) {
+                    for (std::uint32_t v = 0; v < tfGeneratedVerts; ++v) {
+                        float pointSize = 0.0f;
+                        std::memcpy(&pointSize,
+                                    bytes + static_cast<std::size_t>(v) *
+                                                kTesComputeSlotBytes +
+                                                pointSizeMember->offset,
+                                    sizeof(pointSize));
+                        if (pointSize != 0.0f && std::isfinite(pointSize)) {
+                            replayHasPointSize = true;
+                            break;
+                        }
+                    }
+                }
                 appgl::EmulatedDraw replay;
                 replay.ok = true;
                 replay.topology = GL_POINTS;
                 replay.vertexCount = tfGeneratedVerts;
-                replay.hasPointSize = (pointSizeMember != nullptr);
+                replay.hasPointSize = replayHasPointSize;
                 replay.streamVertexCounts[0] = tfGeneratedVerts;
                 std::size_t varyingFloats = 0;
                 std::uint32_t nextLocation = 0;
@@ -33728,12 +33744,12 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                     replay.varyingWidths.push_back(rv.width);
                     replay.varyingLocations.push_back(nextLocation);
                     replay.varyingInterp.push_back(0);
-                    replay.varyingBaseType.push_back(0);
+                    replay.varyingBaseType.push_back(rv.baseType);
                     replay.varyingScalarByteSize.push_back(sizeof(float));
                     replay.varyingStageSlotWidths.push_back(rv.width);
                     replay.varyingStageSlotLocations.push_back(nextLocation);
                     replay.varyingStageSlotInterp.push_back(0);
-                    replay.varyingStageSlotBaseType.push_back(0);
+                    replay.varyingStageSlotBaseType.push_back(rv.baseType);
                     replay.varyingStageSlotScalarByteSize.push_back(sizeof(float));
                     varyingFloats += rv.width;
                     nextLocation += 1u;
@@ -33759,10 +33775,17 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                                     static_cast<std::size_t>(rv.width) * sizeof(float));
                         dstOff += rv.width;
                     }
-                    if (pointSizeMember != nullptr) {
-                        std::memcpy(dst + dstOff,
-                                    src + pointSizeMember->offset,
-                                    sizeof(float));
+                    if (replay.hasPointSize) {
+                        float pointSize = 1.0f;
+                        if (pointSizeMember != nullptr) {
+                            std::memcpy(&pointSize,
+                                        src + pointSizeMember->offset,
+                                        sizeof(pointSize));
+                            if (pointSize == 0.0f || !std::isfinite(pointSize)) {
+                                pointSize = 1.0f;
+                            }
+                        }
+                        std::memcpy(dst + dstOff, &pointSize, sizeof(pointSize));
                     }
                 }
                 if (encodeEmulatedGsDraw(program, programName, replay)) {
@@ -34772,7 +34795,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                 // only, while viewport-routed GS/cull paths also mark the
                 // narrower glGetTexImage Y-unflip flag.
                 const bool clipControlShaderYFixup =
-                    translatedDrawUsesClipControlYSign(tdi);
+                    translatedDrawUsesClipControlYSign(tdi) &&
+                    !tdi.stencilTestEnabled;
                 const bool lowerLeftFramebufferReadbackFlip =
                     tdi.clipOrigin == GL_LOWER_LEFT &&
                     !clipControlShaderYFixup;
