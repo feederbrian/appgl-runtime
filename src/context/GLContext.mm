@@ -14710,8 +14710,21 @@ bool GLContext::bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
             return false;
         }
     }
+    auto recordTfBinding = [&](GLuint boundBuffer,
+                               GLintptr boundOffset,
+                               GLsizeiptr boundSize) {
+        if (target == GL_TRANSFORM_FEEDBACK_BUFFER &&
+            index < GLTransformFeedbackObject::kMaxTfBuffers &&
+            impl_->boundTransformFeedbackId != 0) {
+            if (auto* tf = impl_->objects->transformFeedbacks().get(
+                    impl_->boundTransformFeedbackId)) {
+                tf->bufferBindings[index] = {boundBuffer, boundOffset, boundSize};
+            }
+        }
+    };
     if (buffer == 0) {
         impl_->state->bindIndexedBuffer(target, index, 0, 0, 0);
+        recordTfBinding(0, 0, 0);
         // Spec: bind* with buffer == 0 also resets the generic target binding.
         impl_->state->bindBuffer(target, 0);
         return true;
@@ -14723,6 +14736,7 @@ bool GLContext::bindBufferRange(GLenum target, GLuint index, GLuint buffer, GLin
     }
     object->instantiated = true;
     impl_->state->bindIndexedBuffer(target, index, buffer, offset, size);
+    recordTfBinding(buffer, offset, size);
     // Spec (4.6 §6.1.1): BindBufferRange additionally binds buffer to the generic
     // buffer binding point specified by target. Without this the generic UBO/SSBO
     // bindings would silently desync from the indexed table after a per-index bind.
@@ -14748,6 +14762,14 @@ bool GLContext::bindBufferBase(GLenum target, GLuint index, GLuint buffer) {
     // to the live `GLBufferObject::shadowBytes.size()` when
     // rangeSize==0.
     impl_->state->bindIndexedBuffer(target, index, buffer, 0, 0);
+    if (target == GL_TRANSFORM_FEEDBACK_BUFFER &&
+        index < GLTransformFeedbackObject::kMaxTfBuffers &&
+        impl_->boundTransformFeedbackId != 0) {
+        if (auto* tf = impl_->objects->transformFeedbacks().get(
+                impl_->boundTransformFeedbackId)) {
+            tf->bufferBindings[index] = {buffer, 0, 0};
+        }
+    }
     // Spec (4.6 §6.1.1): BindBufferBase also binds buffer to the generic target.
     impl_->state->bindBuffer(target, buffer);
     return true;
@@ -20327,7 +20349,20 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
     // TF plumbing only runs when the program has varyings recorded
     // and TF is active. Counter updates always run (PRIMITIVES_
     // GENERATED tracks every draw regardless).
-    const bool doTF = transformFeedbackActive &&
+    const bool tfActive = isTfActiveOnBoundImpl();
+    auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
+        if (boundTransformFeedbackId == 0) {
+            return 0;
+        }
+        auto* tf = objects->transformFeedbacks().get(boundTransformFeedbackId);
+        if (tf == nullptr ||
+            stream >= GLTransformFeedbackObject::kMaxTransformFeedbackStreams) {
+            return 0;
+        }
+        return static_cast<std::size_t>(
+            std::max<GLsizei>(tf->capturedVertexCount[stream], 0));
+    };
+    const bool doTF = tfActive &&
                       !program.transformFeedbackVaryingNames.empty() &&
                       tesOutBytes != nullptr &&
                       totalVerts > 0 &&
@@ -20441,7 +20476,8 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                     for (std::size_t bytes : fieldBytes) perVertexBytes += bytes;
                     const std::size_t perPrimBytes = perVertexBytes * vpp;
                     const std::size_t nPrim = (vpp > 0) ? (totalVerts / vpp) : 0;
-                    std::size_t cursor = static_cast<std::size_t>(binding.offset);
+                    std::size_t cursor = static_cast<std::size_t>(binding.offset) +
+                        capturedVerticesBeforeDraw(0) * perVertexBytes;
                     std::vector<std::uint8_t> scratch;
                     for (std::size_t p = 0; p < nPrim; ++p) {
                         if (cursor + perPrimBytes > capacity) break;
@@ -20473,7 +20509,8 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                         binds[i].buffer = b.buffer;
                         binds[i].baseOffset = static_cast<std::size_t>(b.offset);
                         binds[i].rangeSize = static_cast<std::size_t>(b.size);
-                        binds[i].cursor = binds[i].baseOffset;
+                        binds[i].cursor = binds[i].baseOffset +
+                            capturedVerticesBeforeDraw(0) * fieldBytes[i];
                     }
                     std::vector<std::uint8_t> scratch;
                     for (std::size_t p = 0; p < nPrim; ++p) {
@@ -20569,6 +20606,8 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
             std::size_t perVertexBytes = 0;
             for (const auto& s : sources) perVertexBytes += s.bytes;
             const std::size_t perPrimBytes = perVertexBytes * vpp;
+            cursor = static_cast<std::size_t>(binding.offset) +
+                capturedVerticesBeforeDraw(0) * perVertexBytes;
             for (std::size_t p = 0; p < nPrim; ++p) {
                 GLBufferObject* buf = binding.buffer != 0
                     ? objects->buffers().get(binding.buffer) : nullptr;
@@ -20610,9 +20649,10 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                 binds[i].buffer     = b.buffer;
                 binds[i].baseOffset = static_cast<std::size_t>(b.offset);
                 binds[i].rangeSize  = static_cast<std::size_t>(b.size);
-                binds[i].cursor     = binds[i].baseOffset;
                 binds[i].perVertexBytes = sources[i].bytes;
                 binds[i].perPrimBytes   = sources[i].bytes * vpp;
+                binds[i].cursor     = binds[i].baseOffset +
+                    capturedVerticesBeforeDraw(0) * binds[i].perVertexBytes;
             }
             const std::size_t nPrim = (vpp > 0) ? (totalVerts / vpp) : 0;
             for (std::size_t p = 0; p < nPrim; ++p) {
@@ -20649,7 +20689,7 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                 ++primsWritten;
             }
         }
-    } else if (transformFeedbackActive) {
+    } else if (tfActive) {
         primsWritten = primsGenerated;
     }
 
@@ -20670,7 +20710,7 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
                 }
                 break;
             case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
-                if (transformFeedbackActive) {
+                if (tfActive) {
                     q.result += static_cast<GLuint64>(primsWritten);
                 }
                 break;
@@ -20763,8 +20803,21 @@ void GLContext::Impl::writeVsTfFromComputeOutput(
         }
     };
 
+    const bool tfActive = isTfActiveOnBoundImpl();
+    auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
+        if (boundTransformFeedbackId == 0) {
+            return 0;
+        }
+        auto* tf = objects->transformFeedbacks().get(boundTransformFeedbackId);
+        if (tf == nullptr ||
+            stream >= GLTransformFeedbackObject::kMaxTransformFeedbackStreams) {
+            return 0;
+        }
+        return static_cast<std::size_t>(
+            std::max<GLsizei>(tf->capturedVertexCount[stream], 0));
+    };
     const bool doTF =
-        transformFeedbackActive &&
+        tfActive &&
         !program.transformFeedbackVaryingNames.empty() &&
         !program.vsTfResolvedSources.empty();
 
@@ -20781,6 +20834,8 @@ void GLContext::Impl::writeVsTfFromComputeOutput(
                 static_cast<std::size_t>(binding.size);
             std::size_t perVertexBytes = 0;
             for (const auto& s : sources) perVertexBytes += s.bytes;
+            cursor = static_cast<std::size_t>(binding.offset) +
+                capturedVerticesBeforeDraw(0) * perVertexBytes;
             for (std::uint32_t v = 0; v < totalVerts; ++v) {
                 GLBufferObject* buf = binding.buffer != 0
                     ? objects->buffers().get(binding.buffer) : nullptr;
@@ -20823,8 +20878,9 @@ void GLContext::Impl::writeVsTfFromComputeOutput(
                 binds[i].buffer     = b.buffer;
                 binds[i].baseOffset = static_cast<std::size_t>(b.offset);
                 binds[i].rangeSize  = static_cast<std::size_t>(b.size);
-                binds[i].cursor     = binds[i].baseOffset;
                 binds[i].bytes      = sources[i].bytes;
+                binds[i].cursor     = binds[i].baseOffset +
+                    capturedVerticesBeforeDraw(0) * binds[i].bytes;
             }
             std::size_t writtenVerts = 0;
             for (std::uint32_t v = 0; v < totalVerts; ++v) {
@@ -20859,7 +20915,7 @@ void GLContext::Impl::writeVsTfFromComputeOutput(
             }
             primsWritten = (vpp > 0) ? (writtenVerts / vpp) : 0;
         }
-    } else if (transformFeedbackActive) {
+    } else if (tfActive) {
         primsWritten = primsGenerated;
     }
 
@@ -20871,7 +20927,7 @@ void GLContext::Impl::writeVsTfFromComputeOutput(
                 q.result += static_cast<GLuint64>(primsGenerated);
                 break;
             case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
-                if (transformFeedbackActive) {
+                if (tfActive) {
                     q.result += static_cast<GLuint64>(primsWritten);
                 }
                 break;
@@ -21354,7 +21410,20 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // vertex into a single buffer at index 0.
     // Built-in `gl_Position` captures from the EmulatedVertex
     // position field.
-    if (transformFeedbackActive && !program.transformFeedbackVaryingNames.empty()) {
+    const bool tfActive = isTfActiveOnBoundImpl();
+    auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
+        if (boundTransformFeedbackId == 0) {
+            return 0;
+        }
+        auto* tf = objects->transformFeedbacks().get(boundTransformFeedbackId);
+        if (tf == nullptr ||
+            stream >= GLTransformFeedbackObject::kMaxTransformFeedbackStreams) {
+            return 0;
+        }
+        return static_cast<std::size_t>(
+            std::max<GLsizei>(tf->capturedVertexCount[stream], 0));
+    };
+    if (tfActive && !program.transformFeedbackVaryingNames.empty()) {
         const std::size_t fpv = ed.floatsPerVertex;
         const std::size_t vCount = ed.vertexCount;
         const auto& tfNames = program.transformFeedbackVaryingNames;
@@ -21670,7 +21739,8 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                     for (std::size_t bytes : fieldBytes) perVertexBytes += bytes;
                     const std::size_t perPrimBytes = perVertexBytes * vpp;
                     const std::size_t nPrim = (vpp > 0) ? (vCount / vpp) : 0;
-                    std::size_t cursor = static_cast<std::size_t>(binding.offset);
+                    std::size_t cursor = static_cast<std::size_t>(binding.offset) +
+                        capturedVerticesBeforeDraw(0) * perVertexBytes;
                     std::vector<std::uint8_t> scratch;
                     for (std::size_t p = 0; p < nPrim; ++p) {
                         if (cursor + perPrimBytes > capacity) break;
@@ -21703,7 +21773,8 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                     binds[i].buffer = b.buffer;
                     binds[i].baseOffset = static_cast<std::size_t>(b.offset);
                     binds[i].rangeSize = static_cast<std::size_t>(b.size);
-                    binds[i].cursor = binds[i].baseOffset;
+                    binds[i].cursor = binds[i].baseOffset +
+                        capturedVerticesBeforeDraw(0) * fieldBytes[i];
                 }
                 const std::size_t nPrim = (vpp > 0) ? (vCount / vpp) : 0;
                 std::vector<std::uint8_t> scratch;
@@ -21843,6 +21914,10 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
             for (const auto& s : slots) {
                 if (s.stream != 0) { anyMultiStream = true; break; }
             }
+            for (auto& sl : slots) {
+                sl.cursor = sl.baseOffset +
+                    capturedVerticesBeforeDraw(sl.stream) * sl.perVertexBytes;
+            }
             auto slotMatchesPrim = [&](const TfBufSlot& s,
                                        std::uint32_t pstream) -> bool {
                 if (!anyMultiStream) return true;
@@ -21933,9 +22008,10 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 binds[i].buffer     = b.buffer;
                 binds[i].baseOffset = static_cast<std::size_t>(b.offset);
                 binds[i].rangeSize  = static_cast<std::size_t>(b.size);
-                binds[i].cursor     = binds[i].baseOffset;
                 binds[i].perVertexBytes = sources[i].count * sources[i].scalarBytes;
                 binds[i].perPrimBytes   = binds[i].perVertexBytes * vpp;
+                binds[i].cursor     = binds[i].baseOffset +
+                    capturedVerticesBeforeDraw(0) * binds[i].perVertexBytes;
             }
             const std::size_t nPrim = (vpp > 0) ? (vCount / vpp) : 0;
             for (std::size_t p = 0; p < nPrim; ++p) {
@@ -21979,7 +22055,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 ++primsWritten;
             }
         }
-    } else if (transformFeedbackActive) {
+    } else if (tfActive) {
         // TF active with no recorded varyings — still count
         // primitives written (implementations typically count
         // PRIMITIVES_WRITTEN against the TF mode). For us the
@@ -22028,17 +22104,62 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // sister gate at `updatePrimitiveCountersForNonGsDraw`'s
     // TFB_WRITTEN case skips when `transformFeedbackActive` to
     // avoid double-counting against the credit issued here.
+    bool hasMultiStreamOutput = false;
+    for (std::size_t s = 1; s < ed.streamVertexCounts.size(); ++s) {
+        if (ed.streamVertexCounts[s] != 0) {
+            hasMultiStreamOutput = true;
+            break;
+        }
+    }
+    auto generatedPrimsForStream = [&](GLuint stream) -> std::size_t {
+        if (!hasMultiStreamOutput) {
+            return stream == 0 ? primsGenerated : 0u;
+        }
+        const std::size_t idx = static_cast<std::size_t>(stream);
+        if (idx >= ed.streamVertexCounts.size() || vpp == 0) {
+            return 0;
+        }
+        return ed.streamVertexCounts[idx] / vpp;
+    };
+    auto writtenPrimsForStream = [&](GLuint stream) -> std::size_t {
+        if (!hasMultiStreamOutput) {
+            return stream == 0 ? primsWritten : 0u;
+        }
+        const std::size_t idx = static_cast<std::size_t>(stream);
+        if (idx >= GLTransformFeedbackObject::kMaxTransformFeedbackStreams ||
+            vpp == 0) {
+            return 0;
+        }
+        if (primsWrittenByStreamValid) {
+            return primsWrittenByStream[idx];
+        }
+        if (idx >= ed.streamVertexCounts.size()) {
+            return 0;
+        }
+        const std::size_t totalVerts = ed.vertexCount;
+        const std::size_t writtenVerts = primsWritten * vpp;
+        if (totalVerts == 0) {
+            return 0;
+        }
+        if (writtenVerts == totalVerts) {
+            return ed.streamVertexCounts[idx] / vpp;
+        }
+        return (ed.streamVertexCounts[idx] * writtenVerts / totalVerts) / vpp;
+    };
+
     objects->queries().forEach([&](GLuint /*id*/, GLQueryObject& q) {
         if (!q.active) return;
         switch (q.target) {
             case GL_PRIMITIVES_GENERATED:
                 if (program.gsPresent) {
-                    q.result += static_cast<GLuint64>(primsGenerated);
+                    q.result += static_cast<GLuint64>(
+                        generatedPrimsForStream(q.index));
                 }
                 break;
             case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
-                if (transformFeedbackActive) {
-                    q.result += static_cast<GLuint64>(primsWritten);
+                if (tfActive) {
+                    q.result += static_cast<GLuint64>(
+                        writtenPrimsForStream(q.index));
                 }
                 break;
             case GL_GEOMETRY_SHADER_INVOCATIONS:
@@ -22086,11 +22207,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
         const GLuint tfName = boundTransformFeedbackId;
         if (tfName != 0) {
             if (auto* tf = objects->transformFeedbacks().get(tfName)) {
-                bool hasMultiStream = false;
-                for (std::size_t s = 1; s < ed.streamVertexCounts.size(); ++s) {
-                    if (ed.streamVertexCounts[s] != 0) { hasMultiStream = true; break; }
-                }
-                if (hasMultiStream && primsWrittenByStreamValid) {
+                if (hasMultiStreamOutput && primsWrittenByStreamValid) {
                     // CKPT96: INTERLEAVED multi-stream path tracked per-
                     // stream prim writes truncation-aware. Use those
                     // directly — gives the spec-correct count for each
@@ -22102,7 +22219,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                         tf->capturedVertexCount[s] +=
                             static_cast<GLsizei>(primsWrittenByStream[s] * vpp);
                     }
-                } else if (hasMultiStream) {
+                } else if (hasMultiStreamOutput) {
                     // CKPT95 fallback path (SEPARATE_ATTRIBS multi-
                     // stream, or any non-INTERLEAVED multi-stream
                     // route): credit each slot from interpreter
@@ -22198,6 +22315,22 @@ GLuint GLContext::boundTransformFeedback() const {
 
 void GLContext::setBoundTransformFeedback(GLuint id) {
     impl_->boundTransformFeedbackId = id;
+    if (id == 0) {
+        return;
+    }
+    auto* tf = impl_->objects->transformFeedbacks().get(id);
+    if (tf == nullptr) {
+        return;
+    }
+    for (std::size_t i = 0; i < tf->bufferBindings.size(); ++i) {
+        const auto& binding = tf->bufferBindings[i];
+        impl_->state->bindIndexedBuffer(
+            GL_TRANSFORM_FEEDBACK_BUFFER,
+            static_cast<GLuint>(i),
+            binding.buffer,
+            binding.offset,
+            binding.size);
+    }
 }
 
 GLuint GLContext::boundDrawFramebuffer() const {
@@ -35776,7 +35909,18 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = resolved.stride;
                 const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
-                const std::size_t startOff = resolved.offset + firstOff;
+                std::size_t primaryBaseOffset = resolved.offset;
+                for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                    const auto& attr = vao->attributes[ai];
+                    if (!attr.enabled) continue;
+                    auto attrRes = resolveVertexAttrib(attr, *vao);
+                    if (attrRes.bufferName == resolved.bufferName &&
+                        attrRes.stride == posStride) {
+                        primaryBaseOffset =
+                            std::min(primaryBaseOffset, attrRes.offset);
+                    }
+                }
+                const std::size_t startOff = primaryBaseOffset + firstOff;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
@@ -35862,7 +36006,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                         if (attrRes.bufferName == resolved.bufferName &&
                             attrRes.stride == posStride) {
                             // Primary group: same VBO + same stride → buffer 0.
-                            layout.offset = attrRes.offset - resolved.offset;
+                            layout.offset = attrRes.offset - primaryBaseOffset;
                             tdi.vertexAttributeLayouts.push_back(layout);
                         } else {
                             // Different VBO or different stride → extra buffer.
@@ -36275,7 +36419,24 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = resolved.stride;
                 const std::size_t firstOff = static_cast<std::size_t>(first) * posStride;
-                const std::size_t startOff = resolved.offset + firstOff;
+                std::size_t primaryBaseOffset = resolved.offset;
+                for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                    const auto& attr = vao->attributes[ai];
+                    if (!attr.enabled) continue;
+                    auto attrRes = resolveVertexAttrib(attr, *vao);
+                    GLuint attrDivisor = attr.useSeparatedFormat
+                        ? (attr.bindingIndex < vao->bindingPoints.size()
+                            ? vao->bindingPoints[attr.bindingIndex].divisor
+                            : attr.divisor)
+                        : attr.divisor;
+                    if (attrRes.bufferName == resolved.bufferName &&
+                        attrRes.stride == posStride &&
+                        attrDivisor == 0) {
+                        primaryBaseOffset =
+                            std::min(primaryBaseOffset, attrRes.offset);
+                    }
+                }
+                const std::size_t startOff = primaryBaseOffset + firstOff;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
@@ -36367,7 +36528,7 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
                             && attrRes.stride == posStride
                             && attrDivisor == 0) {
                             // Same VBO + same stride + per-vertex → buffer 0.
-                            layout.offset = attrRes.offset - resolved.offset;
+                            layout.offset = attrRes.offset - primaryBaseOffset;
                             tdi.vertexAttributeLayouts.push_back(layout);
                         } else {
                             GLBufferObject* extraVbo = impl_->objects->buffers().get(attrRes.bufferName);
@@ -46298,14 +46459,22 @@ bool GLContext::transformFeedbackBufferBase(GLuint xfb, GLuint index, GLuint buf
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (buffer != 0) {
+        GLBufferObject* bufferObject = impl_->objects->buffers().get(buffer);
+        if (bufferObject == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        bufferObject->instantiated = true;
+    }
     // Record the per-TF-object binding for the DSA getter queries
     // (getTransformFeedbacki_v / getTransformFeedbacki64_v).
     obj->bufferBindings[index] = {buffer, 0, 0};
-    // Also mirror into the global indexed binding so draw-time
-    // consumers of the currently-bound TF see the update (CTS's
-    // DSA xfb tests chain a Bind after Buffer* to observe the
-    // global state consistent with the per-object state).
-    bindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, index, buffer);
+    if (xfb == impl_->boundTransformFeedbackId) {
+        impl_->state->bindIndexedBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,
+                                        index, buffer, 0, 0);
+        impl_->state->bindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
+    }
     return true;
 }
 
@@ -46316,8 +46485,27 @@ bool GLContext::transformFeedbackBufferRange(GLuint xfb, GLuint index, GLuint bu
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    if (offset < 0 || size < 0 ||
+        (offset % 4) != 0 ||
+        (size % 4) != 0 ||
+        (buffer != 0 && size <= 0)) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (buffer != 0) {
+        GLBufferObject* bufferObject = impl_->objects->buffers().get(buffer);
+        if (bufferObject == nullptr) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
+        }
+        bufferObject->instantiated = true;
+    }
     obj->bufferBindings[index] = {buffer, offset, size};
-    bindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER, index, buffer, offset, size);
+    if (xfb == impl_->boundTransformFeedbackId) {
+        impl_->state->bindIndexedBuffer(GL_TRANSFORM_FEEDBACK_BUFFER,
+                                        index, buffer, offset, size);
+        impl_->state->bindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
+    }
     return true;
 }
 
