@@ -56,6 +56,7 @@ inline BindingMap makeComputeBindingMap() {
 struct ShaderReflection {
     struct VertexInput {
         GLuint location = 0;
+        GLuint sourceLocation = 0;
         GLenum type = 0;
         std::string name;
         bool containsFp64 = false;

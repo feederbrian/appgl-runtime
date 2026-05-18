@@ -226,7 +226,19 @@ bool lowerFp64VertexStageInputs(std::string& msl) {
         std::string suffix;
         std::uint32_t location = 0;
     };
+    struct AttributeLine {
+        std::size_t lineStart = 0;
+        std::size_t lineEnd = 0;
+        std::size_t attrNumberStart = 0;
+        std::size_t attrNumberEnd = 0;
+        std::string typeName;
+        std::string name;
+        std::uint32_t originalLocation = 0;
+        std::uint32_t adjustedLocation = 0;
+        std::uint32_t sourceOrder = 0;
+    };
     std::vector<Fp64Input> inputs;
+    std::vector<AttributeLine> attributes;
 
     const std::string structNeedle = "struct main0_in";
     const std::size_t structPos = msl.find(structNeedle);
@@ -243,15 +255,20 @@ bool lowerFp64VertexStageInputs(std::string& msl) {
     }
 
     std::size_t lineStart = structOpen + 1;
+    std::uint32_t sourceOrder = 0;
     while (lineStart < structClose) {
         std::size_t lineEnd = msl.find('\n', lineStart);
         if (lineEnd == std::string::npos || lineEnd > structClose) {
             lineEnd = structClose;
         }
         const std::string line = msl.substr(lineStart, lineEnd - lineStart);
-        const std::size_t typePos = line.find("appgl_df64");
         const std::size_t attrPos = line.find("[[attribute(");
-        if (typePos != std::string::npos && attrPos != std::string::npos) {
+        if (attrPos != std::string::npos) {
+            std::size_t typePos = 0;
+            while (typePos < line.size() &&
+                   std::isspace(static_cast<unsigned char>(line[typePos]))) {
+                ++typePos;
+            }
             std::size_t typeEnd = typePos;
             while (typeEnd < line.size() && isIdentifierChar(line[typeEnd])) {
                 ++typeEnd;
@@ -277,46 +294,109 @@ bool lowerFp64VertexStageInputs(std::string& msl) {
                     static_cast<std::uint32_t>(line[locEnd] - '0');
                 ++locEnd;
             }
-            if (!name.empty()) {
-                std::string replacement;
-                if (typeName == "appgl_df64") {
-                    replacement = "    uint2 " + name + " [[attribute(" +
-                        std::to_string(location) + ")]];";
-                } else if (typeName == "appgl_df64x2") {
-                    replacement = "    uint4 " + name + " [[attribute(" +
-                        std::to_string(location) + ")]];";
-                } else if (typeName == "appgl_df64x3") {
-                    replacement = "    uint4 " + name + "_0 [[attribute(" +
-                        std::to_string(location) + ")]];\n    uint2 " +
-                        name + "_1 [[attribute(" +
-                        std::to_string(location + 1u) + ")]];";
-                } else if (typeName == "appgl_df64x4") {
-                    replacement = "    uint4 " + name + "_0 [[attribute(" +
-                        std::to_string(location) + ")]];\n    uint4 " +
-                        name + "_1 [[attribute(" +
-                        std::to_string(location + 1u) + ")]];";
-                }
-                if (!replacement.empty()) {
-                    msl.replace(lineStart, lineEnd - lineStart, replacement);
-                    const auto delta =
-                        static_cast<std::ptrdiff_t>(replacement.size()) -
-                        static_cast<std::ptrdiff_t>(lineEnd - lineStart);
-                    structClose = static_cast<std::size_t>(
-                        static_cast<std::ptrdiff_t>(structClose) + delta);
-                    lineEnd = lineStart + replacement.size();
-                    Fp64Input input;
-                    input.name = name;
-                    input.suffix = typeName.substr(std::strlen("appgl_df64"));
-                    input.location = location;
-                    inputs.push_back(std::move(input));
-                }
+            if (!name.empty() && locEnd > locStart) {
+                AttributeLine attr;
+                attr.lineStart = lineStart;
+                attr.lineEnd = lineEnd;
+                attr.attrNumberStart = lineStart + locStart;
+                attr.attrNumberEnd = lineStart + locEnd;
+                attr.typeName = typeName;
+                attr.name = name;
+                attr.originalLocation = location;
+                attr.adjustedLocation = location;
+                attr.sourceOrder = sourceOrder++;
+                attributes.push_back(std::move(attr));
             }
         }
         lineStart = lineEnd + 1;
     }
 
+    auto fp64SlotCount = [](const std::string& typeName) -> std::uint32_t {
+        return (typeName == "appgl_df64x3" || typeName == "appgl_df64x4")
+            ? 2u : 1u;
+    };
+    std::vector<std::size_t> sorted;
+    sorted.reserve(attributes.size());
+    for (std::size_t i = 0; i < attributes.size(); ++i) {
+        sorted.push_back(i);
+    }
+    std::stable_sort(sorted.begin(), sorted.end(),
+                     [&](std::size_t a, std::size_t b) {
+                         if (attributes[a].originalLocation !=
+                             attributes[b].originalLocation) {
+                             return attributes[a].originalLocation <
+                                    attributes[b].originalLocation;
+                         }
+                         return attributes[a].sourceOrder <
+                                attributes[b].sourceOrder;
+                     });
+    std::uint32_t nextMslLocation = 0;
+    for (std::size_t idx : sorted) {
+        AttributeLine& attr = attributes[idx];
+        if (attr.originalLocation > nextMslLocation) {
+            nextMslLocation = attr.originalLocation;
+        }
+        attr.adjustedLocation = nextMslLocation;
+        nextMslLocation += fp64SlotCount(attr.typeName);
+    }
+
+    std::string newBody;
+    newBody.reserve(structClose - structOpen + attributes.size() * 24u);
+    std::size_t cursor = structOpen + 1;
+    bool changed = false;
+    bool loweredAny = false;
+    for (const auto& attr : attributes) {
+        newBody.append(msl, cursor, attr.lineStart - cursor);
+        const std::string line = msl.substr(attr.lineStart,
+                                           attr.lineEnd - attr.lineStart);
+        std::string replacement;
+        if (attr.typeName == "appgl_df64") {
+            replacement = "    uint2 " + attr.name + " [[attribute(" +
+                std::to_string(attr.adjustedLocation) + ")]];";
+        } else if (attr.typeName == "appgl_df64x2") {
+            replacement = "    uint4 " + attr.name + " [[attribute(" +
+                std::to_string(attr.adjustedLocation) + ")]];";
+        } else if (attr.typeName == "appgl_df64x3") {
+            replacement = "    uint4 " + attr.name + "_0 [[attribute(" +
+                std::to_string(attr.adjustedLocation) + ")]];\n    uint2 " +
+                attr.name + "_1 [[attribute(" +
+                std::to_string(attr.adjustedLocation + 1u) + ")]];";
+        } else if (attr.typeName == "appgl_df64x4") {
+            replacement = "    uint4 " + attr.name + "_0 [[attribute(" +
+                std::to_string(attr.adjustedLocation) + ")]];\n    uint4 " +
+                attr.name + "_1 [[attribute(" +
+                std::to_string(attr.adjustedLocation + 1u) + ")]];";
+        } else if (attr.adjustedLocation != attr.originalLocation) {
+            replacement = line;
+            replacement.replace(attr.attrNumberStart - attr.lineStart,
+                                attr.attrNumberEnd - attr.attrNumberStart,
+                                std::to_string(attr.adjustedLocation));
+        } else {
+            replacement = line;
+        }
+
+        if (attr.typeName.rfind("appgl_df64", 0) == 0) {
+            Fp64Input input;
+            input.name = attr.name;
+            input.suffix = attr.typeName.substr(std::strlen("appgl_df64"));
+            input.location = attr.adjustedLocation;
+            inputs.push_back(std::move(input));
+            loweredAny = true;
+        }
+        changed = changed || replacement != line;
+        newBody.append(replacement);
+        cursor = attr.lineEnd;
+    }
+    newBody.append(msl, cursor, structClose - cursor);
+    if (changed) {
+        const std::size_t bodyStart = structOpen + 1;
+        const std::size_t oldBodySize = structClose - bodyStart;
+        msl.replace(bodyStart, oldBodySize, newBody);
+        structClose = bodyStart + newBody.size();
+    }
+
     if (inputs.empty()) {
-        return false;
+        return loweredAny;
     }
 
     const std::size_t mainPos = msl.find("main0(");
@@ -364,6 +444,310 @@ bool lowerFp64VertexStageInputs(std::string& msl) {
     if (!injection.empty()) {
         msl.insert(bodyOpen + 1, injection);
     }
+    return true;
+}
+
+std::string fp64StageTransportType(const std::string& typeName) {
+    if (typeName == "appgl_df64") return "float";
+    if (typeName == "appgl_df64x2") return "float2";
+    if (typeName == "appgl_df64x3") return "float3";
+    if (typeName == "appgl_df64x4") return "float4";
+    return {};
+}
+
+struct Fp64StageField {
+    std::string name;
+    std::string typeName;
+    std::string transportType;
+};
+
+std::vector<Fp64StageField> rewriteFp64StageStructFields(
+    std::string& msl,
+    const std::string& structName)
+{
+    std::vector<Fp64StageField> fields;
+    const std::size_t structPos = msl.find("struct " + structName);
+    if (structPos == std::string::npos ||
+        msl.find("appgl_df64", structPos) == std::string::npos) {
+        return fields;
+    }
+    const std::size_t braceOpen = msl.find('{', structPos);
+    if (braceOpen == std::string::npos) {
+        return fields;
+    }
+    const std::size_t braceClose = msl.find("};", braceOpen);
+    if (braceClose == std::string::npos) {
+        return fields;
+    }
+
+    std::string rewrittenBody;
+    rewrittenBody.reserve(braceClose - braceOpen);
+    std::size_t lineStart = braceOpen + 1;
+    while (lineStart < braceClose) {
+        std::size_t lineEnd = msl.find('\n', lineStart);
+        if (lineEnd == std::string::npos || lineEnd > braceClose) {
+            lineEnd = braceClose;
+        }
+        std::string line = msl.substr(lineStart, lineEnd - lineStart);
+        const std::size_t typePos = line.find("appgl_df64");
+        const bool stageField =
+            line.find("[[user(locn") != std::string::npos;
+        if (typePos != std::string::npos && stageField) {
+            std::size_t typeEnd = typePos;
+            while (typeEnd < line.size() && isIdentifierChar(line[typeEnd])) {
+                ++typeEnd;
+            }
+            const std::string typeName = line.substr(typePos, typeEnd - typePos);
+            const std::string transportType = fp64StageTransportType(typeName);
+            if (!transportType.empty()) {
+                std::size_t nameStart = typeEnd;
+                while (nameStart < line.size() &&
+                       std::isspace(static_cast<unsigned char>(line[nameStart]))) {
+                    ++nameStart;
+                }
+                std::size_t nameEnd = nameStart;
+                while (nameEnd < line.size() && isIdentifierChar(line[nameEnd])) {
+                    ++nameEnd;
+                }
+                if (nameEnd > nameStart) {
+                    fields.push_back({
+                        line.substr(nameStart, nameEnd - nameStart),
+                        typeName,
+                        transportType
+                    });
+                    line.replace(typePos, typeName.size(), transportType);
+                }
+            }
+        }
+        rewrittenBody += line;
+        if (lineEnd < braceClose) {
+            rewrittenBody += '\n';
+        }
+        lineStart = lineEnd + 1;
+    }
+
+    if (!fields.empty()) {
+        msl.replace(braceOpen + 1, braceClose - (braceOpen + 1),
+                    rewrittenBody);
+    }
+    return fields;
+}
+
+bool rewriteVertexFp64StageOutputTransport(std::string& msl) {
+    auto fields = rewriteFp64StageStructFields(msl, "main0_out");
+    if (fields.empty()) {
+        return false;
+    }
+
+    const std::size_t mainPos = msl.find("main0(");
+    if (mainPos == std::string::npos) {
+        return true;
+    }
+    std::size_t paramEnd = mainPos;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return true;
+    }
+    const std::size_t bodyOpen = msl.find('{', paramEnd);
+    if (bodyOpen == std::string::npos) {
+        return true;
+    }
+
+    for (const auto& field : fields) {
+        const std::string assignNeedle = "out." + field.name + " = ";
+        std::size_t pos = bodyOpen + 1;
+        while ((pos = msl.find(assignNeedle, pos)) != std::string::npos) {
+            const std::size_t rhsStart = pos + assignNeedle.size();
+            const std::size_t semi = msl.find(';', rhsStart);
+            if (semi == std::string::npos) {
+                break;
+            }
+            const std::string rhs = msl.substr(rhsStart, semi - rhsStart);
+            const std::string replacement =
+                "appgl_df64_to_float(" + rhs + ")";
+            msl.replace(rhsStart, semi - rhsStart, replacement);
+            pos = rhsStart + replacement.size();
+        }
+    }
+    return true;
+}
+
+bool rewriteFragmentFp64StageInputTransport(std::string& msl) {
+    auto fields = rewriteFp64StageStructFields(msl, "main0_in");
+    if (fields.empty()) {
+        return false;
+    }
+
+    const std::size_t mainPos = msl.find("main0(");
+    if (mainPos == std::string::npos) {
+        return true;
+    }
+    std::size_t paramEnd = mainPos;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return true;
+    }
+    const std::size_t bodyOpen = msl.find('{', paramEnd);
+    if (bodyOpen == std::string::npos) {
+        return true;
+    }
+
+    for (const auto& field : fields) {
+        const std::string needle = "in." + field.name;
+        const std::string replacement =
+            "appgl_df64_from_float(" + needle + ")";
+        std::size_t pos = bodyOpen + 1;
+        while ((pos = msl.find(needle, pos)) != std::string::npos) {
+            const bool leftOk =
+                (pos == 0) || !isIdentifierChar(msl[pos - 1]);
+            const std::size_t right = pos + needle.size();
+            const bool rightOk =
+                (right >= msl.size()) || !isIdentifierChar(msl[right]);
+            if (leftOk && rightOk) {
+                msl.replace(pos, needle.size(), replacement);
+                pos += replacement.size();
+            } else {
+                pos += needle.size();
+            }
+        }
+    }
+    return true;
+}
+
+bool rewritePackedFp64DefaultUniforms(std::string& msl) {
+    const std::size_t uniformsPos = msl.find("struct _DefaultUniforms");
+    if (uniformsPos == std::string::npos ||
+        msl.find("packed_appgl_df64", uniformsPos) == std::string::npos) {
+        return false;
+    }
+
+    const std::size_t braceOpen = msl.find('{', uniformsPos);
+    if (braceOpen == std::string::npos) {
+        return false;
+    }
+    const std::size_t braceClose = msl.find("};", braceOpen);
+    if (braceClose == std::string::npos) {
+        return false;
+    }
+
+    struct PackedField {
+        std::string packedType;
+        std::string unpackedType;
+        std::string name;
+    };
+    std::vector<PackedField> fields;
+    std::size_t lineStart = braceOpen + 1;
+    while (lineStart < braceClose) {
+        std::size_t lineEnd = msl.find('\n', lineStart);
+        if (lineEnd == std::string::npos || lineEnd > braceClose) {
+            lineEnd = braceClose;
+        }
+        const std::string line = msl.substr(lineStart, lineEnd - lineStart);
+        const std::size_t typePos = line.find("packed_appgl_df64");
+        if (typePos != std::string::npos) {
+            std::size_t typeEnd = typePos;
+            while (typeEnd < line.size() && isIdentifierChar(line[typeEnd])) {
+                ++typeEnd;
+            }
+            const std::string packedType =
+                line.substr(typePos, typeEnd - typePos);
+            std::size_t nameStart = typeEnd;
+            while (nameStart < line.size() &&
+                   std::isspace(static_cast<unsigned char>(line[nameStart]))) {
+                ++nameStart;
+            }
+            std::size_t nameEnd = nameStart;
+            while (nameEnd < line.size() && isIdentifierChar(line[nameEnd])) {
+                ++nameEnd;
+            }
+            if (nameEnd > nameStart) {
+                fields.push_back({
+                    packedType,
+                    packedType.substr(std::strlen("packed_")),
+                    line.substr(nameStart, nameEnd - nameStart)
+                });
+            }
+        }
+        lineStart = lineEnd + 1;
+    }
+
+    if (fields.empty()) {
+        return false;
+    }
+
+    if (msl.find("struct packed_appgl_df64") == std::string::npos) {
+        const std::size_t insertPos = msl.find("struct appgl_df64mat2x2");
+        if (insertPos != std::string::npos) {
+            const char* packedDefs = R"MSL(
+struct packed_appgl_df64 {
+    uint2 words;
+};
+
+struct packed_appgl_df64x2 {
+    uint2 x;
+    uint2 y;
+};
+
+struct packed_appgl_df64x3 {
+    uint2 x;
+    uint2 y;
+    uint2 z;
+};
+
+struct packed_appgl_df64x4 {
+    uint2 x;
+    uint2 y;
+    uint2 z;
+    uint2 w;
+};
+
+inline appgl_df64 appgl_df64_from_packed(packed_appgl_df64 v)
+{
+    return appgl_df64(v.words);
+}
+
+inline appgl_df64x2 appgl_df64_from_packed(packed_appgl_df64x2 v)
+{
+    return appgl_df64x2(appgl_df64(v.x), appgl_df64(v.y));
+}
+
+inline appgl_df64x3 appgl_df64_from_packed(packed_appgl_df64x3 v)
+{
+    return appgl_df64x3(appgl_df64(v.x), appgl_df64(v.y), appgl_df64(v.z));
+}
+
+inline appgl_df64x4 appgl_df64_from_packed(packed_appgl_df64x4 v)
+{
+    return appgl_df64x4(appgl_df64(v.x), appgl_df64(v.y), appgl_df64(v.z), appgl_df64(v.w));
+}
+
+)MSL";
+            msl.insert(insertPos, packedDefs);
+        }
+    }
+
+    for (const auto& field : fields) {
+        const std::string ctor = field.unpackedType + "(";
+        std::size_t pos = 0;
+        while ((pos = msl.find(ctor, pos)) != std::string::npos) {
+            const std::size_t argStart = pos + ctor.size();
+            const std::size_t close = msl.find(')', argStart);
+            if (close == std::string::npos) {
+                break;
+            }
+            const std::string arg = msl.substr(argStart, close - argStart);
+            const std::string suffix = "." + field.name;
+            if (arg.size() >= suffix.size() &&
+                arg.compare(arg.size() - suffix.size(), suffix.size(),
+                            suffix) == 0) {
+                const std::string replacement =
+                    "appgl_df64_from_packed(" + arg + ")";
+                msl.replace(pos, close + 1 - pos, replacement);
+                pos += replacement.size();
+            } else {
+                pos = close + 1;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -2993,12 +3377,19 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
 
         if (isVertex && mslOpts.appgl_fp64_emulation) {
             (void)lowerFp64VertexStageInputs(msl);
+            (void)rewriteVertexFp64StageOutputTransport(msl);
         }
         if (isVertex) {
             (void)injectPrimitiveFragmentShadingRateCombiner(msl);
             (void)injectClipControlYSignFixup(msl);
         }
 
+        if (isFragment && mslOpts.appgl_fp64_emulation) {
+            (void)rewriteFragmentFp64StageInputTransport(msl);
+        }
+        if (mslOpts.appgl_fp64_emulation) {
+            (void)rewritePackedFp64DefaultUniforms(msl);
+        }
         if (isFragment) {
             // Sprint 18 Bank D-3 (`textures_bind_unit`): SPIRV-Cross
             // maps GLSL gl_FragCoord to Metal's top-left
@@ -3759,9 +4150,14 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
             const auto& type = compiler.get_type(entry.res->type_id);
             const GLenum glType = spirvBaseTypeToGL(type);
             const bool containsFp64 = spirvTypeUsesFp64(compiler, type);
+            const std::uint32_t scalarSlots =
+                (type.basetype == spirv_cross::SPIRType::Double &&
+                 type.vecsize > 2) ? 2u : 1u;
             for (std::uint32_t slot = 0; slot < entry.slotCount; ++slot) {
                 ShaderReflection::VertexInput vi;
                 vi.location = nextMslLocation + slot;
+                vi.sourceLocation =
+                    entry.spirvLocation + (slot / scalarSlots);
                 vi.name = entry.slotCount > 1
                     ? (entry.res->name + "[" + std::to_string(slot) + "]")
                     : entry.res->name;

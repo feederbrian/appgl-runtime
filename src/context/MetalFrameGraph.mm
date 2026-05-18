@@ -546,12 +546,14 @@ static std::uint64_t computePipelineCacheKey(
         mix(static_cast<std::uint32_t>(l.glNormalized));
         mix(l.glIsInteger ? 1u : 0u);
     };
+    mix(static_cast<std::uint32_t>(info.vertexStride));
     for (const auto& l : info.vertexAttributeLayouts) {
         hashLayout(l);
     }
     for (const auto& evb : info.extraVertexBuffers) {
         mix(static_cast<std::uint32_t>(evb.stride));
         mix(static_cast<std::uint32_t>(evb.divisor));
+        mix(evb.constantStep ? 1u : 0u);
         for (const auto& l : evb.attributes) {
             hashLayout(l);
         }
@@ -1601,11 +1603,17 @@ struct MetalFrameGraph::Impl {
             for (std::size_t ei = 0; ei < info.extraVertexBuffers.size(); ++ei) {
                 const auto& evb = info.extraVertexBuffers[ei];
                 NSUInteger metalBuf = static_cast<NSUInteger>(ei + 1);
-                vertexDescriptor.layouts[metalBuf].stride = static_cast<NSUInteger>(evb.stride);
-                if (evb.divisor > 0) {
+                if (evb.constantStep) {
+                    vertexDescriptor.layouts[metalBuf].stride =
+                        static_cast<NSUInteger>(evb.stride > 0 ? evb.stride : evb.byteCount);
+                    vertexDescriptor.layouts[metalBuf].stepFunction = MTLVertexStepFunctionConstant;
+                    vertexDescriptor.layouts[metalBuf].stepRate = 0;
+                } else if (evb.divisor > 0) {
+                    vertexDescriptor.layouts[metalBuf].stride = static_cast<NSUInteger>(evb.stride);
                     vertexDescriptor.layouts[metalBuf].stepFunction = MTLVertexStepFunctionPerInstance;
                     vertexDescriptor.layouts[metalBuf].stepRate = static_cast<NSUInteger>(evb.divisor);
                 } else {
+                    vertexDescriptor.layouts[metalBuf].stride = static_cast<NSUInteger>(evb.stride);
                     vertexDescriptor.layouts[metalBuf].stepFunction = MTLVertexStepFunctionPerVertex;
                     vertexDescriptor.layouts[metalBuf].stepRate = 1;
                 }
@@ -2698,7 +2706,10 @@ struct MetalFrameGraph::Impl {
                                                offset:static_cast<NSUInteger>(evb.metalBufferOffset)
                                               atIndex:static_cast<NSUInteger>(ei + 1)];
             } else {
-                auto alloc = ringSuballocate(evb.data, evb.byteCount);
+                const void* bytes = evb.data != nullptr
+                    ? evb.data
+                    : (evb.ownedData.empty() ? nullptr : evb.ownedData.data());
+                auto alloc = ringSuballocate(bytes, evb.byteCount);
                 if (alloc.buffer == nil) {
                     return false;
                 }

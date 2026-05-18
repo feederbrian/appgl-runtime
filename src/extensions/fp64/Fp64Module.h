@@ -12,6 +12,7 @@ const char* vertexAttrib64BitExtensionString();
 bool buildFlagEnabled();
 bool runtimeFlagEnabled();
 bool isAdvertisingHeld();
+bool shaderTranslationSupported(ExtensionContext& ctx);
 bool isAvailable(ExtensionContext& ctx);
 void initialize(ExtensionContext& ctx);
 void shutdown();

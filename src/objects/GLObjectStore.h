@@ -349,9 +349,13 @@ struct GLVertexAttributeState {
     GLuint divisor = 0;
     bool integer = false;
     bool longData = false;
+    enum class ImmediateKind : std::uint8_t { Float, Int, UInt };
+    ImmediateKind immediateKind = ImmediateKind::Float;
     // CPU-side shadow for glVertexAttribL{1,2,3,4}d[v] immediate values.
     // Used by glGetVertexAttribLdv for lossless f64 readback.
     GLdouble immediateDouble[4] = {0.0, 0.0, 0.0, 1.0};
+    GLint immediateInt[4] = {0, 0, 0, 1};
+    GLuint immediateUInt[4] = {0, 0, 0, 1};
     // GL 4.3 separated vertex format state.
     GLuint bindingIndex = 0;         // which binding point this attribute uses (default = attrib index)
     GLuint relativeOffset = 0;       // offset within the vertex for this attribute

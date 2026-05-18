@@ -153,6 +153,8 @@ public:
     bool vertexBindingDivisor(GLuint bindingindex, GLuint divisor);
     // GL 4.1 — double-precision vertex attributes (f64→f32 narrowing).
     bool vertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer);
+    bool setVertexAttribImmediate(GLuint index, GLint count, const GLdouble* values);
+    bool setVertexAttribIImmediate(GLuint index, const GLint* values, bool isUnsigned);
     bool setVertexAttribLImmediate(GLuint index, GLint count, const GLdouble* values);
     bool getVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params);
     bool activeTexture(GLenum texture);

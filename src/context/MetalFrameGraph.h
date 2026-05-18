@@ -143,6 +143,8 @@ struct TranslatedDrawInfo {
         std::size_t stride = 0;
         GLuint divisor = 0;  // 0=per-vertex, 1+=per-instance
         std::vector<VertexAttributeLayout> attributes;
+        std::vector<std::uint8_t> ownedData;
+        bool constantStep = false;
         // Direct Metal buffer binding (OPT-5).
         void* metalBuffer = nullptr;
         std::size_t metalBufferOffset = 0;

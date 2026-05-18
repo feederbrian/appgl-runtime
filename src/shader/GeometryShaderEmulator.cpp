@@ -8248,6 +8248,17 @@ float readFloatVertexComponent(const std::uint8_t* src,
                                GLenum type,
                                GLboolean normalized,
                                int component) {
+    auto readU32 = [&]() -> std::uint32_t {
+        std::uint32_t raw = 0;
+        std::memcpy(&raw, src, sizeof(raw));
+        return raw;
+    };
+    auto signExtend = [](std::uint32_t value, int bits) -> std::int32_t {
+        const std::uint32_t signBit = 1u << (bits - 1);
+        const std::uint32_t mask = (1u << bits) - 1u;
+        value &= mask;
+        return static_cast<std::int32_t>((value ^ signBit) - signBit);
+    };
     switch (type) {
         case GL_FLOAT: {
             float v = 0.0f;
@@ -8268,6 +8279,43 @@ float readFloatVertexComponent(const std::uint8_t* src,
             std::int32_t v = 0;
             std::memcpy(&v, src + component * 4, sizeof(v));
             return static_cast<float>(static_cast<double>(v) / 65536.0);
+        }
+        case GL_UNSIGNED_INT_2_10_10_10_REV: {
+            const std::uint32_t raw = readU32();
+            const int shift = (component == 3) ? 30 : component * 10;
+            const int bits = (component == 3) ? 2 : 10;
+            const std::uint32_t mask = (1u << bits) - 1u;
+            const std::uint32_t value = (raw >> shift) & mask;
+            if (normalized == GL_TRUE) {
+                return static_cast<float>(
+                    static_cast<double>(value) / static_cast<double>(mask));
+            }
+            return static_cast<float>(value);
+        }
+        case GL_INT_2_10_10_10_REV: {
+            const std::uint32_t raw = readU32();
+            const int shift = (component == 3) ? 30 : component * 10;
+            const int bits = (component == 3) ? 2 : 10;
+            const std::int32_t value = signExtend(raw >> shift, bits);
+            if (normalized == GL_TRUE) {
+                const double maxPositive = (component == 3) ? 1.0 : 511.0;
+                return static_cast<float>(
+                    std::max(-1.0, static_cast<double>(value) / maxPositive));
+            }
+            return static_cast<float>(value);
+        }
+        case GL_UNSIGNED_INT_10F_11F_11F_REV: {
+            const std::uint32_t raw = readU32();
+            if (component == 0) {
+                return imageUnsignedFPToFloat(raw & 0x7ffu, 6);
+            }
+            if (component == 1) {
+                return imageUnsignedFPToFloat((raw >> 11) & 0x7ffu, 6);
+            }
+            if (component == 2) {
+                return imageUnsignedFPToFloat((raw >> 22) & 0x3ffu, 5);
+            }
+            return 1.0f;
         }
         default:
             break;
@@ -8290,7 +8338,12 @@ float readFloatVertexComponent(const std::uint8_t* src,
 float readFloatVertexComponent(const std::uint8_t* src,
                                const GLVertexAttributeState& attr,
                                int component) {
-    return readFloatVertexComponent(src, attr.type, attr.normalized, component);
+    int sourceComponent = component;
+    if (attr.size == static_cast<GLint>(GL_BGRA)) {
+        if (component == 0) sourceComponent = 2;
+        else if (component == 2) sourceComponent = 0;
+    }
+    return readFloatVertexComponent(src, attr.type, attr.normalized, sourceComponent);
 }
 
 // Extract a single vertex's attribute value from a VAO + VBO shadow.
@@ -8308,9 +8361,21 @@ Value readVertexAttribFromVAO(
     if (attrIdx >= vao.attributes.size()) return v;
     const auto& attr = vao.attributes[attrIdx];
     if (!attr.enabled) {
-        v.kind = Value::Kind::Float4;
-        for (int k = 0; k < 4; ++k) {
-            v.f[k] = static_cast<float>(attr.immediateDouble[k]);
+        if (attr.immediateKind == GLVertexAttributeState::ImmediateKind::Int) {
+            v.kind = Value::Kind::Int4;
+            for (int k = 0; k < 4; ++k) v.i[k] = attr.immediateInt[k];
+        } else if (attr.immediateKind == GLVertexAttributeState::ImmediateKind::UInt) {
+            v.kind = Value::Kind::UInt4;
+            for (int k = 0; k < 4; ++k) {
+                v.i[k] = static_cast<std::int32_t>(attr.immediateUInt[k]);
+            }
+        } else {
+            v.kind = Value::Kind::Float4;
+            v.hasDouble = true;
+            for (int k = 0; k < 4; ++k) {
+                v.d[k] = attr.immediateDouble[k];
+                v.f[k] = static_cast<float>(attr.immediateDouble[k]);
+            }
         }
         return v;
     }
@@ -8352,9 +8417,7 @@ Value readVertexAttribFromVAO(
             bufferName = bp.buffer;
             baseOffset = static_cast<std::size_t>(bp.offset) +
                          static_cast<std::size_t>(attr.relativeOffset);
-            if (bp.stride > 0) {
-                stride = static_cast<std::size_t>(bp.stride);
-            }
+            stride = static_cast<std::size_t>(std::max<GLsizei>(bp.stride, 0));
         }
     }
     std::size_t relativeOffset = 0;
@@ -8422,6 +8485,7 @@ struct VsAttribFetchSource {
     GLboolean normalized = GL_FALSE;
     bool isInt = false;
     bool isUInt = false;
+    bool isBgra = false;
 };
 
 std::vector<VsAttribFetchSource> buildVsAttribFetchSources(
@@ -8437,10 +8501,23 @@ std::vector<VsAttribFetchSource> buildVsAttribFetchSources(
         src.enabled = attr.enabled;
         src.type = attr.type;
         src.normalized = attr.normalized;
+        src.isBgra = (attr.size == static_cast<GLint>(GL_BGRA));
         if (!attr.enabled) {
-            src.immediate.kind = Value::Kind::Float4;
-            for (int k = 0; k < 4; ++k) {
-                src.immediate.f[k] = static_cast<float>(attr.immediateDouble[k]);
+            if (attr.immediateKind == GLVertexAttributeState::ImmediateKind::Int) {
+                src.immediate.kind = Value::Kind::Int4;
+                for (int k = 0; k < 4; ++k) src.immediate.i[k] = attr.immediateInt[k];
+            } else if (attr.immediateKind == GLVertexAttributeState::ImmediateKind::UInt) {
+                src.immediate.kind = Value::Kind::UInt4;
+                for (int k = 0; k < 4; ++k) {
+                    src.immediate.i[k] = static_cast<std::int32_t>(attr.immediateUInt[k]);
+                }
+            } else {
+                src.immediate.kind = Value::Kind::Float4;
+                src.immediate.hasDouble = true;
+                for (int k = 0; k < 4; ++k) {
+                    src.immediate.d[k] = attr.immediateDouble[k];
+                    src.immediate.f[k] = static_cast<float>(attr.immediateDouble[k]);
+                }
             }
             sources.push_back(src);
             continue;
@@ -8462,9 +8539,7 @@ std::vector<VsAttribFetchSource> buildVsAttribFetchSources(
                 bufferName = bp.buffer;
                 src.baseOffset = static_cast<std::size_t>(bp.offset) +
                                  static_cast<std::size_t>(attr.relativeOffset);
-                if (bp.stride > 0) {
-                    src.stride = static_cast<std::size_t>(bp.stride);
-                }
+                src.stride = static_cast<std::size_t>(std::max<GLsizei>(bp.stride, 0));
             }
         }
         if (bufferName == 0) continue;
@@ -8515,7 +8590,12 @@ Value readVertexAttribFromSource(const VsAttribFetchSource& src,
         v.f[0] = v.f[1] = v.f[2] = 0.0f;
         v.f[3] = 1.0f;
         for (int k = 0; k < src.componentCount; ++k) {
-            v.f[k] = readFloatVertexComponent(raw, src.type, src.normalized, k);
+            int sourceComponent = k;
+            if (src.isBgra) {
+                if (k == 0) sourceComponent = 2;
+                else if (k == 2) sourceComponent = 0;
+            }
+            v.f[k] = readFloatVertexComponent(raw, src.type, src.normalized, sourceComponent);
         }
     }
     return v;
@@ -8816,14 +8896,82 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         info.scalarByteSize = v.scalarByteSize;
         allOutputs.push_back(std::move(info));
     }
+    auto stripArrayElementName = [](const std::string& name) -> std::string {
+        const auto bracket = name.rfind('[');
+        if (bracket == std::string::npos ||
+            name.empty() || name.back() != ']') {
+            return name;
+        }
+        const std::string idx =
+            name.substr(bracket + 1, name.size() - bracket - 2);
+        if (idx.empty() ||
+            !std::all_of(idx.begin(), idx.end(), [](char c) {
+                return std::isdigit(static_cast<unsigned char>(c));
+            })) {
+            return name;
+        }
+        return name.substr(0, bracket);
+    };
+    auto tfMemberAliasMatches = [](const std::string& candidate,
+                                   const std::string& requested) -> bool {
+        const auto dot = requested.rfind('.');
+        if (dot == std::string::npos || dot + 1 >= requested.size()) {
+            return false;
+        }
+        const std::string tail = requested.substr(dot + 1);
+        if (candidate == tail) {
+            return true;
+        }
+        const auto cDot = candidate.rfind('.');
+        if (cDot != std::string::npos &&
+            cDot + 1 < candidate.size() &&
+            candidate.substr(cDot + 1) == tail) {
+            return true;
+        }
+        const auto cUnderscore = candidate.rfind('_');
+        return cUnderscore != std::string::npos &&
+               cUnderscore + 1 < candidate.size() &&
+               candidate.substr(cUnderscore + 1) == tail;
+    };
+    auto appendCapturedOnce = [](std::vector<VsOutputVaryingInfo>& dst,
+                                 const VsOutputVaryingInfo& v) {
+        for (const auto& existing : dst) {
+            if (existing.name == v.name &&
+                existing.location == v.location &&
+                existing.width == v.width) {
+                return;
+            }
+        }
+        dst.push_back(v);
+    };
+
     std::vector<VsOutputVaryingInfo> captured;
     for (const auto& tfName : program.transformFeedbackVaryingNames) {
         if (tfName == "gl_Position") continue;   // handled by position[4]
+
+        const std::string lookupName = stripArrayElementName(tfName);
+        const VsOutputVaryingInfo* exact = nullptr;
         for (const auto& v : allOutputs) {
-            if (v.name == tfName) {
-                captured.push_back(v);
+            if (v.name == tfName || v.name == lookupName) {
+                exact = &v;
                 break;
             }
+        }
+        if (exact != nullptr) {
+            appendCapturedOnce(captured, *exact);
+            continue;
+        }
+
+        const VsOutputVaryingInfo* alias = nullptr;
+        std::size_t aliasCount = 0;
+        for (const auto& v : allOutputs) {
+            if (tfMemberAliasMatches(v.name, lookupName)) {
+                alias = &v;
+                ++aliasCount;
+            }
+        }
+        if (aliasCount == 1 && alias != nullptr) {
+            appendCapturedOnce(captured, *alias);
         }
     }
     // Sum total varying widths to size the per-vertex stride. Even
@@ -8899,11 +9047,6 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         }
     };
 
-    // Sprint20 residual: preserve the pre-existing baseInstance handling
-    // in this VS-only TF path. gl_InstanceID remains instanceIdx, and
-    // instanced VBO fetch is not adjusted here by Phase 3a.
-    (void)baseInstance;
-
     auto runVertexRange = [&](std::size_t beginVertex,
                               std::size_t endVertex,
                               Interpreter& vsInterp,
@@ -8925,6 +9068,9 @@ EmulatedDraw emulateVsOnlyDrawForTf(
             const std::size_t vertexOrdinal = ordinal - instanceOrdinal * countSize;
             const std::int32_t glInstanceID =
                 static_cast<std::int32_t>(instanceOrdinal);
+            const std::int32_t attribInstanceID =
+                static_cast<std::int32_t>(
+                    instanceOrdinal + static_cast<std::size_t>(baseInstance));
             // Sprint 7 #9 (CKPT65) — drawElements indexes via
             // elementIndices[vi]; drawArrays uses sequential first+vi.
             const std::size_t vboSlot = (elementIndices != nullptr)
@@ -8937,7 +9083,7 @@ EmulatedDraw emulateVsOnlyDrawForTf(
             outVertex.position[3] = 1.0f;
             vsAttribs.clear();
             for (const auto& src : vsAttribSources) {
-                Value v = readVertexAttribFromSource(src, vboSlot, glInstanceID);
+                Value v = readVertexAttribFromSource(src, vboSlot, attribInstanceID);
                 if (v.kind != Value::Kind::Invalid) {
                     vsAttribs[src.location] = v;
                 }

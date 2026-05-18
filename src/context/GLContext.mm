@@ -2609,10 +2609,17 @@ struct GLContext::Impl {
         // (see `anyIndexedViewportSet_` in GLStateTracker.h). Depth
         // range already has the correct default (0, 1) in every
         // slot via the struct default — no setDepthRange needed.
-        // Initialize per-context immediate double attribs to {0,0,0,1} (OpenGL default).
+        // Initialize per-context immediate attribs to {0,0,0,1} (OpenGL default).
         for (auto& slot : immediateDoubleAttribs) {
             slot = {0.0, 0.0, 0.0, 1.0};
         }
+        for (auto& slot : immediateIntAttribs) {
+            slot = {0, 0, 0, 1};
+        }
+        for (auto& slot : immediateUIntAttribs) {
+            slot = {0u, 0u, 0u, 1u};
+        }
+        immediateAttribKinds.fill(GLVertexAttributeState::ImmediateKind::Float);
     }
 
     void releaseBufferStorage(GLBufferObject& object) {
@@ -8220,6 +8227,22 @@ struct GLContext::Impl {
         return false;
     }
 
+    GLuint metalVertexInputLocationForSource(const ShaderReflection& reflection,
+                                             GLuint sourceLocation) const {
+        bool found = false;
+        GLuint metalLocation = sourceLocation;
+        for (const auto& input : reflection.vertexInputs) {
+            if (input.sourceLocation != sourceLocation) {
+                continue;
+            }
+            if (!found || input.location < metalLocation) {
+                metalLocation = input.location;
+                found = true;
+            }
+        }
+        return metalLocation;
+    }
+
     void prepareFp64VertexSidecars(TranslatedDrawInfo& info) {
         if (info.vertexReflection == nullptr ||
             !info.vertexReflection->fp64TranslationActive) {
@@ -8231,6 +8254,8 @@ struct GLContext::Impl {
                                std::vector<Fp64VertexAttribRange>& ranges,
                                std::size_t sourceOffset,
                                std::size_t stride) {
+            layout.location = metalVertexInputLocationForSource(
+                *info.vertexReflection, layout.location);
             if (layout.glType != GL_DOUBLE ||
                 !vertexInputLocationContainsFp64(*info.vertexReflection,
                                                  layout.location)) {
@@ -8275,8 +8300,8 @@ struct GLContext::Impl {
                         }
                     }
                 }
-                info.vertexAttributeLayouts = std::move(lowered);
             }
+            info.vertexAttributeLayouts = std::move(lowered);
         }
 
         for (auto& evb : info.extraVertexBuffers) {
@@ -8304,8 +8329,8 @@ struct GLContext::Impl {
                         }
                     }
                 }
-                evb.attributes = std::move(lowered);
             }
+            evb.attributes = std::move(lowered);
         }
     }
 
@@ -12263,6 +12288,9 @@ struct GLContext::Impl {
     // reported slot, so this shadow must cover all advertised attributes.
     static constexpr std::size_t kMaxImmediateDoubleAttribs = 32;
     std::array<std::array<GLdouble, 4>, kMaxImmediateDoubleAttribs> immediateDoubleAttribs{};
+    std::array<std::array<GLint, 4>, kMaxImmediateDoubleAttribs> immediateIntAttribs{};
+    std::array<std::array<GLuint, 4>, kMaxImmediateDoubleAttribs> immediateUIntAttribs{};
+    std::array<GLVertexAttributeState::ImmediateKind, kMaxImmediateDoubleAttribs> immediateAttribKinds{};
 
     // Phase 8X Group 4d follow-up¹⁷ — compat-profile immediate-mode
     // capture state.
@@ -15306,6 +15334,20 @@ bool GLContext::bindVertexArray(GLuint array) {
         return false;
     }
     object->instantiated = true;
+    const std::size_t n = std::min<std::size_t>(
+        object->attributes.size(), impl_->kMaxImmediateDoubleAttribs);
+    for (std::size_t i = 0; i < n; ++i) {
+        auto& attr = object->attributes[i];
+        const auto& fd = impl_->immediateDoubleAttribs[i];
+        const auto& si = impl_->immediateIntAttribs[i];
+        const auto& ui = impl_->immediateUIntAttribs[i];
+        attr.immediateKind = impl_->immediateAttribKinds[i];
+        for (int k = 0; k < 4; ++k) {
+            attr.immediateDouble[k] = fd[k];
+            attr.immediateInt[k] = si[k];
+            attr.immediateUInt[k] = ui[k];
+        }
+    }
     impl_->state->bindVertexArray(array);
     impl_->state->bindBuffer(GL_ELEMENT_ARRAY_BUFFER, object->elementArrayBuffer);
     return true;
@@ -15970,6 +16012,67 @@ bool GLContext::vertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsi
     return true;
 }
 
+bool GLContext::setVertexAttribImmediate(GLuint index, GLint count, const GLdouble* values) {
+    if (index >= impl_->kMaxImmediateDoubleAttribs || values == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    auto& slot = impl_->immediateDoubleAttribs[index];
+    slot[0] = count >= 1 ? values[0] : 0.0;
+    slot[1] = count >= 2 ? values[1] : 0.0;
+    slot[2] = count >= 3 ? values[2] : 0.0;
+    slot[3] = count >= 4 ? values[3] : 1.0;
+    impl_->immediateAttribKinds[index] = GLVertexAttributeState::ImmediateKind::Float;
+    if (GLVertexArrayObject* vertexArray = impl_->currentVertexArrayOrDefault();
+        vertexArray != nullptr && index < vertexArray->attributes.size()) {
+        auto& attr = vertexArray->attributes[index];
+        attr.immediateKind = GLVertexAttributeState::ImmediateKind::Float;
+        for (int k = 0; k < 4; ++k) {
+            attr.immediateDouble[k] = slot[k];
+            attr.immediateInt[k] = static_cast<GLint>(slot[k]);
+            attr.immediateUInt[k] = static_cast<GLuint>(std::max<GLdouble>(slot[k], 0.0));
+        }
+    }
+    return true;
+}
+
+bool GLContext::setVertexAttribIImmediate(GLuint index, const GLint* values, bool isUnsigned) {
+    if (index >= impl_->kMaxImmediateDoubleAttribs || values == nullptr) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    auto& si = impl_->immediateIntAttribs[index];
+    auto& ui = impl_->immediateUIntAttribs[index];
+    auto& fd = impl_->immediateDoubleAttribs[index];
+    for (int k = 0; k < 4; ++k) {
+        if (isUnsigned) {
+            const GLuint u = static_cast<GLuint>(values[k]);
+            ui[k] = u;
+            si[k] = static_cast<GLint>(u);
+            fd[k] = static_cast<GLdouble>(u);
+        } else {
+            const GLint s = values[k];
+            si[k] = s;
+            ui[k] = static_cast<GLuint>(s);
+            fd[k] = static_cast<GLdouble>(s);
+        }
+    }
+    impl_->immediateAttribKinds[index] = isUnsigned
+        ? GLVertexAttributeState::ImmediateKind::UInt
+        : GLVertexAttributeState::ImmediateKind::Int;
+    if (GLVertexArrayObject* vertexArray = impl_->currentVertexArrayOrDefault();
+        vertexArray != nullptr && index < vertexArray->attributes.size()) {
+        auto& attr = vertexArray->attributes[index];
+        attr.immediateKind = impl_->immediateAttribKinds[index];
+        for (int k = 0; k < 4; ++k) {
+            attr.immediateInt[k] = si[k];
+            attr.immediateUInt[k] = ui[k];
+            attr.immediateDouble[k] = fd[k];
+        }
+    }
+    return true;
+}
+
 bool GLContext::setVertexAttribLImmediate(GLuint index, GLint count, const GLdouble* values) {
     // Immediate vertex attributes are per-context state (not per-VAO).
     if (index >= impl_->kMaxImmediateDoubleAttribs) {
@@ -15981,13 +16084,19 @@ bool GLContext::setVertexAttribLImmediate(GLuint index, GLint count, const GLdou
     slot[1] = count >= 2 ? values[1] : 0.0;
     slot[2] = count >= 3 ? values[2] : 0.0;
     slot[3] = count >= 4 ? values[3] : 1.0;
+    impl_->immediateAttribKinds[index] = GLVertexAttributeState::ImmediateKind::Float;
     if (GLVertexArrayObject* vertexArray = impl_->currentVertexArrayOrDefault();
         vertexArray != nullptr && index < vertexArray->attributes.size()) {
         auto& attr = vertexArray->attributes[index];
+        attr.immediateKind = GLVertexAttributeState::ImmediateKind::Float;
         attr.immediateDouble[0] = slot[0];
         attr.immediateDouble[1] = slot[1];
         attr.immediateDouble[2] = slot[2];
         attr.immediateDouble[3] = slot[3];
+        for (int k = 0; k < 4; ++k) {
+            attr.immediateInt[k] = static_cast<GLint>(slot[k]);
+            attr.immediateUInt[k] = static_cast<GLuint>(std::max<GLdouble>(slot[k], 0.0));
+        }
     }
     return true;
 }
@@ -27569,7 +27678,7 @@ bool GLContext::linkProgram(GLuint program) {
     BindingMap bindings;
     ExtensionContext fp64ExtensionContext(*this);
     const bool fp64EmulationAvailable =
-        extensions::fp64::isAvailable(fp64ExtensionContext);
+        extensions::fp64::shaderTranslationSupported(fp64ExtensionContext);
 
     auto spirvUsesStorageBuffers = [](const std::uint32_t* spirvData,
                                       std::size_t spirvWords) -> bool {
@@ -32670,6 +32779,132 @@ static void populateVertexAttributeLayoutVAOFields(
     layout.glIsInteger = attr.integer;
 }
 
+static GLint shaderVertexInputComponentCount(GLenum type) {
+    switch (type) {
+        case GL_FLOAT:
+        case GL_INT:
+        case GL_UNSIGNED_INT:
+        case GL_DOUBLE:
+            return 1;
+        case GL_FLOAT_VEC2:
+        case GL_INT_VEC2:
+        case GL_UNSIGNED_INT_VEC2:
+        case GL_DOUBLE_VEC2:
+            return 2;
+        case GL_FLOAT_VEC3:
+        case GL_INT_VEC3:
+        case GL_UNSIGNED_INT_VEC3:
+        case GL_DOUBLE_VEC3:
+            return 3;
+        case GL_FLOAT_VEC4:
+        case GL_INT_VEC4:
+        case GL_UNSIGNED_INT_VEC4:
+        case GL_DOUBLE_VEC4:
+            return 4;
+        default:
+            return 4;
+    }
+}
+
+static bool shaderVertexInputIsSignedInteger(GLenum type) {
+    return type == GL_INT ||
+           type == GL_INT_VEC2 ||
+           type == GL_INT_VEC3 ||
+           type == GL_INT_VEC4;
+}
+
+static bool shaderVertexInputIsUnsignedInteger(GLenum type) {
+    return type == GL_UNSIGNED_INT ||
+           type == GL_UNSIGNED_INT_VEC2 ||
+           type == GL_UNSIGNED_INT_VEC3 ||
+           type == GL_UNSIGNED_INT_VEC4;
+}
+
+static bool translatedDrawHasVertexLayoutAt(
+    const TranslatedDrawInfo& tdi,
+    GLuint location)
+{
+    for (const auto& layout : tdi.vertexAttributeLayouts) {
+        if (layout.location == location) return true;
+    }
+    for (const auto& evb : tdi.extraVertexBuffers) {
+        for (const auto& layout : evb.attributes) {
+            if (layout.location == location) return true;
+        }
+    }
+    return false;
+}
+
+static void appendCurrentGenericVertexAttributes(
+    TranslatedDrawInfo& tdi,
+    const GLVertexArrayObject* vao)
+{
+    if (tdi.vertexReflection == nullptr || vao == nullptr) {
+        return;
+    }
+
+    TranslatedDrawInfo::ExtraVertexBuffer* currentBuffer = nullptr;
+    for (const auto& input : tdi.vertexReflection->vertexInputs) {
+        if (translatedDrawHasVertexLayoutAt(tdi, input.location)) {
+            continue;
+        }
+        if (input.sourceLocation >= vao->attributes.size()) {
+            continue;
+        }
+
+        const auto& attr = vao->attributes[input.sourceLocation];
+        if (attr.enabled || input.containsFp64) {
+            continue;
+        }
+
+        if (currentBuffer == nullptr) {
+            tdi.extraVertexBuffers.emplace_back();
+            currentBuffer = &tdi.extraVertexBuffers.back();
+            currentBuffer->constantStep = true;
+            currentBuffer->stride = 16;
+            currentBuffer->divisor = 0;
+        }
+
+        const std::size_t alignedOffset =
+            (currentBuffer->ownedData.size() + 15u) & ~std::size_t(15u);
+        currentBuffer->ownedData.resize(alignedOffset + 16u, 0u);
+
+        TranslatedDrawInfo::VertexAttributeLayout layout;
+        layout.location = input.location;
+        layout.offset = alignedOffset;
+        layout.glComponentCount =
+            std::max<GLint>(1, std::min<GLint>(4, shaderVertexInputComponentCount(input.type)));
+        layout.glNormalized = GL_FALSE;
+
+        std::uint8_t* dst = currentBuffer->ownedData.data() + alignedOffset;
+        if (shaderVertexInputIsSignedInteger(input.type)) {
+            layout.glType = GL_INT;
+            layout.glIsInteger = true;
+            auto* values = reinterpret_cast<GLint*>(dst);
+            for (int i = 0; i < 4; ++i) {
+                values[i] = attr.immediateInt[i];
+            }
+        } else if (shaderVertexInputIsUnsignedInteger(input.type)) {
+            layout.glType = GL_UNSIGNED_INT;
+            layout.glIsInteger = true;
+            auto* values = reinterpret_cast<GLuint*>(dst);
+            for (int i = 0; i < 4; ++i) {
+                values[i] = attr.immediateUInt[i];
+            }
+        } else {
+            layout.glType = GL_FLOAT;
+            layout.glIsInteger = false;
+            auto* values = reinterpret_cast<float*>(dst);
+            for (int i = 0; i < 4; ++i) {
+                values[i] = static_cast<float>(attr.immediateDouble[i]);
+            }
+        }
+        currentBuffer->attributes.push_back(layout);
+        currentBuffer->byteCount = currentBuffer->ownedData.size();
+        currentBuffer->stride = currentBuffer->byteCount;
+    }
+}
+
 SolidColorDrawSetup buildSolidColorDrawSetup(GLStateTracker& state,
                                              GLObjectStore& objects,
                                              GLenum mode,
@@ -32930,6 +33165,22 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
         if (fsProg != nullptr) {
             vsProg->fragmentMSL = fsProg->fragmentMSL;
             vsProg->fragmentReflection = fsProg->fragmentReflection;
+            for (const auto& fsUniform : fsProg->uniforms) {
+                auto existing = std::find_if(
+                    vsProg->uniforms.begin(), vsProg->uniforms.end(),
+                    [&](const GLProgramUniformInfo& u) {
+                        return u.name == fsUniform.name;
+                    });
+                if (existing != vsProg->uniforms.end()) {
+                    *existing = fsUniform;
+                } else {
+                    vsProg->uniforms.push_back(fsUniform);
+                }
+                auto valueIt = fsProg->uniformValues.find(fsUniform.location);
+                if (valueIt != fsProg->uniformValues.end()) {
+                    vsProg->uniformValues[fsUniform.location] = valueIt->second;
+                }
+            }
             // The translated-draw path caches uniform layouts on the
             // container program. If we merged a new FS shape we need
             // the layout recomputed, otherwise the vertex and fragment
@@ -33049,7 +33300,7 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     if (owner != nullptr) {
         ExtensionContext fp64ExtensionContext(*owner);
         fp64EmulationAvailable =
-            extensions::fp64::isAvailable(fp64ExtensionContext);
+            extensions::fp64::shaderTranslationSupported(fp64ExtensionContext);
     }
 
     auto synth = std::make_unique<GLProgramObject>();
@@ -34404,6 +34655,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         {
             ShaderReflection::VertexInput pos;
             pos.location = 0;
+            pos.sourceLocation = pos.location;
             pos.type = GL_FLOAT_VEC4;
             pos.name = "vsin_position";
             program.gsPassThroughReflection.vertexInputs.push_back(pos);
@@ -34415,6 +34667,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         for (std::size_t i = 0; i < stageSlotWidths.size(); ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = static_cast<GLuint>(i + 1);
+            vi.sourceLocation = vi.location;
             const std::uint8_t bt = (i < stageSlotBaseType.size())
                 ? stageSlotBaseType[i] : 0;
             const std::uint32_t w = stageSlotWidths[i];
@@ -34456,6 +34709,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         for (std::uint32_t i = 0; i < replayDraw.clipDistanceLen; ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = clipBaseLoc + i;
+            vi.sourceLocation = vi.location;
             vi.type = GL_FLOAT;
             vi.name = "vsin_clip" + std::to_string(i);
             program.gsPassThroughReflection.vertexInputs.push_back(vi);
@@ -34464,6 +34718,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
         for (std::uint32_t i = 0; i < replayDraw.cullDistanceLen; ++i) {
             ShaderReflection::VertexInput vi;
             vi.location = cullBaseLoc + i;
+            vi.sourceLocation = vi.location;
             vi.type = GL_FLOAT;
             vi.name = "vsin_cull" + std::to_string(i);
             program.gsPassThroughReflection.vertexInputs.push_back(vi);
@@ -34880,6 +35135,7 @@ static bool translatedDrawUsesClipControlYSign(const TranslatedDrawInfo& tdi) {
 // candidate: sister-pattern leverage at the call-site-wrapper level.
 bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
     prepareFp64VertexSidecars(tdi);
+    appendCurrentGenericVertexAttributes(tdi, currentVertexArrayOrDefault());
     const GLuint drawFboName = state->boundDrawFramebuffer();
     if (drawFboName != 0) {
         if (const GLFramebufferObject* drawFbo =

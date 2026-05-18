@@ -254,9 +254,12 @@ bool isAdvertisingHeld() {
     return false;
 }
 
+bool shaderTranslationSupported(ExtensionContext& ctx) {
+    return supportsAppleGpuFamily(ctx) || forceAdvertiseForMeasurement();
+}
+
 bool isAvailable(ExtensionContext& ctx) {
-    return runtimeFlagEnabled() &&
-           (supportsAppleGpuFamily(ctx) || forceAdvertiseForMeasurement());
+    return runtimeFlagEnabled() && shaderTranslationSupported(ctx);
 }
 
 void initialize(ExtensionContext& ctx) {

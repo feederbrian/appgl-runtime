@@ -32,6 +32,33 @@ GLContext* currentContextOrNull() {
     return Runtime::shared().currentContext();
 }
 
+void setCurrentFloatAttrib(GLuint index, GLdouble x, GLdouble y,
+                           GLdouble z, GLdouble w, GLint count) {
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    const GLdouble values[4] = {x, y, z, w};
+    context->setVertexAttribImmediate(index, count, values);
+}
+
+void setCurrentIntAttrib(GLuint index, GLint x, GLint y, GLint z, GLint w) {
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    const GLint values[4] = {x, y, z, w};
+    context->setVertexAttribIImmediate(index, values, false);
+}
+
+void setCurrentUIntAttrib(GLuint index, GLuint x, GLuint y, GLuint z, GLuint w) {
+    auto* context = currentContextOrNull();
+    if (context == nullptr) return;
+    const GLint values[4] = {
+        static_cast<GLint>(x),
+        static_cast<GLint>(y),
+        static_cast<GLint>(z),
+        static_cast<GLint>(w),
+    };
+    context->setVertexAttribIImmediate(index, values, true);
+}
+
 // Phase 8X Group 4d follow-up¹¹ — §Tertiary chokepoint-bypass
 // warning helper. Many 3.3 texture-upload entry points in this file
 // are still pass-through no-op stubs (`(void)data;`) from the
@@ -670,102 +697,84 @@ static void APIENTRY glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble *p
 }
 
 static void APIENTRY glVertexAttrib1d(GLuint index, GLdouble x) {
-    (void)index;
-    (void)x;
+    setCurrentFloatAttrib(index, x, 0.0, 0.0, 1.0, 1);
 }
 
 static void APIENTRY glVertexAttrib1dv(GLuint index, const GLdouble *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], 0.0, 0.0, 1.0, 1);
 }
 
 static void APIENTRY glVertexAttrib1f(GLuint index, GLfloat x) {
-    (void)index;
-    (void)x;
+    setCurrentFloatAttrib(index, x, 0.0, 0.0, 1.0, 1);
 }
 
 static void APIENTRY glVertexAttrib1fv(GLuint index, const GLfloat *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], 0.0, 0.0, 1.0, 1);
 }
 
 static void APIENTRY glVertexAttrib1s(GLuint index, GLshort x) {
-    (void)index;
-    (void)x;
+    setCurrentFloatAttrib(index, x, 0.0, 0.0, 1.0, 1);
 }
 
 static void APIENTRY glVertexAttrib1sv(GLuint index, const GLshort *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], 0.0, 0.0, 1.0, 1);
 }
 
 static void APIENTRY glVertexAttrib2d(GLuint index, GLdouble x, GLdouble y) {
-    (void)index;
-    (void)x;
-    (void)y;
+    setCurrentFloatAttrib(index, x, y, 0.0, 1.0, 2);
 }
 
 static void APIENTRY glVertexAttrib2dv(GLuint index, const GLdouble *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], v[1], 0.0, 1.0, 2);
 }
 
 static void APIENTRY glVertexAttrib2f(GLuint index, GLfloat x, GLfloat y) {
-    (void)index;
-    (void)x;
-    (void)y;
+    setCurrentFloatAttrib(index, x, y, 0.0, 1.0, 2);
 }
 
 static void APIENTRY glVertexAttrib2fv(GLuint index, const GLfloat *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], v[1], 0.0, 1.0, 2);
 }
 
 static void APIENTRY glVertexAttrib2s(GLuint index, GLshort x, GLshort y) {
-    (void)index;
-    (void)x;
-    (void)y;
+    setCurrentFloatAttrib(index, x, y, 0.0, 1.0, 2);
 }
 
 static void APIENTRY glVertexAttrib2sv(GLuint index, const GLshort *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], v[1], 0.0, 1.0, 2);
 }
 
 static void APIENTRY glVertexAttrib3d(GLuint index, GLdouble x, GLdouble y, GLdouble z) {
-    (void)index;
-    (void)x;
-    (void)y;
-    (void)z;
+    setCurrentFloatAttrib(index, x, y, z, 1.0, 3);
 }
 
 static void APIENTRY glVertexAttrib3dv(GLuint index, const GLdouble *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], v[1], v[2], 1.0, 3);
 }
 
 static void APIENTRY glVertexAttrib3f(GLuint index, GLfloat x, GLfloat y, GLfloat z) {
-    (void)index;
-    (void)x;
-    (void)y;
-    (void)z;
+    setCurrentFloatAttrib(index, x, y, z, 1.0, 3);
 }
 
 static void APIENTRY glVertexAttrib3fv(GLuint index, const GLfloat *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], v[1], v[2], 1.0, 3);
 }
 
 static void APIENTRY glVertexAttrib3s(GLuint index, GLshort x, GLshort y, GLshort z) {
-    (void)index;
-    (void)x;
-    (void)y;
-    (void)z;
+    setCurrentFloatAttrib(index, x, y, z, 1.0, 3);
 }
 
 static void APIENTRY glVertexAttrib3sv(GLuint index, const GLshort *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], v[1], v[2], 1.0, 3);
 }
 
 static void APIENTRY glVertexAttrib4Nbv(GLuint index, const GLbyte *v) {
@@ -812,47 +821,35 @@ static void APIENTRY glVertexAttrib4bv(GLuint index, const GLbyte *v) {
 }
 
 static void APIENTRY glVertexAttrib4d(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w) {
-    (void)index;
-    (void)x;
-    (void)y;
-    (void)z;
-    (void)w;
+    setCurrentFloatAttrib(index, x, y, z, w, 4);
 }
 
 static void APIENTRY glVertexAttrib4dv(GLuint index, const GLdouble *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], v[1], v[2], v[3], 4);
 }
 
 static void APIENTRY glVertexAttrib4f(GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
-    (void)index;
-    (void)x;
-    (void)y;
-    (void)z;
-    (void)w;
+    setCurrentFloatAttrib(index, x, y, z, w, 4);
 }
 
 static void APIENTRY glVertexAttrib4fv(GLuint index, const GLfloat *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], v[1], v[2], v[3], 4);
 }
 
 static void APIENTRY glVertexAttrib4iv(GLuint index, const GLint *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], v[1], v[2], v[3], 4);
 }
 
 static void APIENTRY glVertexAttrib4s(GLuint index, GLshort x, GLshort y, GLshort z, GLshort w) {
-    (void)index;
-    (void)x;
-    (void)y;
-    (void)z;
-    (void)w;
+    setCurrentFloatAttrib(index, x, y, z, w, 4);
 }
 
 static void APIENTRY glVertexAttrib4sv(GLuint index, const GLshort *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentFloatAttrib(index, v[0], v[1], v[2], v[3], 4);
 }
 
 static void APIENTRY glVertexAttrib4ubv(GLuint index, const GLubyte *v) {
@@ -1275,11 +1272,7 @@ static void APIENTRY glVertexAttribI3i(GLuint index, GLint x, GLint y, GLint z) 
 }
 
 static void APIENTRY glVertexAttribI4i(GLuint index, GLint x, GLint y, GLint z, GLint w) {
-    (void)index;
-    (void)x;
-    (void)y;
-    (void)z;
-    (void)w;
+    setCurrentIntAttrib(index, x, y, z, w);
 }
 
 static void APIENTRY glVertexAttribI1ui(GLuint index, GLuint x) {
@@ -1301,11 +1294,7 @@ static void APIENTRY glVertexAttribI3ui(GLuint index, GLuint x, GLuint y, GLuint
 }
 
 static void APIENTRY glVertexAttribI4ui(GLuint index, GLuint x, GLuint y, GLuint z, GLuint w) {
-    (void)index;
-    (void)x;
-    (void)y;
-    (void)z;
-    (void)w;
+    setCurrentUIntAttrib(index, x, y, z, w);
 }
 
 static void APIENTRY glVertexAttribI1iv(GLuint index, const GLint *v) {
@@ -1324,8 +1313,8 @@ static void APIENTRY glVertexAttribI3iv(GLuint index, const GLint *v) {
 }
 
 static void APIENTRY glVertexAttribI4iv(GLuint index, const GLint *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentIntAttrib(index, v[0], v[1], v[2], v[3]);
 }
 
 static void APIENTRY glVertexAttribI1uiv(GLuint index, const GLuint *v) {
@@ -1344,8 +1333,8 @@ static void APIENTRY glVertexAttribI3uiv(GLuint index, const GLuint *v) {
 }
 
 static void APIENTRY glVertexAttribI4uiv(GLuint index, const GLuint *v) {
-    (void)index;
-    (void)v;
+    if (v == nullptr) return;
+    setCurrentUIntAttrib(index, v[0], v[1], v[2], v[3]);
 }
 
 static void APIENTRY glVertexAttribI4bv(GLuint index, const GLbyte *v) {
