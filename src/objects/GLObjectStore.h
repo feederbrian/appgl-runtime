@@ -297,6 +297,10 @@ struct GLRenderbufferObject {
     // stale after stencilOp updates unless this routes readback through
     // the Metal stencil plane.
     bool wasMetalStencilRendered = false;
+    // Source-orientation marker for Metal-rendered FBO attachments. Color
+    // and depth readback use it to decide whether GL row 0 must sample the
+    // bottom Metal row.
+    bool framebufferReadbackYFlip = true;
 };
 
 struct GLFramebufferAttachment {

@@ -31,6 +31,7 @@ constexpr std::uint32_t kDefaultUniformSyntheticBinding = 1024u;
 constexpr std::uint32_t kFragCoordParamsBufferSlot = 15u;
 constexpr std::uint32_t kFragmentShadingRateParamsBufferSlot = 30u;
 constexpr std::uint32_t kMultisampleStorageImageSampleCountsBufferSlot = 30u;
+constexpr std::uint32_t kClipControlYSignPreferredBufferSlot = 29u;
 constexpr std::uint32_t kMaxMetalBufferSlot = 30u;
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
 constexpr std::uint32_t kMultisampleStorageSparseResidencyTextureSlotOffset = 96u;
@@ -832,6 +833,162 @@ std::uint32_t chooseFreeBufferSlot(const std::string& msl,
         }
     }
     return preferredSlot;
+}
+
+std::string findPositionFieldName(const std::string& msl) {
+    const std::size_t attr = msl.find("[[position]]");
+    if (attr == std::string::npos) {
+        return {};
+    }
+    const std::size_t lineStart = msl.rfind('\n', attr);
+    std::size_t cursor = attr;
+    while (cursor > (lineStart == std::string::npos ? 0 : lineStart) &&
+           !isIdentifierChar(msl[cursor - 1])) {
+        --cursor;
+    }
+    const std::size_t nameEnd = cursor;
+    while (cursor > (lineStart == std::string::npos ? 0 : lineStart) &&
+           isIdentifierChar(msl[cursor - 1])) {
+        --cursor;
+    }
+    if (cursor == nameEnd) {
+        return {};
+    }
+    return msl.substr(cursor, nameEnd - cursor);
+}
+
+bool findMain0Body(const std::string& msl,
+                   std::size_t& paramEnd,
+                   std::size_t& bodyOpen,
+                   std::size_t& bodyClose) {
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    bodyOpen = msl.find('{', paramEnd);
+    if (bodyOpen == std::string::npos) {
+        return false;
+    }
+    std::size_t depth = 1;
+    bodyClose = bodyOpen + 1;
+    while (bodyClose < msl.size() && depth > 0) {
+        const char c = msl[bodyClose];
+        if (c == '{') {
+            ++depth;
+        } else if (c == '}') {
+            --depth;
+            if (depth == 0) {
+                break;
+            }
+        }
+        ++bodyClose;
+    }
+    return depth == 0 && bodyClose < msl.size();
+}
+
+std::uint32_t injectClipControlYSignFixup(std::string& msl) {
+    static constexpr const char* kParamName = "_appgl_ClipControlYSign";
+    if (msl.find(kParamName) != std::string::npos) {
+        return kMaxMetalBufferSlot + 1u;
+    }
+    // Clip/cull-distance shaders already carry explicit rasterizer clipping
+    // state and, for cull distance, may use a CPU prepass plus filtered draw.
+    // Keep those paths on the legacy viewport/readback orientation model.
+    if (msl.find("gl_ClipDistance") != std::string::npos ||
+        msl.find("gl_CullDistance") != std::string::npos ||
+        msl.find("[[clip_distance]]") != std::string::npos) {
+        return kMaxMetalBufferSlot + 1u;
+    }
+
+    const std::string positionField = findPositionFieldName(msl);
+    if (positionField.empty()) {
+        return kMaxMetalBufferSlot + 1u;
+    }
+
+    std::size_t paramEnd = 0;
+    std::size_t bodyOpen = 0;
+    std::size_t bodyClose = 0;
+    if (!findMain0Body(msl, paramEnd, bodyOpen, bodyClose)) {
+        return kMaxMetalBufferSlot + 1u;
+    }
+
+    struct Insertion {
+        std::size_t pos;
+        std::string text;
+    };
+    std::vector<Insertion> insertions;
+    std::size_t scan = bodyOpen + 1;
+    while ((scan = msl.find("return", scan)) != std::string::npos && scan < bodyClose) {
+        if ((scan > 0 && isIdentifierChar(msl[scan - 1])) ||
+            (scan + 6 < msl.size() && isIdentifierChar(msl[scan + 6]))) {
+            scan += 6;
+            continue;
+        }
+        std::size_t cursor = scan + 6;
+        while (cursor < bodyClose &&
+               std::isspace(static_cast<unsigned char>(msl[cursor]))) {
+            ++cursor;
+        }
+        if (cursor >= bodyClose ||
+            !isIdentifierChar(msl[cursor]) ||
+            std::isdigit(static_cast<unsigned char>(msl[cursor]))) {
+            scan += 6;
+            continue;
+        }
+        const std::size_t nameStart = cursor;
+        while (cursor < bodyClose && isIdentifierChar(msl[cursor])) {
+            ++cursor;
+        }
+        const std::string resultName = msl.substr(nameStart, cursor - nameStart);
+        while (cursor < bodyClose &&
+               std::isspace(static_cast<unsigned char>(msl[cursor]))) {
+            ++cursor;
+        }
+        if (cursor >= bodyClose || msl[cursor] != ';') {
+            scan += 6;
+            continue;
+        }
+
+        const std::size_t lineStart = msl.rfind('\n', scan);
+        const std::size_t lineBegin = lineStart == std::string::npos ? 0 : lineStart + 1;
+        std::size_t indentEnd = lineBegin;
+        while (indentEnd < scan &&
+               std::isspace(static_cast<unsigned char>(msl[indentEnd])) &&
+               msl[indentEnd] != '\n') {
+            ++indentEnd;
+        }
+        const std::string indent = msl.substr(lineBegin, indentEnd - lineBegin);
+        insertions.push_back({
+            scan,
+            indent + resultName + "." + positionField +
+                ".y *= " + kParamName + ";\n"
+        });
+        scan = cursor + 1;
+    }
+    if (insertions.empty()) {
+        return kMaxMetalBufferSlot + 1u;
+    }
+
+    const std::uint32_t slot =
+        chooseFreeBufferSlot(msl, kClipControlYSignPreferredBufferSlot);
+    const std::size_t paramStart = msl.rfind('(', paramEnd);
+    bool hasExistingParams = false;
+    if (paramStart != std::string::npos) {
+        for (std::size_t i = paramStart + 1; i < paramEnd; ++i) {
+            if (!std::isspace(static_cast<unsigned char>(msl[i]))) {
+                hasExistingParams = true;
+                break;
+            }
+        }
+    }
+    const std::string param =
+        std::string(hasExistingParams ? ", " : "") +
+        "constant float& " + std::string(kParamName) +
+        " [[buffer(" + std::to_string(slot) + ")]]";
+    msl.insert(paramEnd, param);
+    for (auto it = insertions.rbegin(); it != insertions.rend(); ++it) {
+        msl.insert(it->pos + param.size(), it->text);
+    }
+    return slot;
 }
 
 bool parseUnsignedAfter(const std::string& text,
@@ -2839,6 +2996,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         }
         if (isVertex) {
             (void)injectPrimitiveFragmentShadingRateCombiner(msl);
+            (void)injectClipControlYSignFixup(msl);
         }
 
         if (isFragment) {

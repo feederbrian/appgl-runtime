@@ -2672,6 +2672,7 @@ struct GLContext::Impl {
         object.storageDefined = false;
         object.wasMetalDepthRendered = false;
         object.wasMetalStencilRendered = false;
+        object.framebufferReadbackYFlip = true;
     }
 
     void releaseSamplerState(GLSamplerObject& object) {
@@ -10035,6 +10036,7 @@ struct GLContext::Impl {
             if (rb->metalTexture != nullptr) {
                 metalTex = (__bridge id<MTLTexture>)rb->metalTexture;
             }
+            sourceNeedsFboYFlip = rb->framebufferReadbackYFlip;
             if (metalTex == nil) {
                 if (rb->rgba8.empty()) return false;
                 const std::uint8_t* source = rb->rgba8.data();
@@ -10249,7 +10251,8 @@ struct GLContext::Impl {
                                    NSUInteger sourceSlice,
                                    GLint x, GLint y,
                                    GLsizei width, GLsizei height,
-                                   void* pixels) const {
+                                   void* pixels,
+                                   bool yFlipDepthReadback) const {
         if (metalTex == nil) return false;
         const MTLPixelFormat pf = metalTex.pixelFormat;
         const NSUInteger texWidth = std::max<NSUInteger>(metalTex.width >> mipLevel, 1);
@@ -10362,10 +10365,6 @@ struct GLContext::Impl {
                 default: return 0.0f;
             }
         };
-        // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate depth-readback
-        // Y-flip on current clipOrigin (sister gate to color readback
-        // path; same single-state-snapshot conservative scope).
-        const bool yFlipDepthReadback = (state->clipOrigin() != GL_UPPER_LEFT);
         auto* out = static_cast<GLfloat*>(pixels);
         for (GLsizei row = 0; row < height; ++row) {
             for (GLsizei col = 0; col < width; ++col) {
@@ -10425,8 +10424,12 @@ struct GLContext::Impl {
             if (renderbuffer->metalTexture != nullptr &&
                 renderbuffer->wasMetalDepthRendered) {
                 id<MTLTexture> metalTex = (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                const bool yFlipDepthReadback =
+                    renderbuffer->framebufferReadbackYFlip &&
+                    state->clipOrigin() != GL_UPPER_LEFT;
                 if (readDepthFromMetalTexture(metalTex, /*mipLevel*/0, /*sourceSlice*/0,
-                                              x, y, width, height, pixels)) {
+                                              x, y, width, height, pixels,
+                                              yFlipDepthReadback)) {
                     return true;
                 }
                 // Fall through to CPU shadow path on Metal-readback
@@ -10474,8 +10477,12 @@ struct GLContext::Impl {
                  texType == MTLTextureTypeCubeArray)
                     ? static_cast<NSUInteger>(std::max<GLint>(attachment.layer, 0))
                     : 0;
+            const bool yFlipDepthReadback =
+                (tex->wasFramebufferRenderedTo || tex->wasViewportRenderedTo) &&
+                state->clipOrigin() != GL_UPPER_LEFT;
             return readDepthFromMetalTexture(metalTex, mipLevel, sourceSlice,
-                                             x, y, width, height, pixels);
+                                             x, y, width, height, pixels,
+                                             yFlipDepthReadback);
         }
         return false;
     }
@@ -11131,7 +11138,7 @@ struct GLContext::Impl {
             metalTex = (__bridge id<MTLTexture>)rb->metalTexture;
             sourceWidth = rb->width;
             sourceHeight = rb->height;
-            // Renderbuffers are always draw targets — viewport-flip applies.
+            sourceNeedsFboYFlip = rb->framebufferReadbackYFlip;
         } else if (att->kind == GLFramebufferAttachment::Kind::Texture) {
             const GLTextureObject* tex = objects->textures().get(att->object);
             if (!tex || tex->metalTexture == nullptr) return false;
@@ -34706,6 +34713,12 @@ bool GLContext::Impl::dispatchCullFilteredDraw(
     return encodeTranslatedDrawAndMarkFbo(tdi);
 }
 
+static bool translatedDrawUsesClipControlYSign(const TranslatedDrawInfo& tdi) {
+    return tdi.vertexMSL != nullptr &&
+        tdi.vertexMSL->find("_appgl_ClipControlYSign [[buffer(") !=
+            std::string::npos;
+}
+
 // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — see header
 // comment at the Impl method declaration. Item 26 LIVE 19th-instance
 // candidate: sister-pattern leverage at the call-site-wrapper level.
@@ -34758,15 +34771,31 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                 // ordinary LOWER_LEFT FBO draws mark framebuffer readback
                 // only, while viewport-routed GS/cull paths also mark the
                 // narrower glGetTexImage Y-unflip flag.
-                if (tdi.clipOrigin == GL_LOWER_LEFT ||
+                const bool clipControlShaderYFixup =
+                    translatedDrawUsesClipControlYSign(tdi);
+                const bool lowerLeftFramebufferReadbackFlip =
+                    tdi.clipOrigin == GL_LOWER_LEFT &&
+                    !clipControlShaderYFixup;
+                if (lowerLeftFramebufferReadbackFlip ||
+                    clipControlShaderYFixup ||
                     tdi.markColorAttachmentReadbackFlip) {
                     for (const auto& kv : fbo->attachments) {
                         if (!isColorAttachment(kv.first)) continue;
+                        if (kv.second.kind ==
+                                GLFramebufferAttachment::Kind::Renderbuffer) {
+                            if (GLRenderbufferObject* rb =
+                                    objects->renderbuffers().get(kv.second.object)) {
+                                rb->framebufferReadbackYFlip =
+                                    lowerLeftFramebufferReadbackFlip;
+                            }
+                            continue;
+                        }
                         if (kv.second.kind !=
                                 GLFramebufferAttachment::Kind::Texture) continue;
                         if (GLTextureObject* tex =
                                 objects->textures().get(kv.second.object)) {
-                            if (tdi.clipOrigin == GL_LOWER_LEFT) {
+                            if (lowerLeftFramebufferReadbackFlip ||
+                                clipControlShaderYFixup) {
                                 tex->wasFramebufferRenderedTo = true;
                             }
                             if (tdi.markColorAttachmentReadbackFlip) {
@@ -34790,6 +34819,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                     if (GLRenderbufferObject* rb =
                             objects->renderbuffers().get(it->second.object)) {
                         rb->wasMetalDepthRendered = true;
+                        rb->framebufferReadbackYFlip =
+                            lowerLeftFramebufferReadbackFlip;
                     }
                 };
                 markDepthAttachment(GL_DEPTH_ATTACHMENT);
@@ -34813,7 +34844,8 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                             GLFramebufferAttachment::Kind::Texture) return;
                     if (GLTextureObject* tex =
                             objects->textures().get(it->second.object)) {
-                        if (tdi.clipOrigin == GL_LOWER_LEFT) {
+                        if (tdi.clipOrigin == GL_LOWER_LEFT ||
+                            clipControlShaderYFixup) {
                             tex->wasFramebufferRenderedTo = true;
                             tex->wasViewportRenderedTo = true;
                             tex->swizzleDirty = true;

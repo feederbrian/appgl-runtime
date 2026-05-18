@@ -322,18 +322,11 @@ struct TranslatedDrawInfo {
     ViewportEntry viewportArray[kMaxDrawViewports] = {};
     std::size_t viewportArrayCount = 0;
 
-    // Sprint 17 Day 3+ BONUS-1 [clip_control]: per-draw clip_control
-    // origin snapshot. Drives the viewport-descriptor Y-flip gate in
-    // `encodeTranslatedDraw` / `tryMetalMeshGSDraw`:
-    //   GL_LOWER_LEFT (GL traditional, Y-up clip) →
-    //     `originY = rtHeight - glY - glH` (existing flip; converts
-    //     bottom-up GL coords to top-down Metal coords).
-    //   GL_UPPER_LEFT (D3D-like, Y-down clip) →
-    //     `originY = glY` (no flip; user has explicitly opted into
-    //     Metal-native top-down convention).
-    // The flip is single-sourced here — SPIRV-Cross's `flip_vert_y`
-    // stays default false in ShaderTranslator. Combining shader-side
-    // and viewport-side flip would double-flip on UPPER_LEFT.
+    // Sprint 17 Day 3+ BONUS-1 / Sprint 21 A-2 [clip_control]: per-draw
+    // origin snapshot. Legacy paths use it to choose the Metal viewport
+    // origin; translated vertex shaders use an injected draw-time Y sign
+    // so the viewport rectangle stays fixed while the clip origin flips
+    // the mapping inside it.
     GLenum clipOrigin = GL_LOWER_LEFT;
     // True only when the caller knows this draw used a GL Y-up producer path
     // under LOWER_LEFT clip origin, so texture readback must undo that

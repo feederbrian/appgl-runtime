@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -33,6 +34,28 @@ namespace appgl {
 
 static constexpr NSUInteger kAppGLFragCoordParamsBufferSlot = 15;
 static constexpr NSUInteger kAppGLFragmentShadingRateParamsBufferSlot = 30;
+
+static NSInteger clipControlYSignBufferSlot(const std::string* msl) {
+    if (msl == nullptr) {
+        return -1;
+    }
+    static constexpr const char* kNeedle =
+        "_appgl_ClipControlYSign [[buffer(";
+    const std::size_t pos = msl->find(kNeedle);
+    if (pos == std::string::npos) {
+        return -1;
+    }
+    std::size_t cursor = pos + std::strlen(kNeedle);
+    NSInteger slot = 0;
+    bool haveDigit = false;
+    while (cursor < msl->size() &&
+           std::isdigit(static_cast<unsigned char>((*msl)[cursor]))) {
+        haveDigit = true;
+        slot = slot * 10 + static_cast<NSInteger>((*msl)[cursor] - '0');
+        ++cursor;
+    }
+    return haveDigit ? slot : -1;
+}
 
 // Phase 4A [metal-tess-TF] — MSL source for the CPU-exact domain-gen
 // port. Shared between the production path (`ensureTessDomainPortLibrary`
@@ -1260,6 +1283,10 @@ struct MetalFrameGraph::Impl {
         const bool vertexNeedsFragmentShadingRateState =
             info.vertexMSL != nullptr &&
             info.vertexMSL->find("_appgl_FSRState") != std::string::npos;
+        const NSInteger vertexClipControlYSignSlot =
+            clipControlYSignBufferSlot(info.vertexMSL);
+        const bool clipControlShaderYFixup =
+            vertexClipControlYSignSlot >= 0;
         auto mslUsesMultiviewViewMask = [](const std::string* msl) -> bool {
             return msl != nullptr &&
                 msl->find("spvViewMask") != std::string::npos;
@@ -2482,19 +2509,21 @@ struct MetalFrameGraph::Impl {
         // baselines on tests that don't exercise viewport_array.
         if (info.viewportArrayCount > 1) {
             const double rtHeight = static_cast<double>(colorTexture.height);
-            // Sprint 17 Day 3+ BONUS-1 [clip_control]: gate viewport-Y-flip
-            // on `info.clipOrigin`. Default GL_LOWER_LEFT → flip as before
-            // (GL bottom-up → Metal top-down). GL_UPPER_LEFT → no flip
-            // (user opted into Metal-native top-down convention).
+            // Sprint 21 A-2 [clip_control.viewport_bounds]: match the
+            // single-viewport path. Shaders with the injected Y-sign keep
+            // each viewport rectangle fixed; legacy paths keep the
+            // origin-dependent Metal viewport conversion.
             const bool flipY = (info.clipOrigin != GL_UPPER_LEFT);
             MTLViewport vps[TranslatedDrawInfo::kMaxDrawViewports];
             for (std::size_t i = 0; i < info.viewportArrayCount; ++i) {
                 const auto& e = info.viewportArray[i];
                 vps[i].originX = static_cast<double>(e.originX);
-                vps[i].originY = flipY
-                    ? (rtHeight - static_cast<double>(e.originY)
-                       - static_cast<double>(e.height))
-                    : static_cast<double>(e.originY);
+                vps[i].originY = clipControlShaderYFixup
+                    ? static_cast<double>(e.originY)
+                    : (flipY
+                        ? (rtHeight - static_cast<double>(e.originY)
+                           - static_cast<double>(e.height))
+                        : static_cast<double>(e.originY));
                 vps[i].width   = static_cast<double>(e.width);
                 vps[i].height  = static_cast<double>(e.height);
                 vps[i].znear   = e.depthNear;
@@ -2528,15 +2557,19 @@ struct MetalFrameGraph::Impl {
             const GLsizei availH = static_cast<GLsizei>(std::max<GLint>(0, rtH - glY));
             const GLsizei glW = std::min<GLsizei>(info.viewportWidth, availW);
             const GLsizei glH = std::min<GLsizei>(info.viewportHeight, availH);
-            // Sprint 17 Day 3+ BONUS-1 [clip_control]: see flip-gate
-            // rationale at the multi-viewport site above. Single-viewport
-            // path applies the same `clipOrigin`-dependent Y-flip choice.
+            // Sprint 21 A-2 [clip_control.viewport_bounds]: translated
+            // vertex shaders now carry a draw-time clip-control Y sign.
+            // When present, keep the viewport rectangle fixed and let
+            // LOWER_LEFT flip the mapping inside it. Legacy paths keep
+            // the existing viewport-origin convention.
             const bool flipY = (info.clipOrigin != GL_UPPER_LEFT);
             MTLViewport vp;
             vp.originX = static_cast<double>(glX);
-            vp.originY = flipY
-                ? (rtHeight - static_cast<double>(glY) - static_cast<double>(glH))
-                : static_cast<double>(glY);
+            vp.originY = clipControlShaderYFixup
+                ? static_cast<double>(glY)
+                : (flipY
+                    ? (rtHeight - static_cast<double>(glY) - static_cast<double>(glH))
+                    : static_cast<double>(glY));
             vp.width   = static_cast<double>(glW);
             vp.height  = static_cast<double>(glH);
             vp.znear   = info.depthRangeNear;
@@ -2714,6 +2747,14 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder setVertexBytes:&info.fragmentShadingRateShaderState
                                               length:sizeof(info.fragmentShadingRateShaderState)
                                              atIndex:kAppGLFragmentShadingRateParamsBufferSlot];
+            }
+            if (vertexClipControlYSignSlot >= 0) {
+                const float clipControlYSign =
+                    (clipControlShaderYFixup &&
+                     info.clipOrigin != GL_UPPER_LEFT) ? -1.0f : 1.0f;
+                [currentRenderEncoder setVertexBytes:&clipControlYSign
+                                              length:sizeof(clipControlYSign)
+                                             atIndex:static_cast<NSUInteger>(vertexClipControlYSignSlot)];
             }
             if (fragmentNeedsFragCoordParams) {
                 const float renderTargetHeight = colorTexture != nil
