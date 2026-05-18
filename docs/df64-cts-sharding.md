@@ -30,22 +30,37 @@ Important artifacts:
 - `manifest.json`
 - `summary.txt`
 
-## Two-worker calibration
+## Runtime-enabled validation
 
 ```bash
 appgl-runtime/tools/run_df64_cts_shards.py \
-  --workers 2 \
-  --out-dir appgl-runtime/tests/reports/df64-shards/calibration-2w
+  --workers 4 \
+  --appgl-lib-dir appgl-runtime/build \
+  --out-dir appgl-runtime/tests/reports/df64-shards/runtime-enabled-4w \
+  --label df64-runtime \
+  --expect-pass 663 \
+  --expect-fail 0 \
+  --no-default-baseline-qpas \
+  --env APPGL_ENABLE_FP64_EMULATION=1
 ```
 
-The default unsharded baseline is 9,134.20 seconds, from the Phase 7.2x
-real-device fp64 core, builtin, and vertex64 QPAs. The expected preservation
-counts are 611 Pass and 52 Fail.
+Sprint 21 validates the default build with a runtime opt-in. With
+`APPGL_ENABLE_FP64_EMULATION=1`, the expected df64 surface is 663 Pass and
+0 Fail. Without the runtime opt-in, the same default build should report the
+extension-gated cases as `NotSupported`. Do not use
+`gpu_shader_fp64.fp64.state_query` as the default-off advertising probe; that
+CTS case intentionally skips the `GL_ARB_gpu_shader_fp64` support check.
 
-The 611/52 preservation gate requires the same temporary dual-advertising
-runtime behavior used for the Phase 7.2x measurement. A final held-advertising
-runtime build should report these extension-gated cases as `NotSupported`; that
-is correct for the held product state but is not a valid sharding calibration
+## Historical calibration
+
+The default unsharded baseline is 9,134.20 seconds, from the Phase 7.2x
+real-device fp64 core, builtin, and vertex64 QPAs. The historical preservation
+counts were 611 Pass and 52 Fail.
+
+The 611/52 preservation gate required the same temporary dual-advertising
+runtime behavior used for the Phase 7.2x measurement. A held-advertising
+runtime build reports these extension-gated cases as `NotSupported`; that is
+correct for the held product state but is not a valid sharding calibration
 artifact for the temporary advertised baseline.
 
 For Step 0 and later calibration probes, prefer the committed measurement gate:

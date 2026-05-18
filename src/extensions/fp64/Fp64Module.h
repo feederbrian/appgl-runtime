@@ -10,6 +10,7 @@ const char* extensionString();
 const char* vertexAttrib64BitExtensionString();
 
 bool buildFlagEnabled();
+bool runtimeFlagEnabled();
 bool isAdvertisingHeld();
 bool isAvailable(ExtensionContext& ctx);
 void initialize(ExtensionContext& ctx);
