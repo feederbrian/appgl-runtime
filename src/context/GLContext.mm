@@ -34916,7 +34916,7 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
             if (mode == GL_PATCHES && ppo != nullptr) {
                 const bool hasTcs = ppo->tessControlProgram != 0;
                 const bool hasTes = ppo->tessEvalProgram != 0;
-                if (hasTcs != hasTes) {
+                if (hasTcs && !hasTes) {
                     pushError(GL_INVALID_OPERATION);
                     return false;
                 }
