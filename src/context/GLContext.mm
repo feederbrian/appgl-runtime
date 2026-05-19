@@ -6361,6 +6361,11 @@ struct GLContext::Impl {
                     mipTailOffset(base.desc.width,
                                   target == GL_TEXTURE_1D ? 1 : base.desc.height,
                                   target == GL_TEXTURE_3D ? base.desc.depth : 1));
+            if (texObj.desc.immutable && texObj.desc.levels > 0) {
+                effectiveMax = std::min<GLint>(
+                    effectiveMax,
+                    texObj.params.baseLevel + texObj.desc.levels - 1);
+            }
         }
 
         auto levelComplete = [&](const GLTextureImageLevel& level,
@@ -7225,8 +7230,24 @@ struct GLContext::Impl {
                 const bool sampledComplete =
                     sampledTextureCompleteForSampler(*texObject,
                                                      *samplerParamsForCompleteness);
+                const bool sparseSampledFeedback =
+                    owner != nullptr &&
+                    usesSparseSampledSidecars &&
+                    extensions::sparse_texture::isSparseStorageImageSidecarTarget(
+                        resolvedTarget);
+                bool sparseResidencyFeedbackTexture = false;
+                bool sparseSampledTexture = false;
+                if (owner != nullptr) {
+                    ExtensionContext extensionContext(*owner);
+                    sparseSampledTexture =
+                        extensions::sparse_texture::textureSparse(
+                            extensionContext, texObject) == GL_TRUE;
+                    sparseResidencyFeedbackTexture =
+                        sparseSampledFeedback && sparseSampledTexture;
+                }
                 binding.metalTexture = nullptr;
                 if (!sampledComplete &&
+                    !sparseSampledTexture &&
                     supportsIncompleteSampledColorFallback(samplerGLType,
                                                            resolvedTarget,
                                                            *texObject)) {
@@ -7239,10 +7260,7 @@ struct GLContext::Impl {
                 outBindings.push_back(binding);
                 const GLenum sparseSidecarTarget =
                     resolvedTarget;
-                if (owner != nullptr &&
-                    usesSparseSampledSidecars &&
-                    extensions::sparse_texture::isSparseStorageImageSidecarTarget(
-                        sparseSidecarTarget)) {
+                if (sparseSampledFeedback) {
                     ExtensionContext extensionContext(*owner);
                     extensions::sparse_texture::SparseStorageImageSidecarInfo sidecarInfo;
                     const auto sparseRoute =
