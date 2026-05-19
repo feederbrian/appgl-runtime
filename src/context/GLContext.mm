@@ -16996,22 +16996,22 @@ bool GLContext::texSubImage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
+    ExtensionContext extensionContext(*this);
     const int cubeFaceForSubImage = Impl::cubeFaceIndexForTarget(target);
+    const int sparseCubeFace =
+        (extensions::sparse_texture::textureSparse(extensionContext, object) == GL_TRUE &&
+         object->target == GL_TEXTURE_CUBE_MAP &&
+         levelIt->second.desc.depth >= 6)
+            ? cubeFaceForSubImage
+            : -1;
     GLTextureImageLevel* imagePtr = &levelIt->second;
-    if (cubeFaceForSubImage >= 0) {
+    if (cubeFaceForSubImage >= 0 && sparseCubeFace < 0) {
         auto& faceLevels = object->cubeFaceLevels[static_cast<std::size_t>(cubeFaceForSubImage)];
         auto [faceIt, _inserted] = faceLevels.try_emplace(level, levelIt->second);
         imagePtr = &faceIt->second;
     }
     GLTextureImageLevel& image = *imagePtr;
     GLint effectiveZoffset = zoffset;
-    ExtensionContext extensionContext(*this);
-    const int sparseCubeFace =
-        (extensions::sparse_texture::textureSparse(extensionContext, object) == GL_TRUE &&
-         object->target == GL_TEXTURE_CUBE_MAP &&
-         image.desc.depth >= 6)
-            ? Impl::cubeFaceIndexForTarget(target)
-            : -1;
     if (sparseCubeFace >= 0) {
         effectiveZoffset = sparseCubeFace;
     }
@@ -17164,7 +17164,7 @@ bool GLContext::texSubImage(
         }
     }
 
-    if (cubeFaceForSubImage >= 0) {
+    if (cubeFaceForSubImage >= 0 && sparseCubeFace < 0) {
         object->levels[level] = image;
     }
 
