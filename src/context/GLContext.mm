@@ -2566,6 +2566,8 @@ bool defaultUniformBlockContainsFp64(const ShaderReflection& reflection);
 
 struct GLContext::Impl {
     ~Impl() {
+        releaseRetainedMetalObject(incompleteSampledColorTexture);
+        incompleteSampledColorTexture = nullptr;
         if (objects == nullptr) {
             return;
         }
@@ -6190,11 +6192,32 @@ struct GLContext::Impl {
         const bool depthStencilNeedsSwizzleProxy =
             !depthStencilNeedsSamplingFlip &&
             needsDepthStencilSwizzleProxy(texObj, baseTex);
+        const NSUInteger mipCount = baseTex.mipmapLevelCount;
+        const GLint requestedBaseLevel = std::max<GLint>(texObj.params.baseLevel, 0);
+        const bool validMipRange =
+            mipCount > 0 &&
+            requestedBaseLevel < static_cast<GLint>(mipCount) &&
+            texObj.params.maxLevel >= requestedBaseLevel;
+        const NSUInteger viewBaseMip = validMipRange
+            ? static_cast<NSUInteger>(requestedBaseLevel)
+            : 0;
+        const NSUInteger viewLastMip = validMipRange
+            ? std::min<NSUInteger>(
+                  static_cast<NSUInteger>(texObj.params.maxLevel),
+                  mipCount - 1)
+            : (mipCount > 0 ? mipCount - 1 : 0);
+        const NSRange viewLevels = validMipRange
+            ? NSMakeRange(viewBaseMip, viewLastMip - viewBaseMip + 1)
+            : NSMakeRange(0, mipCount);
+        const bool needsMipRangeView =
+            validMipRange &&
+            (viewBaseMip != 0 || viewLastMip + 1 < mipCount);
         const bool needsView =
             !isDefaultSwizzle(sw) ||
             samplingPixelFormat != baseTex.pixelFormat ||
             depthStencilNeedsSamplingFlip ||
-            depthStencilNeedsSwizzleProxy;
+            depthStencilNeedsSwizzleProxy ||
+            needsMipRangeView;
 
         // Fast path: default swizzle and no sampling-format override —
         // use the base texture, release any stale view.
@@ -6279,7 +6302,7 @@ struct GLContext::Impl {
         id<MTLTexture> swizzledView = [baseTex
             newTextureViewWithPixelFormat:samplingPixelFormat
                              textureType:baseTex.textureType
-                                  levels:NSMakeRange(0, baseTex.mipmapLevelCount)
+                                  levels:viewLevels
                                   slices:NSMakeRange(0, baseTex.arrayLength)
                                  swizzle:channels];
         if (swizzledView != nil) {
@@ -6289,6 +6312,126 @@ struct GLContext::Impl {
         return texObj.metalSwizzledView != nullptr
             ? texObj.metalSwizzledView
             : texObj.metalTexture;
+    }
+
+    static bool samplerMinFilterRequiresMipChain(GLint minFilter) {
+        switch (minFilter) {
+            case GL_NEAREST_MIPMAP_NEAREST:
+            case GL_LINEAR_MIPMAP_NEAREST:
+            case GL_NEAREST_MIPMAP_LINEAR:
+            case GL_LINEAR_MIPMAP_LINEAR:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool sampledTextureCompleteForSampler(const GLTextureObject& texObj,
+                                          const GLTextureParameters& samplerParams) const {
+        const GLenum target = texObj.desc.target != 0 ? texObj.desc.target : texObj.target;
+        if (target == GL_TEXTURE_BUFFER) {
+            return texObj.metalTexture != nullptr;
+        }
+        if (target == GL_TEXTURE_2D_MULTISAMPLE ||
+            target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
+            target == GL_TEXTURE_RECTANGLE) {
+            auto it = texObj.levels.find(0);
+            return it != texObj.levels.end() && it->second.defined;
+        }
+        if (texObj.params.maxLevel < texObj.params.baseLevel) {
+            return false;
+        }
+
+        auto baseIt = texObj.levels.find(texObj.params.baseLevel);
+        if (baseIt == texObj.levels.end() || !baseIt->second.defined) {
+            return false;
+        }
+        const GLTextureImageLevel& base = baseIt->second;
+        if (base.desc.width <= 0 || base.desc.height <= 0 || base.desc.depth <= 0) {
+            return false;
+        }
+
+        const bool needsMipChain =
+            samplerMinFilterRequiresMipChain(samplerParams.minFilter);
+        GLint effectiveMax = texObj.params.baseLevel;
+        if (needsMipChain) {
+            effectiveMax = std::min(
+                texObj.params.maxLevel,
+                texObj.params.baseLevel +
+                    mipTailOffset(base.desc.width,
+                                  target == GL_TEXTURE_1D ? 1 : base.desc.height,
+                                  target == GL_TEXTURE_3D ? base.desc.depth : 1));
+        }
+
+        auto levelComplete = [&](const GLTextureImageLevel& level,
+                                 GLint levelOffset) -> bool {
+            if (!level.defined) return false;
+            if (level.desc.internalFormat != base.desc.internalFormat) return false;
+            if (level.desc.width != mipDimension(base.desc.width, levelOffset)) {
+                return false;
+            }
+            const GLsizei expectedHeight =
+                target == GL_TEXTURE_1D ? 1 : mipDimension(base.desc.height, levelOffset);
+            if (level.desc.height != expectedHeight) {
+                return false;
+            }
+            const GLsizei expectedDepth =
+                target == GL_TEXTURE_3D ? mipDimension(base.desc.depth, levelOffset) : base.desc.depth;
+            return level.desc.depth == expectedDepth;
+        };
+
+        for (GLint level = texObj.params.baseLevel; level <= effectiveMax; ++level) {
+            const GLint offset = level - texObj.params.baseLevel;
+            if (target == GL_TEXTURE_CUBE_MAP) {
+                for (const auto& faceLevels : texObj.cubeFaceLevels) {
+                    auto faceIt = faceLevels.find(level);
+                    if (faceIt == faceLevels.end() ||
+                        !levelComplete(faceIt->second, offset)) {
+                        return false;
+                    }
+                }
+            } else {
+                auto levelIt = texObj.levels.find(level);
+                if (levelIt == texObj.levels.end() ||
+                    !levelComplete(levelIt->second, offset)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    static bool supportsIncompleteSampledColorFallback(GLenum samplerGLType,
+                                                       GLenum target,
+                                                       const GLTextureObject& texObj) {
+        return samplerGLType == GL_SAMPLER_2D &&
+               target == GL_TEXTURE_2D &&
+               !isDepthFormat(texObj.desc.internalFormat) &&
+               !isStencilFormat(texObj.desc.internalFormat);
+    }
+
+    void* resolveIncompleteSampledColorFallbackTexture() {
+        if (incompleteSampledColorTexture != nullptr || device == nil) {
+            return incompleteSampledColorTexture;
+        }
+
+        MTLTextureDescriptor* desc =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+                                                               width:1
+                                                              height:1
+                                                           mipmapped:NO];
+        desc.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+        if (texture == nil) {
+            return nullptr;
+        }
+        const float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        [texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                    mipmapLevel:0
+                      withBytes:rgba
+                    bytesPerRow:sizeof(rgba)];
+        incompleteSampledColorTexture = transferRetainedMetalObject(texture);
+        return incompleteSampledColorTexture;
     }
 
     // Phase 8X Group 4d follow-up⁷ — walk a program's fragment/vertex
@@ -7041,6 +7184,8 @@ struct GLContext::Impl {
                 // back to the texture's own params. Both paths
                 // lazily rebuild the MTLSamplerState on demand.
                 void* metalSamplerState = nullptr;
+                const GLTextureParameters* samplerParamsForCompleteness =
+                    &texObject->params;
                 const GLuint samplerName = state->boundSampler(static_cast<GLuint>(glUnit));
                 if (samplerName != 0) {
                     GLSamplerObject* samplerObj = objects->samplers().get(samplerName);
@@ -7049,6 +7194,7 @@ struct GLContext::Impl {
                             (void)rebuildSamplerState(*samplerObj);
                         }
                         metalSamplerState = samplerObj->metalSampler;
+                        samplerParamsForCompleteness = &samplerObj->params;
                     }
                 }
                 if (metalSamplerState == nullptr) {
@@ -7074,11 +7220,25 @@ struct GLContext::Impl {
                 // consecutive Metal slot starting at metalBinding.
                 TranslatedDrawInfo::TextureBinding binding;
                 binding.metalSlot = sampledTex.metalBinding + static_cast<std::uint32_t>(arrayElement);
-                binding.metalTexture = resolveSwizzledTexture(*texObject);
+                const GLenum resolvedTarget =
+                    preferredTarget != 0 ? preferredTarget : discoveredTarget;
+                const bool sampledComplete =
+                    sampledTextureCompleteForSampler(*texObject,
+                                                     *samplerParamsForCompleteness);
+                binding.metalTexture = nullptr;
+                if (!sampledComplete &&
+                    supportsIncompleteSampledColorFallback(samplerGLType,
+                                                           resolvedTarget,
+                                                           *texObject)) {
+                    binding.metalTexture = resolveIncompleteSampledColorFallbackTexture();
+                }
+                if (binding.metalTexture == nullptr) {
+                    binding.metalTexture = resolveSwizzledTexture(*texObject);
+                }
                 binding.metalSamplerState = metalSamplerState;
                 outBindings.push_back(binding);
                 const GLenum sparseSidecarTarget =
-                    preferredTarget != 0 ? preferredTarget : discoveredTarget;
+                    resolvedTarget;
                 if (owner != nullptr &&
                     usesSparseSampledSidecars &&
                     extensions::sparse_texture::isSparseStorageImageSidecarTarget(
@@ -12165,6 +12325,7 @@ struct GLContext::Impl {
     std::unique_ptr<GLCapabilities> capabilities;
     std::unique_ptr<GLObjectStore> objects;
     std::unique_ptr<GLStateTracker> state;
+    void* incompleteSampledColorTexture = nullptr;
 
     // Phase 8X Group 4d follow-up⁸ — one-shot-per-key dedup sets for the
     // sampler-resolution / sampler-build diagnostic logs. Both fire at
@@ -17948,7 +18109,9 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
     if (pname == GL_TEXTURE_SWIZZLE_R || pname == GL_TEXTURE_SWIZZLE_G ||
         pname == GL_TEXTURE_SWIZZLE_B || pname == GL_TEXTURE_SWIZZLE_A ||
         pname == GL_TEXTURE_SWIZZLE_RGBA ||
-        pname == GL_DEPTH_STENCIL_TEXTURE_MODE) {
+        pname == GL_DEPTH_STENCIL_TEXTURE_MODE ||
+        pname == GL_TEXTURE_BASE_LEVEL ||
+        pname == GL_TEXTURE_MAX_LEVEL) {
         object->swizzleDirty = true;
     }
     return true;
@@ -18104,6 +18267,10 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
     // fields (lod clamps, border color) so the cached sampler must
     // rebuild on the next draw.
     object->samplerDirty = true;
+    if (pname == GL_TEXTURE_BASE_LEVEL ||
+        pname == GL_TEXTURE_MAX_LEVEL) {
+        object->swizzleDirty = true;
+    }
     return true;
 }
 
