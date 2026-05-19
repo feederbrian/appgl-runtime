@@ -104,6 +104,19 @@ bool isFormatTypeCompatible_extern(GLenum format, GLenum type);
 
 namespace {
 
+bool appglEnvEnabledDefaultOn(const char* name) {
+    const char* value = std::getenv(name);
+    return value == nullptr || (value[0] != '0' && value[0] != '\0');
+}
+
+bool metalTessTFEnabled() {
+    return appglEnvEnabledDefaultOn("APPGL_ENABLE_METAL_TESS_TF");
+}
+
+bool liftTessUniformGuardEnabled() {
+    return appglEnvEnabledDefaultOn("APPGL_LIFT_TESS_UNIFORM_GUARD");
+}
+
 bool sourceDeclaresFragCoordOriginUpperLeft(const std::string& source) {
     std::string clean;
     clean.reserve(source.size());
@@ -28065,9 +28078,9 @@ bool GLContext::linkProgram(GLuint program) {
             // change. CPU `emulateVsOnlyDrawForTf` remains the
             // authoritative TF capture path until Phase 3 routes
             // around it. Master gate: APPGL_ENABLE_METAL_TF_VS=1
-            // (off by default, mirroring APPGL_ENABLE_METAL_TESS_TF's
-            // conservative posture). Read once at link time so a
-            // relink under different env settings re-evaluates cleanly.
+            // (still off by default for this separate VS-only TF
+            // path). Read once at link time so a relink under
+            // different env settings re-evaluates cleanly.
             //
             // Pre-conditions:
             //   • VS+FS translation succeeded (vsOk && fsOk)
@@ -29418,40 +29431,33 @@ bool GLContext::linkProgram(GLuint program) {
                         programObject->tessEvalMSL.find("spvIn [[buffer(") != std::string::npos ||
                         programObject->tessEvalMSL.find("spvPatchIn [[buffer(") != std::string::npos);
                 // ----------------------------------------------------
-                // APPGL_ENABLE_METAL_TESS_TF — master enable for the
-                // Metal tess+TF compute chain. When set:
+                // APPGL_ENABLE_METAL_TESS_TF — default-on master
+                // enable for the Metal tess+TF compute chain
+                // (APPGL_ENABLE_METAL_TESS_TF=0 restores the legacy
+                // CPU route for attribution). When enabled:
                 //   • This link-time block sets metalTessTier for tess
                 //     programs with TF varyings (Phase2 or Phase3) and
-                //     stashes metalTessEvalComputePipelineState. Without
-                //     it, tessBlockedByTF==true forces tier=None and
-                //     every drawArrays(GL_PATCHES) routes to the CPU
-                //     tess interpreter.
+                //     stashes metalTessEvalComputePipelineState.
+                //     Opting out forces tier=None for TF-varying tess
+                //     programs and routes drawArrays(GL_PATCHES) to
+                //     the CPU tess interpreter.
                 //   • tryMetalTessellationDraw and the rasterizer-
-                //     discard probe path also re-check this env (4
-                //     read sites in this file plus the dispatch site
-                //     in MetalFrameGraph.mm).
+                //     discard probe path also re-check this gate.
                 // It pairs with APPGL_LIFT_TESS_UNIFORM_GUARD: that var
-                // additionally relaxes the "tess uses uniforms → CPU
-                // fallback" guard, but on its own does NOTHING because
-                // the master enable above is required to even build the
-                // PSOs at link time. Both must be set for the Metal
-                // compute chain to engage on uniform-using tess shaders.
-                // Default off — enabling produces measurable forward
-                // motion (env-off→env-full vacuous→genuine transitions
-                // landed 11 GENUINE_PASS in the 2026-04-25 baseline)
-                // but also exposes byte-layout / kernel-emission gaps
-                // (data_pass_through-class still fails verification).
+                // relaxes the "tess uses uniforms -> CPU fallback"
+                // guard. Both gates are default-on now; either =0
+                // keeps the old CPU path available for attribution.
                 // Programs that declared TF varyings at link time must
                 // source TES output into the bound TF buffer at draw
                 // time. tessTFReady=true means: (a) probe built the TES
                 // compute PSO, (b) reflection produced a TES output
-                // layout, (c) APPGL_ENABLE_METAL_TESS_TF is set.
+                // layout, (c) APPGL_ENABLE_METAL_TESS_TF is enabled.
                 const bool tessUsesTF =
                     !programObject->transformFeedbackVaryingNames.empty();
                 const bool tessTFReady =
                     probe.tessEvalComputeOk &&
                     programObject->tessEvalOutputLayout.structSize > 0 &&
-                    std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+                    metalTessTFEnabled();
                 const bool tessBlockedByTF = tessUsesTF && !tessTFReady;
                 if (probe.computeOk && !needsPhase3 && !tessBlockedByTF) {
                     programObject->metalTessTier =
@@ -33663,22 +33669,17 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         program.tessControlMSL.find("_DefaultUniforms") != std::string::npos ||
         program.tessEvalAsComputeMSL.find("_DefaultUniforms") != std::string::npos ||
         program.tessVertexAsComputeMSL.find("_DefaultUniforms") != std::string::npos;
-    // Phase 5 probe-only env: APPGL_LIFT_TESS_UNIFORM_GUARD routes
-    // uniform-using tess programs through Metal instead of the CPU
-    // fallback. Net delta with this env on is -13 (6 invariance +
-    // 8 vertex_spacing regress, 1 tessellation_shader_tessellation
-    // win) because our Metal domain-gen output disagrees with CTS
-    // counter-program probe counts for several (mode, spacing,
-    // level) combinations. Off by default — Phase 5 proper needs a
-    // tess-spec-exact rewrite of `spvGenTessDomain` + counter-
-    // program routing to match. Left in for future ratcheting.
-    const bool liftUniformGuard = std::getenv("APPGL_LIFT_TESS_UNIFORM_GUARD") != nullptr;
+    // APPGL_LIFT_TESS_UNIFORM_GUARD is the paired default-on gate for
+    // uniform-using tess programs. APPGL_LIFT_TESS_UNIFORM_GUARD=0
+    // preserves the legacy CPU fallback for attribution.
+    const bool liftUniformGuard = liftTessUniformGuardEnabled();
+    const bool enableMetalTessTF = metalTessTFEnabled();
     const bool tessTFActive =
         transformFeedbackActive &&
         program.metalTessEvalComputePipelineState != nullptr &&
         program.tessEvalOutputLayout.structSize > 0 &&
         (liftUniformGuard || !tessUsesUniforms) &&
-        std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+        enableMetalTessTF;
     // Detector point B — gate-evaluation instrumentation paired with link
     // probe (A) and dispatch (C). Logs every reach of this gate plus the
     // tier classification + rasterizer-discard state so post-processors
@@ -33695,7 +33696,7 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
             static_cast<int>(program.metalTessTier),
             tessUsesUniforms ? 1 : 0,
             liftUniformGuard ? 1 : 0,
-            std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr ? 1 : 0,
+            enableMetalTessTF ? 1 : 0,
             program.metalTessEvalComputePipelineState != nullptr ? 1 : 0,
             program.tessEvalOutputLayout.structSize,
             transformFeedbackActive ? 1 : 0,
@@ -33713,7 +33714,7 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         program.tessGenPointMode == GL_TRUE &&
         !(program.metalTessEvalComputePipelineState != nullptr &&
           program.tessEvalOutputLayout.structSize > 0 &&
-          std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr)) {
+          enableMetalTessTF)) {
         return false;
     }
     // Rasterizer-discard is usually paired with TF. When the TF-
@@ -33730,7 +33731,7 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // comes back 0.
     const bool keepMetalForDiscardProbe = liftUniformGuard &&
         program.metalTessEvalComputePipelineState != nullptr &&
-        std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+        enableMetalTessTF;
     if (state->isEnabled(GL_RASTERIZER_DISCARD) && !tessTFActive &&
         !keepMetalForDiscardProbe) {
         return false;
@@ -33853,8 +33854,8 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     }
     // Phase 3B.4 [metal-tess-TF]: forward the TES-as-compute PSO if
     // the link-time probe built one. The encoder only runs the
-    // domain-gen + TES-compute dispatches when
-    // `APPGL_ENABLE_METAL_TESS_TF` is set; without that env the PSO
+    // domain-gen + TES-compute dispatches when the default-on
+    // `APPGL_ENABLE_METAL_TESS_TF` gate is enabled; with =0 the PSO
     // slot is ignored and the render path runs unchanged.
     info.tessEvalComputePipelineState =
         program.metalTessEvalComputePipelineState;
@@ -33888,21 +33889,22 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // program. Only runs when the program actually references
     // _DefaultUniforms in its compute MSL — otherwise we skip the
     // per-draw pack cost.
-    // Phase 5 opt-in path: when APPGL_LIFT_TESS_UNIFORM_GUARD is
-    // set, pack the default uniforms so the Metal path feeds the
-    // right tess factors to TCS/VS-compute/TES-compute.
+    // Phase 5 path: when APPGL_LIFT_TESS_UNIFORM_GUARD is enabled
+    // (default, with =0 opt-out), pack the default uniforms so the
+    // Metal path feeds the right tess factors to
+    // TCS/VS-compute/TES-compute.
     thread_local std::vector<std::uint8_t> tcsUniformScratch;
     thread_local std::vector<std::uint8_t> vsComputeUniformScratch;
     thread_local std::vector<std::uint8_t> tesComputeUniformScratch;
     // Phase 5 probe: pack uniforms for ANY Metal-routed tess draw
-    // when env lifted, not just TF-active ones. The CTS counter
+    // when the uniform guard is enabled, not just TF-active ones. The CTS counter
     // probe is non-TF but still needs accurate tess factors or its
     // PRIMITIVES_GENERATED count won't match the subsequent TF
     // draws.
     const bool packUniformsForThisDraw = liftUniformGuard && tessUsesUniforms &&
         program.metalTessEvalComputePipelineState != nullptr &&
         program.tessEvalOutputLayout.structSize > 0 &&
-        std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+        enableMetalTessTF;
     if (packUniformsForThisDraw) {
         if (program.tessControlUniformLayout.empty() &&
             !program.tessControlReflection.uniformBlocks.empty()) {
@@ -34033,7 +34035,7 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     const bool runTessTFWrite =
         program.metalTessEvalComputePipelineState != nullptr &&
         program.tessEvalOutputLayout.structSize > 0 &&
-        std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr;
+        enableMetalTessTF;
     if (runTessTFWrite) {
         info.outGeneratedVertCount = &tfGeneratedVerts;
         info.outTesComputeOutBuf = &tfRetainedOutBuf;
@@ -34053,7 +34055,7 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
             (unsigned)programName,
             program.metalTessEvalComputePipelineState != nullptr ? 1 : 0,
             program.tessEvalOutputLayout.structSize,
-            std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr ? 1 : 0,
+            enableMetalTessTF ? 1 : 0,
             runTessTFWrite ? 1 : 0);
     }
 

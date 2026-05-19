@@ -35,6 +35,15 @@ namespace appgl {
 static constexpr NSUInteger kAppGLFragCoordParamsBufferSlot = 15;
 static constexpr NSUInteger kAppGLFragmentShadingRateParamsBufferSlot = 30;
 
+static bool appglEnvEnabledDefaultOn(const char* name) {
+    const char* value = std::getenv(name);
+    return value == nullptr || (value[0] != '0' && value[0] != '\0');
+}
+
+static bool metalTessTFEnabled() {
+    return appglEnvEnabledDefaultOn("APPGL_ENABLE_METAL_TESS_TF");
+}
+
 static NSInteger clipControlYSignBufferSlot(const std::string* msl) {
     if (msl == nullptr) {
         return -1;
@@ -6268,12 +6277,13 @@ fragment float4 appgl_immediate_textured_fs(
         // reads those bytes into the bound transform-feedback buffers.
         //
         // Runs whenever info.tessEvalComputePipelineState is non-null
-        // and the env flag is set. The caller toggles the TF write
+        // and the default-on APPGL_ENABLE_METAL_TESS_TF gate is
+        // enabled (=0 opt-out). The caller toggles the TF write
         // portion via `info.outGeneratedVertCount` / `info.outTesComputeOutBuf`;
         // when both are null the chain just counts verts (needed for
         // PRIMITIVES_GENERATED on tess draws without TF).
         const bool isTessTF = (info.tessEvalComputePipelineState != nullptr) &&
-            (std::getenv("APPGL_ENABLE_METAL_TESS_TF") != nullptr);
+            metalTessTFEnabled();
         id<MTLBuffer> domainCoordBuf = nil;
         id<MTLBuffer> domainPrimIDBuf = nil;
         id<MTLBuffer> totalVertCountBuf = nil;
