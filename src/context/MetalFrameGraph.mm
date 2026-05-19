@@ -57,6 +57,16 @@ static NSInteger clipControlYSignBufferSlot(const std::string* msl) {
     return haveDigit ? slot : -1;
 }
 
+static MTLWinding frontFacingWindingForClipControl(GLenum frontFace,
+                                                   bool invertForClipControlY)
+{
+    bool clockwise = (frontFace == GL_CW);
+    if (invertForClipControlY) {
+        clockwise = !clockwise;
+    }
+    return clockwise ? MTLWindingClockwise : MTLWindingCounterClockwise;
+}
+
 // Phase 4A [metal-tess-TF] — MSL source for the CPU-exact domain-gen
 // port. Shared between the production path (`ensureTessDomainPortLibrary`
 // on `Impl`) and the validation probe (`phaseAProbeTessDomainPort`).
@@ -1291,6 +1301,8 @@ struct MetalFrameGraph::Impl {
             vertexClipControlYSignSlot >= 0 &&
             info.clipControlYSignFixupEnabled &&
             !info.stencilTestEnabled;
+        const bool clipControlInvertsWinding =
+            clipControlShaderYFixup && info.clipOrigin != GL_UPPER_LEFT;
         auto mslUsesMultiviewViewMask = [](const std::string* msl) -> bool {
             return msl != nullptr &&
                 msl->find("spvViewMask") != std::string::npos;
@@ -2481,7 +2493,9 @@ struct MetalFrameGraph::Impl {
             [currentRenderEncoder setCullMode:desiredCull];
             cachedCullMode = desiredCull;
         }
-        const MTLWinding desiredWinding = info.frontFace == GL_CW ? MTLWindingClockwise : MTLWindingCounterClockwise;
+        const MTLWinding desiredWinding =
+            frontFacingWindingForClipControl(info.frontFace,
+                                             clipControlInvertsWinding);
         if (desiredWinding != cachedFrontFaceWinding) {
             [currentRenderEncoder setFrontFacingWinding:desiredWinding];
             cachedFrontFaceWinding = desiredWinding;
