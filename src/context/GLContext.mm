@@ -32075,6 +32075,15 @@ bool reflectionNeedsFp64BindingShim(const ShaderReflection& reflection) {
     return reflection.fp64TranslationActive && reflection.usesFp64;
 }
 
+bool tessellationProgramUsesFp64(const GLProgramObject& program) {
+    return program.tessControlReflection.usesFp64 ||
+           program.tessControlReflection.fp64TranslationActive ||
+           program.tessVertexAsComputeReflection.usesFp64 ||
+           program.tessVertexAsComputeReflection.fp64TranslationActive ||
+           program.tessEvalAsComputeReflection.usesFp64 ||
+           program.tessEvalAsComputeReflection.fp64TranslationActive;
+}
+
 bool resourceNeedsFp64BindingShim(const ShaderReflection& reflection,
                                   const ShaderReflection::ResourceBinding& binding) {
     return reflectionNeedsFp64BindingShim(reflection) && binding.containsFp64;
@@ -33665,8 +33674,10 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // spacing rounding, …). Our domain-gen isn't exact enough yet —
     // keep uniform-using programs on the CPU tessellator to preserve
     // 3B.5's wins until the tess correctness gap closes.
+    const bool tcsUsesDefaultUniforms =
+        program.tessControlMSL.find("_DefaultUniforms") != std::string::npos;
     const bool tessUsesUniforms =
-        program.tessControlMSL.find("_DefaultUniforms") != std::string::npos ||
+        tcsUsesDefaultUniforms ||
         program.tessEvalAsComputeMSL.find("_DefaultUniforms") != std::string::npos ||
         program.tessVertexAsComputeMSL.find("_DefaultUniforms") != std::string::npos;
     // APPGL_LIFT_TESS_UNIFORM_GUARD is the paired default-on gate for
@@ -33674,11 +33685,20 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // preserves the legacy CPU fallback for attribution.
     const bool liftUniformGuard = liftTessUniformGuardEnabled();
     const bool enableMetalTessTF = metalTessTFEnabled();
+    const bool tessUsesFp64 = tessellationProgramUsesFp64(program);
+    const bool tcsUsesFp64 = program.tessControlReflection.usesFp64;
+    // CTS max_uniform_components lowers as a TCS FP64 reflection without
+    // a `_DefaultUniforms` MSL marker. The Metal tessellation TF path does
+    // not yet preserve those FP64 side-effect bytes, so keep only TCS-FP64
+    // TF/discard captures on the CPU tessellator.
+    const bool tessFp64TfFallback = tcsUsesFp64 &&
+        (transformFeedbackActive || state->isEnabled(GL_RASTERIZER_DISCARD));
     const bool tessTFActive =
         transformFeedbackActive &&
         program.metalTessEvalComputePipelineState != nullptr &&
         program.tessEvalOutputLayout.structSize > 0 &&
         (liftUniformGuard || !tessUsesUniforms) &&
+        !tessFp64TfFallback &&
         enableMetalTessTF;
     // Detector point B — gate-evaluation instrumentation paired with link
     // probe (A) and dispatch (C). Logs every reach of this gate plus the
@@ -33687,7 +33707,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     if (detectorEnabled()) {
         std::fprintf(stderr,
             "APPGL_DETECTOR lift_gate prog=%u mode=0x%04X count=%d tier=%d "
-            "tessUsesUniforms=%d liftGuard=%d enableMetalTF=%d "
+            "tessUsesUniforms=%d tessUsesFp64=%d tcsUsesFp64=%d "
+            "fp64Fallback=%d "
+            "liftGuard=%d enableMetalTF=%d "
             "compPSO=%d tesOutSize=%zu tfActive=%d rasterDiscard=%d "
             "-> tessTFActive=%d\n",
             static_cast<unsigned int>(programName),
@@ -33695,6 +33717,9 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
             static_cast<int>(count),
             static_cast<int>(program.metalTessTier),
             tessUsesUniforms ? 1 : 0,
+            tessUsesFp64 ? 1 : 0,
+            tcsUsesFp64 ? 1 : 0,
+            tessFp64TfFallback ? 1 : 0,
             liftUniformGuard ? 1 : 0,
             enableMetalTessTF ? 1 : 0,
             program.metalTessEvalComputePipelineState != nullptr ? 1 : 0,
@@ -33731,7 +33756,8 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // comes back 0.
     const bool keepMetalForDiscardProbe = liftUniformGuard &&
         program.metalTessEvalComputePipelineState != nullptr &&
-        enableMetalTessTF;
+        enableMetalTessTF &&
+        !tessFp64TfFallback;
     if (state->isEnabled(GL_RASTERIZER_DISCARD) && !tessTFActive &&
         !keepMetalForDiscardProbe) {
         return false;
