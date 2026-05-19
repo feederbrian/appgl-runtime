@@ -151,6 +151,7 @@ struct GLTextureObject {
     GLTextureDesc desc;
     GLTextureParameters params;
     std::unordered_map<GLint, GLTextureImageLevel> levels;
+    std::array<std::unordered_map<GLint, GLTextureImageLevel>, 6> cubeFaceLevels;
     bool instantiated = false;
 
     // Phase 8X Group 4d follow-up⁷ — lazy MTLSamplerState cached on the

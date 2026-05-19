@@ -2694,6 +2694,9 @@ struct GLContext::Impl {
         object.swizzleDirty = true;
         object.desc = {};
         object.levels.clear();
+        for (auto& faceLevels : object.cubeFaceLevels) {
+            faceLevels.clear();
+        }
     }
 
     void releaseRenderbufferStorage(GLRenderbufferObject& object) {
@@ -4315,6 +4318,20 @@ struct GLContext::Impl {
         if (device == nil || !baseLevel.defined || baseLevel.desc.width <= 0 || baseLevel.desc.height <= 0 || baseLevel.desc.depth <= 0) {
             return true;
         }
+        auto cubeFaceLevel = [&](NSUInteger face, GLint level) -> const GLTextureImageLevel* {
+            if (object.target == GL_TEXTURE_CUBE_MAP && face < object.cubeFaceLevels.size()) {
+                const auto& faceLevels = object.cubeFaceLevels[face];
+                const auto faceIt = faceLevels.find(level);
+                if (faceIt != faceLevels.end() && faceIt->second.defined) {
+                    return &faceIt->second;
+                }
+            }
+            const auto it = object.levels.find(level);
+            if (it != object.levels.end() && it->second.defined) {
+                return &it->second;
+            }
+            return nullptr;
+        };
 
         ExtensionContext extensionContext(*owner);
         bool sparseUploadHandled = false;
@@ -4542,6 +4559,15 @@ struct GLContext::Impl {
                     maxLevelExisting = std::max(maxLevelExisting, levelIndex);
                 }
             }
+            if (object.target == GL_TEXTURE_CUBE_MAP) {
+                for (const auto& faceLevels : object.cubeFaceLevels) {
+                    for (const auto& [levelIndex, image] : faceLevels) {
+                        if (levelIndex >= 0 && image.defined) {
+                            maxLevelExisting = std::max(maxLevelExisting, levelIndex);
+                        }
+                    }
+                }
+            }
             const bool use2DFor1D = sparseClampUses2DBackingFor1DTextures();
             const NSUInteger wantMipCount = (object.target == GL_TEXTURE_1D && !use2DFor1D)
                 ? 1u
@@ -4602,7 +4628,49 @@ struct GLContext::Impl {
                     const NSUInteger rowStride = static_cast<NSUInteger>(safeDimension(image.desc.width)) * bpp;
                     const NSUInteger imageStride = rowStride * static_cast<NSUInteger>(
                         object.target == GL_TEXTURE_1D ? 1 : safeDimension(image.desc.height));
-                    if (object.target == GL_TEXTURE_3D) {
+                    if (object.target == GL_TEXTURE_CUBE_MAP) {
+                        const MTLRegion r = MTLRegionMake2D(0, 0,
+                            static_cast<NSUInteger>(safeDimension(image.desc.width)),
+                            static_cast<NSUInteger>(safeDimension(image.desc.height)));
+                        for (NSUInteger face = 0; face < 6; ++face) {
+                            const GLTextureImageLevel* faceImage =
+                                cubeFaceLevel(face, levelIndex);
+                            if (faceImage == nullptr) {
+                                continue;
+                            }
+                            const std::uint8_t* faceBytes = nullptr;
+                            std::size_t faceBpp = 4;
+                            if (useNativePath && faceImage->nativeBpp > 0 &&
+                                !faceImage->nativeData.empty()) {
+                                faceBytes = faceImage->nativeData.data();
+                                faceBpp = faceImage->nativeBpp;
+                            } else if (useNativePath) {
+                                continue;
+                            } else if (!faceImage->rgba8.empty()) {
+                                faceBytes = faceImage->rgba8.data();
+                            } else {
+                                continue;
+                            }
+                            const NSUInteger faceRowStride =
+                                static_cast<NSUInteger>(safeDimension(faceImage->desc.width)) * faceBpp;
+                            const NSUInteger faceImageStride = faceRowStride *
+                                static_cast<NSUInteger>(safeDimension(faceImage->desc.height));
+                            if (fastPathNeedsBlit) {
+                                fpBlitUpload2D(faceBytes,
+                                               faceRowStride,
+                                               faceImageStride,
+                                               r,
+                                               mipLevel,
+                                               face,
+                                               faceBpp);
+                            } else {
+                                [existing replaceRegion:r mipmapLevel:mipLevel slice:face
+                                              withBytes:faceBytes
+                                            bytesPerRow:faceRowStride
+                                          bytesPerImage:faceImageStride];
+                            }
+                        }
+                    } else if (object.target == GL_TEXTURE_3D) {
                         const NSUInteger slices = static_cast<NSUInteger>(safeDimension(image.desc.depth));
                         for (NSUInteger slice = 0; slice < slices; ++slice) {
                             const MTLRegion r = MTLRegionMake3D(0, 0, slice,
@@ -4696,6 +4764,15 @@ struct GLContext::Impl {
         for (const auto& [levelIndex, image] : object.levels) {
             if (levelIndex >= 0 && image.defined) {
                 highestDefinedLevel = std::max(highestDefinedLevel, levelIndex);
+            }
+        }
+        if (object.target == GL_TEXTURE_CUBE_MAP) {
+            for (const auto& faceLevels : object.cubeFaceLevels) {
+                for (const auto& [levelIndex, image] : faceLevels) {
+                    if (levelIndex >= 0 && image.defined) {
+                        highestDefinedLevel = std::max(highestDefinedLevel, levelIndex);
+                    }
+                }
             }
         }
 
@@ -4948,7 +5025,45 @@ struct GLContext::Impl {
                 static_cast<NSUInteger>(object.target == GL_TEXTURE_1D ? 1 : safeDimension(image.desc.height)),
                 static_cast<NSUInteger>(object.target == GL_TEXTURE_3D ? safeDimension(image.desc.depth) : 1)
             );
-            if (object.target == GL_TEXTURE_3D) {
+            if (object.target == GL_TEXTURE_CUBE_MAP) {
+                const MTLRegion faceRegion = MTLRegionMake2D(
+                    0, 0, region.size.width, region.size.height);
+                for (NSUInteger face = 0; face < 6; ++face) {
+                    const GLTextureImageLevel* faceImage =
+                        cubeFaceLevel(face, levelIndex);
+                    if (faceImage == nullptr) {
+                        continue;
+                    }
+                    const std::uint8_t* faceBytes = nullptr;
+                    std::size_t faceBpp = 4;
+                    if (useNativePath && faceImage->nativeBpp > 0 &&
+                        !faceImage->nativeData.empty()) {
+                        faceBytes = faceImage->nativeData.data();
+                        faceBpp = faceImage->nativeBpp;
+                    } else if (useNativePath) {
+                        continue;
+                    } else if (!faceImage->rgba8.empty()) {
+                        faceBytes = faceImage->rgba8.data();
+                    } else {
+                        continue;
+                    }
+                    const NSUInteger faceBytesPerRow =
+                        static_cast<NSUInteger>(safeDimension(faceImage->desc.width) * faceBpp);
+                    const NSUInteger faceBytesPerImage = faceBytesPerRow *
+                        static_cast<NSUInteger>(safeDimension(faceImage->desc.height));
+                    if (needsBlitUpload) {
+                        blitUpload2D(faceBytes, faceBytesPerRow, faceBytesPerImage,
+                                     faceRegion, mipLevel, face, faceBpp);
+                    } else {
+                        [texture replaceRegion:faceRegion
+                                    mipmapLevel:mipLevel
+                                          slice:face
+                                      withBytes:faceBytes
+                                    bytesPerRow:faceBytesPerRow
+                                  bytesPerImage:faceBytesPerImage];
+                    }
+                }
+            } else if (object.target == GL_TEXTURE_3D) {
                 for (NSUInteger slice = 0; slice < region.size.depth; ++slice) {
                     const MTLRegion sliceRegion = MTLRegionMake3D(0, 0, slice, region.size.width, region.size.height, 1);
                     const auto* sliceBytes = uploadBytes + static_cast<std::size_t>(slice * bytesPerImage);
@@ -16404,12 +16519,15 @@ bool GLContext::texImage(
     }
     object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
     image.desc.levels = object->desc.levels;
+    const int faceIdx = Impl::cubeFaceIndexForTarget(target);
+    if (faceIdx >= 0) {
+        object->cubeFaceLevels[static_cast<std::size_t>(faceIdx)][level] = image;
+    }
     object->levels[level] = std::move(image);
     // Track cube-face definition for cube-completeness checking at
     // glGenerateMipmap time. Only level-0 face definitions count toward
     // cube completeness (GL 4.6 §8.17).
     if (level == 0) {
-        const int faceIdx = Impl::cubeFaceIndexForTarget(target);
         if (faceIdx >= 0) {
             object->cubeFacesDefined |= static_cast<std::uint8_t>(1u << faceIdx);
         }
@@ -16717,7 +16835,14 @@ bool GLContext::texSubImage(
         pushError(GL_INVALID_OPERATION);
         return false;
     }
-    GLTextureImageLevel& image = levelIt->second;
+    const int cubeFaceForSubImage = Impl::cubeFaceIndexForTarget(target);
+    GLTextureImageLevel* imagePtr = &levelIt->second;
+    if (cubeFaceForSubImage >= 0) {
+        auto& faceLevels = object->cubeFaceLevels[static_cast<std::size_t>(cubeFaceForSubImage)];
+        auto [faceIt, _inserted] = faceLevels.try_emplace(level, levelIt->second);
+        imagePtr = &faceIt->second;
+    }
+    GLTextureImageLevel& image = *imagePtr;
     GLint effectiveZoffset = zoffset;
     ExtensionContext extensionContext(*this);
     const int sparseCubeFace =
@@ -16876,6 +17001,10 @@ bool GLContext::texSubImage(
                   nonzeroCount,
                   hexPeek);
         }
+    }
+
+    if (cubeFaceForSubImage >= 0) {
+        object->levels[level] = image;
     }
 
     if (!impl_->replaceMetalTexture(*object, impl_->state->boundTexture(target))) {
@@ -17284,6 +17413,11 @@ bool GLContext::texStorage(
             image.nativeBpp =
                 static_cast<std::size_t>(nativeInfo.bytesPerPixel);
             image.nativeData.resize(lvlPixels * image.nativeBpp, 0);
+        }
+        if (target == GL_TEXTURE_CUBE_MAP) {
+            for (auto& faceLevels : object->cubeFaceLevels) {
+                faceLevels[lvl] = image;
+            }
         }
         object->levels[lvl] = std::move(image);
     }
