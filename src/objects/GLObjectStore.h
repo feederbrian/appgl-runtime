@@ -1121,6 +1121,8 @@ struct GLProgramObject {
     // PSO-build-failure gate). Released on relink / program-delete.
     std::string metalGSVsComputeMSL;
     void* metalGSVsComputePipelineState = nullptr;
+    bool metalGSVsComputeNeedsDescriptor = false;
+    std::unordered_map<std::string, void*> metalGSVsComputePSOCache;
     // Sprint 3 Phase 2: cached id<MTLFunction> for the mesh function.
     // Built from `geometryShaderAsMeshMSL` at link time so the per-
     // FBO-format render-PSO build at draw time only pays the

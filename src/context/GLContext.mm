@@ -28022,6 +28022,21 @@ bool GLContext::linkProgram(GLuint program) {
     programObject->gsPassThroughFragmentMSLActive = false;
     programObject->gsPassThroughFragmentMSLPrimIdLoc = 0;
     programObject->gsPassThroughReflection = ShaderReflection{};
+    programObject->geometryShaderAsMeshMSL.clear();
+    programObject->metalGSVsComputeMSL.clear();
+    releaseRetainedMetalObject(programObject->metalGSVsComputePipelineState);
+    programObject->metalGSVsComputePipelineState = nullptr;
+    for (auto& entry : programObject->metalGSVsComputePSOCache) {
+        releaseRetainedMetalObject(entry.second);
+    }
+    programObject->metalGSVsComputePSOCache.clear();
+    programObject->metalGSVsComputeNeedsDescriptor = false;
+    releaseRetainedMetalObject(programObject->metalGSMeshPipelineState);
+    programObject->metalGSMeshPipelineState = nullptr;
+    releaseRetainedMetalObject(programObject->metalGSMeshFunction);
+    programObject->metalGSMeshFunction = nullptr;
+    releaseRetainedMetalObject(programObject->metalGSFragmentFunction);
+    programObject->metalGSFragmentFunction = nullptr;
     programObject->geometryEmulated = false;
     programObject->geometrySpirv.clear();
     programObject->vertexSpirv.clear();
@@ -28919,7 +28934,199 @@ bool GLContext::linkProgram(GLuint program) {
             // stash the emitted MSL for later PSO build. Otherwise
             // fall back to the existing CPU GS interpreter
             // classification (`geometryEmulated`).
+            auto synthesizeMeshSampledReflection =
+                [&](appgl::ShaderReflection& reflection,
+                    const std::string& meshMSL) {
+                    if (!reflection.sampledTextures.empty() ||
+                        geometryShader == nullptr ||
+                        geometryShader->spirv.empty()) {
+                        return;
+                    }
+                    auto isSamplerUniformType = [](GLenum type) {
+                        switch (type) {
+                            case GL_SAMPLER_1D:
+                            case GL_INT_SAMPLER_1D:
+                            case GL_UNSIGNED_INT_SAMPLER_1D:
+                            case GL_SAMPLER_1D_SHADOW:
+                            case GL_SAMPLER_2D:
+                            case GL_INT_SAMPLER_2D:
+                            case GL_UNSIGNED_INT_SAMPLER_2D:
+                            case GL_SAMPLER_2D_SHADOW:
+                            case GL_SAMPLER_3D:
+                            case GL_INT_SAMPLER_3D:
+                            case GL_UNSIGNED_INT_SAMPLER_3D:
+                            case GL_SAMPLER_CUBE:
+                            case GL_INT_SAMPLER_CUBE:
+                            case GL_UNSIGNED_INT_SAMPLER_CUBE:
+                            case GL_SAMPLER_CUBE_SHADOW:
+                            case GL_SAMPLER_1D_ARRAY:
+                            case GL_INT_SAMPLER_1D_ARRAY:
+                            case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+                            case GL_SAMPLER_1D_ARRAY_SHADOW:
+                            case GL_SAMPLER_2D_ARRAY:
+                            case GL_INT_SAMPLER_2D_ARRAY:
+                            case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+                            case GL_SAMPLER_2D_ARRAY_SHADOW:
+                            case GL_SAMPLER_CUBE_MAP_ARRAY:
+                            case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+                            case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+                            case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+                            case GL_SAMPLER_2D_RECT:
+                            case GL_INT_SAMPLER_2D_RECT:
+                            case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+                            case GL_SAMPLER_2D_RECT_SHADOW:
+                            case GL_SAMPLER_BUFFER:
+                            case GL_INT_SAMPLER_BUFFER:
+                            case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+                            case GL_SAMPLER_2D_MULTISAMPLE:
+                            case GL_INT_SAMPLER_2D_MULTISAMPLE:
+                            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+                            case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                            case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                            case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+                                return true;
+                            default:
+                                return false;
+                        }
+                    };
+                    auto stripAppGLPrefix = [](std::string name) {
+                        constexpr const char* kAppglPrefix = "_appgl_";
+                        constexpr std::size_t kAppglPrefixLen = 7;
+                        if (name.compare(0, kAppglPrefixLen, kAppglPrefix) == 0) {
+                            name = name.substr(kAppglPrefixLen);
+                        }
+                        return name;
+                    };
+                    auto findTextureSlot = [&](const std::string& name,
+                                               std::uint32_t fallback) {
+                        auto isIdentChar = [](char c) {
+                            return c == '_' ||
+                                (c >= '0' && c <= '9') ||
+                                (c >= 'A' && c <= 'Z') ||
+                                (c >= 'a' && c <= 'z');
+                        };
+                        std::size_t pos = 0;
+                        const std::string attrNeedle = "[[texture(";
+                        while ((pos = meshMSL.find(name, pos)) != std::string::npos) {
+                            const std::size_t end = pos + name.size();
+                            const bool leftOk = pos == 0 ||
+                                !isIdentChar(meshMSL[pos - 1]);
+                            const bool rightOk = end >= meshMSL.size() ||
+                                !isIdentChar(meshMSL[end]);
+                            if (leftOk && rightOk) {
+                                const std::size_t attr =
+                                    meshMSL.find(attrNeedle, end);
+                                const std::size_t stop =
+                                    meshMSL.find_first_of(",)", end);
+                                if (attr != std::string::npos &&
+                                    (stop == std::string::npos || attr < stop)) {
+                                    const std::size_t valueStart =
+                                        attr + attrNeedle.size();
+                                    const std::size_t valueEnd =
+                                        meshMSL.find(")]]", valueStart);
+                                    if (valueEnd != std::string::npos) {
+                                        try {
+                                            return static_cast<std::uint32_t>(
+                                                std::stoul(meshMSL.substr(
+                                                    valueStart,
+                                                    valueEnd - valueStart)));
+                                        } catch (...) {
+                                            return fallback;
+                                        }
+                                    }
+                                }
+                            }
+                            pos = end;
+                        }
+                        return fallback;
+                    };
+                    auto collectTextureSlots = [&]() {
+                        std::vector<std::uint32_t> slots;
+                        const std::string attrNeedle = "[[texture(";
+                        std::size_t pos = 0;
+                        while ((pos = meshMSL.find(attrNeedle, pos)) != std::string::npos) {
+                            const std::size_t valueStart =
+                                pos + attrNeedle.size();
+                            const std::size_t valueEnd =
+                                meshMSL.find(")]]", valueStart);
+                            if (valueEnd == std::string::npos) {
+                                break;
+                            }
+                            try {
+                                slots.push_back(static_cast<std::uint32_t>(
+                                    std::stoul(meshMSL.substr(
+                                        valueStart, valueEnd - valueStart))));
+                            } catch (...) {
+                            }
+                            pos = valueEnd + 3;
+                        }
+                        return slots;
+                    };
+                    auto appendBindingIfMissing =
+                        [&](const GLProgramUniformInfo& uniformInfo,
+                            std::uint32_t metalSlot) {
+                            for (const auto& existing : reflection.sampledTextures) {
+                                if (existing.name == uniformInfo.name) {
+                                    return;
+                                }
+                            }
+                            appgl::ShaderReflection::ResourceBinding binding;
+                            binding.name = uniformInfo.name;
+                            binding.glBinding = uniformInfo.explicitBinding >= 0
+                                ? static_cast<GLuint>(uniformInfo.explicitBinding)
+                                : 0u;
+                            binding.metalBinding = metalSlot;
+                            reflection.sampledTextures.push_back(std::move(binding));
+                        };
+
+                    const auto vars = appgl::collectSamplerVarsFromSpirv(
+                        geometryShader->spirv.data(),
+                        geometryShader->spirv.size());
+                    for (const auto& var : vars) {
+                        const std::string lookupName =
+                            stripAppGLPrefix(var.name);
+                        const GLProgramUniformInfo* uniformInfo = nullptr;
+                        for (const auto& uniform : programObject->uniforms) {
+                            if (uniform.name == lookupName &&
+                                isSamplerUniformType(uniform.type)) {
+                                uniformInfo = &uniform;
+                                break;
+                            }
+                        }
+                        if (uniformInfo == nullptr) {
+                            continue;
+                        }
+                        appgl::ShaderReflection::ResourceBinding binding;
+                        binding.name = lookupName;
+                        binding.glBinding = uniformInfo->explicitBinding >= 0
+                            ? static_cast<GLuint>(uniformInfo->explicitBinding)
+                            : 0u;
+                        binding.metalBinding =
+                            findTextureSlot(var.name, binding.glBinding);
+                        reflection.sampledTextures.push_back(std::move(binding));
+                    }
+                    if (reflection.sampledTextures.empty()) {
+                        const auto textureSlots = collectTextureSlots();
+                        if (!textureSlots.empty()) {
+                            std::size_t slotIndex = 0;
+                            for (const auto& uniform : programObject->uniforms) {
+                                if (!isSamplerUniformType(uniform.type)) {
+                                    continue;
+                                }
+                                if (slotIndex >= textureSlots.size()) {
+                                    break;
+                                }
+                                const std::uint32_t fallbackSlot =
+                                    textureSlots[slotIndex++];
+                                appendBindingIfMissing(
+                                    uniform,
+                                    findTextureSlot(uniform.name, fallbackSlot));
+                            }
+                        }
+                    }
+                };
             if (geometryShader != nullptr && !geometryShader->spirv.empty() &&
+                !programObject->geometryEmulated &&
                 impl_->capabilities != nullptr &&
                 impl_->capabilities->meshShaderSupported()) {
                 // Shape gate: input topology, output topology,
@@ -28964,7 +29171,14 @@ bool GLContext::linkProgram(GLuint program) {
                         geometryShader->source,
                         meshGsMSL, meshGsRefl, gsMeshOpts);
                     if (meshOk && !meshGsMSL.empty()) {
+                        synthesizeMeshSampledReflection(meshGsRefl, meshGsMSL);
                         programObject->geometryShaderAsMeshMSL = std::move(meshGsMSL);
+                        if (!meshGsRefl.sampledTextures.empty() ||
+                            !meshGsRefl.storageImages.empty() ||
+                            !meshGsRefl.uniformBlocks.empty() ||
+                            !meshGsRefl.storageBuffers.empty()) {
+                            programObject->geometryReflection = std::move(meshGsRefl);
+                        }
                         programObject->metalGSTier =
                             GLProgramObject::MetalGSTier::MeshShader;
                     }
@@ -28995,6 +29209,65 @@ bool GLContext::linkProgram(GLuint program) {
                 bool meshLinkOk = true;
                 // (1) VS-as-compute translation + PSO build.
                 if (vertexShader != nullptr && !vertexShader->spirv.empty()) {
+                    auto annotateMeshVsComputeInputs =
+                        [](std::string& msl,
+                           const appgl::ShaderReflection& reflection) {
+                            const std::size_t structPos =
+                                msl.find("struct main0_in");
+                            if (structPos == std::string::npos) {
+                                return;
+                            }
+                            const std::size_t bodyStart =
+                                msl.find('{', structPos);
+                            std::size_t bodyEnd = msl.find("};", bodyStart);
+                            if (bodyStart == std::string::npos ||
+                                bodyEnd == std::string::npos) {
+                                return;
+                            }
+                            auto isIdentChar = [](char c) {
+                                return c == '_' ||
+                                    (c >= '0' && c <= '9') ||
+                                    (c >= 'A' && c <= 'Z') ||
+                                    (c >= 'a' && c <= 'z');
+                            };
+                            for (const auto& input : reflection.vertexInputs) {
+                                if (input.name.empty()) {
+                                    continue;
+                                }
+                                std::size_t pos = bodyStart;
+                                while ((pos = msl.find(input.name, pos)) !=
+                                       std::string::npos && pos < bodyEnd) {
+                                    const std::size_t end =
+                                        pos + input.name.size();
+                                    const bool leftOk = pos == 0 ||
+                                        !isIdentChar(msl[pos - 1]);
+                                    const bool rightOk = end >= msl.size() ||
+                                        !isIdentChar(msl[end]);
+                                    if (!leftOk || !rightOk) {
+                                        pos = end;
+                                        continue;
+                                    }
+                                    const std::size_t semi =
+                                        msl.find(';', end);
+                                    if (semi == std::string::npos ||
+                                        semi >= bodyEnd) {
+                                        break;
+                                    }
+                                    const std::size_t existing =
+                                        msl.find("[[attribute(", end);
+                                    if (existing == std::string::npos ||
+                                        existing > semi) {
+                                        const std::string attr =
+                                            " [[attribute(" +
+                                            std::to_string(input.location) +
+                                            ")]]";
+                                        msl.insert(semi, attr);
+                                        bodyEnd += attr.size();
+                                    }
+                                    break;
+                                }
+                            }
+                        };
                     appgl::TranslatorOptions vsComputeOpts;
                     vsComputeOpts.forceVertexForTessellation = true;
                     // Path G [Checkpoint 15, fork f19ce45]: ACTUAL fix
@@ -29018,6 +29291,7 @@ bool GLContext::linkProgram(GLuint program) {
                         vertexShader->source,
                         vsComputeMSL, vsComputeRefl, vsComputeOpts);
                     if (vsTrOk && !vsComputeMSL.empty()) {
+                        annotateMeshVsComputeInputs(vsComputeMSL, vsRefl);
                         programObject->metalGSVsComputeMSL = vsComputeMSL;
                         std::string vsPsoErr;
                         void* vsPSO = impl_->frameGraph
@@ -29026,13 +29300,28 @@ bool GLContext::linkProgram(GLuint program) {
                                                          nullptr);
                         if (vsPSO != nullptr) {
                             programObject->metalGSVsComputePipelineState = vsPSO;
+                        } else if (vsPsoErr.find("stage_in") != std::string::npos) {
+                            programObject->metalGSVsComputeNeedsDescriptor = true;
                         } else {
+                            if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                                std::fprintf(stderr,
+                                    "[MESH_GS] link VS-compute PSO failed: %s\n",
+                                    vsPsoErr.c_str());
+                            }
                             meshLinkOk = false;
                         }
                     } else {
+                        if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                            std::fprintf(stderr,
+                                "[MESH_GS] vertex-as-compute translation failed\n");
+                        }
                         meshLinkOk = false;
                     }
                 } else {
+                    if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                        std::fprintf(stderr,
+                            "[MESH_GS] missing vertex shader SPIR-V for mesh link\n");
+                    }
                     meshLinkOk = false;
                 }
                 // (2) Compile mesh function + FS function.
@@ -29045,6 +29334,11 @@ bool GLContext::linkProgram(GLuint program) {
                     if (meshFn != nullptr) {
                         programObject->metalGSMeshFunction = meshFn;
                     } else {
+                        if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                            std::fprintf(stderr,
+                                "[MESH_GS] mesh function compile failed: %s\n",
+                                meshFnErr.c_str());
+                        }
                         meshLinkOk = false;
                     }
                 }
@@ -29056,6 +29350,11 @@ bool GLContext::linkProgram(GLuint program) {
                     if (fsFn != nullptr) {
                         programObject->metalGSFragmentFunction = fsFn;
                     } else {
+                        if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                            std::fprintf(stderr,
+                                "[MESH_GS] mesh fragment function compile failed: %s\n",
+                                fsFnErr.c_str());
+                        }
                         meshLinkOk = false;
                     }
                 }
@@ -34577,7 +34876,6 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
                                           GLsizei count,
                                           GLint first)
 {
-    (void)programName;
     (void)first;
     // MVP envelope guard. Phase 2 currently handles GL_POINTS draws
     // only — covers all 6 conversion-target failing tests
@@ -34589,7 +34887,10 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     if (program.metalGSTier != GLProgramObject::MetalGSTier::MeshShader) {
         return false;
     }
-    if (program.metalGSVsComputePipelineState == nullptr ||
+    void* meshVsComputePipelineState = program.metalGSVsComputePipelineState;
+    std::vector<appgl::MetalTessVertexBufferBinding> meshVsBufferBindings;
+    if ((meshVsComputePipelineState == nullptr &&
+         !program.metalGSVsComputeNeedsDescriptor) ||
         program.metalGSMeshFunction == nullptr ||
         program.metalGSFragmentFunction == nullptr) {
         return false;
@@ -34601,6 +34902,56 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
         std::fflush(stderr);
     }
 
+    if (program.metalGSVsComputeNeedsDescriptor &&
+        meshVsComputePipelineState == nullptr) {
+        const GLuint vaoName = state->boundVertexArray();
+        GLVertexArrayObject* vao = objects->vertexArrays().get(vaoName);
+        if (vao == nullptr) {
+            return false;
+        }
+        appgl::MetalVertexDescriptorBuildResult buildResult =
+            appgl::buildMetalStageInputOutputDescriptor(*vao);
+        if (buildResult.descriptor == nullptr) {
+            return false;
+        }
+        auto cached = program.metalGSVsComputePSOCache.find(buildResult.hash);
+        if (cached != program.metalGSVsComputePSOCache.end()) {
+            meshVsComputePipelineState = cached->second;
+        } else {
+            std::string err;
+            meshVsComputePipelineState = frameGraph->buildComputePipelineState(
+                program.metalGSVsComputeMSL, &err, nullptr,
+                buildResult.descriptor);
+            if (meshVsComputePipelineState != nullptr) {
+                program.metalGSVsComputePSOCache[buildResult.hash] =
+                    meshVsComputePipelineState;
+            } else if (std::getenv("APPGL_TRACE_MESH_GS") != nullptr) {
+                std::fprintf(stderr,
+                    "[MESH_GS] draw-time VS-compute PSO build failed: %s\n",
+                    err.c_str());
+            }
+        }
+        if (meshVsComputePipelineState != nullptr) {
+            for (const auto& binding : buildResult.vertexBufferBindings) {
+                GLBufferObject* vbo = objects->buffers().get(binding.glBuffer);
+                if (vbo == nullptr || vbo->metalBuffer == nullptr) {
+                    appgl::releaseMetalStageInputOutputDescriptor(
+                        buildResult.descriptor);
+                    return false;
+                }
+                appgl::MetalTessVertexBufferBinding ent;
+                ent.metalBuffer = vbo->metalBuffer;
+                ent.offset = 0;
+                ent.metalSlot = binding.metalSlot;
+                meshVsBufferBindings.push_back(ent);
+            }
+        }
+        appgl::releaseMetalStageInputOutputDescriptor(buildResult.descriptor);
+        if (meshVsComputePipelineState == nullptr) {
+            return false;
+        }
+    }
+
     // Resolve current FBO color + depth/stencil targets. Mirrors the
     // pattern used by encodeTranslatedDraw at the drawArrays call site.
     GLsizei fboW = 0, fboH = 0;
@@ -34610,7 +34961,8 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     if (fboColTex == nullptr) return false;
 
     appgl::MetalFrameGraph::MetalMeshGSDrawInfo info;
-    info.vertexComputePipelineState = program.metalGSVsComputePipelineState;
+    info.vertexComputePipelineState = meshVsComputePipelineState;
+    info.vertexComputeBufferBindings = std::move(meshVsBufferBindings);
     info.meshFunction = program.metalGSMeshFunction;
     info.fragmentFunction = program.metalGSFragmentFunction;
     info.meshPipelineStateInOut = &program.metalGSMeshPipelineState;
@@ -34667,8 +35019,10 @@ bool GLContext::Impl::tryMetalMeshGSDraw(GLProgramObject& program,
     TranslatedDrawInfo textureInfo;
     textureInfo.program = programName;
     textureInfo.fragmentReflection = &program.fragmentReflection;
+    textureInfo.vertexReflection = &program.geometryReflection;
     resolveSamplerBindings(program, textureInfo);
     resolveImageBindings(program, textureInfo);
+    info.meshTextures = std::move(textureInfo.vertexTextures);
     info.fragmentTextures = std::move(textureInfo.fragmentTextures);
     info.fragmentNeedsFragCoordParams =
         (program.fragmentMSL.find("_appgl_FragCoordParams") != std::string::npos);

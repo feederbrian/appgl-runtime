@@ -7245,6 +7245,15 @@ fragment float4 appgl_immediate_textured_fs(
                          length:info.vsUniformSize
                         atIndex:16];
             }
+            for (const auto& binding : info.vertexComputeBufferBindings) {
+                if (binding.metalBuffer == nullptr) {
+                    continue;
+                }
+                [vsEnc setBuffer:(__bridge id<MTLBuffer>)binding.metalBuffer
+                          offset:(NSUInteger)binding.offset
+                         atIndex:(NSUInteger)binding.metalSlot];
+            }
+            [vsEnc setStageInRegion:MTLRegionMake1D(0, info.vertexCount)];
             const NSUInteger maxPerTg =
                 vsPSO.maxTotalThreadsPerThreadgroup > 0
                     ? vsPSO.maxTotalThreadsPerThreadgroup : 32;
@@ -7256,6 +7265,12 @@ fragment float4 appgl_immediate_textured_fs(
             [vsEnc endEncoding];
             [vsCmdBuf commit];
             [vsCmdBuf waitUntilCompleted];
+            if (vsCmdBuf.status == MTLCommandBufferStatusError) {
+                NSString* msg = vsCmdBuf.error.localizedDescription;
+                info.diagnostic = msg != nil ? msg.UTF8String
+                                             : "vs compute command buffer failed";
+                return false;
+            }
         }
 
         // (3b) Mesh-render PSO build / cache lookup.
@@ -7504,6 +7519,21 @@ fragment float4 appgl_immediate_textured_fs(
                     (__bridge id<MTLSamplerState>)binding.metalSamplerState;
                 [renc setFragmentSamplerState:smp
                                        atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            }
+        }
+        for (const auto& binding : info.meshTextures) {
+            id<MTLTexture> tex =
+                (__bridge id<MTLTexture>)binding.metalTexture;
+            if (tex == nil) {
+                continue;
+            }
+            [renc setMeshTexture:tex
+                          atIndex:static_cast<NSUInteger>(binding.metalSlot)];
+            if (binding.metalSamplerState != nullptr) {
+                id<MTLSamplerState> smp =
+                    (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                [renc setMeshSamplerState:smp
+                                   atIndex:static_cast<NSUInteger>(binding.metalSlot)];
             }
         }
 

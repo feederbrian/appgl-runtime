@@ -1156,6 +1156,8 @@ public:
         std::size_t meshUniformSize = 0;
         const void* fsUniformData = nullptr;
         std::size_t fsUniformSize = 0;
+        std::vector<MetalTessVertexBufferBinding> vertexComputeBufferBindings;
+        std::vector<TranslatedDrawInfo::TextureBinding> meshTextures;
         std::vector<TranslatedDrawInfo::TextureBinding> fragmentTextures;
         // Fragment shaders rewritten to synthesize OpenGL lower-left
         // gl_FragCoord.y need the same slot-15 params as translated draws.

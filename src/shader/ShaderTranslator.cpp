@@ -2912,6 +2912,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         };
         if (execModel == spv::ExecutionModelVertex) {
             assignMissingLocations(resources.stage_outputs);
+        } else if (execModel == spv::ExecutionModelGeometry) {
+            assignMissingLocations(resources.stage_outputs);
         } else if (execModel == spv::ExecutionModelFragment) {
             assignMissingLocations(resources.stage_inputs);
             assignMissingLocations(resources.stage_outputs);
