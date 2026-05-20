@@ -5413,6 +5413,38 @@ fragment float4 appgl_immediate_textured_fs(
         }
     }
 
+    bool drainCurrentCommandBufferForStandaloneEncoding(std::string* diagnostic) {
+        endRenderPass();
+        if (currentCommandBuffer == nil) {
+            return true;
+        }
+
+        id<MTLCommandBuffer> drained = currentCommandBuffer;
+        if (!usesOffscreenTarget && currentDrawable != nil && pendingPresent) {
+            [drained presentDrawable:currentDrawable];
+        }
+        [drained commit];
+        [drained waitUntilCompleted];
+        if (ringSlotAcquired) {
+            dispatch_semaphore_signal(frameSemaphore);
+            advanceRingBuffer();
+        }
+        currentCommandBuffer = nil;
+        currentDrawable = nil;
+        pendingPresent = false;
+        resetCachedEncoderState();
+
+        if (drained.status == MTLCommandBufferStatusError) {
+            if (diagnostic != nullptr) {
+                NSString* msg = drained.error.localizedDescription;
+                *diagnostic = msg != nil ? msg.UTF8String
+                                         : "prior command buffer failed";
+            }
+            return false;
+        }
+        return true;
+    }
+
     bool isReady() const {
         return device != nil && commandQueue != nil && depthStencilTexture != nil && (layer != nil || offscreenColorTexture != nil);
     }
@@ -7205,6 +7237,9 @@ fragment float4 appgl_immediate_textured_fs(
         }
         if (info.fboColorTexture == nullptr) {
             info.diagnostic = "no color attachment";
+            return false;
+        }
+        if (!drainCurrentCommandBufferForStandaloneEncoding(&info.diagnostic)) {
             return false;
         }
 
