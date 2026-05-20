@@ -17286,6 +17286,18 @@ bool GLContext::compressedTexImage(GLenum target, GLint level,
     object->desc.depth = depth;
     object->desc.layers = (target == GL_TEXTURE_2D_ARRAY) ? depth : 1;
     object->desc.internalFormat = internalformat;
+    object->desc.levels = std::max<GLsizei>(object->desc.levels, level + 1);
+
+    GLTextureImageLevel image;
+    image.desc = object->desc;
+    image.desc.width = width;
+    image.desc.height = (target == GL_TEXTURE_1D) ? 1 : height;
+    image.desc.depth = depth;
+    image.desc.layers = (target == GL_TEXTURE_2D_ARRAY) ? depth : 1;
+    image.desc.levels = object->desc.levels;
+    image.defined = true;
+    object->levels[level] = std::move(image);
+
     // Allocate Metal texture if missing OR if format/size changed.
     id<MTLTexture> existing = (__bridge id<MTLTexture>)object->metalTexture;
     const bool arrayTexture = target == GL_TEXTURE_2D_ARRAY;
