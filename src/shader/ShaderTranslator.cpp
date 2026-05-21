@@ -2914,6 +2914,10 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             assignMissingLocations(resources.stage_outputs);
         } else if (execModel == spv::ExecutionModelGeometry) {
             assignMissingLocations(resources.stage_outputs);
+        } else if (execModel == spv::ExecutionModelTessellationEvaluation &&
+                   options.forceTessellation &&
+                   !options.forceTessEvalAsCompute) {
+            assignMissingLocations(resources.stage_outputs);
         } else if (execModel == spv::ExecutionModelFragment) {
             assignMissingLocations(resources.stage_inputs);
             assignMissingLocations(resources.stage_outputs);

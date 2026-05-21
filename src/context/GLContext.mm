@@ -34539,6 +34539,29 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     info.baseInstance = baseInstance;
     info.program = programName;
 
+    auto resolveTessStageSamplerBindings =
+        [&](const ShaderReflection& reflection,
+            std::vector<TranslatedDrawInfo::TextureBinding>& outBindings) {
+            TranslatedDrawInfo textureInfo;
+            textureInfo.program = programName;
+            textureInfo.vertexReflection = &reflection;
+            resolveSamplerBindings(program, textureInfo);
+            outBindings = std::move(textureInfo.vertexTextures);
+        };
+    resolveTessStageSamplerBindings(program.tessControlReflection,
+        info.tessControlTextures);
+    resolveTessStageSamplerBindings(program.tessVertexAsComputeReflection,
+        info.tessVertexAsComputeTextures);
+    {
+        TranslatedDrawInfo textureInfo;
+        textureInfo.program = programName;
+        textureInfo.vertexReflection = &program.tessEvalAsComputeReflection;
+        textureInfo.fragmentReflection = &program.fragmentReflection;
+        resolveSamplerBindings(program, textureInfo);
+        info.tessEvalTextures = std::move(textureInfo.vertexTextures);
+        info.fragmentTextures = std::move(textureInfo.fragmentTextures);
+    }
+
     // Phase 4 [metal-tess-TF]: pack default uniforms for each tess
     // compute stage so the TCS / VS-compute / TES-compute kernels
     // read glUniform* values. Layout is computed lazily once per
@@ -34755,12 +34778,10 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
         writeTessTFAndUpdateCounters(program, bytes,
                                       tfGeneratedVerts,
                                       kTesComputeSlotBytes, topo);
-        if (encodeOk &&
-            !state->isEnabled(GL_RASTERIZER_DISCARD) &&
-            program.tessEvalMSL.empty() &&
-            program.tessGenMode == GL_ISOLINES &&
-            program.tessGenPointMode == GL_TRUE &&
-            topo == GL_POINTS) {
+	        if (encodeOk &&
+	            !state->isEnabled(GL_RASTERIZER_DISCARD) &&
+	            program.tessGenPointMode == GL_TRUE &&
+	            topo == GL_POINTS) {
             const auto& layout = program.tessEvalOutputLayout;
             const StageOutputLayout::Member* positionMember = nullptr;
             const StageOutputLayout::Member* pointSizeMember = nullptr;

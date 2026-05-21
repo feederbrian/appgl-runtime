@@ -5896,6 +5896,63 @@ fragment float4 appgl_immediate_textured_fs(
             info.tessEvalComputePipelineState == nullptr) return false;
         if (info.fragmentMSL == nullptr || info.fragmentMSL->empty()) return false;
         if (info.patchCount <= 0 || info.tessControlOutputVertices <= 0) return false;
+        auto bindComputeTextures =
+            [](id<MTLComputeCommandEncoder> encoder,
+               const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+                for (const auto& binding : textures) {
+                    id<MTLTexture> tex =
+                        (__bridge id<MTLTexture>)binding.metalTexture;
+                    if (tex == nil) {
+                        continue;
+                    }
+                    const NSUInteger slot =
+                        static_cast<NSUInteger>(binding.metalSlot);
+                    [encoder setTexture:tex atIndex:slot];
+                    if (binding.metalSamplerState != nullptr) {
+                        id<MTLSamplerState> smp =
+                            (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                        [encoder setSamplerState:smp atIndex:slot];
+                    }
+                }
+            };
+        auto bindVertexTextures =
+            [](id<MTLRenderCommandEncoder> encoder,
+               const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+                for (const auto& binding : textures) {
+                    id<MTLTexture> tex =
+                        (__bridge id<MTLTexture>)binding.metalTexture;
+                    if (tex == nil) {
+                        continue;
+                    }
+                    const NSUInteger slot =
+                        static_cast<NSUInteger>(binding.metalSlot);
+                    [encoder setVertexTexture:tex atIndex:slot];
+                    if (binding.metalSamplerState != nullptr) {
+                        id<MTLSamplerState> smp =
+                            (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                        [encoder setVertexSamplerState:smp atIndex:slot];
+                    }
+                }
+            };
+        auto bindFragmentTextures =
+            [](id<MTLRenderCommandEncoder> encoder,
+               const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+                for (const auto& binding : textures) {
+                    id<MTLTexture> tex =
+                        (__bridge id<MTLTexture>)binding.metalTexture;
+                    if (tex == nil) {
+                        continue;
+                    }
+                    const NSUInteger slot =
+                        static_cast<NSUInteger>(binding.metalSlot);
+                    [encoder setFragmentTexture:tex atIndex:slot];
+                    if (binding.metalSamplerState != nullptr) {
+                        id<MTLSamplerState> smp =
+                            (__bridge id<MTLSamplerState>)binding.metalSamplerState;
+                        [encoder setFragmentSamplerState:smp atIndex:slot];
+                    }
+                }
+            };
 
         // (1) Drain any prior state so compute runs against a clean
         // command buffer and subsequent render-pass reads see the
@@ -6054,6 +6111,7 @@ fragment float4 appgl_immediate_textured_fs(
                          length:info.tessVertexAsComputeUniformSize
                         atIndex:16];
             }
+            bindComputeTextures(vsEnc, info.tessVertexAsComputeTextures);
             // T4I [metal-tess-TF]: bind VAO vertex buffers for VS
             // compute when the PSO was built with a stage-input
             // descriptor. The slots match the descriptor's
@@ -6149,6 +6207,7 @@ fragment float4 appgl_immediate_textured_fs(
                     length:info.tessControlUniformSize
                    atIndex:16];
         }
+        bindComputeTextures(cenc, info.tessControlTextures);
         if (isPhase3) {
             [cenc setBuffer:vsOutBuf offset:0 atIndex:22];
             [cenc setBuffer:patchOutBuf offset:0 atIndex:27];
@@ -6723,6 +6782,7 @@ fragment float4 appgl_immediate_textured_fs(
                                   length:info.tessEvalAsComputeUniformSize
                                  atIndex:16];
                     }
+                    bindComputeTextures(tesEnc, info.tessEvalTextures);
                     // TES-compute output buffer (spvOut at buffer 28).
                     [tesEnc setBuffer:tesComputeOutBuf offset:0 atIndex:28];
                     // spvIndirectParams at 29 — reuse the one we built
@@ -6877,6 +6937,16 @@ fragment float4 appgl_immediate_textured_fs(
         // Returning true here treats the compute chain as the complete
         // draw — caller's encode succeeded, no fallback to CPU.
         if (info.tessEvalMSL == nullptr || info.tessEvalMSL->empty()) {
+            return true;
+        }
+        // Metal's fixed-function tessellator has no GL point_mode output.
+        // When the caller retained the TES-compute output, let it replay
+        // those generated vertices as GL_POINTS instead of drawing the
+        // hardware tessellator's triangle/line topology.
+        if (info.pointMode &&
+            info.outGeneratedVertCount != nullptr &&
+            info.outTesComputeOutBuf != nullptr &&
+            tessTFGeneratedVerts > 0) {
             return true;
         }
         id<MTLLibrary> tesLib = getOrCompileLibrary(*info.tessEvalMSL);
@@ -7157,6 +7227,8 @@ fragment float4 appgl_immediate_textured_fs(
         // buffers as vertex-stage inputs so the TES can read them via
         // `raw_buffer_tese_input=true`.
         [enc setRenderPipelineState:renderPSO];
+        bindVertexTextures(enc, info.tessEvalTextures);
+        bindFragmentTextures(enc, info.fragmentTextures);
         [enc setTessellationFactorBuffer:factorBuf offset:0 instanceStride:0];
         if (isPhase3) {
             [enc setVertexBuffer:cpOutBuf offset:0 atIndex:22];

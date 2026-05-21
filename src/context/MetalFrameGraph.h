@@ -736,6 +736,13 @@ struct MetalTessDrawInfo {
     const void* tessEvalAsComputeUniformData = nullptr;
     std::size_t tessEvalAsComputeUniformSize = 0;
 
+    // Sampled texture/sampler bindings for tessellation stages. Slots
+    // match SPIRV-Cross's [[texture(N)]] / [[sampler(N)]] arguments.
+    std::vector<TranslatedDrawInfo::TextureBinding> tessControlTextures;
+    std::vector<TranslatedDrawInfo::TextureBinding> tessVertexAsComputeTextures;
+    std::vector<TranslatedDrawInfo::TextureBinding> tessEvalTextures;
+    std::vector<TranslatedDrawInfo::TextureBinding> fragmentTextures;
+
     // Cached MSL sources for rebuilding the render pipeline on FBO
     // format changes. Non-owning; must outlive the encode call.
     const std::string* tessEvalMSL = nullptr;
