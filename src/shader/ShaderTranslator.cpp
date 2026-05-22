@@ -1864,6 +1864,24 @@ bool resourcesUseMultiviewBuiltins(
            contains(resources.builtin_outputs);
 }
 
+bool resourcesUse1DImages(spirv_cross::Compiler& compiler,
+                          const spirv_cross::ShaderResources& resources) {
+    auto contains1DImage = [&](const auto& images) {
+        for (const auto& image : images) {
+            const auto& type = compiler.get_type(image.type_id);
+            if ((type.basetype == spirv_cross::SPIRType::Image ||
+                 type.basetype == spirv_cross::SPIRType::SampledImage) &&
+                type.image.dim == spv::Dim1D) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return contains1DImage(resources.sampled_images) ||
+           contains1DImage(resources.separate_images) ||
+           contains1DImage(resources.storage_images);
+}
+
 bool isDefaultUniformBlockResource(spirv_cross::Compiler& compiler,
                                    const spirv_cross::Resource& resource) {
     const auto& blockType = compiler.get_type(resource.base_type_id);
@@ -2212,16 +2230,21 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         (void)isTessControl; (void)isTessEval; (void)isVertex;
         (void)isGeometry; (void)isFragment; (void)isGraphicsStage;
 
+        const auto shaderResourcesForOptions = compiler.get_shader_resources();
+
         spirv_cross::CompilerMSL::Options mslOpts;
         mslOpts.platform = spirv_cross::CompilerMSL::Options::macOS;
-        // GL_ARB_sparse_texture_clamp CTS exercises 1D/1D-array
-        // textureClampARB with mipmapped min_lod_clamp sampling. Native
-        // Metal texture1d backings are single-mip in AppGL due AGX
-        // descriptor/assertion limits, so when the extension is active we
-        // lower 1D image/sampler declarations to 2D/2D-array and let the
-        // runtime provide matching 2D mip-chain backing.
+        // Native Metal texture1d backings are single-mip in AppGL due
+        // AGX descriptor/assertion limits. Extension paths that need
+        // mipmapped 1D/1D-array sampling or query visibility lower 1D
+        // image/sampler declarations to 2D/2D-array. Keep the option off
+        // for non-1D shaders so extension advertising does not perturb
+        // unrelated SPIRV-Cross emission or compiler behavior.
+        const bool extensionNeeds1DAs2D =
+            extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp") ||
+            extensions::ExtensionRegistry::isExtensionActive("GL_ARB_texture_query_levels");
         mslOpts.texture_1D_as_2D =
-            extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp");
+            extensionNeeds1DAs2D && resourcesUse1DImages(compiler, shaderResourcesForOptions);
         mslOpts.sample_dref_lod_cube_as_nearest_level =
             extensions::ExtensionRegistry::isExtensionActive("GL_EXT_texture_shadow_lod");
         // Step 8 (tessellation on Metal via SPIRV-Cross): when the shader is
@@ -2406,8 +2429,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // `[[primitive_shading_rate]]`). Keep the rest of the runtime on the
         // long-held MSL 2.3 ABI so unrelated translated/GS pass-through
         // pipelines do not inherit FSR-specific compiler behavior.
-        const auto versionResources = compiler.get_shader_resources();
-        if (resourcesUseMultiviewBuiltins(versionResources)) {
+        if (resourcesUseMultiviewBuiltins(shaderResourcesForOptions)) {
             mslOpts.multiview = true;
             mslOpts.multiview_layered_rendering = true;
         }
@@ -2415,7 +2437,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             spirvModuleDeclaresFp64(spirv, wordCount)) {
             mslOpts.appgl_fp64_emulation = true;
         }
-        if (resourcesUseFragmentShadingRateBuiltins(versionResources)) {
+        if (resourcesUseFragmentShadingRateBuiltins(shaderResourcesForOptions)) {
             mslOpts.set_msl_version(2, 4);
         } else {
             mslOpts.set_msl_version(2, 3);

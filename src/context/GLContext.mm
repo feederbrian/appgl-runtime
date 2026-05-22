@@ -764,12 +764,13 @@ MTLResourceOptions metalBufferOptionsForUsage(GLenum usage) {
     return options;
 }
 
-bool sparseClampUses2DBackingFor1DTextures() {
-    return extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp");
+bool uses2DBackingFor1DTextures() {
+    return extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp") ||
+           extensions::ExtensionRegistry::isExtensionActive("GL_ARB_texture_query_levels");
 }
 
 MTLTextureType metalTextureTypeForTarget(GLenum target) {
-    const bool use2DFor1D = sparseClampUses2DBackingFor1DTextures();
+    const bool use2DFor1D = uses2DBackingFor1DTextures();
     switch (target) {
         case GL_TEXTURE_1D:
             return use2DFor1D ? MTLTextureType2D : MTLTextureType1D;
@@ -4499,6 +4500,7 @@ struct GLContext::Impl {
                       ? static_cast<NSUInteger>(std::max<GLsizei>(baseLevel.desc.depth, 6) / 6)
                       : 1));
             const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
+            const bool use2DFor1D = uses2DBackingFor1DTextures();
             // Pick the Metal format. There are three cases:
             //   1. Storage-only depth/stencil/stencil format
             //      (`glTexStorage3D(GL_DEPTH_COMPONENT32F, ...)` and
@@ -4537,9 +4539,10 @@ struct GLContext::Impl {
                         native == MTLPixelFormatX32_Stencil8 ||
                         native == MTLPixelFormatX24_Stencil8;
                     // Metal depth/stencil formats require 2D/2DArray/Cube
-                    // texture types. Fall back to RGBA8Unorm for
-                    // mismatched targets (3D/1D/1D_ARRAY) to avoid a
-                    // hard Metal-descriptor-validation crash.
+                    // texture types. Promoted 1D/1D_ARRAY targets use
+                    // 2D/2DArray backing and can keep the depth format.
+                    // Other mismatched targets fall back to RGBA8Unorm
+                    // to avoid a hard Metal-descriptor-validation crash.
                     const bool targetSupportsDepth = (
                         object.target == GL_TEXTURE_2D ||
                         object.target == GL_TEXTURE_2D_ARRAY ||
@@ -4547,7 +4550,9 @@ struct GLContext::Impl {
                         object.target == GL_TEXTURE_CUBE_MAP_ARRAY ||
                         object.target == GL_TEXTURE_2D_MULTISAMPLE ||
                         object.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
-                        object.target == GL_TEXTURE_RECTANGLE);
+                        object.target == GL_TEXTURE_RECTANGLE ||
+                        ((object.target == GL_TEXTURE_1D ||
+                          object.target == GL_TEXTURE_1D_ARRAY) && use2DFor1D));
                     if (isDepthStencil && !targetSupportsDepth) {
                         // Keep RGBA8 fallback to avoid Metal crash.
                     } else if (isDepthStencil || hasNativeData) {
@@ -4572,7 +4577,6 @@ struct GLContext::Impl {
                     }
                 }
             }
-            const bool use2DFor1D = sparseClampUses2DBackingFor1DTextures();
             const NSUInteger wantMipCount = (object.target == GL_TEXTURE_1D && !use2DFor1D)
                 ? 1u
                 : static_cast<NSUInteger>(maxLevelExisting + 1);
@@ -4804,6 +4808,7 @@ struct GLContext::Impl {
         //      canonical witness of the wrong behaviour (16 tests
         //      regressed when the gate was dropped in e1bd4cf).
         const bool hasNativeData = (baseLevel.nativeBpp > 0 && !baseLevel.nativeData.empty());
+        const bool use2DFor1D = uses2DBackingFor1DTextures();
         MTLPixelFormat chosenFormat = MTLPixelFormatRGBA8Unorm;
         {
             MTLPixelFormat nativeFmt = metalRenderbufferFormat(baseLevel.desc.internalFormat);
@@ -4818,12 +4823,12 @@ struct GLContext::Impl {
                     nativeFmt == MTLPixelFormatX24_Stencil8;
                 // Metal requires depth/stencil formats to be paired with
                 // 2D / 2DArray / Cube / CubeArray texture types only.
-                // A GL texture with a depth/stencil internal format but a
-                // GL_TEXTURE_3D / 1D / 1D_ARRAY target would crash Metal's
-                // descriptor validator. Fall back to RGBA8Unorm on such
-                // mismatch — the swizzle tests use depth formats purely
-                // as the 2D-target functional payload, so 3D/1D paths
-                // can still run under the generic RGBA8 shadow path.
+                // Promoted 1D/1D_ARRAY targets use 2D/2DArray backing and
+                // can keep the depth format; other mismatched targets fall
+                // back to RGBA8Unorm to avoid a Metal descriptor crash.
+                // The swizzle tests use depth formats purely as the
+                // 2D-target functional payload, so non-promoted 1D and 3D
+                // paths can still run under the generic RGBA8 shadow path.
                 // CTS `texture_swizzle.functional_format_idx_63_target_
                 // idx_0` exercises one such combination.
                 const bool targetSupportsDepth = (
@@ -4833,7 +4838,9 @@ struct GLContext::Impl {
                     object.target == GL_TEXTURE_CUBE_MAP_ARRAY ||
                     object.target == GL_TEXTURE_2D_MULTISAMPLE ||
                     object.target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY ||
-                    object.target == GL_TEXTURE_RECTANGLE);
+                    object.target == GL_TEXTURE_RECTANGLE ||
+                    ((object.target == GL_TEXTURE_1D ||
+                      object.target == GL_TEXTURE_1D_ARRAY) && use2DFor1D));
                 if (isDepthStencil && !targetSupportsDepth) {
                     // Depth/stencil format on unsupported target —
                     // Metal would reject. Keep RGBA8Unorm fallback.
@@ -4878,7 +4885,6 @@ struct GLContext::Impl {
         // GL_ARB_texture_view trip a Metal hard assertion at descriptor
         // creation (CKPT156 Day 3 experiment).
         const NSUInteger requestedLevels = static_cast<NSUInteger>(highestDefinedLevel + 1);
-        const bool use2DFor1D = sparseClampUses2DBackingFor1DTextures();
         const bool metalRequiresSingleLevel =
             ((object.target == GL_TEXTURE_1D ||
               object.target == GL_TEXTURE_1D_ARRAY) && !use2DFor1D) ||
@@ -5990,7 +5996,7 @@ struct GLContext::Impl {
         const std::size_t proxyBpp = (proxyFormat == MTLPixelFormatR8Uint)
             ? 1u
             : sizeof(float);
-        const bool use2DFor1D = sparseClampUses2DBackingFor1DTextures();
+        const bool use2DFor1D = uses2DBackingFor1DTextures();
         for (const auto& [levelIndex, image] : texObj.levels) {
             if (levelIndex < 0 || !image.defined ||
                 static_cast<NSUInteger>(levelIndex) >= proxy.mipmapLevelCount) {
@@ -6259,6 +6265,21 @@ struct GLContext::Impl {
         releaseRetainedMetalObject(texObj.metalSwizzledView);
         texObj.metalSwizzledView = nullptr;
 
+        auto textureViewSliceRange = [](id<MTLTexture> tex) -> NSRange {
+            NSUInteger sliceCount = std::max<NSUInteger>(tex.arrayLength, 1);
+            switch (tex.textureType) {
+                case MTLTextureTypeCube:
+                    sliceCount = 6;
+                    break;
+                case MTLTextureTypeCubeArray:
+                    sliceCount = 6 * std::max<NSUInteger>(tex.arrayLength, 1);
+                    break;
+                default:
+                    break;
+            }
+            return NSMakeRange(0, sliceCount);
+        };
+
         // Sprint 18 texture_swizzle MS+MSAA Mode 1: RGB-family GL
         // internal formats have no alpha channel, so GL §11.1.3.7 makes
         // GL_ALPHA reads synthesize 1. The Metal storage is often
@@ -6284,7 +6305,7 @@ struct GLContext::Impl {
                         newTextureViewWithPixelFormat:proxy.pixelFormat
                                          textureType:proxy.textureType
                                               levels:NSMakeRange(0, proxy.mipmapLevelCount)
-                                              slices:NSMakeRange(0, proxy.arrayLength)
+                                              slices:textureViewSliceRange(proxy)
                                              swizzle:channels];
                 }
                 if (swizzledProxy != nil) {
@@ -6307,7 +6328,7 @@ struct GLContext::Impl {
             newTextureViewWithPixelFormat:samplingPixelFormat
                              textureType:baseTex.textureType
                                   levels:viewLevels
-                                  slices:NSMakeRange(0, baseTex.arrayLength)
+                                  slices:textureViewSliceRange(baseTex)
                                  swizzle:channels];
         if (swizzledView != nil) {
             texObj.metalSwizzledView = transferRetainedMetalObject(swizzledView);

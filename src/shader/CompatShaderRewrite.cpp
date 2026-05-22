@@ -708,8 +708,10 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
     {
         static const char* const kUnknownExtensions[] = {
             "GL_ARB_cull_distance",
+            "GL_ARB_texture_query_levels",
         };
         bool strippedCullDistance = false;
+        bool strippedTextureQueryLevels = false;
         for (const char* ext : kUnknownExtensions) {
             std::string needle = std::string("#extension ") + ext;
             std::size_t pos = 0;
@@ -721,6 +723,29 @@ CompatShaderRewriteResult rewriteCompatShader(std::string_view source,
                 pos += 10;
                 if (std::string(ext) == "GL_ARB_cull_distance") {
                     strippedCullDistance = true;
+                } else if (std::string(ext) == "GL_ARB_texture_query_levels") {
+                    strippedTextureQueryLevels = true;
+                }
+            }
+        }
+        if (strippedTextureQueryLevels) {
+            // Glslang's Vulkan front-end does not know the ARB extension
+            // token, but textureQueryLevels is accepted as core GLSL 4.30.
+            // CTS uses #version 400 + the extension; upgrade that frontend
+            // view while preserving the original GL-facing extension advert.
+            std::size_t versionPos = result.source.find("#version");
+            if (versionPos != std::string::npos) {
+                std::size_t eol = result.source.find('\n', versionPos);
+                if (eol != std::string::npos) {
+                    const std::string_view versionLine(
+                        result.source.data() + versionPos,
+                        eol - versionPos);
+                    const int versionNumber = parseVersionNumber(versionLine);
+                    if (versionNumber > 0 && versionNumber < 430) {
+                        const std::size_t lineLen = eol - versionPos;
+                        const std::string newLine = "#version 430 core";
+                        result.source.replace(versionPos, lineLen, newLine);
+                    }
                 }
             }
         }
