@@ -1,0 +1,31 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -15576,6 +15576,11 @@ string CompilerMSL::to_function_args(const TextureFunctionArguments &args, bool
+ 		{
+ 			farg_str += ", " + to_unpacked_expression(lod);
+ 		}
++		else if (msl_options.sample_dref_lod_cube_as_nearest_level && args.dref && imgtype.image.dim == DimCube &&
++		         !imgtype.image.arrayed)
++		{
++			farg_str += ", level(max(0.0, floor(" + to_unpacked_expression(lod) + " + 0.5)))";
++		}
+ 		else if (msl_options.sample_dref_lod_array_as_grad && args.dref && imgtype.image.arrayed)
+ 		{
+ 			if (msl_options.is_macos() && !msl_options.supports_msl_version(2, 3))
+diff --git a/spirv_msl.hpp b/spirv_msl.hpp
+--- a/spirv_msl.hpp
++++ b/spirv_msl.hpp
+@@ -820,6 +820,12 @@ public:
+ 		// so it can be enabled only when the bug is present.
+ 		bool sample_dref_lod_array_as_grad = false;
+ 
++		// If set, Lod operands to OpImageSample*DrefExplicitLod for cube depth images
++		// will be rounded to the nearest mip before passing level(). This is narrower
++		// than the depth-array gradient workaround and only affects depth-cube compare
++		// LOD lowering.
++		bool sample_dref_lod_cube_as_nearest_level = false;
++
+ 		// MSL doesn't guarantee coherence between writes and subsequent reads of read_write textures.
+ 		// This inserts fences before each read of a read_write texture to ensure coherency.
+ 		// If you're sure you never rely on this, you can set this to false for a possible performance improvement.

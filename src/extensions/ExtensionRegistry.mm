@@ -13,7 +13,7 @@ namespace appgl::extensions {
 
 namespace {
 
-constexpr std::array<const char*, 56> kBaseExtensions = {
+constexpr std::array<const char*, 57> kBaseExtensions = {
     "GL_KHR_debug",
     "GL_ARB_debug_output",
     "GL_ARB_multitexture",
@@ -24,6 +24,7 @@ constexpr std::array<const char*, 56> kBaseExtensions = {
     "GL_EXT_texture_shared_exponent",
     "GL_ARB_texture_non_power_of_two",
     "GL_ARB_texture_query_lod",
+    "GL_EXT_texture_shadow_lod",
     "GL_ARB_framebuffer_object",
     "GL_EXT_framebuffer_object",
     "GL_EXT_framebuffer_multisample",

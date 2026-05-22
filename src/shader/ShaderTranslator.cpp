@@ -2222,6 +2222,8 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // runtime provide matching 2D mip-chain backing.
         mslOpts.texture_1D_as_2D =
             extensions::ExtensionRegistry::isExtensionActive("GL_ARB_sparse_texture_clamp");
+        mslOpts.sample_dref_lod_cube_as_nearest_level =
+            extensions::ExtensionRegistry::isExtensionActive("GL_EXT_texture_shadow_lod");
         // Step 8 (tessellation on Metal via SPIRV-Cross): when the shader is
         // a tess stage, we emit MSL compatible with Metal's native tess
         // pipeline (TCS-as-compute + TES-as-vertex-function + hardware

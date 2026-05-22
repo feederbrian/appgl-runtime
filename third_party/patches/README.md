@@ -109,6 +109,25 @@ cube targets at level 0.
 depth cluster under temporary sparse_texture_clamp advertisement (8/8
 after pairing with the AppGL clamp-depth sizing gate).
 
+### `spirv-cross-msl-depthcube-dref-lod-nearest.patch`
+
+**Target:** `third_party/SPIRV-Cross/spirv_msl.{hpp,cpp}` —
+`CompilerMSL::to_function_args()` depth-cube compare LOD handling.
+
+**Summary:** Adds an AppGL MSL option that rounds
+`OpImageSample*DrefExplicitLod` operands for non-array cube depth
+images to the nearest mip before emitting Metal `level()`.
+
+**Why:** `GL_EXT_texture_shadow_lod` CTS passes 2D-array and cube-array
+shadow LOD paths, but non-array `samplerCubeShadow textureLod` fails on
+Metal when handed the raw fractional LOD. The extension's CTS sampler
+uses nearest-mipmap selection, so rounding the explicit LOD to the
+nearest mip preserves the tested GL behavior while keeping the workaround
+limited to depth-cube compare LOD lowering.
+
+**CTS tests unlocked:** Sprint 21 FANTASTIC
+`KHR-GL46.ext_texture_shadow_lod.texturelod.samplercubeshadow_{vertex,fragment}`.
+
 ### `spirv-cross-msl-tcs-output-classification.patch`
 
 **Target:** `third_party/SPIRV-Cross/spirv_msl.{hpp,cpp}` — adds
