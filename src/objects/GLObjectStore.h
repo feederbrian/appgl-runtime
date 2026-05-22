@@ -63,6 +63,9 @@ struct GLBufferObject {
     bool instantiated = false;
     bool immutable = false;           // GL 4.4 glBufferStorage
     GLbitfield storageFlags = 0;      // GL 4.4 glBufferStorage flags
+    bool sparseStorage = false;       // GL_ARB_sparse_buffer
+    GLsizeiptr sparsePageSize = 0;
+    std::vector<std::uint8_t> sparseCommittedPages;
     GLenum mapAccess = GL_READ_WRITE;
     GLbitfield mapAccessFlags = 0;
     GLintptr mapOffset = 0;

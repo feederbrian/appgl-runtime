@@ -5921,6 +5921,33 @@
       "notes": ""
     },
     {
+      "name": "glBufferPageCommitmentARB",
+      "subsystem": "buffers and memory",
+      "introducedVersion": "ARB_sparse_buffer",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedBufferPageCommitmentARB",
+      "subsystem": "direct state access",
+      "introducedVersion": "ARB_sparse_buffer",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
+      "name": "glNamedBufferPageCommitmentEXT",
+      "subsystem": "direct state access",
+      "introducedVersion": "ARB_sparse_buffer",
+      "state": "Unimplemented",
+      "firstPassingTestId": "",
+      "firstPassingBenchmarkId": "",
+      "notes": ""
+    },
+    {
       "name": "glTexPageCommitmentARB",
       "subsystem": "textures and samplers",
       "introducedVersion": "ARB_sparse_texture",

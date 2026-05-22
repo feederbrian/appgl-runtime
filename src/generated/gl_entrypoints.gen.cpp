@@ -5874,6 +5874,33 @@ extern "C" void APIENTRY glPolygonOffsetClamp(GLfloat factor, GLfloat units, GLf
     appgl::unimplementedReturn<void>(appgl::FunctionId::glPolygonOffsetClamp, "glPolygonOffsetClamp");
 }
 
+extern "C" void APIENTRY glBufferPageCommitmentARB(GLenum target, GLintptr offset, GLsizeiptr size, GLboolean commit) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glBufferPageCommitmentARB, "glBufferPageCommitmentARB");
+    if (auto fn = appgl::Runtime::shared().dispatch().glBufferPageCommitmentARB) {
+        fn(target, offset, size, commit);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glBufferPageCommitmentARB, "glBufferPageCommitmentARB");
+}
+
+extern "C" void APIENTRY glNamedBufferPageCommitmentARB(GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glNamedBufferPageCommitmentARB, "glNamedBufferPageCommitmentARB");
+    if (auto fn = appgl::Runtime::shared().dispatch().glNamedBufferPageCommitmentARB) {
+        fn(buffer, offset, size, commit);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glNamedBufferPageCommitmentARB, "glNamedBufferPageCommitmentARB");
+}
+
+extern "C" void APIENTRY glNamedBufferPageCommitmentEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit) {
+    appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glNamedBufferPageCommitmentEXT, "glNamedBufferPageCommitmentEXT");
+    if (auto fn = appgl::Runtime::shared().dispatch().glNamedBufferPageCommitmentEXT) {
+        fn(buffer, offset, size, commit);
+        return;
+    }
+    appgl::unimplementedReturn<void>(appgl::FunctionId::glNamedBufferPageCommitmentEXT, "glNamedBufferPageCommitmentEXT");
+}
+
 extern "C" void APIENTRY glTexPageCommitmentARB(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit) {
     appgl::Runtime::shared().recordFunctionInvocation(appgl::FunctionId::glTexPageCommitmentARB, "glTexPageCommitmentARB");
     if (auto fn = appgl::Runtime::shared().dispatch().glTexPageCommitmentARB) {

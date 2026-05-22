@@ -8145,6 +8145,13 @@ void APIENTRY glBufferStorage(GLenum target, GLsizeiptr size, const void* data, 
     markBufferFunction(FunctionId::glBufferStorage, "Immutable buffer storage created.");
 }
 
+void APIENTRY glBufferPageCommitmentARB(GLenum target, GLintptr offset, GLsizeiptr size, GLboolean commit) {
+    auto* ctx = requireCurrentContext("glBufferPageCommitmentARB");
+    if (!ctx) return;
+    if (!ctx->bufferPageCommitment(target, offset, size, commit)) return;
+    markBufferFunction(FunctionId::glBufferPageCommitmentARB, "Sparse buffer page commitment updated.");
+}
+
 // ---------------------------------------------------------------------------
 // GL 4.4 — Multi-bind.
 // ---------------------------------------------------------------------------
@@ -8297,6 +8304,16 @@ void APIENTRY glNamedBufferStorage(GLuint buffer, GLsizeiptr size, const void* d
     auto* ctx = requireCurrentContext("glNamedBufferStorage"); if (!ctx) return;
     if (!ctx->namedBufferStorage(buffer, size, data, flags)) return;
     markBufferFunction(FunctionId::glNamedBufferStorage, "DSA immutable buffer storage.");
+}
+void APIENTRY glNamedBufferPageCommitmentARB(GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit) {
+    auto* ctx = requireCurrentContext("glNamedBufferPageCommitmentARB"); if (!ctx) return;
+    if (!ctx->namedBufferPageCommitment(buffer, offset, size, commit)) return;
+    markBufferFunction(FunctionId::glNamedBufferPageCommitmentARB, "DSA sparse buffer page commitment updated.");
+}
+void APIENTRY glNamedBufferPageCommitmentEXT(GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit) {
+    auto* ctx = requireCurrentContext("glNamedBufferPageCommitmentEXT"); if (!ctx) return;
+    if (!ctx->namedBufferPageCommitment(buffer, offset, size, commit)) return;
+    markBufferFunction(FunctionId::glNamedBufferPageCommitmentEXT, "EXT DSA sparse buffer page commitment updated.");
 }
 void APIENTRY glNamedBufferData(GLuint buffer, GLsizeiptr size, const void* data, GLenum usage) {
     auto* ctx = requireCurrentContext("glNamedBufferData"); if (!ctx) return;

@@ -349,6 +349,7 @@ public:
 
     // GL 4.4 — immutable buffer storage.
     bool bufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfield flags);
+    bool bufferPageCommitment(GLenum target, GLintptr offset, GLsizeiptr size, GLboolean commit);
     // GL 4.4 — multi-bind.
     bool bindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers);
     bool bindBuffersRange(GLenum target, GLuint first, GLsizei count, const GLuint* buffers,
@@ -378,6 +379,7 @@ public:
 
     // GL 4.5 — DSA buffer operations.
     bool namedBufferStorage(GLuint buffer, GLsizeiptr size, const void* data, GLbitfield flags);
+    bool namedBufferPageCommitment(GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit);
     bool namedBufferData(GLuint buffer, GLsizeiptr size, const void* data, GLenum usage);
     bool namedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const void* data);
     bool copyNamedBufferSubData(GLuint readBuffer, GLuint writeBuffer, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);

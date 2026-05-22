@@ -81,6 +81,9 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     dispatch.glTexStorage3D = &impl::glTexStorage3D;
     dispatch.glTexStorage2DMultisample = &impl::glTexStorage2DMultisample;
     dispatch.glTexStorage3DMultisample = &impl::glTexStorage3DMultisample;
+    dispatch.glBufferPageCommitmentARB = &impl::glBufferPageCommitmentARB;
+    dispatch.glNamedBufferPageCommitmentARB = &impl::glNamedBufferPageCommitmentARB;
+    dispatch.glNamedBufferPageCommitmentEXT = &impl::glNamedBufferPageCommitmentEXT;
     dispatch.glTexPageCommitmentARB = &impl::glTexPageCommitmentARB;
     dispatch.glGetFragmentShadingRatesEXT = &impl::glGetFragmentShadingRatesEXT;
     dispatch.glShadingRateEXT = &impl::glShadingRateEXT;
@@ -415,6 +418,12 @@ void installBootstrapDispatch(GLDispatchTable& dispatch, CoverageStore& coverage
     // GL 4.2/4.3 — internal format query.
     dispatch.glGetInternalformativ = &impl::glGetInternalformativ;
     dispatch.glGetInternalformati64v = &impl::glGetInternalformati64v;
+    coverage.markImplemented(FunctionId::glBufferPageCommitmentARB,
+                             "ARB_sparse_buffer target commitment is wired to committed-page emulation.");
+    coverage.markImplemented(FunctionId::glNamedBufferPageCommitmentARB,
+                             "ARB_sparse_buffer DSA commitment is wired to committed-page emulation.");
+    coverage.markImplemented(FunctionId::glNamedBufferPageCommitmentEXT,
+                             "EXT DSA sparse-buffer commitment alias is wired to committed-page emulation.");
     coverage.markImplemented(FunctionId::glTexPageCommitmentARB,
                              "ARB_sparse_texture commitment entry point is wired to Metal sparse mapping.");
     coverage.markImplemented(FunctionId::glGetFragmentShadingRatesEXT,

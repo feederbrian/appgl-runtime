@@ -89,6 +89,24 @@ MANUAL_EXTENSION_COMMANDS = [
 # GLCapabilities::initializeExtensions() and kAppGLExtensionList.
 EXTRA_EXTENSION_COMMANDS = [
     (
+        "glBufferPageCommitmentARB",
+        "void",
+        "GLenum target, GLintptr offset, GLsizeiptr size, GLboolean commit",
+        "ARB_sparse_buffer",
+    ),
+    (
+        "glNamedBufferPageCommitmentARB",
+        "void",
+        "GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit",
+        "ARB_sparse_buffer",
+    ),
+    (
+        "glNamedBufferPageCommitmentEXT",
+        "void",
+        "GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit",
+        "ARB_sparse_buffer",
+    ),
+    (
         "glTexPageCommitmentARB",
         "void",
         "GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLboolean commit",
@@ -151,6 +169,8 @@ EXTRA_EXTENSION_COMMANDS = [
 ]
 
 EXTRA_EXTENSION_ENUMS = [
+    ("GL_SPARSE_STORAGE_BIT_ARB", "0x0400"),
+    ("GL_SPARSE_BUFFER_PAGE_SIZE_ARB", "0x82F8"),
     ("GL_VIRTUAL_PAGE_SIZE_X_ARB", "0x9195"),
     ("GL_VIRTUAL_PAGE_SIZE_Y_ARB", "0x9196"),
     ("GL_VIRTUAL_PAGE_SIZE_Z_ARB", "0x9197"),

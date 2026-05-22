@@ -661,6 +661,7 @@ void GLCapabilities::initializeLimits(void* rawMetalDevice) {
         sparseColorTexturesSupported ? max3DTextureSize : 0;
     integerLimits_[GL_MAX_SPARSE_ARRAY_TEXTURE_LAYERS_ARB] =
         sparseColorTexturesSupported ? maxArrayLayers : 0;
+    integerLimits_[GL_SPARSE_BUFFER_PAGE_SIZE_ARB] = 65536;
     // Metal reports a mip tail for sparse textures, so conservatively
     // expose FALSE until dispatch #2 maps tail commitment semantics.
     integerLimits_[GL_SPARSE_TEXTURE_FULL_ARRAY_CUBE_MIPMAPS_ARB] = 0;

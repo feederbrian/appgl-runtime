@@ -2522,12 +2522,17 @@ static void APIENTRY glGetQueryiv(GLenum target, GLenum pname, GLint* params) {
 }
 
 static void APIENTRY glGetQueryObjectiv(GLuint id, GLenum pname, GLint* params) {
-    if (params == nullptr) {
-        return;
-    }
     auto* context = currentContextOrNull();
     if (context == nullptr) {
-        *params = 0;
+        if (params != nullptr) *params = 0;
+        return;
+    }
+    if (const GLuint queryBuffer = context->state().boundBuffer(GL_QUERY_BUFFER)) {
+        context->getQueryBufferObjectiv(
+            id, queryBuffer, pname, reinterpret_cast<GLintptr>(params));
+        return;
+    }
+    if (params == nullptr) {
         return;
     }
     auto* query = context->objects().queries().get(id);
@@ -2543,12 +2548,17 @@ static void APIENTRY glGetQueryObjectiv(GLuint id, GLenum pname, GLint* params) 
 }
 
 static void APIENTRY glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint* params) {
-    if (params == nullptr) {
-        return;
-    }
     auto* context = currentContextOrNull();
     if (context == nullptr) {
-        *params = 0;
+        if (params != nullptr) *params = 0;
+        return;
+    }
+    if (const GLuint queryBuffer = context->state().boundBuffer(GL_QUERY_BUFFER)) {
+        context->getQueryBufferObjectuiv(
+            id, queryBuffer, pname, reinterpret_cast<GLintptr>(params));
+        return;
+    }
+    if (params == nullptr) {
         return;
     }
     auto* query = context->objects().queries().get(id);
@@ -2564,12 +2574,17 @@ static void APIENTRY glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint* params
 }
 
 static void APIENTRY glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64* params) {
-    if (params == nullptr) {
-        return;
-    }
     auto* context = currentContextOrNull();
     if (context == nullptr) {
-        *params = 0;
+        if (params != nullptr) *params = 0;
+        return;
+    }
+    if (const GLuint queryBuffer = context->state().boundBuffer(GL_QUERY_BUFFER)) {
+        context->getQueryBufferObjecti64v(
+            id, queryBuffer, pname, reinterpret_cast<GLintptr>(params));
+        return;
+    }
+    if (params == nullptr) {
         return;
     }
     auto* query = context->objects().queries().get(id);
@@ -2585,12 +2600,17 @@ static void APIENTRY glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64* para
 }
 
 static void APIENTRY glGetQueryObjectui64v(GLuint id, GLenum pname, GLuint64* params) {
-    if (params == nullptr) {
-        return;
-    }
     auto* context = currentContextOrNull();
     if (context == nullptr) {
-        *params = 0;
+        if (params != nullptr) *params = 0;
+        return;
+    }
+    if (const GLuint queryBuffer = context->state().boundBuffer(GL_QUERY_BUFFER)) {
+        context->getQueryBufferObjectui64v(
+            id, queryBuffer, pname, reinterpret_cast<GLintptr>(params));
+        return;
+    }
+    if (params == nullptr) {
         return;
     }
     auto* query = context->objects().queries().get(id);

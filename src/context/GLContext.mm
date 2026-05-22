@@ -232,6 +232,19 @@ inline bool lookupIndexedBufferPname(GLenum pname, IndexedBufferPname& out) {
 
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
 constexpr std::uint32_t kMultisampleStorageSparseResidencyTextureSlotOffset = 96u;
+constexpr GLsizeiptr kSparseBufferPageSizeARB = 65536;
+
+static void fillBufferClearPattern(std::uint8_t* dst, std::size_t bytes,
+                                   const void* data, std::size_t patternBytes) {
+    if (patternBytes == 0 || data == nullptr) {
+        std::memset(dst, 0, bytes);
+        return;
+    }
+    for (std::size_t i = 0; i < bytes; i += patternBytes) {
+        const std::size_t remaining = std::min(patternBytes, bytes - i);
+        std::memcpy(dst + i, data, remaining);
+    }
+}
 
 std::uint32_t multisampleStorageImageSampleCountSlotForMSL(
     const std::string& msl) {
@@ -2665,6 +2678,9 @@ struct GLContext::Impl {
         object.fp64TransportSidecars.clear();
         object.size = 0;
         object.shadowBytes.clear();
+        object.sparseStorage = false;
+        object.sparsePageSize = 0;
+        object.sparseCommittedPages.clear();
         resetBufferMapping(object);
     }
 
@@ -4121,6 +4137,16 @@ struct GLContext::Impl {
         if (offset > bufSize || requiredBytes > bufSize - offset) {
             return {nullptr, false};
         }
+        if (buf->sparseStorage) {
+            syncSparseShadowFromMetalAndMask(
+                *buf,
+                static_cast<GLintptr>(offset),
+                static_cast<GLsizeiptr>(requiredBytes));
+            if (buf->shadowBytes.size() < offset + requiredBytes &&
+                !ensureSparseBufferBacking(*buf)) {
+                return {nullptr, false};
+            }
+        }
         if (buf->shadowBytes.size() < offset + requiredBytes) {
             // Shadow is smaller than the declared buffer size. Treat as
             // out-of-range to avoid reading past the end of our CPU mirror.
@@ -4182,6 +4208,9 @@ struct GLContext::Impl {
         const std::size_t bufSize = static_cast<std::size_t>(
             std::max<GLsizeiptr>(buf->size, 0));
         if (offset > bufSize || requiredBytes > bufSize - offset) {
+            return {nullptr, false};
+        }
+        if (buf->sparseStorage && !ensureSparseBufferBacking(*buf)) {
             return {nullptr, false};
         }
         // For persistent-mapped buffers the application reads from
@@ -8304,6 +8333,324 @@ struct GLContext::Impl {
         object.metalBuffer = retainedMetalBuffer;
         resetBufferMapping(object);
         // ADV-10: invalidate cached index expansion on data change.
+        ++object.indexExpansionGeneration;
+        return true;
+    }
+
+    bool replaceSparseBufferStorage(GLBufferObject& object, GLsizeiptr size) {
+        releaseBufferStorage(object);
+        object.size = size;
+        object.usage = GL_STATIC_DRAW;
+        object.sparseStorage = true;
+        object.sparsePageSize = kSparseBufferPageSizeARB;
+        const auto pageSize = static_cast<std::size_t>(object.sparsePageSize);
+        const auto byteSize = static_cast<std::size_t>(size);
+        const std::size_t pageCount = (byteSize + pageSize - 1u) / pageSize;
+        object.sparseCommittedPages.assign(pageCount, 0);
+        resetBufferMapping(object);
+        ++object.indexExpansionGeneration;
+        return true;
+    }
+
+    bool ensureSparseBufferBacking(GLBufferObject& object) {
+        if (!object.sparseStorage || object.size <= 0) {
+            return true;
+        }
+        const auto byteSize = static_cast<std::size_t>(object.size);
+        if (object.shadowBytes.size() < byteSize) {
+            object.shadowBytes.resize(byteSize, 0);
+        }
+        if (device == nil) {
+            return true;
+        }
+        id<MTLBuffer> metalBuffer = metalBufferFromRaw(object.metalBuffer);
+        if (metalBuffer != nil && [metalBuffer length] >= static_cast<NSUInteger>(byteSize)) {
+            return true;
+        }
+        releaseRetainedMetalObject(object.metalBuffer);
+        object.metalBuffer = nullptr;
+        metalBuffer = [device newBufferWithLength:static_cast<NSUInteger>(byteSize)
+                                          options:metalBufferOptionsForUsage(object.usage)];
+        if (metalBuffer == nil) {
+            return false;
+        }
+        if (!object.shadowBytes.empty()) {
+            std::memcpy([metalBuffer contents], object.shadowBytes.data(), byteSize);
+        }
+        object.metalBuffer = transferRetainedMetalObject(metalBuffer);
+        return true;
+    }
+
+    bool sparsePageCommitted(const GLBufferObject& object, std::size_t page) const {
+        return page < object.sparseCommittedPages.size() &&
+               object.sparseCommittedPages[page] != 0;
+    }
+
+    std::pair<std::size_t, std::size_t> sparsePageByteRange(
+        const GLBufferObject& object,
+        std::size_t page) const {
+        const auto pageSize = static_cast<std::size_t>(object.sparsePageSize);
+        const std::size_t start = page * pageSize;
+        const std::size_t end = std::min<std::size_t>(
+            start + pageSize,
+            static_cast<std::size_t>(std::max<GLsizeiptr>(object.size, 0)));
+        return {start, end};
+    }
+
+    void syncSparseShadowFromMetalAndMask(GLBufferObject& object, GLintptr offset, GLsizeiptr size) {
+        if (!object.sparseStorage || object.size <= 0 || size <= 0) {
+            return;
+        }
+        const auto byteSize = static_cast<std::size_t>(object.size);
+        const std::size_t rangeStart = std::min<std::size_t>(
+            static_cast<std::size_t>(offset),
+            byteSize);
+        const std::size_t rangeEnd = std::min<std::size_t>(
+            static_cast<std::size_t>(offset + size),
+            byteSize);
+        if (rangeEnd <= rangeStart) {
+            return;
+        }
+        id<MTLBuffer> metalBuffer = metalBufferFromRaw(object.metalBuffer);
+        std::uint8_t* metalBytes = metalBuffer == nil
+            ? nullptr
+            : static_cast<std::uint8_t*>([metalBuffer contents]);
+        if (object.shadowBytes.size() < rangeEnd) {
+            object.shadowBytes.resize(rangeEnd, 0);
+        }
+        if (metalBytes != nullptr) {
+            std::memcpy(object.shadowBytes.data() + rangeStart, metalBytes + rangeStart, rangeEnd - rangeStart);
+        }
+        for (std::size_t page = 0; page < object.sparseCommittedPages.size(); ++page) {
+            if (object.sparseCommittedPages[page] != 0) {
+                continue;
+            }
+            const auto [start, end] = sparsePageByteRange(object, page);
+            const std::size_t maskStart = std::max(start, rangeStart);
+            const std::size_t maskEnd = std::min(end, rangeEnd);
+            if (maskEnd <= maskStart) {
+                continue;
+            }
+            const std::size_t bytes = maskEnd - maskStart;
+            std::memset(object.shadowBytes.data() + maskStart, 0, bytes);
+            if (metalBytes != nullptr) {
+                std::memset(metalBytes + maskStart, 0, bytes);
+            }
+        }
+    }
+
+    bool commitSparseBufferRange(GLBufferObject& object, GLintptr offset, GLsizeiptr size, GLboolean commit) {
+        if (!object.sparseStorage || size == 0) {
+            return true;
+        }
+        const bool doCommit = commit != GL_FALSE;
+        const auto pageSize = static_cast<std::size_t>(object.sparsePageSize);
+        const std::size_t start = static_cast<std::size_t>(offset);
+        const std::size_t end = static_cast<std::size_t>(offset + size);
+        const std::size_t startPage = start / pageSize;
+        const std::size_t endPage = (end + pageSize - 1u) / pageSize;
+
+        if (doCommit) {
+            if (!ensureSparseBufferBacking(object)) {
+                return false;
+            }
+        }
+        id<MTLBuffer> metalBuffer = metalBufferFromRaw(object.metalBuffer);
+        std::uint8_t* metalBytes = metalBuffer == nil
+            ? nullptr
+            : static_cast<std::uint8_t*>([metalBuffer contents]);
+        for (std::size_t page = startPage; page < endPage && page < object.sparseCommittedPages.size(); ++page) {
+            const auto [pageStart, pageEnd] = sparsePageByteRange(object, page);
+            if (doCommit) {
+                if (object.sparseCommittedPages[page] == 0) {
+                    object.sparseCommittedPages[page] = 1;
+                    if (object.shadowBytes.size() >= pageEnd) {
+                        std::memset(object.shadowBytes.data() + pageStart, 0, pageEnd - pageStart);
+                    }
+                    if (metalBytes != nullptr) {
+                        std::memset(metalBytes + pageStart, 0, pageEnd - pageStart);
+                    }
+                }
+            } else {
+                object.sparseCommittedPages[page] = 0;
+                if (object.shadowBytes.size() >= pageEnd) {
+                    std::memset(object.shadowBytes.data() + pageStart, 0, pageEnd - pageStart);
+                }
+                if (metalBytes != nullptr) {
+                    std::memset(metalBytes + pageStart, 0, pageEnd - pageStart);
+                }
+            }
+        }
+        ++object.indexExpansionGeneration;
+        return true;
+    }
+
+    bool sparseRangeHasCommittedPages(const GLBufferObject& object, GLintptr offset, GLsizeiptr size) const {
+        if (!object.sparseStorage || size <= 0 || object.sparsePageSize <= 0) {
+            return false;
+        }
+        const auto pageSize = static_cast<std::size_t>(object.sparsePageSize);
+        const std::size_t start = static_cast<std::size_t>(offset);
+        const std::size_t end = static_cast<std::size_t>(offset + size);
+        const std::size_t startPage = start / pageSize;
+        const std::size_t endPage = (end + pageSize - 1u) / pageSize;
+        for (std::size_t page = startPage; page < endPage && page < object.sparseCommittedPages.size(); ++page) {
+            if (sparsePageCommitted(object, page)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool writeBufferRange(GLBufferObject& object, GLintptr offset, const void* data, GLsizeiptr size) {
+        if (size <= 0) {
+            return true;
+        }
+        if (object.sparseStorage) {
+            if (!sparseRangeHasCommittedPages(object, offset, size)) {
+                return true;
+            }
+            if (!ensureSparseBufferBacking(object)) {
+                return false;
+            }
+            auto* dst = object.shadowBytes.data();
+            id<MTLBuffer> metalBuffer = metalBufferFromRaw(object.metalBuffer);
+            std::uint8_t* metalBytes = metalBuffer == nil
+                ? nullptr
+                : static_cast<std::uint8_t*>([metalBuffer contents]);
+            const auto* src = static_cast<const std::uint8_t*>(data);
+            const auto pageSize = static_cast<std::size_t>(object.sparsePageSize);
+            const std::size_t rangeStart = static_cast<std::size_t>(offset);
+            const std::size_t rangeEnd = static_cast<std::size_t>(offset + size);
+            const std::size_t startPage = rangeStart / pageSize;
+            const std::size_t endPage = (rangeEnd + pageSize - 1u) / pageSize;
+            for (std::size_t page = startPage; page < endPage && page < object.sparseCommittedPages.size(); ++page) {
+                if (!sparsePageCommitted(object, page)) {
+                    continue;
+                }
+                const auto [pageStart, pageEnd] = sparsePageByteRange(object, page);
+                const std::size_t copyStart = std::max(rangeStart, pageStart);
+                const std::size_t copyEnd = std::min(rangeEnd, pageEnd);
+                if (copyEnd <= copyStart) {
+                    continue;
+                }
+                const std::size_t copyBytes = copyEnd - copyStart;
+                std::memcpy(dst + copyStart, src + (copyStart - rangeStart), copyBytes);
+                if (metalBytes != nullptr) {
+                    std::memcpy(metalBytes + copyStart, src + (copyStart - rangeStart), copyBytes);
+                }
+            }
+            ++object.indexExpansionGeneration;
+            return true;
+        }
+        if (object.shadowBytes.size() < static_cast<std::size_t>(offset + size)) {
+            return false;
+        }
+        std::memcpy(
+            object.shadowBytes.data() + static_cast<std::size_t>(offset),
+            data,
+            static_cast<std::size_t>(size));
+        syncMetalFromShadow(object, offset, size);
+        ++object.indexExpansionGeneration;
+        return true;
+    }
+
+    bool readBufferRange(GLBufferObject& object, GLintptr offset, GLsizeiptr size, void* data) {
+        if (size <= 0) {
+            return true;
+        }
+        if (object.sparseStorage) {
+            std::memset(data, 0, static_cast<std::size_t>(size));
+            if (!sparseRangeHasCommittedPages(object, offset, size)) {
+                return true;
+            }
+            syncSparseShadowFromMetalAndMask(object, offset, size);
+            const std::uint8_t* src = readableBufferContents(object);
+            if (src == nullptr) {
+                return true;
+            }
+            auto* dst = static_cast<std::uint8_t*>(data);
+            const auto pageSize = static_cast<std::size_t>(object.sparsePageSize);
+            const std::size_t rangeStart = static_cast<std::size_t>(offset);
+            const std::size_t rangeEnd = static_cast<std::size_t>(offset + size);
+            const std::size_t startPage = rangeStart / pageSize;
+            const std::size_t endPage = (rangeEnd + pageSize - 1u) / pageSize;
+            for (std::size_t page = startPage; page < endPage && page < object.sparseCommittedPages.size(); ++page) {
+                if (!sparsePageCommitted(object, page)) {
+                    continue;
+                }
+                const auto [pageStart, pageEnd] = sparsePageByteRange(object, page);
+                const std::size_t copyStart = std::max(rangeStart, pageStart);
+                const std::size_t copyEnd = std::min(rangeEnd, pageEnd);
+                if (copyEnd <= copyStart) {
+                    continue;
+                }
+                std::memcpy(
+                    dst + (copyStart - rangeStart),
+                    src + copyStart,
+                    copyEnd - copyStart);
+            }
+            return true;
+        }
+        const std::uint8_t* src = readableBufferContents(object);
+        if (src == nullptr) {
+            return false;
+        }
+        std::memcpy(
+            data,
+            src + static_cast<std::size_t>(offset),
+            static_cast<std::size_t>(size));
+        return true;
+    }
+
+    bool fillBufferRange(GLBufferObject& object, GLintptr offset, GLsizeiptr size, const void* pattern, std::size_t patternBytes) {
+        if (size <= 0) {
+            return true;
+        }
+        if (object.sparseStorage) {
+            if (!sparseRangeHasCommittedPages(object, offset, size)) {
+                return true;
+            }
+            if (!ensureSparseBufferBacking(object)) {
+                return false;
+            }
+            auto* shadow = object.shadowBytes.data();
+            id<MTLBuffer> metalBuffer = metalBufferFromRaw(object.metalBuffer);
+            std::uint8_t* metalBytes = metalBuffer == nil
+                ? nullptr
+                : static_cast<std::uint8_t*>([metalBuffer contents]);
+            const auto pageSize = static_cast<std::size_t>(object.sparsePageSize);
+            const std::size_t rangeStart = static_cast<std::size_t>(offset);
+            const std::size_t rangeEnd = static_cast<std::size_t>(offset + size);
+            const std::size_t startPage = rangeStart / pageSize;
+            const std::size_t endPage = (rangeEnd + pageSize - 1u) / pageSize;
+            for (std::size_t page = startPage; page < endPage && page < object.sparseCommittedPages.size(); ++page) {
+                if (!sparsePageCommitted(object, page)) {
+                    continue;
+                }
+                const auto [pageStart, pageEnd] = sparsePageByteRange(object, page);
+                const std::size_t fillStart = std::max(rangeStart, pageStart);
+                const std::size_t fillEnd = std::min(rangeEnd, pageEnd);
+                if (fillEnd <= fillStart) {
+                    continue;
+                }
+                fillBufferClearPattern(shadow + fillStart, fillEnd - fillStart, pattern, patternBytes);
+                if (metalBytes != nullptr) {
+                    fillBufferClearPattern(metalBytes + fillStart, fillEnd - fillStart, pattern, patternBytes);
+                }
+            }
+            ++object.indexExpansionGeneration;
+            return true;
+        }
+        if (object.shadowBytes.size() < static_cast<std::size_t>(offset + size)) {
+            object.shadowBytes.resize(static_cast<std::size_t>(offset + size), 0);
+        }
+        fillBufferClearPattern(
+            object.shadowBytes.data() + static_cast<std::size_t>(offset),
+            static_cast<std::size_t>(size),
+            pattern,
+            patternBytes);
+        syncMetalFromShadow(object, offset, size);
         ++object.indexExpansionGeneration;
         return true;
     }
@@ -12682,6 +13029,7 @@ struct GLContext::Impl {
     bool transformFeedbackPaused = false;
     GLenum transformFeedbackPrimitiveMode = GL_POINTS;
     GLuint boundTransformFeedbackId = 0;
+    std::array<GLsizei, GLTransformFeedbackObject::kMaxTransformFeedbackStreams> defaultTransformFeedbackCapturedVertexCount{};
 
     // CKPT85 helpers — Impl methods can't call the public GLContext
     // getters directly without a back-pointer dance, so these inlines
@@ -15323,14 +15671,10 @@ bool GLContext::bufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         return false;
     }
     if (size > 0) {
-        std::memcpy(
-            object->shadowBytes.data() + static_cast<std::size_t>(offset),
-            data,
-            static_cast<std::size_t>(size)
-        );
-        impl_->syncMetalFromShadow(*object, offset, size);
-        // ADV-10: invalidate cached index expansion on data change.
-        ++object->indexExpansionGeneration;
+        if (!impl_->writeBufferRange(*object, offset, data, size)) {
+            pushError(GL_OUT_OF_MEMORY);
+            return false;
+        }
     }
     return true;
 }
@@ -15380,18 +15724,15 @@ bool GLContext::copyBufferSubData(
         }
     }
     if (size > 0) {
-        const std::uint8_t* readBytes = impl_->readableBufferContents(*readObject);
-        if (readBytes == nullptr) {
+        std::vector<std::uint8_t> copyBytes(static_cast<std::size_t>(size));
+        if (!impl_->readBufferRange(*readObject, readOffset, size, copyBytes.data())) {
             pushError(GL_INVALID_OPERATION);
             return false;
         }
-        std::memcpy(
-            writeObject->shadowBytes.data() + static_cast<std::size_t>(writeOffset),
-            readBytes + static_cast<std::size_t>(readOffset),
-            static_cast<std::size_t>(size)
-        );
-        impl_->syncMetalFromShadow(*writeObject, writeOffset, size);
-        ++writeObject->indexExpansionGeneration;
+        if (!impl_->writeBufferRange(*writeObject, writeOffset, copyBytes.data(), size)) {
+            pushError(GL_OUT_OF_MEMORY);
+            return false;
+        }
     }
     return true;
 }
@@ -15488,12 +15829,10 @@ bool GLContext::getBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size
         return false;
     }
     if (size > 0) {
-        const std::uint8_t* bytes = impl_->readableBufferContents(*object);
-        if (bytes == nullptr) {
+        if (!impl_->readBufferRange(*object, offset, size, data)) {
             pushError(GL_INVALID_OPERATION);
             return false;
         }
-        std::memcpy(data, bytes + static_cast<std::size_t>(offset), static_cast<std::size_t>(size));
         if (target == GL_TRANSFORM_FEEDBACK_BUFFER) {
             logTFReadback(target, name, offset, size,
                           static_cast<const std::uint8_t*>(data));
@@ -15529,6 +15868,10 @@ void* GLContext::mapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
     const GLuint name = impl_->state->boundBuffer(target);
     GLBufferObject* object = impl_->objects->buffers().get(name);
     if (name == 0 || object == nullptr || !object->instantiated || object->mapped) {
+        pushError(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+    if (object->sparseStorage) {
         pushError(GL_INVALID_OPERATION);
         return nullptr;
     }
@@ -18041,23 +18384,18 @@ bool GLContext::texBufferRange(
     object->desc.immutable = true;
     object->target = target;
 
-    // Create the Metal MTLTexture view over the source MTLBuffer using
-    // `MTLTextureType::textureBuffer` (Metal 2.1+). This gives
-    // `texture_buffer<T>` samplerBuffer access in MSL, which CTS
-    // `direct_state_access.textures_buffer_*` uses via isamplerBuffer /
-    // usamplerBuffer / samplerBuffer. Without this, the texture slot
-    // was nil at draw time, the fragment shader sampled zero, and the
-    // test threw an InternalError when `glGetProgramInfoLog` emitted
-    // and the surrounding `catch(...)` converted the throw into IE.
+    // SPIRV-Cross lowers GL samplerBuffer to a synthetic texture2d<T>
+    // with texel coordinates (index % 4096, index / 4096). Build the
+    // Metal view with the same 4096-wide row layout so accesses past
+    // the first row remain valid.
     GLBufferObject* bufObj = impl_->objects->buffers().get(buffer);
     if (bufObj != nullptr && bufObj->metalBuffer != nullptr) {
         id<MTLBuffer> mtlBuffer = (__bridge id<MTLBuffer>)bufObj->metalBuffer;
         MTLPixelFormat pf = metalRenderbufferFormat(internalformat);
         if (pf != MTLPixelFormatInvalid) {
             MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
-            desc.textureType = MTLTextureTypeTextureBuffer;
+            desc.textureType = MTLTextureType2D;
             desc.pixelFormat = pf;
-            // Metal texture-buffer width counts TEXELS, not bytes.
             const NSUInteger bpp = [&](MTLPixelFormat p) -> NSUInteger {
                 auto info = Impl::nativeFormatInfo(p);
                 return static_cast<NSUInteger>(info.bytesPerPixel);
@@ -18065,15 +18403,33 @@ bool GLContext::texBufferRange(
             if (bpp > 0) {
                 const NSUInteger byteLen = static_cast<NSUInteger>(size);
                 const NSUInteger texelCount = byteLen / bpp;
-                // Metal asserts on width=0 or when offset+byteLen exceeds
-                // the buffer length. Skip Metal-side creation under those
-                // degenerate conditions — CTS `textures_buffer_range_errors`
-                // deliberately passes them and only reads the pushed GL
-                // error afterwards.
-                if (texelCount > 0 &&
-                    static_cast<NSUInteger>(offset) + byteLen <= mtlBuffer.length) {
-                    desc.width = texelCount;
-                    desc.height = 1;
+                constexpr NSUInteger kTexelBufferRowTexels = 4096;
+                GLint64 maxTextureHeight = 16384;
+                if (impl_->capabilities != nullptr) {
+                    impl_->capabilities->queryInteger64(GL_MAX_TEXTURE_SIZE, &maxTextureHeight);
+                }
+                const NSUInteger maxRows = static_cast<NSUInteger>(
+                    std::max<GLint64>(maxTextureHeight, 1));
+                const NSUInteger visibleTexelCount = std::min<NSUInteger>(
+                    texelCount,
+                    kTexelBufferRowTexels * maxRows);
+                const NSUInteger rowTexels = std::min<NSUInteger>(
+                    visibleTexelCount,
+                    kTexelBufferRowTexels);
+                const NSUInteger rowBytesUnaligned = rowTexels * bpp;
+                const NSUInteger rowBytes =
+                    ((rowBytesUnaligned + 15u) / 16u) * 16u;
+                const NSUInteger rowCount =
+                    rowTexels > 0 ? (visibleTexelCount + rowTexels - 1u) / rowTexels : 0;
+                const NSUInteger viewBytes = rowBytes * rowCount;
+                // Metal asserts on zero dimensions or when the strided
+                // 2D buffer view exceeds the buffer length. Skip Metal-side
+                // creation under those degenerate conditions; validation
+                // has already reported GL errors for invalid API inputs.
+                if (rowTexels > 0 && rowCount > 0 &&
+                    static_cast<NSUInteger>(offset) + viewBytes <= mtlBuffer.length) {
+                    desc.width = rowTexels;
+                    desc.height = rowCount;
                     desc.depth = 1;
                     desc.mipmapLevelCount = 1;
                     desc.arrayLength = 1;
@@ -18081,7 +18437,7 @@ bool GLContext::texBufferRange(
                     desc.usage = MTLTextureUsageShaderRead;
                     id<MTLTexture> tex = [mtlBuffer newTextureWithDescriptor:desc
                                                                       offset:static_cast<NSUInteger>(offset)
-                                                                 bytesPerRow:byteLen];
+                                                                 bytesPerRow:rowBytes];
                     // Release any prior metalTexture before retaining the new one.
                     if (object->metalTexture != nullptr) {
                         releaseRetainedMetalObject(object->metalTexture);
@@ -20935,15 +21291,9 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
         if (bufferName == 0 || bytes == 0) return;
         GLBufferObject* buf = objects->buffers().get(bufferName);
         if (buf == nullptr) return;
-        if (bufOffset + bytes > buf->shadowBytes.size()) return;
-        std::memcpy(buf->shadowBytes.data() + bufOffset, src, bytes);
-        if (buf->metalBuffer != nullptr) {
-            id<MTLBuffer> mb = (__bridge id<MTLBuffer>)buf->metalBuffer;
-            std::uint8_t* mc = static_cast<std::uint8_t*>([mb contents]);
-            if (mc != nullptr) {
-                std::memcpy(mc + bufOffset, src, bytes);
-            }
-        }
+        if (bufOffset + bytes > static_cast<std::size_t>(std::max<GLsizeiptr>(buf->size, 0))) return;
+        (void)writeBufferRange(*buf, static_cast<GLintptr>(bufOffset), src,
+                               static_cast<GLsizeiptr>(bytes));
     };
 
     // TF plumbing only runs when the program has varyings recorded
@@ -20952,6 +21302,10 @@ void GLContext::Impl::writeTessTFAndUpdateCounters(
     const bool tfActive = isTfActiveOnBoundImpl();
     auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
         if (boundTransformFeedbackId == 0) {
+            if (stream < defaultTransformFeedbackCapturedVertexCount.size()) {
+                return static_cast<std::size_t>(
+                    std::max<GLsizei>(defaultTransformFeedbackCapturedVertexCount[stream], 0));
+            }
             return 0;
         }
         auto* tf = objects->transformFeedbacks().get(boundTransformFeedbackId);
@@ -21392,20 +21746,18 @@ void GLContext::Impl::writeVsTfFromComputeOutput(
         if (bufferName == 0 || bytes == 0) return;
         GLBufferObject* buf = objects->buffers().get(bufferName);
         if (buf == nullptr) return;
-        if (bufOffset + bytes > buf->shadowBytes.size()) return;
-        std::memcpy(buf->shadowBytes.data() + bufOffset, src, bytes);
-        if (buf->metalBuffer != nullptr) {
-            id<MTLBuffer> mb = (__bridge id<MTLBuffer>)buf->metalBuffer;
-            std::uint8_t* mc = static_cast<std::uint8_t*>([mb contents]);
-            if (mc != nullptr) {
-                std::memcpy(mc + bufOffset, src, bytes);
-            }
-        }
+        if (bufOffset + bytes > static_cast<std::size_t>(std::max<GLsizeiptr>(buf->size, 0))) return;
+        (void)writeBufferRange(*buf, static_cast<GLintptr>(bufOffset), src,
+                               static_cast<GLsizeiptr>(bytes));
     };
 
     const bool tfActive = isTfActiveOnBoundImpl();
     auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
         if (boundTransformFeedbackId == 0) {
+            if (stream < defaultTransformFeedbackCapturedVertexCount.size()) {
+                return static_cast<std::size_t>(
+                    std::max<GLsizei>(defaultTransformFeedbackCapturedVertexCount[stream], 0));
+            }
             return 0;
         }
         auto* tf = objects->transformFeedbacks().get(boundTransformFeedbackId);
@@ -22013,6 +22365,10 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     const bool tfActive = isTfActiveOnBoundImpl();
     auto capturedVerticesBeforeDraw = [this](std::size_t stream) -> std::size_t {
         if (boundTransformFeedbackId == 0) {
+            if (stream < defaultTransformFeedbackCapturedVertexCount.size()) {
+                return static_cast<std::size_t>(
+                    std::max<GLsizei>(defaultTransformFeedbackCapturedVertexCount[stream], 0));
+            }
             return 0;
         }
         auto* tf = objects->transformFeedbacks().get(boundTransformFeedbackId);
@@ -22202,7 +22558,7 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
             GLBufferObject* buf = objects->buffers().get(bufferName);
             if (buf == nullptr) return;
             const std::size_t bytes = count * scalarBytes;
-            if (bufOffset + bytes > buf->shadowBytes.size()) return;
+            if (bufOffset + bytes > static_cast<std::size_t>(std::max<GLsizeiptr>(buf->size, 0))) return;
             std::vector<std::uint8_t> converted;
             const void* writePtr = src;
             if (scalarBytes == sizeof(double)) {
@@ -22215,19 +22571,8 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                 }
                 writePtr = converted.data();
             }
-            // Update both the shadow bytes AND the Metal buffer
-            // contents. `mutableBufferContents` (the backing for
-            // `glMapBufferRange`) prefers the Metal buffer when one
-            // is allocated; writing only to `shadowBytes` leaves
-            // the readback staring at uninitialised Metal memory.
-            std::memcpy(buf->shadowBytes.data() + bufOffset, writePtr, bytes);
-            if (buf->metalBuffer != nullptr) {
-                id<MTLBuffer> mb = (__bridge id<MTLBuffer>)buf->metalBuffer;
-                std::uint8_t* mc = static_cast<std::uint8_t*>([mb contents]);
-                if (mc != nullptr) {
-                    std::memcpy(mc + bufOffset, writePtr, bytes);
-                }
-            }
+            (void)writeBufferRange(*buf, static_cast<GLintptr>(bufOffset),
+                                   writePtr, static_cast<GLsizeiptr>(bytes));
         };
 
         // Checks whether a range `[cursor .. cursor + size)` fits
@@ -22245,7 +22590,8 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
             GLBufferObject* buf = objects->buffers().get(bufferName);
             if (buf == nullptr) return false;
             const std::size_t capacity = (rangeSize > 0)
-                ? (rangeStart + rangeSize) : buf->shadowBytes.size();
+                ? (rangeStart + rangeSize)
+                : static_cast<std::size_t>(std::max<GLsizeiptr>(buf->size, 0));
             return cursor + needBytes <= capacity;
         };
         auto writeRawBytesToBuffer = [this](GLuint bufferName,
@@ -22254,17 +22600,12 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
                                             std::size_t bytes) {
             if (bufferName == 0 || bytes == 0) return;
             GLBufferObject* buf = objects->buffers().get(bufferName);
-            if (buf == nullptr || bufOffset + bytes > buf->shadowBytes.size()) {
+            if (buf == nullptr ||
+                bufOffset + bytes > static_cast<std::size_t>(std::max<GLsizeiptr>(buf->size, 0))) {
                 return;
             }
-            std::memcpy(buf->shadowBytes.data() + bufOffset, src, bytes);
-            if (buf->metalBuffer != nullptr) {
-                id<MTLBuffer> mb = (__bridge id<MTLBuffer>)buf->metalBuffer;
-                std::uint8_t* mc = static_cast<std::uint8_t*>([mb contents]);
-                if (mc != nullptr) {
-                    std::memcpy(mc + bufOffset, src, bytes);
-                }
-            }
+            (void)writeBufferRange(*buf, static_cast<GLintptr>(bufOffset), src,
+                                   static_cast<GLsizeiptr>(bytes));
         };
 
         auto hasTfName = [&](const char* name) -> bool {
@@ -22805,7 +23146,40 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
     // and only the per-stream COUNT semantic shifts here).
     if (isTfActiveOnBoundImpl()) {
         const GLuint tfName = boundTransformFeedbackId;
-        if (tfName != 0) {
+        if (tfName == 0) {
+            if (hasMultiStreamOutput && primsWrittenByStreamValid) {
+                for (std::size_t s = 0;
+                     s < primsWrittenByStream.size() &&
+                     s < defaultTransformFeedbackCapturedVertexCount.size();
+                     ++s) {
+                    defaultTransformFeedbackCapturedVertexCount[s] +=
+                        static_cast<GLsizei>(primsWrittenByStream[s] * vpp);
+                }
+            } else if (hasMultiStreamOutput) {
+                const std::size_t writtenVerts = primsWritten * vpp;
+                const std::size_t totalVerts = ed.vertexCount;
+                if (totalVerts == 0 || writtenVerts == totalVerts) {
+                    for (std::size_t s = 0; s < ed.streamVertexCounts.size()
+                                          && s < defaultTransformFeedbackCapturedVertexCount.size();
+                         ++s) {
+                        defaultTransformFeedbackCapturedVertexCount[s] +=
+                            static_cast<GLsizei>(ed.streamVertexCounts[s]);
+                    }
+                } else if (totalVerts > 0) {
+                    for (std::size_t s = 0; s < ed.streamVertexCounts.size()
+                                          && s < defaultTransformFeedbackCapturedVertexCount.size();
+                         ++s) {
+                        const std::size_t scaled =
+                            ed.streamVertexCounts[s] * writtenVerts / totalVerts;
+                        defaultTransformFeedbackCapturedVertexCount[s] +=
+                            static_cast<GLsizei>(scaled);
+                    }
+                }
+            } else {
+                defaultTransformFeedbackCapturedVertexCount[0] +=
+                    static_cast<GLsizei>(primsWritten * vpp);
+            }
+        } else {
             if (auto* tf = objects->transformFeedbacks().get(tfName)) {
                 if (hasMultiStreamOutput && primsWrittenByStreamValid) {
                     // CKPT96: INTERLEAVED multi-stream path tracked per-
@@ -22862,6 +23236,9 @@ bool GLContext::Impl::writeGsXfbAndCheckDiscard(
 
 void GLContext::setTransformFeedbackActive(bool active) {
     impl_->transformFeedbackActive = active;
+    if (active && impl_->boundTransformFeedbackId == 0) {
+        impl_->defaultTransformFeedbackCapturedVertexCount.fill(0);
+    }
     // Mirror the active flag onto the currently-bound TF object so
     // DSA `glGetTransformFeedbackiv(xfb, GL_TRANSFORM_FEEDBACK_ACTIVE)`
     // returns the correct per-object state. CTS
@@ -36334,6 +36711,11 @@ static bool translatedDrawHasClipControlYSignParameter(const TranslatedDrawInfo&
             std::string::npos;
 }
 
+static bool translatedDrawUsesFragCoordParams(const TranslatedDrawInfo& tdi) {
+    return tdi.fragmentMSL != nullptr &&
+        tdi.fragmentMSL->find("_appgl_FragCoordParams") != std::string::npos;
+}
+
 // Sprint 17 Day 7+ Bank-Group-H Path B Phase 3 day 4 — see header
 // comment at the Impl method declaration. Item 26 LIVE 19th-instance
 // candidate: sister-pattern leverage at the call-site-wrapper level.
@@ -36445,7 +36827,12 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                 const bool lowerLeftFramebufferReadbackFlip =
                     tdi.clipOrigin == GL_LOWER_LEFT &&
                     !clipControlShaderYFixup;
+                const bool fragCoordClipControlReadbackFlip =
+                    tdi.clipOrigin == GL_LOWER_LEFT &&
+                    clipControlShaderYFixup &&
+                    translatedDrawUsesFragCoordParams(tdi);
                 if (lowerLeftFramebufferReadbackFlip ||
+                    fragCoordClipControlReadbackFlip ||
                     clipControlShaderYFixup ||
                     tdi.markColorAttachmentReadbackFlip) {
                     for (const auto& kv : fbo->attachments) {
@@ -36455,7 +36842,9 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                             if (GLRenderbufferObject* rb =
                                     objects->renderbuffers().get(kv.second.object)) {
                                 rb->framebufferReadbackYFlip =
-                                    lowerLeftFramebufferReadbackFlip;
+                                    lowerLeftFramebufferReadbackFlip ||
+                                    fragCoordClipControlReadbackFlip ||
+                                    tdi.markColorAttachmentReadbackFlip;
                             }
                             continue;
                         }
@@ -38785,8 +39174,12 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 vaoName, 0, 0, 0);
         }
         if (!vao->attributes.empty()) {
-            const auto& posAttr = vao->attributes[0];
-            auto resolved = resolveVertexAttrib(posAttr, *vao);
+            std::size_t primaryIdx = 0;
+            for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                if (vao->attributes[ai].enabled) { primaryIdx = ai; break; }
+            }
+            const auto& primaryAttr = vao->attributes[primaryIdx];
+            auto resolved = resolveVertexAttrib(primaryAttr, *vao);
             GLBufferObject* vbo = (resolved.bufferName != 0)
                 ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
             if (vbo == nullptr) {
@@ -38800,7 +39193,18 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
             }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = resolved.stride;
-                const std::size_t startOff = resolved.offset;
+                std::size_t primaryBaseOffset = resolved.offset;
+                for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                    const auto& attr = vao->attributes[ai];
+                    if (!attr.enabled) continue;
+                    auto attrRes = resolveVertexAttrib(attr, *vao);
+                    if (attrRes.bufferName == resolved.bufferName &&
+                        attrRes.stride == posStride) {
+                        primaryBaseOffset =
+                            std::min(primaryBaseOffset, attrRes.offset);
+                    }
+                }
+                const std::size_t startOff = primaryBaseOffset;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
@@ -38884,7 +39288,7 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                             populateVertexAttributeLayoutVAOFields(layout, attr);
                             if (attrRes.bufferName == resolved.bufferName
                                 && attrRes.stride == posStride) {
-                                layout.offset = attrRes.offset - resolved.offset;
+                                layout.offset = attrRes.offset - primaryBaseOffset;
                                 tdi.vertexAttributeLayouts.push_back(layout);
                             } else {
                                 GLBufferObject* extraVbo =
@@ -39050,6 +39454,10 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
     if (impl_->shouldSkipDrawForConditionalRender()) {
         return true;
     }
+    if (isTransformFeedbackActive()) {
+        return drawElementsInstancedBaseVertex(
+            mode, count, type, indices, 1, basevertex, 0, drawID);
+    }
     // GL 4.6 §22.1 / §22.3 — pipeline-stats counter update for
     // non-GS indexed draws. GS path is handled via
     // writeGsXfbAndCheckDiscard below.
@@ -39161,8 +39569,12 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                 vaoName, 0, 0, 0);
         }
         if (!vao->attributes.empty()) {
-            const auto& posAttr = vao->attributes[0];
-            auto resolved = resolveVertexAttrib(posAttr, *vao);
+            std::size_t primaryIdx = 0;
+            for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                if (vao->attributes[ai].enabled) { primaryIdx = ai; break; }
+            }
+            const auto& primaryAttr = vao->attributes[primaryIdx];
+            auto resolved = resolveVertexAttrib(primaryAttr, *vao);
             GLBufferObject* vbo = (resolved.bufferName != 0)
                 ? impl_->objects->buffers().get(resolved.bufferName) : nullptr;
             if (vbo == nullptr) {
@@ -39176,7 +39588,18 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
             }
             if (vbo != nullptr && !vbo->shadowBytes.empty()) {
                 const std::size_t posStride = resolved.stride;
-                const std::size_t startOff = resolved.offset;
+                std::size_t primaryBaseOffset = resolved.offset;
+                for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
+                    const auto& attr = vao->attributes[ai];
+                    if (!attr.enabled) continue;
+                    auto attrRes = resolveVertexAttrib(attr, *vao);
+                    if (attrRes.bufferName == resolved.bufferName &&
+                        attrRes.stride == posStride) {
+                        primaryBaseOffset =
+                            std::min(primaryBaseOffset, attrRes.offset);
+                    }
+                }
+                const std::size_t startOff = primaryBaseOffset;
 
                 if (startOff > vbo->shadowBytes.size()) {
                     reportTranslatedFallbackOnce(program, programName,
@@ -39217,16 +39640,56 @@ bool GLContext::drawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, 
                     tdi.metalFragmentFunctionOut = &program->metalFragmentFunction;
                     tdi.program = programName;
 
+                    struct DEBVGroupKey {
+                        GLuint bufferName;
+                        std::size_t stride;
+                        bool operator==(const DEBVGroupKey& o) const {
+                            return bufferName == o.bufferName && stride == o.stride;
+                        }
+                    };
+                    struct DEBVGroupKeyHash {
+                        std::size_t operator()(const DEBVGroupKey& k) const {
+                            return std::hash<GLuint>()(k.bufferName)
+                                 ^ (std::hash<std::size_t>()(k.stride) << 16);
+                        }
+                    };
+                    std::unordered_map<DEBVGroupKey, std::size_t, DEBVGroupKeyHash> debvExtraMap;
                     for (std::size_t ai = 0; ai < vao->attributes.size(); ++ai) {
                         const auto& attr = vao->attributes[ai];
                         if (!attr.enabled) continue;
                         auto attrRes = resolveVertexAttrib(attr, *vao);
-                        if (attrRes.bufferName != resolved.bufferName) continue;
                         TranslatedDrawInfo::VertexAttributeLayout layout;
                         layout.location = static_cast<GLuint>(ai);
-                        layout.offset = attrRes.offset - resolved.offset;
                         populateVertexAttributeLayoutVAOFields(layout, attr);
-                        tdi.vertexAttributeLayouts.push_back(layout);
+                        if (attrRes.bufferName == resolved.bufferName
+                            && attrRes.stride == posStride) {
+                            layout.offset = attrRes.offset - primaryBaseOffset;
+                            tdi.vertexAttributeLayouts.push_back(layout);
+                        } else {
+                            GLBufferObject* extraVbo =
+                                impl_->objects->buffers().get(attrRes.bufferName);
+                            if (extraVbo == nullptr || extraVbo->shadowBytes.empty()) continue;
+                            DEBVGroupKey key{attrRes.bufferName, attrRes.stride};
+                            auto it = debvExtraMap.find(key);
+                            std::size_t idx;
+                            if (it == debvExtraMap.end()) {
+                                idx = tdi.extraVertexBuffers.size();
+                                debvExtraMap[key] = idx;
+                                TranslatedDrawInfo::ExtraVertexBuffer evb;
+                                evb.data = extraVbo->shadowBytes.data();
+                                evb.byteCount = extraVbo->shadowBytes.size();
+                                evb.stride = attrRes.stride;
+                                evb.divisor = 0;
+                                evb.metalBuffer = extraVbo->metalBuffer;
+                                evb.metalBufferOffset = 0;
+                                evb.glBuffer = attrRes.bufferName;
+                                tdi.extraVertexBuffers.push_back(std::move(evb));
+                            } else {
+                                idx = it->second;
+                            }
+                            layout.offset = attrRes.offset;
+                            tdi.extraVertexBuffers[idx].attributes.push_back(layout);
+                        }
                     }
 
                     if (!program->uniformLayoutComputed) {
@@ -40894,6 +41357,21 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
             info.buffers.push_back(bb);
         }
     }
+    for (const auto& ac : programObject->resourceAtomicCounterBuffers) {
+        if (ac.binding < 0) continue;
+        const GLuint glBinding = static_cast<GLuint>(ac.binding);
+        const GLIndexedBufferBinding binding = impl_->state->indexedBufferBinding(
+            GL_ATOMIC_COUNTER_BUFFER, glBinding);
+        if (binding.buffer == 0) continue;
+        const GLBufferObject* bufObj = impl_->objects->buffers().get(binding.buffer);
+        if (bufObj == nullptr || bufObj->metalBuffer == nullptr) continue;
+
+        ComputeDispatchInfo::BufferBinding bb;
+        bb.metalBuffer = bufObj->metalBuffer;
+        bb.offset = static_cast<std::size_t>(binding.offset);
+        bb.metalSlot = glBinding;
+        info.buffers.push_back(bb);
+    }
     thread_local std::vector<std::uint8_t> computeUniformScratchIndirect;
     if (!programObject->uniformLayoutComputed
         || programObject->computeUniformLayout.empty()) {
@@ -42188,11 +42666,13 @@ bool GLContext::readIndirectBuffer(GLenum target, const void* indirect, std::siz
             pushError(GL_INVALID_OPERATION);
             return false;
         }
-        if (buf->shadowBytes.size() >= offset + size) {
-            std::memcpy(out, buf->shadowBytes.data() + offset, size);
-        } else {
-            // Shadow copy not available — zero-fill as a safe fallback.
-            std::memset(out, 0, size);
+        if (!impl_->readBufferRange(
+                *buf,
+                static_cast<GLintptr>(offset),
+                static_cast<GLsizeiptr>(size),
+                out)) {
+            pushError(GL_INVALID_OPERATION);
+            return false;
         }
     } else {
         // No buffer bound — `indirect` is a client pointer.
@@ -42513,26 +42993,11 @@ bool GLContext::clearBufferData(GLenum target, GLenum internalformat, GLenum for
     if (buffer->size == 0) {
         return true; // valid no-op
     }
-    // Fill the shadow bytes with the clear value (or zero if data is null).
-    if (buffer->shadowBytes.size() < static_cast<std::size_t>(buffer->size)) {
-        buffer->shadowBytes.resize(static_cast<std::size_t>(buffer->size), 0);
-    }
     const std::size_t patternBytes = bufferClearPatternBytes(format, type);
-    fillBufferClearPattern(buffer->shadowBytes.data(), buffer->shadowBytes.size(),
-                            data, patternBytes);
-    // Sync into the Metal buffer so getBufferSubData / glMap paths see the
-    // cleared pattern rather than whatever the Metal buffer previously held
-    // (the readback helper prefers Metal contents when the object has a
-    // Metal buffer backing it).
-    id<MTLBuffer> metalBuffer = (__bridge id<MTLBuffer>)buffer->metalBuffer;
-    if (metalBuffer != nil) {
-        std::uint8_t* metalBytes = static_cast<std::uint8_t*>([metalBuffer contents]);
-        if (metalBytes != nullptr) {
-            fillBufferClearPattern(metalBytes, buffer->shadowBytes.size(),
-                                    data, patternBytes);
-        }
+    if (!impl_->fillBufferRange(*buffer, 0, buffer->size, data, patternBytes)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
     }
-    ++buffer->indexExpansionGeneration;
     return true;
 }
 
@@ -42586,21 +43051,11 @@ bool GLContext::clearBufferSubData(GLenum target, GLenum internalformat, GLintpt
     if (size == 0) {
         return true;
     }
-    if (buffer->shadowBytes.size() < static_cast<std::size_t>(buffer->size)) {
-        buffer->shadowBytes.resize(static_cast<std::size_t>(buffer->size), 0);
-    }
     const std::size_t patternBytes = bufferClearPatternBytes(format, type);
-    fillBufferClearPattern(buffer->shadowBytes.data() + offset,
-                            static_cast<std::size_t>(size), data, patternBytes);
-    id<MTLBuffer> metalBuffer = (__bridge id<MTLBuffer>)buffer->metalBuffer;
-    if (metalBuffer != nil) {
-        std::uint8_t* metalBytes = static_cast<std::uint8_t*>([metalBuffer contents]);
-        if (metalBytes != nullptr) {
-            fillBufferClearPattern(metalBytes + offset,
-                                    static_cast<std::size_t>(size), data, patternBytes);
-        }
+    if (!impl_->fillBufferRange(*buffer, offset, size, data, patternBytes)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
     }
-    ++buffer->indexExpansionGeneration;
     return true;
 }
 
@@ -43937,8 +44392,14 @@ bool GLContext::bufferStorage(GLenum target, GLsizeiptr size, const void* data, 
     }
     const GLbitfield validBits = GL_MAP_READ_BIT | GL_MAP_WRITE_BIT |
                                  GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT |
-                                 GL_DYNAMIC_STORAGE_BIT | GL_CLIENT_STORAGE_BIT;
+                                 GL_DYNAMIC_STORAGE_BIT | GL_CLIENT_STORAGE_BIT |
+                                 GL_SPARSE_STORAGE_BIT_ARB;
     if (flags & ~validBits) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if ((flags & GL_SPARSE_STORAGE_BIT_ARB) &&
+        (flags & (GL_MAP_READ_BIT | GL_MAP_WRITE_BIT))) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
@@ -43950,16 +44411,83 @@ bool GLContext::bufferStorage(GLenum target, GLsizeiptr size, const void* data, 
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    // Delegate to replaceBufferStorage to create both shadow bytes and Metal
-    // buffer, then layer immutability flags on top.  Without this the Metal
-    // buffer would remain null and draws would render black.
-    if (!impl_->replaceBufferStorage(*buf, size, data, GL_STATIC_DRAW)) {
-        pushError(GL_OUT_OF_MEMORY);
-        return false;
+    if (flags & GL_SPARSE_STORAGE_BIT_ARB) {
+        if (!impl_->replaceSparseBufferStorage(*buf, size)) {
+            pushError(GL_OUT_OF_MEMORY);
+            return false;
+        }
+    } else {
+        // Delegate to replaceBufferStorage to create both shadow bytes and Metal
+        // buffer, then layer immutability flags on top.  Without this the Metal
+        // buffer would remain null and draws would render black.
+        if (!impl_->replaceBufferStorage(*buf, size, data, GL_STATIC_DRAW)) {
+            pushError(GL_OUT_OF_MEMORY);
+            return false;
+        }
     }
     buf->immutable = true;
     buf->storageFlags = flags;
     buf->instantiated = true;
+    return true;
+}
+
+static bool isSparseBufferCommitmentTarget(GLenum target) {
+    switch (target) {
+        case GL_ARRAY_BUFFER:
+        case GL_ELEMENT_ARRAY_BUFFER:
+        case GL_COPY_READ_BUFFER:
+        case GL_COPY_WRITE_BUFFER:
+        case GL_PIXEL_PACK_BUFFER:
+        case GL_PIXEL_UNPACK_BUFFER:
+        case GL_TRANSFORM_FEEDBACK_BUFFER:
+        case GL_UNIFORM_BUFFER:
+        case GL_TEXTURE_BUFFER:
+        case GL_DRAW_INDIRECT_BUFFER:
+        case GL_ATOMIC_COUNTER_BUFFER:
+        case GL_DISPATCH_INDIRECT_BUFFER:
+        case GL_SHADER_STORAGE_BUFFER:
+        case GL_QUERY_BUFFER:
+        case GL_PARAMETER_BUFFER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool GLContext::bufferPageCommitment(GLenum target, GLintptr offset, GLsizeiptr size, GLboolean commit) {
+    if (!isSparseBufferCommitmentTarget(target)) {
+        pushError(GL_INVALID_ENUM);
+        return false;
+    }
+    const GLuint name = impl_->state->boundBuffer(target);
+    GLBufferObject* object = impl_->objects->buffers().get(name);
+    if (name == 0 || object == nullptr || !object->instantiated || !object->sparseStorage) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (offset < 0 || size < 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    const GLsizeiptr pageSize = object->sparsePageSize > 0
+        ? object->sparsePageSize
+        : kSparseBufferPageSizeARB;
+    if ((offset % pageSize) != 0) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (offset > object->size || size > object->size - offset) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if ((size % pageSize) != 0 && offset + size != object->size) {
+        pushError(GL_INVALID_VALUE);
+        return false;
+    }
+    if (!impl_->commitSparseBufferRange(*object, offset, size, commit)) {
+        pushError(GL_OUT_OF_MEMORY);
+        return false;
+    }
     return true;
 }
 
@@ -44592,6 +45120,20 @@ bool GLContext::namedBufferStorage(GLuint buffer, GLsizeiptr size, const void* d
     GLuint prev = impl_->state->boundBuffer(target);
     impl_->state->bindBuffer(target, buffer);
     bool ok = bufferStorage(target, size, data, flags);
+    impl_->state->bindBuffer(target, prev);
+    return ok;
+}
+
+bool GLContext::namedBufferPageCommitment(GLuint buffer, GLintptr offset, GLsizeiptr size, GLboolean commit) {
+    auto* obj = impl_->objects->buffers().get(buffer);
+    if (!obj || !obj->instantiated || !obj->sparseStorage) {
+        pushError(GL_INVALID_OPERATION);
+        return false;
+    }
+    GLenum target = GL_ARRAY_BUFFER;
+    GLuint prev = impl_->state->boundBuffer(target);
+    impl_->state->bindBuffer(target, buffer);
+    bool ok = bufferPageCommitment(target, offset, size, commit);
     impl_->state->bindBuffer(target, prev);
     return ok;
 }
@@ -48332,15 +48874,8 @@ bool GLContext::writeQueryBufferObject(GLuint id, GLuint buffer, GLenum pname, G
             return false;
     }
     T value = static_cast<T>(raw);
-    auto& shadow = buf->shadowBytes;
-    if (shadow.size() < static_cast<std::size_t>(offset) + sizeof(T)) {
-        shadow.resize(static_cast<std::size_t>(buf->size));
-    }
-    std::memcpy(shadow.data() + static_cast<std::size_t>(offset),
-                &value, sizeof(T));
-    impl_->syncMetalFromShadow(*buf, offset,
-                               static_cast<GLsizeiptr>(sizeof(T)));
-    return true;
+    return impl_->writeBufferRange(*buf, offset, &value,
+                                   static_cast<GLsizeiptr>(sizeof(T)));
 }
 
 bool GLContext::getQueryBufferObjectiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
