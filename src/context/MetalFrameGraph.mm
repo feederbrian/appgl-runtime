@@ -2902,11 +2902,37 @@ struct MetalFrameGraph::Impl {
                         }
                     }
                 }
+                bool fragmentUsesStorageImage = false;
+                for (const auto& binding : info.fragmentTextures) {
+                    if (binding.metalTexture != nullptr &&
+                        binding.metalSamplerState == nullptr) {
+                        fragmentUsesStorageImage = true;
+                        break;
+                    }
+                }
                 const bool flipToLowerLeft =
                     (info.clipOrigin != GL_UPPER_LEFT) &&
                     !fragmentSamplesColorAttachment;
+                const auto storageImageLowerLeftBase = [&]() -> float {
+                    if (colorTexture == nil) {
+                        return static_cast<float>(
+                            std::max<GLsizei>(info.viewportHeight, 1));
+                    }
+                    const GLint rtH =
+                        static_cast<GLint>(colorTexture.height);
+                    const GLint glY = std::max<GLint>(0, info.viewportY);
+                    const GLsizei availH = static_cast<GLsizei>(
+                        std::max<GLint>(0, rtH - glY));
+                    const GLsizei glH = std::min<GLsizei>(
+                        info.viewportHeight, availH);
+                    return static_cast<float>(glY + glH);
+                }();
+                const float lowerLeftBase =
+                    fragmentUsesStorageImage
+                        ? storageImageLowerLeftBase
+                        : renderTargetHeight;
                 const float fragCoordParams[4] = {
-                    flipToLowerLeft ? renderTargetHeight : 0.0f,
+                    flipToLowerLeft ? lowerLeftBase : 0.0f,
                     flipToLowerLeft ? -1.0f : 1.0f,
                     flipToLowerLeft ? 1.0f : 0.0f,
                     0.0f,
