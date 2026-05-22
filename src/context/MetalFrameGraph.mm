@@ -66,6 +66,52 @@ static NSInteger clipControlYSignBufferSlot(const std::string* msl) {
     return haveDigit ? slot : -1;
 }
 
+static NSInteger textureReductionModesBufferSlot(const std::string* msl) {
+    if (msl == nullptr) {
+        return -1;
+    }
+    static constexpr const char* kNeedle =
+        "_appgl_TextureReductionModes [[buffer(";
+    const std::size_t pos = msl->find(kNeedle);
+    if (pos == std::string::npos) {
+        return -1;
+    }
+    std::size_t cursor = pos + std::strlen(kNeedle);
+    NSInteger slot = 0;
+    bool haveDigit = false;
+    while (cursor < msl->size() &&
+           std::isdigit(static_cast<unsigned char>((*msl)[cursor]))) {
+        haveDigit = true;
+        slot = slot * 10 + static_cast<NSInteger>((*msl)[cursor] - '0');
+        ++cursor;
+    }
+    return haveDigit ? slot : -1;
+}
+
+static std::vector<std::uint32_t> buildTextureReductionModes(
+    const std::vector<TranslatedDrawInfo::TextureBinding>& textures) {
+    std::uint32_t maxSlot = 127;
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+            continue;
+        }
+        maxSlot = std::max(maxSlot, binding.metalSlot);
+    }
+    std::vector<std::uint32_t> modes(
+        static_cast<std::size_t>(maxSlot) + 1u,
+        static_cast<std::uint32_t>(GL_WEIGHTED_AVERAGE_ARB));
+    for (const auto& binding : textures) {
+        if (binding.metalTexture == nullptr || binding.metalSamplerState == nullptr) {
+            continue;
+        }
+        if (binding.metalSlot >= modes.size()) {
+            continue;
+        }
+        modes[binding.metalSlot] = binding.reductionMode;
+    }
+    return modes;
+}
+
 static MTLWinding frontFacingWindingForClipControl(GLenum frontFace,
                                                    bool invertForClipControlY)
 {
@@ -2810,6 +2856,24 @@ struct MetalFrameGraph::Impl {
                 [currentRenderEncoder setVertexBytes:&clipControlYSign
                                               length:sizeof(clipControlYSign)
                                              atIndex:static_cast<NSUInteger>(vertexClipControlYSignSlot)];
+            }
+            const NSInteger vertexReductionModesSlot =
+                textureReductionModesBufferSlot(info.vertexMSL);
+            if (vertexReductionModesSlot >= 0) {
+                std::vector<std::uint32_t> modes =
+                    buildTextureReductionModes(info.vertexTextures);
+                [currentRenderEncoder setVertexBytes:modes.data()
+                                              length:modes.size() * sizeof(std::uint32_t)
+                                             atIndex:static_cast<NSUInteger>(vertexReductionModesSlot)];
+            }
+            const NSInteger fragmentReductionModesSlot =
+                textureReductionModesBufferSlot(info.fragmentMSL);
+            if (fragmentReductionModesSlot >= 0) {
+                std::vector<std::uint32_t> modes =
+                    buildTextureReductionModes(info.fragmentTextures);
+                [currentRenderEncoder setFragmentBytes:modes.data()
+                                                length:modes.size() * sizeof(std::uint32_t)
+                                               atIndex:static_cast<NSUInteger>(fragmentReductionModesSlot)];
             }
             if (fragmentNeedsFragCoordParams) {
                 const float renderTargetHeight = colorTexture != nil

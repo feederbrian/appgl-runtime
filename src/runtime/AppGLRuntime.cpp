@@ -1211,6 +1211,7 @@ bool isValidTextureParameterPname(GLenum pname) {
         case GL_TEXTURE_SWIZZLE_RGBA:
         case GL_TEXTURE_LOD_BIAS:
         case GL_TEXTURE_MAX_ANISOTROPY:
+        case GL_TEXTURE_REDUCTION_MODE_ARB:
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
         // ARB_sparse_texture scaffold. These are per-texture state, not
         // sampler-object state, and remain queryable even while runtime
@@ -1257,6 +1258,7 @@ bool isValidSamplerParameterPname(GLenum pname) {
         case GL_TEXTURE_COMPARE_FUNC:
         case GL_TEXTURE_BORDER_COLOR:
         case GL_TEXTURE_MAX_ANISOTROPY:
+        case GL_TEXTURE_REDUCTION_MODE_ARB:
             return true;
         default:
             return false;
@@ -1304,6 +1306,10 @@ bool validateTextureParameterValues(GLenum pname, const GLint* params) {
         case GL_TEXTURE_LOD_BIAS:
         case GL_TEXTURE_MAX_ANISOTROPY:
             return true;
+        case GL_TEXTURE_REDUCTION_MODE_ARB:
+            return params[0] == GL_MIN ||
+                   params[0] == GL_WEIGHTED_AVERAGE_ARB ||
+                   params[0] == GL_MAX;
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return params[0] == GL_DEPTH_COMPONENT || params[0] == GL_STENCIL_INDEX;
         case GL_TEXTURE_SPARSE_ARB:

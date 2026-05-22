@@ -32,6 +32,7 @@ constexpr std::uint32_t kFragCoordParamsBufferSlot = 15u;
 constexpr std::uint32_t kFragmentShadingRateParamsBufferSlot = 30u;
 constexpr std::uint32_t kMultisampleStorageImageSampleCountsBufferSlot = 30u;
 constexpr std::uint32_t kClipControlYSignPreferredBufferSlot = 29u;
+constexpr std::uint32_t kTextureReductionModesPreferredBufferSlot = 14u;
 constexpr std::uint32_t kMaxMetalBufferSlot = 30u;
 constexpr std::uint32_t kMultisampleSampledSidecarTextureSlotOffset = 64u;
 constexpr std::uint32_t kMultisampleStorageSparseResidencyTextureSlotOffset = 96u;
@@ -1666,6 +1667,420 @@ bool injectMultisampleStorageSparseResidencyTextures(std::string& msl) {
         insertion += param;
     }
     msl.insert(paramEnd, insertion);
+    return true;
+}
+
+std::string trimCopy(const std::string& value) {
+    std::size_t begin = 0;
+    while (begin < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[begin]))) {
+        ++begin;
+    }
+    std::size_t end = value.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+std::vector<std::string> splitTopLevelCommas(const std::string& text) {
+    std::vector<std::string> parts;
+    std::size_t begin = 0;
+    int parenDepth = 0;
+    int bracketDepth = 0;
+    int angleDepth = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (ch == '(') {
+            ++parenDepth;
+        } else if (ch == ')' && parenDepth > 0) {
+            --parenDepth;
+        } else if (ch == '[') {
+            ++bracketDepth;
+        } else if (ch == ']' && bracketDepth > 0) {
+            --bracketDepth;
+        } else if (ch == '<') {
+            ++angleDepth;
+        } else if (ch == '>' && angleDepth > 0) {
+            --angleDepth;
+        } else if (ch == ',' && parenDepth == 0 &&
+                   bracketDepth == 0 && angleDepth == 0) {
+            parts.push_back(trimCopy(text.substr(begin, i - begin)));
+            begin = i + 1;
+        }
+    }
+    parts.push_back(trimCopy(text.substr(begin)));
+    return parts;
+}
+
+bool findMatchingParen(const std::string& text,
+                       std::size_t open,
+                       std::size_t& close) {
+    if (open >= text.size() || text[open] != '(') {
+        return false;
+    }
+    int depth = 1;
+    for (std::size_t i = open + 1; i < text.size(); ++i) {
+        if (text[i] == '(') {
+            ++depth;
+        } else if (text[i] == ')') {
+            --depth;
+            if (depth == 0) {
+                close = i;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+enum class TextureReductionTextureKind {
+    Unsupported,
+    Texture1D,
+    Texture1DArray,
+    Texture2D,
+    Texture2DArray,
+    Texture3D,
+    TextureCube,
+};
+
+struct TextureReductionParam {
+    std::string name;
+    TextureReductionTextureKind kind = TextureReductionTextureKind::Unsupported;
+    std::uint32_t slot = 0;
+};
+
+TextureReductionTextureKind textureReductionKindForType(const std::string& type) {
+    auto isFloatTexture = [&](const char* textureName) {
+        const std::string needle = std::string(textureName) + "<float";
+        const std::size_t pos = type.find(needle);
+        if (pos == std::string::npos) {
+            return false;
+        }
+        const std::size_t after = pos + needle.size();
+        return after < type.size() && (type[after] == '>' || type[after] == ',');
+    };
+    if (isFloatTexture("texture1d_array")) {
+        return TextureReductionTextureKind::Texture1DArray;
+    }
+    if (isFloatTexture("texture1d")) {
+        return TextureReductionTextureKind::Texture1D;
+    }
+    if (isFloatTexture("texture2d_array")) {
+        return TextureReductionTextureKind::Texture2DArray;
+    }
+    if (isFloatTexture("texture2d")) {
+        return TextureReductionTextureKind::Texture2D;
+    }
+    if (isFloatTexture("texture3d")) {
+        return TextureReductionTextureKind::Texture3D;
+    }
+    if (isFloatTexture("texturecube")) {
+        return TextureReductionTextureKind::TextureCube;
+    }
+    return TextureReductionTextureKind::Unsupported;
+}
+
+std::vector<TextureReductionParam> textureReductionParams(const std::string& msl) {
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return {};
+    }
+    const std::size_t mainPos = msl.find("main0(");
+    if (mainPos == std::string::npos) {
+        return {};
+    }
+    const std::size_t paramStart = mainPos + std::strlen("main0");
+    const std::vector<std::string> params =
+        splitTopLevelCommas(msl.substr(paramStart + 1, paramEnd - paramStart - 1));
+
+    std::vector<TextureReductionParam> result;
+    for (const std::string& param : params) {
+        const std::size_t textureAttr = param.find("[[texture(");
+        if (textureAttr == std::string::npos) {
+            continue;
+        }
+        std::uint32_t slot = 0;
+        std::size_t afterSlot = 0;
+        if (!parseUnsignedAfter(param, textureAttr + std::strlen("[[texture("),
+                                slot, &afterSlot)) {
+            continue;
+        }
+
+        std::string prefix = trimCopy(param.substr(0, textureAttr));
+        if (prefix.empty()) {
+            continue;
+        }
+        std::size_t nameEnd = prefix.size();
+        while (nameEnd > 0 &&
+               std::isspace(static_cast<unsigned char>(prefix[nameEnd - 1]))) {
+            --nameEnd;
+        }
+        std::size_t nameBegin = nameEnd;
+        while (nameBegin > 0 && isIdentifierChar(prefix[nameBegin - 1])) {
+            --nameBegin;
+        }
+        if (nameBegin == nameEnd) {
+            continue;
+        }
+        TextureReductionParam parsed;
+        parsed.name = prefix.substr(nameBegin, nameEnd - nameBegin);
+        parsed.kind = textureReductionKindForType(prefix.substr(0, nameBegin));
+        parsed.slot = slot;
+        if (parsed.kind != TextureReductionTextureKind::Unsupported) {
+            result.push_back(std::move(parsed));
+        }
+    }
+    return result;
+}
+
+const char* textureReductionHelperSource() {
+    return R"APPGL(
+
+static inline float4 appgl_texred_reduce4(float4 a, float4 b, uint mode) {
+    return mode == 0x8007u ? min(a, b) : max(a, b);
+}
+
+static inline float appgl_texred_center(int i, uint size) {
+    uint safeSize = size == 0u ? 1u : size;
+    return (float(i) + 0.5f) / float(safeSize);
+}
+
+static inline float4 appgl_texture_minmax_1d(texture1d<float> tex, sampler smp, float coord, constant uint* modes, uint slot) {
+    uint mode = modes[slot];
+    if (mode == 0x9367u) return tex.sample(smp, coord);
+    uint w = tex.get_width();
+    float p = coord * float(w == 0u ? 1u : w) - 0.5f;
+    int base = int(floor(p));
+    float4 r = tex.sample(smp, appgl_texred_center(base, w));
+    r = appgl_texred_reduce4(r, tex.sample(smp, appgl_texred_center(base + 1, w)), mode);
+    return r;
+}
+
+static inline float4 appgl_texture_minmax_1d_array(texture1d_array<float> tex, sampler smp, float coord, uint layer, constant uint* modes, uint slot) {
+    uint mode = modes[slot];
+    if (mode == 0x9367u) return tex.sample(smp, coord, layer);
+    uint w = tex.get_width();
+    float p = coord * float(w == 0u ? 1u : w) - 0.5f;
+    int base = int(floor(p));
+    float4 r = tex.sample(smp, appgl_texred_center(base, w), layer);
+    r = appgl_texred_reduce4(r, tex.sample(smp, appgl_texred_center(base + 1, w), layer), mode);
+    return r;
+}
+
+static inline float4 appgl_texture_minmax_2d(texture2d<float> tex, sampler smp, float2 coord, constant uint* modes, uint slot) {
+    uint mode = modes[slot];
+    if (mode == 0x9367u) return tex.sample(smp, coord);
+    uint w = tex.get_width();
+    uint h = tex.get_height();
+    float2 size = float2(float(w == 0u ? 1u : w), float(h == 0u ? 1u : h));
+    int2 base = int2(floor(coord * size - float2(0.5f)));
+    float2 c00 = float2(appgl_texred_center(base.x, w), appgl_texred_center(base.y, h));
+    float2 c10 = float2(appgl_texred_center(base.x + 1, w), appgl_texred_center(base.y, h));
+    float2 c01 = float2(appgl_texred_center(base.x, w), appgl_texred_center(base.y + 1, h));
+    float2 c11 = float2(appgl_texred_center(base.x + 1, w), appgl_texred_center(base.y + 1, h));
+    float4 r = tex.sample(smp, c00);
+    r = appgl_texred_reduce4(r, tex.sample(smp, c10), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, c01), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, c11), mode);
+    return r;
+}
+
+static inline float4 appgl_texture_minmax_2d_array(texture2d_array<float> tex, sampler smp, float2 coord, uint layer, constant uint* modes, uint slot) {
+    uint mode = modes[slot];
+    if (mode == 0x9367u) return tex.sample(smp, coord, layer);
+    uint w = tex.get_width();
+    uint h = tex.get_height();
+    float2 size = float2(float(w == 0u ? 1u : w), float(h == 0u ? 1u : h));
+    int2 base = int2(floor(coord * size - float2(0.5f)));
+    float2 c00 = float2(appgl_texred_center(base.x, w), appgl_texred_center(base.y, h));
+    float2 c10 = float2(appgl_texred_center(base.x + 1, w), appgl_texred_center(base.y, h));
+    float2 c01 = float2(appgl_texred_center(base.x, w), appgl_texred_center(base.y + 1, h));
+    float2 c11 = float2(appgl_texred_center(base.x + 1, w), appgl_texred_center(base.y + 1, h));
+    float4 r = tex.sample(smp, c00, layer);
+    r = appgl_texred_reduce4(r, tex.sample(smp, c10, layer), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, c01, layer), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, c11, layer), mode);
+    return r;
+}
+
+static inline float4 appgl_texture_minmax_3d(texture3d<float> tex, sampler smp, float3 coord, constant uint* modes, uint slot) {
+    uint mode = modes[slot];
+    if (mode == 0x9367u) return tex.sample(smp, coord);
+    uint w = tex.get_width();
+    uint h = tex.get_height();
+    uint d = tex.get_depth();
+    float3 size = float3(float(w == 0u ? 1u : w), float(h == 0u ? 1u : h), float(d == 0u ? 1u : d));
+    int3 base = int3(floor(coord * size - float3(0.5f)));
+    float4 r = tex.sample(smp, float3(appgl_texred_center(base.x, w), appgl_texred_center(base.y, h), appgl_texred_center(base.z, d)));
+    r = appgl_texred_reduce4(r, tex.sample(smp, float3(appgl_texred_center(base.x + 1, w), appgl_texred_center(base.y, h), appgl_texred_center(base.z, d))), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, float3(appgl_texred_center(base.x, w), appgl_texred_center(base.y + 1, h), appgl_texred_center(base.z, d))), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, float3(appgl_texred_center(base.x + 1, w), appgl_texred_center(base.y + 1, h), appgl_texred_center(base.z, d))), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, float3(appgl_texred_center(base.x, w), appgl_texred_center(base.y, h), appgl_texred_center(base.z + 1, d))), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, float3(appgl_texred_center(base.x + 1, w), appgl_texred_center(base.y, h), appgl_texred_center(base.z + 1, d))), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, float3(appgl_texred_center(base.x, w), appgl_texred_center(base.y + 1, h), appgl_texred_center(base.z + 1, d))), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, float3(appgl_texred_center(base.x + 1, w), appgl_texred_center(base.y + 1, h), appgl_texred_center(base.z + 1, d))), mode);
+    return r;
+}
+
+struct appgl_texred_cube_coord {
+    float2 uv;
+    uint face;
+};
+
+static inline appgl_texred_cube_coord appgl_texred_cube_face(float3 dir) {
+    float3 ad = abs(dir);
+    appgl_texred_cube_coord out;
+    if (ad.x >= ad.y && ad.x >= ad.z) {
+        float inv = 1.0f / (ad.x > 0.000001f ? ad.x : 0.000001f);
+        out.face = dir.x >= 0.0f ? 0u : 1u;
+        out.uv = dir.x >= 0.0f ? float2(-dir.z, -dir.y) * inv : float2(dir.z, -dir.y) * inv;
+    } else if (ad.y >= ad.x && ad.y >= ad.z) {
+        float inv = 1.0f / (ad.y > 0.000001f ? ad.y : 0.000001f);
+        out.face = dir.y >= 0.0f ? 2u : 3u;
+        out.uv = dir.y >= 0.0f ? float2(dir.x, dir.z) * inv : float2(dir.x, -dir.z) * inv;
+    } else {
+        float inv = 1.0f / (ad.z > 0.000001f ? ad.z : 0.000001f);
+        out.face = dir.z >= 0.0f ? 4u : 5u;
+        out.uv = dir.z >= 0.0f ? float2(dir.x, -dir.y) * inv : float2(-dir.x, -dir.y) * inv;
+    }
+    out.uv = out.uv * 0.5f + float2(0.5f);
+    return out;
+}
+
+static inline float3 appgl_texred_cube_dir(uint face, float2 uv) {
+    float sc = uv.x * 2.0f - 1.0f;
+    float tc = uv.y * 2.0f - 1.0f;
+    if (face == 0u) return normalize(float3(1.0f, -tc, -sc));
+    if (face == 1u) return normalize(float3(-1.0f, -tc, sc));
+    if (face == 2u) return normalize(float3(sc, 1.0f, tc));
+    if (face == 3u) return normalize(float3(sc, -1.0f, -tc));
+    if (face == 4u) return normalize(float3(sc, -tc, 1.0f));
+    return normalize(float3(-sc, -tc, -1.0f));
+}
+
+static inline float4 appgl_texture_minmax_cube(texturecube<float> tex, sampler smp, float3 coord, constant uint* modes, uint slot) {
+    uint mode = modes[slot];
+    if (mode == 0x9367u) return tex.sample(smp, coord);
+    uint w = tex.get_width();
+    appgl_texred_cube_coord fc = appgl_texred_cube_face(coord);
+    float2 size = float2(float(w == 0u ? 1u : w));
+    int2 base = int2(floor(fc.uv * size - float2(0.5f)));
+    float2 c00 = float2(appgl_texred_center(base.x, w), appgl_texred_center(base.y, w));
+    float2 c10 = float2(appgl_texred_center(base.x + 1, w), appgl_texred_center(base.y, w));
+    float2 c01 = float2(appgl_texred_center(base.x, w), appgl_texred_center(base.y + 1, w));
+    float2 c11 = float2(appgl_texred_center(base.x + 1, w), appgl_texred_center(base.y + 1, w));
+    float4 r = tex.sample(smp, appgl_texred_cube_dir(fc.face, c00));
+    r = appgl_texred_reduce4(r, tex.sample(smp, appgl_texred_cube_dir(fc.face, c10)), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, appgl_texred_cube_dir(fc.face, c01)), mode);
+    r = appgl_texred_reduce4(r, tex.sample(smp, appgl_texred_cube_dir(fc.face, c11)), mode);
+    return r;
+}
+)APPGL";
+}
+
+bool injectTextureReductionMinmax(std::string& msl) {
+    static constexpr const char* kParamName = "_appgl_TextureReductionModes";
+    if (msl.find(kParamName) != std::string::npos ||
+        msl.find(".sample(") == std::string::npos) {
+        return false;
+    }
+    const std::vector<TextureReductionParam> params =
+        textureReductionParams(msl);
+    if (params.empty()) {
+        return false;
+    }
+
+    struct Replacement {
+        std::size_t begin = 0;
+        std::size_t end = 0;
+        std::string text;
+    };
+    std::vector<Replacement> replacements;
+    for (const TextureReductionParam& param : params) {
+        const std::string needle = param.name + ".sample(";
+        std::size_t pos = 0;
+        while ((pos = msl.find(needle, pos)) != std::string::npos) {
+            if (pos > 0 && isIdentifierChar(msl[pos - 1])) {
+                pos += needle.size();
+                continue;
+            }
+            const std::size_t open = pos + param.name.size() + std::strlen(".sample");
+            std::size_t close = 0;
+            if (!findMatchingParen(msl, open, close)) {
+                pos += needle.size();
+                continue;
+            }
+            const std::vector<std::string> args =
+                splitTopLevelCommas(msl.substr(open + 1, close - open - 1));
+            std::string replacement;
+            const std::string slot = std::to_string(param.slot) + "u";
+            if (param.kind == TextureReductionTextureKind::Texture1D &&
+                args.size() == 2) {
+                replacement = "appgl_texture_minmax_1d(" + param.name + ", " +
+                    args[0] + ", " + args[1] + ", " + kParamName + ", " + slot + ")";
+            } else if (param.kind == TextureReductionTextureKind::Texture1DArray &&
+                       args.size() == 3) {
+                replacement = "appgl_texture_minmax_1d_array(" + param.name + ", " +
+                    args[0] + ", " + args[1] + ", " + args[2] + ", " +
+                    kParamName + ", " + slot + ")";
+            } else if (param.kind == TextureReductionTextureKind::Texture2D &&
+                       args.size() == 2) {
+                replacement = "appgl_texture_minmax_2d(" + param.name + ", " +
+                    args[0] + ", " + args[1] + ", " + kParamName + ", " + slot + ")";
+            } else if (param.kind == TextureReductionTextureKind::Texture2DArray &&
+                       args.size() == 3) {
+                replacement = "appgl_texture_minmax_2d_array(" + param.name + ", " +
+                    args[0] + ", " + args[1] + ", " + args[2] + ", " +
+                    kParamName + ", " + slot + ")";
+            } else if (param.kind == TextureReductionTextureKind::Texture3D &&
+                       args.size() == 2) {
+                replacement = "appgl_texture_minmax_3d(" + param.name + ", " +
+                    args[0] + ", " + args[1] + ", " + kParamName + ", " + slot + ")";
+            } else if (param.kind == TextureReductionTextureKind::TextureCube &&
+                       args.size() == 2) {
+                replacement = "appgl_texture_minmax_cube(" + param.name + ", " +
+                    args[0] + ", " + args[1] + ", " + kParamName + ", " + slot + ")";
+            }
+            if (!replacement.empty()) {
+                replacements.push_back({pos, close + 1, std::move(replacement)});
+            }
+            pos = close + 1;
+        }
+    }
+    if (replacements.empty()) {
+        return false;
+    }
+
+    std::sort(replacements.begin(), replacements.end(),
+              [](const Replacement& a, const Replacement& b) {
+                  return a.begin > b.begin;
+              });
+    for (const Replacement& replacement : replacements) {
+        msl.replace(replacement.begin,
+                    replacement.end - replacement.begin,
+                    replacement.text);
+    }
+
+    std::size_t paramEnd = 0;
+    if (!findMain0ParameterEnd(msl, paramEnd)) {
+        return false;
+    }
+    const std::uint32_t bufferSlot =
+        chooseFreeBufferSlot(msl, kTextureReductionModesPreferredBufferSlot);
+    const std::string param =
+        ", constant uint* " + std::string(kParamName) +
+        " [[buffer(" + std::to_string(bufferSlot) + ")]]";
+    msl.insert(paramEnd, param);
+
+    const std::string usingNeedle = "using namespace metal;\n";
+    const std::size_t usingPos = msl.find(usingNeedle);
+    if (usingPos != std::string::npos) {
+        msl.insert(usingPos + usingNeedle.size(), textureReductionHelperSource());
+    } else {
+        msl.insert(0, std::string(textureReductionHelperSource()) + "\n");
+    }
     return true;
 }
 
@@ -4062,6 +4477,11 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 pos = idx + returnPattern.size();
             }
             msl = std::move(out2);
+        }
+
+        if (execModel == spv::ExecutionModelFragment ||
+            execModel == spv::ExecutionModelVertex) {
+            injectTextureReductionMinmax(msl);
         }
 
         if (log != nullptr) {

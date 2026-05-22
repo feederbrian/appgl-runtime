@@ -2327,6 +2327,8 @@ static bool isValidTexParameterEnumValue(GLenum pname, GLint v) {
                    v == GL_LESS || v == GL_GREATER ||
                    v == GL_EQUAL || v == GL_NOTEQUAL ||
                    v == GL_ALWAYS || v == GL_NEVER;
+        case GL_TEXTURE_REDUCTION_MODE_ARB:
+            return v == GL_MIN || v == GL_WEIGHTED_AVERAGE_ARB || v == GL_MAX;
         case GL_DEPTH_STENCIL_TEXTURE_MODE:
             return v == GL_DEPTH_COMPONENT || v == GL_STENCIL_INDEX;
         case GL_TEXTURE_SWIZZLE_R:
@@ -2434,6 +2436,9 @@ bool setTextureParameterInteger(GLTextureParameters& params, GLenum pname, const
             return true;
         case GL_TEXTURE_MAX_ANISOTROPY:
             params.maxAnisotropy = static_cast<GLfloat>(values[0]);
+            return true;
+        case GL_TEXTURE_REDUCTION_MODE_ARB:
+            params.reductionMode = values[0];
             return true;
         default:
             return false;
@@ -2557,6 +2562,9 @@ bool getTextureParameterInteger(const GLTextureParameters& params, GLenum pname,
             return true;
         case GL_TEXTURE_MAX_ANISOTROPY:
             values[0] = static_cast<GLint>(params.maxAnisotropy);
+            return true;
+        case GL_TEXTURE_REDUCTION_MODE_ARB:
+            values[0] = params.reductionMode;
             return true;
         default:
             return false;
@@ -7286,6 +7294,7 @@ struct GLContext::Impl {
                 void* metalSamplerState = nullptr;
                 const GLTextureParameters* samplerParamsForCompleteness =
                     &texObject->params;
+                GLint effectiveReductionMode = texObject->params.reductionMode;
                 const GLuint samplerName = state->boundSampler(static_cast<GLuint>(glUnit));
                 if (samplerName != 0) {
                     GLSamplerObject* samplerObj = objects->samplers().get(samplerName);
@@ -7295,6 +7304,7 @@ struct GLContext::Impl {
                         }
                         metalSamplerState = samplerObj->metalSampler;
                         samplerParamsForCompleteness = &samplerObj->params;
+                        effectiveReductionMode = samplerObj->params.reductionMode;
                     }
                 }
                 if (metalSamplerState == nullptr) {
@@ -7352,6 +7362,7 @@ struct GLContext::Impl {
                     binding.metalTexture = resolveSwizzledTexture(*texObject);
                 }
                 binding.metalSamplerState = metalSamplerState;
+                binding.reductionMode = static_cast<std::uint32_t>(effectiveReductionMode);
                 outBindings.push_back(binding);
                 const GLenum sparseSidecarTarget =
                     resolvedTarget;
@@ -18556,7 +18567,8 @@ bool GLContext::texParameterInteger(GLenum target, GLenum pname, const GLint* pa
             pname == GL_TEXTURE_WRAP_R || pname == GL_TEXTURE_MIN_LOD ||
             pname == GL_TEXTURE_MAX_LOD || pname == GL_TEXTURE_LOD_BIAS ||
             pname == GL_TEXTURE_COMPARE_MODE || pname == GL_TEXTURE_COMPARE_FUNC ||
-            pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_MAX_ANISOTROPY);
+            pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_MAX_ANISOTROPY ||
+            pname == GL_TEXTURE_REDUCTION_MODE_ARB);
         if (isMSTarget && isSamplerPname) {
             // GL 4.6 §8.10 table 23.18 — multisample targets reject
             // every sampler-state pname with INVALID_ENUM (not
@@ -18731,7 +18743,8 @@ bool GLContext::texParameterFloat(GLenum target, GLenum pname, const GLfloat* pa
             pname == GL_TEXTURE_WRAP_R || pname == GL_TEXTURE_MIN_LOD ||
             pname == GL_TEXTURE_MAX_LOD || pname == GL_TEXTURE_LOD_BIAS ||
             pname == GL_TEXTURE_COMPARE_MODE || pname == GL_TEXTURE_COMPARE_FUNC ||
-            pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_MAX_ANISOTROPY);
+            pname == GL_TEXTURE_BORDER_COLOR || pname == GL_TEXTURE_MAX_ANISOTROPY ||
+            pname == GL_TEXTURE_REDUCTION_MODE_ARB);
         // GL 4.6 §8.10 — MS target + sampler pname is INVALID_OPERATION
         // (core spec wording). Buffer target + sampler/level pname is
         // INVALID_ENUM (buffer textures have no filter/mipmap state).
@@ -44325,7 +44338,29 @@ bool GLContext::getInternalformativ(GLenum target, GLenum internalformat, GLenum
     // BLEND) reflect the actual entries that initializeFormatTable() puts
     // on the device, rather than returning GL_FULL_SUPPORT unconditionally.
     std::optional<GLFormatCapability> capability = impl_->capabilities->format(internalformat);
+    const auto textureReductionModeSupported = [&]() -> bool {
+        const bool supportedTarget =
+            target == GL_TEXTURE_1D ||
+            target == GL_TEXTURE_1D_ARRAY ||
+            target == GL_TEXTURE_2D ||
+            target == GL_TEXTURE_2D_ARRAY ||
+            target == GL_TEXTURE_3D ||
+            target == GL_TEXTURE_CUBE_MAP;
+        if (!supportedTarget) {
+            return false;
+        }
+        if (internalformat == GL_RED) {
+            return true;
+        }
+        if (internalformat == GL_DEPTH_COMPONENT) {
+            return target != GL_TEXTURE_3D && target != GL_TEXTURE_CUBE_MAP;
+        }
+        return capability.has_value();
+    };
     switch (pname) {
+        case GL_TEXTURE_REDUCTION_MODE_ARB:
+            params[0] = textureReductionModeSupported() ? GL_TRUE : GL_FALSE;
+            return true;
         case GL_NUM_VIRTUAL_PAGE_SIZES_ARB: {
             const MTLSize tile = sparsePageSizeForFormat(impl_->device, target, internalformat);
             params[0] = (tile.width > 0 && capability.has_value()) ? 1 : 0;
@@ -45418,6 +45453,7 @@ static bool dsaIsSamplerStateOnMultisampleTarget(GLenum target, GLenum pname) {
         case GL_TEXTURE_COMPARE_FUNC:
         case GL_TEXTURE_BORDER_COLOR:
         case GL_TEXTURE_MAX_ANISOTROPY:
+        case GL_TEXTURE_REDUCTION_MODE_ARB:
             return true;
         default:
             return false;

@@ -146,6 +146,7 @@ struct GLTextureParameters {
     // query them for a full default round-trip.
     GLfloat lodBias = 0.0f;
     GLfloat maxAnisotropy = 1.0f;
+    GLint reductionMode = GL_WEIGHTED_AVERAGE_ARB;
 };
 
 struct GLTextureObject {

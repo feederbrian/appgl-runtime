@@ -209,6 +209,7 @@ struct TranslatedDrawInfo {
         std::uint32_t metalSlot = 0;
         void* metalTexture = nullptr;       // id<MTLTexture>
         void* metalSamplerState = nullptr;  // id<MTLSamplerState>
+        std::uint32_t reductionMode = GL_WEIGHTED_AVERAGE_ARB;
     };
     std::vector<TextureBinding> fragmentTextures;
     std::vector<TextureBinding> vertexTextures;
