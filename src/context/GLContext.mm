@@ -2139,6 +2139,45 @@ MTLSamplerAddressMode metalAddressMode(GLint mode) {
     }
 }
 
+bool borderComponentIsZero(GLfloat value) {
+    return std::fabs(value) <= 0.00001f;
+}
+
+bool borderComponentIsOneOrAbove(GLfloat value) {
+    return value >= 0.99999f;
+}
+
+MTLSamplerBorderColor metalBorderColor(const GLTextureParameters& params) {
+    const auto& color = params.borderColor;
+    const bool allWhite =
+        borderComponentIsOneOrAbove(color[0]) &&
+        borderComponentIsOneOrAbove(color[1]) &&
+        borderComponentIsOneOrAbove(color[2]) &&
+        borderComponentIsOneOrAbove(color[3]);
+    if (allWhite) {
+        return MTLSamplerBorderColorOpaqueWhite;
+    }
+
+    const bool rgbBlack =
+        borderComponentIsZero(color[0]) &&
+        borderComponentIsZero(color[1]) &&
+        borderComponentIsZero(color[2]);
+    if (rgbBlack && borderComponentIsOneOrAbove(color[3])) {
+        return MTLSamplerBorderColorOpaqueBlack;
+    }
+
+    // Metal only exposes transparent black, opaque black, and opaque
+    // white border colors. Keep arbitrary GL colors on the default
+    // transparent-black path rather than approximating them silently.
+    return MTLSamplerBorderColorTransparentBlack;
+}
+
+void applyMetalBorderColor(MTLSamplerDescriptor* descriptor, const GLTextureParameters& params) {
+    if (@available(macOS 10.12, *)) {
+        descriptor.borderColor = metalBorderColor(params);
+    }
+}
+
 MTLSamplerMinMagFilter metalMinMagFilter(GLint filter) {
     switch (filter) {
         case GL_NEAREST:
@@ -5543,6 +5582,7 @@ struct GLContext::Impl {
         descriptor.sAddressMode = metalAddressMode(object.params.wrapS);
         descriptor.tAddressMode = metalAddressMode(object.params.wrapT);
         descriptor.rAddressMode = metalAddressMode(object.params.wrapR);
+        applyMetalBorderColor(descriptor, object.params);
         // Metal requires lodMinClamp >= 0 and lodMaxClamp >= lodMinClamp.
         // GL's defaults are minLod=-1000, maxLod=1000 which Metal rejects.
         // Clamp to [0, max(0, maxLod)] — for the common GL default this
@@ -5617,6 +5657,7 @@ struct GLContext::Impl {
         descriptor.sAddressMode = metalAddressMode(object.params.wrapS);
         descriptor.tAddressMode = metalAddressMode(object.params.wrapT);
         descriptor.rAddressMode = metalAddressMode(object.params.wrapR);
+        applyMetalBorderColor(descriptor, object.params);
         // Metal requires lodMinClamp >= 0 and lodMaxClamp >= lodMinClamp.
         // GL's defaults are minLod=-1000, maxLod=1000 which Metal rejects.
         // Clamp to [0, max(0, maxLod)] — for the common GL default this
