@@ -7699,17 +7699,11 @@ struct GLContext::Impl {
                 }
                 if (bpp == 0) continue;
                 slot.bytesPerRow = slot.width * bpp;
-                const bool supportsSingleSliceReadback =
-                    texObject->target == GL_TEXTURE_1D ||
-                    texObject->target == GL_TEXTURE_2D ||
-                    texObject->target == GL_TEXTURE_RECTANGLE ||
-                    texObject->target == GL_TEXTURE_CUBE_MAP ||
-                    texObject->target == GL_TEXTURE_BUFFER;
-                if (!supportsSingleSliceReadback) {
-                    continue;
-                }
-                slot.data.assign(slot.bytesPerRow * slot.height, 0u);
-                MTLRegion region = MTLRegionMake2D(0, 0, slot.width, slot.height);
+                const std::uint32_t readbackHeight =
+                    static_cast<std::uint32_t>(mtlTex.height);
+                slot.data.assign(slot.bytesPerRow * readbackHeight, 0u);
+                MTLRegion region = MTLRegionMake2D(0, 0, slot.width,
+                                                   readbackHeight);
                 @try {
                     [mtlTex getBytes:slot.data.data()
                          bytesPerRow:slot.bytesPerRow
