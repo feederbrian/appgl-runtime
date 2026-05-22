@@ -270,6 +270,8 @@ struct GLRenderbufferObject {
     GLsizei height = 0;
     GLsizei samples = 0;
     std::vector<std::uint8_t> rgba8;
+    bool rgba8ShadowClearPending = false;
+    std::array<std::uint8_t, 4> rgba8ShadowClearValue = {0, 0, 0, 0};
     // CKPT117 (Sprint 11 Phase 1 1a — RB.nativeData refactor): mirror of
     // GLTextureImageLevel::{nativeData,nativeBpp}. Allows RBs to carry a
     // native-precision shadow for non-RGBA8 internal formats (RGB10_A2,

@@ -2709,6 +2709,8 @@ struct GLContext::Impl {
         object.height = 0;
         object.samples = 0;
         object.rgba8.clear();
+        object.rgba8ShadowClearPending = false;
+        object.rgba8ShadowClearValue = {0, 0, 0, 0};
         object.depth32.clear();
         object.stencil8.clear();
         object.storageDefined = false;
@@ -5346,6 +5348,8 @@ struct GLContext::Impl {
         const std::size_t texelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
         if (isColorFormat(internalFormat)) {
             object.rgba8.assign(texelCount * 4u, 0);
+            object.rgba8ShadowClearPending = false;
+            object.rgba8ShadowClearValue = {0, 0, 0, 0};
             // CKPT117 (Sprint 11 Phase 1 1a): allocate a native-precision
             // shadow alongside rgba8 when the internal format maps to a
             // non-RGBA8 Metal pixel format. This unblocks copy_image
@@ -9324,7 +9328,31 @@ struct GLContext::Impl {
         return clearColorAttachmentIntImpl<GLuint>(attachment, value);
     }
 
-    bool clearColorAttachment(const GLFramebufferAttachment& attachment, const GLfloat color[4]) {
+    void materializeRenderbufferRGBA8Clear(GLRenderbufferObject& renderbuffer) {
+        if (!renderbuffer.rgba8ShadowClearPending) {
+            return;
+        }
+        const std::size_t rbBytes =
+            static_cast<std::size_t>(renderbuffer.width) *
+            static_cast<std::size_t>(renderbuffer.height) * 4u;
+        if (renderbuffer.rgba8.size() != rbBytes) {
+            renderbuffer.rgba8.assign(rbBytes, 0);
+        }
+        const std::uint8_t px[4] = {
+            renderbuffer.rgba8ShadowClearValue[0],
+            renderbuffer.rgba8ShadowClearValue[1],
+            renderbuffer.rgba8ShadowClearValue[2],
+            renderbuffer.rgba8ShadowClearValue[3],
+        };
+        for (std::size_t offset = 0; offset + 4u <= rbBytes; offset += 4u) {
+            std::memcpy(renderbuffer.rgba8.data() + offset, px, 4u);
+        }
+        renderbuffer.rgba8ShadowClearPending = false;
+    }
+
+    bool clearColorAttachment(const GLFramebufferAttachment& attachment,
+                              const GLfloat color[4],
+                              bool allowNativeRenderbufferClear) {
         const std::uint8_t rgba[4] = {
             normalizedByte(color[0]),
             normalizedByte(color[1]),
@@ -9638,12 +9666,6 @@ struct GLContext::Impl {
             if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isColorFormat(renderbuffer->internalFormat)) {
                 return false;
             }
-            const std::size_t rbBytes =
-                static_cast<std::size_t>(renderbuffer->width) *
-                static_cast<std::size_t>(renderbuffer->height) * 4u;
-            if (renderbuffer->rgba8.size() < rbBytes) {
-                renderbuffer->rgba8.assign(rbBytes, 0);
-            }
             GLint minX = 0;
             GLint maxX = renderbuffer->width;
             GLint minY = 0;
@@ -9659,6 +9681,70 @@ struct GLContext::Impl {
             if (minX >= maxX || minY >= maxY) {
                 return true;
             }
+            const GLBlendState& blend = state->blendState();
+            const bool fullColorMask =
+                blend.colorMask[0] != GL_FALSE &&
+                blend.colorMask[1] != GL_FALSE &&
+                blend.colorMask[2] != GL_FALSE &&
+                blend.colorMask[3] != GL_FALSE;
+            const std::size_t renderbufferPixels =
+                static_cast<std::size_t>(renderbuffer->width) *
+                static_cast<std::size_t>(renderbuffer->height);
+            const bool defaultClipControl =
+                state->clipOrigin() == GL_LOWER_LEFT &&
+                state->clipDepthMode() == GL_NEGATIVE_ONE_TO_ONE;
+            const bool blackColorClear =
+                rgba[0] == 0 && rgba[1] == 0 && rgba[2] == 0;
+            // Keep native clears to the CTS cleanup pattern that motivated
+            // this fast path. Nonzero-background clip_control cases read
+            // partial draw results back from max-size FBOs and stay on the
+            // proven CPU-shadow path.
+            constexpr std::size_t kMaxNativeRenderbufferClearPixels =
+                256u * 1024u * 1024u;
+            if (allowNativeRenderbufferClear &&
+                !clearScissorActive &&
+                fullColorMask &&
+                defaultClipControl &&
+                blackColorClear &&
+                frameGraph != nullptr &&
+                frameGraph->currentRenderEncoder() == nullptr &&
+                renderbuffer->metalTexture != nullptr &&
+                renderbuffer->nativeBpp == 0 &&
+                renderbuffer->width > 0 &&
+                renderbuffer->height > 0 &&
+                renderbufferPixels <= kMaxNativeRenderbufferClearPixels) {
+                id<MTLTexture> metalTex =
+                    (__bridge id<MTLTexture>)renderbuffer->metalTexture;
+                const MTLPixelFormat pf = metalTex.pixelFormat;
+                const bool nativeRGBA8Clear =
+                    pf == MTLPixelFormatRGBA8Unorm ||
+                    pf == MTLPixelFormatRGBA8Unorm_sRGB;
+                if (nativeRGBA8Clear) {
+                    const float rgbaF[4] = {
+                        color[0], color[1], color[2], color[3]
+                    };
+                    if (frameGraph->clearLayeredTextureColor(
+                            renderbuffer->metalTexture, 0, rgbaF)) {
+                        renderbuffer->rgba8ShadowClearPending = true;
+                        renderbuffer->rgba8ShadowClearValue = {
+                            rgba[0], rgba[1], rgba[2], rgba[3]
+                        };
+                        return true;
+                    }
+                }
+            }
+            if (renderbuffer->rgba8ShadowClearPending && frameGraph != nullptr) {
+                frameGraph->flushForReadback();
+            }
+            if (clearScissorActive) {
+                materializeRenderbufferRGBA8Clear(*renderbuffer);
+            }
+            const std::size_t rbBytes =
+                static_cast<std::size_t>(renderbuffer->width) *
+                static_cast<std::size_t>(renderbuffer->height) * 4u;
+            if (renderbuffer->rgba8.size() < rbBytes) {
+                renderbuffer->rgba8.assign(rbBytes, 0);
+            }
             const bool lowerLeft = state->clipOrigin() != GL_UPPER_LEFT;
             for (GLint glY = minY; glY < maxY; ++glY) {
                 const GLint storageY = lowerLeft ? (renderbuffer->height - 1 - glY) : glY;
@@ -9670,6 +9756,7 @@ struct GLContext::Impl {
                     std::memcpy(renderbuffer->rgba8.data() + offset, rgba, 4);
                 }
             }
+            renderbuffer->rgba8ShadowClearPending = false;
             // Also clear the Metal texture so that readPixels — which
             // prefers the Metal texture over the CPU shadow — sees the
             // cleared value at the texture's native precision.
@@ -10044,6 +10131,7 @@ struct GLContext::Impl {
             }
             targetWidth = renderbufferTarget->width;
             targetHeight = renderbufferTarget->height;
+            materializeRenderbufferRGBA8Clear(*renderbufferTarget);
             rgba8 = &renderbufferTarget->rgba8;
         } else if (attachment->kind == GLFramebufferAttachment::Kind::Texture) {
             textureTarget = objects->textures().get(attachment->object);
@@ -10285,7 +10373,10 @@ struct GLContext::Impl {
                     continue;
                 }
                 const GLFramebufferAttachment* attachment = framebufferAttachment(*framebuffer, buffer);
-                if (attachment != nullptr && !clearColorAttachment(*attachment, state->clearState().color)) {
+                if (attachment != nullptr &&
+                    !clearColorAttachment(*attachment,
+                                          state->clearState().color,
+                                          true)) {
                     return false;
                 }
             }
@@ -11052,6 +11143,7 @@ struct GLContext::Impl {
             if (renderbuffer == nullptr || !renderbuffer->storageDefined || !isColorFormat(renderbuffer->internalFormat)) {
                 return false;
             }
+            materializeRenderbufferRGBA8Clear(*renderbuffer);
             if (renderbuffer->rgba8.empty()) {
                 renderbuffer->rgba8.assign(static_cast<std::size_t>(renderbuffer->width) * static_cast<std::size_t>(renderbuffer->height) * 4u, 0);
             }
@@ -35958,6 +36050,15 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
         } else {
             if (GLFramebufferObject* fbo =
                     objects->framebuffers().get(drawFboName)) {
+                for (const auto& kv : fbo->attachments) {
+                    if (!isColorAttachment(kv.first)) continue;
+                    if (kv.second.kind !=
+                            GLFramebufferAttachment::Kind::Renderbuffer) continue;
+                    if (GLRenderbufferObject* rb =
+                            objects->renderbuffers().get(kv.second.object)) {
+                        rb->rgba8ShadowClearPending = false;
+                    }
+                }
                 // Split the two color-texture readback contracts:
                 // ordinary LOWER_LEFT FBO draws mark framebuffer readback
                 // only, while viewport-routed GS/cull paths also mark the
@@ -42748,6 +42849,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     } else {
         GLRenderbufferObject* srcRB = impl_->objects->renderbuffers().get(srcName);
         if (!srcRB || !srcRB->storageDefined) { pushError(GL_INVALID_VALUE); return false; }
+        impl_->materializeRenderbufferRGBA8Clear(*srcRB);
         srcImgW = srcRB->width;
         srcImgH = srcRB->height;
         srcImgD = 1;
@@ -42837,6 +42939,7 @@ bool GLContext::copyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLeve
     } else {
         dstRB = impl_->objects->renderbuffers().get(dstName);
         if (!dstRB || !dstRB->storageDefined) { pushError(GL_INVALID_VALUE); return false; }
+        impl_->materializeRenderbufferRGBA8Clear(*dstRB);
         dstImgW = dstRB->width;
         dstImgH = dstRB->height;
         const std::size_t totalPixels = static_cast<std::size_t>(dstImgW) * dstImgH;
@@ -47066,7 +47169,7 @@ bool GLContext::clearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint
         }
         GLFramebufferAttachment* att = impl_->framebufferAttachment(*fbo, attachmentEnum);
         if (att == nullptr) return true;
-        return impl_->clearColorAttachment(*att, value);
+        return impl_->clearColorAttachment(*att, value, false);
     }
     if (buffer == GL_DEPTH) {
         if (drawbuffer != 0) {
@@ -47114,7 +47217,7 @@ bool GLContext::clearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint
             static_cast<float>(value[2]),
             static_cast<float>(value[3]),
         };
-        return impl_->clearColorAttachment(*att, fv);
+        return impl_->clearColorAttachment(*att, fv, false);
     }
     if (buffer == GL_STENCIL) {
         if (drawbuffer != 0) {
@@ -47159,7 +47262,7 @@ bool GLContext::clearNamedFramebufferuiv(GLuint framebuffer, GLenum buffer, GLin
         static_cast<float>(value[2]),
         static_cast<float>(value[3]),
     };
-    return impl_->clearColorAttachment(*att, fv);
+    return impl_->clearColorAttachment(*att, fv, false);
 }
 
 bool GLContext::clearNamedFramebufferfi(GLuint framebuffer, GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
