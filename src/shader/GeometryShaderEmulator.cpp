@@ -8850,7 +8850,9 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     GLint first,
     GLsizei instanceCount,
     GLuint baseInstance,
-    const std::uint32_t* elementIndices)
+    const std::uint32_t* elementIndices,
+    const SampledTextureMap* sampledTextures,
+    const SampledTextureMap* storageImages)
 {
     EmulatedDraw d;
     d.topology = drawMode;
@@ -9052,6 +9054,12 @@ EmulatedDraw emulateVsOnlyDrawForTf(
         }
         if (vsUboMapPtr != nullptr) {
             interp.setUniformBuffers(vsUboMapPtr);
+        }
+        if (sampledTextures != nullptr) {
+            interp.setSampledTextures(sampledTextures);
+        }
+        if (storageImages != nullptr) {
+            interp.setStorageImages(storageImages);
         }
     };
 

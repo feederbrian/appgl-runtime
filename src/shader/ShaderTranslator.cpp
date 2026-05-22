@@ -3241,15 +3241,26 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                           if (a.glBinding != b.glBinding) return a.glBinding < b.glBinding;
                           return a.id < b.id;
                       });
-            for (auto& entry : sortedSampled) {
+            for (std::size_t i = 0; i < sortedSampled.size(); ++i) {
+                auto& entry = sortedSampled[i];
                 spirv_cross::MSLResourceBinding binding;
                 binding.stage = compiler.get_execution_model();
                 binding.desc_set = compiler.get_decoration(entry.res->id, spv::DecorationDescriptorSet);
-                binding.binding = entry.glBinding;
                 if (useArgBuf) {
+                    binding.binding = entry.glBinding;
                     binding.msl_texture = bindings.textureBase + 2 * entry.glBinding;
                     binding.msl_sampler = bindings.samplerBase + 2 * entry.glBinding + 1;
                 } else {
+                    // GLSL sampler uniforms without layout(binding=N)
+                    // can share DecorationBinding=0. SPIRV-Cross keys
+                    // add_msl_resource_binding on (stage,set,binding),
+                    // so make the direct-Metal key unique while
+                    // reflection preserves the original GL binding for
+                    // runtime sampler-unit lookup.
+                    const auto syntheticBinding = static_cast<std::uint32_t>(i);
+                    compiler.set_decoration(entry.id, spv::DecorationBinding,
+                                            syntheticBinding);
+                    binding.binding = syntheticBinding;
                     binding.msl_texture = unifiedNextTextureSlot;
                     binding.msl_sampler = unifiedNextTextureSlot;
                     unifiedNextTextureSlot += entry.arraySize;

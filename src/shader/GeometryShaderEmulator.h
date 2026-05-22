@@ -386,7 +386,9 @@ EmulatedDraw emulateVsOnlyDrawForTf(
     // offset-resolved). When non-null, the i-th vertex reads VBO slot
     // elementIndices[i] instead of (first + i). drawArrays call-site:
     // pass nullptr (default).
-    const std::uint32_t* elementIndices = nullptr);
+    const std::uint32_t* elementIndices = nullptr,
+    const SampledTextureMap* sampledTextures = nullptr,
+    const SampledTextureMap* storageImages = nullptr);
 
 // Sprint 20 Decision F Option A Step 0: env-gated aggregate timing
 // counters for the VS-only transform-feedback CPU path. These are no-ops

@@ -7663,6 +7663,24 @@ struct GLContext::Impl {
                 id<MTLTexture> mtlTex =
                     (__bridge id<MTLTexture>)texObject->metalTexture;
                 if (mtlTex.width == 0 || mtlTex.height == 0) continue;
+                appgl::SampledTextureSlot& slot = slots[i];
+                slot.width = static_cast<std::uint32_t>(mtlTex.width);
+                slot.height = static_cast<std::uint32_t>(
+                    texObject->target == GL_TEXTURE_1D_ARRAY
+                        ? std::max<NSUInteger>(mtlTex.arrayLength, 1u)
+                        : mtlTex.height);
+                if (mtlTex.depth > 1) {
+                    slot.depth = static_cast<std::uint32_t>(mtlTex.depth);
+                } else if (texObject->target == GL_TEXTURE_1D_ARRAY ||
+                           texObject->target == GL_TEXTURE_2D_ARRAY ||
+                           texObject->target == GL_TEXTURE_CUBE_MAP_ARRAY ||
+                           texObject->target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY) {
+                    slot.depth = static_cast<std::uint32_t>(
+                        std::max<NSUInteger>(mtlTex.arrayLength, 1u));
+                }
+                slot.internalFormat = static_cast<std::uint32_t>(
+                    texObject->desc.internalFormat);
+                slot.samplerType = samplerGLType;
                 // Format gating — minimal initial set.
                 const std::uint32_t intFmt =
                     static_cast<std::uint32_t>(texObject->desc.internalFormat);
@@ -7680,12 +7698,16 @@ struct GLContext::Impl {
                         break;
                 }
                 if (bpp == 0) continue;
-                appgl::SampledTextureSlot& slot = slots[i];
-                slot.width = static_cast<std::uint32_t>(mtlTex.width);
-                slot.height = static_cast<std::uint32_t>(mtlTex.height);
                 slot.bytesPerRow = slot.width * bpp;
-                slot.internalFormat = intFmt;
-                slot.samplerType = samplerGLType;
+                const bool supportsSingleSliceReadback =
+                    texObject->target == GL_TEXTURE_1D ||
+                    texObject->target == GL_TEXTURE_2D ||
+                    texObject->target == GL_TEXTURE_RECTANGLE ||
+                    texObject->target == GL_TEXTURE_CUBE_MAP ||
+                    texObject->target == GL_TEXTURE_BUFFER;
+                if (!supportsSingleSliceReadback) {
+                    continue;
+                }
                 slot.data.assign(slot.bytesPerRow * slot.height, 0u);
                 MTLRegion region = MTLRegionMake2D(0, 0, slot.width, slot.height);
                 @try {
@@ -7695,10 +7717,10 @@ struct GLContext::Impl {
                          mipmapLevel:0];
                 } @catch (NSException* exc) {
                     // Private storage textures don't support getBytes.
-                    // Leave the slot data zero-filled; interpreter returns 0.
+                    // Keep descriptor dimensions for textureSize();
+                    // sampling/fetching from an empty data vector still
+                    // returns zero.
                     slot.data.clear();
-                    slot.width = 0;
-                    slot.height = 0;
                 }
             }
             result[v.varId] = std::move(slots);
@@ -37640,9 +37662,19 @@ bool GLContext::drawArrays(GLenum mode, GLint first, GLsizei count, GLuint drawI
                 }
             }
             if (!gpuTfHandled) {
+                const auto vsTexMap = impl_->buildSampledTextureMap(
+                    program->vertexSpirv,
+                    &program->vertexReflection, *program);
+                const auto vsImgMap = impl_->buildStorageImageMap(
+                    program->vertexSpirv,
+                    &program->vertexReflection, *program);
                 appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
                     *program, *vao, *impl_->objects, *impl_->state,
-                    mode, count, first);
+                    mode, count, first,
+                    /*instanceCount=*/1, /*baseInstance=*/0,
+                    /*elementIndices=*/nullptr,
+                    vsTexMap.empty() ? nullptr : &vsTexMap,
+                    vsImgMap.empty() ? nullptr : &vsImgMap);
                 if (ed.ok) {
                     bool discard = false;
                     if (appgl::vsOnlyTfTimingEnabled()) {
@@ -38229,10 +38261,18 @@ bool GLContext::drawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLs
         GLVertexArrayObject* vao = (vaoName != 0)
             ? impl_->objects->vertexArrays().get(vaoName) : nullptr;
         if (vao != nullptr && !program->vertexSpirv.empty()) {
+            const auto vsTexMap = impl_->buildSampledTextureMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            const auto vsImgMap = impl_->buildStorageImageMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
             appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
                 *program, *vao, *impl_->objects, *impl_->state,
                 mode, count, first, instancecount, baseinstance,
-                /*elementIndices=*/nullptr);
+                /*elementIndices=*/nullptr,
+                vsTexMap.empty() ? nullptr : &vsTexMap,
+                vsImgMap.empty() ? nullptr : &vsImgMap);
             if (ed.ok) {
                 bool discard = false;
                 if (appgl::vsOnlyTfTimingEnabled()) {
@@ -38999,11 +39039,19 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
                 (mode == GL_POINTS) ? GL_POINTS :
                 (mode == GL_LINES || mode == GL_LINE_STRIP || mode == GL_LINE_LOOP) ? GL_LINES :
                 GL_TRIANGLES;
+            const auto vsTexMap = impl_->buildSampledTextureMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            const auto vsImgMap = impl_->buildStorageImageMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
             appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
                 *program, *vao, *impl_->objects, *impl_->state,
                 capTopology, static_cast<GLsizei>(capIdx.size()), /*first=*/0,
                 /*instanceCount=*/1, /*baseInstance=*/0,
-                capIdx.data());
+                capIdx.data(),
+                vsTexMap.empty() ? nullptr : &vsTexMap,
+                vsImgMap.empty() ? nullptr : &vsImgMap);
             if (ed.ok) {
                 bool discard = false;
                 if (appgl::vsOnlyTfTimingEnabled()) {
@@ -40116,11 +40164,19 @@ bool GLContext::drawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLen
                 (mode == GL_POINTS) ? GL_POINTS :
                 (mode == GL_LINES || mode == GL_LINE_STRIP || mode == GL_LINE_LOOP) ? GL_LINES :
                 GL_TRIANGLES;
+            const auto vsTexMap = impl_->buildSampledTextureMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            const auto vsImgMap = impl_->buildStorageImageMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
             appgl::EmulatedDraw ed = appgl::emulateVsOnlyDrawForTf(
                 *program, *vao, *impl_->objects, *impl_->state,
                 capTopology, static_cast<GLsizei>(capIdx.size()), /*first=*/0,
                 instancecount, baseinstance,
-                capIdx.data());
+                capIdx.data(),
+                vsTexMap.empty() ? nullptr : &vsTexMap,
+                vsImgMap.empty() ? nullptr : &vsImgMap);
             if (ed.ok) {
                 bool discard = false;
                 if (appgl::vsOnlyTfTimingEnabled()) {
