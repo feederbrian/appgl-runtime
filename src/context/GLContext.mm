@@ -35681,28 +35681,24 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                 draw.varyingLocations;
             const std::vector<std::uint32_t> originalStageSlotLocations =
                 draw.varyingStageSlotLocations;
-            std::unordered_set<std::uint32_t> occupiedLocations;
+            std::unordered_set<std::uint32_t> fsLocations;
             for (const auto& kv : fsInputLocations) {
-                occupiedLocations.insert(kv.second);
+                fsLocations.insert(kv.second);
             }
-            auto rangeFree = [&](std::uint32_t loc, std::uint32_t count) -> bool {
-                for (std::uint32_t slot = 0; slot < count; ++slot) {
-                    if (occupiedLocations.find(loc + slot) != occupiedLocations.end()) {
-                        return false;
-                    }
-                }
-                return true;
+
+            struct RemapEntry {
+                std::size_t varyingIndex = 0;
+                std::uint32_t oldLoc = 0;
+                std::uint32_t newLoc = 0;
+                std::uint32_t slotCount = 1;
+                std::uint32_t stageSlotIndex = 0;
+                bool assigned = false;
             };
-            auto markRange = [&](std::uint32_t loc, std::uint32_t count) {
-                for (std::uint32_t slot = 0; slot < count; ++slot) {
-                    occupiedLocations.insert(loc + slot);
-                }
-            };
-            bool changed = false;
+            std::vector<RemapEntry> entries;
+            entries.reserve(draw.varyingNames.size());
+
             std::uint32_t stageSlotIndex = 0;
-            std::uint32_t nextFreeLocation = 0;
             for (std::size_t i = 0; i < draw.varyingNames.size(); ++i) {
-                const auto locIt = fsInputLocations.find(draw.varyingNames[i]);
                 const std::uint32_t oldLoc =
                     i < originalVaryingLocations.size() ? originalVaryingLocations[i] : 0u;
                 std::uint32_t slotCount = 1;
@@ -35723,35 +35719,86 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                     }
                     slotCount = std::max<std::uint32_t>(slotCount, 1u);
                 }
-                std::uint32_t newLoc = oldLoc;
-                if (locIt != fsInputLocations.end()) {
-                    newLoc = locIt->second;
-                    markRange(newLoc, slotCount);
-                } else {
-                    if (!rangeFree(newLoc, slotCount)) {
-                        while (!rangeFree(nextFreeLocation, slotCount)) {
-                            ++nextFreeLocation;
-                        }
-                        newLoc = nextFreeLocation;
+                entries.push_back({i, oldLoc, oldLoc, slotCount, stageSlotIndex, false});
+                stageSlotIndex += slotCount;
+            }
+
+            std::unordered_set<std::uint32_t> claimedLocations;
+            auto rangeFreeIn = [](const std::unordered_set<std::uint32_t>& occupied,
+                                  std::uint32_t loc,
+                                  std::uint32_t count) -> bool {
+                for (std::uint32_t slot = 0; slot < count; ++slot) {
+                    if (occupied.find(loc + slot) != occupied.end()) {
+                        return false;
                     }
-                    markRange(newLoc, slotCount);
                 }
-                if (i < draw.varyingLocations.size() &&
-                    draw.varyingLocations[i] != newLoc) {
-                    draw.varyingLocations[i] = newLoc;
+                return true;
+            };
+            auto markRange = [](std::unordered_set<std::uint32_t>& occupied,
+                                std::uint32_t loc,
+                                std::uint32_t count) {
+                for (std::uint32_t slot = 0; slot < count; ++slot) {
+                    occupied.insert(loc + slot);
+                }
+            };
+            auto rangeFreeForExtra =
+                [&](std::uint32_t loc, std::uint32_t count) -> bool {
+                    return rangeFreeIn(fsLocations, loc, count) &&
+                           rangeFreeIn(claimedLocations, loc, count);
+                };
+
+            // Exact names are authoritative. Block-member rewrites can
+            // rename otherwise-linked varyings (`output_block_*` ->
+            // `input_block_*`), so unmatched entries get a second chance
+            // to keep an original FS location before extras are relocated.
+            for (RemapEntry& entry : entries) {
+                const auto locIt = fsInputLocations.find(
+                    draw.varyingNames[entry.varyingIndex]);
+                if (locIt == fsInputLocations.end()) continue;
+                entry.newLoc = locIt->second;
+                entry.assigned = true;
+                markRange(claimedLocations, entry.newLoc, entry.slotCount);
+            }
+            for (RemapEntry& entry : entries) {
+                if (entry.assigned) continue;
+                if (fsLocations.find(entry.oldLoc) == fsLocations.end()) continue;
+                if (!rangeFreeIn(claimedLocations, entry.oldLoc, entry.slotCount)) continue;
+                entry.newLoc = entry.oldLoc;
+                entry.assigned = true;
+                markRange(claimedLocations, entry.newLoc, entry.slotCount);
+            }
+            std::uint32_t nextFreeLocation = 0;
+            for (RemapEntry& entry : entries) {
+                if (entry.assigned) continue;
+                if (rangeFreeForExtra(entry.oldLoc, entry.slotCount)) {
+                    entry.newLoc = entry.oldLoc;
+                } else {
+                    while (!rangeFreeForExtra(nextFreeLocation, entry.slotCount)) {
+                        ++nextFreeLocation;
+                    }
+                    entry.newLoc = nextFreeLocation;
+                }
+                entry.assigned = true;
+                markRange(claimedLocations, entry.newLoc, entry.slotCount);
+            }
+
+            bool changed = false;
+            for (const RemapEntry& entry : entries) {
+                if (entry.varyingIndex < draw.varyingLocations.size() &&
+                    draw.varyingLocations[entry.varyingIndex] != entry.newLoc) {
+                    draw.varyingLocations[entry.varyingIndex] = entry.newLoc;
                     changed = true;
                 }
                 for (std::uint32_t slot = 0;
-                     slot < slotCount &&
-                     stageSlotIndex + slot < draw.varyingStageSlotLocations.size();
+                     slot < entry.slotCount &&
+                     entry.stageSlotIndex + slot < draw.varyingStageSlotLocations.size();
                      ++slot) {
-                    const std::uint32_t slotLoc = newLoc + slot;
-                    if (draw.varyingStageSlotLocations[stageSlotIndex + slot] != slotLoc) {
-                        draw.varyingStageSlotLocations[stageSlotIndex + slot] = slotLoc;
+                    const std::uint32_t slotLoc = entry.newLoc + slot;
+                    if (draw.varyingStageSlotLocations[entry.stageSlotIndex + slot] != slotLoc) {
+                        draw.varyingStageSlotLocations[entry.stageSlotIndex + slot] = slotLoc;
                         changed = true;
                     }
                 }
-                stageSlotIndex += slotCount;
             }
             if (changed && draw.hasPrimitiveID) {
                 std::uint32_t maxLoc = 0;
