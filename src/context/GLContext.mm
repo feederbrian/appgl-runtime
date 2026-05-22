@@ -43389,15 +43389,27 @@ bool GLContext::getInternalformativ(GLenum target, GLenum internalformat, GLenum
             params[0] = static_cast<GLint>(value);
             return true;
         }
-        case GL_NUM_SAMPLE_COUNTS:
-            params[0] = 3; // Metal typically supports 1, 2, 4 samples
+        case GL_NUM_SAMPLE_COUNTS: {
+            const bool multisampleTextureTarget =
+                target == GL_TEXTURE_2D_MULTISAMPLE ||
+                target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
+            // Metal has no 1-sample multisample texture type; AppGL backs a
+            // GL samples=1 MS texture with 2 storage samples, and shader
+            // textureSamples() observes that Metal sample count. Only report
+            // backing-faithful counts for MS texture internalformat queries.
+            params[0] = multisampleTextureTarget ? 2 : 3;
             return true;
-        case GL_SAMPLES:
+        }
+        case GL_SAMPLES: {
+            const bool multisampleTextureTarget =
+                target == GL_TEXTURE_2D_MULTISAMPLE ||
+                target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
             // Return sample counts in descending order.
             if (count >= 1) params[0] = 4;
             if (count >= 2) params[1] = 2;
-            if (count >= 3) params[2] = 1;
+            if (!multisampleTextureTarget && count >= 3) params[2] = 1;
             return true;
+        }
         case GL_INTERNALFORMAT_SUPPORTED:
             params[0] = capability.has_value() ? GL_TRUE : GL_FALSE;
             return true;
