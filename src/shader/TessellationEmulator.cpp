@@ -2320,6 +2320,8 @@ EmulatedDraw emulateTessellationDraw(
     // primitive-level CPU filter below.
     std::uint32_t tessClipLen = 0;
     std::uint32_t tessCullLen = 0;
+    bool tessWritesLayer = false;
+    bool tessWritesViewportIndex = false;
     if (useInterpreter && !program.tessEvalSpirv.empty()) {
         TessEvalInterface teIface = scanTessEvalInterface(
             program.tessEvalSpirv.data(),
@@ -2331,17 +2333,27 @@ EmulatedDraw emulateTessellationDraw(
                     tessClipLen = std::max(tessClipLen, ov.scalarCount);
                 } else if (ov.builtIn == spv::BuiltInCullDistance) {
                     tessCullLen = std::max(tessCullLen, ov.scalarCount);
+                } else if (ov.builtIn == spv::BuiltInLayer) {
+                    tessWritesLayer = true;
+                } else if (ov.builtIn == spv::BuiltInViewportIndex) {
+                    tessWritesViewportIndex = true;
                 }
             }
         }
     }
     const std::size_t clipBase = kPosFloats + varyingFloats;
     const std::size_t cullBase = clipBase + tessClipLen;
-    const std::size_t floatsPerVertex = cullBase + tessCullLen;
+    const std::size_t layerSlot = tessWritesLayer ? 1u : 0u;
+    const std::size_t viSlot = tessWritesViewportIndex ? 1u : 0u;
+    const std::size_t layerBase = cullBase + tessCullLen;
+    const std::size_t viBase = layerBase + layerSlot;
+    const std::size_t floatsPerVertex = viBase + viSlot;
     d.vertexCount = totalVerts;
     d.floatsPerVertex = floatsPerVertex;
     d.clipDistanceLen = tessClipLen;
     d.cullDistanceLen = tessCullLen;
+    d.hasLayer = tessWritesLayer;
+    d.hasViewportIndex = tessWritesViewportIndex;
     d.expandedVertexData.assign(totalVerts * floatsPerVertex, 0.0f);
     d.topology = domainOut.topology;
 
@@ -2816,6 +2828,18 @@ EmulatedDraw emulateTessellationDraw(
                 d.expandedVertexData[dst + cullBase + c] =
                     c < outV.cullDistance.size() ? outV.cullDistance[c] : 0.0f;
             }
+            if (d.hasLayer) {
+                std::memcpy(&d.expandedVertexData[dst + layerBase],
+                            &outV.layer, sizeof(std::int32_t));
+                if (outV.layer >= 0 &&
+                    static_cast<std::uint32_t>(outV.layer) > d.maxEmittedLayer) {
+                    d.maxEmittedLayer = static_cast<std::uint32_t>(outV.layer);
+                }
+            }
+            if (d.hasViewportIndex) {
+                std::memcpy(&d.expandedVertexData[dst + viBase],
+                            &outV.viewportIndex, sizeof(std::int32_t));
+            }
         } else {
             // Phase 3f-15: interpreter bailed. Mark the draw as
             // failed so the caller (emulateTessellationDraw's
@@ -2877,7 +2901,7 @@ EmulatedDraw emulateTessellationDraw(
         }
         if (primSize > 0) {
             const std::size_t oldFpv = d.floatsPerVertex;
-            const std::size_t newFpv = cullBase;
+            const std::size_t newFpv = cullBase + layerSlot + viSlot;
             std::vector<float> filtered;
             filtered.reserve(d.expandedVertexData.size());
             for (std::size_t base = 0; base < d.vertexCount; base += primSize) {
@@ -2905,13 +2929,48 @@ EmulatedDraw emulateTessellationDraw(
                 for (std::size_t k = 0; k < avail; ++k) {
                     const float* src =
                         d.expandedVertexData.data() + (base + k) * oldFpv;
-                    filtered.insert(filtered.end(), src, src + newFpv);
+                    filtered.insert(filtered.end(), src, src + cullBase);
+                    if (d.hasLayer) filtered.push_back(src[layerBase]);
+                    if (d.hasViewportIndex) filtered.push_back(src[viBase]);
                 }
             }
             d.vertexCount = newFpv > 0 ? filtered.size() / newFpv : 0;
             d.floatsPerVertex = newFpv;
             d.cullDistanceLen = 0;
             d.expandedVertexData = std::move(filtered);
+        }
+    }
+
+    if ((d.hasLayer || d.hasViewportIndex) && d.vertexCount > 0) {
+        std::size_t primSize = 0;
+        switch (d.topology) {
+            case GL_POINTS:    primSize = 1; break;
+            case GL_LINES:     primSize = 2; break;
+            case GL_TRIANGLES: primSize = 3; break;
+            default:           primSize = 0; break;
+        }
+        if (primSize > 0) {
+            const std::size_t activeLayerBase =
+                kPosFloats + varyingFloats + d.clipDistanceLen + d.cullDistanceLen;
+            const std::size_t activeViBase =
+                activeLayerBase + (d.hasLayer ? 1u : 0u);
+            auto propagateIntSlot = [&](std::size_t slot) {
+                for (std::size_t i = 0; i + primSize <= d.vertexCount; i += primSize) {
+                    const std::size_t last =
+                        (i + primSize - 1u) * d.floatsPerVertex + slot;
+                    std::int32_t value = 0;
+                    std::memcpy(&value, &d.expandedVertexData[last],
+                                sizeof(std::int32_t));
+                    for (std::size_t k = 0; k < primSize; ++k) {
+                        const std::size_t dst =
+                            (i + k) * d.floatsPerVertex + slot;
+                        std::memcpy(&d.expandedVertexData[dst], &value,
+                                    sizeof(std::int32_t));
+                    }
+                }
+            };
+            if (d.hasLayer) propagateIntSlot(activeLayerBase);
+            if (d.hasViewportIndex) propagateIntSlot(activeViBase);
         }
     }
 

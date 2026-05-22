@@ -1168,6 +1168,25 @@ struct MetalFrameGraph::Impl {
             FG_TRACE(@"encodeTranslatedDraw: no vertex MSL, returning false");
             return false;
         }
+        if (std::getenv("APPGL_TRACE_VIEWPORT_LAYER_ARRAY") != nullptr &&
+            ((info.vertexMSL->find("[[viewport_array_index]]") != std::string::npos ||
+              info.vertexMSL->find("[[render_target_array_index]]") != std::string::npos) ||
+             info.viewportArrayCount > 1 ||
+             info.fboColorArrayLength > 0)) {
+            std::fprintf(stderr,
+                "[SVLA] translated draw program=%u mode=0x%x verts=%d idx=%d "
+                "vpCount=%zu fboArray=%u markViewport=%d hasVertexData=%d hasMetalVBO=%d attrLayouts=%zu\n",
+                static_cast<unsigned>(info.program),
+                static_cast<unsigned>(info.mode),
+                static_cast<int>(info.vertexCount),
+                static_cast<int>(info.indexCount),
+                info.viewportArrayCount,
+                info.fboColorArrayLength,
+                info.markColorAttachmentReadbackFlip ? 1 : 0,
+                info.vertexData != nullptr ? 1 : 0,
+                info.metalVertexBuffer != nullptr ? 1 : 0,
+                info.vertexAttributeLayouts.size());
+        }
         // Fragment MSL is only required when rasterization runs. Under
         // GL_RASTERIZER_DISCARD the pipeline skips the fragment stage
         // entirely (see the rasterizerDiscard branch in the pipeline
@@ -7026,6 +7045,29 @@ fragment float4 appgl_immediate_textured_fs(
             (info.genVertexOrder == GL_CW) ^ tesYFlipped;
         pipeDesc.tessellationOutputWindingOrder =
             windingIsCW ? MTLWindingClockwise : MTLWindingCounterClockwise;
+        const bool tessEvalWritesRenderTargetArrayIndex =
+            info.tessEvalMSL != nullptr &&
+            info.tessEvalMSL->find("[[render_target_array_index]]") !=
+                std::string::npos;
+        const bool tessEvalWritesViewportArrayIndex =
+            info.tessEvalMSL != nullptr &&
+            info.tessEvalMSL->find("[[viewport_array_index]]") !=
+                std::string::npos;
+        if (info.fboColorArrayLength > 0 ||
+            info.viewportArrayCount > 1 ||
+            tessEvalWritesRenderTargetArrayIndex ||
+            tessEvalWritesViewportArrayIndex) {
+            if (info.pointMode) {
+                pipeDesc.inputPrimitiveTopology =
+                    MTLPrimitiveTopologyClassPoint;
+            } else if (info.genMode == GL_ISOLINES) {
+                pipeDesc.inputPrimitiveTopology =
+                    MTLPrimitiveTopologyClassLine;
+            } else {
+                pipeDesc.inputPrimitiveTopology =
+                    MTLPrimitiveTopologyClassTriangle;
+            }
+        }
         pipeDesc.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
         pipeDesc.tessellationFactorStepFunction =
             MTLTessellationFactorStepFunctionConstant;
@@ -7080,6 +7122,10 @@ fragment float4 appgl_immediate_textured_fs(
             pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
         }
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        if (info.fboColorArrayLength > 0) {
+            pass.renderTargetArrayLength =
+                static_cast<NSUInteger>(info.fboColorArrayLength);
+        }
         if (depthTex != nil && fmtHasDepth) {
             pass.depthAttachment.texture = depthTex;
             if (info.pendingClearDepth) {
@@ -7112,47 +7158,82 @@ fragment float4 appgl_immediate_textured_fs(
         // — replicate that here. For Phase 2 we treat the FBO height
         // as the color texture's height.
         const double fbHeight = (double)colorTex.height;
-        MTLViewport viewport = {
-            (double)info.viewportX,
-            fbHeight - (double)info.viewportY - (double)info.viewportHeight,
-            (double)info.viewportWidth,
-            (double)info.viewportHeight,
-            info.depthRangeNear,
-            info.depthRangeFar
-        };
-        [enc setViewport:viewport];
-
-        MTLScissorRect scissor;
-        if (info.scissorTestEnabled) {
-            scissor.x = (NSUInteger)std::max(info.scissorX, 0);
-            const GLint flippedY = (GLint)colorTex.height
-                                    - info.scissorY
-                                    - info.scissorHeight;
-            scissor.y = (NSUInteger)std::max(flippedY, 0);
-            scissor.width = (NSUInteger)std::max(info.scissorWidth, 0);
-            scissor.height = (NSUInteger)std::max(info.scissorHeight, 0);
+        const bool flipY = (info.clipOrigin != GL_UPPER_LEFT);
+        if (info.viewportArrayCount > 1) {
+            MTLViewport viewports[TranslatedDrawInfo::kMaxDrawViewports];
+            for (std::size_t i = 0; i < info.viewportArrayCount; ++i) {
+                const auto& e = info.viewportArray[i];
+                viewports[i].originX = (double)e.originX;
+                viewports[i].originY = flipY
+                    ? (fbHeight - (double)e.originY - (double)e.height)
+                    : (double)e.originY;
+                viewports[i].width = (double)e.width;
+                viewports[i].height = (double)e.height;
+                viewports[i].znear = e.depthNear;
+                viewports[i].zfar = e.depthFar;
+            }
+            [enc setViewports:viewports count:info.viewportArrayCount];
         } else {
-            scissor.x = 0;
-            scissor.y = 0;
-            scissor.width = colorTex.width;
-            scissor.height = colorTex.height;
+            MTLViewport viewport = {
+                (double)info.viewportX,
+                flipY
+                    ? (fbHeight - (double)info.viewportY - (double)info.viewportHeight)
+                    : (double)info.viewportY,
+                (double)info.viewportWidth,
+                (double)info.viewportHeight,
+                info.depthRangeNear,
+                info.depthRangeFar
+            };
+            [enc setViewport:viewport];
         }
-        // Clamp scissor to render target.
-        if (scissor.x + scissor.width > colorTex.width) {
-            scissor.width = scissor.x < colorTex.width
-                ? colorTex.width - scissor.x : 0;
+
+        auto makeTessScissor = [&](bool enabled, GLint x, GLint y,
+                                   GLsizei width, GLsizei height) {
+            MTLScissorRect scissor;
+            if (enabled) {
+                scissor.x = (NSUInteger)std::max(x, 0);
+                const GLint metalY = flipY
+                    ? ((GLint)colorTex.height - y - height)
+                    : y;
+                scissor.y = (NSUInteger)std::max(metalY, 0);
+                scissor.width = (NSUInteger)std::max(width, 0);
+                scissor.height = (NSUInteger)std::max(height, 0);
+            } else {
+                scissor.x = 0;
+                scissor.y = 0;
+                scissor.width = colorTex.width;
+                scissor.height = colorTex.height;
+            }
+            if (scissor.x + scissor.width > colorTex.width) {
+                scissor.width = scissor.x < colorTex.width
+                    ? colorTex.width - scissor.x : 0;
+            }
+            if (scissor.y + scissor.height > colorTex.height) {
+                scissor.height = scissor.y < colorTex.height
+                    ? colorTex.height - scissor.y : 0;
+            }
+            if (scissor.width == 0 || scissor.height == 0) {
+                scissor.x = colorTex.width;
+                scissor.y = colorTex.height;
+                scissor.width = 1;
+                scissor.height = 1;
+            }
+            return scissor;
+        };
+        if (info.viewportArrayCount > 1) {
+            MTLScissorRect scissors[TranslatedDrawInfo::kMaxDrawViewports];
+            for (std::size_t i = 0; i < info.viewportArrayCount; ++i) {
+                const auto& e = info.scissorArray[i];
+                const bool enabled = info.scissorTestEnabled && e.enabled;
+                scissors[i] = makeTessScissor(
+                    enabled, e.x, e.y, e.width, e.height);
+            }
+            [enc setScissorRects:scissors count:info.viewportArrayCount];
+        } else {
+            [enc setScissorRect:makeTessScissor(
+                info.scissorTestEnabled, info.scissorX, info.scissorY,
+                info.scissorWidth, info.scissorHeight)];
         }
-        if (scissor.y + scissor.height > colorTex.height) {
-            scissor.height = scissor.y < colorTex.height
-                ? colorTex.height - scissor.y : 0;
-        }
-        if (scissor.width == 0 || scissor.height == 0) {
-            scissor.x = colorTex.width;
-            scissor.y = colorTex.height;
-            scissor.width = 1;
-            scissor.height = 1;
-        }
-        [enc setScissorRect:scissor];
 
         // Cull / front-face. GL and Metal both use a CCW/CW winding
         // convention so the enum maps 1:1.

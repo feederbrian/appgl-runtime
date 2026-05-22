@@ -20086,6 +20086,17 @@ bool reportTranslatedFallbackOnce(GLProgramObject* program,
           static_cast<unsigned>(vboName),
           attrCount,
           shadowBytesSize);
+    if (std::getenv("APPGL_TRACE_VIEWPORT_LAYER_ARRAY") != nullptr) {
+        std::fprintf(stderr,
+            "[SVLA] %s fallback program=%u gate=%s vao=%u vbo=%u attrCount=%zu shadowBytes=%zu\n",
+            siteName,
+            static_cast<unsigned>(programName),
+            translatedFallbackGateName(gate),
+            static_cast<unsigned>(vaoName),
+            static_cast<unsigned>(vboName),
+            attrCount,
+            shadowBytesSize);
+    }
     return true;
 }
 
@@ -20113,6 +20124,12 @@ void recordPipelineBuildFailureOnce(GLProgramObject* program,
                                     const std::string& errorText) {
     if (program == nullptr || errorText.empty()) {
         return;
+    }
+    if (std::getenv("APPGL_TRACE_VIEWPORT_LAYER_ARRAY") != nullptr) {
+        std::fprintf(stderr,
+            "[SVLA] pipeline-build failure program=%u %s\n",
+            static_cast<unsigned>(programName),
+            errorText.c_str());
     }
     // Reuse the EncodeFailed bit as the gate. The reportTranslatedFallbackOnce
     // call above sets it; this function only fires when that gate just
@@ -25142,6 +25159,12 @@ static GLenum detectBoolMemberType(const std::string& source,
     return searchForBoolType(searchBody, parts.back());
 }
 
+static bool mslWritesRenderTargetArrayIndex(const std::string* msl);
+static bool mslWritesViewportArrayIndex(const std::string* msl);
+static void rewriteMslOutputLocationsForFragmentInputs(
+    std::string& vertexMSL,
+    const std::string& fragmentMSL);
+
 bool GLContext::linkProgram(GLuint program) {
     GLProgramObject* programObject = impl_->objects->programs().get(program);
     if (programObject == nullptr) {
@@ -28503,6 +28526,11 @@ bool GLContext::linkProgram(GLuint program) {
                 "fragment", fsSpirvData, fsSpirvWords, fragmentShader->source,
                 programObject->fragmentMSL, fsRefl, fsOptions);
             if (vsOk && fsOk) {
+                if (mslWritesViewportArrayIndex(&programObject->vertexMSL) ||
+                    mslWritesRenderTargetArrayIndex(&programObject->vertexMSL)) {
+                    rewriteMslOutputLocationsForFragmentInputs(
+                        programObject->vertexMSL, programObject->fragmentMSL);
+                }
                 programObject->vertexReflection = std::move(vsRefl);
                 programObject->fragmentReflection = std::move(fsRefl);
                 programObject->hasTranslatedPipeline = true;
@@ -34377,6 +34405,138 @@ GLProgramObject* GLContext::Impl::ensurePipelineTessSynthesizedProgram(
     return ppo.syntheticTessProgram.get();
 }
 
+static bool mslWritesRenderTargetArrayIndex(const std::string* msl) {
+    return msl != nullptr &&
+        msl->find("[[render_target_array_index]]") != std::string::npos;
+}
+
+static bool mslWritesViewportArrayIndex(const std::string* msl) {
+    return msl != nullptr &&
+        msl->find("[[viewport_array_index]]") != std::string::npos;
+}
+
+static std::unordered_map<std::string, std::uint32_t>
+collectMslUserLocationsByName(const std::string& msl, const char* structName) {
+    std::unordered_map<std::string, std::uint32_t> result;
+    const std::string needle = std::string("struct ") + structName;
+    const std::size_t structPos = msl.find(needle);
+    if (structPos == std::string::npos) return result;
+    const std::size_t bodyBegin = msl.find('{', structPos);
+    const std::size_t bodyEnd = msl.find("};", bodyBegin);
+    if (bodyBegin == std::string::npos || bodyEnd == std::string::npos) {
+        return result;
+    }
+    std::size_t cursor = bodyBegin + 1;
+    while (cursor < bodyEnd) {
+        const std::size_t semi = msl.find(';', cursor);
+        if (semi == std::string::npos || semi > bodyEnd) break;
+        const std::string line = msl.substr(cursor, semi - cursor);
+        cursor = semi + 1;
+        const std::size_t userPos = line.find("[[user(locn");
+        if (userPos == std::string::npos) continue;
+        const std::size_t locBegin = userPos + std::strlen("[[user(locn");
+        std::size_t locEnd = locBegin;
+        while (locEnd < line.size() &&
+               std::isdigit(static_cast<unsigned char>(line[locEnd]))) {
+            ++locEnd;
+        }
+        if (locEnd == locBegin) continue;
+
+        std::size_t nameEnd = userPos;
+        while (nameEnd > 0 &&
+               std::isspace(static_cast<unsigned char>(line[nameEnd - 1]))) {
+            --nameEnd;
+        }
+        std::size_t nameBegin = nameEnd;
+        while (nameBegin > 0) {
+            const unsigned char ch =
+                static_cast<unsigned char>(line[nameBegin - 1]);
+            if (!(std::isalnum(ch) || ch == '_')) break;
+            --nameBegin;
+        }
+        if (nameBegin == nameEnd) continue;
+
+        result[line.substr(nameBegin, nameEnd - nameBegin)] =
+            static_cast<std::uint32_t>(
+                std::strtoul(line.c_str() + locBegin, nullptr, 10));
+    }
+    return result;
+}
+
+static void rewriteMslOutputLocationsForFragmentInputs(
+    std::string& vertexMSL,
+    const std::string& fragmentMSL) {
+    const auto fsInputs =
+        collectMslUserLocationsByName(fragmentMSL, "main0_in");
+    if (fsInputs.empty()) return;
+
+    std::uint32_t nextFree = 0;
+    for (const auto& kv : fsInputs) {
+        nextFree = std::max(nextFree, kv.second + 1u);
+    }
+
+    const std::size_t structPos = vertexMSL.find("struct main0_out");
+    if (structPos == std::string::npos) return;
+    const std::size_t bodyBegin = vertexMSL.find('{', structPos);
+    std::size_t bodyEnd = vertexMSL.find("};", bodyBegin);
+    if (bodyBegin == std::string::npos || bodyEnd == std::string::npos) {
+        return;
+    }
+
+    std::size_t cursor = bodyBegin + 1;
+    while (cursor < bodyEnd) {
+        const std::size_t semi = vertexMSL.find(';', cursor);
+        if (semi == std::string::npos || semi > bodyEnd) break;
+        const std::size_t userPos = vertexMSL.find("[[user(locn", cursor);
+        if (userPos == std::string::npos || userPos > semi) {
+            cursor = semi + 1;
+            continue;
+        }
+        const std::size_t locBegin = userPos + std::strlen("[[user(locn");
+        std::size_t locEnd = locBegin;
+        while (locEnd < vertexMSL.size() &&
+               std::isdigit(static_cast<unsigned char>(vertexMSL[locEnd]))) {
+            ++locEnd;
+        }
+        if (locEnd == locBegin) {
+            cursor = semi + 1;
+            continue;
+        }
+
+        std::size_t nameEnd = userPos;
+        while (nameEnd > cursor &&
+               std::isspace(static_cast<unsigned char>(vertexMSL[nameEnd - 1]))) {
+            --nameEnd;
+        }
+        std::size_t nameBegin = nameEnd;
+        while (nameBegin > cursor) {
+            const unsigned char ch =
+                static_cast<unsigned char>(vertexMSL[nameBegin - 1]);
+            if (!(std::isalnum(ch) || ch == '_')) break;
+            --nameBegin;
+        }
+        if (nameBegin == nameEnd) {
+            cursor = semi + 1;
+            continue;
+        }
+
+        const std::string name = vertexMSL.substr(nameBegin, nameEnd - nameBegin);
+        const auto locIt = fsInputs.find(name);
+        const std::uint32_t newLoc =
+            locIt != fsInputs.end() ? locIt->second : nextFree++;
+        const std::string replacement = std::to_string(newLoc);
+        vertexMSL.replace(locBegin, locEnd - locBegin, replacement);
+        const std::ptrdiff_t delta =
+            static_cast<std::ptrdiff_t>(replacement.size()) -
+            static_cast<std::ptrdiff_t>(locEnd - locBegin);
+        const std::size_t adjustedSemi =
+            static_cast<std::size_t>(static_cast<std::ptrdiff_t>(semi) + delta);
+        bodyEnd =
+            static_cast<std::size_t>(static_cast<std::ptrdiff_t>(bodyEnd) + delta);
+        cursor = adjustedSemi + 1;
+    }
+}
+
 bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
                                                 GLuint programName,
                                                 GLenum mode,
@@ -34791,6 +34951,69 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     const auto& dr = state->depthRange();
     info.depthRangeNear = dr.nearValue;
     info.depthRangeFar = dr.farValue;
+    info.clipOrigin = state->clipOrigin();
+
+    {
+        appgl::GLStateTracker::IndexedViewportEntry vparr[
+            appgl::TranslatedDrawInfo::kMaxDrawViewports];
+        std::size_t got = 0;
+        state->getViewportArray(vparr,
+            appgl::TranslatedDrawInfo::kMaxDrawViewports, &got);
+        appgl::GLStateTracker::IndexedScissorEntry scarrPre[
+            appgl::TranslatedDrawInfo::kMaxDrawViewports];
+        std::size_t scgotPre = 0;
+        state->getScissorArray(scarrPre,
+            appgl::TranslatedDrawInfo::kMaxDrawViewports, &scgotPre);
+        bool anyDiverge = false;
+        for (std::size_t i = 1; i < got; ++i) {
+            if (vparr[i].x != vparr[0].x ||
+                vparr[i].y != vparr[0].y ||
+                vparr[i].width != vparr[0].width ||
+                vparr[i].height != vparr[0].height ||
+                vparr[i].depthNear != vparr[0].depthNear ||
+                vparr[i].depthFar != vparr[0].depthFar) {
+                anyDiverge = true;
+                break;
+            }
+        }
+        if (!anyDiverge) {
+            for (std::size_t i = 1; i < scgotPre; ++i) {
+                if (scarrPre[i].x != scarrPre[0].x ||
+                    scarrPre[i].y != scarrPre[0].y ||
+                    scarrPre[i].width != scarrPre[0].width ||
+                    scarrPre[i].height != scarrPre[0].height ||
+                    scarrPre[i].enabled != scarrPre[0].enabled) {
+                    anyDiverge = true;
+                    break;
+                }
+            }
+        }
+        if (anyDiverge) {
+            for (std::size_t i = 0; i < got; ++i) {
+                info.viewportArray[i].originX = vparr[i].x;
+                info.viewportArray[i].originY = vparr[i].y;
+                info.viewportArray[i].width = vparr[i].width;
+                info.viewportArray[i].height = vparr[i].height;
+                info.viewportArray[i].depthNear = vparr[i].depthNear;
+                info.viewportArray[i].depthFar = vparr[i].depthFar;
+            }
+            info.viewportArrayCount = got;
+            appgl::GLStateTracker::IndexedScissorEntry scarr[
+                appgl::TranslatedDrawInfo::kMaxDrawViewports];
+            std::size_t scgot = 0;
+            state->getScissorArray(scarr,
+                appgl::TranslatedDrawInfo::kMaxDrawViewports, &scgot);
+            const std::size_t cap = std::min(got, scgot);
+            for (std::size_t i = 0; i < cap; ++i) {
+                info.scissorArray[i].x = scarr[i].x;
+                info.scissorArray[i].y = scarr[i].y;
+                info.scissorArray[i].width = scarr[i].width;
+                info.scissorArray[i].height = scarr[i].height;
+                info.scissorArray[i].enabled = scarr[i].enabled;
+            }
+            info.scissorArrayCount = cap;
+        }
+    }
 
     info.scissorTestEnabled = state->isEnabled(GL_SCISSOR_TEST);
     const auto& sc = state->scissor();
@@ -34804,10 +35027,16 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     // because winding.triangles_ccw draws to a single-attachment FBO.
     GLsizei fboW = 0, fboH = 0;
     void* fboDSTex = nullptr;
-    void* fboColTex = resolveFBOColorTarget(fboW, fboH, fboDSTex);
+    std::uint32_t fboArrayLen = 0;
+    void* fboColTex = resolveFBOColorTarget(
+        fboW, fboH, fboDSTex, &fboArrayLen);
     if (fboColTex != nullptr || fboDSTex != nullptr) {
         info.fboColorTexture = fboColTex;
         info.fboDepthStencilTexture = fboDSTex;
+        if (mslWritesRenderTargetArrayIndex(info.tessEvalMSL) &&
+            fboColTex != nullptr) {
+            info.fboColorArrayLength = fboArrayLen > 0 ? fboArrayLen : 1u;
+        }
     }
 
     // Phase 3B.5 [metal-tess-TF]: when the Metal tess-TF path is
@@ -34854,6 +35083,26 @@ bool GLContext::Impl::tryMetalTessellationDraw(GLProgramObject& program,
     const bool encodeOk = frameGraph->encodeMetalTessellationDraw(info);
     if (encodeOk && state->boundDrawFramebuffer() == 0) {
         invalidateDefaultFramebufferShadow();
+    } else if (encodeOk) {
+        if (GLFramebufferObject* fbo =
+                objects->framebuffers().get(state->boundDrawFramebuffer())) {
+            const bool markViewportReadback =
+                info.viewportArrayCount > 1 &&
+                mslWritesViewportArrayIndex(info.tessEvalMSL) &&
+                state->clipOrigin() == GL_LOWER_LEFT;
+            for (const auto& kv : fbo->attachments) {
+                if (!isColorAttachment(kv.first)) continue;
+                if (kv.second.kind !=
+                        GLFramebufferAttachment::Kind::Texture) continue;
+                if (GLTextureObject* tex =
+                        objects->textures().get(kv.second.object)) {
+                    tex->wasFramebufferRenderedTo = true;
+                    if (markViewportReadback) {
+                        tex->wasViewportRenderedTo = true;
+                    }
+                }
+            }
+        }
     }
 
     if (detectorEnabled()) {
@@ -35428,25 +35677,34 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                     std::strtoul(line.c_str() + locBegin, nullptr, 10));
                 fsInputLocations[name] = loc;
             }
-            if (fsInputLocations.empty()) return;
-
             const std::vector<std::uint32_t> originalVaryingLocations =
                 draw.varyingLocations;
             const std::vector<std::uint32_t> originalStageSlotLocations =
                 draw.varyingStageSlotLocations;
+            std::unordered_set<std::uint32_t> occupiedLocations;
+            for (const auto& kv : fsInputLocations) {
+                occupiedLocations.insert(kv.second);
+            }
+            auto rangeFree = [&](std::uint32_t loc, std::uint32_t count) -> bool {
+                for (std::uint32_t slot = 0; slot < count; ++slot) {
+                    if (occupiedLocations.find(loc + slot) != occupiedLocations.end()) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            auto markRange = [&](std::uint32_t loc, std::uint32_t count) {
+                for (std::uint32_t slot = 0; slot < count; ++slot) {
+                    occupiedLocations.insert(loc + slot);
+                }
+            };
             bool changed = false;
             std::uint32_t stageSlotIndex = 0;
+            std::uint32_t nextFreeLocation = 0;
             for (std::size_t i = 0; i < draw.varyingNames.size(); ++i) {
                 const auto locIt = fsInputLocations.find(draw.varyingNames[i]);
                 const std::uint32_t oldLoc =
                     i < originalVaryingLocations.size() ? originalVaryingLocations[i] : 0u;
-                const std::uint32_t newLoc =
-                    locIt != fsInputLocations.end() ? locIt->second : oldLoc;
-                if (i < draw.varyingLocations.size() &&
-                    draw.varyingLocations[i] != newLoc) {
-                    draw.varyingLocations[i] = newLoc;
-                    changed = true;
-                }
                 std::uint32_t slotCount = 1;
                 if (!originalStageSlotLocations.empty() &&
                     stageSlotIndex < originalStageSlotLocations.size()) {
@@ -35464,6 +35722,24 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
                         ++slotCount;
                     }
                     slotCount = std::max<std::uint32_t>(slotCount, 1u);
+                }
+                std::uint32_t newLoc = oldLoc;
+                if (locIt != fsInputLocations.end()) {
+                    newLoc = locIt->second;
+                    markRange(newLoc, slotCount);
+                } else {
+                    if (!rangeFree(newLoc, slotCount)) {
+                        while (!rangeFree(nextFreeLocation, slotCount)) {
+                            ++nextFreeLocation;
+                        }
+                        newLoc = nextFreeLocation;
+                    }
+                    markRange(newLoc, slotCount);
+                }
+                if (i < draw.varyingLocations.size() &&
+                    draw.varyingLocations[i] != newLoc) {
+                    draw.varyingLocations[i] = newLoc;
+                    changed = true;
                 }
                 for (std::uint32_t slot = 0;
                      slot < slotCount &&
@@ -35808,8 +36084,7 @@ bool GLContext::Impl::encodeEmulatedGsDraw(GLProgramObject& program,
     gsPipelineBuildError.clear();
     tdi.pipelineBuildErrorOut = &gsPipelineBuildError;
 
-    const bool ok = encodeTranslatedDrawAndMarkFbo(tdi);
-    return ok;
+    return encodeTranslatedDrawAndMarkFbo(tdi);
 }
 
 // Sprint 17 Day 7+ Bank-Group-H Path B Component D-γ — see header
@@ -36052,6 +36327,39 @@ bool GLContext::Impl::encodeTranslatedDrawAndMarkFbo(TranslatedDrawInfo& tdi) {
                 tdi.stencilTestEnabled = false;
             }
         }
+    }
+    if (mslWritesRenderTargetArrayIndex(tdi.vertexMSL) &&
+        tdi.fboColorArrayLength == 0) {
+        if (drawFboName == 0) {
+            tdi.fboColorArrayLength = 1;
+        } else {
+            GLsizei fboW = 0, fboH = 0;
+            void* fboDSTex = nullptr;
+            std::uint32_t fboArrayLen = 0;
+            std::array<void*, 7> extraColTex = {};
+            std::array<std::uint32_t, 8> colSlices = {};
+            void* fboColTex = resolveFBOColorTarget(
+                fboW, fboH, fboDSTex, &fboArrayLen,
+                &extraColTex, &colSlices);
+            if (fboColTex != nullptr || fboDSTex != nullptr) {
+                tdi.fboColorTexture = fboColTex;
+                tdi.fboAdditionalColorTextures = extraColTex;
+                tdi.fboColorSlices = colSlices;
+                tdi.fboDepthStencilTexture = fboDSTex;
+                tdi.fboWidth = fboW;
+                tdi.fboHeight = fboH;
+                if (fboColTex != nullptr) {
+                    tdi.fboColorArrayLength =
+                        fboArrayLen > 0 ? fboArrayLen : 1u;
+                }
+            }
+        }
+    }
+    if (!tdi.markColorAttachmentReadbackFlip &&
+        tdi.viewportArrayCount > 1 &&
+        mslWritesViewportArrayIndex(tdi.vertexMSL) &&
+        tdi.clipOrigin == GL_LOWER_LEFT) {
+        tdi.markColorAttachmentReadbackFlip = true;
     }
 
     const bool ok = frameGraph->encodeTranslatedDraw(tdi);
@@ -38027,9 +38335,70 @@ bool GLContext::drawElements(GLenum mode, GLsizei count, GLenum type, const void
         }
 
         if (!idx32.empty()) {
+            const auto vsTexMap = impl_->buildSampledTextureMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            const auto gsTexMap = impl_->buildSampledTextureMap(
+                program->geometrySpirv,
+                &program->geometryReflection, *program);
+            const auto vsImgMap = impl_->buildStorageImageMap(
+                program->vertexSpirv,
+                &program->vertexReflection, *program);
+            const auto gsImgMap = impl_->buildStorageImageMap(
+                program->geometrySpirv,
+                &program->geometryReflection, *program);
+            appgl::EmulatedDraw priorStage;
+            const bool hasTess = program->tessellationEmulated ||
+                                 program->tessellationInterpreted;
+            if (hasTess) {
+                appgl::SampledTextureMap tcsSamMap, tcsImgMap;
+                appgl::SampledTextureMap tesSamMap, tesImgMap;
+                if (!program->tessControlSpirv.empty()) {
+                    tcsSamMap = impl_->buildSampledTextureMap(
+                        program->tessControlSpirv,
+                        &program->tessControlReflection, *program);
+                    tcsImgMap = impl_->buildStorageImageMap(
+                        program->tessControlSpirv,
+                        &program->tessControlReflection, *program);
+                }
+                if (!program->tessEvalSpirv.empty()) {
+                    tesSamMap = impl_->buildSampledTextureMap(
+                        program->tessEvalSpirv,
+                        &program->tessEvalAsComputeReflection, *program);
+                    tesImgMap = impl_->buildStorageImageMap(
+                        program->tessEvalSpirv,
+                        &program->tessEvalAsComputeReflection, *program);
+                }
+                std::vector<std::uint32_t> tessIdx32 = idx32;
+                impl_->compactRestartIndicesForPatchTess(type, tessIdx32);
+                if (!tessIdx32.empty()) {
+                    const GLsizei tessCount =
+                        static_cast<GLsizei>(tessIdx32.size());
+                    priorStage = appgl::emulateTessellationDraw(
+                        *program, *vao, *impl_->objects, *impl_->state,
+                        mode, tessCount, /*first=*/0, tessIdx32.data(),
+                        /*instanceCount=*/1, /*baseInstance=*/0,
+                        tcsSamMap.empty() ? nullptr : &tcsSamMap,
+                        tcsImgMap.empty() ? nullptr : &tcsImgMap,
+                        tesSamMap.empty() ? nullptr : &tesSamMap,
+                        tesImgMap.empty() ? nullptr : &tesImgMap,
+                        vsTexMap.empty() ? nullptr : &vsTexMap,
+                        vsImgMap.empty() ? nullptr : &vsImgMap);
+                    if (!priorStage.ok && !priorStage.diagnostic.empty()) {
+                        APPGL_LOG(SHADER, @"drawElements tess+GS: tess-emul: %s",
+                                  priorStage.diagnostic.c_str());
+                    }
+                }
+            }
             appgl::EmulatedDraw ed = appgl::emulateGeometryDraw(
                 *program, *vao, *impl_->objects, *impl_->state,
-                mode, count, /*first=*/0, idx32.data());
+                mode, count, /*first=*/0, idx32.data(),
+                /*instanceCount=*/1, /*baseInstance=*/0,
+                vsTexMap.empty() ? nullptr : &vsTexMap,
+                gsTexMap.empty() ? nullptr : &gsTexMap,
+                vsImgMap.empty() ? nullptr : &vsImgMap,
+                gsImgMap.empty() ? nullptr : &gsImgMap,
+                (hasTess && priorStage.ok) ? &priorStage : nullptr);
             if (ed.ok) {
                 if (impl_->writeGsXfbAndCheckDiscard(*program, ed)) {
                     return true;

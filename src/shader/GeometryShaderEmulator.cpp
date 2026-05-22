@@ -3742,6 +3742,14 @@ bool Interpreter::executeTes(EmulatedVertex& out,
         out.varyings.insert(out.varyings.end(), v.begin(), v.end());
     }
     captureClipCull(out.clipDistance, out.cullDistance);
+    if (auto layerValue = captureLayer(); layerValue.has_value()) {
+        out.layer = *layerValue;
+        didWriteLayer_ = true;
+    }
+    if (auto vi = captureViewportIndex(); vi.has_value()) {
+        out.viewportIndex = *vi;
+        didWriteViewportIndex_ = true;
+    }
     return !errored_;
 }
 

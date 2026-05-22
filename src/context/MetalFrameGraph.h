@@ -821,12 +821,17 @@ struct MetalTessDrawInfo {
     GLsizei viewportHeight = 0;
     GLdouble depthRangeNear = 0.0;
     GLdouble depthRangeFar = 1.0;
+    TranslatedDrawInfo::ViewportEntry viewportArray[TranslatedDrawInfo::kMaxDrawViewports] = {};
+    std::size_t viewportArrayCount = 0;
 
     bool scissorTestEnabled = false;
     GLint scissorX = 0;
     GLint scissorY = 0;
     GLsizei scissorWidth = 0;
     GLsizei scissorHeight = 0;
+    TranslatedDrawInfo::ScissorEntry scissorArray[TranslatedDrawInfo::kMaxDrawViewports] = {};
+    std::size_t scissorArrayCount = 0;
+    GLenum clipOrigin = GL_LOWER_LEFT;
 
     // Framebuffer attachments. Mirrors the FBO handling in
     // TranslatedDrawInfo. When `fboColorTexture` is non-null the render
@@ -836,6 +841,7 @@ struct MetalTessDrawInfo {
     // Pixel formats are read from the MTLTextures inside the encoder.
     void* fboColorTexture = nullptr;          // id<MTLTexture>
     void* fboDepthStencilTexture = nullptr;   // id<MTLTexture>
+    std::uint32_t fboColorArrayLength = 0;
 
     // Clear-state propagation: when true, the render pass begins with
     // LoadActionClear using these values. Matches the pending-clear
