@@ -7948,6 +7948,7 @@ struct GLContext::Impl {
             return msl != nullptr &&
                 msl->find("spvDescriptorSetBuffer") != std::string::npos;
         };
+        constexpr std::uint32_t kAtomicCounterDirectBufferBase = 22;
         const bool vertexAtomicArgBuf = stageUsesArgBuf(info.vertexMSL);
         const bool fragmentAtomicArgBuf = stageUsesArgBuf(info.fragmentMSL);
         auto addAtomicBinding = [&](const GLProgramResourceEntry& ac,
@@ -7975,11 +7976,13 @@ struct GLContext::Impl {
             const GLuint glBinding = static_cast<GLuint>(ac.binding);
             if ((ac.referencedBy & 0x01) != 0) {
                 addAtomicBinding(ac, true, false,
-                    vertexAtomicArgBuf ? (256u + glBinding) : glBinding);
+                    vertexAtomicArgBuf ? (256u + glBinding)
+                                      : (kAtomicCounterDirectBufferBase + glBinding));
             }
             if ((ac.referencedBy & 0x02) != 0) {
                 addAtomicBinding(ac, false, true,
-                    fragmentAtomicArgBuf ? (256u + glBinding) : glBinding);
+                    fragmentAtomicArgBuf ? (256u + glBinding)
+                                        : (kAtomicCounterDirectBufferBase + glBinding));
             }
         }
     }
@@ -25005,6 +25008,78 @@ bool GLContext::compileShader(GLuint shader) {
         }
     }
 
+    // GL 4.6 §4.4.6: an atomic counter whose declared offset range exceeds
+    // GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE is a compile-time error. Glslang only
+    // reaches this path now that we inject the atomic-counter extensions.
+    if (compileSource.find("atomic_uint") != std::string::npos) {
+        GLint maxAtomicCounterBufferSize = 0;
+        if (impl_->capabilities != nullptr) {
+            impl_->capabilities->queryInteger(
+                GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE,
+                &maxAtomicCounterBufferSize);
+        }
+        if (maxAtomicCounterBufferSize > 0) {
+            const std::string stripped =
+                stripGlslCommentsForAppglValidation(compileSource);
+            const auto defines = parseGlslIntegerDefines(stripped);
+            std::size_t p = 0;
+            while ((p = stripped.find("atomic_uint", p)) != std::string::npos) {
+                if (!tokenAt(stripped, p, "atomic_uint")) {
+                    p += 11;
+                    continue;
+                }
+                std::size_t declStart = p;
+                while (declStart > 0 && stripped[declStart - 1] != ';' &&
+                       stripped[declStart - 1] != '}') {
+                    --declStart;
+                }
+                const std::size_t semi = stripped.find(';', p);
+                if (semi == std::string::npos) break;
+                const std::string prefix =
+                    stripped.substr(declStart, p - declStart);
+                int layoutOffset = 0;
+                if (parseLayoutIntegerQualifier(
+                        prefix, "offset", defines, layoutOffset)) {
+                    int arraySize = 1;
+                    std::size_t namePos = p + 11;
+                    (void)readGlslIdent(stripped, namePos);
+                    skipGlslWs(stripped, namePos);
+                    if (namePos < semi && stripped[namePos] == '[') {
+                        const std::size_t close =
+                            stripped.find(']', namePos + 1);
+                        if (close != std::string::npos && close < semi) {
+                            int parsedArraySize = 1;
+                            if (parseGlslIntegerExpression(
+                                    std::string_view(stripped).substr(
+                                        namePos + 1, close - namePos - 1),
+                                    defines,
+                                    parsedArraySize) &&
+                                parsedArraySize > 0) {
+                                arraySize = parsedArraySize;
+                            }
+                        }
+                    }
+                    const long long endByte =
+                        static_cast<long long>(layoutOffset) +
+                        4ll * static_cast<long long>(arraySize);
+                    if (endByte > maxAtomicCounterBufferSize) {
+                        object->compileLog =
+                            "ERROR: atomic_uint layout range exceeds "
+                            "GL_MAX_ATOMIC_COUNTER_BUFFER_SIZE.";
+                        object->compiled = false;
+                        object->spirv.clear();
+                        Runtime::shared().recordShaderTranslation({
+                            shaderTag, "compile", sourceHash, "", "",
+                            object->compileLog, "", false
+                        });
+                        return true;
+                    }
+                }
+                p = semi + 1;
+            }
+        }
+    }
+
     // GLSL 4.60 §3.5: the `#` preprocessing operator (stringification)
     // is not allowed in GLSL. CTS
     // `shaders.preprocessor.basic.stringification_{vertex,fragment}`
@@ -29655,7 +29730,32 @@ bool GLContext::linkProgram(GLuint program) {
         if (spirvData == nullptr || spirvWords == 0) return false;
         try {
             spirv_cross::Compiler compiler(spirvData, spirvWords);
-            return !compiler.get_shader_resources().storage_buffers.empty();
+            const auto resources = compiler.get_shader_resources();
+            std::uint32_t directSlotSpan = 0;
+            for (const auto& ssbo : resources.storage_buffers) {
+                auto hasAtomicCounterName = [](const std::string& name) {
+                    return name.find("AtomicCounter") != std::string::npos ||
+                           name.find("atomicCounter") != std::string::npos;
+                };
+                if (hasAtomicCounterName(ssbo.name)) continue;
+                try {
+                    const auto& type = compiler.get_type(ssbo.base_type_id);
+                    if (hasAtomicCounterName(compiler.get_name(type.self))) continue;
+                } catch (...) {
+                }
+                std::uint32_t slotSpan = 1;
+                try {
+                    const auto& type = compiler.get_type(ssbo.type_id);
+                    if (!type.array.empty() && type.array[0] > 0) {
+                        slotSpan = type.array[0];
+                    }
+                } catch (...) {
+                }
+                directSlotSpan += slotSpan;
+            }
+            // Direct graphics SSBO slots occupy 28..30. Only force argument
+            // buffers when the translated stage would outgrow that range.
+            return directSlotSpan > 3;
         } catch (...) {
             return false;
         }
@@ -35725,6 +35825,18 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
     // both stages populated. Overwrite every call — cheap, keeps a
     // stage swap between draws in sync. The pipeline state cache is
     // keyed on the MSL contents so a real swap invalidates itself.
+    auto clearPipelineFragmentAtomicCounters = [&]() {
+        for (auto it = vsProg->resourceAtomicCounterBuffers.begin();
+             it != vsProg->resourceAtomicCounterBuffers.end(); ) {
+            it->referencedBy &= ~0x02u;
+            if (it->referencedBy == 0) {
+                it = vsProg->resourceAtomicCounterBuffers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    };
+    clearPipelineFragmentAtomicCounters();
     if (ppo->fragmentProgram != 0) {
         GLProgramObject* fsProg = objects->programs().get(ppo->fragmentProgram);
         if (fsProg != nullptr) {
@@ -35744,6 +35856,25 @@ GLProgramObject* GLContext::Impl::resolveDrawProgram(GLuint& programName) {
                 auto valueIt = fsProg->uniformValues.find(fsUniform.location);
                 if (valueIt != fsProg->uniformValues.end()) {
                     vsProg->uniformValues[fsUniform.location] = valueIt->second;
+                }
+            }
+            for (const auto& fsAc : fsProg->resourceAtomicCounterBuffers) {
+                auto existing = std::find_if(
+                    vsProg->resourceAtomicCounterBuffers.begin(),
+                    vsProg->resourceAtomicCounterBuffers.end(),
+                    [&](const GLProgramResourceEntry& entry) {
+                        return entry.binding == fsAc.binding;
+                    });
+                if (existing != vsProg->resourceAtomicCounterBuffers.end()) {
+                    existing->referencedBy |= (fsAc.referencedBy & 0x02u);
+                    existing->offset = std::max(existing->offset, fsAc.offset);
+                } else {
+                    GLProgramResourceEntry merged = fsAc;
+                    merged.referencedBy &= 0x02u;
+                    if (merged.referencedBy != 0) {
+                        vsProg->resourceAtomicCounterBuffers.push_back(
+                            std::move(merged));
+                    }
                 }
             }
             // The translated-draw path caches uniform layouts on the
@@ -42636,16 +42767,11 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
 
     // Sprint 17 Day 4+ BONUS-2 Phase 3-r [gpu_shader5 atomic_counters_array_indexing]:
     // atomic counter buffer binding for compute. SPIRV-Cross emits AC
-    // as `volatile device gl_AtomicCounterBlock_<N>& [[buffer(N)]]`
-    // (atomic counter binding maps directly to a Metal buffer slot at
-    // the GL binding value, sister to UBO mapping at slot N+kUniform-
-    // BufferBase but distinct in SPIRV-Cross's atomic-counter emit
-    // path). Walk the program's atomic-counter buffer resource list
-    // (populated at link time from glslang's reflection) and bind
-    // each GL_ATOMIC_COUNTER_BUFFER-bound buffer at the matching
-    // Metal slot. Without this binding, atomicCounter* operations
-    // execute against an unbound MTLBuffer and produce undefined
-    // (typically zero) reads.
+    // into a dedicated direct-buffer slot range. Walk the program's
+    // atomic-counter buffer resource list and bind each
+    // GL_ATOMIC_COUNTER_BUFFER-backed buffer at the matching Metal slot.
+    // Without this binding, atomicCounter* operations execute against an
+    // unbound MTLBuffer and produce undefined (typically zero) reads.
     for (const auto& ac : programObject->resourceAtomicCounterBuffers) {
         if (ac.binding < 0) continue;
         const GLuint glBinding = static_cast<GLuint>(ac.binding);
@@ -42658,11 +42784,9 @@ bool GLContext::dispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint
         ComputeDispatchInfo::BufferBinding bb;
         bb.metalBuffer = bufObj->metalBuffer;
         bb.offset = static_cast<std::size_t>(binding.offset);
-        // SPIRV-Cross atomic counter Metal slot mapping: GL binding
-        // value used directly (verified via APPGL_DUMP_MSL output for
-        // `gpu_shader5.atomic_counters_array_indexing`:
-        // `[[buffer(0)]]` for `layout(binding=0)`).
-        bb.metalSlot = glBinding;
+        // Atomic counters are emitted into a dedicated direct-buffer slot
+        // range so compute SSBO binding 0 cannot alias atomic binding 0.
+        bb.metalSlot = 22u + glBinding;
         info.buffers.push_back(bb);
     }
 
@@ -43226,7 +43350,7 @@ bool GLContext::dispatchComputeIndirect(GLintptr indirect) {
         ComputeDispatchInfo::BufferBinding bb;
         bb.metalBuffer = bufObj->metalBuffer;
         bb.offset = static_cast<std::size_t>(binding.offset);
-        bb.metalSlot = glBinding;
+        bb.metalSlot = 22u + glBinding;
         info.buffers.push_back(bb);
     }
     thread_local std::vector<std::uint8_t> computeUniformScratchIndirect;
@@ -43601,42 +43725,44 @@ bool GLContext::getActiveAtomicCounterBufferiv(GLuint program, GLuint bufferInde
         pushError(GL_INVALID_VALUE);
         return false;
     }
-    // Metal has no native atomic counters. Programs will never report any
-    // active atomic counter buffers, so any bufferIndex is out of range.
-    // However, for applications that query speculatively we return sensible
-    // defaults when bufferIndex == 0 to avoid error spam, and GL_INVALID_VALUE
-    // otherwise.
-    if (bufferIndex > 0) {
+    if (bufferIndex >= object->resourceAtomicCounterBuffers.size()) {
         pushError(GL_INVALID_VALUE);
         return false;
     }
+    const GLProgramResourceEntry& entry =
+        object->resourceAtomicCounterBuffers[bufferIndex];
     switch (pname) {
         case GL_ATOMIC_COUNTER_BUFFER_BINDING:
-            *params = 0;
+            *params = entry.binding;
             return true;
         case GL_ATOMIC_COUNTER_BUFFER_DATA_SIZE:
-            *params = 0;
+            *params = entry.offset >= 0 ? entry.offset : 0;
             return true;
         case GL_ATOMIC_COUNTER_BUFFER_ACTIVE_ATOMIC_COUNTERS:
-            *params = 0;
+            *params = static_cast<GLint>(entry.activeVariables.size());
+            return true;
+        case GL_ATOMIC_COUNTER_BUFFER_ACTIVE_ATOMIC_COUNTER_INDICES:
+            for (std::size_t i = 0; i < entry.activeVariables.size(); ++i) {
+                params[i] = entry.activeVariables[i];
+            }
             return true;
         case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_VERTEX_SHADER:
-            *params = GL_FALSE;
+            *params = (entry.referencedBy & 0x01) ? GL_TRUE : GL_FALSE;
             return true;
         case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_FRAGMENT_SHADER:
-            *params = GL_FALSE;
+            *params = (entry.referencedBy & 0x02) ? GL_TRUE : GL_FALSE;
             return true;
         case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_GEOMETRY_SHADER:
-            *params = GL_FALSE;
+            *params = (entry.referencedBy & 0x04) ? GL_TRUE : GL_FALSE;
             return true;
         case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_TESS_CONTROL_SHADER:
-            *params = GL_FALSE;
+            *params = (entry.referencedBy & 0x08) ? GL_TRUE : GL_FALSE;
             return true;
         case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_TESS_EVALUATION_SHADER:
-            *params = GL_FALSE;
+            *params = (entry.referencedBy & 0x10) ? GL_TRUE : GL_FALSE;
             return true;
         case GL_ATOMIC_COUNTER_BUFFER_REFERENCED_BY_COMPUTE_SHADER:
-            *params = GL_FALSE;
+            *params = (entry.referencedBy & 0x20) ? GL_TRUE : GL_FALSE;
             return true;
         default:
             pushError(GL_INVALID_ENUM);

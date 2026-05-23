@@ -1634,9 +1634,15 @@ static void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount,
                 params[i] = u.blockIndex;
                 break;
             case GL_UNIFORM_OFFSET:
-                params[i] = u.offset;
+                params[i] = (u.type == GL_UNSIGNED_INT_ATOMIC_COUNTER)
+                    ? u.atomicCounterOffset
+                    : u.offset;
                 break;
             case GL_UNIFORM_ARRAY_STRIDE: {
+                if (u.type == GL_UNSIGNED_INT_ATOMIC_COUNTER) {
+                    params[i] = (u.isArray && u.arraySize > 1) ? 4 : 0;
+                    break;
+                }
                 // For non-block or non-array uniforms, stride is 0.
                 if (u.blockIndex < 0 || u.arraySize <= 0) {
                     params[i] = 0;
@@ -1692,7 +1698,7 @@ static void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount,
                 params[i] = u.isRowMajor ? GL_TRUE : GL_FALSE;
                 break;
             case GL_UNIFORM_ATOMIC_COUNTER_BUFFER_INDEX:
-                params[i] = -1;
+                params[i] = u.atomicCounterBufferIndex;
                 break;
             default:
                 context->pushError(GL_INVALID_ENUM);

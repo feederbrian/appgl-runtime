@@ -2397,6 +2397,10 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     int sourceLen = static_cast<int>(source.size());
     shader.setStringsWithLengths(&sourcePtr, &sourceLen, 1);
 
+    const bool usesAtomicCounters =
+        source.find("atomic_uint") != std::string_view::npos ||
+        source.find("atomicCounter") != std::string_view::npos;
+
     // Sprint 9 Phase 3 (CKPT103): glslang's strict version-based gating of
     // ARB_sample_shading + OES_sample_variables built-ins (gl_NumSamples,
     // gl_SampleID, gl_SamplePosition, gl_SampleMaskIn, gl_SampleMask)
@@ -2413,11 +2417,24 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
         "#extension GL_ARB_sample_shading : enable\n"
         "#extension GL_OES_sample_variables : enable\n"
         "#extension GL_OES_shader_multisample_interpolation : enable\n";
+    std::string preamble;
+    if (usesAtomicCounters) {
+        // glslang's Vulkan path gates the GL 4.2/4.6 atomic-counter built-ins
+        // more strictly than desktop GL drivers. CTS supplies #version 420/450
+        // shaders without explicit extension lines; inject the desktop-GL
+        // extensions as a preamble so atomic_uint and atomicCounter* parse.
+        preamble += "#extension GL_ARB_shader_atomic_counters : enable\n";
+        preamble += "#extension GL_ARB_shader_atomic_counter_ops : enable\n";
+        preamble += "#extension GL_ARB_shader_storage_buffer_object : enable\n";
+    }
     if (eshStage == EShLangFragment) {
-        shader.setPreamble(kFragmentSamplePreamble);
+        preamble += kFragmentSamplePreamble;
+    }
+    if (!preamble.empty()) {
+        shader.setPreamble(preamble.c_str());
         if (std::getenv("APPGL_TRACE_GLSLANG") != nullptr) {
-            std::fprintf(stderr, "[glslang-preamble] FS preamble set: %zu bytes\n",
-                std::strlen(kFragmentSamplePreamble));
+            std::fprintf(stderr, "[glslang-preamble] stage=%d preamble set: %zu bytes\n",
+                static_cast<int>(eshStage), preamble.size());
         }
     }
 
@@ -2439,11 +2456,27 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     // compare GLSL gl_Max* constants against glGetIntegerv) pass.
     static const TBuiltInResource appglResources = makeAppGLBuiltInResources();
     const TBuiltInResource* resources = &appglResources;
+    TBuiltInResource atomicVertexResources;
+    if (usesAtomicCounters && eshStage == EShLangVertex) {
+        atomicVertexResources = appglResources;
+        // Public GL caps still advertise zero vertex atomic counters, which
+        // preserves cap-gated tests. The SSO atomicCounters case nonetheless
+        // compiles a vertex shader containing atomic_uint; allow glslang to
+        // produce SPIR-V so the already-supported Metal atomic-counter binding
+        // path can execute it.
+        atomicVertexResources.maxVertexAtomicCounters = 8;
+        atomicVertexResources.maxVertexAtomicCounterBuffers = 1;
+        resources = &atomicVertexResources;
+    }
     EShMessages messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
 
     if (!shader.parse(resources, version, false, messages)) {
         if (log != nullptr) {
             *log = shader.getInfoLog();
+        }
+        if (std::getenv("APPGL_TRACE_GLSLANG") != nullptr) {
+            std::fprintf(stderr, "[glslang-parse-fail] stage=%d log=%s\n",
+                static_cast<int>(eshStage), shader.getInfoLog());
         }
         return {};
     }
@@ -2453,6 +2486,10 @@ std::vector<std::uint32_t> ShaderTranslator::compileGLSL(std::string_view source
     if (!program.link(messages)) {
         if (log != nullptr) {
             *log = program.getInfoLog();
+        }
+        if (std::getenv("APPGL_TRACE_GLSLANG") != nullptr) {
+            std::fprintf(stderr, "[glslang-link-fail] stage=%d log=%s\n",
+                static_cast<int>(eshStage), program.getInfoLog());
         }
         return {};
     }
@@ -3225,6 +3262,51 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         // causing a Metal buffer slot mismatch at draw time.
         auto resources = compiler.get_shader_resources();
         auto activeVars = compiler.get_active_interface_variables();
+        constexpr std::uint32_t kAtomicCounterSyntheticBindingBase = 64;
+        constexpr std::uint32_t kAtomicCounterDirectBufferBase = 22;
+        auto isAtomicCounterStorageBuffer = [&](const spirv_cross::Resource& res) {
+            auto hasAtomicCounterName = [](const std::string& name) {
+                return name.find("AtomicCounter") != std::string::npos ||
+                       name.find("atomicCounter") != std::string::npos;
+            };
+            if (hasAtomicCounterName(res.name)) return true;
+            try {
+                const auto& type = compiler.get_type(res.base_type_id);
+                if (hasAtomicCounterName(compiler.get_name(type.self))) return true;
+            } catch (...) {
+            }
+            return false;
+        };
+        auto parseAtomicCounterBlockBinding = [](const std::string& name,
+                                                 std::uint32_t& binding) {
+            const char* needle = "AtomicCounterBlock_";
+            const std::size_t pos = name.find(needle);
+            if (pos == std::string::npos) return false;
+            const std::size_t start = pos + std::strlen(needle);
+            if (start >= name.size() ||
+                !std::isdigit(static_cast<unsigned char>(name[start]))) {
+                return false;
+            }
+            char* end = nullptr;
+            const unsigned long value =
+                std::strtoul(name.c_str() + start, &end, 10);
+            if (end == name.c_str() + start) return false;
+            binding = static_cast<std::uint32_t>(value);
+            return true;
+        };
+        auto atomicCounterStorageBinding = [&](const spirv_cross::Resource& res) {
+            std::uint32_t parsed = 0;
+            if (parseAtomicCounterBlockBinding(res.name, parsed)) return parsed;
+            try {
+                const auto& type = compiler.get_type(res.base_type_id);
+                if (parseAtomicCounterBlockBinding(
+                        compiler.get_name(type.self), parsed)) {
+                    return parsed;
+                }
+            } catch (...) {
+            }
+            return compiler.get_decoration(res.id, spv::DecorationBinding);
+        };
 
         // GL 4.6 §7.4.1 (separate programs) — when a shader is compiled
         // as a separable program via glCreateShaderProgramv, glslang's
@@ -3503,6 +3585,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
             struct SSBORef { std::uint32_t glBinding; spirv_cross::Resource* res; };
             std::vector<SSBORef> sortedSSBOs;
             for (auto& ssbo : resources.storage_buffers) {
+                if (isAtomicCounterStorageBuffer(ssbo)) continue;
                 SSBORef r;
                 r.glBinding = compiler.get_decoration(ssbo.id, spv::DecorationBinding);
                 r.res = &ssbo;
@@ -3545,12 +3628,34 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
         for (auto& atomicCounter : resources.atomic_counters) {
             const std::uint32_t glBinding =
                 compiler.get_decoration(atomicCounter.id, spv::DecorationBinding);
+            const std::uint32_t syntheticBinding =
+                kAtomicCounterSyntheticBindingBase + glBinding;
+            compiler.set_decoration(atomicCounter.id, spv::DecorationDescriptorSet, 0);
+            compiler.set_decoration(atomicCounter.id, spv::DecorationBinding, syntheticBinding);
             spirv_cross::MSLResourceBinding binding;
             binding.stage = compiler.get_execution_model();
-            binding.desc_set =
-                compiler.get_decoration(atomicCounter.id, spv::DecorationDescriptorSet);
-            binding.binding = glBinding;
-            binding.msl_buffer = useArgBuf ? (256 + glBinding) : glBinding;
+            binding.desc_set = 0;
+            binding.binding = syntheticBinding;
+            binding.msl_buffer = useArgBuf
+                ? (256 + glBinding)
+                : (kAtomicCounterDirectBufferBase + glBinding);
+            compiler.add_msl_resource_binding(binding);
+        }
+        for (auto& atomicCounter : resources.storage_buffers) {
+            if (!isAtomicCounterStorageBuffer(atomicCounter)) continue;
+            const std::uint32_t glBinding =
+                atomicCounterStorageBinding(atomicCounter);
+            const std::uint32_t syntheticBinding =
+                kAtomicCounterSyntheticBindingBase + glBinding;
+            compiler.set_decoration(atomicCounter.id, spv::DecorationDescriptorSet, 0);
+            compiler.set_decoration(atomicCounter.id, spv::DecorationBinding, syntheticBinding);
+            spirv_cross::MSLResourceBinding binding;
+            binding.stage = compiler.get_execution_model();
+            binding.desc_set = 0;
+            binding.binding = syntheticBinding;
+            binding.msl_buffer = useArgBuf
+                ? (256 + glBinding)
+                : (kAtomicCounterDirectBufferBase + glBinding);
             compiler.add_msl_resource_binding(binding);
         }
 
@@ -3885,6 +3990,7 @@ std::string ShaderTranslator::spirvToMSL(const std::uint32_t* spirv, std::size_t
                 }
             };
             for (auto& ssbo : resources.storage_buffers) {
+                if (isAtomicCounterStorageBuffer(ssbo)) continue;
                 const auto& varType = compiler.get_type(ssbo.type_id);
                 if (varType.array.empty() || varType.array[0] <= 1) {
                     continue;
@@ -4566,6 +4672,19 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
     try {
         spirv_cross::Compiler compiler(spirv, wordCount);
         auto resources = compiler.get_shader_resources();
+        auto isAtomicCounterStorageBuffer = [&](const spirv_cross::Resource& res) {
+            auto hasAtomicCounterName = [](const std::string& name) {
+                return name.find("AtomicCounter") != std::string::npos ||
+                       name.find("atomicCounter") != std::string::npos;
+            };
+            if (hasAtomicCounterName(res.name)) return true;
+            try {
+                const auto& type = compiler.get_type(res.base_type_id);
+                if (hasAtomicCounterName(compiler.get_name(type.self))) return true;
+            } catch (...) {
+            }
+            return false;
+        };
         result.usesFragmentShadingRateBuiltins =
             resourcesUseFragmentShadingRateBuiltins(resources);
         result.usesFp64 = spirvModuleDeclaresFp64(spirv, wordCount);
@@ -5351,6 +5470,7 @@ ShaderReflection ShaderTranslator::reflect(const std::uint32_t* spirv, std::size
         std::vector<std::pair<std::uint32_t, spirv_cross::Resource*>> sortedSSBOs;
         auto ssboActive = compiler.get_active_interface_variables();
         for (auto& ssbo : resources.storage_buffers) {
+            if (isAtomicCounterStorageBuffer(ssbo)) continue;
             sortedSSBOs.emplace_back(
                 compiler.get_decoration(ssbo.id, spv::DecorationBinding), &ssbo);
         }
