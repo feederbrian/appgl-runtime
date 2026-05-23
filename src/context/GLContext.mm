@@ -24745,6 +24745,7 @@ bool GLContext::compileShader(GLuint shader) {
         std::unordered_map<std::string, std::string> uniformToImpl;
         std::unordered_map<std::string, std::vector<std::string>> typeToImpls;
         std::unordered_map<std::string, std::string> uniformToType;
+        std::unordered_map<std::string, std::string> implToPrototype;
         // Sprint 17 Day 7+ Bank-Group-C dynamic-dispatch (v1):
         // capture subroutine-type prototype return-type + raw param
         // text. v1 covers void-return parameterless subroutines
@@ -24827,7 +24828,7 @@ bool GLContext::compileShader(GLuint shader) {
                     if (q < in.size() && in[q] == ',') ++q;
                 }
                 if (q < in.size()) ++q;  // skip ')'
-                (void)readWord(q);   // return type
+                std::string retType = readWord(q);
                 std::string fnName = readWord(q);
                 if (!fnName.empty()) {
                     for (const auto& t : typeList) {
@@ -24839,12 +24840,17 @@ bool GLContext::compileShader(GLuint shader) {
                 // then capture matched `{body}`.
                 skipWs(q);
                 if (q < in.size() && in[q] == '(') {
+                    const std::size_t paramsStart = q;
                     int pd2 = 1;
                     ++q;
                     while (q < in.size() && pd2 > 0) {
                         if (in[q] == '(') ++pd2;
                         else if (in[q] == ')') --pd2;
                         ++q;
+                    }
+                    if (!fnName.empty() && !retType.empty() && q <= in.size()) {
+                        implToPrototype[fnName] =
+                            retType + " " + fnName + in.substr(paramsStart, q - paramsStart) + ";";
                     }
                 }
                 skipWs(q);
@@ -25160,11 +25166,24 @@ bool GLContext::compileShader(GLuint shader) {
         // `#version`/`#extension` block at the top of the rewritten
         // output rather than appending at the end.
         std::string synthHeader;
+        if (!implToPrototype.empty()) {
+            synthHeader = "// appgl: subroutine implementation prototypes\n";
+            std::vector<std::string> protoNames;
+            protoNames.reserve(implToPrototype.size());
+            for (const auto& kv : implToPrototype) protoNames.push_back(kv.first);
+            std::sort(protoNames.begin(), protoNames.end());
+            for (const auto& name : protoNames) {
+                synthHeader += implToPrototype[name];
+                synthHeader += "\n";
+            }
+        }
         for (const auto& n : subUniNames) {
             auto it = uniformIsV1Eligible.find(n);
             if (it == uniformIsV1Eligible.end() || !it->second) continue;
             if (synthHeader.empty()) {
                 synthHeader = "// appgl: subroutine dynamic-dispatch uniforms (v1)\n";
+            } else if (synthHeader.find("subroutine dynamic-dispatch uniforms") == std::string::npos) {
+                synthHeader += "// appgl: subroutine dynamic-dispatch uniforms (v1)\n";
             }
             synthHeader += "uniform uint _appgl_sub_";
             synthHeader += n;
